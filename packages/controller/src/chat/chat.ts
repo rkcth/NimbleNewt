@@ -14,11 +14,18 @@ import { LIMITS as STORAGE_LIMITS, type AggregateRef, type Change, type Controll
 import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
+import { docVerifyCode } from "../submissions/doc-obligations.js";
 import { probeUrl } from "../projects/probes.js";
+import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
+import { WINDOW_DEFAULTS } from "../release/windows.js";
+import { DEFAULT_REPLY_TOKENS, smallWindowWarning } from "../context/fixed-part.js";
+import { MIN_WORKABLE_CONTEXT_TOKENS, PROVIDER_NAME } from "../setup/providers.js";
+import { ROUTING_LIMITS } from "../routing/index.js";
+import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_DATE_KEYS, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -198,6 +205,58 @@ export interface ChatDeps {
  * every other command that changes things still is. They need nothing from the model, so a provider outage does not stand between the owner and a stop.
  */
 const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "lifecycle.force", "lifecycle.choose", "lifecycle.advance", "grant.revoke", "routing.disable", "routing.drain", "routing.cutover", "routing.reenable"]);
+
+/**
+ * What a maintenance window proposal (card K07) shows about its time and limits: the owner's local time and zone, the instants it comes to in UTC (a time the clocks skip, or one they pass twice, is
+ * said so), how long it lasts, how early preparation starts and how much free space it needs, with the defaults filled in, so every number the window would be set with is on the proposal.
+ */
+export function windowTimeNote(args: Readonly<Record<string, unknown>>): string {
+  const num = (v: unknown, fallback: number): string => (v === undefined ? `${fallback} (the default)` : typeof v === "number" ? String(v) : quotedText(String(v), 20));
+  const parts = [`The window opens on ${quotedText(String(args["date"]), 20)} at ${quotedText(String(args["time"]), 10)} in ${quotedText(String(args["timeZone"]), 64)}`];
+  const zone = knownZone(args["timeZone"]);
+  const minutes = args["durationMinutes"];
+  if (zone !== undefined && isLocalDate(args["date"]) && isLocalTime(args["time"])) {
+    const opens = instantOf(args["date"], args["time"], zone);
+    const wall = wallClock(opens, zone);
+    const shownAt = `${wall.date} ${String(wall.hour).padStart(2, "0")}:${String(wall.minute).padStart(2, "0")}`;
+    if (shownAt !== `${args["date"]} ${args["time"]}`) parts.push(`(that time does not exist that day, because the clocks go forward; it opens at ${shownAt} local time instead)`);
+    else if (wallClock(opens + 3_600_000, zone).hour === wall.hour && wallClock(opens + 3_600_000, zone).minute === wall.minute && wallClock(opens + 3_600_000, zone).date === wall.date) parts.push("(that time happens twice that night, because the clocks go back; it opens at the first of the two)");
+    parts.push(`= ${new Date(opens).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+    if (typeof minutes === "number" && Number.isSafeInteger(minutes)) parts.push(`until ${new Date(opens + minutes * 60_000).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+  }
+  return `${parts.join(" ")}; it lasts ${typeof minutes === "number" ? String(minutes) : quotedText(String(minutes), 20)} minutes. Preparation starts ${num(args["prepareLeadMinutes"], WINDOW_DEFAULTS.prepareLeadMinutes)} minutes before it opens and needs ${num(args["minFreeBytes"], WINDOW_DEFAULTS.minFreeBytes)} bytes free under the release folder. Check that this is the time you meant.`;
+}
+
+/** What the staged-release picker reads from `release.status`. */
+export interface ReleaseStatusForPick { readonly current?: { id: string }; readonly previous?: { id: string }; readonly lastKnownGood?: { id: string }; readonly history?: readonly { kind?: string; to?: string; from?: string }[]; readonly failedStarts?: readonly { id: string }[]; readonly staged?: readonly { candidateId: string; stagedAt?: string }[] }
+
+/**
+ * The one staged release waiting to be installed, for a maintenance window set without a release named (card K07), or what to ask the owner. A release that ran here stays staged for going back
+ * and is never "the update waiting": the current, previous and last known good releases and every release the activation history shows switched to or from (an aborted switch, or a resolve that
+ * may have aborted, does not count as having run). The history is trimmed, so a release staged before the current one could have run long ago: such a release is never picked silently, nor is one
+ * of several, and when the status's page of staged releases is full the owner is asked too.
+ */
+export function pickWaitingRelease(s: ReleaseStatusForPick, quarantined: readonly string[]): { id: string } | { ask: string } {
+  const ran = new Set<string>();
+  for (const id of [s.current?.id, s.previous?.id, s.lastKnownGood?.id]) if (typeof id === "string") ran.add(id);
+  for (const h of s.history ?? []) {
+    if (typeof h.from === "string") ran.add(h.from);
+    if (typeof h.to === "string" && h.kind !== "aborted" && h.kind !== "resolved") ran.add(h.to);
+  }
+  const q = new Set(quarantined);
+  const failed = new Set((s.failedStarts ?? []).map((f) => f.id));
+  const staged = s.staged ?? [];
+  const eligible = staged.filter((x) => !ran.has(x.candidateId) && !q.has(x.candidateId) && !failed.has(x.candidateId));
+  const name = (xs: readonly { candidateId: string }[]): string => `${xs.slice(0, 5).map((x) => x.candidateId).join(", ")}${xs.length > 5 ? ", ..." : ""}`;
+  if (staged.length >= ACTIVATION_LIMITS.listed) return { ask: `Many staged releases are kept (${staged.length} or more), so the one waiting cannot be told from the list: which one should the window install? Name its rcn- ID.` };
+  if (eligible.length === 0) return { ask: "No staged release is waiting to be installed (stage one first with release.stage), so there is nothing for a maintenance window to install." };
+  if (eligible.length > 1) return { ask: `${eligible.length} staged releases could be installed (${name(eligible)}): which one should the window install?` };
+  const only = eligible[0]!;
+  // Staged before the running release: it may be an older build (or one that ran before the history kept), so it is offered by name, not taken.
+  const currentStagedAt = s.current === undefined ? undefined : staged.find((x) => x.candidateId === s.current!.id)?.stagedAt;
+  if (s.current !== undefined && (currentStagedAt === undefined || only.stagedAt === undefined || only.stagedAt <= currentStagedAt)) return { ask: `The only staged release that has not run here, ${only.candidateId}, was staged before the running release ${s.current.id}, so it may be older: name it if that is the one the window should install.` };
+  return { id: only.candidateId };
+}
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
@@ -542,7 +601,7 @@ export class ChatService {
       if (intent.kind === "status") {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
-        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup"].includes(String(request["kind"]))) {
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs"].includes(String(request["kind"]))) {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
@@ -593,8 +652,8 @@ export class ChatService {
         // A task's activity, explanations, replay, hand-off, work report (card W10) or stop cleanup is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
         // A title beside an ID, or one that is not text, is dropped: the ID (or the missing task) decides. A stop-cleanup question that names a scope has no use for a title either, so the title goes.
         if (request["kind"] === "stop_cleanup" && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
-        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
-        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "defects" || request["kind"] === "qa" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "defects" || request["kind"] === "qa" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           const wanted = request["taskTitle"];
           const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
@@ -728,8 +787,8 @@ export class ChatService {
       // Every text in the command must be the owner's own words (or a record, or a fixed choice): a model cannot add content the owner never said. Left unchecked here: a right's `basis` (set by the chat), a gate's kind and topic (always shown first), a release digest, a restore or transfer `confirm` (refilled from a fresh plan), `runningCalls` of a revoke or the standing policy (a fixed choice, always shown first or asked about), and the `confirm` of a real retention run (refilled from a fresh preview, never the model's).
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
-      const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_DATE_KEYS : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
+      const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.window.set" ? ["digest", "date", "time", "timeZone"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op.startsWith("simulation.") ? SIMULATION_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_EXEMPT : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : intent.op.startsWith("defect.") ? DEFECT_EXEMPT : intent.op.startsWith("doc.") ? DOC_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // A probe's address is the reach the owner approves (card P04i): it must be written out whole in the owner's message, exactly as given; a part of a longer address or one in other letter case is not theirs.
       // An address the probe would refuse is refused here, before it is shown: the proposal then always shows the whole address, as it would be asked (second review).
@@ -986,6 +1045,75 @@ export class ChatService {
     }
     // Activation names the digest from the staged record, never from the interpreter or the owner's words (the owner sees it in the preview and the controller binds the word to it).
     const fillNotes: string[] = [];
+    // A maintenance window names the digest from the staged record too (card K07); its date, time and zone are the interpreter's reading of the owner's words, so the proposal shows them before anything is set.
+    if (intent.op === "release.window.set") {
+      delete args["digest"];
+      let wanted = args["candidateId"];
+      // No release named ("put the update on tonight at 2"): the one staged release that never ran here (not current, previous, last known good or in the activation history), is not quarantined and never failed to start is meant; with several, the owner is asked which.
+      if (wanted === undefined) {
+        const st = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.status", args: {} });
+        if (!st.ok) return refuse(st.error.code, st.error.message);
+        const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
+        if (!wl.ok) return refuse(wl.error.code, wl.error.message);
+        const pick = pickWaitingRelease(st.result["item"] as ReleaseStatusForPick, ((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId));
+        if ("ask" in pick) return refuse("invalid_command", pick.ask);
+        wanted = pick.id;
+        args["candidateId"] = wanted;
+        fillNotes.push(`Release ${wanted}: the one staged release waiting to be installed (you did not name one).`);
+      }
+      if (typeof wanted !== "string") return refuse("invalid_command", "Which staged release should the window activate? Nothing in your message names one.");
+      const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.verify", args: { releaseId: wanted } });
+      if (!found.ok) return refuse(found.error.code, found.error.message);
+      args["digest"] = String(found.result["digest"]);
+      fillNotes.push(`Digest of the staged release, filled in from its record: ${String(found.result["digest"])}${found.result["ok"] === true ? "" : " (its files do not match this digest now; the window will fail its preparation)"}`);
+      if (args["durationMinutes"] === undefined) return refuse("invalid_command", "How long should the maintenance window last (15 minutes to 24 hours)?");
+      fillNotes.push(windowTimeNote(args));
+    }
+    // Cancelling a maintenance window without naming it ("cancel the maintenance window") means the one window that is open; there is at most one, and with none the owner is told so.
+    if (intent.op === "release.window.cancel" && args["windowId"] === undefined) {
+      const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
+      if (!wl.ok) return refuse(wl.error.code, wl.error.message);
+      const open = ((wl.result["windows"] ?? []) as { windowId: string; status: string }[]).filter((w) => w.status === "scheduled" || w.status === "prepared" || w.status === "activated");
+      if (open.length !== 1) return refuse(open.length === 0 ? "not_found" : "invalid_command", open.length === 0 ? "No maintenance window is open, so there is nothing to cancel." : `${open.length} maintenance windows are open (${open.slice(0, 5).map((w) => w.windowId).join(", ")}): which one should be cancelled?`);
+      args["windowId"] = open[0]!.windowId;
+    }
+    // Verifying a document by chat (card Q03b): "verify the user guide". The document change, the code and a release's version are records, so what the owner did not name is filled from the records the
+    // `docs` view shows: the one document change of the project made since the flag (several: the owner is asked which; none: they are told the keeper must submit it first), per task the code the document
+    // was flagged for (else the code it was last verified with), and the release's version. A document change the interpreter names must be one the view lists or one the owner wrote out.
+    if (intent.op === "doc.obligation.verify" && typeof args["obligationId"] === "string") {
+      const item = await this.#get(token, "doc.obligation.get", { id: args["obligationId"] });
+      if (item === undefined) return refuse("not_found", "no such documentation obligation");
+      const title = `${quotedText(String(item["title"]), 80)} (${args["obligationId"]})`;
+      const flaggedAt = typeof item["flaggedAt"] === "string" ? item["flaggedAt"] : undefined;
+      const since = flaggedAt === undefined ? "" : ` made since it was flagged at ${flaggedAt}`;
+      if (item["state"] === "verified" && args["documentSubmissionId"] === undefined) return refuse("invalid_command", `${title} is already verified against tested code and nothing has flagged it since, so there is nothing to verify. To check it again, name the document change to verify it with.`);
+      const listed = await this.#deps.api.handle(token, { v: API_VERSION, op: "submission.documents", args: { projectId: String(item["projectId"]), limit: DOC_CHOICES + 1, ...(flaggedAt === undefined ? {} : { since: flaggedAt }) } });
+      if (!listed.ok) return refuse(listed.error.code, listed.error.message);
+      const docs = (listed.result["items"] ?? []) as { id: string; taskId: string; submittedBy: string; createdAt: string; artifactDigest?: string }[];
+      const shownDocs = docs.slice(0, DOC_CHOICES);
+      const label = (x: (typeof docs)[number]): string => `${x.id}: task ${x.taskId}, by ${x.submittedBy}, at ${x.createdAt}, ${String(x.artifactDigest).slice(0, 19)}`;
+      const given = args["documentSubmissionId"];
+      if (given === undefined) {
+        if (docs.length === 0) return refuse("not_found", `No document change of this project${since} can verify ${title}, so nothing was proposed. ${String(item["owner"])}, who keeps it, submits the updated document first (a document submission in the docs role); then ask again.`);
+        if (docs.length > 1) return { ok: false, kind: "ask", question: `${docs.length > DOC_CHOICES ? `More than ${DOC_CHOICES}` : String(docs.length)} document changes of this project${since} could verify ${title}${docs.length > DOC_CHOICES ? " (the newest are shown)" : ""}. Which one is the updated document?`, options: shownDocs.map(label), field: "documentSubmissionId", choices: shownDocs.map((x) => x.id) };
+        args["documentSubmissionId"] = docs[0]!.id;
+        fillNotes.push(`Document change ${label(docs[0]!)}: the one document change of this project${since}.`);
+      } else if (typeof given !== "string" || (!shownDocs.some((x) => x.id === given) && !wholeWord(words, given))) {
+        return refuse("unsupported_value", `${typeof given === "string" ? quotedText(given, 40) : "That"} is not a document change the docs view lists for ${title}${shownDocs.length === 0 ? ` (it lists none${since})` : ` (it lists ${shownDocs.map((x) => x.id).join(", ")})`}, and your message does not name it, so nothing was proposed.`);
+      }
+      if (args["evidence"] === undefined) {
+        const code = docVerifyCode(item as unknown as Parameters<typeof docVerifyCode>[0]);
+        const refs = (Array.isArray(item["implementationRefs"]) ? item["implementationRefs"] : []) as string[];
+        const missing = refs.filter((t) => code[t] === undefined);
+        if (missing.length > 0) return refuse("invalid_command", `Which tested code should ${title} be verified against for ${missing.join(", ")}? Nothing in its record names code for ${missing.length === 1 ? "that task" : "those tasks"}; the qa view of a task lists its code submissions and whether their QA gate passes.`);
+        args["evidence"] = refs.map((t) => code[t]!);
+        fillNotes.push(`Checked against ${refs.map((t) => `code ${code[t]!} of ${t}`).join(", ")}: ${(item["reasons"] as unknown[] | undefined)?.length ? "the newest code it was flagged for, or the code it was last verified with" : "the code it was last verified with"}, from its record; the QA gate of each must pass when this is applied.`);
+      }
+      if (args["applicableVersion"] === undefined && typeof item["releaseVersion"] === "string") {
+        args["applicableVersion"] = item["releaseVersion"];
+        fillNotes.push(`For version ${quotedText(item["releaseVersion"], 40)}: the release that flagged it.`);
+      }
+    }
     if (intent.op === "release.activate") {
       delete args["digest"];
       delete args["migrationPlan"];
@@ -1096,7 +1224,16 @@ export class ChatService {
       // right in words. The name is looked up as an assignment's is (exactly one active agent, case ignored; none is refused, two are asked about) and the right is drawn up for that agent's principal.
       const grantName = args["agentName"];
       delete args["agentName"];
-      let namedGrantee: { principal: string; name: string } | undefined;
+      // A bundle of rights (card D01): "let Ann work on Garden" asks for every right Ann's own roles stand for, in that project. It is drawn up below, once the project and the times are settled.
+      const bundle = args["bundle"];
+      delete args["bundle"];
+      if (bundle !== undefined) {
+        if (intent.op !== "grant.create") return refuse("invalid_command", "bundle is not an argument of this operation");
+        if (typeof bundle !== "string" || !GRANT_BUNDLES.has(bundle)) return refuse("invalid_command", `bundle must be one of ${[...GRANT_BUNDLES].join(", ")}: the rights the agent's own roles stand for`);
+        if (args["action"] !== undefined) return refuse("invalid_command", "the right is named twice over, as one action and as the agent's whole bundle; which one is meant has to be settled.");
+        if (grantName === undefined) return refuse("invalid_command", "a bundle of rights is given to an agent named by its name; which agent should have it?");
+      }
+      let namedGrantee: { principal: string; name: string; roles: readonly string[] } | undefined;
       if (grantName !== undefined) {
         if (intent.op !== "grant.create") return refuse("invalid_command", "agentName is not an argument of this operation");
         if (args["grantee"] !== undefined) return refuse("invalid_command", "the agent is named twice over, as a grantee and by name; which one is meant has to be settled.");
@@ -1105,7 +1242,7 @@ export class ChatService {
         const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === grantName.trim().toLowerCase());
         if (exact.length === 0) return refuse("not_found", `no active agent is called ${quotedText(grantName.trim(), 80)}`);
         if (exact.length > 1) return { ok: false, kind: "ask", question: `More than one agent is called ${quotedText(grantName.trim(), 80)}. Which one do you mean?`, options: exact.slice(0, CHAT_LIMITS.options).map((a) => String(a["id"]).slice(0, 60)) };
-        namedGrantee = { principal: `agent:${String(exact[0]!["id"])}`, name: String(exact[0]!["friendlyName"]).slice(0, 80) };
+        namedGrantee = { principal: `agent:${String(exact[0]!["id"])}`, name: String(exact[0]!["friendlyName"]).slice(0, 80), roles: Array.isArray(exact[0]!["roles"]) ? (exact[0]!["roles"] as unknown[]).filter((r): r is string => typeof r === "string") : [] };
       }
       for (const key of ["grantee", "action", "grantId"] as const) if (typeof args[key] === "string" && !wholeWord(words, args[key] as string)) return refuse("unsupported_value", `${key === "grantId" ? "The right" : "The " + key} ${quotedText(args[key] as string, 60)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which ${key === "grantId" ? "grant did you mean, by its grt- ID?" : key === "action" ? "right did you mean?" : "principal did you mean?"}`);
       // The principal found from the owner's name is not in their words (only the name is), so it is put in after the check above.
@@ -1153,6 +1290,19 @@ export class ChatService {
           if (!found.ok) return found;
           labels[found.id] = found.name;
         } else return refuse("invalid_command", "Which project should this right cover, or should it cover every project?");
+        if (bundle !== undefined && namedGrantee !== undefined) {
+          // A bundle is for one project (first review): a plain "let Ann work" sentence never reaches every project at once; rights for every project are named one by one.
+          if (scope === "*") return refuse("invalid_command", `a bundle of rights covers one project, never every project. Which project should ${quotedText(namedGrantee.name, 80)} work on? To give rights in every project, name each right.`);
+          const drawn = await this.#rightsBundle(token, namedGrantee, args, typeof scope === "string" ? labels[scope] ?? scope : "");
+          if (!drawn.ok) return drawn;
+          // One grant.create per right, each with the same grantee, scope, times and reason; the last is the command's own step, pushed at the end like every other command's.
+          // The action is put first, so each line of the proposal starts with the right it gives.
+          const rest = { ...args };
+          for (const action of drawn.actions.slice(0, -1)) steps.push({ op: intent.op, args: { action, ...rest }, commandId: "" });
+          for (const key of Object.keys(args)) delete args[key];
+          Object.assign(args, { action: drawn.actions[drawn.actions.length - 1] }, rest);
+          fillNotes.push(drawn.note);
+        }
       }
     }
 
@@ -1679,6 +1829,24 @@ export class ChatService {
       if (first !== undefined) notes.push(...relianceLines(first));
       else if (!found.ok && found.error.code !== "not_found" && found.error.code !== "invalid_command") notes.push("Which running work relies on this right could not be checked just now; work that does may stop at its next check.");
     }
+    // A model window too small to start a task (card "Fixed-part sizing after T08", follow-up): the owner reads the warning in the proposal, before saying yes, not only in the answer after it. The same rule as the
+    // first-call admission decides it (`smallWindowWarning`): a new provider's routes have no reply limit, so the hosts' usual reply room counts; a reply limit counts with the route's stored window.
+    if (intent.op === "routing.provider.add" && Array.isArray(args["providers"])) {
+      for (const p of args["providers"].slice(0, 10)) {
+        if (p === null || typeof p !== "object") continue;
+        const { name, contextTokens } = p as Record<string, unknown>;
+        if (typeof contextTokens !== "number" || !Number.isSafeInteger(contextTokens) || contextTokens < MIN_WORKABLE_CONTEXT_TOKENS || contextTokens > ROUTING_LIMITS.contextTokens) continue;
+        const warning = smallWindowWarning(contextTokens);
+        if (warning !== undefined) notes.push(`Provider ${typeof name === "string" && PROVIDER_NAME.test(name) ? name : "(unnamed)"}: ${warning}`);
+      }
+    }
+    if (intent.op === "routing.budget.set" && typeof args["route"] === "string" && Object.hasOwn(args, "maxTokens")) {
+      const limit = args["maxTokens"];
+      const read = limit === null || (typeof limit === "number" && Number.isSafeInteger(limit) && limit >= 1 && limit <= ROUTING_LIMITS.maxTokens) ? await this.#deps.api.handle(token, { v: API_VERSION, op: "routing.budgets", args: {} }) : undefined;
+      const entry = read?.ok === true ? (read.result["routes"] as { route: string; contextTokens: number }[] | undefined)?.find((r) => r.route === args["route"]) : undefined;
+      const warning = entry === undefined ? undefined : smallWindowWarning(entry.contextTokens, limit === null ? DEFAULT_REPLY_TOKENS : (limit as number));
+      if (warning !== undefined) notes.push(`Route ${entry!.route}: ${warning}`);
+    }
     if (intent.op === "catalog.policy.change") {
       const standing = await this.#get(token, "catalog.policy.get", {});
       if (standing?.["source"] === "operator") notes.push(`The operator set this at startup (${String(standing["effective"])}); your setting is saved but does not apply until that startup option is removed.`);
@@ -2029,6 +2197,17 @@ export class ChatService {
         const item = typeof args["concernId"] === "string" ? await this.#get(token, "stall.concern.get", { concernId: args["concernId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such concern") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "defect": {
+        // A defect's revision when the judgement or decision is shown (card Q04): a check, a repair or a decision in between makes the proposal stale, so the owner never judges a version they were not shown.
+        const item = typeof args["id"] === "string" ? await this.#get(token, "defect.get", { id: args["id"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such defect") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`defect:${args["id"] as string}`) };
+      }
+      case "doc-obligation": {
+        // A documentation obligation's revision when the replacement or verification is shown (card Q03); a new obligation has none to expect.
+        if (args["obligationId"] === undefined) return { ok: true };
+        const item = typeof args["obligationId"] === "string" ? await this.#get(token, "doc.obligation.get", { id: args["obligationId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such documentation obligation") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`doc-obligation:${args["obligationId"] as string}`) };
+      }
       case "contract": {
         const item = typeof args["taskId"] === "string" ? await this.#get(token, "contract.get", { taskId: args["taskId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such task") : { ok: true, name: "expectedVersion", value: (item["version"] as number) + ahead(`contract:${args["taskId"] as string}`) };
@@ -2147,6 +2326,39 @@ export class ChatService {
     const response = await this.#deps.api.handle(token, { v: API_VERSION, op, args });
     if (response.ok) return (response.result["items"] as Record<string, unknown>[] | undefined) ?? [];
     throw new DomainError(response.error.code === "unauthenticated" ? "unauthenticated" : "unavailable", response.error.message);
+  }
+
+  /**
+   * The rights a bundle stands for (card D01): every capability of the agent's own roles, as the role templates list them now, in the order the roles and their capabilities are written, each once.
+   * A right the agent already holds in exactly that scope for good (active, no start, no end, no idle window, no terms, not derived) is left out, so saying it twice gives nothing twice.
+   * An agent with no role, a role with no template, a template holding a wildcard or an approval, or nothing left to give is refused with what to do instead; nothing is guessed.
+   */
+  async #rightsBundle(token: string, agent: { principal: string; name: string; roles: readonly string[] }, args: Readonly<Record<string, unknown>>, projectName: string): Promise<{ ok: true; actions: string[]; note: string } | ReturnType<typeof refuse>> {
+    const who = quotedText(agent.name, 80);
+    if (agent.roles.length === 0) return refuse("invalid_command", `${who} has no role, so there is no bundle of rights to give. Give ${who} a role first (for example "make ${agent.name} an author"), or name the rights one by one.`);
+    const templates = new Map((await this.#listAll(token, "role.list", {})).map((r) => [String(r["name"]), Array.isArray(r["capabilities"]) ? (r["capabilities"] as unknown[]).filter((c): c is string => typeof c === "string") : []]));
+    const unknown = agent.roles.find((r) => !templates.has(r));
+    if (unknown !== undefined) return refuse("not_found", `the role ${quotedText(unknown, 60)} of ${who} has no template, so what it stands for is not known. Name the rights one by one, or define the role first.`);
+    const actions = [...new Set(agent.roles.flatMap((r) => templates.get(r) ?? []))];
+    if (actions.length === 0) return refuse("invalid_command", `the roles of ${who} (${agent.roles.join(", ")}) stand for no rights, so there is nothing to give. Name the rights one by one.`);
+    // A template may hold a wildcard (`*`, `task.*`); a plain sentence never draws one up (first review): each line of a bundle names one exact right, so the owner sees what each one gives.
+    const wide = actions.find((a) => a === "*" || a.endsWith(".*"));
+    if (wide !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(wide, 60)}, which covers more than one right, so no bundle was drawn up. Name the rights one by one.`);
+    // An approval right (`approve.…`) lets an agent's action through without asking the owner; a plain "let Ann work" sentence never gives one (first review), as an agent never derives one and a meeting never grants one.
+    const waiver = actions.find((a) => a.startsWith("approve."));
+    if (waiver !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(waiver, 60)}, an approval that lets actions through without asking you, so no bundle was drawn up. Name the rights one by one.`);
+    // A right held for good already covers whatever times the new one would have; one that starts later, ends, lapses, rests on another right or holds only under terms (hours, environments, a spend limit) does not.
+    // Only the agent's own rights count (second review): the list is asked for by grantee, and each item is checked again, so another agent's right in the project never leaves one of Ann's out.
+    const held = new Set((await this.#listAll(token, "grant.list", { grantee: agent.principal }))
+      .filter((g) => g["grantee"] === agent.principal && g["state"] === "active" && g["project"] === args["project"] && g["resource"] === undefined && g["notBefore"] === undefined && g["expiresAt"] === undefined && g["idleDays"] === undefined && g["parentId"] === undefined && g["terms"] === undefined)
+      .map((g) => String(g["action"])));
+    const fresh = actions.filter((a) => !held.has(a));
+    const where = quotedText(projectName, 80);
+    if (fresh.length === 0) return refuse("invalid_command", `${who} already holds every right of the role${agent.roles.length === 1 ? "" : "s"} ${agent.roles.join(", ")} in ${where}, so nothing was drawn up.`);
+    if (fresh.length > GRANT_BUNDLE_LIMIT) return refuse("invalid_command", `the roles of ${who} stand for ${String(fresh.length)} rights, more than the ${String(GRANT_BUNDLE_LIMIT)} one proposal can show. Name the rights you want in smaller groups.`);
+    const skipped = actions.filter((a) => held.has(a));
+    const note = `These are the rights the role${agent.roles.length === 1 ? "" : "s"} ${agent.roles.join(", ")} of ${who} stand${agent.roles.length === 1 ? "s" : ""} for, each only in ${where}${skipped.length === 0 ? "" : `; already held there and left out: ${skipped.join(", ")}`}. Saying yes gives them all; to give fewer, say no and name the rights you want.`;
+    return { ok: true, actions: fresh, note };
   }
 
   /** Every item of a list operation, bounded (five pages). */
@@ -2689,6 +2901,8 @@ function recordOf(step: ChatStep): string | undefined {
     case "difficulty.set-profiles": return "difficulty-profiles";
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
+    // A repair named in the same message comes before the owner's judgement of it, which then expects the defect's next revision.
+    case "defect.repair": return `defect:${a["id"] as string}`;
     case "standup.update": return `standup:${a["scheduleId"] as string}`;
     case "notifications.configure": return "notifications";
     case "retention.settings.set": return "retention";
@@ -2711,6 +2925,8 @@ function shownOf(result: JsonObject): string[] | undefined {
   return Array.isArray(lines) && lines.length > 0 && lines.every((l) => typeof l === "string") ? (lines as string[]).slice(0, 12).map((l) => l.slice(0, 600)) : undefined;
 }
 
+/** How many document changes the chat offers when it asks which one verifies a document (card Q03b): the `docs` view lists as many. */
+const DOC_CHOICES = 3;
 const refuse = (code: string, message: string): { ok: false; kind: "refuse"; code: string; message: string } => ({ ok: false, kind: "refuse", code, message });
 
 /**

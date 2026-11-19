@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
 import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, runContainmentSuite, runOutcome, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
-import { unavailableBackend, windowsEvidenceBackend } from "./containment-windows.js";
+import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher, type LaunchRequest, type RunResult } from "./launcher.js";
 import { bubblewrapBackend } from "./linux.js";
 
@@ -103,6 +103,16 @@ describe("G05 containment suite on the production launcher (Linux, bubblewrap)",
     const suite = await runContainmentSuite({ launcher: await SandboxLauncher.create({ backend: dead, protectedPaths: [], audit: () => undefined }) });
     assert.equal(suite.cases.length, REQUIRED_CASE_IDS.length);
     assert.ok(suite.cases.every((c) => c.verdict === "not_run"));
+  });
+
+  test("a long no-capacity reason is cut, so the report it goes into still parses (a case detail is at most 400 characters)", async () => {
+    const reason = `Windows Sandbox refused the client: ${"C:\\Program Files\\WindowsApps\\x can be changed by S-1-5-21-1-2-3-1001; ".repeat(20)}`;
+    assert.ok(reason.length > 400);
+    const dead: SandboxBackend = { name: "dead", health: async () => ({ healthy: false, backend: "dead", reason }), plan: () => { throw new Error("never"); }, guestView: () => { throw new Error("never"); } };
+    const suite = await runContainmentSuite({ launcher: await SandboxLauncher.create({ backend: dead, protectedPaths: [], audit: () => undefined }) });
+    assert.ok(suite.cases.every((c) => c.verdict === "not_run" && c.detail.startsWith("no capacity: Windows Sandbox refused the client") && c.detail.length <= 400), JSON.stringify(suite.cases[0]));
+    const parsed = parseReport(JSON.stringify(report("win32", { capacityAvailable: false, capacityReason: "short", cases: suite.cases, trustedHost: undefined, windows: undefined })));
+    assert.ok("report" in parsed, JSON.stringify(parsed));
   });
 
   test("a probe that cannot be made is inconclusive, which the gate does not accept", async (t) => {
@@ -312,6 +322,16 @@ describe("G05 containment suite, Windows cases (recorded launchers, any OS)", ()
   test("a confined Windows run that prints protected content fails its case", async () => {
     const suite = await runContainmentSuite({ dialect: "windows", launcher: recordingLauncher([], () => UNCONFINED_READS), unconfinedLauncher: recordingLauncher([], () => UNCONFINED_READS) });
     for (const id of READ_CASES) assert.equal(suite.cases.find((c) => c.id === id)!.verdict, "fail", id);
+  });
+
+  test("the Windows evidence run's owner and share account: configured, else the console user (as windows-real.test.ts), else the runner's account; the source is always named", async () => {
+    const env = { USERDOMAIN: "PC", USERNAME: "runner" };
+    assert.deepEqual(evidenceIdentity(env, "PC\\owner"), { owner: "PC\\owner", shareIdentity: "PC\\owner", ownerSource: "console", shareSource: "console" });
+    assert.deepEqual(evidenceIdentity(env), { owner: "PC\\runner", shareIdentity: "PC\\runner", ownerSource: "runner", shareSource: "runner" });
+    assert.deepEqual(evidenceIdentity(env, ""), evidenceIdentity(env));
+    assert.deepEqual(evidenceIdentity({ ...env, NIMBLENEWT_WSB_OWNER: "PC\\set", NIMBLENEWT_WSB_SHARE_IDENTITY: "PC\\share" }, "PC\\owner"), { owner: "PC\\set", shareIdentity: "PC\\share", ownerSource: "configured", shareSource: "configured" });
+    assert.deepEqual(evidenceIdentity({ ...env, NIMBLENEWT_WSB_OWNER: "PC\\set", NIMBLENEWT_WSB_SHARE_IDENTITY: "" }, "PC\\owner"), { owner: "PC\\set", shareIdentity: "PC\\owner", ownerSource: "configured", shareSource: "console" });
+    if (process.platform !== "win32") assert.equal(await windowsConsoleUser(), undefined);
   });
 
   test("the Windows evidence backend never throws: off Windows, or misconfigured, it has no capacity and says why", async () => {

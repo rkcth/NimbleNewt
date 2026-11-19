@@ -4,7 +4,7 @@ import { fauxAssistantMessage, fauxToolCall, Type } from "@earendil-works/pi-ai"
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { requestId } from "@nimblenewt/contracts";
 import { agentNamespace } from "@nimblenewt/registry";
-import { BRIDGE_TOOL_NAMES, DeclarationBoard, PiAdapter, boundTransport, bridgeToolName, composeTools, createBridge, InvalidToolError, type AdapterTool, type BridgeReply, type BridgeRequest, type BridgeTransport } from "./index.js";
+import { BRIDGE_REPLAY, BRIDGE_TOOL_NAMES, DeclarationBoard, PiAdapter, boundTransport, bridgeToolName, composeTools, createBridge, InvalidToolError, type AdapterTool, type BridgeReply, type BridgeRequest, type BridgeTransport } from "./index.js";
 import { OFFLINE_MODEL_REF, createOfflineModels } from "./testing/offline.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -26,14 +26,15 @@ function fakeController(catalogue: { name: string; kind: string; version: string
   return { seen, transport, publish: (tool: { name: string; kind: string; version: string }) => { catalogue.push(tool); revision++; } };
 }
 
-test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent and carrying no replay flag", () => {
+test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent, each presented again after a crash (G04 follow-up: the controller answers it from its records)", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-propose", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-propose", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
-    assert.equal(tool.replay, undefined, "whether a call may be run again is the controller's decision from the approved manifest, never declared here");
+    assert.equal(tool.replay, "safe", "an interrupted bridge call is presented again under its own call ID; what that means is the controller's decision");
+    assert.equal(tool.replay, BRIDGE_REPLAY);
     assert.ok(Object.isFrozen(tool));
   }
   assert.ok(Object.isFrozen(bridge) && Object.isFrozen(bridge.tools));
@@ -156,6 +157,39 @@ test("an attempt resumed in a new process goes on numbering after the call IDs a
   assert.match(ids[0]!, /^d:[0-9a-f]{40}$/, "call_0 was used before the restart");
   assert.notEqual(ids[1], "call_0:2", "the second use of a seeded ID is renumbered too");
   assert.notEqual(ids[0], ids[1]);
+});
+
+test("G04 follow-up: a call a crash interrupted keeps the ID the bridge gave it when Pi presents it again, and a new call with the same provider ID after it is numbered on", async () => {
+  const before = fakeController();
+  const tool = (b: ReturnType<typeof createBridge>) => b.tools.find((t) => t.name === bridgeToolName("task.get"))!;
+  const ctx = (callId: string) => ({ callId }) as never;
+  // Before the crash: a provider that counts from zero in every reply used call_0 twice, and the second call was interrupted.
+  const first = createBridge(before.transport);
+  await tool(first).execute({}, ctx("call_0"));
+  await tool(first).execute({}, ctx("call_0"));
+  await tool(first).execute({}, ctx("call_0"));
+  const [, second, third] = before.seen.map((r) => r.callId);
+  // A new process: the stored conversation holds call_0 twice, the second without a result. Pi presents it again, then the model makes a new call_0.
+  const after = fakeController();
+  const resumed = createBridge(after.transport);
+  resumed.seed(["call_0", "call_0"], ["call_0"]);
+  await tool(resumed).execute({}, ctx("call_0"));
+  await tool(resumed).execute({}, ctx("call_0"));
+  assert.deepEqual(after.seen.map((r) => r.callId), [second, third], "the interrupted call reaches the controller under its old ID; the next one gets the next number");
+  // A single interrupted call with a fitting ID is presented as it was.
+  const plain = fakeController();
+  const once = createBridge(plain.transport);
+  once.seed(["p1"], ["p1"]);
+  await tool(once).execute({}, ctx("p1"));
+  await tool(once).execute({}, ctx("p1"));
+  assert.equal(plain.seen[0]!.callId, "p1");
+  assert.match(plain.seen[1]!.callId, /^d:[0-9a-f]{40}$/);
+  // Without open calls the numbering goes on as before (no ID is given out twice).
+  const closed = fakeController();
+  const none = createBridge(closed.transport);
+  none.seed(["p1"]);
+  await tool(none).execute({}, ctx("p1"));
+  assert.equal(closed.seen[0]!.callId, plain.seen[1]!.callId);
 });
 
 test("a provider call ID the controller would refuse (a `|`, or too long) is sent as a digest of itself, always the same one; a fitting ID is sent as it is", async () => {

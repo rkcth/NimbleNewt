@@ -120,7 +120,7 @@ Result: `{ items, more }`: each `{ grantId, grantee, action, project, state, inF
 
 #### `setup.readiness`
 
-Owner only: what is set up and what is missing before a first agent can work (owner identity, approval profile, a project, a model route, a host, notifications, an agent, a first task). Read-only; each item says whether it is done, left at its default, missing or optional, what was found and how to set it up.
+Owner only: what is set up and what is missing before a first agent can work (owner identity, approval profile, a project, a model route, a host, notifications, an agent, a first task). Read-only; each item says whether it is done, left at its default, missing or optional, what was found and how to set it up. The model route item names up to three usable routes whose context window cannot start a task (by the first-call admission rule, with the route's reply limit) with the window each needs, counts the rest, and is missing when no usable route can start one.
 
 Arguments:
 
@@ -483,7 +483,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `context.route.get`
 
-The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 14000, 8000 for the prompt and 6000 for the tool schemas; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Also, for the goal anchor (card W12): `anchor` (on by default: each attempt's first prompt opens with a short block the controller writes from its own records, the task's goal, acceptance criteria, what a done is checked against, the agent's own work notes, the owner's rules and the IDs of the records it was made from, and the worker puts that block again at the top of every summary that replaces a cut conversation, so an agent that has lost its place finds its goal again; that summary is a plain extract, the start and the end of what was cut, written without a model, so details from the middle may be missing; a remote machine that sets no context of its own writes it only while the anchor is on, with it off the model writes the summary again; off: no block) and `anchorChars` (the most characters the block may take, 900 to 6000, default 2400; the route's window caps it further at 4 percent of the window, always well under the reply reserve). Also, for the memory tool (card W13): `recall` (on by default: the agent may call the read-only tool task.recall to read back, from the controller's own records of its current task, its goal and plan, its own earlier notes, hand-off facts, the full text of notes that were cut, and a short digest of what was done; off: the tool answers that it is switched off) and `recallCalls` (how many calls one attempt may make, 1 to 100, default 20). Shows the entries, the defaults and what applies now.
+The route-change check's settings (owner only): `check` (on by default: when a task is about to run on another model route than it last ran on, the dispatcher builds its context again for that route's window, refuses to start it if what must stay whole does not fit, and otherwise puts that rebuilt context, with references to what was cut, at the end of its first prompt) and `floorChars` (the characters counted as the fixed part, system prompt and tool schemas, of a route nobody has measured yet; default 21750, 3000 for the prompt and 18750 for the tool schemas, the real worker's measured fixed part with a little room; it only sizes the cut, an unmeasured route is never refused on it: the first call on the route is checked with its real size and the owner gets a notice). Also, for the goal anchor (card W12): `anchor` (on by default: each attempt's first prompt opens with a short block the controller writes from its own records, the task's goal, acceptance criteria, what a done is checked against, the agent's own work notes, the owner's rules and the IDs of the records it was made from, and the worker puts that block again at the top of every summary that replaces a cut conversation, so an agent that has lost its place finds its goal again; that summary is a plain extract, the start and the end of what was cut, written without a model, so details from the middle may be missing; a remote machine that sets no context of its own writes it only while the anchor is on, with it off the model writes the summary again; off: no block) and `anchorChars` (the most characters the block may take, 900 to 6000, default 2400; the route's window caps it further at 4 percent of the window, always well under the reply reserve). Also, for the memory tool (card W13): `recall` (on by default: the agent may call the read-only tool task.recall to read back, from the controller's own records of its current task, its goal and plan, its own earlier notes, hand-off facts, the full text of notes that were cut, and a short digest of what was done; off: the tool answers that it is switched off) and `recallCalls` (how many calls one attempt may make, 1 to 100, default 20). Shows the entries, the defaults and what applies now.
 
 Arguments:
 
@@ -1797,6 +1797,16 @@ Arguments:
 
 Result: `{ item }`: the summary.
 
+#### `landing.queue.list`
+
+The landing queue of a project's landing branch, oldest first (card P10): each approved submission waiting to land, its task, the base and tree that will land and its position. Needs the owner or the right `integration.lease` on the project.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ branch, items: [{ position, seq, submissionId, taskId, base, tree, author, queuedAt, queuedBy, replaced? }] }`; `branch` is empty while the project names no landing branch.
+
 #### `integrator.lease.list`
 
 The integrator leases of a project, one per branch ever leased: who holds each, its fence, when it expires and whether it is live now. Needs the right `integration.lease` on the project.
@@ -1820,7 +1830,7 @@ Result: `{ item }`.
 
 #### `status.ask`
 
-A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `command_state` (what became of a task's latest assignment or transfer, in the shared command words), `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `work_report` (the report an agent ended a task's attempt with, its running notes, the second agent's questions and the answers, and whether the report was found supported or not questioned, card W10: `{ kind: "work_report", taskId }`), `attempt_endings` (how each attempt of a task ended or stands, newest first, at most 6: the agent and route, when it started and ended, why its last turn stopped in plain words, the nudges to go on, the plan steps checked of how many, its stops before the work was done, the checks of its done, whether a second agent questioned its report, its waits for jobs, and the blocker it left, then the open agent_stopped_early, done_unverified and report_unsupported blockers of the task with what they say; read as the work report is, card W08: `{ kind: "attempt_endings", taskId }`; in chat the task may be named by its title), `start_size` (a task's starting sizes across its hand-offs, the alerts open on it with the trend, the largest contributors and where the originals are kept, and the watch's thresholds: `{ kind: "start_size", taskId }`; in chat the task may be named by its title), `handoff_archive` (the whole text of a hand-off package section cut to fit, a chat answer at a time: `{ kind: "handoff_archive", taskId, section?, from? }` for the task's latest hand-off, going on or finished, or `{ kind: "handoff_archive", archiveId, from? }`; without a section it lists the cuts; `from` is the line to read on from), `attention` (what in the overview needs a person's eye, as lines: paused assignees, unreachable workers, uncertain tool results and stale artifacts, each with when it was seen: `{ kind: "attention", projectId?, agentId?, state?, attentionKind?, since?, until?, limit? }`; the same list as `status.attention`, which pages), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `setup` (owner only: the first-run walk-through, `{ kind: "setup" }`: what is set up, what is still open in the order a person sets it up, and the plain question, recommendation and meaning of declining for the next open step), `standup_questions` (what the stand-ups asked the owner: the open questions and the latest answers), `meeting_procedure` (where a motion stands in the meeting procedure: the stage, the round and what it waits for: `{ kind: "meeting_procedure", motionId }`; a member or reader is never told who has voted), `meeting_waiting` (what an open meeting run on the floor waits on now: the owner, a member or the chair, a tool or nothing: `{ kind: "meeting_waiting", recordId }`; while a vote is open only the owner is told which voter), `agents` (the agents with the coordinator marked and its lifecycle state, read only and under the rules of `agent.list`: `{ kind: "agents", state?, limit? }`, active agents unless state is retired, at most 50; only the owner is told which agent is the coordinator and what holds it; an agent's name is shown quoted), `database_transfer` (which database the controller runs on, where it can be moved, the last move and the restart setting, owner only: `{ kind: "database_transfer" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`; in chat the task, the agent or the team may be named by its title or name, and the chat finds it; a scope with no request of its own is answered from the wider scope whose stop reaches it - its agent, a team above it, a parent task of its swarm or the installation - and the answer names that scope), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `standups` (a project's stand-ups themselves, each one two lines: the schedule as set — whether it is active, paused or ended, how often and at what time it is held, how long, how wide its window and who is on its roster — then its meetings, the one coming up and how the last one ended: `{ kind: "standups", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_patterns` (owner only: what the meeting decision log suggests, per kind of grant or budget raise how often the owner agreed, refused or let it through, and where they always agreed a suggestion to let the class through; it never changes the policy: `{ kind: "decision_patterns", projectId? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `thinking` (owner only: what the model was thinking while it worked on a task, kept for a limited time, with `{ kind: "thinking", taskId, after?, limit? }`; shown quoted as the model's own untrusted words and each look is recorded), `replay` (step through a task's activity as it was recorded, read only: a summary with the lines of work and agents to follow and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent?, stepKind?, since?, until? }` (what anyone recorded is shown quoted), or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `meeting_desk_reads` (what a meeting's chair read from absent members' desks and shared working notes, each file with whose it is, its revision, size, reader and time in the order read, and every refused attempt to change one: `{ kind: "meeting_desk_reads", occurrenceId, deskRecordId?, limit? }`; the occurrence ID is the one the meetings answer cites), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set, then the same state as `retention.status` as lines: the data disk's free room against the reserve, each quota class with its use and the scopes near it, the backups and the latest one, the latest deletions and retention runs, counts and record IDs only, and the room each bulk log (messages to the owner, between agents, recorded model replies) takes with what the last runs removed of it: `{ kind: "retention" }`), `web_access` (owner only: how the web chat is set up and which browsers are signed in), `wip_backup` (owner only: with `projectId`, whether the optional work-in-progress backup of a project is on, what its standing approval covers and what the last backups did), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `capacity` (owner only: the capacity settings in force, in three groups - the optional caps (attempts at once per project, per agent and the children reporting to one supervising agent), the host and global quotas with each host's declared CPUs and memory and what runs and waits now, and the limits on spawning child tasks - each figure marked as yours or the default and an off one said to be off: `{ kind: "capacity" }`), `environment` (owner only: one agent's environment as it is now - the active revision with the shared base, the agent's own packages and their exact versions, skills and limits, a newer staged revision that waits, and why each revision was made; `{ kind: "environment", agent }` where agent is the agent principal such as agent:agt-..., or `agentName` in the owner's words), `access` (owner only: what approved environment requests give one agent now, the network sites it may reach through the relay and the resources mounted read-only for its next attempts, or that this controller does not enforce them; `agent` or `agentName`), `maintenance` (owner only: the agents' requests to change their environment, what each asked for, whether it is waiting, applied, rolled back, failed or revoked and why; `maintenanceId`, `agent` or `agentName`, `status`, `limit` are optional), `release` (owner only: release testing — per candidate the gate result of each platform (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also says whether its host picked it up, when the host was last heard and when it ends as timed out if no result comes), whether the candidate is approved, and what is staged and current: `{ kind: "release", candidateId?, limit? }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `jobs` (owner only: the long-running jobs that have not ended, each with its state, task, kind and since when, which are outcome-unknown and wait for a reconciliation, and which a stop could not end: `{ kind: "jobs", limit? }`), `chat_budget` (owner only: the daily cap on the tokens the controller's own model calls may use, who set it and today's count and what is left: `{ kind: "chat_budget" }`; the same state as `chat.budget.get`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`), `toolbox` (owner only: the shared tools, each with its version in use, who it is for, the platforms it declares and how many personal copies were made: `{ kind: "toolbox" }`), `toolbox_proposals` (owner only, card T08: the agents' proposals for the shared toolbox, each with its author, what it changes, its base and whether that is still the version in use, the access it adds or drops and its state; by default those waiting, with the number deferred; `state` names another or `all`: `{ kind: "toolbox_proposals", state? }`), `wakes` (owner only, card M04h: the stopped agents the controller woke for a meeting and whether each is waiting, attending, given up on or stopped by you: `{ kind: "wakes" }`), `landing` (owner only: where finished work lands, card H12s: the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, one policy for the whole installation: `{ kind: "landing" }`)}`), `approval_load` (owner only: the approval load - your decisions per day, how long asks waited, how many actions ran by rule, standing grant, agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer and whether the derived-profile question is due: `{ kind: "approval_load", days? }`, days 1 to 90, default 7), `settings` (owner only, card U08: every setting with the value in force and whether it is the default, set by you, inherited or locked, and the layer it comes from: `{ kind: "settings", prefix? }`), `providers` (owner only: each model provider with where it runs, its address, the NAME of its secret and whether that secret is set, and its models, never a key: `{ kind: "providers" }`), `secrets` (owner only: the names of the secrets in use and whether each is set, never a value: `{ kind: "secrets" }`), `sandbox` (owner only: the sandbox mechanism each host uses and a warning where its boundary is weaker, as macOS Seatbelt's is: `{ kind: "sandbox" }`), `kept_secret_uses` (owner only: the network grants, backup targets and work-in-progress backups made before the rule that a secret kept for something else is never sent to another party and that still name one, by the secret's name, never a value: `{ kind: "kept_secret_uses" }`), `grant_reliance` (owner only: the running work that may rely on a standing right before it is taken back, of one right or of every right that has any: `{ kind: "grant_reliance", grantId? }`) and `compatibility` (owner only: whether the runtimes in use are ones this version supports, what database migrations wait and the agents and operations each finding touches: `{ kind: "compatibility" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest, then the kind, `{ kind: "needs_you", limit? }`) and `critical_path` (owner only: what the owner marked as the critical path and the decisions waiting for the owner that hold it up, `{ kind: "critical_path" }`). What the caller may not read reads as missing.
+A status view from the records, each line citing its records: `task`, `overview`, `noticeboard`, `changes`, `tools`, `delivered` (artifacts are checked against their files when the controller keeps them), `failed_events`, `failed_event`, `command_state` (what became of a task's latest assignment or transfer, in the shared command words), `handoff` (the hand-off going on for a task: `{ kind: "handoff", taskId }`), `work_report` (the report an agent ended a task's attempt with, its running notes, the second agent's questions and the answers, and whether the report was found supported or not questioned, card W10: `{ kind: "work_report", taskId }`), `defects` (what was checked in a task's deliverables and what was found, card Q04: each deliverable the caller may read with its newest version and state, and each defect with its ID, severity, state, the repair and review cycles used against the limit in force and the finding, shown quoted: `{ kind: "defects", taskId }`; in chat the task may be named by its title), `docs` (the documentation obligations of a project, card Q03: each document with its audience, owner agent, version, implementing tasks and claims, whether it is verified against tested code or flagged unverified or stale and why, and its update tasks; `{ kind: "docs", projectId }`), `qa` (what QA checked on a task, card Q02: per checked submission whether the QA gate passes and why not, each evidence record with its tree, source, environment, times, contract version, decisions and results kept apart, whether it still holds, and the pending re-checks: `{ kind: "qa", taskId }`), `attempt_endings` (how each attempt of a task ended or stands, newest first, at most 6: the agent and route, when it started and ended, why its last turn stopped in plain words, the nudges to go on, the plan steps checked of how many, its stops before the work was done, the checks of its done, whether a second agent questioned its report, its waits for jobs, and the blocker it left, then the open agent_stopped_early, done_unverified and report_unsupported blockers of the task with what they say; read as the work report is, card W08: `{ kind: "attempt_endings", taskId }`; in chat the task may be named by its title), `start_size` (a task's starting sizes across its hand-offs, the alerts open on it with the trend, the largest contributors and where the originals are kept, and the watch's thresholds: `{ kind: "start_size", taskId }`; in chat the task may be named by its title), `handoff_archive` (the whole text of a hand-off package section cut to fit, a chat answer at a time: `{ kind: "handoff_archive", taskId, section?, from? }` for the task's latest hand-off, going on or finished, or `{ kind: "handoff_archive", archiveId, from? }`; without a section it lists the cuts; `from` is the line to read on from), `attention` (what in the overview needs a person's eye, as lines: paused assignees, unreachable workers, uncertain tool results and stale artifacts, each with when it was seen: `{ kind: "attention", projectId?, agentId?, state?, attentionKind?, since?, until?, limit? }`; the same list as `status.attention`, which pages), `timeline` (a project's recent steps across its tasks: `{ kind: "timeline", projectId, agent?, since?, limit? }`), `shutdown` (whether the installation could be stopped now, owner only: `{ kind: "shutdown" }`), `setup` (owner only: the first-run walk-through, `{ kind: "setup" }`: what is set up, what is still open in the order a person sets it up, and the plain question, recommendation and meaning of declining for the next open step), `standup_questions` (what the stand-ups asked the owner: the open questions and the latest answers), `meeting_procedure` (where a motion stands in the meeting procedure: the stage, the round and what it waits for: `{ kind: "meeting_procedure", motionId }`; a member or reader is never told who has voted), `meeting_waiting` (what an open meeting run on the floor waits on now: the owner, a member or the chair, a tool or nothing: `{ kind: "meeting_waiting", recordId }`; while a vote is open only the owner is told which voter), `agents` (the agents with the coordinator marked and its lifecycle state, read only and under the rules of `agent.list`: `{ kind: "agents", state?, limit? }`, active agents unless state is retired, at most 50; only the owner is told which agent is the coordinator and what holds it; an agent's name is shown quoted), `database_transfer` (which database the controller runs on, where it can be moved, the last move and the restart setting, owner only: `{ kind: "database_transfer" }`), `stop_cleanup` (what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup, and how much was charged to the budgets: `{ kind: "stop_cleanup", taskId }`, or `{ kind: "stop_cleanup", scopeKind, scopeId }` (chat's flat form) or `{ kind: "stop_cleanup", scope: { kind, id } }`; in chat the task, the agent or the team may be named by its title or name, and the chat finds it; a scope with no request of its own is answered from the wider scope whose stop reaches it - its agent, a team above it, a parent task of its swarm or the installation - and the answer names that scope), `meetings` (a project's planned meetings with their rosters, and its stand-ups by their latest occurrence: `{ kind: "meetings", projectId, limit? }`), `standups` (a project's stand-ups themselves, each one two lines: the schedule as set — whether it is active, paused or ended, how often and at what time it is held, how long, how wide its window and who is on its roster — then its meetings, the one coming up and how the last one ended: `{ kind: "standups", projectId, limit? }`), `agenda` (a project's open stand-up topics in meeting order: `{ kind: "agenda", projectId, limit? }`), `decision_patterns` (owner only: what the meeting decision log suggests, per kind of grant or budget raise how often the owner agreed, refused or let it through, and where they always agreed a suggestion to let the class through; it never changes the policy: `{ kind: "decision_patterns", projectId? }`), `decision_log` (owner only: what happened to each change a meeting decided and who allowed it: `{ kind: "decision_log", projectId?, changeKind?, outcome?, after?, limit? }`, one page of the stored log (in entry-ID order, not time order), newest first within the page, `after` continues), `explanations` (what agents wrote about their choices on a task: `{ kind: "explanations", taskId, seq?, limit? }`), `activity` (a task's recorded steps in plain lines: `{ kind: "activity", taskId, latest?, after?, limit? }`), `thinking` (owner only: what the model was thinking while it worked on a task, kept for a limited time, with `{ kind: "thinking", taskId, after?, limit? }`; shown quoted as the model's own untrusted words and each look is recorded), `replay` (step through a task's activity as it was recorded, read only: a summary with the lines of work and agents to follow and a window of steps with `{ kind: "replay", taskId, from?, limit?, lane?, agent?, stepKind?, since?, until? }` (what anyone recorded is shown quoted), or one step in full with what led to it with `{ kind: "replay", taskId, seq }`; ask for a task by its title with `taskTitle` and the chat finds the task), `owner_questions` (owner only: the questions agents have put to the owner, `{ kind: "owner_questions", limit? }`), `revocations` (owner only: the catalogue tool versions the owner revoked, newest first: which version, why, by whom and when; a closing line says when the catalogue was larger than one look covers, so there may be more: `{ kind: "revocations", name?, limit? }`), `standup_briefs` (the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, the advice it needs, its priorities and the notes added to it, each marked as the owner's or the agent's: `{ kind: "standup_briefs", occurrenceId, agent? }`; in chat the stand-up and the agent may be named by title and name, and the chat finds them), `meeting_desk_reads` (what a meeting's chair read from absent members' desks and shared working notes, each file with whose it is, its revision, size, reader and time in the order read, and every refused attempt to change one: `{ kind: "meeting_desk_reads", occurrenceId, deskRecordId?, limit? }`; the occurrence ID is the one the meetings answer cites), `retention_hold` (owner only: whether a record is kept from deletion and why, one line per reason: `{ kind: "retention_hold", recordKind, id }`; a tool version is named by its tool and version: `{ kind: "retention_hold", recordKind: "catalog-version", name, version }`), `retention` (owner only: the retention values in force and which of them the owner set, then the same state as `retention.status` as lines: the data disk's free room against the reserve, each quota class with its use and the scopes near it, the backups and the latest one, the latest deletions and retention runs, counts and record IDs only, and the room each bulk log (messages to the owner, between agents, recorded model replies) takes with what the last runs removed of it: `{ kind: "retention" }`), `web_access` (owner only: how the web chat is set up and which browsers are signed in), `wip_backup` (owner only: with `projectId`, whether the optional work-in-progress backup of a project is on, what its standing approval covers and what the last backups did), `release_windows` (owner only: the maintenance windows for release updates, newest first: which release each activates, when it opens and closes in its own time zone, its status and why, what it waits for, whether the earlier release could still come back, and the quarantined releases), `event_sources` (owner only: which event sources are watched, each on or off, and what the ones the owner defined watch: `{ kind: "event_sources" }`), `capacity` (owner only: the capacity settings in force, in three groups - the optional caps (attempts at once per project, per agent and the children reporting to one supervising agent), the host and global quotas with each host's declared CPUs and memory and what runs and waits now, and the limits on spawning child tasks - each figure marked as yours or the default and an off one said to be off: `{ kind: "capacity" }`), `environment` (owner only: one agent's environment as it is now - the active revision with the shared base, the agent's own packages and their exact versions, skills and limits, a newer staged revision that waits, and why each revision was made; `{ kind: "environment", agent }` where agent is the agent principal such as agent:agt-..., or `agentName` in the owner's words), `access` (owner only: what approved environment requests give one agent now, the network sites it may reach through the relay and the resources mounted read-only for its next attempts, or that this controller does not enforce them; `agent` or `agentName`), `maintenance` (owner only: the agents' requests to change their environment, what each asked for, whether it is waiting, applied, rolled back, failed or revoked and why; `maintenanceId`, `agent` or `agentName`, `status`, `limit` are optional), `release` (owner only: release testing — per candidate the gate result of each platform (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also says whether its host picked it up, when the host was last heard and when it ends as timed out if no result comes), whether the candidate is approved, and what is staged and current: `{ kind: "release", candidateId?, limit? }`), `model_routes` (owner only: the routing controls in force, how failed routes come back and which targets are down; with a target, the three facts about taking it out of service: `{ kind: "model_routes", level?, name? }`), `reconnect` (owner only: whether reconnected workers resume their attempts by themselves, where that setting comes from and how long a waiting attempt keeps its lease, and each attempt waiting for the owner's decision with its placement, host and session: `{ kind: "reconnect", limit? }`), `jobs` (owner only: the long-running jobs that have not ended, each with its state, task, kind and since when, which are outcome-unknown and wait for a reconciliation, and which a stop could not end: `{ kind: "jobs", limit? }`), `chat_budget` (owner only: the daily cap on the tokens the controller's own model calls may use, who set it and today's count and what is left: `{ kind: "chat_budget" }`; the same state as `chat.budget.get`), `catalog_policy` (owner only: what happens to running tool calls when a version is revoked and no choice is named, where that comes from and the owner's setting: `{ kind: "catalog_policy" }`), `toolbox` (owner only: the shared tools, each with its version in use, who it is for, the platforms it declares and how many personal copies were made: `{ kind: "toolbox" }`), `toolbox_proposals` (owner only, card T08: the agents' proposals for the shared toolbox, each with its author, what it changes, its base and whether that is still the version in use, the access it adds or drops and its state; by default those waiting, with the number deferred; `state` names another or `all`: `{ kind: "toolbox_proposals", state? }`), `wakes` (owner only, card M04h: the stopped agents the controller woke for a meeting and whether each is waiting, attending, given up on or stopped by you: `{ kind: "wakes" }`), `landing` (owner only: where finished work lands, card H12s: the landing branch, whether the review gate's commit permit is required, whether the built-in protected files apply and the owner's extra protected paths, each marked as the owner's setting or the default, one policy for the whole installation: `{ kind: "landing" }`)}`), `approval_load` (owner only: the approval load - your decisions per day, how long asks waited, how many actions ran by rule, standing grant, agent review or you, every ask still waiting with its age, the standing-rule proposals waiting for your answer and whether the derived-profile question is due: `{ kind: "approval_load", days? }`, days 1 to 90, default 7), `settings` (owner only, card U08: every setting with the value in force and whether it is the default, set by you, inherited or locked, and the layer it comes from: `{ kind: "settings", prefix? }`), `providers` (owner only: each model provider with where it runs, its address, the NAME of its secret and whether that secret is set, and its models, never a key: `{ kind: "providers" }`), `secrets` (owner only: the names of the secrets in use and whether each is set, never a value: `{ kind: "secrets" }`), `sandbox` (owner only: the sandbox mechanism each host uses and a warning where its boundary is weaker, as macOS Seatbelt's is: `{ kind: "sandbox" }`), `kept_secret_uses` (owner only: the network grants, backup targets and work-in-progress backups made before the rule that a secret kept for something else is never sent to another party and that still name one, by the secret's name, never a value: `{ kind: "kept_secret_uses" }`), `grant_reliance` (owner only: the running work that may rely on a standing right before it is taken back, of one right or of every right that has any: `{ kind: "grant_reliance", grantId? }`) and `compatibility` (owner only: whether the runtimes in use are ones this version supports, what database migrations wait and the agents and operations each finding touches: `{ kind: "compatibility" }`) and `needs_you` (owner only: everything waiting for the owner's decision, questions, approvals, meeting decisions held for the owner and blockers, with what each holds up, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest, then the kind, `{ kind: "needs_you", limit? }`) and `critical_path` (owner only: what the owner marked as the critical path and the decisions waiting for the owner that hold it up, `{ kind: "critical_path" }`). What the caller may not read reads as missing.
 
 Arguments:
 
@@ -2607,7 +2617,7 @@ Result: `{ items }`.
 
 #### `service.observe`
 
-What the service reports now about one resource: its system version, its state and the time it was looked at. Needs the same right as operating on the resource.
+What the service reports now about one resource: its system version, its state and the time it was looked at. Needs the same right as operating on the resource. A local worker reads through its tool bridge (`nimblenewt__service-observe`, its own task only).
 
 Arguments:
 
@@ -2616,6 +2626,28 @@ Arguments:
 - `resource`: the resource name
 
 Result: `{ systemVersion, state, observedAt }`.
+
+#### `simulation.observe`
+
+Owner only (card P07): what a simulation scope's stand-in holds for one resource, labelled simulated. Read only.
+
+Arguments:
+
+- `scopeId`: the scope
+- `service`: the service name
+- `resource`: the resource name
+
+Result: `{ systemVersion, state, observedAt, simulated: true, label }`.
+
+#### `simulation.get`
+
+Owner only (card P07): a simulation scope, its stand-in world and the status of each of its effects as the ledger records them, all labelled simulated. Read only.
+
+Arguments:
+
+- `scopeId`: the scope
+
+Result: `{ id, scope, effects: [{ effectId, status, target?, simulated: true }] }`.
 
 #### `deliverable.record.get`
 
@@ -2650,6 +2682,76 @@ Arguments:
 
 Result: `{ items, next? }`.
 
+#### `defect.get`
+
+One defect: its deliverable and version, finding, severity, evidence, responsible agent, state, repair version, cycles and the limit in force, every check of a repair (verdict, reason, who, when, cycles after it) and the owner's decisions with the findings that remained. Hidden as not found where the caller may not read the deliverable.
+
+Arguments:
+
+- `id`: the defect
+
+Result: `{ item }`.
+
+#### `defect.list`
+
+The defects of a deliverable, in the order they were reported (at most 100), with each one's state and cycles against the limit in force. Needs the right to read the deliverable.
+
+Arguments:
+
+- `deliverableId`: the deliverable
+
+Result: `{ items }`.
+
+#### `qa.evidence.list`
+
+The QA evidence of a task, newest first, each with its tree, source (`self` or `independent`), criteria revision, decisions, environment, times, checks and state, plus `staleNow` (what has changed since, for a record not yet invalidated), and the task's re-checks (pending or done). The task's read right.
+
+Arguments:
+
+- `taskId`: the task
+
+Result: `{ taskId, criteriaRevision, items, rechecks }`.
+
+#### `qa.evidence.get`
+
+One QA evidence record (`qae-`) or re-check (`qrc-`). Hidden as not found where the caller may not read the task.
+
+Arguments:
+
+- `id`: the record
+
+Result: `{ item }`.
+
+#### `qa.evidence.gate`
+
+Whether the independent QA evidence for one code submission passes, read only (card Q02). Required checks are the task contract's check names and required evidence items; each needs `passed` in the newest current independent record that names it. `failed`, `blocked`, `not-run` and `missing` are each counted and each fail; no evidence fails; evidence whose criteria or decisions changed since does not count (`stale`), and a task relying on a superseded decision fails. With no required checks, every check named in any current independent record is judged the same way (a newer record that leaves a check out does not hide an earlier failure of it). Self-checks never count.
+
+Arguments:
+
+- `submissionId`: the code submission
+
+Result: `{ item }`: `verdict` (`passed` or `failed`), `reasons`, `tree`, `criteriaRevision`, `decisions`, `required`, `checks` (each `{ name, result, evidenceId? }`), `counts` (`passed`, `failed`, `blocked`, `notRun`, `missing`), `stale`, `pendingRechecks`.
+
+#### `doc.obligation.list`
+
+The documentation obligations of a project in the order recorded (card Q03), each with its audience, owner, version, implementing tasks, claims, state (`unverified`, `verified` or `stale`; `flagged` is true unless verified), what it was verified against (document submission, artifact digest, and per task the code submission and tree), why it is stale and its update tasks. Anyone who may read the project's tasks.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ projectId, items }`.
+
+#### `doc.obligation.get`
+
+One documentation obligation (`dob-`). Hidden as not found where the caller may not read the project's tasks.
+
+Arguments:
+
+- `id`: the obligation
+
+Result: `{ item }`.
+
 #### `submission.list`
 
 The submissions recorded for a task, in ID order, visible exactly as `submission.get`: the owner sees all; an agent that may read the task sees the ones it made and the ones it was asked to review (a reviewer sees only the submission its review request names). A task the caller may not read is `not_found`. A listing is not a feed: IDs are hash-ordered, so new records can land before a cursor you hold and pages are not a stable snapshot; page through to collect, do not poll for news.
@@ -2662,6 +2764,19 @@ Arguments:
 - `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this task; any other value is `invalid_command`)
 
 Result: `{ items, next?, scanLimited? }`; `scanLimited` means the search stopped before the end: ask again with `next`.
+
+#### `submission.documents`
+
+The newest document submissions (kind `document`, made in the docs role) of a project, newest first (card Q03b), from the project's index of its newest 100 document changes: what an owner or docs agent passes as `documentSubmissionId` to `doc.obligation.verify`. Each is visible exactly as `submission.get`: the owner sees all; an agent that may read the project's tasks sees the ones of tasks it may read that it made or was asked to review. A project the caller may not read is `not_found`. `since` keeps those recorded no earlier than that time (a flagged document's `flaggedAt`: only a document change made since the flag verifies it).
+
+Arguments:
+
+- `projectId`: the project
+- `since` (optional): a time (`2026-11-19T10:00:00.000Z`): only document changes recorded no earlier
+- `limit` (optional): 1 to 50, default 20
+- `after` (optional): the `next` of the previous page (an opaque cursor bound to you and this project; once newer document changes have pushed its place out of the newest 100 it is refused with `invalid_command`: list again without it)
+
+Result: `{ items, next? }`: `next` only when another item you may read follows; each item is the submission with its revision and `createdAt` (when it was recorded).
 
 #### `submission.get`
 
@@ -2782,6 +2897,26 @@ Arguments:
 - none
 
 Result: `{ probation, policy, external, current, lastKnownGood }` (null where there is none).
+
+#### `release.window.get`
+
+Owner, or an agent granted exactly `release.manage` (card K07): one maintenance window: the release and digest, when it opens and closes (local and UTC), scope, channel, preparation limits, health deadline, who authorized it, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled), what it waits for, its history and, once it changed the release, whether the earlier release could still be rolled back to.
+
+Arguments:
+
+- `windowId`: the window
+
+Result: The window.
+
+#### `release.window.list`
+
+Owner, or an agent granted exactly `release.manage` (card K07): the maintenance windows, newest opening first (up to 50), and the releases quarantined after a failed window.
+
+Arguments:
+
+- none
+
+Result: `{ windows, quarantined, truncated }`.
 
 #### `agenda.get`
 
@@ -3404,7 +3539,7 @@ Arguments:
 
 - `enable` (optional): list of `check`, `floorChars`, `anchor`, `recall`
 - `disable` (optional): list of `check`, `floorChars`, `anchor`, `recall`
-- `set` (optional): for example `{ "floorChars": 14000 }`, `{ "anchorChars": 2400 }` or `{ "recallCalls": 20 }`
+- `set` (optional): for example `{ "floorChars": 20000 }`, `{ "anchorChars": 2400 }` or `{ "recallCalls": 20 }`
 - `unset` (optional): list of names
 - `expectedRevision` (optional): the revision you read
 
@@ -4136,7 +4271,7 @@ Result: `{ ok }`.
 
 #### `routing.provider.add`
 
-Owner only (guided setup): adds or replaces model providers in one step: each with its name, where it runs (`local` or `cloud`), whether it costs money, its model server's address, the NAME of the secret that holds its key (never the key itself; the owner puts the key in the secret store on the machine), what kind of server it is (`kind`: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic; an unknown kind is refused; left out, the routes' reply limit and reasoning cap are not sent on `chat/completions` and the task's activity says so), its model names and their context window. The routes `provider/model` are added to the routing table, and the `default` profile (free and local routes first) is rebuilt and given to the coordinator, the safety supervisor and the author unless the table already gives them something else. The team needs at least two routes on two different servers so that losing one does not stop it; fewer is refused in plain words and nothing is changed. Providers and routes not named stay as they are.
+Owner only (guided setup): adds or replaces model providers in one step: each with its name, where it runs (`local` or `cloud`), whether it costs money, its model server's address, the NAME of the secret that holds its key (never the key itself; the owner puts the key in the secret store on the machine), what kind of server it is (`kind`: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic; an unknown kind is refused; left out, the routes' reply limit and reasoning cap are not sent on `chat/completions` and the task's activity says so), its model names and their context window. The routes `provider/model` are added to the routing table, and the `default` profile (free and local routes first) is rebuilt and given to the coordinator, the safety supervisor and the author unless the table already gives them something else. The team needs at least two routes on two different servers so that losing one does not stop it; fewer is refused in plain words and nothing is changed. Providers and routes not named stay as they are. A context window under 8,192 tokens is refused; one from there up to the smallest window that can start a task (34,816 tokens since card P03b; the fixed instructions and tools take about 6,800) is added, and the answer carries `warnings` (and the same lines as `shown`, which the chat shows) naming the window that is needed; the chat shows the same warning in its proposal, before the owner agrees.
 
 Arguments:
 
@@ -4150,7 +4285,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `routing.budget.set`
 
-The owner (or someone given routing.write) sets how long one reply of a model route may be (`maxTokens`) and how many of those tokens it may spend reasoning (`reasoningTokens`, less than maxTokens). Both go into every model call of the route from the next call on, in the field names of the route's endpoint; a reply cut off at the limit is continued in the same turn with a nudge to stop deliberating and act. A value left out keeps its earlier value; null removes it (the call then keeps what the agent's runtime asks for).
+The owner (or someone given routing.write) sets how long one reply of a model route may be (`maxTokens`) and how many of those tokens it may spend reasoning (`reasoningTokens`, less than maxTokens). Both go into every model call of the route from the next call on, in the field names of the route's endpoint; a reply cut off at the limit is continued in the same turn with a nudge to stop deliberating and act. A value left out keeps its earlier value; null removes it (the call then keeps what the agent's runtime asks for). Every first call of a task keeps room for a whole reply within its working share of the window, so a large limit raises the window a task needs: the chat's proposal warns, with that window, when the limit would leave the route unable to start a task, and `setup.readiness` names such a route.
 
 Arguments:
 
@@ -5956,7 +6091,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `workspace.request`
 
-Integrates, lands, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a landing is an integration of committed work that is made only while the checkout's base is the landing branch's current head (otherwise it is refused and nothing is written; the author refreshes first) and reports `detail.landed` (all or nothing: it is planned from the checkout's committed objects, needs a clean shared tree on the named landing branch and, unless the project says otherwise, the review gate's commit permit on the checkout's commits; protected paths such as CI configuration, hooks and Git attributes are kept for review; the landed files stay uncommitted in the shared tree until the integrator or owner commits them, and no further landing is made before); a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated or landed. An attempt of the task does not start while a request is running. `release` is run behind the same quiet and commits what the checkout holds in the task's own checkout as the platform's commit (fixed author, task, request and attempt trailers; `detail.committed`, `commit`, `files`, `protectedHeld`, `permitRequiredToLand`); it is not a review-gate permit commit, so a landing that requires the permit still refuses it, and an unreadable landing policy refuses the release. With `submissionId` a release commits an approved code submission of the task: refused unless its newest review approves it (or it recorded that no other agent could review), and the commit is exactly its base and tree (other work in the checkout refuses it: a new submission and approval are needed), carries a `NimbleNewt-Submission` trailer and is made once: asking again answers the recorded commit (`detail.alreadyRecorded`), and a commit made before a restart that was never recorded is found and recorded instead of a second one (`detail.recovered`); only the local worker host does this. A host that does not carry it answers with a refusal.
+Integrates, lands, refreshes or quarantines a task's checkout on the host that holds it (the local worker or a remote one, which answer the same typed outcomes). The task's running attempts are made quiet first (new calls refused, calls in flight settled, a checkpoint taken) and go on afterwards; if one cannot be made quiet nothing runs and a blocker says why. A refresh is refused for a checkout that holds changes; an integration carries the changes into the shared workspace through the expected-version bridge (a file that moved is kept for review) and makes no commit; a landing is an integration of committed work that is made only while the checkout's base is the landing branch's current head (otherwise it is refused and nothing is written; the author refreshes first) and reports `detail.landed` (all or nothing: it is planned from the checkout's committed objects, needs a clean shared tree on the named landing branch and, unless the project says otherwise, the review gate's commit permit on the checkout's commits; protected paths such as CI configuration, hooks and Git attributes are kept for review; the landed files stay uncommitted in the shared tree until the integrator or owner commits them, and no further landing is made before); a quarantine moves the checkout to the owner-only quarantine and stops the task's running attempts. A running agent is told when its checkout was refreshed or its changes integrated or landed. An attempt of the task does not start while a request is running. `release` is run behind the same quiet and commits what the checkout holds in the task's own checkout as the platform's commit (fixed author, task, request and attempt trailers; `detail.committed`, `commit`, `files`, `protectedHeld`, `permitRequiredToLand`); it is not a review-gate permit commit, so a landing that requires the permit still refuses it, and an unreadable landing policy refuses the release. With `submissionId` a release commits an approved code submission of the task: refused unless its newest review approves it (or it recorded that no other agent could review), and the commit is exactly its base and tree (other work in the checkout refuses it: a new submission and approval are needed), carries a `NimbleNewt-Submission` trailer and is made once: asking again answers the recorded commit (`detail.alreadyRecorded`), and a commit made before a restart that was never recorded is found and recorded instead of a second one (`detail.recovered`); only the local worker host does this. A host that does not carry it answers with a refusal. A landing lands only the task whose approved submission is the oldest in the landing branch's queue (`landing.queue.list`; card P10), refused `invalid_transition` before anything is recorded otherwise; the host lands it only when the landing branch is at the submission's base and the checkout's committed work is exactly its approved tree (any commit beyond the submission refuses the whole landing), and a landing it confirms takes the submission out of the queue (`detail.submission`, `base`, `tree`). The owner may land a task with nothing queued only while the queue is empty. A landing is also gated on the project's required checks (`integration.get` `requiredChecks`, card P09), judged for the submission the queue says lands (with no queue kept, the one the landing names in `submissionId`): after the lease and the queue are shown again and right before anything is written, `tests` runs the task contract's test commands (`contract.set checks`; a version the assignee or the submitter stored itself is not used) in the sandbox on a fresh copy of the exact tree the landing would make, and `review` needs that submission's newest review to approve it and its patch ID (computed by the host from the submission's base and tree, and equal to the one it names) to equal the landed change's (an approval carries over to a refreshed tree only while the patch is unchanged); `qa`, `docs` and `director` are not collected at landing yet. A check that did not run counts as failed. Unless every required check passed, nothing is landed (`refused`), a queued submission stays in the queue, the results bound to that tree are in `checks` and the author (the submission's agent, else the assignee) gets them in its inbox (`toldAuthor`); when they passed, the lease and the queue are shown once more and the host lands only that tree (it must also be the queued submission's approved tree). A project that requires no check is not gated.
 
 Arguments:
 
@@ -5965,9 +6100,9 @@ Arguments:
 - `reason`: why
 - `leaseId` (optional): a landing only, when the installation gates landings by lease (it does): the integrator lease of the task's project on the landing branch (`integrator.lease.acquire`); the caller must be its holder and still have the right `integration.lease`. The owner may leave it and `fence` out: the live lease of the landing branch is then used (refused when no integrator holds it)
 - `fence` (optional): a landing only: the fence of that lease, as the acquire or renew answered it
-- `submissionId` (optional): a release only: the approved code submission to commit (`sbm-...`)
+- `submissionId` (optional): a release: the approved code submission to commit (`sbm-...`); a landing: the task's queued submission (optional, checked when given: the task's queue entry is landed and judged either way; where no queue is kept, the reviewed code submission it lands, needed when the project requires review)
 
-Result: `{ id, state, lease?, operation, taskId, requestedBy, assignee?, summary?, detail?, blocker?, quietAttempts?, told?, stopped?, held?, replayed }`; `assignee` is the agent the task was assigned to (the request is recorded against it); `detail` is the host's bounded figures (files written or kept for review, the new base, the quarantine ID; for a landing `landed` is true only when every file was written and the checkout marked, so `state` `done` can mean not landed: look at `detail.landed`, `kept` and `partial`, and `waitingToCommit` says the landed files wait to be committed); `told` and `stopped` name the attempts told their checkout changed or stopped by a quarantine; `held` names attempts whose freeze could not be lifted (a blocker says so; the recovery lifts it); `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
+Result: `{ id, state, lease?, operation, taskId, requestedBy, assignee?, summary?, detail?, blocker?, quietAttempts?, told?, stopped?, held?, queued?, landedSubmission?, checks?, toldAuthor?, replayed }`; `queued` (a landing) is the queue entry it lands `{ submissionId, base, tree, branch }`; `landedSubmission` is the submission a landing named where no queue is kept; `checks` (a landing) is `{ required, passed, base?, tree?, patchId?, submissionId?, contractVersion?, results: [{ check, result: pass, fail or not_run, boundTo?, summary, runs? }], at }`; `assignee` is the agent the task was assigned to (the request is recorded against it); `detail` is the host's bounded figures (files written or kept for review, the new base, the quarantine ID; for a landing `landed` is true only when every file was written and the checkout marked, so `state` `done` can mean not landed: look at `detail.landed`, `kept` and `partial`, and `waitingToCommit` says the landed files wait to be committed); `told` and `stopped` name the attempts told their checkout changed or stopped by a quarantine; `held` names attempts whose freeze could not be lifted (a blocker says so; the recovery lifts it); `state` is `done`, `refused`, `failed` or `uncertain` (a repeat while the host was still working: check the checkout before asking again).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -6015,6 +6150,33 @@ Arguments:
 - `commandId`: required
 
 Result: `{ item }` as `integrator.lease.acquire`, with `state` `released`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `landing.queue.add`
+
+Puts an approved code submission in the landing queue of its project's landing branch (card P10). The queue lands oldest first: a landing (`workspace.request` with `operation: landing`) lands only the task whose submission is the oldest entry, exactly its approved base and tree. An approval recorded by a reviewer (or a code submission that needs no review) is queued by the controller itself; this adds one by hand. A newer approved submission of a task already queued takes the old one's place and keeps its turn; a submission already queued is left where it is (`already`). Needs the owner, the right `integration.lease` on the project, or to be the submission's author. Refused `review_invalid` for work that is not approved, `invalid_transition` for a submission that already landed from the queue or one older than the task's queued submission, `forbidden` while the project names no landing branch, `unavailable` past 200 entries.
+
+Arguments:
+
+- `submissionId`: the approved code submission (`sbm-...`)
+- `commandId`: required
+
+Result: `{ entry: { seq, submissionId, taskId, base, tree, author, queuedAt, queuedBy, replaced? }, position, branch, already, replaced? }`; `position` 1 is the next to land.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `landing.queue.remove`
+
+Takes a task's submission out of the landing queue of its project's landing branch (card P10), so the next one becomes the oldest. The owner or an integrator (the right `integration.lease` on the project) may take any out; an author its own. A submission whose newest review takes the approval back leaves the queue by itself.
+
+Arguments:
+
+- `taskId`: the task whose queued submission is taken out
+- `reason`: why (recorded)
+- `commandId`: required
+
+Result: `{ taskId, branch, removed?, replayed }`; `removed` is the entry taken out (absent on a repeat).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -7343,7 +7505,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `service.operate`
 
-Does ONE action on ONE resource of a service for a task and records what the service itself reports afterwards. The scope is judged first: the right `effect.perform` (granted per resource: kind `service`, id `<service>/<resource>`, or project-wide) is needed on the named resource and on every other resource the action would change, otherwise it is refused as `forbidden` and nothing is done. An agent must own the task's current attempt. The intent is written to the effect ledger first; the service applies it once (a repeat with the same command ID applies nothing again); the resource is read back and judged, and the resources next to it are checked to be unchanged. `confirmed` means applied and verified; the result then carries `outcome { reference, systemVersion, observedAt }`, the only thing a deliverable of type `operational-outcome` may name. A change that cannot be verified, or that moved something outside the scope, is `uncertain`: it is never retried blindly and a person decides. No service connected: `unavailable`.
+Does ONE action on ONE resource of a service for a task and records what the service itself reports afterwards. The scope is judged first: the right `effect.perform` (granted per resource: kind `service`, id `<service>/<resource>`, or project-wide) is needed on the named resource and on every other resource the action would change, otherwise it is refused as `forbidden` and nothing is done. An agent must own the task's current attempt. The intent is written to the effect ledger first; the service applies it once (a repeat with the same command ID applies nothing again); the resource is read back and judged, and the resources next to it are checked to be unchanged. `confirmed` means applied and verified; the result then carries `outcome { reference, systemVersion, observedAt }`, the only thing a deliverable of type `operational-outcome` may name. A change that cannot be verified, or that moved something outside the scope, is `uncertain`: it is never retried blindly and a person decides. No service connected: `unavailable`. A local worker operates through its tool bridge (`nimblenewt__service-operate`, its own task only, the call ID as the command ID).
 
 Arguments:
 
@@ -7357,9 +7519,54 @@ Result: `{ effectId, status, outcome?, evidence?, note? }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `simulation.open`
+
+Owner only (card P07): opens a simulation scope for a task, an isolated place to try service operations before any real access is used. The scope has its own stand-in of the services, built from `layout`, and reaches no real service, tool, model, message or grant. Every operation in it is an effect of the effect ledger marked with the scope: the ledger runs it only through the scope's simulated stand-in and refuses (records `failed`, does nothing) any real write, send or spend. Every result is labelled simulated and can never be named as a real outcome; real access is granted separately (grant.create). Repeating the command opens it once.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task
+- `layout`: the stand-in: `{ <service>: { <resource>: { state?: { ... }, dependents?: [{ service, resource }] } } }`, 1 to 20 services of 1 to 20 resources
+- `purpose` (optional): a few words on what is being tried (up to 200 characters)
+
+Result: `{ id, replayed, scope: { taskId, projectId, state, label, isolation, world, effects } }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `simulation.operate`
+
+Owner only (card P07): does one action on one resource of a simulation scope's stand-in, through the effect ledger as an effect of the scope, with the same read-back and collateral checks as service.operate. Nothing real is written, sent or spent; the result says `simulated: true` and carries the label. `inject` makes the stand-in misbehave once, as a real service might: `refuse`, `lose-answer` (the ledger asks instead of repeating), `corrupt` (the read-back catches it) or `leak` (a neighbour changes too: the collateral check catches it). Repeating the command does it once. A closed scope refuses.
+
+Arguments:
+
+- `commandId`: required
+- `scopeId`: the scope
+- `service`: the service name
+- `resource`: the resource name
+- `action`: { type, params? }: `set` with params.fields, or `restart`
+- `inject` (optional): refuse, lose-answer, corrupt or leak
+
+Result: `{ scopeId, effectId, status, evidence?, note?, simulated: true, label }`; the evidence also says `simulated: true` and names the scope.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `simulation.close`
+
+Owner only (card P07): closes a simulation scope. No further operation runs in it; what it recorded stays readable. Repeating it is harmless.
+
+Arguments:
+
+- `commandId`: required
+- `scopeId`: the scope
+
+Result: `{ id, scope }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `deliverable.draft`
 
-Starts a deliverable of a task in `draft` (version 1): its type, title, responsible agent, audience and access scope, and optionally its content (artifacts of the task, grouped as `source` or `exported`; the code or document submissions it is; for an operational outcome the verified reference, system version and observation time). An agent holding the author, docs or qa role creates its own; the owner may name the responsible agent. Access scope `owner`: the owner and the responsible agent read it; `task` (default): also agents that may read the task; `project`: also any agent holding a role in the project. Audience `external`: only the owner can accept it. Repeating the same command ID records once.
+Starts a deliverable of a task in `draft` (version 1): its type, title, responsible agent, audience and access scope, and optionally its content (artifacts of the task, grouped as `source` or `exported`; the code or document submissions it is; for an operational outcome the verified reference, system version and observation time). An agent holding the author, docs or qa role creates its own; the owner may name the responsible agent. Access scope `owner`: the owner and the responsible agent read it; `task` (default): also agents that may read the task; `project`: also any agent holding a role in the project. Audience `external`: only the owner can accept it. Repeating the same command ID records once. A local worker drafts through its tool bridge (`nimblenewt__deliverable-draft`: its own task, itself responsible).
 
 Arguments:
 
@@ -7417,7 +7624,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `deliverable.submit`
 
-Submits the draft version for review (draft to submitted). The artifacts are checked against their bytes, the version must be complete for its type, and `contractVersion` must be the task contract version now in force (a stale one is `stale_revision` with the current version). Responsible agent or owner. Submitting is not acceptance.
+Submits the draft version for review (draft to submitted). The artifacts are checked against their bytes, the version must be complete for its type, and `contractVersion` must be the task contract version now in force (a stale one is `stale_revision` with the current version). Responsible agent or owner. Submitting is not acceptance. A local worker submits through its tool bridge (`nimblenewt__deliverable-submit`), always against the contract version its attempt began with.
 
 Arguments:
 
@@ -7487,6 +7694,169 @@ Arguments:
 - `id`: the deliverable
 
 Result: `{ id, ok, problems, invalidated }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `defect.report`
+
+Records a defect found in one submitted version of a deliverable (card Q04): what was found (the finding, optionally the deliverable event it came from, such as the rejection), its severity and its evidence. The defect is linked to the deliverable and the version; the deliverable's responsible agent repairs it. The owner, or an agent holding the reviewer, qa or director role in the project that did none of that version's work; a draft has no defects. Repeating the same command ID records once.
+
+Arguments:
+
+- `commandId`: required
+- `deliverableId`: the deliverable
+- `version`: the version the defect was found in
+- `finding`: what was found
+- `findingEvent` (optional): the number of the deliverable event of that version it came from (see `deliverable.record.events`)
+- `severity`: `critical`, `major` or `minor`
+- `evidence` (optional): up to 10 references (artifact or submission IDs, check names, lines of a log)
+
+Result: `{ id, revision, replayed }`: `id` is the defect's ID.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `defect.repair`
+
+The responsible agent (or the owner) names the newer version of the deliverable that repairs an open defect (open to repair-submitted). The version must be submitted (or under review or accepted) and newer than the defect's version and than any earlier repair. An escalated defect waits for the owner's decision instead.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the defect
+- `version`: the version that repairs it
+- `expectedRevision` (optional): the defect's revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `defect.review`
+
+Checks a submitted repair: `fixed` resolves the defect; `not-fixed` (with the reason) counts one repair and review cycle and returns the defect to `open`, or, once the cycles reach the limit in force (setting `review.repairCycles`, default 3, per project), escalates it to the owner, who is told. Each check is its own record and is never rewritten. The owner, or a reviewer, qa or director agent that did none of the repair version's work (a QA agent that made the repair is a contributor and cannot pass it).
+
+Arguments:
+
+- `commandId`: required
+- `id`: the defect
+- `verdict`: `fixed` or `not-fixed`
+- `reason` (optional): what is still wrong (required for not-fixed)
+- `expectedRevision` (optional): the defect's revision you read
+
+Result: `{ id, revision, replayed, state, cycles, limit }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `defect.override`
+
+Owner only: decides an unresolved defect (usually one that escalated). `accept-as-is` closes it as `overridden` with the finding remaining; `repair-again` returns it to `open` with its cycle count kept (it is never reset), so the next failed check escalates again. The decision is its own record with the owner's reason and every finding of the deliverable still unresolved at that moment; no check is changed, so a failed check is never shown as passed. Accepting the deliverable itself stays `deliverable.accept`.
+
+Arguments:
+
+- `commandId`: required
+- `id`: the defect
+- `outcome`: `accept-as-is` or `repair-again`
+- `reason`: the owner's reason
+- `expectedRevision` (optional): the defect's revision you read
+
+Result: `{ id, overrideId, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `qa.evidence.record`
+
+Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles its pending re-checks; the author's new self-check settles only the re-check of its own earlier self-check. Repeating the same command ID records once.
+
+Arguments:
+
+- `commandId`: required
+- `submissionId`: the code submission checked
+- `criteriaRevision`: the task contract version checked against (0 when it has none)
+- `decisions` (optional): the owner decisions (IDs) the work was judged against
+- `environment`: where it ran (OS, runtime, services, versions)
+- `observedAt`: when the checks ran (UTC time)
+- `checks`: [{ name, result: `passed`, `failed`, `blocked` or `not-run`, detail? }] (1 to 50)
+
+Result: `{ id, revision, replayed, source (`self` or `independent`), settled (re-checks settled) }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `qa.evidence.check`
+
+Looks at a task's current QA evidence against what it was bound to (card Q02). A record whose acceptance criteria, required evidence or checks changed in the task contract, whose owner decisions were superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, assigned to whoever recorded it; the owner is told. Anyone who may read the task; nothing stale writes nothing.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task
+
+Result: `{ taskId, invalidated, rechecks, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `doc.obligation.record`
+
+Records a documentation obligation (card Q03): a document (`audience` `user`, `developer`, `support` or `promotional`), where it lives, its owner (the agent that keeps it current and gets its update tasks), the product version it applies to, the tasks whose behaviour it describes (`implementationRefs`) and any capability it claims, each claim naming one of those tasks (a claim with no implementing task is an unsupported claim and refused). The owner must be an active agent that may read the project's tasks. It starts `unverified`. With `obligationId` and `expectedRevision` it replaces one: a change of the tasks, claims or version makes it `unverified` again. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID records once.
+
+Arguments:
+
+- `commandId`: required
+- `projectId`: the project
+- `obligationId` (optional): the obligation to replace
+- `expectedRevision` (optional): its revision, to replace it
+- `title`: the document's name
+- `location`: where it lives (a path, an address or an artifact ID)
+- `audience`: `user`, `developer`, `support` or `promotional`
+- `owner`: the agent keeping it (`agent:<id>`)
+- `applicableVersion`: the version it applies to
+- `implementationRefs`: the task IDs whose behaviour it describes (1 to 20)
+- `claims` (optional): [{ text, taskId }]: capabilities it claims, each with the implementing task (at most 20)
+
+Result: `{ id, revision, replayed, state }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `doc.obligation.verify`
+
+Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged (`submission.documents` with `since` set to its `flaggedAt` lists them, and the `docs` status view shows them), and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
+
+Arguments:
+
+- `commandId`: required
+- `obligationId`: the obligation
+- `expectedRevision`: its revision
+- `documentSubmissionId`: the document submission
+- `evidence`: the code submission IDs, one per described task
+- `applicableVersion` (optional): the version it now applies to
+
+Result: `{ id, revision, replayed, settled (update tasks settled) }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `doc.impact.check`
+
+Which documents a task's new tested code affects (card Q03). `submissionId` names the code (a code submission of the task); without it, the newest independently QA-checked one is used. When that code's QA gate passes, every document of the project describing the task that was verified against another tree of it becomes `stale`, and every unverified one is flagged; a document whose own evidence for the task no longer passes QA becomes `stale` whatever the code (`verdict` says whether the named code passes). A flagged document gets an update task, created ready and assigned to the document's owner, whose text links the tested code: one open update task per task described (a further change of the same task is noted on the record, and the document must then be verified against the newest flagged tree). Asked again for the same code, nothing is repeated (unopened update tasks are opened); code the document was flagged for in an earlier, settled round flags it again. The owner, or a docs or director agent of the project.
+
+Arguments:
+
+- `commandId`: required
+- `taskId`: the task whose behaviour changed
+- `submissionId` (optional): its tested code submission
+
+Result: `{ taskId, submissionId, tree, verdict, flagged (obligation IDs), tasks: [{ obligationId, taskId, assigned }], replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `doc.release.check`
+
+A release of `version` (card Q03): every document of the project that applies to another version (user and developer documentation, support guidance and promotional assets alike) is flagged `stale` with an update task assigned to its owner, and must then be verified for that version. The same release flags nothing twice. The owner, or a docs or director agent of the project.
+
+Arguments:
+
+- `commandId`: required
+- `projectId`: the project
+- `version`: the version being released
+
+Result: `{ projectId, version, flagged, byAudience, tasks: [{ obligationId, taskId, assigned }], replayed }`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -7902,6 +8272,43 @@ Arguments:
 - `commandId`: required
 
 Result: `{ stopped, releaseId }` (stopped false when no watch was open).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.window.set`
+
+Owner only (card K07): a maintenance window for one exact staged release: a local date and time in a named time zone and how long it lasts. From `prepareLeadMinutes` before it opens the controller prepares (verifies the staged files against the digest, checks the release is not quarantined and that `minFreeBytes` are free); while it is open and no agent attempt is running it activates the release through the same checks as release.activate (approval, signature, platform, targets, migration plan). Running work is never stopped: if it never goes quiet the window ends deferred. A window that closes before the update started ends missed and never deploys later. A release that fails its checks or fails to start after the window is quarantined (no later window can bring it back). One open window at a time.
+
+Arguments:
+
+- `candidateId`: the staged release
+- `digest`: the digest `release.stage` returned (release.verify shows it)
+- `date`: YYYY-MM-DD, local to timeZone
+- `time`: HH:MM (24-hour), local to timeZone
+- `timeZone`: a time zone name such as Europe/London
+- `durationMinutes`: 15 to 1440
+- `channel` (optional): a short name for the trusted source the release came from (a label)
+- `scope` (optional): installation (the only scope for now)
+- `prepareLeadMinutes` (optional): how long before the opening preparation may start (default 60)
+- `minFreeBytes` (optional): the free space the release root must have (default 1 GiB)
+- `healthDeadlineSeconds` (optional): 30 to 3600 (default 300); recorded, the launcher's startup window is what is enforced
+- `commandId`: required
+
+Result: `{ windowId, opensAt, closesAt, replayed }` (UTC instants).
+
+Completion: finished when accepted (`completed: true`).
+
+#### `release.window.cancel`
+
+Owner only (card K07): ends a maintenance window that has not activated its release yet. Nothing else changes. A window that already activated is rolled back with release.rollback instead.
+
+Arguments:
+
+- `windowId`: the window
+- `reason` (optional): a short reason (up to 200 characters)
+- `commandId`: required
+
+Result: `{ windowId, status }`.
 
 Completion: finished when accepted (`completed: true`).
 

@@ -10,8 +10,9 @@ import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import { windowsRealHost } from "./windows-real.js";
 import type { WindowsHost } from "./windows-host.js";
-import { scrub, scrubDeep, type RedactionNames } from "./windows-redact.js";
-import { verifyClient, type WindowsSettings } from "./windows-plan.js";
+import { redactAccountName, redactSid, scrub, scrubDeep, sidClass, type RedactionNames } from "./windows-redact.js";
+import { describeSignature, entryTokens, entryWrites, icaclsWriterEntries, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, verifyClient, type WindowsSettings } from "./windows-plan.js";
+import { WSB_SUMMARY_SCHEMA, WSB_TESTS, controlsFromEscapeOutput, type WsbControl } from "./containment-windows-evidence.js";
 
 // Real Windows Sandbox tests (card A03b). They need a Windows machine with the Windows Sandbox feature, an owner signed in at the console, and NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
 // Everywhere else they are skipped with the message below, and windows.test.ts (simulated host) covers the rules. They run from the `sandbox-windows` job of .github/workflows/own-hardware.yml.
@@ -34,8 +35,12 @@ const note = (name: string, value: unknown): void => { findings[name] = value; t
 const results: Record<string, "pass" | "fail"> = {};
 const testNames: string[] = [];
 const modes = new Set<string>(["owner-session"]);
-/** Which sub-fact of the facts test held (names and booleans only). */
-const factsSummary: Record<string, boolean> = {};
+/** Which sub-fact of the facts test held (names and booleans), plus what the client check found about the package and the signatures (Windows' own words: status names, the
+ * signer certificate's subject, the package family; no account or path names, and passed through the same redaction as everything uploaded). */
+const factsSummary: Record<string, boolean | string> = {};
+/** The mapped-output ACL controls the escape fixture showed (booleans only), read by the G05 producer (containment-windows-evidence.ts). */
+let controls: Partial<Record<WsbControl, boolean>> = {};
+const supervisorAclMode = process.env["NIMBLENEWT_WSB_SUPERVISOR_ACL"] === "report-only" ? "report-only" : "strict";
 
 // A failing test also leaves a REDACTED detail (NIMBLENEWT_WSB_DETAIL, uploaded as its own artifact with a short retention): the error message, the failing step, and the last host calls
 // with their output cut to 2 KiB each, with account, domain, machine and home names and SIDs replaced by placeholders (windows-redact.ts). Auto-login and lock-task results are never copied.
@@ -47,7 +52,8 @@ const clean = (text: string): string => scrub(text, redactNames as RedactionName
 function recording(inner: WindowsHost): WindowsHost {
   const wrapped = { ...inner } as unknown as Record<string, unknown>;
   const quiet = new Set(["autologon", "lockTask"]);
-  for (const m of ["findPackage", "signature", "session", "autologon", "lockTask", "writableBy"] as const) {
+  for (const m of ["findPackage", "signature", "session", "autologon", "lockTask", "writableBy", "ownerSid", "accessEntries"] as const) {
+    if (inner[m] === undefined) continue;
     wrapped[m] = async (...args: unknown[]) => {
       try { const v = await (inner[m] as (...a: unknown[]) => Promise<unknown>)(...args); calls.push({ step: m, ok: true }); return v; }
       catch (error) { calls.push({ step: m, ok: false, detail: quiet.has(m) ? "failed" : (error as Error).message }); throw error; }
@@ -64,6 +70,9 @@ function recordFailure(name: string, error: unknown, since: number): void {
   const mine = calls.slice(since);
   const failing = [...mine].reverse().find((c) => !c.ok);
   details[name] = { error: clean(error instanceof Error ? error.message : String(error)), failingStep: failing === undefined ? "(an assertion, no host call failed)" : clean(failing.step), calls: mine.slice(-12).map((c) => ({ step: clean(c.step), ok: c.ok, ...(c.detail === undefined ? {} : { detail: clean(c.detail) }) })) };
+  writeDetail();
+}
+function writeDetail(): void {
   try { mkdirSync(detailDir, { recursive: true }); writeFileSync(join(detailDir, "detail.json"), JSON.stringify(scrubDeep({ os: osRelease(), tests: details }, redactNames as RedactionNames), null, 2)); } catch { /* best effort */ }
 }
 function check(name: string, optionsOrFn: { skip?: string | false } | (() => Promise<void>), maybeFn?: () => Promise<void>): void {
@@ -80,7 +89,7 @@ const writeSummary = (): void => {
   const values = Object.values(tests);
   try {
     mkdirSync(outDir, { recursive: true });
-    writeFileSync(join(outDir, "summary.json"), JSON.stringify(scrubDeep({ os: osRelease(), node: process.version, modes: [...modes], counts: { pass: values.filter((v) => v === "pass").length, fail: values.filter((v) => v === "fail").length, other: values.filter((v) => v !== "pass" && v !== "fail").length }, facts: factsSummary, tests }, redactNames as RedactionNames), null, 2));
+    writeFileSync(join(outDir, "summary.json"), JSON.stringify(scrubDeep({ schema: WSB_SUMMARY_SCHEMA, os: osRelease(), node: process.version, modes: [...modes], supervisorAcl: supervisorAclMode, controls, counts: { pass: values.filter((v) => v === "pass").length, fail: values.filter((v) => v === "fail").length, other: values.filter((v) => v !== "pass" && v !== "fail").length }, facts: factsSummary, tests }, redactNames as RedactionNames), null, 2));
   } catch { /* best effort */ }
 };
 
@@ -113,7 +122,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
   };
   const acl = async (path: string): Promise<string> => (await host.run(`${process.env["SystemRoot"]}\\System32\\icacls.exe`, [path], { timeoutMs: 30_000 })).stdout;
   const wsbList = async (): Promise<string> => {
-    const client = await verifyClient(host, { controlDir: "", shareIdentity, owner, minVersion: "0.0", packageName: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", mode: "owner-session", lockTask: "x" } satisfies WindowsSettings);
+    const client = await verifyClient(host, { controlDir: "", shareIdentity, owner, minVersion: "0.0", mode: "owner-session", lockTask: "x" } satisfies WindowsSettings);
     assert.ok(client.ok, client.ok ? "" : client.reason);
     const r = await host.run(client.value.wsb, ["list", "--raw"], { cwd: client.value.cwd, timeoutMs: 60_000 });
     note("wsb list --raw", { code: r.code, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 500) });
@@ -134,22 +143,65 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
   });
   after(() => { rmSync(base, { recursive: true, force: true }); writeSummary(); });
 
-  check("facts: the package, the signature, the working directory, the session, the auto-login flags (booleans only) and the supervisor ACLs", async () => {
-    const settings: WindowsSettings = { controlDir: join(base, "control"), shareIdentity, owner, minVersion: "0.8.107.0", packageName: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" };
+  check(WSB_TESTS.facts, async () => {
+    const settings: WindowsSettings = { controlDir: join(base, "control"), shareIdentity, owner, minVersion: "0.8.107.0", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" };
     const sub = factsSummary;
     const attempt = async <T>(name: string, fn: () => Promise<T>): Promise<T | undefined> => { try { const v = await fn(); sub[name] = true; return v; } catch { sub[name] = false; return undefined; } };
     const pkg = await attempt("package found", async () => { const p = await host.findPackage(); if (p === undefined) throw new Error("no package"); return p; });
     if (pkg !== undefined) {
-      sub["publisher is Microsoft"] = pkg.publisherId === "8wekyb3d8bbwe";
+      sub["publisher is Microsoft"] = SANDBOX_PACKAGES.some((p) => p.publisherId === pkg.publisherId);
+      sub["package name, publisher and family on the allowlist"] = SANDBOX_PACKAGES.some((p) => p.name === pkg.name && p.publisherId === pkg.publisherId && packageFamilyName(p) === pkg.familyName);
+      sub["package family"] = pkg.familyName;
+      sub["package signature kind"] = pkg.signatureKind ?? "not reported";
+      sub["package status"] = pkg.status ?? "not reported";
+      sub["package NonRemovable"] = pkg.nonRemovable === undefined ? "not reported" : String(pkg.nonRemovable);
+      sub["package IsFramework"] = pkg.isFramework === undefined ? "not reported" : String(pkg.isFramework);
       sub["version at least the qualified one"] = /^\d+(\.\d+){1,3}$/.test(pkg.version);
       sub["package folder under WindowsApps"] = pkg.installLocation.toLowerCase().includes("\\windowsapps\\");
       sub["wsb.exe visible to this account"] = host.exists(`${pkg.installLocation}\\wsb.exe`);
       sub["WindowsSandboxServer.exe visible to this account"] = host.exists(`${pkg.installLocation}\\WindowsSandboxServer.exe`);
-      const sig = await attempt("wsb.exe signature readable", () => host.signature(`${pkg.installLocation}\\wsb.exe`));
-      sub["wsb.exe signature valid"] = sig?.valid === true;
+      const signatures: Record<string, string> = {};
+      for (const file of ["wsb.exe", "WindowsSandboxServer.exe"]) {
+        const sig = await attempt(`${file} signature readable`, () => host.signature(`${pkg.installLocation}\\${file}`));
+        sub[`${file} signature valid`] = sig?.valid === true;
+        if (sig !== undefined) {
+          sub[`${file} signature status`] = sig.status ?? "not reported";
+          sub[`${file} signature type`] = sig.signatureType ?? "not reported";
+          sub[`${file} signer`] = sig.subject ?? "none";
+          sub[`${file} signature message`] = sig.statusMessage ?? "";
+          signatures[file] = describeSignature(sig);
+        }
+      }
+      // What the package proof reads for a file without a signature of its own: the owner (by SID; only the three well-known ones are named, any other is "another account") and
+      // who else can change the folder and the files (the access-list reader's answer; it goes to the redacted detail only).
+      const wellKnown: Record<string, string> = { "S-1-5-18": "SYSTEM", "S-1-5-32-544": "Administrators", [TRUSTED_OWNER_SIDS[2]!]: "TrustedInstaller" };
+      const access: Record<string, unknown> = {};
+      const writersWithRights: Record<string, unknown> = {};
+      const bySid: Record<string, unknown> = {};
+      for (const [label, p] of [["package folder", pkg.installLocation], ["wsb.exe", `${pkg.installLocation}\\wsb.exe`], ["WindowsSandboxServer.exe", `${pkg.installLocation}\\WindowsSandboxServer.exe`]] as const) {
+        const ownerSid = await attempt(`${label} owner readable`, () => host.ownerSid(p));
+        if (ownerSid !== undefined) sub[`${label} owner`] = wellKnown[ownerSid] ?? "another account";
+        const others = await attempt(`${label} access list readable`, () => host.writableBy(p));
+        if (others !== undefined) { sub[`${label} changeable only by SYSTEM, Administrators, TrustedInstaller`] = others.length === 0; access[label] = others.map((a) => clean(/^(?:unrecognised entry |no access entry)/.test(a) ? a : redactAccountName(a))); }
+        // Who the other writers are, without personal data: icacls' own rights for each (inherit-only shows as (IO)), and the whole access list by SID (Get-Acl), each SID
+        // redacted by class (well-known kinds of account stay, machine and account parts of the others go; windows-redact.ts redactSid).
+        const icaclsOut = await attempt(`${label} icacls output readable`, async () => { const r = await host.run(`${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\icacls.exe`, [p], { timeoutMs: 30_000 }); if (r.code !== 0) throw new Error(`icacls exit ${String(r.code)}`); return r.stdout; });
+        if (icaclsOut !== undefined) { const w = icaclsWriterEntries(icaclsOut, p).map((x) => clean("problem" in x ? x.problem : `${redactAccountName(x.account)} ${x.rights}`)); writersWithRights[label] = w; sub[`${label} other writers (icacls)`] = w.length === 0 ? "none" : w.join("; "); }
+        const entries = host.accessEntries === undefined ? undefined : await attempt(`${label} access list by SID readable`, () => host.accessEntries!(p));
+        if (entries !== undefined) {
+          const describe = (e: (typeof entries)[number]): string => `${redactSid(e.sid)} [${sidClass(e.sid)}] ${entryTokens(e)}${e.inheritOnly ? " inherit-only" : ""}`;
+          const writers = entries.filter(entryWrites);
+          sub[`${label} other writers (by SID)`] = writers.length === 0 ? "none" : writers.map(describe).join("; ");
+          bySid[label] = entries.map((e) => ({ sid: redactSid(e.sid), kind: sidClass(e.sid), rights: entryTokens(e), allow: e.allow, inherited: e.inherited, inheritOnly: e.inheritOnly, writes: entryWrites(e) }));
+        }
+      }
+      // The detail artifact gets the same, whether or not the test fails, so the next real run shows exactly why a signature was or was not accepted.
+      details["client facts"] = { family: pkg.familyName, signatureKind: pkg.signatureKind ?? "not reported", status: pkg.status ?? "not reported", nonRemovable: pkg.nonRemovable ?? "not reported", isFramework: pkg.isFramework ?? "not reported", version: pkg.version, signatures, access, writersWithRights, accessBySid: bySid };
+      writeDetail();
     }
     const client = await verifyClient(host, settings);
     sub["client verified as a whole"] = client.ok;
+    sub["client proof"] = client.ok ? client.value.proof : "refused";
     const session = await attempt("session readable", () => host.session());
     sub["console user present"] = session?.consoleUser !== undefined;
     sub["owner was explicitly configured"] = process.env["NIMBLENEWT_WSB_OWNER"] !== undefined;
@@ -165,7 +217,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     assert.equal(sub["console user is the configured owner"], true, "the console user must be the configured owner");
   });
 
-  check("health: a real probe sandbox starts, the guest cannot write read-only inputs or .git or reach the network, and everything is torn down", async () => {
+  check(WSB_TESTS.health, async () => {
     const backend = windowsSandboxBackend(opts());
     const h = await backend.health();
     note("health", h);
@@ -174,7 +226,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     assert.ok(!(await wsbList()).match(/[0-9a-f]{8}-[0-9a-f]{4}/i), "no sandbox is left running after the probe");
   });
 
-  check("escape fixture: the guest tries to leave and is denied; the launch record shows the mode; the host is unchanged and the ACLs are back as they were", async () => {
+  check(WSB_TESTS.escape, async () => {
     const launcher = await launcherFor();
     assert.equal(launcher.capacity.available, true, launcher.capacity.reason);
     const fixtures = dir("fixture");
@@ -198,6 +250,8 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     const run = await launcher.launch({ recipe: r, command: ["/windows/system32/cmd.exe", "/d", "/c", "C:\\nn\\inputs\\fixture\\escape.cmd"], timeoutMs: 300_000, maxOutputBytes: 1_000_000 });
     const result = await run.result;
     note("escape fixture", { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, record: records.at(-1) });
+    // Recorded before the assertions, so a failing fixture still says which control held (the G05 producer counts them only when this whole test passed).
+    controls = controlsFromEscapeOutput(result.stdout, (await acl(r.workdir)) === aclBefore);
     for (const line of ["1_write_readonly_input=denied", "2_write_git=denied", "3_write_work=allowed", "4_read_host_path=denied", "5_host_profile=absent", "6_network=denied", "7_edit_launch_script=denied", "8_write_through_junction=denied"]) {
       assert.ok(result.stdout.includes(line), `${line} is missing from the guest's report:\n${result.stdout}\n${result.stderr}`);
     }
@@ -217,7 +271,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     assert.ok(!(await wsbList()).match(/[0-9a-f]{8}-[0-9a-f]{4}/i));
   });
 
-  check("the command's exit code and output come back", async () => {
+  check(WSB_TESTS.exitCode, async () => {
     const launcher = await launcherFor();
     const run = await launcher.launch({ recipe: recipe(), command: ["/windows/system32/cmd.exe", "/d", "/c", "echo hello-from-guest&& exit 7"], timeoutMs: 300_000, maxOutputBytes: 100_000 });
     const result = await run.result;
@@ -226,7 +280,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     assert.match(result.stdout, /hello-from-guest/);
   });
 
-  check("a second job while one runs is refused as busy, and a hard kill of the first ends its sandbox and gives the ACLs back", async () => {
+  check(WSB_TESTS.busy, async () => {
     const launcher = await launcherFor();
     const r = recipe();
     const aclBefore = await acl(r.workdir);
@@ -246,7 +300,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     assert.equal(await acl(r.workdir), aclBefore);
   });
 
-  check("fail closed: another account at the console, or a client older than asked for, gives no capacity and starts nothing", async () => {
+  check(WSB_TESTS.failClosed, async () => {
     const wrongOwner = await launcherFor({ owner: "NOSUCHDOMAIN\\nobody" });
     assert.equal(wrongOwner.capacity.available, false);
     assert.match(wrongOwner.capacity.reason!, /not the configured owner/);
@@ -257,7 +311,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     assert.ok(!(await wsbList()).match(/[0-9a-f]{8}-[0-9a-f]{4}/i));
   });
 
-  check("the strict supervisor-ACL rule on this machine (recorded; asserted only when the strict rule is the one in use)", async () => {
+  check(WSB_TESTS.strictAcl, async () => {
     const strict = await windowsSandboxBackend(opts({ supervisorAcl: "strict" })).health();
     note("strict supervisor ACL", { healthy: strict.healthy, reason: strict.reason });
     if (process.env["NIMBLENEWT_WSB_SUPERVISOR_ACL"] !== "report-only") assert.equal(strict.healthy, true, strict.reason);

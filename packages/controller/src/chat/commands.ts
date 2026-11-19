@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "database-transfer";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -66,6 +66,10 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "recovery.ladder.enable": { verb: "Let supervisors take recovery steps on a stuck agent", mode: "propose" },
   // A rerun of a replay (card U09b) changes nothing: it is a walk through the recorded steps in an isolated scope, so it applies at once. Saying a step was wrong (replaces true) changes how every later replay shows it, so it is first shown.
   "activity.replay.simulate": { verb: "Rerun a task's replay as a simulation (nothing is run, sent or changed; failAt injects a provider failure at a step)", mode: "apply" },
+  // Simulation scopes (card P07): a stand-in of the services where the effect ledger refuses any real write, send or spend, so opening one, trying an action in it and closing it change nothing real: they apply at once. Real access is granted separately (grant.create, always shown first).
+  "simulation.open": { verb: "Open a simulation scope for a task: a stand-in of its services (layout: services, their resources, each with state and dependents) to try actions in before any real access; nothing real is written, sent or spent", mode: "apply" },
+  "simulation.operate": { verb: "Try one action (set fields or restart) on a resource in a simulation scope; the result is simulated (inject refuse, lose-answer, corrupt or leak to see how a failure is handled)", mode: "apply" },
+  "simulation.close": { verb: "Close a simulation scope (nothing more runs in it; what it recorded stays readable)", mode: "apply" },
   "activity.correct": { verb: "Correct a step of a task's activity; replaces true says the step was wrong, so the replay shows it as replaced", mode: "propose" },
   "thinking.collection.set": { verb: "Turn collecting the model's thinking off or on (enabled true or false); what was kept stays until retention removes it", mode: "apply" },
   "replay.limits.set": { verb: "Change how much of a task's record one replay reads", mode: "apply" },
@@ -116,6 +120,19 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "deliverable.review.start": { verb: "Start reviewing a deliverable", mode: "apply" },
   "deliverable.accept": { verb: "Accept a deliverable", mode: "propose" },
   "deliverable.reject": { verb: "Reject a deliverable", mode: "propose" },
+  // Defects (card Q04): recording a finding, or a repair, adds a record and changes no decision, so it applies at once; judging a repair and the owner's override decide whether work goes on, so they are shown first in every profile
+  // and pinned to the defect's revision when shown (a repair checked or repaired again in between, now in another version, makes the proposal stale).
+  "defect.report": { verb: "Record a defect found in a version of a deliverable (finding in the owner's words, severity critical, major or minor)", mode: "apply" },
+  "defect.repair": { verb: "Say which newer version of the deliverable repairs a defect", mode: "apply" },
+  "defect.review": { verb: "Judge the repair of a defect (verdict fixed or not-fixed, with what is still wrong)", mode: "propose", revision: "defect" },
+  "defect.override": { verb: "Decide a defect yourself (outcome accept-as-is, keeping the finding on the record, or repair-again, keeping the cycle count; reason in the owner's words)", mode: "propose", revision: "defect" },
+  // QA evidence (card Q02): invalidating evidence whose criteria or owner decisions changed, and scheduling its re-check, only applies what the records already say; it applies at once.
+  "qa.evidence.check": { verb: "Check whether a task's QA evidence still holds (its acceptance criteria and the owner decisions it was judged against unchanged); evidence that no longer holds is invalidated and a re-check is scheduled", mode: "apply" },
+  // Documentation obligations (card Q03): each names an agent who gets update tasks or record IDs the interpreter picked from the docs view, so each is shown first. A replacement or a verification is pinned to the obligation's revision.
+  "doc.obligation.record": { verb: "Record which document must be kept true to which work (title, where it lives, audience user, developer, support or promotional, the agent keeping it, the version it applies to, the tasks it describes, and any capability it claims with the task behind it); or, with obligationId, replace one", mode: "propose", revision: "doc-obligation", needsProject: true },
+  "doc.obligation.verify": { verb: "Mark a document as checked against tested work (the docs role's document change made since it was flagged, and for every task it describes code whose QA gate passes; what the owner leaves out is filled from the records the docs view shows, and the owner is asked when several document changes fit)", mode: "propose", revision: "doc-obligation" },
+  "doc.impact.check": { verb: "Find the documents a task's new tested code affects; each affected or unverified document gets an update task assigned to the agent keeping it", mode: "propose" },
+  "doc.release.check": { verb: "Flag every document (user and developer docs, support guidance, promotional assets) that applies to another version than the release, each with an update task for the agent keeping it", mode: "propose", needsProject: true },
   // Guided setup (card U14): a provider decides where the team's data may go and what it may spend, so it is shown first in every profile. Only the NAME of a credential is ever in the chat; the key goes into the secret store on the machine.
   "routing.provider.add": { verb: "Add or replace model providers (each: name, location local or cloud, endpoint address, models, contextTokens, paid, kind = what the model server is: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic, which decides how a route's reply limit and reasoning cap are sent; credentialName = the NAME of a secret, never a key); the team needs at least two routes on two different servers", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
@@ -178,6 +195,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
   "release.stage": { verb: "Stage a release", mode: "apply" },
   "release.activate": { verb: "Activate a staged release", mode: "propose" },
+  // A maintenance window (card K07) is a standing word to activate one exact release at a stated time: always shown first. Cancelling one only stops it: the safe direction, applied at once.
+  "release.window.set": { verb: "Set a maintenance window that activates a staged release at a stated time", mode: "propose" },
+  "release.window.cancel": { verb: "Cancel a maintenance window", mode: "apply" },
   "release.stage.remove": { verb: "Remove a staged release", mode: "propose" },
   "release.activation.resolve": { verb: "Resolve an interrupted release switch", mode: "propose" },
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
@@ -202,9 +222,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Changing a task's checkout on the host that holds it (card H12m): carrying its work into the shared workspace, landing it, refreshing it to the shared head, quarantining it (its attempt is stopped) or committing
   // reviewed work. Each changes files or stops an agent, so it is shown first in every profile (provisional); the operation is a fixed choice, the reason must be the owner's own words.
   // Kept short: the proposal line the owner confirms is this verb followed by the operation, the task and the reason, and it is cut at CHAT_LIMITS.line.
-  "workspace.request": { verb: "Change a task's checkout on its host (operation: integration shares its work, landing lands its commits, refresh moves it to the shared head, quarantine moves it aside for the owner and stops its attempt, release commits its work in the task's own checkout; submissionId (release only): the approved submission to commit, exactly as reviewed and once; reason: the owner's words)", mode: "propose" },
+  "workspace.request": { verb: "Change a task's checkout on its host (operation: integration shares its work, landing lands its commits, refresh moves it to the shared head, quarantine moves it aside for the owner and stops its attempt, release commits its work in the task's own checkout; a landing lands the task's queued approved submission when it is the oldest in the landing queue, and only when the project's required checks pass on that tree; submissionId (release only): the approved submission to commit, exactly as reviewed and once; reason: the owner's words)", mode: "propose" },
   // How finished work lands (card P08b): where work reaches the codebase is authority, so it is shown first in every profile. The record and the rules are the same as through the API.
   // Ending an integrator lease by force (card P10): the owner names the project's branch; shown first because it stops the integrator's landing at once.
+  // Taking a task's approved submission out of the landing queue (card P10): it changes what lands next, so it is shown first.
+  "landing.queue.remove": { verb: "Take a task's approved work out of the landing queue so it does not land next (reason: the owner's words)", mode: "propose" },
   "integrator.lease.release": { verb: "End the integrator lease of a landing branch by force (the holder's landing stops; branch: the branch's name)", mode: "propose", needsProject: true },
   "integration.set": { verb: "Change how finished work lands", mode: "propose" },
   "integration.default.set": { verb: "Change how new projects land finished work", mode: "propose" },
@@ -384,6 +406,15 @@ const MONTH_WORDS: Readonly<Record<string, number>> = {
 };
 /** The two times of a right. They are checked by `grantDateInWords` (a day the owner named, not the exact characters of an ISO moment), so `foreignValue` is told to leave them alone. */
 export const GRANT_DATE_KEYS: ReadonlySet<string> = new Set(["notBefore", "expiresAt"]);
+/**
+ * A bundle of rights (card D01): `bundle: "roles"` on grant.create asks for every right the named agent's own roles stand for (the role templates), in the one project named, so an owner can say
+ * "let Ann work on Garden" instead of naming each right. It is a fixed choice, not words the owner has to say; the rights it expands to are shown one per line before anything is given.
+ */
+export const GRANT_BUNDLES: ReadonlySet<string> = new Set(["roles"]);
+/** What `foreignValue` leaves alone on grant.create: the two times (checked by `grantDateInWords`) and the bundle (a fixed choice, checked by the chat). */
+export const GRANT_EXEMPT: ReadonlySet<string> = new Set([...GRANT_DATE_KEYS, "bundle"]);
+/** The most rights one bundle may propose at once: each is a line of the proposal, and a proposal shows at most 40 lines. */
+export const GRANT_BUNDLE_LIMIT = 30;
 
 /**
  * The moment a right starts or ends, when the owner's own words give that day (card U03e). What counts as their day: the moment as written (what `foreignValue` looks for in every other text of a
@@ -442,7 +473,7 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative") && !(op === "meeting.record.open-vote" && k === "limitMinutes")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" || op === "responsibility.probe.set" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "retirement.agent" ? ["agentName"] : []), ...(op === "owner.answer" || op === "standup.answer-question" ? ["questionTopic"] : []), ...(op === "needs-you.answer" ? ["itemTopic"] : []), ...(op === "meeting.invite-direct" || op === "meeting.attend.wake" || op === "meeting.attend.wake-stop" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(MOTION_CONTROLS.has(op) || op === "meeting.proc.rule" || op === "meeting.proc.untable" || op === "meeting.proc.begin" || op === "meeting.proc.advance" ? ["motionTopic"] : []), ...(FLOOR_CONTROLS.has(op) ? ["meetingTopic"] : []), ...(op === "meeting.floor.ask" || op === "meeting.floor.address" ? ["agentName"] : []), ...(op === "meeting.floor.priorities" ? ["agendaTopic", "urgency"] : []), ...(op === "meeting.proc.owner-message" ? ["meetingTopic"] : []), ...(op === "meeting.record.finish" || op === "meeting.record.outcomes" ? ["meetingTopic"] : []), ...(op === "meeting.record.apply" ? ["decisionTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "task.assign" || op === "task.transfer" || op === "grant.create" ? ["agentName"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
+  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative") && !(op === "meeting.record.open-vote" && k === "limitMinutes")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" || op === "responsibility.probe.set" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "retirement.agent" ? ["agentName"] : []), ...(op === "owner.answer" || op === "standup.answer-question" ? ["questionTopic"] : []), ...(op === "needs-you.answer" ? ["itemTopic"] : []), ...(op === "meeting.invite-direct" || op === "meeting.attend.wake" || op === "meeting.attend.wake-stop" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(MOTION_CONTROLS.has(op) || op === "meeting.proc.rule" || op === "meeting.proc.untable" || op === "meeting.proc.begin" || op === "meeting.proc.advance" ? ["motionTopic"] : []), ...(FLOOR_CONTROLS.has(op) ? ["meetingTopic"] : []), ...(op === "meeting.floor.ask" || op === "meeting.floor.address" ? ["agentName"] : []), ...(op === "meeting.floor.priorities" ? ["agendaTopic", "urgency"] : []), ...(op === "meeting.proc.owner-message" ? ["meetingTopic"] : []), ...(op === "meeting.record.finish" || op === "meeting.record.outcomes" ? ["meetingTopic"] : []), ...(op === "meeting.record.apply" ? ["decisionTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "task.assign" || op === "task.transfer" || op === "grant.create" ? ["agentName"] : []), ...(op === "grant.create" ? ["bundle"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
 }
 
 /**
@@ -578,9 +609,19 @@ export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "dis
  * `context.route.change` names the settings it turns on, off or back to their defaults (`enable`, `disable`, `unset`) from a fixed list the service checks (`check`, `floorChars`, `anchor`, `anchorChars`, `recall`, `recallCalls`; cards W12, W13): the owner says
  * "stop reminding the agents of their goal when their memory is cut", the interpreter chooses `anchor`, and the proposal shows the name before anything is applied. The names are not words an owner has to say; an unknown one is refused by the service.
  */
+/**
+ * The defect commands (card Q04) name a defect or a deliverable by the ID the `defects` status view showed the owner, and the outcome and severity from a fixed list the service checks: the owner says
+ * "ship the guide as it is" or "that is a big problem", the interpreter chooses the ID and the value, and the service refuses an unknown or unreadable one. The finding and the reason are still the owner's own words.
+ */
+export const DEFECT_EXEMPT: ReadonlySet<string> = new Set(["id", "deliverableId", "outcome", "severity"]);
+/**
+ * The documentation commands (card Q03) name records the docs and overview views showed the owner (the obligation, the agent keeping a document, the tasks it describes, the document and code submissions)
+ * and the audience from a fixed list the service checks. The title, where the document lives, the versions and the claims are still the owner's own words.
+ */
+export const DOC_EXEMPT: ReadonlySet<string> = new Set(["obligationId", "owner", "implementationRefs", "audience", "documentSubmissionId", "evidence", "submissionId"]);
 export const ROUTE_SETTING_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable", "unset"]);
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
-export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
+export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId", "windowId"]);
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 
@@ -671,6 +712,11 @@ export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "d
 export const NEED_CHOICES: ReadonlySet<string> = new Set(["allow", "deny", "agree", "decline", "approve", "done"]);
 /** A recovery step's `action` is one of six fixed rungs (and the step is always shown first); its `text` must still be the owner's own words (card V02c). */
 export const RECOVERY_STEP_EXEMPT: ReadonlySet<string> = new Set(["action"]);
+/**
+ * A simulation scope's controls (card P07) change nothing real: the scope is a record reference the service checks (owner only), the service and resource are names in the scope's own stand-in (an unknown one is refused),
+ * and the action type and injected failure are fixed choices. Texts the owner gives as state (a field's value) must still be the owner's own words.
+ */
+export const SIMULATION_EXEMPT: ReadonlySet<string> = new Set(["scopeId", "service", "resource", "type", "inject"]);
 /** A workspace request's `operation` is one of five fixed choices (and the request is always shown first); its `reason` must still be the owner's own words (card H12m). */
 export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation"]);
 

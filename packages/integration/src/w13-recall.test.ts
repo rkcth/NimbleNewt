@@ -21,6 +21,10 @@ const skipOrFail = (t: { skip(why: string): void }, why: string): void => { if (
 const AGENT = "agt-abcdefghijklmnopqrst";
 const until = async (ok: () => boolean | Promise<boolean>, ms: number, why: string): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(why); await new Promise((r) => setTimeout(r, 50)); } };
 
+// The model's window: its startup share (a quarter) holds the real process's fixed part (the system text and every bridge tool's schema, about 20,250 characters since card P03b's service and deliverable tools) beside the
+// anchor and the task, so the first call is sent. The large input the provider reports later is past Pi's blocking threshold for this window (the window less a 5,120-token reserve), so the process cuts.
+const WINDOW = 36_864;
+const REPORTED_LARGE = 30_000;
 interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object } }
 interface Model { readonly server: Server; readonly url: string; readonly seen: { readonly body: { messages: { role: string; content: unknown }[] } }[] }
 async function model(steps: Step[]): Promise<Model> {
@@ -35,7 +39,7 @@ async function model(steps: Step[]): Promise<Model> {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(sse({ role: "assistant", content: "" }, null));
       // The provider reports a small input at first and a large one later: Pi judges the conversation by what the provider reports, so it cuts it after the third call, as a conversation that has grown past the window is.
-      const prompt = at <= 3 ? 10 : 20_000;
+      const prompt = at <= 3 ? 10 : REPORTED_LARGE;
       const usage = { prompt_tokens: prompt, completion_tokens: 3, total_tokens: prompt + 3 };
       if (step.call !== undefined) {
         res.write(sse({ tool_calls: [{ index: 0, id: `call_${at}`, type: "function", function: { name: step.call.name, arguments: JSON.stringify(step.call.args) } }] }, null));
@@ -66,7 +70,6 @@ test("W13: after the real process cuts the conversation, the model calls task.re
     for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
     return dirs;
   };
-  const WINDOW = 24576;
   let local: LocalWorker | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(directory, "c.sqlite") }, argv: [], env: {}, print: () => undefined,

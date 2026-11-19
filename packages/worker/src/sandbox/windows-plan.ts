@@ -1,11 +1,33 @@
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
-import type { WindowsHost, WindowsPackageInfo } from "./windows-host.js";
+import type { WindowsAccessEntry, WindowsHost, WindowsPackageInfo, WindowsSignature } from "./windows-host.js";
 import type { NormalizedRecipe } from "./recipe.js";
 
-/** The Microsoft package that provides `wsb.exe` and the Sandbox service, and the hash of Microsoft's publisher certificate (the part after the underscore in the package family name). */
-export const SANDBOX_PACKAGE = "MicrosoftWindows.WindowsSandbox";
-export const MICROSOFT_PUBLISHER_ID = "8wekyb3d8bbwe";
+/** Microsoft's publisher id for packages that ship with Windows itself (publisher `CN=Microsoft Windows, O=Microsoft Corporation, ...`). */
+export const WINDOWS_PUBLISHER_ID = "cw5n1h2txyewy";
+/** Microsoft's publisher id for its Store and app packages (publisher `CN=Microsoft Corporation, O=Microsoft Corporation, ...`). */
+export const MICROSOFT_STORE_PUBLISHER_ID = "8wekyb3d8bbwe";
+
+export interface SandboxPackageIdentity {
+  /** The exact package name (`Name`), compared with case. */
+  readonly name: string;
+  /** The exact publisher id (`PublisherId`, the part after the underscore in the package family name), compared with case. */
+  readonly publisherId: string;
+}
+
+/**
+ * The only packages accepted as the Windows Sandbox client (the one that provides `wsb.exe` and `WindowsSandboxServer.exe`): exact pairs of package name and publisher id, so the
+ * package family name must be exactly `<name>_<publisherId>`. No wildcard, prefix, suffix or case-insensitive match, and nothing in the configuration can add to the list.
+ * - `MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy`: the Windows-provided package, the one found on the owner's Windows 11 machine (build 10.0.26200, own-hardware run 44462551218).
+ * - `Microsoft.WindowsSandbox_8wekyb3d8bbwe`: the same client if Microsoft ships it as a Store package. ASSUMPTION: this name is Microsoft's naming pattern for Store packages; it
+ *   has not been seen on a real machine.
+ */
+export const SANDBOX_PACKAGES: readonly SandboxPackageIdentity[] = Object.freeze([
+  Object.freeze({ name: "MicrosoftWindows.WindowsSandbox", publisherId: WINDOWS_PUBLISHER_ID }),
+  Object.freeze({ name: "Microsoft.WindowsSandbox", publisherId: MICROSOFT_STORE_PUBLISHER_ID }),
+]);
+/** The package family name of an identity: `<name>_<publisherId>`. */
+export const packageFamilyName = (p: SandboxPackageIdentity): string => `${p.name}_${p.publisherId}`;
 /** The client version the research of 2026-10-16 was done with (Windows 11 Pro 10.0.26200). An older client is refused; a newer one is accepted and its version is recorded in the audit. */
 export const DEFAULT_MIN_VERSION = "0.8.107.0";
 export const LOCK_TASK_NAME = "NimbleNewt-LockOnLogon";
@@ -27,8 +49,6 @@ export interface WindowsSettings {
   /** The account expected to be signed in at the console. */
   readonly owner: string;
   readonly minVersion: string;
-  readonly packageName: string;
-  readonly publisherId: string;
   readonly mode: WindowsMode;
   readonly lockTask: string;
   /** Auto-login and lock mode only: the protected helper the lock task must run. */
@@ -196,24 +216,113 @@ export function aclSteps(identity: string, shares: readonly Share[]): AclStep[] 
   return steps;
 }
 
-const TRUSTED = /^(?:nt authority\\system|builtin\\administrators|nt service\\trustedinstaller|creator owner|nt authority\\local service)$/i;
-const WRITE_RIGHTS = new Set(["F", "M", "W", "WD", "AD", "DC", "DE", "GA", "GW", "WDAC", "WO"]);
-/** From the text `icacls <path>` prints, the accounts other than the trusted ones that are allowed to write. Deny entries are ignored. */
+// SYSTEM, Administrators and TrustedInstaller, by their English names (on a Windows in another language the names differ and are reported as writers: a refusal, never an
+// acceptance). CREATOR OWNER only shapes the entries of files created later, which needs a right to create files that is reported on its own.
+const TRUSTED = /^(?:nt authority\\system|builtin\\administrators|nt service\\trustedinstaller|creator owner)$/i;
+// D (the simple delete right) is included like DE (the specific one): a file that can be deleted can be replaced by whoever may then create one.
+const WRITE_RIGHTS = new Set(["F", "M", "W", "D", "WD", "AD", "DC", "DE", "GA", "GW", "WDAC", "WO"]);
+/**
+ * From the text `icacls <path>` prints, the accounts other than the trusted ones that are allowed to write. Deny entries are ignored. A line that looks like an access entry
+ * (`name:(`) but is not one in the expected form is reported as `unrecognised entry "..."`, so a caller that requires an empty list refuses it rather than skipping it. The same
+ * holds for any other text inside the block of entries (from the first line to the first blank line, which separates the entries from the summary icacls prints in the system's
+ * language), and an output with no readable entry at all is reported as `no access entry could be read`: neither is ever read as "nobody else can write".
+ * Inherit-only entries: an entry marked `(IO)` gives nothing on the object it is attached to (Windows' INHERIT_ONLY_ACE: "does not control access to the object to which it is
+ * attached"); it only shapes what children inherit, through `(OI)` (files) and `(CI)` (folders). An `(IO)` entry with neither `(OI)` nor `(CI)` therefore gives no right to anything
+ * and is not a writer. An `(IO)` entry WITH `(OI)` or `(CI)` is still reported: on a folder it makes the files and folders inside writable (inherited), and the callers use a
+ * folder's list as the proof for what the folder holds (the package proof checks only two of the package's files one by one, not the libraries next to them).
+ * Process trust labels: an entry for a SID of exactly the form `S-1-19-<type>-<level>` is a trust label from the system access list, which only restricts; it is skipped
+ * (see `scanIcacls`), and it is not counted as an access entry.
+ */
 export function parseIcaclsWritable(output: string, path: string): string[] {
   const found = new Set<string>();
-  for (const raw of output.split(/\r?\n/)) {
-    let line = raw.trim();
-    if (line === "" || /^successfully processed/i.test(line)) continue;
-    if (line.toLowerCase().startsWith(path.toLowerCase())) line = line.slice(path.length).trim();
-    const m = /^(.+?):((?:\([^)]*\))+)$/.exec(line);
-    if (m === null) continue;
-    const tokens = [...m[2]!.matchAll(/\(([^)]*)\)/g)].flatMap((t) => t[1]!.split(","));
-    if (tokens.includes("DENY")) continue;
-    if (TRUSTED.test(m[1]!)) continue;
-    if (tokens.some((t) => WRITE_RIGHTS.has(t))) found.add(m[1]!);
-  }
+  for (const item of scanIcacls(output, path)) found.add("problem" in item ? item.problem : item.account);
   return [...found];
 }
+
+/**
+ * The same reading as `parseIcaclsWritable`, but each writer keeps its rights as icacls printed them (`{ account: "PC\\erin", rights: "(I)(OI)(CI)(M)" }`), for the findings of a
+ * real run. Unreadable output is reported the same way (`{ problem: 'unrecognised entry "..."' }`, `{ problem: "no access entry could be read" }`).
+ */
+export function icaclsWriterEntries(output: string, path: string): ({ readonly account: string; readonly rights: string } | { readonly problem: string })[] {
+  return scanIcacls(output, path);
+}
+
+function scanIcacls(output: string, path: string): ({ readonly account: string; readonly rights: string } | { readonly problem: string })[] {
+  const found: ({ readonly account: string; readonly rights: string } | { readonly problem: string })[] = [];
+  let entries = 0, started = false, inBlock = false;
+  for (const raw of output.split(/\r?\n/)) {
+    let line = raw.trim();
+    if (line === "") { if (started) inBlock = false; continue; }
+    if (!started) { started = true; inBlock = true; }
+    if (/^successfully processed/i.test(line)) continue;
+    if (line.toLowerCase().startsWith(path.toLowerCase())) line = line.slice(path.length).trim();
+    if (line === "") continue;
+    const m = /^(.+?):((?:\([^)]*\))+)$/.exec(line);
+    if (m === null) { if (inBlock || line.includes(":(")) found.push({ problem: `unrecognised entry ${JSON.stringify(line.slice(0, 120))}` }); continue; }
+    // A process trust label (`S-1-19-<type>-<level>`, e.g. `S-1-19-512-8192:(I)(RX,D,WDAC,WO,WA)` on the Store package of Windows Sandbox) is not a grant: it is a
+    // SYSTEM_PROCESS_TRUST_LABEL_ACE kept in the system access list (SACL), which icacls prints among the access entries. Its rights only limit what processes below that trust
+    // level may do; it never gives an account a right, so it is not a writer. icacls does not mark which list a line came from, but the skip does not depend on it: a trust
+    // SID is a token's trust level, never its user or one of its groups, so even an allow entry for one in the DACL would match no caller. Only a SID of exactly that shape is skipped (not counted as an entry either); anything else that
+    // merely starts the same way (`S-1-19-1`, `S-1-19-5-6-7`, `S-1-190-1-2`) is read like any other account.
+    if (/^S-1-19-\d+-\d+$/.test(m[1]!)) continue;
+    entries++;
+    const tokens = [...m[2]!.matchAll(/\(([^)]*)\)/g)].flatMap((t) => t[1]!.split(","));
+    if (tokens.includes("DENY")) continue;
+    if (tokens.includes("IO") && !tokens.includes("OI") && !tokens.includes("CI")) continue;
+    if (TRUSTED.test(m[1]!)) continue;
+    if (tokens.some((t) => WRITE_RIGHTS.has(t))) found.push({ account: m[1]!, rights: m[2]! });
+  }
+  if (entries === 0) found.push({ problem: "no access entry could be read" });
+  return found;
+}
+
+// ---------- access lists by SID (Get-Acl), recorded by the real-run findings ----------
+
+/** icacls' simple rights, each an exact access mask. */
+const SIMPLE_RIGHTS: readonly (readonly [string, number])[] = [["F", 0x1f01ff], ["M", 0x1301bf], ["RX", 0x1200a9], ["R", 0x120089], ["W", 0x100116]];
+/** icacls' specific and generic rights, by bit. */
+const RIGHT_BITS: readonly (readonly [string, number])[] = [
+  ["RD", 0x1], ["WD", 0x2], ["AD", 0x4], ["REA", 0x8], ["WEA", 0x10], ["X", 0x20], ["DC", 0x40], ["RA", 0x80], ["WA", 0x100],
+  ["DE", 0x10000], ["RC", 0x20000], ["WDAC", 0x40000], ["WO", 0x80000], ["S", 0x100000], ["AS", 0x1000000], ["MA", 0x2000000],
+  ["GA", 0x10000000], ["GE", 0x20000000], ["GW", 0x40000000], ["GR", 0x80000000],
+];
+/** The bits that let an account change a file or folder, the same rights `parseIcaclsWritable` counts: WD, AD, DC, DE, WDAC, WO, GA, GW. */
+const WRITE_MASK = 0x2 | 0x4 | 0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+const KNOWN_MASK = RIGHT_BITS.reduce((m, [, bit]) => (m | bit) >>> 0, 0);
+/** SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER by SID: the same accounts `parseIcaclsWritable` trusts by English name. */
+const TRUSTED_WRITER_SIDS: readonly string[] = Object.freeze(["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "S-1-3-0"]);
+
+/** An access mask as icacls writes it: one simple right when the mask is exactly one, otherwise each specific right; a bit icacls has no name for is written in hex. */
+export function rightsTokens(mask: number): string[] {
+  const m = mask >>> 0;
+  const simple = SIMPLE_RIGHTS.find(([, v]) => v === m);
+  if (simple !== undefined) return [simple[0]];
+  const out = RIGHT_BITS.filter(([, bit]) => (m & bit) !== 0).map(([name]) => name);
+  const rest = (m & ~KNOWN_MASK) >>> 0;
+  if (rest !== 0) out.push(`0x${rest.toString(16)}`);
+  return out.length === 0 ? ["none"] : out;
+}
+
+/** An entry's flags and rights as icacls prints them: `(DENY)(I)(OI)(CI)(NP)(IO)(RX,W)`. */
+export function entryTokens(e: WindowsAccessEntry): string {
+  const flags = [!e.allow ? "(DENY)" : "", e.inherited ? "(I)" : "", e.objectInherit ? "(OI)" : "", e.containerInherit ? "(CI)" : "", e.noPropagate ? "(NP)" : "", e.inheritOnly ? "(IO)" : ""].join("");
+  return `${flags}(${rightsTokens(e.rights).join(",")})`;
+}
+
+/**
+ * Whether an entry lets its account change the object or what it holds, read the same way as `parseIcaclsWritable`: an allow entry with a write, delete, change-permission or
+ * take-ownership right (or a right that has no name, which counts as a change), not for SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER, and not an inherit-only
+ * entry that is passed on to nothing.
+ */
+export function entryWrites(e: WindowsAccessEntry): boolean {
+  if (!e.allow || TRUSTED_WRITER_SIDS.includes(e.sid)) return false;
+  if (e.inheritOnly && !e.objectInherit && !e.containerInherit) return false;
+  const m = e.rights >>> 0;
+  return (m & WRITE_MASK) !== 0 || (m & ~KNOWN_MASK) >>> 0 !== 0;
+}
+
+/** The accounts accepted as the owner of a client file or its package folder on the package proof, by well-known SID (the same in every language): SYSTEM, Administrators, TrustedInstaller. */
+export const TRUSTED_OWNER_SIDS: readonly string[] = Object.freeze(["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"]);
 
 // ---------- package and session checks ----------
 
@@ -224,17 +333,80 @@ export interface VerifiedClient {
   /** The full path of wsb.exe; always started with `cwd` as its working directory. */
   readonly wsb: string;
   readonly cwd: string;
+  /** How each client file was proven to be Microsoft's, for the audit: `wsb.exe: authenticode; WindowsSandboxServer.exe: microsoft-package`. */
+  readonly proof: string;
 }
 
 const MICROSOFT_SUBJECT = /(?:^|,\s*)(?:CN|O)=Microsoft Corporation(?:,|$)/;
 
-/** The Windows Sandbox client must be the Microsoft package, at or above the qualified version, in the protected packages folder, with its files signed by Microsoft; it is started from its own folder (the research found it fails from any other). */
+/** One line saying what the signature check found, for refusals and the findings: status, Windows' message, the kind of signature and the signer. */
+export function describeSignature(sig: WindowsSignature): string {
+  const parts = [`status ${sig.status ?? (sig.valid ? "Valid" : "not reported")}`];
+  if (sig.statusMessage !== undefined && sig.statusMessage !== "") parts.push(`"${sig.statusMessage}"`);
+  parts.push(`type ${sig.signatureType ?? "not reported"}`);
+  parts.push(`signer ${sig.subject ?? "none"}`);
+  return parts.join(", ");
+}
+
+/** Shortens Windows' signature message for the record: the file's own path becomes `<file>`, white space is folded, and at most 200 characters are kept. */
+export function shortStatusMessage(message: string, path: string): string {
+  let text = message;
+  if (path !== "") { const lowerPath = path.toLowerCase(); let i: number; while ((i = text.toLowerCase().indexOf(lowerPath)) >= 0) text = `${text.slice(0, i)}<file>${text.slice(i + path.length)}`; }
+  text = text.replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
+
+/** The package signature kinds the Microsoft-package proof accepts, exactly (with case): `System` (signed by Windows itself) and `Store` (signed through the Microsoft Store). */
+export const ACCEPTED_SIGNATURE_KINDS: readonly string[] = Object.freeze(["System", "Store"]);
+
+/**
+ * The second accepted proof for a client file (card A03b, publisher and Store follow-ups). Files inside a package can carry no Authenticode signature of their own: the package as
+ * a whole is signed and Windows checks it. Such a file is accepted only when all of this holds, exactly:
+ * - `Get-AuthenticodeSignature` says `NotSigned` (no signature at all; any other failure, such as HashMismatch or NotTrusted, is refused, never explained away);
+ * - the package is one of the two allowlisted pairs in `SANDBOX_PACKAGES` (name, publisher id and family name exact; checked again here, not only by the caller);
+ * - Windows says the package is signed by Windows itself or through the Microsoft Store (`SignatureKind` exactly `System` or `Store`; Developer, Enterprise, None, an empty or
+ *   missing value and anything else are refused) and its state is exactly `Ok` (not Tampered, Modified or anything else);
+ * - neither the package folder nor the file is a link, a junction or a short name (their real paths are the paths themselves);
+ * - the file and the package folder can be written by nobody but SYSTEM, Administrators and TrustedInstaller (their access lists, read with icacls);
+ * - the file and the package folder are owned by one of those three, by SID (`TRUSTED_OWNER_SIDS`; an owner can rewrite an access list without any entry in it).
+ * The package's folder under `%ProgramFiles%\WindowsApps` was already checked before this is asked.
+ * The own-hardware run 44467707810 found the Windows-provided package (`MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy` 0.8.114.0) reported with `SignatureKind` `Store`, not
+ * `System`, which is why `Store` is accepted for these two exact packages.
+ */
+async function microsoftPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, location: string, file: string): Promise<Verdict> {
+  if (!SANDBOX_PACKAGES.some((p) => p.name === pkg.name && p.publisherId === pkg.publisherId && packageFamilyName(p) === pkg.familyName)) return { ok: false, reason: `the package ${pkg.familyName} is not one of ${SANDBOX_PACKAGES.map(packageFamilyName).join(", ")}` };
+  if (pkg.signatureKind === undefined || !ACCEPTED_SIGNATURE_KINDS.includes(pkg.signatureKind)) return { ok: false, reason: `Windows reports the package's signature kind as ${pkg.signatureKind ?? "not reported"}, not System or Store` };
+  if (pkg.status !== "Ok") return { ok: false, reason: `Windows reports the package's state as ${pkg.status ?? "not reported"}, not Ok` };
+  // The file and the folder must be the package's own, not reached through a link, a junction (here or higher up) or a short name: the access lists read below are then the
+  // ones of the file that is started. The real host fails closed (a path whose real path cannot be read counts as a link).
+  for (const p of [location, file]) if (host.isLinkOrJunction(p)) return { ok: false, reason: `${p} is a link, a junction or a short name, not the package's own path` };
+  for (const p of [file, location]) {
+    let writable: readonly string[];
+    try { writable = await host.writableBy(p); } catch (error) { return { ok: false, reason: `the access list of ${p} could not be read: ${(error as Error).message}` }; }
+    if (writable.length > 0) return { ok: false, reason: `${p} can be changed by ${writable.join(", ")}` };
+  }
+  for (const p of [file, location]) {
+    let owner: string;
+    try { owner = await host.ownerSid(p); } catch (error) { return { ok: false, reason: `the owner of ${p} could not be read: ${(error as Error).message}` }; }
+    if (!TRUSTED_OWNER_SIDS.includes(owner)) return { ok: false, reason: `${p} is owned by ${owner}, not by SYSTEM, Administrators or TrustedInstaller` };
+  }
+  return { ok: true, value: undefined };
+}
+
+/**
+ * The Windows Sandbox client must be one of the exact Microsoft packages in `SANDBOX_PACKAGES` (name, publisher id and family name all exact), at or above the qualified version, in
+ * the protected packages folder, with its two programs proven to be Microsoft's: a valid Authenticode signature by Microsoft, or (only for a file with no signature at all) the
+ * Microsoft-package proof above. It is started from its own folder (the research found it fails from any other). Every refusal says exactly what was found.
+ */
 export async function verifyClient(host: WindowsHost, settings: WindowsSettings): Promise<Verdict<VerifiedClient>> {
   let pkg: WindowsPackageInfo | undefined;
   try { pkg = await host.findPackage(); } catch (error) { return { ok: false, reason: `the Windows Sandbox client could not be looked up: ${(error as Error).message}` }; }
-  if (pkg === undefined) return { ok: false, reason: `Windows Sandbox is not installed (package ${settings.packageName} not found); enable the Windows Sandbox feature and its client update` };
-  if (pkg.name !== settings.packageName) return { ok: false, reason: `unexpected package ${pkg.name}` };
-  if (pkg.publisherId !== settings.publisherId) return { ok: false, reason: `the Windows Sandbox package is from publisher ${pkg.publisherId}, not ${settings.publisherId} (Microsoft); refusing it` };
+  if (pkg === undefined) return { ok: false, reason: `Windows Sandbox is not installed (none of the packages ${SANDBOX_PACKAGES.map(packageFamilyName).join(", ")} was found); enable the Windows Sandbox feature and its client update` };
+  const named = SANDBOX_PACKAGES.filter((p) => p.name === pkg.name);
+  if (named.length === 0) return { ok: false, reason: `unexpected package ${pkg.name}` };
+  const identity = named.find((p) => p.publisherId === pkg.publisherId);
+  if (identity === undefined) return { ok: false, reason: `the Windows Sandbox package ${pkg.name} is from publisher ${pkg.publisherId}; only ${named.map(packageFamilyName).join(", ")} is accepted for that name (Microsoft); refusing it` };
+  if (pkg.familyName !== packageFamilyName(identity)) return { ok: false, reason: `the Windows Sandbox package family is ${pkg.familyName}, not ${packageFamilyName(identity)}; refusing it` };
   let versionOk: boolean;
   try { versionOk = compareVersions(pkg.version, settings.minVersion) >= 0; } catch { return { ok: false, reason: `the Windows Sandbox version ${pkg.version} is not a version number` }; }
   if (!versionOk) return { ok: false, reason: `the Windows Sandbox client ${pkg.version} is older than the qualified ${settings.minVersion}; update it` };
@@ -244,12 +416,20 @@ export async function verifyClient(host: WindowsHost, settings: WindowsSettings)
   const wsb = `${location}\\wsb.exe`;
   const server = `${location}\\WindowsSandboxServer.exe`;
   for (const file of [wsb, server]) if (!host.exists(file)) return { ok: false, reason: `${file} was not found in the package folder; the client is started from there and cannot work without it` };
+  const proofs: string[] = [];
   for (const file of [wsb, server]) {
-    let sig;
+    let sig: WindowsSignature;
     try { sig = await host.signature(file); } catch (error) { return { ok: false, reason: `the signature of ${file} could not be checked: ${(error as Error).message}` }; }
-    if (!sig.valid || sig.subject === undefined || !MICROSOFT_SUBJECT.test(sig.subject)) return { ok: false, reason: `${file} does not carry a valid Microsoft signature` };
+    const name = win32.basename(file);
+    if (sig.valid && sig.subject !== undefined && MICROSOFT_SUBJECT.test(sig.subject)) { proofs.push(`${name}: authenticode`); continue; }
+    if (!sig.valid && sig.status === "NotSigned") {
+      const packaged = await microsoftPackageProof(host, pkg, location, file);
+      if (packaged.ok) { proofs.push(`${name}: microsoft-package`); continue; }
+      return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)}), and the package is not proven to be Microsoft's instead: ${packaged.reason}` };
+    }
+    return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)})` };
   }
-  return { ok: true, value: { package: pkg, wsb, cwd: location } };
+  return { ok: true, value: { package: pkg, wsb, cwd: location, proof: proofs.join("; ") } };
 }
 
 /** Whether the session conditions of the configured mode hold right now. Fails closed: anything that cannot be determined is a refusal. */

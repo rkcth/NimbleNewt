@@ -39,6 +39,11 @@ export interface Reconciliation {
  */
 export interface EffectBridge {
   readonly idempotent: boolean;
+  /**
+   * True only for a bridge that reaches nothing real: an in-process stand-in of a simulation scope (card P07). The ledger runs an effect intended in a simulation scope
+   * through such a bridge only, and never lets such a bridge settle a real effect, so a simulated result can never be taken for a real one.
+   */
+  readonly simulated?: true;
   execute(request: EffectRequest): Promise<JsonObject>;
   reconcile?(request: EffectRequest): Promise<Reconciliation>;
 }
@@ -56,8 +61,13 @@ export interface EffectBody {
   readonly fence?: Fence;
   /** True once an executor has started it: from then on the external effect may have happened. */
   readonly started: boolean;
-  /** The executor currently allowed to act, until `until`. */
-  readonly claim?: { readonly holder: string; readonly until: string };
+  /**
+   * The executor currently allowed to act, until `until`. `epoch`: the primary epoch the claim was taken under (claims written before the G04 follow-up have none). A claim of an older epoch belongs to a controller that is no longer
+   * the primary (it died or was replaced, and the store refuses its writes), so it is treated as given up at once instead of after its lease: a call presented again right after a restart is not refused as busy.
+   */
+  readonly claim?: { readonly holder: string; readonly until: string; readonly epoch?: number };
+  /** The simulation scope the effect was intended in (card P07): it can only ever be simulated, and its evidence is always labelled so. */
+  readonly simulation?: string;
 }
 
 export type EffectStatus = EffectRecord["status"];
@@ -76,6 +86,8 @@ export interface IntendEffect extends CommandMeta {
   /** Required with `fence`. */
   readonly taskId?: string;
   readonly fence?: Fence;
+  /** The simulation scope this effect belongs to (card P07). Such an effect is never real: the ledger refuses to run it through any bridge that is not simulated. */
+  readonly simulation?: string;
 }
 export interface ResolveEffect extends CommandMeta {
   readonly effectId: string;
@@ -85,8 +97,20 @@ export interface ResolveEffect extends CommandMeta {
 
 export const EFFECT_LIMITS = { kind: 40, target: 500, inputBytes: 64 * 1024, lease: 5 * 60_000 } as const;
 const EFFECT_ID = /^eff-[a-z2-7]{20}$/;
+/** The ID of a simulation scope (card P07). */
+export const SIMULATION_SCOPE_ID = /^sms-[a-z2-7]{20}$/;
+/** The words every result of a simulation scope carries (card P07). */
+export const SIMULATED_EFFECT_LABEL = "Simulated: done against a stand-in inside a simulation scope. Nothing real was written, sent or spent.";
+/** What the ledger records when an effect of a simulation scope is offered to a real bridge (card P07). */
+export const SIMULATION_REFUSAL = "refused: an effect of a simulation scope cannot perform a real write, send or spend; nothing was done";
+/** The labels the ledger adds to the evidence of an effect of a simulation scope, whatever the bridge or the person resolving it wrote. */
+const simulatedEvidence = (scope: string | undefined, evidence: JsonObject): JsonObject => (scope === undefined ? evidence : { ...evidence, simulated: true, simulation: scope, label: SIMULATED_EFFECT_LABEL });
 const KIND = /^[a-z][a-z0-9-]{0,39}$/;
 const EFFECTS_ACTOR = "effects";
+/** The effect kind of a tool bridge call admitted as an effect of its generation (card L05d, `GenerationService.admitCall`). Only the tool bridge itself can run such a call; no reconciler bridge can ask about it. */
+export const BRIDGE_CALL_KIND = "bridge";
+/** The stand-in `closeUnbridged` passes to `run`: it is never executed there (only an effect that started, or whose attempt lost its fence before it started, is handed over), and if it were it would do nothing and say so. */
+const NO_BRIDGE: EffectBridge = { idempotent: false, execute: async () => { throw new EffectRejected("not run: no bridge of this controller can perform this effect"); } };
 
 /** Options of one `run`. */
 export interface RunOptions {
@@ -138,7 +162,9 @@ export class EffectService {
   /** Records the intent. Repeating the command returns the same effect. */
   intend(command: IntendEffect): Promise<CommandResult> {
     return this.#runner.command("effect.intend", command, async (meta) => {
-      onlyKnown(command, ["commandId", "actor", "kind", "target", "input", "taskId", "fence"]);
+      onlyKnown(command, ["commandId", "actor", "kind", "target", "input", "taskId", "fence", "simulation"]);
+      if (command.simulation !== undefined && (typeof command.simulation !== "string" || !SIMULATION_SCOPE_ID.test(command.simulation))) invalid("simulation", "is not a simulation scope ID");
+      const simulation = command.simulation;
       const kind = typeof command.kind === "string" && KIND.test(command.kind) ? command.kind : invalid("kind", "must be 1 to 40 lower-case letters, digits or hyphens, starting with a letter");
       const target = text(command.target, "target", { min: 1, max: EFFECT_LIMITS.target });
       if (command.input === null || typeof command.input !== "object" || Array.isArray(command.input)) invalid("input", "must be a JSON object");
@@ -150,12 +176,12 @@ export class EffectService {
       if (fence !== undefined && this.#assignments === undefined) invalid("fence", "cannot be checked: this service has no assignment service");
       const inputDigest = sha256(canonical);
       return {
-        payload: defined({ kind, target, inputDigest, taskId, fence: fence as unknown as JsonObject | undefined }),
+        payload: defined({ kind, target, inputDigest, taskId, fence: fence as unknown as JsonObject | undefined, simulation }),
         build: async () => {
           const effectId = derivedId("eff", meta.commandId);
           const ref: AggregateRef = { kind: "effect", id: effectId };
           const guard = fence === undefined ? undefined : await this.#assignments!.guardFor(fence).check(taskId!);
-          const body: EffectBody = { kind, target, input: command.input, inputDigest, key: effectId, createdBy: meta.actor, ...(taskId === undefined ? {} : { taskId }), ...(fence === undefined ? {} : { fence }), started: false };
+          const body: EffectBody = { kind, target, input: command.input, inputDigest, key: effectId, createdBy: meta.actor, ...(taskId === undefined ? {} : { taskId }), ...(fence === undefined ? {} : { fence }), started: false, ...(simulation === undefined ? {} : { simulation }) };
           return {
             ref, creates: true, changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...(guard?.changes ?? [])],
             detail: { kind, target, inputDigest, ...(guard?.detail ?? {}) },
@@ -194,10 +220,13 @@ export class EffectService {
       if (record.status === "confirmed" || record.status === "failed") return { effectId, status: record.status, ...(record.evidence === undefined ? {} : { evidence: record.evidence }) };
       if (record.status === "uncertain") throw new DomainError("effect_uncertain", `effect ${effectId} (${record.target}) may or may not have happened and cannot be retried blindly; check the target and resolve it`, { field: "effectId" });
       const body = aggregate.body as unknown as EffectBody;
+      // Card P07: an effect of a simulation scope never reaches a real bridge, and a simulated bridge never settles a real effect. Both are judged before any claim, so nothing is done.
+      if (body.simulation !== undefined && bridge.simulated !== true) return this.#settle(effectId, aggregate, "failed", { reason: SIMULATION_REFUSAL, refusedBridge: body.kind });
+      if (body.simulation === undefined && bridge.simulated === true) throw new DomainError("forbidden", `effect ${effectId} is real and a simulated stand-in cannot perform or settle it; nothing was done`, { field: "effectId" });
       const now = Date.parse(this.#runner.now());
       // Any unexpired claim is a busy effect, this executor's own included: a claim that was not released belongs to a run that may still be in
       // flight (or to a process that died and has to wait out its lease).
-      if (body.claim !== undefined && Date.parse(body.claim.until) > now) throw new DomainError("effect_busy", `effect ${effectId} is being handled by ${body.claim.holder} until ${body.claim.until}`, { field: "effectId" });
+      if (this.#claimLive(body, now)) throw new DomainError("effect_busy", `effect ${effectId} is being handled by ${body.claim?.holder ?? ""} until ${body.claim?.until ?? ""}`, { field: "effectId" });
       const abandoned = body.claim !== undefined;
 
       // Fence: before the effect started, an attempt that lost its generation never starts it.
@@ -248,7 +277,8 @@ export class EffectService {
           const { aggregate, record } = await this.#load(effectId);
           if (record.status !== "uncertain") throw new DomainError("invalid_command", `effect ${effectId} is ${record.status}; only an uncertain effect is resolved by hand`, { field: "effectId" });
           const ref: AggregateRef = { kind: "effect", id: effectId };
-          return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: aggregate.revision }], detail: { outcome: command.outcome, resolvedBy: command.actor }, settle: [{ effectId, outcome: command.outcome, evidence: { ...command.evidence, resolvedBy: command.actor } }] };
+          const scope = (aggregate.body as unknown as EffectBody).simulation;
+          return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: aggregate.revision }], detail: { outcome: command.outcome, resolvedBy: command.actor }, settle: [{ effectId, outcome: command.outcome, evidence: simulatedEvidence(scope, { ...command.evidence, resolvedBy: command.actor }) }] };
         },
       };
     });
@@ -263,6 +293,33 @@ export class EffectService {
   }
 
   // ---- execution -------------------------------------------------------------------------------------------------------------
+
+  /** Whether an executor may still be acting on the effect: a claim that has not expired, taken under this primary epoch (or under none recorded). */
+  #claimLive(body: EffectBody, now: number): boolean {
+    if (body.claim === undefined || Date.parse(body.claim.until) <= now) return false;
+    return body.claim.epoch === undefined || body.claim.epoch >= this.#runner.epoch;
+  }
+
+  /**
+   * G04 follow-up, for an effect that no bridge of this controller can run or ask (a tool bridge call admitted as an effect, card L05d: only the tool bridge performs it, when the call is presented). While the attempt that admitted it
+   * still holds the task, the effect is left to that attempt: the worker presents the interrupted call again under its own call ID and the ledger answers it. Once that attempt can no longer present it (its fence is lost), nothing
+   * else ever will, so it is brought to a final state here without running anything: one that never started is closed as `failed` (nothing was done); one that started under a claim its executor never gave back (the executor
+   * vanished) is marked `uncertain`, which stops every later run and is reported to the owner (the reconciler opens the blocker). A started effect whose claim was given back (an idempotent operation answered "not finished") and
+   * an effect with no fence that never started are left alone. Returns the outcome, or `undefined` when the effect is left alone.
+   */
+  async closeUnbridged(effectId: string): Promise<EffectOutcome | undefined> {
+    const { aggregate, record } = await this.#load(effectId);
+    if (record.status !== "intended") return undefined;
+    const body = aggregate.body as unknown as EffectBody;
+    if (body.simulation !== undefined || this.#claimLive(body, Date.parse(this.#runner.now()))) return undefined;
+    if (body.started && body.claim === undefined) return undefined;
+    if (body.fence !== undefined) {
+      // Whether the attempt still holds the task cannot be judged without the assignments: left alone.
+      if (body.taskId === undefined || this.#assignments === undefined) return undefined;
+      try { await this.#assignments.guardFor(body.fence).check(body.taskId); return undefined; } catch (error) { if (!isDomainError(error, "fenced")) throw error; }
+    } else if (!body.started) return undefined;
+    return this.run(effectId, NO_BRIDGE);
+  }
 
   /** `tries`: executions made so far in this call plus this one; a call executes at most twice, so a target that keeps failing ends the call as `pending` instead of looping. */
   async #execute(request: EffectRequest, bridge: EffectBridge, tries = 1): Promise<EffectOutcome> {
@@ -325,7 +382,7 @@ export class EffectService {
   }
 
   async #claim(effectId: string, aggregate: { revision: number; body: unknown }, body: EffectBody, guardChanges: readonly Change[], now: number): Promise<void> {
-    const next: EffectBody = { ...body, started: true, claim: { holder: this.#holder, until: new Date(now + this.#leaseMs).toISOString() } };
+    const next: EffectBody = { ...body, started: true, claim: { holder: this.#holder, until: new Date(now + this.#leaseMs).toISOString(), epoch: this.#runner.epoch } };
     const ref: AggregateRef = { kind: "effect", id: effectId };
     await this.#runner.command("effect.claim", { commandId: `claim:${effectId}:${aggregate.revision}:${this.#holder}`, actor: EFFECTS_ACTOR }, async () => ({
       payload: { effectId, revision: aggregate.revision, holder: this.#holder },
@@ -359,6 +416,7 @@ export class EffectService {
     const ref: AggregateRef = { kind: "effect", id: effectId };
     const { claim, ...rest } = aggregate.body as EffectBody;
     const next: EffectBody = rest;
+    evidence = simulatedEvidence(rest.simulation, evidence);
     // A result is recorded only by the executor that still holds the claim (or by anyone for an effect nobody holds, such as one that never started).
     if (claim !== undefined && claim.holder !== this.#holder) {
       return { effectId, status: "pending", note: `the lease on this effect passed to ${claim.holder} while it was being done; the result was not recorded here and that executor will find out what happened` };

@@ -1,3 +1,4 @@
+import { DEFAULT_REPLY_TOKENS, FIXED_PART_WORDS, WORKER_FIXED_PART_CHARS, grouped, windowCanStartTask, windowNeeded } from "../context/fixed-part.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import type { ControllerStorage } from "../storage/types.js";
@@ -28,7 +29,7 @@ export const SETUP_GUIDE: Readonly<Record<ReadinessItem["id"], ReadinessItem["gu
   profile: { question: "How much should the team ask you before it acts? A new installation starts in strict, which asks at every consequential step. Derived lets what you say authorize what it reasonably needs (building, fixing what fails, merging into the integration branch, deploying to development and test) and still asks about anything wider, such as a customer-live environment, new outside access or spending beyond the estimate. Autonomous acts within the rights you have given. Do you want to switch from strict to derived?", recommended: "Derived for testing and development work; say strict to stay as you are.", ifDeclined: "It stays strict, which is safe: nothing consequential happens without you; the answer is recorded, and either profile can be chosen later." },
   project: { question: "What is your first project: its name, what it is for, and where its git repository is (a folder on this computer or an address)? A project may also start with no repository at all.", recommended: "Name it and point it at an existing repository.", ifDeclined: "Agents have nothing to work on until a project exists." },
   "version-control": { question: "Where is that repository hosted, and which CI checks it: GitHub, GitLab, a server of your own (which one?), or nowhere (a local repository with no remote)? Nothing here assumes GitHub.", recommended: "Say what you use; if it has no remote say none.", ifDeclined: "The answer stays open; work is still done in the local repository and the project's required checks are the ones you name for landing." },
-  "model-route": { question: "Which model should the team use? Give a model server (a local one or a free route is a good start) and its address, the model's real context window in tokens (check the model server's documentation or settings if unsure; the team's fixed instructions and tools take about 4,200 tokens and a task's first call must fit in a quarter of the window, so 32,768 or more is needed in practice: a smaller one such as 8,192 or 16,384 is accepted but its tasks stop with a context blocker, and under 8,192 is refused), and name the credential's name in the secret store if it needs a key. The team needs at least two routes on two different servers, so that losing one does not stop it.", recommended: "A local model plus one free or cheap cloud route as the backup.", ifDeclined: "A paid provider is left out; with no route at all the team cannot run, but the owner's records and views still work." },
+  "model-route": { question: "Which model should the team use? Give a model server (a local one or a free route is a good start) and its address, the model's real context window in tokens (check the model server's documentation or settings if unsure; " + FIXED_PART_WORDS + ": a smaller one such as 8,192 or 16,384 is accepted with a warning but its tasks stop with a context blocker, and under 8,192 is refused), and name the credential's name in the secret store if it needs a key. The team needs at least two routes on two different servers, so that losing one does not stop it.", recommended: "A local model plus one free or cheap cloud route as the backup.", ifDeclined: "A paid provider is left out; with no route at all the team cannot run, but the owner's records and views still work." },
   host: { question: "Which machine runs the agents? This computer is the usual first choice.", recommended: "This computer.", ifDeclined: "Tasks can be created and assigned, but nothing runs until a host has announced itself." },
   notifications: { question: "How do you want to hear from the team: the inbox only (nothing leaves this installation), or a named channel with digest times and quiet hours?", recommended: "The inbox to begin with.", ifDeclined: "The inbox stays the only place; nothing leaves the installation." },
   agent: { question: "What should the first agent be called, and what role does it have (author, reviewer, integrator, qa, docs or director)?", recommended: "An author named for the work, with the rights to work in the first project only.", ifDeclined: "No work can be assigned." },
@@ -45,6 +46,9 @@ export interface Readiness {
 }
 
 const PAGE = 200;
+/** What the setup views (the status kind setup and the web page's setup table, `clip(i.detail, 240)` in packages/ui) show of an item's detail, and of one route's name in it. */
+const DETAIL_SHOWN = 240;
+const ROUTE_SHOWN = 60;
 const MAX_PAGES = 5;
 
 /**
@@ -86,10 +90,30 @@ export class SetupReadinessService {
     const completeP = await this.#each("project", (_id, body) => { if (body["state"] === "archived") return; projects++; if (Array.isArray(body["repositories"]) && body["repositories"].length > 0) withRepository++; });
     items.push({ id: "project", label: "A project", required: true, state: projects > 0 ? "done" : "missing", detail: projects === 0 ? "no project yet" : `${plural(projects, "active project", "active projects", !completeP)}, ${withRepository} with a repository bound`, how: "project.create, then resource.bind for its repository" });
 
-    const table = (await s.getAggregate({ kind: "routing-table", id: "routing" }))?.body as { providers?: Record<string, { enabled?: boolean }>; routes?: Record<string, unknown> } | undefined;
+    const table = (await s.getAggregate({ kind: "routing-table", id: "routing" }))?.body as { providers?: Record<string, { enabled?: boolean }>; routes?: Record<string, { contextTokens?: unknown; maxTokens?: unknown }> } | undefined;
     const enabled = Object.entries(table?.providers ?? {}).filter(([, p]) => p.enabled === true).map(([name]) => name);
     const routes = Object.keys(table?.routes ?? {}).filter((r) => enabled.includes(r.split("/")[0]!));
-    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > 0 ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${enabled.length} enabled provider(s), ${routes.length} usable route(s)` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher" });
+    // A stored route whose window cannot start a task (card "Fixed-part sizing after T08", follow-up), by the same rule as the first-call admission with the route's own reply limit: named with the window it needs.
+    // With no route that can start one, the step is not done: the team cannot run a task.
+    // The window needed is worked out once per reply limit (routes usually share one; a large limit takes many steps to work out).
+    const needs = new Map<number, number | undefined>();
+    const tooSmall = routes.flatMap((r) => {
+      const e = table?.routes?.[r];
+      const window = e?.contextTokens, reply = typeof e?.maxTokens === "number" && Number.isSafeInteger(e.maxTokens) && e.maxTokens >= 0 ? e.maxTokens : DEFAULT_REPLY_TOKENS;
+      if (typeof window !== "number" || !Number.isSafeInteger(window) || windowCanStartTask(window, WORKER_FIXED_PART_CHARS, reply)) return [];
+      if (!needs.has(reply)) needs.set(reply, windowNeeded(window, reply));
+      const need = needs.get(reply);
+      if (need === undefined) return [];
+      const name = r.length > ROUTE_SHOWN ? `${r.slice(0, ROUTE_SHOWN - 3)}...` : r;
+      return [`${name} (${grouped(window)} tokens${reply === DEFAULT_REPLY_TOKENS ? "" : ` with a reply limit of ${grouped(reply)}`}; needs ${grouped(need)})`];
+    });
+    const found = `${enabled.length} enabled provider(s), ${routes.length} usable route(s)`;
+    // Up to three routes are named, as many as fit in what the setup view shows of a detail (`DETAIL_SHOWN`); the rest are counted.
+    const smallWords = (named: number): string => `; no task can start on ${tooSmall.length === routes.length ? (routes.length === 1 ? "it" : "any of them") : `${tooSmall.length} of them`}: ${tooSmall.slice(0, named).join(", ")}${tooSmall.length > named ? ` and ${tooSmall.length - named} more` : ""}`;
+    let named = Math.min(3, tooSmall.length);
+    while (named > 1 && found.length + smallWords(named).length > DETAIL_SHOWN) named--;
+    const small = tooSmall.length === 0 ? "" : smallWords(named);
+    items.push({ id: "model-route", label: "A model provider and route", required: true, state: routes.length > tooSmall.length ? "done" : "missing", detail: table === undefined ? "no routing table" : routes.length > 0 ? `${found}${small}` : "the routing table has no route on an enabled provider", how: "routing.provider.add (an owner command, also reached by chat): a provider, its address and models; or the configuration document's models section read by the launcher. A route named as too small: add its provider again with the model's real window, or lower the route's reply limit with routing.budget.set" });
 
     let hosts = 0; let announced = 0;
     const completeH = await this.#each("principal", (_id, body) => { if (body["kind"] === "host" && body["state"] === "active") hosts++; });

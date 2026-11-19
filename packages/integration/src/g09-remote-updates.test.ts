@@ -18,7 +18,7 @@ const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-remoteupdatesgivenon";
 const ABILITIES = { formats: [1], features: ["limits", "wall-time"], enforces: { cpus: "full", memoryMb: "full", diskMb: "full", processes: "full", wallTimeMs: "full" } };
-const WINDOW = 32768;
+const WINDOW = 36864;
 
 test("an updated resume on a remote worker host: the offer carries the selected correction, the machine's process places it once before the turn with its provenance, and a later run does not place it again (card G09)", async (t) => {
   const launcher = await sandbox(t);

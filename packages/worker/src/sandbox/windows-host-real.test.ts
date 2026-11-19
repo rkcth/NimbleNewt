@@ -11,7 +11,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { checkWindowsHostPath, VM_FALLBACK_DECISION, type WindowsSettings } from "./windows-plan.js";
+import { checkWindowsHostPath, entryTokens, entryWrites, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
 import { windowsRealHost } from "./windows-real.js";
 
 // Card A03b: the Windows launcher's own parts on a REAL Windows machine, without Windows Sandbox itself. They run on every Windows CI cell (GitHub's hosted Windows runners,
@@ -65,7 +65,7 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
   test("the real probes answer in the shape the rules expect: package, console session, auto-login flags (booleans only), a missing scheduled task, the lock file", async () => {
     const pkg = await host.findPackage().catch((error: Error) => error);
     // Either the package is absent (undefined), or it is described in full; a lookup this account may not make throws, which the client check turns into a refusal.
-    if (pkg !== undefined && !(pkg instanceof Error)) for (const k of ["name", "publisherId", "version", "installLocation"] as const) assert.equal(typeof pkg[k], "string", k);
+    if (pkg !== undefined && !(pkg instanceof Error)) for (const k of ["name", "publisherId", "familyName", "version", "installLocation"] as const) assert.equal(typeof pkg[k], "string", k);
     const session = await host.session();
     if (session.consoleUser !== undefined) assert.match(session.consoleUser, /\S/);
     if (session.locked !== undefined) assert.equal(typeof session.locked, "boolean");
@@ -88,16 +88,55 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
   test("signatures: a Windows system program is validly signed by Microsoft; a plain file is not valid", async () => {
     const sig = await host.signature(`${sysRoot()}\\System32\\icacls.exe`);
     assert.equal(sig.valid, true);
+    assert.equal(sig.status, "Valid");
     assert.match(sig.subject ?? "", /O=Microsoft Corporation/);
+    // System programs are signed inside the file or through an installed catalog; where PowerShell does not report the kind it is absent.
+    if (sig.signatureType !== undefined) assert.ok(["Authenticode", "Catalog"].includes(sig.signatureType), sig.signatureType);
     const plain = join(dir("sig"), "plain.exe");
     writeFileSync(plain, "not a program");
-    assert.equal((await host.signature(plain)).valid, false);
+    const unsigned = await host.signature(plain);
+    assert.equal(unsigned.valid, false);
+    assert.ok(unsigned.status !== undefined && unsigned.status !== "Valid", `status ${String(unsigned.status)}`);
+    // Windows' message is kept short and never carries the file's own path (which could hold an account name).
+    assert.ok(!(unsigned.statusMessage ?? "").toLowerCase().includes(plain.toLowerCase()), unsigned.statusMessage);
+    assert.ok((unsigned.statusMessage ?? "").length <= 200);
+  });
+
+  test("owners: a Windows system program is owned by one of the accounts the package proof trusts, read as a SID; a missing path is an error", async () => {
+    const owner = await host.ownerSid(`${sysRoot()}\\System32\\icacls.exe`);
+    assert.ok(TRUSTED_OWNER_SIDS.includes(owner), owner);
+    const mine = join(dir("owner"), "mine.txt");
+    writeFileSync(mine, "x");
+    assert.match(await host.ownerSid(mine), /^S-1-\d+(?:-\d+)+$/);
+    await assert.rejects(host.ownerSid(join(dir("owner"), "absent.txt")));
+  });
+
+  test("access lists by SID (recorded by the real-run findings): a Windows system program's list reads, both readers agree on whether anyone else can change it, and what it holds is recorded", async (t) => {
+    const icacls = `${sysRoot()}\\System32\\icacls.exe`;
+    const entries = await host.accessEntries!(icacls);
+    assert.ok(entries.length > 0);
+    for (const e of entries) assert.match(e.sid, /^S-1-\d+(?:-\d+)+$/);
+    // The two readers must give the same answer. What the answer is depends on the runner image (hosted images could differ), so it is recorded, not required: on the
+    // standard System32 list TrustedInstaller has full control and nobody else can change the file.
+    const bySid = entries.filter(entryWrites), byName = await host.writableBy(icacls);
+    assert.equal(bySid.length === 0, byName.length === 0, `by SID ${JSON.stringify(bySid)}, by name ${JSON.stringify(byName)}`);
+    t.diagnostic(`icacls.exe: TrustedInstaller full control ${String(entries.some((e) => e.allow && e.sid === TRUSTED_OWNER_SIDS[2] && e.rights === 0x1f01ff))}; other writers by SID ${JSON.stringify(bySid.map((e) => `${e.sid} ${entryTokens(e)}`))}, by name ${JSON.stringify(byName)}`);
+    // A fresh folder inherits its entries; one explicit grant to NETWORK SERVICE shows up by SID as a writer, as it does for the icacls reader.
+    const folder = dir("bysid");
+    execFileSync(`${sysRoot()}\\System32\\icacls.exe`, [folder, "/grant", "*S-1-5-20:(OI)(CI)(IO)(M)"], { windowsHide: true });
+    const after = await host.accessEntries!(folder);
+    const mine = after.filter((e) => e.sid === "S-1-5-20" && !e.inherited);
+    assert.equal(mine.length, 1, JSON.stringify(after));
+    assert.deepEqual([mine[0]!.inheritOnly, mine[0]!.objectInherit, mine[0]!.containerInherit, entryWrites(mine[0]!)], [true, true, true, true]);
+    assert.equal(entryTokens(mine[0]!), "(OI)(CI)(IO)(M)");
+    assert.ok((await host.writableBy(folder)).includes("NT AUTHORITY\\NETWORK SERVICE"));
+    await assert.rejects(host.accessEntries!(join(folder, "absent.txt")));
   });
 
   // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout. The ceiling that governs here is not a per-test one: the package runner's
   // --test-timeout (300 s) also bounds this whole file (node --test runs each file as one timed test), and a per-test limit could not fire during spawnSync anyway. In run
   // 44242108811 the other tests of this file took about 30 s together, so the child gets 250 s: past that it is stopped and this test fails with its own message, and the job
-  // is released whatever happens, so no later test sees it. (Six probes that each time out twice would need 720 s; that is a failure, not a case to wait for.)
+  // is released whatever happens, so no later test sees it. (Seven probes that each time out twice would need 840 s; that is a failure, not a case to wait for.)
   const ENV_PROBES_CHILD_MS = 250_000;
   test("the probes also work inside the exact environment the launcher gives the runner process (its own temporary folder, nothing of the user's)", async () => {
     const backend = windowsSandboxBackend(options());
@@ -108,14 +147,14 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
         `const { windowsRealHost } = await import(${JSON.stringify(pathToFileURL(realHostModule).href)});`,
         "const h = windowsRealHost(); const out = {};",
         // The package lookup runs first in every job (admission); a failure here would make the runner refuse every job, so it must succeed, finding the client or not.
-        "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
-        "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
+        "for (const [k, f] of Object.entries({ package: () => h.findPackage(), task: () => h.lockTask('NimbleNewt-ci-absent'), session: () => h.session(), autologon: () => h.autologon(), signature: () => h.signature(process.env.SystemRoot + '\\\\System32\\\\icacls.exe'), owner: () => h.ownerSid(process.env.NIMBLENEWT_WSB_JOB), writable: () => h.writableBy(process.env.NIMBLENEWT_WSB_JOB) })) {",
+        "  try { const v = await f(); out[k] = k === 'signature' ? v.valid : k === 'writable' ? Array.isArray(v) : k === 'owner' ? /^S-1-/.test(v) : 'ok'; } catch (e) { out[k] = 'failed: ' + String(e.message).slice(0, 300); }",
         "}",
         "process.stdout.write(JSON.stringify(out));",
       ].join("\n");
       const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...plan.env }, cwd: plan.cwd, encoding: "utf8", timeout: ENV_PROBES_CHILD_MS, windowsHide: true });
       assert.equal(child.status, 0, child.error === undefined ? child.stderr : `the probes did not all answer within ${String(ENV_PROBES_CHILD_MS / 1000)} s (${child.error.message}): ${child.stderr}`);
-      assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, writable: true });
+      assert.deepEqual(JSON.parse(child.stdout), { package: "ok", task: "ok", session: "ok", autologon: "ok", signature: true, owner: true, writable: true });
     } finally {
       await backend.release!(plan);
     }
@@ -181,7 +220,7 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
 
   test("per-job access lists on real NTFS: one named account gets exactly the narrow grants during the job, the supervisor's folders get nothing, and every list is restored exactly", async () => {
     const controlDir = join(base, "control-acl");
-    const settings: WindowsSettings = { controlDir, shareIdentity: SHARE, owner: OWNER, minVersion: "0.8.107.0", packageName: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" };
+    const settings: WindowsSettings = { controlDir, shareIdentity: SHARE, owner: OWNER, minVersion: "0.8.107.0", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" };
     mkdirSync(controlDir, { recursive: true });
     const r = recipeIn("acl");
     const input = dir("acl", "input");
@@ -195,7 +234,7 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     for (const [p, text] of aclBefore) assert.deepEqual(ownEntries(text, SHARE), [], `${p} starts with no entry for the share account`);
 
     // The one stand-in: the Windows Sandbox client. Its package, signature and the console session are reported as verified; every other call (icacls, the file system) is real.
-    const install = `${process.env["ProgramFiles"]}\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.107.0_x64__8wekyb3d8bbwe`;
+    const install = `${process.env["ProgramFiles"]}\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.107.0_x64__${WINDOWS_PUBLISHER_ID}`;
     const fakeFiles = new Set([`${install}\\wsb.exe`, `${install}\\WindowsSandboxServer.exe`].map(lower));
     const wsb: string[][] = [];
     const jobDir = jobDirFor(settings, `ci-${randomUUID()}`);
@@ -206,7 +245,7 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     const stand: WindowsHost = {
       ...host,
       exists: (p) => fakeFiles.has(lower(p)) || host.exists(p),
-      findPackage: async () => ({ name: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", version: "0.8.107.0", installLocation: install }),
+      findPackage: async () => ({ name: SANDBOX_PACKAGES[0]!.name, publisherId: SANDBOX_PACKAGES[0]!.publisherId, familyName: packageFamilyName(SANDBOX_PACKAGES[0]!), version: "0.8.107.0", installLocation: install }),
       signature: async () => ({ valid: true, subject: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" }),
       session: async () => ({ consoleUser: OWNER, locked: false }),
       run: async (file, args, opts): Promise<ProcessResult> => {

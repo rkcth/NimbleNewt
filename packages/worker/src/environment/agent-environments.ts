@@ -27,6 +27,8 @@ export interface AgentEnvironmentsOptions {
   readonly lockWaitMs?: number;
 }
 
+/** How many more times a link that reads as "not a link" (EINVAL) is asked before it is called corrupt. */
+const LINK_RETRIES = 5;
 const AGENT = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 /** A directory name for an id or package name that cannot collide with another and holds no separator. */
 export const encodeName = (name: string): string => name.replace(/[^A-Za-z0-9._-]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
@@ -132,8 +134,21 @@ export class AgentEnvironments {
 
   /** The active revision number, or undefined when none was ever activated. Throws `corrupt` for a link that is not one of ours. */
   async active(agentId: string, which: "active" | "previous" = "active"): Promise<number | undefined> {
-    let target: string;
-    try { target = await readlink(join(this.agentDir(agentId), which)); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+    const path = join(this.agentDir(agentId), which);
+    const read = this.#io.readlink?.bind(this.#io) ?? ((p: string) => readlink(p));
+    let target: string | undefined;
+    // The link is replaced by renaming a new link over it (#point). On macOS a readlink that meets that replacement has been seen to fail
+    // with EINVAL ("not a link") for a moment (CI, 2026-11-19), so EINVAL is asked again a few times; a path that stays something other
+    // than a link is corrupt. ENOENT is not retried: rename replaces atomically, and no link means none was ever activated (or restore removed it).
+    for (let attempt = 0; target === undefined; attempt++) {
+      try { target = await read(path); } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return undefined;
+        if (code !== "EINVAL") throw error;
+        if (attempt >= LINK_RETRIES) throw new EnvironmentStoreError("corrupt", `the ${which} link of ${agentId} is not a link`);
+        await new Promise((r) => setTimeout(r, 2 * (attempt + 1)));
+      }
+    }
     const m = /^revisions\/(\d{1,10})$/.exec(target);
     if (m === null) throw new EnvironmentStoreError("corrupt", `the ${which} link of ${agentId} points somewhere it should not`);
     return Number(m[1]);

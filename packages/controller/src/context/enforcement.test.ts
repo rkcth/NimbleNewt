@@ -6,7 +6,7 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
-import { ContextEnforcementService, ENFORCEMENT_LIMITS, NOTE_ARCHIVE_READ, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, handoffNote, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
+import { ContextEnforcementService, DEFAULT_ROUTE_FLOOR_CHARS, ENFORCEMENT_LIMITS, NOTE_ARCHIVE_READ, contextRouteKey, DeskService, HistoryService, RetrievalService, contextBudget, handoffNote, tokensOf, type CompactionOutcome, type HandoffFacts, type SourceRef, type StartupItem, type Summariser } from "./index.js";
 
 after(stopServer);
 
@@ -188,12 +188,14 @@ for (const backend of backends) {
     const before = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/small", window: 65_536, items });
     assert.deepEqual([before.measured, before.rebuilt], [false, true]);
     // A first call on the route measures its system prompt and tool schemas (for every task, kept per route).
-    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route: contextRouteKey("local/small"), call: { systemPromptChars: 12_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } });
-    assert.deepEqual(await enf.fixedPartOf("local/small", 65_536), { systemPromptChars: 12_000, toolSchemaChars: 9_000, tokens: 7_000 });
+    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route: contextRouteKey("local/small"), call: { systemPromptChars: 12_000, toolSchemaChars: 18_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    // The measured figure is well over the unmeasured-route floor (which follows the real worker's fixed part, card "Fixed-part sizing after T08"), so it leaves less room than the floor did.
+    assert.ok(30_000 > DEFAULT_ROUTE_FLOOR_CHARS + 5_000);
+    assert.deepEqual(await enf.fixedPartOf("local/small", 65_536), { systemPromptChars: 12_000, toolSchemaChars: 18_000, tokens: 10_000 });
     assert.equal(await enf.fixedPartOf("other/route", 65_536), undefined);
     const after = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "local/small", window: 65_536, items });
     assert.equal(after.measured, true);
-    assert.ok(after.rebuilt && after.startup.tokens + 7_000 <= contextBudget(65_536).startupTokens, "the view is built around the real fixed part");
+    assert.ok(after.rebuilt && after.startup.tokens + 10_000 <= contextBudget(65_536).startupTokens, "the view is built around the real fixed part");
     assert.ok(after.startup.tokens < before.startup.tokens, "a larger fixed part leaves less room, so more is cut");
     // The cut text can be read back by digest.
     const cut = after.startup.cuts[0]!;
@@ -217,12 +219,12 @@ for (const backend of backends) {
     const at = (i: number): string => new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString();
     const items: StartupItem[] = [{ id: "g", kind: "goal", text: "Goal: ship v1.", at: at(0) }, { id: "h", kind: "human", text: "Merge the branch.", at: at(1) }];
     for (let i = 0; i < 20; i++) items.push({ id: `q${i}`, kind: "decision", text: `Open question ${i}: ${"which pot size ".repeat(40)}`, at: at(i + 2) });
-    const moved = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 32_768, items });
+    const moved = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 40_960, items });
     assert.equal(moved.rebuilt, true);
     const view = moved.view;
     assert.ok(moved.startup.cuts.length > 0, "the window is small enough that some questions are cut");
     // The view: a header naming the route, every kept piece in its order, then the footer saying how to read what was cut.
-    assert.match(view, /^\[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route tiny\/one \(a 32768-token window\)\.\]/);
+    assert.match(view, /^\[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route tiny\/one \(a 40960-token window\)\.\]/);
     let from = 0;
     for (const p of moved.startup.pieces) { const i = view.indexOf(p.text, from); assert.ok(i >= from, `piece ${p.id} is in the view, in order`); from = i + p.text.length; }
     assert.ok(view.includes("Goal: ship v1.") && view.includes("Merge the branch."), "the goal and the owner's words whole");
@@ -233,16 +235,17 @@ for (const backend of backends) {
       const back = await enf.routeArchive(owner, { taskId: t, digest: cut.digest });
       assert.equal(back?.text, items.find((x) => x.id === cut.id)!.text, `the full text of ${cut.id} is read back by the digest the view names`);
     }
-    // The whole view (header and footer too) stays within the startup share beside the route's fixed part (here the floor: the route was not measured, and the floor fits).
-    const budget = contextBudget(32_768);
+    // The whole view (header and footer too) stays within the startup share beside the route's fixed part (here the floor: the route was not measured, and the floor fits). The window is 40,960 tokens: since the floor
+    // follows the real worker's fixed part (card "Fixed-part sizing after T08", 19,000 characters) it no longer fits a 32,768-token window beside these twenty open questions.
+    const budget = contextBudget(40_960);
     assert.deepEqual([moved.measured, moved.warning], [false, undefined]);
-    assert.ok(tokensOf(view.length, budget) + tokensOf(14_000, budget) <= budget.startupTokens, `the view (${tokensOf(view.length, budget)} tokens) fits beside the floor in ${budget.startupTokens}`);
+    assert.ok(tokensOf(view.length, budget) + tokensOf(DEFAULT_ROUTE_FLOOR_CHARS, budget) <= budget.startupTokens, `the view (${tokensOf(view.length, budget)} tokens) fits beside the floor in ${budget.startupTokens}`);
     // Nothing to show: no view. A refusal: no view.
-    assert.equal((await enf.routeMoved(owner, { taskId: t2, attemptId: "att-1", route: "tiny/one", window: 32_768, items: [] })).view, "");
+    assert.equal((await enf.routeMoved(owner, { taskId: t2, attemptId: "att-1", route: "tiny/one", window: 40_960, items: [] })).view, "");
     // A worker that has its process up measures the route; the route is measured from then on, and the view is built on the real figure (more room than the floor, so fewer cuts).
     assert.deepEqual(await enf.measureRoute(owner, { taskId: t, attemptId: "att-1", launch: "l1", route: "tiny/one", systemPromptChars: 0, toolSchemaChars: 4_500 }), { measured: true });
-    assert.deepEqual(await enf.fixedPartOf("tiny/one", 32_768), { systemPromptChars: 0, toolSchemaChars: 4_500, tokens: 1_500 });
-    const measured = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 32_768, items });
+    assert.deepEqual(await enf.fixedPartOf("tiny/one", 40_960), { systemPromptChars: 0, toolSchemaChars: 4_500, tokens: 1_500 });
+    const measured = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "tiny/one", window: 40_960, items });
     assert.equal(measured.measured, true);
     assert.ok(measured.startup.cuts.length < moved.startup.cuts.length, "the measured figure is smaller than the floor: fewer items cut");
     assert.ok(tokensOf(measured.view.length, budget) + 1_500 <= budget.startupTokens);
@@ -690,13 +693,17 @@ for (const backend of backends) {
   suite("a compaction that loses the race for the chain is closed as superseded, not left started, and is not an overflow", async ({ enf, owner, note, ann, setup, t }) => {
     await setup();
     const src = await note(ann, "d", "x");
-    const gates: (() => void)[] = [];
-    const gated = (route: string, out: string): Summariser => ({ route, summarise: () => new Promise<string>((resolve) => { gates.push(() => resolve(out)); }) });
+    // Each summariser's gate is kept under its own route, so a is released first and b second whichever reached its summariser first.
+    const gates = new Map<string, () => void>();
+    const gated = (route: string, out: string): Summariser => ({ route, summarise: () => new Promise<string>((resolve) => { gates.set(route, () => resolve(out)); }) });
     const a = enf.compact(owner, compactCmd(t, "ka", [src]), [gated("a", "Summary A.")]);
     const b = enf.compact(owner, { ...compactCmd(t, "kb", [src]), attemptId: "att-2" }, [gated("b", "Summary B.")]);
-    while (gates.length < 2) await new Promise((r) => setTimeout(r, 5));
-    gates[0]!(); const first = await a;
-    gates[1]!(); const second = await b;
+    // Bounded: a summariser that is never reached fails the test here instead of waiting for the file's timeout.
+    for (const until = Date.now() + 60_000; !(gates.has("a") && gates.has("b")); await new Promise((r) => setTimeout(r, 5))) {
+      if (Date.now() > until) assert.fail(`only ${[...gates.keys()].join(", ") || "no"} summariser was reached within 60 seconds`);
+    }
+    gates.get("a")!(); const first = await a;
+    gates.get("b")!(); const second = await b;
     assert.deepEqual([first.kind, second.kind], ["summary", "superseded"]);
     const rec = (await enf.getCompaction(owner, second.id))!;
     assert.deepEqual([rec.state, rec.superseded], ["failed", true]);

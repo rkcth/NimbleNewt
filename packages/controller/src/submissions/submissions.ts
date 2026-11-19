@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { derivedId } from "../domain/ids.js";
-import { artifactId as checkArtifactId, commandId as checkCommandId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
+import { artifactId as checkArtifactId, commandId as checkCommandId, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -66,8 +66,14 @@ export interface SubmissionApproval {
   readonly projectId: string;
   readonly base: string;
   readonly tree: string;
+  /** The patch ID the submission names (card P09: a reviewer's approval carries over to a landing only while the patch ID is unchanged). */
+  readonly patchId?: string;
   readonly submittedBy: string;
+  /** When the submission was recorded. */
+  readonly submittedAt: string;
   readonly approved: boolean;
+  /** What the newest review of it says, when it has one (card P09 tells a review that asked for changes apart from one that has not been given). */
+  readonly newest?: "approve" | "changes" | "reject";
   readonly approvedBy?: string;
   /** The review submission that approved it, when a reviewer did. */
   readonly reviewId?: string;
@@ -79,16 +85,35 @@ interface VerdictsBody { readonly reviews: readonly { readonly id: string; reado
 const VERDICTS = "submission-verdicts";
 const MAX_VERDICTS = 50;
 /**
+ * The newest document submissions of each project (card Q03b; record kind `document-submission-index`, keyed by the project ID), newest last. Submissions sit in one table in hash order of their IDs,
+ * so "the newest document changes of a project" cannot be read from it without scanning everything; this index is written in the same write as each document submission, and keeps the newest
+ * `DOC_INDEX_KEPT` (older ones drop off the front: the docs agent submits the change again). Only the IDs and tasks are kept; every read takes the record itself and applies the read rule of `get`.
+ */
+interface DocIndexBody { readonly items: readonly { readonly id: string; readonly taskId: string }[] }
+const DOC_INDEX = "document-submission-index";
+export const DOC_INDEX_KEPT = 100;
+/**
  * A review's write met another review of the same subject written at the same moment (card H12o review): both changed the subject's verdict list. Not a refusal: the command is built again from the
  * list as it now is (`rebuildOnVerdictRace`), a few times, and only then answered `unavailable` (send it again).
  */
 class VerdictRace extends DomainError {}
 const VERDICT_RACE_TRIES = 5;
+/**
+ * A document change whose write met another document change of the same project (card Q03b second review): both added to the project's index. Document changes of DIFFERENT tasks did not meet before
+ * the index existed, so a burst of them (a release flags many documents at once) must not fail: each lost write is built again after a short random wait, many more times than a review race
+ * (20 at once all succeed), and only then answered `unavailable`.
+ */
+class DocIndexRace extends VerdictRace {}
+const DOC_INDEX_RACE_TRIES = 40;
+const docIndexRaceWait = (tries: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, Math.random() * Math.min(2 ** tries, 50)); });
 /** The service's runner, whose `command` builds a command again when its write lost a `VerdictRace`; everything else is the runner's own. */
 function rebuildOnVerdictRace(runner: CommandRunner): CommandRunner {
   const command: CommandRunner["command"] = async (type, meta, prepare) => {
     for (let tries = 1; ; tries++) {
-      try { return await runner.command(type, meta, prepare); } catch (error) { if (!(error instanceof VerdictRace) || tries >= VERDICT_RACE_TRIES) throw error; }
+      try { return await runner.command(type, meta, prepare); } catch (error) {
+        if (!(error instanceof VerdictRace) || tries >= (error instanceof DocIndexRace ? DOC_INDEX_RACE_TRIES : VERDICT_RACE_TRIES)) throw error;
+        if (error instanceof DocIndexRace) await docIndexRaceWait(tries);
+      }
     }
   };
   return new Proxy(runner, { get: (target, key) => { if (key === "command") return command; const value: unknown = Reflect.get(target, key, target); return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value; } });
@@ -127,6 +152,8 @@ export interface SubmissionOptions extends RunnerOptions {
   readonly reviewAssignments?: (principalId: string, taskId: string) => Promise<readonly string[]>;
   /** Scan limits for `list`, injectable so a test can shrink them (as `logScan` does for meetings). Defaults: 200 rows a page, 10 pages a call. */
   readonly listScan?: { readonly pageSize: number; readonly reads: number };
+  /** How many of a project's newest document submissions its index keeps (card Q03b), injectable so a test can shrink it. Default `DOC_INDEX_KEPT`. */
+  readonly docIndexKept?: number;
   /**
    * How many refresh rounds the task's author has made, as the controller counted them (card H12p, `WorkspaceOpService.refreshRounds`). When given, a code submission carries THAT number: the agent cannot state its own,
    * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
@@ -186,11 +213,13 @@ export class SubmissionService {
   readonly #onRecorded: SubmissionOptions["onRecorded"];
   readonly #rounds: SubmissionOptions["refreshRounds"];
   readonly #scan: { readonly pageSize: number; readonly reads: number };
+  readonly #docKept: number;
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
     this.#runner = rebuildOnVerdictRace(runner); this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
+    this.#docKept = options.docIndexKept ?? DOC_INDEX_KEPT;
   }
 
   /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
@@ -302,7 +331,7 @@ export class SubmissionService {
           if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body))], detail: { taskId, kind, role }, contention: () => this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body)), ...(await this.#docIndexChange(id, body))], detail: { taskId, kind, role }, contention: () => this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -359,6 +388,8 @@ export class SubmissionService {
   /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review whose verdict list moved. */
   async #contention(id: string, body: SubmissionBody): Promise<DomainError> {
     if ((await this.#runner.get("submission", id)) === undefined && body.kind === "review") return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
+    // Two document changes of one project at the same moment both add to the project's index (card Q03b): the one that lost is built again from the index as it now is.
+    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "document") return new DocIndexRace("unavailable", `another document change of this project was recorded at the same moment; send this one again`);
     return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
   }
 
@@ -377,6 +408,59 @@ export class SubmissionService {
     return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
   }
 
+  /** A document submission is added to its project's index in the same write (card Q03b); the oldest entries beyond `DOC_INDEX_KEPT` drop off. */
+  async #docIndexChange(id: string, body: SubmissionBody): Promise<Change[]> {
+    if (body.kind !== "document") return [];
+    const ref = { kind: DOC_INDEX, id: body.projectId };
+    const current = await this.#runner.get(DOC_INDEX, body.projectId);
+    const list = ((current?.body as unknown as DocIndexBody | undefined)?.items ?? []);
+    if (list.some((x) => x.id === id)) return [];
+    const next: DocIndexBody = { items: [...list, { id, taskId: body.taskId }].slice(-this.#docKept) };
+    return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
+  }
+
+  /**
+   * The newest document submissions of a project (card Q03b), newest first, from the project's index (the newest `DOC_INDEX_KEPT` only). Each is filtered exactly as `get` is: the owner sees all; an
+   * agent sees one only when it may read its task (and with a task credential only that task) and made it or was asked to review it. A project the caller may not read at all is `not_found`.
+   * `since` keeps those recorded no earlier than that time (the record's creation time, the one `doc.obligation.verify` compares with a flag). Paged: `next` is an opaque cursor bound to the caller and
+   * the project. Work is bounded by the index's size.
+   */
+  async documents(by: Principal, projectIdValue: string, query: { since?: string; afterId?: string; limit: number }): Promise<{ items: (Item & { createdAt: string })[]; next?: string }> {
+    const projectId = checkProjectId(projectIdValue);
+    if (!Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 50) bad("limit", "must be a whole number from 1 to 50");
+    if (query.since !== undefined && (typeof query.since !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(query.since))) bad("since", "must be a time like 2026-11-19T10:00:00.000Z");
+    const scope = `project:${projectId}`;
+    const after = query.afterId === undefined ? undefined : this.#unseal(by, scope, query.afterId);
+    if ((await this.#runner.get("project", projectId)) === undefined) throw new DomainError("not_found", "no such project");
+    if (by.kind !== "owner" && (by.kind !== "agent" || (by.taskScope !== undefined && !inTaskScope(by, projectId)) || !allows(by, "task.read", projectId))) throw new DomainError("not_found", "no such project");
+    const index = [...(((await this.#runner.get(DOC_INDEX, projectId))?.body as unknown as DocIndexBody | undefined)?.items ?? [])].reverse();
+    let start = 0;
+    if (after !== undefined) {
+      // The cursor's entry dropped off the index (newer document changes pushed it out): a clear refusal, not an empty page that reads as "no more".
+      const at = index.findIndex((x) => x.id === after);
+      if (at < 0) bad("after", `the listing moved on: the document change this cursor follows is no longer among the project's newest ${this.#docKept}; list again without after`);
+      start = at + 1;
+    }
+    const items: (Item & { createdAt: string })[] = [];
+    const tasks = new Map<string, { task: TaskBody | undefined; assigned: ReadonlySet<string> }>();
+    for (let k = start; k < index.length; k++) {
+      const entry = index[k]!;
+      const found = await this.#runner.get("submission", entry.id);
+      const body = found?.body as unknown as SubmissionBody | undefined;
+      if (found === undefined || body === undefined || body.kind !== "document" || body.projectId !== projectId) continue;
+      if (query.since !== undefined && found.createdAt < query.since) continue;
+      if (by.kind !== "owner") {
+        let seen = tasks.get(body.taskId);
+        if (seen === undefined) { const task = await this.#readableTask(by, body.taskId); seen = { task, assigned: task === undefined ? new Set() : await this.#assignedTo(by, task, body.taskId) }; tasks.set(body.taskId, seen); }
+        if (seen.task === undefined || (body.submittedBy !== by.id && !seen.assigned.has(entry.id))) continue;
+      }
+      // One more readable item past the page: only then is `next` offered (entries the caller may not read, or older than `since`, do not make a next page).
+      if (items.length >= query.limit) return { items, next: this.#seal(by, scope, items[items.length - 1]!.id) };
+      items.push({ ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: found.id, revision: found.revision, createdAt: found.createdAt });
+    }
+    return { items };
+  }
+
   /**
    * Whether a code submission is approved, for the controller's own callers (card H12o: the commit of an approved submission). It takes no caller and is not an API operation: whoever asks has been checked already (the
    * workspace request needs `workspace.manage`). Approved means the NEWEST review of it says `approve` (a later `changes` or `reject` takes an approval back; a review of one's own work was refused when it was recorded),
@@ -388,8 +472,8 @@ export class SubmissionService {
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
     const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
     const newest = reviews[reviews.length - 1];
-    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, submittedBy: found.submittedBy };
-    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id } : { ...base, approved: false, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
+    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt };
+    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve" } : { ...base, approved: false, newest: newest.verdict, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };
   }

@@ -19,8 +19,6 @@ export const BEAT_MS = 20_000;
 const SYSTEM_ROOTS = new Set(["/usr", "/bin", "/lib", "/sbin", "/lib64", "/"]);
 /** What one agent's attempt asks the host for when it is placed (the host's capacity, declared below, says how many fit). */
 export const ATTEMPT_RESOURCES = { cpus: 1, memoryMb: 2048 };
-/** The context window assumed for a route the routing table gives none. */
-const FALLBACK_WINDOW = 32_768;
 
 /**
  * Whether the worker host may change agents' environments (the A09 runtime). OFF unless asked: a command-line switch (`--local-host-environments`) or `NIMBLENEWT_LOCAL_HOST_ENVIRONMENTS=1`.
@@ -118,6 +116,13 @@ export function localHostBuilder(setup) {
       landing: (call) => (composed === undefined ? undefined : composed.landingPolicy(call)),
       // The worker-side security hook (card U11d), reported to the owner's Urgent watch.
       security: (event) => { composed?.reportSecurity(event); },
+      // The landing gate's test commands (card P09): each runs in the sandbox on a fresh copy of the tree the landing would make, with Node.js as /opt/node, no network and the owner's limits and best-effort setting. Before the
+      // controller has built the host there are no limits to read, so a check is not run (the landing is refused).
+      checks: {
+        launcher, readOnly: [{ host: nodeRoot, guest: "/opt/node" }], base: join(base, "landing-checks"),
+        limits: async () => { if (composed === undefined) throw new Error("the host is not built yet"); return composed.currentLimits(); },
+        bestEffort: async () => composed !== undefined && (await composed.bestEffortAllowed()) === true,
+      },
     });
     // The optional work-in-progress backup (card P02b) over the same checkouts. The scan (credential shapes plus every secret value the installation uses, read from the secret store at each scan) is required; the push credential is a
     // secret the OWNER named, read by name at the moment of a push or restore and handed to that one git process (an ssh remote uses this computer's ssh agent). Nothing is read, kept or printed here.
@@ -169,7 +174,7 @@ export function localHostBuilder(setup) {
                 const route = String(order.route);
                 const slash = route.indexOf("/");
                 const entry = (await ctx.controller().services.routing.get())?.routes?.[route];
-                return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? FALLBACK_WINDOW, maxTokens: entry?.maxTokens ?? 4096, reasoning: false, input: ["text"] };
+                return { alias: "m0", provider: route.slice(0, slash), api: "openai-completions", modelId: route.slice(slash + 1), contextWindow: entry?.contextTokens ?? controller.DEFAULT_CONTEXT_TOKENS, maxTokens: entry?.maxTokens ?? controller.DEFAULT_REPLY_TOKENS, reasoning: false, input: ["text"] };
               },
               namespaceId: (order) => services.namespaceId(order),
               bridge: (order, call, token, request) => {
@@ -190,7 +195,7 @@ export function localHostBuilder(setup) {
               hostId: LOCAL_HOST_ID, resources: ATTEMPT_RESOURCES, version: "launcher", guards: services.guards, ownerPolicy: parts.ownerPolicy,
               schedule: (beat) => { const timer = setInterval(() => { void beat(); }, 1000); timer.unref?.(); return () => clearInterval(timer); },
               sandbox: parts.sandbox, runtimes: { open: (order, call, from) => parts.runtimes.open(order, call, from) },
-              workspace: { run: async (call) => { await refreshShared(); return workspaces.port.run(call); } },
+              workspace: { run: async (call) => { await refreshShared(); return workspaces.port.run(call); }, landingChecks: async (call) => { await refreshShared(); return workspaces.port.landingChecks(call); } },
               progress: (scope) => workspaces.progress(scope),
               // The check of a done (card W05): the state of the checkout this port made, and the contract's checks run in the attempt's sandbox. Without it a done of a task whose contract names evidence or checks is never verified.
               verify: async (attemptId, scope, request) => { await refreshShared(); return verifyDone(attemptId, scope, request); },

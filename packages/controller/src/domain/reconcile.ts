@@ -4,7 +4,7 @@ import { DeliveryDispatcher, type DeliveryHandler } from "./delivery.js";
 import { DomainError, isDomainError } from "./errors.js";
 import { sha256 } from "../storage/json.js";
 import { derivedId } from "./ids.js";
-import type { EffectBody, EffectBridge, EffectService } from "./effects.js";
+import { BRIDGE_CALL_KIND, type EffectBody, type EffectBridge, type EffectService } from "./effects.js";
 import { EVENTS_INBOX_SOURCE, type InboxMessageBody, type InboxService } from "./inbox.js";
 import { CommandRunner, mapStorageError, type RunnerOptions } from "./runner.js";
 import type { ProjectService } from "./service.js";
@@ -349,6 +349,17 @@ export class Reconciler {
     return !more;
   }
 
+  /** An uncertain effect is shown to the owner once: an `effect_uncertain` blocker, unless one is open. */
+  async #reportUncertain(effectId: string, body: EffectBody, report: { blockersOpened: number }): Promise<void> {
+    const subject = { kind: "effect", id: effectId };
+    if ((await this.#deps.blockers.openFor("effect_uncertain", subject)) !== undefined) return;
+    await this.#deps.blockers.openBlocker({
+      commandId: `uncertain:${h(`${effectId}\0${await this.#deps.blockers.occurrences("effect_uncertain", subject)}`)}`, actor: this.#options.claimant ?? "reconciler", type: "effect_uncertain", subject, resolver: "owner",
+      summary: `Effect ${effectId} (${body.kind} on ${body.target}) may or may not have happened and cannot be retried blindly. Check the target, then resolve the effect and this blocker.`,
+    });
+    report.blockersOpened += 1;
+  }
+
   async #recoverEffects(report: { effectsRun: number; effectsHeld: number; effectsUnbridged: number; blockersOpened: number; errors: number }): Promise<boolean> {
     const pageSize = this.#options.pageSize ?? 100;
     const cursor = await this.#cursor("effects");
@@ -359,21 +370,31 @@ export class Reconciler {
       try { record = await this.#storage.getEffect(aggregate.id); } catch (error) { throw mapStorageError(error); }
       if (record === undefined || record.status === "confirmed" || record.status === "failed") continue;
       if (record.status === "uncertain") {
-        if ((await this.#deps.blockers.openFor("effect_uncertain", { kind: "effect", id: aggregate.id })) === undefined) {
-          await this.#deps.blockers.openBlocker({
-            commandId: `uncertain:${h(`${aggregate.id}\0${await this.#deps.blockers.occurrences("effect_uncertain", { kind: "effect", id: aggregate.id })}`)}`, actor: this.#options.claimant ?? "reconciler", type: "effect_uncertain", subject: { kind: "effect", id: aggregate.id }, resolver: "owner",
-            summary: `Effect ${aggregate.id} (${body.kind} on ${body.target}) may or may not have happened and cannot be retried blindly. Check the target, then resolve the effect and this blocker.`,
-          });
-          report.blockersOpened += 1;
-        }
+        await this.#reportUncertain(aggregate.id, body, report);
         continue;
       }
       // intended
       if (body.taskId !== undefined && (await this.#deps.blockers.openFor("manual_hold", { kind: "task", id: body.taskId })) !== undefined) { report.effectsHeld += 1; continue; }
       if ((await this.#deps.blockers.openFor("manual_hold", { kind: "effect", id: aggregate.id })) !== undefined) { report.effectsHeld += 1; continue; }
+      const bridge = this.#deps.bridges[body.kind];
+      // G04 follow-up: a tool bridge call admitted as an effect (card L05d) has no bridge here; only the tool bridge runs it, when the attempt presents the call (again, after a restart). Once that attempt can no longer present
+      // it, the ledger closes it without running anything: never started, failed; started by an executor that vanished, uncertain, and the owner is told by the blocker below. Until then it is counted as before.
+      if (bridge === undefined && body.kind === BRIDGE_CALL_KIND) {
+        try {
+          const closed = await this.#deps.effects.closeUnbridged(aggregate.id);
+          if (closed !== undefined && closed.status !== "pending") {
+            report.effectsRun += 1;
+            if (closed.status === "uncertain") await this.#reportUncertain(aggregate.id, body, report);
+            continue;
+          }
+        } catch (error) {
+          if (error instanceof DomainError && (error.code === "effect_busy" || error.code === "effect_uncertain")) continue;
+          await this.#flag({ kind: "effect", id: aggregate.id }, error, report);
+          continue;
+        }
+      }
       // Only effects an executor started and did not finish need repair; an effect never started is waiting for its owner's attempt to do it.
       if (!body.started) continue;
-      const bridge = this.#deps.bridges[body.kind];
       if (bridge === undefined) { report.effectsUnbridged += 1; continue; }
       try {
         await this.#deps.effects.run(aggregate.id, bridge);

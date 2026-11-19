@@ -104,12 +104,32 @@
       ],
       "deliverable": "Actual embedded controller and Pi integration on SQLite and PostgreSQL",
       "acceptance_and_verification": "Kill worker and controller around admission and result; no lost acknowledged request or duplicate protected effect; wait survives service restart; exercise both real controller databases, connection loss and ambiguous commits; validate the mechanism decisions in design proposal section 3; classify any failure as an implementation defect or evidence against the selected architecture; do not defer backend selection to this task; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": "Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code",
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "0b042fd3",
+          "ba70d4d4",
+          "247c459d",
+          "36035bf5",
+          "8eda63c2",
+          "3ba76ee8",
+          "c2d9262e",
+          "19450f22",
+          "503d961f",
+          "4eedf179"
+        ],
+        "ci_runs": [
+          "44479327514"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/g04-evidence.md",
+        "note": "The production S09 services, S08 waits and the Pi adapter on durable storage over SQLite, SQLite on a worker thread and PostgreSQL: a real SIGKILL of controller and Pi at every numbered boundary around admission, the model request, the outside effect and the result (127 boundaries), the worker process killed in flight and after its answer, and the controller crashed with the worker alive, each end in the uncrashed run's state with no acknowledged request lost and the protected effect applied once; a kill inside a protected tool call the model makes ends like the uncrashed run (the call presented again and answered from the effect ledger; otherwise closed as failed or marked uncertain with a blocker); waits survive restart and real kills; injected ambiguous commits and rollbacks on all three databases and 218 real PostgreSQL connection cuts all converge; section 3 rows are covered or handed to named cards (lead decision in the evidence); no architecture or production defect was classified against D2. Limits: the exhaustive sweep (every boundary and cut) ran on Linux only, the qa.yml g04-exhaustive job for macOS and Windows has not run, and hosted CI runs the sampled set with the heavy process files skipped; kills land between storage calls, never inside a commit or fsync, and no power loss is simulated; a real out-of-process worker killed together with the controller and then presented again is covered by unit tests only; the model is scripted."
+      }
     },
     {
       "id": "G05",
@@ -207,12 +227,42 @@
       ],
       "deliverable": "Actual NimbleNewt component/integration tests: Typed pause/branch/resume/suspend fixture with exact context manifests",
       "acceptance_and_verification": "Inquiry sees original current context without polluting parent; unchanged and updated resumes correct; stream interruption and partial tool calls cannot admit stale actions; context survives restart without summary reconstruction; invoke production implementation, not a parallel test-only state machine; attach implementation commit and reproducible evidence; continuity is also validated across a provider change and the correction of an old owner decision; the resume record labels native restore, reconstruction or restart",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": "Historical context-and-windows-results.md only; acceptance requires actual NimbleNewt code",
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "80b7ce54",
+          "67d7af70",
+          "26112b47",
+          "7ae75063",
+          "74006524",
+          "93c3a979",
+          "af7095fd",
+          "e6fcdd95",
+          "662b630f",
+          "b4d57899",
+          "1cb6fbf3",
+          "f0e9be32",
+          "bf21a9af",
+          "eb874ae9",
+          "978fb153",
+          "1281c426",
+          "4b44cbb1",
+          "dcf2919f",
+          "6e984cec",
+          "9fd04694"
+        ],
+        "ci_runs": [
+          "44479327514"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/g09-evidence.md",
+        "note": "Production C05 branches, L05 generations, H04 inquiries and C04 continuations with the Pi adapter on durable storage: an inquiry's request is exactly the parent's current context plus the question and leaves the parent byte-identical; an unchanged resume continues the original context, an updated resume places the selected update once (request ID in the conversation) with its origin, delivered at dispatch to local and remote worker processes; a correction of an old owner decision supersedes it in what the agent sees and a generation on the old revision is refused; a stream cut inside a tool call's arguments and a complete call arriving after a correction are never admitted, shown through the real relay and sandboxed worker; context survives an adapter restart with no summary entry and across a provider change (composed controller with four scripted servers); resume records say native-restore, reconstruction or restart. Two gated runs on the owner's Radiance server held 32 of 33 and 33 of 33 checks (the one miss was a relay defect, fixed). Limits: with the real model the complete-call-refused-at-admission path and a controller process restart are shown only offline; the provider change on the real server was a second provider record on the same backend; reconstruction is a fixture, not a production feature; the first call's size estimate does not count placed updates; the composed delivery test runs on SQLite (service-level tests on all four backends)."
+      }
     },
     {
       "id": "G10",
@@ -8822,12 +8872,49 @@
       ],
       "deliverable": "Responsibility records with managed resources, desired condition, availability need, check schedule and event sources, permitted actions, maintenance windows and escalation rules; deterministic check scheduler; observation and incident records; per-resource maintenance leases (README 110-118; organization-and-workers 19, 66-67; portability-and-configuration 9)",
       "acceptance_and_verification": "Each check produces a bounded task or a recorded observation, calling an agent only when interpretation or action is needed; checks are generated idempotently and survive host restart; intended state, observed state, last successful check and open incidents stay distinct and \"no recent observation\" is never shown healthy; repeated alerts group into one incident with bounded retries and escalation, preserved through restart; provider outages and NimbleNewt downtime show as coverage gaps with start, end and reason, and missed events are reconciled on return; a second agent's update to the same resource blocks visibly on the lease; failed validation triggers authorized rollback or escalation, both recorded; Suspend checkpoints the responsibility without stopping the managed service and Suspend and Release names the new monitor owner; pausing the maintenance agent keeps queued alerts and ownership; a remote host is managed through an approved tool with no worker enrolled on it",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "14e9e350",
+          "7bac980b",
+          "2f9e62bd",
+          "145f6c4f",
+          "a9af4339",
+          "9f661bd8",
+          "25ffdeba",
+          "8ce7e9ed",
+          "42cc5449",
+          "4ffa839c",
+          "28745a44",
+          "aa7fd17d",
+          "c8f14062",
+          "ae8cb140",
+          "8cd7e80e",
+          "14a0439e",
+          "339c26b9",
+          "b13cc345",
+          "a614c53d",
+          "c62bb32c",
+          "f8b9d18c",
+          "5343b37a",
+          "da4fb6e7",
+          "6d337ff0",
+          "c9c5dad5",
+          "7bd4bea8",
+          "f45228b0"
+        ],
+        "ci_runs": [
+          "44479327514"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Responsibility records (managed resources, desired condition, availability need, check schedule and event sources, permitted actions, maintenance windows, escalation rules) with a deterministic scheduler: checks are generated idempotently per slot and by event, survive a restart, and each becomes a recorded observation (the owner's HTTP probe, no agent) or one bounded task for the answerable agent; intended state, observed state, last successful check (lastOkAt) and open incidents are kept apart and a stale or missing check reads unknown, never healthy; repeated alerts group into one incident with bounded retries and escalation that survive restart; provider outages, event-source outages and controller downtime are coverage gaps with start, end and reason, narrowed to the routes and sources a responsibility uses, and missed events are read on return; per-resource maintenance leases block a second agent visibly, a failed validation is rolled back only when permitted or else escalated, both recorded; a Suspend writes a note on the agent's responsibilities (the managed service is not stopped) and the hand-off (L03i) names the new monitor; a paused maintenance agent keeps ownership and its queued notices; a remote host is acted on through the owner-approved remote-action tool with no worker enrolled. Limits: probes and remote actions are HTTP(S) only (no TCP, process, disk or certificate probes, no SSH, no owner certificate authority); Suspend and Release is the L03 hand-off, not a separate stop mode; scans fail closed above 50,000 records; outages the router never saw are not gaps; the remote-action tool has no startController-level test; no real managed service, real model or macOS/Windows run beyond CI."
+      }
     },
     {
       "id": "P05",

@@ -8,9 +8,10 @@ import type { AgentService } from "../agents/index.js";
 import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
-import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
-import type { AcceptanceService, SubmissionService } from "../submissions/index.js";
+import type { ReleaseActivationService, ReleaseService, ReleaseWindowService } from "../release/index.js";
+import type { AcceptanceService, DefectService, DocObligationService, QaEvidenceService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
+import type { SimulationService } from "../simulation/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
 import type { RetentionService, RetentionSettingsService } from "../retention/index.js";
@@ -88,6 +89,7 @@ import type { QuietHostService } from "../remote/quiet-hosts.js";
 import type { CatalogPolicyService } from "../catalog/policy.js";
 import type { QuietHostSettingsService } from "../remote/quiet-host-settings.js";
 import type { IntegratorLeaseOps } from "../landing/lease-ops.js";
+import type { LandingQueueOps } from "../landing/queue-ops.js";
 import type { HandoffService } from "../lifecycle/handoff.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 
@@ -137,22 +139,33 @@ export interface StateApiDeps {
   readonly responsibilityChecks?: Pick<ResponsibilityChecks, "pending">;
   readonly release?: Pick<ReleaseService, "submit" | "authorizeHost" | "issue" | "report" | "interrupt" | "gate" | "approve" | "attempts" | "start" | "cancel" | "settings" | "setSettings" | "changeIssuers">;
   readonly activation?: Pick<ReleaseActivationService, "stage" | "activate" | "rollback" | "status" | "settings" | "setSettings" | "remove" | "resolve" | "verify" | "confirm" | "acknowledgeStart" | "trust" | "addTrustedKey" | "removeTrustedKey" | "requireSignature" | "attachSignature" | "rolloutStatus" | "stopRollout" | "rollbackCheck">;
+  readonly releaseWindows?: Pick<ReleaseWindowService, "set" | "cancel" | "get" | "list">;
   /** Migration recovery and rollback limits (card K03). */
   readonly migrationGuard?: Pick<MigrationGuardService, "status" | "policy" | "setPolicy" | "approveContract" | "withdrawContract" | "rollbackVerdict">;
   readonly swarm?: Pick<SwarmService, "spawn" | "cancel" | "children">;
   readonly incidents?: Pick<IncidentService, "report" | "resolve" | "list" | "observed">;
   /** Submissions by role (card Q01b). */
-  readonly submissions?: Pick<SubmissionService, "record" | "get" | "list">;
+  readonly submissions?: Pick<SubmissionService, "record" | "get" | "list" | "documents">;
   /** Versioned deliverables and their acceptance (card Q01). */
   readonly taskArtifacts?: Pick<TaskArtifactPublisher, "publish">;
   readonly serviceOps?: Pick<ServiceOperations, "operate" | "observe">;
+  /** Simulation scopes (card P07). */
+  readonly simulation?: Pick<SimulationService, "open" | "get" | "observe" | "operate" | "close">;
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
+  /** Defects, repair and review cycles and owner overrides (card Q04). */
+  readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "get" | "list">;
+  /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
+  readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate">;
+  /** Documentation obligations and their impact (card Q03). */
+  readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "impact" | "release" | "list" | "get">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, landing, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
   readonly workspaceOps?: Pick<WorkspaceOpService, "request" | "get" | "reapply">;
   /** The authorised door to the integrator leases of landing (card P10). */
   readonly integratorLeases?: Pick<IntegratorLeaseOps, "acquire" | "renew" | "release" | "list">;
+  /** The door to the landing queues of the projects' landing branches (card P10). Absent when the controller runs without it. */
+  readonly landingQueue?: Pick<LandingQueueOps, "add" | "remove" | "list">;
   /** When present, the status views (task, overview, noticeboard, changes, tools, delivered, failed events) can be asked through the API (card U05b). */
   readonly status?: Pick<StatusService, "ask" | "attention" | "toolActivity">;
   readonly invitations?: InvitationInbox;
@@ -391,15 +404,21 @@ export class StateApi {
         ...(this.#deps.incidents === undefined ? {} : { incidents: this.#deps.incidents }),
         ...(this.#deps.submissions === undefined ? {} : { submissions: this.#deps.submissions }),
         ...(this.#deps.acceptance === undefined ? {} : { acceptance: this.#deps.acceptance }),
+        ...(this.#deps.defects === undefined ? {} : { defects: this.#deps.defects }),
+        ...(this.#deps.qaEvidence === undefined ? {} : { qaEvidence: this.#deps.qaEvidence }),
+        ...(this.#deps.docObligations === undefined ? {} : { docObligations: this.#deps.docObligations }),
         ...(this.#deps.taskArtifacts === undefined ? {} : { taskArtifacts: this.#deps.taskArtifacts }),
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),
+        ...(this.#deps.simulation === undefined ? {} : { simulation: this.#deps.simulation }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
         ...(this.#deps.activation === undefined ? {} : { activation: this.#deps.activation }),
+        ...(this.#deps.releaseWindows === undefined ? {} : { releaseWindows: this.#deps.releaseWindows }),
         ...(this.#deps.migrationGuard === undefined ? {} : { migrationGuard: this.#deps.migrationGuard }),
         ...(this.#deps.swarm === undefined ? {} : { swarm: this.#deps.swarm }),
         ...(this.#deps.meetings === undefined ? {} : { meetings: this.#deps.meetings }),
         ...(this.#deps.workspaceOps === undefined ? {} : { workspaceOps: this.#deps.workspaceOps }),
         ...(this.#deps.integratorLeases === undefined ? {} : { integratorLeases: this.#deps.integratorLeases }),
+        ...(this.#deps.landingQueue === undefined ? {} : { landingQueue: this.#deps.landingQueue }),
         ...(this.#deps.status === undefined ? {} : { status: this.#deps.status }),
         ...(this.#deps.invitations === undefined ? {} : { invitations: this.#deps.invitations }),
         ...(this.#deps.branches === undefined ? {} : { branches: this.#deps.branches }),

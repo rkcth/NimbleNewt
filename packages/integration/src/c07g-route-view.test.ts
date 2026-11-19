@@ -17,7 +17,13 @@ const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-abcdefghijklmnopqrst";
-const HEADER = "[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route localp/small (a 32768-token window).]";
+// The route's window and the figure assumed for a route nobody has measured. The real process's fixed part (its system text and every bridge tool's schema, about 17,600 characters since card T08's toolbox
+// tools, about 20,250 since card P03b's service and deliverable tools) is just under the default floor (21,750 characters since card P03b; 19,000 from card "Fixed-part sizing after T08"), so the owner sets a clearly larger one here: the dispatcher's view is built on more than the process really
+// sends, and the measured view fits more.
+// The window's startup share (a quarter) holds the measured fixed part beside what must stay whole, with room for some of the questions but not all.
+const WINDOW = 40_960;
+const FLOOR_CHARS = 22_750;
+const HEADER = `[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route localp/small (a ${WINDOW}-token window).]`;
 type Reply = { ok: boolean; result?: any; error?: { code: string; message: string } };
 
 test("a task that moves to a route nobody has measured: the real process is measured before its first call and the model gets the owner's context rebuilt on the measured figure, with the cut items readable by digest (card C07g)", async (t) => {
@@ -40,13 +46,13 @@ test("a task that moves to a route nobody has measured: the real process is meas
       manual: true,
       local: {
         acceptUnenforcedLimits: true,
-        window: () => 32_768,
+        window: () => WINDOW,
         build: (services) => {
           const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: model.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }) } : undefined) });
           const parts = localWorkerParts<unknown>({
             launcher: real as never, app: appFromRepository(repository, { root: nodeRoot, executable: "bin/node" }), protectedPaths: [],
             workspace: () => dirs,
-            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32_768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
             namespaceId: () => "abcdef0123456789",
             bridge: async () => ({ ok: true, result: {} }),
             relay: (order, request) => services.attemptRelay(order as never, relay, { model: "local" }).relay(request),
@@ -71,6 +77,7 @@ test("a task that moves to a route nobody has measured: the real process is meas
     const boot = await s.principals.bootstrapOwner({ name: "rob" });
     const owner = await s.principals.authenticate(boot.token);
     const call = (op: string, args: Record<string, unknown>, commandId?: string): Promise<Reply> => c.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never) as Promise<Reply>;
+    assert.equal((await call("context.route.change", { set: { floorChars: FLOOR_CHARS } }, "floor")).ok, true);
     await s.routing.setTable(owner, { commandId: "rt", expectedRevision: 0, table: { ...ROUTING_TABLE, roles: { coordinator: "r-cloud", "safety-supervisor": "r-cloud" } } } as never);
     await DifficultyService.withEpoch(c.storage, c.epoch, s.routing, s.contracts).setProfiles(owner, { commandId: "sp", expectedRevision: 0, profiles: EXEC_PROFILES } as never);
     await s.principals.enroll(owner, { commandId: "e-host", kind: "host", name: "w1", grants: [] });
@@ -122,7 +129,7 @@ test("a task that moves to a route nobody has measured: the real process is meas
     const moves = (await c.storage.listAggregates("ctx-admission", { limit: 50 })).map((x) => x.body as unknown as { type: string; attemptId: string; basis: string; admit: boolean; startupTokens: number }).filter((x) => x.type === "route-change" && x.attemptId === attemptId);
     assert.deepEqual(moves.map((m) => [m.basis, m.admit]).sort(), [["estimated", true], ["unmeasured", true]], "decided on the assumed figure, then again on the measured one");
 
-    // What the model got is the view built on the measured figure: the process's tools are much smaller than the assumed 14,000 characters, so more of the owner's questions fit whole than in the dispatcher's view.
+    // What the model got is the view built on the measured figure: the process's system text and tools are smaller than the assumed floor, so more of the owner's questions fit whole than in the dispatcher's view.
     assert.equal(model.seen.length, 2, "the first call, then the call after the agent ended its work");
     const sent = JSON.stringify(model.seen[0]!.body.messages);
     const text = JSON.parse(sent) as { content: unknown }[];
@@ -130,7 +137,7 @@ test("a task that moves to a route nobody has measured: the real process is meas
     assert.ok(prompt.includes(HEADER), "the rebuilt view reached the model");
     assert.ok(prompt.includes("Goal: every bed gives a harvest this summer.") && prompt.includes("Use the soaker hose, never the sprinkler."), "the owner's goal and words whole");
     const wholeIn = (x: string): number => questions.filter((q) => x.includes(q)).length;
-    assert.ok(sample.toolSchemaChars < 14_000, `the process's tools (${sample.toolSchemaChars} characters) are smaller than the assumed floor`);
+    assert.ok(sample.systemPromptChars + sample.toolSchemaChars < FLOOR_CHARS, `the process's system text and tools (${sample.systemPromptChars} + ${sample.toolSchemaChars} characters) are smaller than the assumed floor`);
     assert.ok(wholeIn(prompt) > wholeIn(assumedView), `more questions whole on the measured figure (${wholeIn(prompt)}) than on the assumed one (${wholeIn(assumedView)})`);
     assert.equal(prompt.includes(assumedView.slice(2)), false, "the assumed view was not sent");
     // Some still did not fit: each is named by the digest of its full text, which reads it back through the API.

@@ -38,11 +38,15 @@ import { ACTIVITY_KINDS, clipText, type ActivityService, type ExplanationBody } 
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
 import type { StaleDeliverable } from "../submissions/acceptance.js";
+import type { DefectService } from "../submissions/defects.js";
+import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
+import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
+import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
-import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService } from "../release/index.js";
+import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService, ReleaseWindowService } from "../release/index.js";
 import { releaseDeadline } from "../release/index.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
@@ -274,6 +278,9 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
+  defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
+  docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
+  qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
   start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
@@ -298,6 +305,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
+  release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
@@ -379,6 +387,9 @@ export type StatusRequest =
   | { readonly kind: "handoff"; readonly taskId: string }
   | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "work_report"; readonly taskId: string }
+  | { readonly kind: "defects"; readonly taskId: string }
+  | { readonly kind: "qa"; readonly taskId: string }
+  | { readonly kind: "docs"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
@@ -418,6 +429,7 @@ export type StatusRequest =
   | { readonly kind: "access"; readonly agent?: string }
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
+  | { readonly kind: "release_windows" }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
@@ -569,6 +581,8 @@ export interface StatusDeps {
   /** The landing settings at the installation layer with whether the owner set each (card H12s, `ConfigurationService.installationSettings` over `LANDING_SETTING_KEYS`). Absent: the view is not offered. */
   /** The wakes of the controller's own meeting wake host (card M04h). Absent, or answering undefined (the application supplies its own host): the view is not offered. */
   readonly wakes?: () => Promise<readonly WakeView[] | undefined>;
+  /** Maintenance windows for release updates (card K07); absent without release activation. */
+  readonly releaseWindows?: (by: Principal) => Promise<Awaited<ReturnType<ReleaseWindowService["list"]>> | undefined>;
   readonly landing?: () => Promise<Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>>;
   /** The projects that have landing values of their own (a project layer of the configuration, or their own landing branch), each value as that project gets it and where it comes from (card H12u). Absent: the view lists the installation only. */
   readonly landingProjects?: () => Promise<{ readonly projects: readonly { readonly projectId: string; /** The branch the owner named for this project (`project.branches.set`, landing). */ readonly branch?: string; readonly values: Readonly<Record<string, { readonly value: unknown; readonly source: { readonly layer: string; readonly id: string }; readonly own?: unknown }>> }[]; readonly truncated: boolean }>;
@@ -706,6 +720,14 @@ export interface StatusDeps {
    * read rule; `reads` is the number of records it read, counted against the attention scan. Absent: deliverables are never listed as stale.
    */
   readonly deliverables?: { contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }> };
+  /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
+  readonly defects?: Pick<DefectService, "forTask">;
+  /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
+  readonly qa?: Pick<QaEvidenceService, "list" | "gate">;
+  /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
+  readonly docs?: Pick<DocObligationService, "list">;
+  /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
+  readonly docSubmissions?: Pick<SubmissionService, "documents">;
 }
 
 export interface StatusOptions extends RunnerOptions {
@@ -725,6 +747,8 @@ export interface StatusOptions extends RunnerOptions {
 export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, since: 40 } as const;
 /** How many references or links one replay chat line names before it counts the rest (card U09): a step may cite up to 100, which would make one line many kilobytes once quoted. */
 const REPLAY_LINE_ITEMS = 12;
+/** How many document changes the `docs` view lists for one flagged document (card Q03b); it says when there are more. */
+const DOC_CANDIDATES = 3;
 /** How many names of one stand-up's roster the stand-ups answer lists before counting the rest (card M03h): a roster may hold 50 principals. */
 const STANDUP_ROSTER_LISTED = 10;
 /** The ID of the one coordinator record (`COORDINATOR_ID` in chat/coordinator.ts), cited when there is none or it cannot be read. */
@@ -922,6 +946,9 @@ export class StatusService {
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
+      case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
+      case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
+      case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
@@ -961,6 +988,7 @@ export class StatusService {
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
+      case "release_windows": { onlyKnown(request, ["kind"]); return this.releaseWindowLines(by); }
       case "environment": { onlyKnown(request, ["kind", "agent"]); return this.environmentLines(by, request.agent); }
       case "maintenance": { onlyKnown(request, ["kind", "maintenanceId", "agent", "status", "limit"]); return this.maintenanceLines(by, request); }
       case "access": { onlyKnown(request, ["kind", "agent"]); return this.accessLines(by, request); }
@@ -1644,6 +1672,24 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
+  /** Card K07: the maintenance windows in plain lines, owner only (a holder of release.manage reads them through release.window.list). */
+  async releaseWindowLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.releaseWindows === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    let found: Awaited<ReturnType<NonNullable<StatusDeps["releaseWindows"]>>>;
+    try { found = await this.#deps.releaseWindows(by); } catch { return { observedAt: this.#runner.now(), lines: [line("The maintenance windows cannot be read right now.", cite("config-layer", "installation"))] }; }
+    if (found === undefined) return undefined;
+    const lines: Line[] = [];
+    for (const w of found.windows.slice(0, 10)) {
+      const when = `${w.date} ${w.time} ${w.timeZone} for ${w.durationMinutes} minutes (${w.opensAt} to ${w.closesAt} UTC)`;
+      const back = w.rollback === undefined ? "" : w.rollback.ok ? ` The earlier release ${w.rollback.to} can still come back (release.rollback).` : ` The earlier release ${w.rollback.to} cannot come back now: ${shown(w.rollback.reasons.join("; "), 200)}.`;
+      lines.push(line(`Window ${w.windowId} for release ${w.candidateId}, ${when}: ${w.status}${w.waiting === undefined ? "" : `, waiting: ${shown(w.waiting, 80)}`}${w.reason === undefined ? "" : ` (${shown(w.reason, 200)})`}.${back}`, cite("release-window", w.windowId, w.revision)));
+    }
+    if (found.truncated || found.windows.length > 10) lines.push(line("Older windows are not shown (release.window.list has up to 50).", cite("config-layer", "installation")));
+    for (const q of found.quarantined.slice(0, 5)) lines.push(line(`Release ${q.candidateId} is quarantined since ${q.at}: ${shown(q.reason, 160)}; no window can activate it.`, cite("release-quarantine", q.candidateId)));
+    if (lines.length === 0) lines.push(line("No maintenance window is set.", cite("config-layer", "installation")));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
   /** The agents woken for a meeting (card M04h), one line each, owner only. A read that fails is said in one line. */
   async wakeLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.wakes === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
@@ -1991,6 +2037,115 @@ export class StatusService {
       const r = d.report;
       lines.push(line(`Earlier: attempt ${shown(attemptId, 60)} ${r === undefined ? `left ${d.notes?.length ?? 0} note(s) and no report` : `ended ${shown(r.result, 20)} at ${r.at}${r.result === "done" && d.outcome !== undefined && d.outcome.status !== "succeeded" ? ` (the attempt itself finished ${d.outcome.status})` : ""} with a report (${r.questioning === "not-asked" ? "not questioned" : r.questioning === "not-run" ? "no second agent questioned it" : `questioned: ${r.questioning}`}): ${quoted(r.text, 200)}`}.`, c));
     }
+    return { observedAt: at, lines };
+  }
+
+  /** What was checked in a task's deliverables and what was found (card Q04): one line per deliverable, then one per defect. What the caller may not read reads as missing. */
+  async defectLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.defects === undefined) return { observedAt: at, lines: [line("Defects are not tracked on this controller.")] };
+    const found = await this.#deps.defects.forTask(by, taskId);
+    if (found === undefined) return undefined;
+    if (found.deliverables.length === 0) return { observedAt: at, lines: [line(`${shown(found.title)} has no deliverable yet, so nothing of it has been checked.`, cite("task", taskId))] };
+    const lines: Line[] = [];
+    const words: Record<string, string> = { open: "open, waiting for a repair", "repair-submitted": "repaired, waiting for a check", resolved: "resolved", escalated: "escalated to you: it waits for your decision (accept it as is, or let the repair go on)", overridden: "overridden by you (accepted as is; its failed checks stay failed)" };
+    for (const d of found.deliverables) {
+      const open = d.defects.filter((x) => x.state !== "resolved" && x.state !== "overridden").length;
+      lines.push(line(`Deliverable ${d.id} ${quoted(d.title, 80)}: version ${d.version} is ${d.state}; ${d.defects.length === 0 ? "no defect was found in it" : `${d.defects.length} defect(s) found, ${open} unresolved`}.`, cite("deliverable", d.id)));
+      for (const x of d.defects.slice(0, 20)) {
+        lines.push(line(`Defect ${x.id} (${x.severity}, found in version ${x.version}${x.repairVersion === undefined ? "" : `, repair in version ${x.repairVersion}`}): ${words[x.state] ?? x.state}; ${x.cycles} of ${found.limit} repair and review cycles used. Finding: ${quoted(x.finding.text, 160)}.${x.lastCheck === undefined ? " No repair of it has been checked yet." : ` Latest check: version ${x.lastCheck.version} ${x.lastCheck.verdict === "fixed" ? "found fixed" : "found not fixed"} by ${x.lastCheck.by}${x.lastCheck.reason === undefined ? "" : ` (${quoted(x.lastCheck.reason, 120)})`}.`}`, cite("defect", x.id), cite("deliverable", d.id)));
+      }
+      if (d.defects.length > 20) lines.push(line(`${d.defects.length - 20} more defects of ${d.id} are not shown; defect.list lists them all.`, cite("deliverable", d.id)));
+    }
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
+   * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
+   */
+  async docLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.docs === undefined) return { observedAt: at, lines: [line("Documentation obligations are not kept on this controller.", cite("project", projectId))] };
+    let list: Awaited<ReturnType<DocObligationService["list"]>>;
+    try { list = await this.#deps.docs.list(by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    if (list.items.length === 0) return { observedAt: at, lines: [line("No documentation obligations are recorded for this project: no document is tied to the behaviour it describes yet.", cite("project", projectId))] };
+    const order = { stale: 0, unverified: 1, verified: 2 } as const;
+    const items = [...list.items].sort((a, b) => order[a.state] - order[b.state]);
+    const lines: Line[] = [];
+    const flagged = items.filter((i) => i.state !== "verified").length;
+    lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    // One read of the project's document changes per flag time (card Q03b review): a release flags many documents at the same moment, and each read may go through the whole index.
+    const changesSince = new Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>();
+    for (const d of items.slice(0, 30)) {
+      const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
+      const v = d.verification;
+      const verified = v === undefined ? "" : ` Last verified ${v.verifiedAt} by ${shown(v.verifiedBy, 80)} for version ${quoted(v.version, 40)}: document change ${v.documentSubmissionId} (${v.artifactDigest.slice(0, 19)}) against ${v.evidence.map((e) => `tree ${e.tree.slice(0, 12)} of ${e.taskId} (${e.submissionId})`).join(", ")}.`;
+      const state = d.state === "verified" ? "Verified." : d.state === "unverified" ? `FLAGGED: unverified (not checked against tested code since it was recorded)${(d.reasons ?? []).length === 0 ? "" : `; since then ${(d.reasons ?? []).map(docReasonText).join("; ")}`}.` : `FLAGGED: stale: ${(d.reasons ?? []).map(docReasonText).join("; ")}.`;
+      const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
+      const open: string[] = [];
+      for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
+      const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d, changesSince);
+      lines.push(line(`${head}. ${state}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
+    }
+    if (list.items.length > 30) lines.push(line(`${list.items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * What would verify a flagged document (card Q03b), for the owner's chat to pass to `doc.obligation.verify`: the newest document changes of the project made since the flag (at most 3, read with the
+   * submissions' own rule, so only those the viewer may read), and per task it describes the code to verify against (the newest flagged code, else the code it was last verified with). Never throws for
+   * a missing service: the line then says the document changes are not listed here.
+   */
+  async #docCandidates(by: Principal, projectId: string, d: Awaited<ReturnType<DocObligationService["list"]>>["items"][number], changesSince: Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>): Promise<string> {
+    const code = docVerifyCode(d);
+    const against = d.implementationRefs.map((t) => (code[t] === undefined ? `${t}: no tested code named yet (see the qa view)` : `${code[t]} (${t})`)).join(", ");
+    const version = d.releaseVersion === undefined ? "" : `, for version ${quoted(d.releaseVersion, 40)}`;
+    if (this.#deps.docSubmissions === undefined) return ` To verify: document changes are not listed here; code ${against}${version}.`;
+    let found: Awaited<ReturnType<SubmissionService["documents"]>>;
+    const key = d.flaggedAt ?? "";
+    let read = changesSince.get(key);
+    if (read === undefined) { const service = this.#deps.docSubmissions; read = service.documents(by, projectId, { limit: DOC_CANDIDATES + 1, ...(d.flaggedAt === undefined ? {} : { since: d.flaggedAt }) }); changesSince.set(key, read); }
+    try { found = await read; } catch (error) { if (error instanceof DomainError && error.code === "not_found") return ""; throw error; }
+    const since = d.flaggedAt === undefined ? "" : ` since it was flagged at ${d.flaggedAt}`;
+    const shownDocs = found.items.slice(0, DOC_CANDIDATES).map((x) => `${x.id} (task ${x.taskId}, by ${shown(x.submittedBy, 80)}, at ${x.createdAt}, ${String(x.artifactDigest).slice(0, 19)})`);
+    const docs = shownDocs.length === 0 ? `no document change of this project${since} that you may read: the agent keeping it submits the updated document (kind document) first`
+      : `${found.items.length === 1 ? "one document change" : `${found.items.length > DOC_CANDIDATES ? `more than ${DOC_CANDIDATES}` : found.items.length} document changes`} of this project${since}, newest first: ${shownDocs.join("; ")}`;
+    return ` To verify: ${docs}; code ${against}${version}.`;
+  }
+
+  /**
+   * What QA checked on a task (card Q02): the gate of each checked submission (newest first, at most 5), then each evidence record (newest first, at most 20) with its tree, source, environment,
+   * times, criteria revision, decisions and results kept apart, and whether it still holds; then the pending re-checks. The QA service's read rule applies (the task's read right).
+   */
+  async qaLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined) return undefined;
+    const body = task.body as unknown as TaskBody;
+    if (!this.#mayReadTask(by, body.projectId, taskId)) return undefined;
+    const at = this.#runner.now();
+    if (this.#deps.qa === undefined) return { observedAt: at, lines: [line("QA evidence is not kept on this controller.", cite("task", taskId))] };
+    let list: Awaited<ReturnType<QaEvidenceService["list"]>>;
+    try { list = await this.#deps.qa.list(by, taskId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    if (list.items.length === 0) return { observedAt: at, lines: [line(`No QA evidence has been recorded for ${shown(body.title)}: its QA gate fails until an independent check is recorded.`, cite("task", taskId))] };
+    const lines: Line[] = [];
+    const subs = [...new Set(list.items.map((e) => e.submissionId))].slice(0, 5);
+    for (const sid of subs) {
+      const g = await this.#deps.qa.gate(by, sid);
+      const parts = [`passed ${g.counts.passed}`, `failed ${g.counts.failed}`, `blocked ${g.counts.blocked}`, `not run ${g.counts.notRun}`, `missing ${g.counts.missing}`].join(", ");
+      const why = g.verdict === "passed" ? "" : ` (${g.reasons.join(", ").replace(/_/g, " ")}${g.checks.filter((c) => c.result !== "passed").length === 0 ? "" : `: ${g.checks.filter((c) => c.result !== "passed").slice(0, 10).map((c) => `${quoted(c.name, 80)} ${c.result}`).join("; ")}`})`;
+      lines.push(line(`QA gate for tree ${g.tree.slice(0, 12)} (submission ${g.submissionId}) ${g.verdict === "passed" ? "passes" : "fails"} against contract version ${g.criteriaRevision}: ${parts}${why}.${g.pendingRechecks.length === 0 ? "" : ` Re-check pending: ${g.pendingRechecks.join(", ")}.`}`, cite("submission", sid), cite("task", taskId)));
+    }
+    for (const e of list.items.slice(0, 20)) {
+      const n = (r: string): number => e.checks.filter((c) => c.result === r).length;
+      const state = e.state === "invalidated" ? ` Invalidated at ${e.invalidatedAt ?? "?"}: ${(e.reasons ?? []).map(qaReasonText).join("; ")}.` : e.staleNow.length > 0 ? ` No longer holds (not yet invalidated): ${e.staleNow.map(qaReasonText).join("; ")}.` : "";
+      lines.push(line(`${e.source === "self" ? "Self-check" : "Independent QA"} ${e.id} by ${shown(e.recordedBy, 80)} on tree ${e.tree.slice(0, 12)}, run ${e.observedAt} in ${quoted(e.environment, 200)}, against contract version ${e.criteriaRevision}${e.decisions.length === 0 ? "" : ` and decisions ${e.decisions.map((d) => `${d.id} (v${d.version})`).join(", ")}`}: passed ${n("passed")}, failed ${n("failed")}, blocked ${n("blocked")}, not run ${n("not-run")}.${state}`, cite("qa-evidence", e.id, e.revision), cite("task", taskId)));
+    }
+    if (list.items.length > 20) lines.push(line(`${list.items.length - 20} older QA record(s) are not shown here (qa.evidence.list has them all).`, cite("task", taskId)));
+    for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.`, cite("qa-recheck", r.id), cite("task", taskId)));
     return { observedAt: at, lines };
   }
 
