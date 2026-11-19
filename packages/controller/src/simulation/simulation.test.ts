@@ -134,6 +134,8 @@ for (const backend of backends) {
       assert.equal(repeat.effectId, set.effectId);
       assert.equal((await again.observe(owner, { scopeId, service: "billing", resource: "cache" })).systemVersion, "v2", "applied once");
       await refuses("command_conflict", () => sims.operate(owner, { commandId: "op-1", scopeId, service: "billing", resource: "cache", action: { type: "restart" } }));
+      // The injected failure is part of the command: the same ID with another one is a different command, not a repeat (second review).
+      await refuses("command_conflict", () => sims.operate(owner, { commandId: "op-1", scopeId, service: "billing", resource: "cache", action: { type: "set", params: { fields: { ttl: 60 } } }, inject: "corrupt" }));
 
       // A restart reaches its dependents; inside the scope that is the stand-in's business only.
       const restart = await sims.operate(owner, { commandId: cid("r"), scopeId, service: "billing", resource: "db", action: { type: "restart" } });

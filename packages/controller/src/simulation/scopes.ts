@@ -245,7 +245,7 @@ export class SimulationService {
       const known = await this.#ports.effects.get(effectId);
       if (known !== undefined) {
         const was = known.input;
-        if (known.simulation !== scopeId || known.kind !== "service-op" || was["service"] !== ref.service || was["resource"] !== ref.resource || canonicalJson(was["action"] as JsonObject) !== canonicalJson(action as unknown as JsonObject)) throw new DomainError("command_conflict", `command ID ${commandId} was already used for a different operation`);
+        if (known.simulation !== scopeId || known.kind !== "service-op" || was["service"] !== ref.service || was["resource"] !== ref.resource || canonicalJson(was["action"] as JsonObject) !== canonicalJson(action as unknown as JsonObject) || was["inject"] !== command.inject) throw new DomainError("command_conflict", `command ID ${commandId} was already used for a different operation`);
         const now = await this.#scope(scopeId);
         // A closed scope runs nothing more: an operation it had not finished is only reported as the ledger has it.
         if (now.body.state !== "open") return this.#result(scopeId, effectId, { status: known.status, ...(known.evidence === undefined ? {} : { evidence: known.evidence }), ...(known.status === "confirmed" || known.status === "failed" ? {} : { note: "the simulation scope is closed, so this operation is not run further" }) });

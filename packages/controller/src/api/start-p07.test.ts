@@ -92,6 +92,19 @@ test("a simulation scope through the composed controller: labelled results, no r
     assert.ok((refused.outcomes as readonly { status: string; code?: string }[]).some((o) => o.code === "unsupported_value"), JSON.stringify(refused));
     assert.equal((await call(boot.token, "simulation.observe", { scopeId, service: "shop", resource: "cart" })).result.state.note, undefined);
 
+    // Opening a scope is reachable in chat too, in free words, and applies at once (second review: no composed test reached simulation.open by chat).
+    const openWords = "open a simulation of the restart the cart task with a shop service holding a cart";
+    say[openWords] = [{ kind: "command", op: "simulation.open", args: { taskId: task, layout: { shop: { cart: { state: { replicas: 1 } } } } }, evidence: openWords, basis: "owner" }];
+    const openedInChat = await c.chat!.submit(boot.token, { messageId: "m0", text: openWords });
+    const openOutcome = (openedInChat.outcomes as readonly { status: string; op?: string; id?: string }[]).find((o) => o.status === "applied" && o.op === "simulation.open");
+    assert.ok(openOutcome?.id !== undefined, JSON.stringify(openedInChat));
+    assert.notEqual(openOutcome.id, scopeId, "a scope of its own");
+    const chatScope = await call(boot.token, "simulation.get", { scopeId: openOutcome.id });
+    assert.equal(chatScope.result.scope.taskId, task);
+    assert.equal(chatScope.result.scope.state, "open");
+    assert.equal(chatScope.result.scope.world.cells["shop/cart"].state.replicas, 1);
+    assert.deepEqual(real.calls, [], "opening in chat reached nothing real");
+
     // A restart keeps the scope, its world and its effects.
     await c.close();
     c = await start();
