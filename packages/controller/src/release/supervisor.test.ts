@@ -25,7 +25,8 @@ const { PointerSwitcher } = await import(process.env.NN_ACTIVATION);
 const launcher = new mod.Launcher({ root: process.env.NN_ROOT, switcher: new PointerSwitcher(process.env.NN_ROOT) });
 const behavior = ${JSON.stringify(behavior)};
 appendFileSync(process.env.NN_PIDS + "/" + id + ".pids", process.pid + "\\n");
-const confirm = async () => { try { await launcher.confirm(id); } catch {} };
+// A confirmation that fails is written down (the test's timeout message shows it) and otherwise ignored, as before.
+const confirm = async () => { try { await launcher.confirm(id); } catch (e) { try { appendFileSync(process.env.NN_PIDS + "/" + id + ".confirm-errors", String(e?.code ?? "") + " " + String(e?.message ?? e).slice(0, 200) + "\\n"); } catch {} } };
 const keep = () => setInterval(() => {}, 1000);
 appendFileSync(process.env.NN_PIDS + "/" + id + ".env", (process.env.NIMBLENEWT_HEARTBEAT_FILE ?? "none") + "\\n");
 const hb = async () => { const { HeartbeatWriter } = await import(process.env.NN_HB); return HeartbeatWriter.start({ file: process.env.NIMBLENEWT_HEARTBEAT_FILE, token: process.env.NIMBLENEWT_HEARTBEAT_TOKEN, intervalMs: Number(process.env.NIMBLENEWT_HEARTBEAT_INTERVAL_MS) }); };
@@ -99,6 +100,28 @@ const POSIX_GROUPS = process.platform === "win32" && "Windows has no process gro
 
 const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
+/**
+ * The bound on the two crash-loop waits below, which see two hangs each: 120 s, and twice that on Windows. On macOS and Linux the case takes about 12 s; a Windows probe (run 44479324035) ran
+ * out the 120 s. Why it was slow there is not known (the error was lost to the cleanup's EBUSY, which no longer happens, and the timeout now names the launcher's lines and any failed
+ * confirmation), so Windows gets more time rather than a guessed fix.
+ */
+const CRASH_LOOP_WAIT_MS = process.platform === "win32" ? 240_000 : 120_000;
+
+/** The errors Windows gives for a folder a process that was killed a moment ago still holds (its working directory, an open file). */
+const STILL_HELD = new Set(["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"]);
+/**
+ * Removes a world's folder. `rmSync`'s own retries do not cover a folder whose first removal fails with EBUSY (Node gives that error at once), so the removal is tried again here, with a
+ * growing pause, about 15 s in all; another error, or the last one, is thrown.
+ */
+async function removeRoot(root: string): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); return; } catch (error) {
+      if (attempt >= 11 || !STILL_HELD.has((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      await new Promise((r) => setTimeout(r, Math.min(2000, 100 * 2 ** (attempt - 1))));
+    }
+  }
+}
+
 async function world(body: (w: World) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "nn-k02a-"));
   const pids = join(root, "pids");
@@ -111,6 +134,7 @@ async function world(body: (w: World) => Promise<void>): Promise<void> {
   const delays: number[] = [];
   const running: ChildProcess[] = [];
   const stops: (() => void)[] = [];
+  const runs: Promise<unknown>[] = [];
   const w: World = {
     root, pids, clock, launcher, events, lines, delays,
     async release(tag, behavior) {
@@ -139,21 +163,35 @@ async function world(body: (w: World) => Promise<void>): Promise<void> {
       });
       const done = sup.run();
       stops.push(() => ac.abort());
+      runs.push(done);
       return { done, stop: () => ac.abort() };
     },
     async waitFor(what, cond, ms = 20_000) {
       const end = Date.now() + ms;
-      while (!cond()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}; events: ${JSON.stringify(events)}`); await new Promise((r) => setTimeout(r, 15)); }
+      const failedConfirms = (): string[] => { try { return readdirSync(pids).filter((f) => f.endsWith(".confirm-errors")).flatMap((f) => readFileSync(join(pids, f), "utf8").split("\n").filter(Boolean).map((l) => `${f}: ${l}`)); } catch { return []; } };
+      while (!cond()) {
+        if (Date.now() > end) throw new Error(`timed out waiting for ${what} after ${ms} ms; events: ${JSON.stringify(events)}; launcher lines: ${JSON.stringify(lines.slice(-40))}; failed confirmations: ${JSON.stringify(failedConfirms())}`);
+        await new Promise((r) => setTimeout(r, 15));
+      }
     },
     pidsOf(r, ext = "pids") { const f = join(pids, `${r.id}.${ext}`); return existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean).map(Number) : []; },
   };
-  try { await body(w); } finally {
-    for (const s of stops) s();
-    for (const f of readdirSync(pids)) for (const p of readFileSync(join(pids, f), "utf8").split("\n").filter(Boolean).map(Number)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
-    for (const c of running) c.kill("SIGKILL");
-    // On Windows a process killed a moment ago can still hold its working directory (a release folder) for a little while.
-    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  // The body's own error is the one the test reports: a cleanup that fails after it is only noted, never put in its place.
+  let failed: { error: unknown } | undefined;
+  try { await body(w); } catch (error) { failed = { error }; }
+  for (const s of stops) s();
+  // The supervisors stop their children (on Windows with taskkill); a bounded wait, so a stuck one cannot hold the test.
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([Promise.allSettled(runs), new Promise((r) => { timer = setTimeout(r, 15_000); })]);
+  clearTimeout(timer);
+  for (const f of readdirSync(pids)) if (f.endsWith(".pids") || f.endsWith(".gpids")) for (const p of readFileSync(join(pids, f), "utf8").split("\n").filter(Boolean).map(Number)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
+  for (const c of running) c.kill("SIGKILL");
+  // On Windows a process killed a moment ago can still hold its working directory (a release folder) for a little while.
+  try { await removeRoot(root); } catch (error) {
+    if (failed === undefined) throw error;
+    console.error(`# the test failed, and its folder ${root} could not be removed afterwards either: ${(error as NodeJS.ErrnoException).code ?? ""} ${(error as Error).message}`);
   }
+  if (failed !== undefined) throw failed.error;
 }
 const kinds = (w: World): string[] => w.events.map((e) => (e.kind === "started" || e.kind === "exited" ? `${e.kind}:${e.releaseId}` : e.kind));
 
@@ -551,7 +589,7 @@ test("a controller that always hangs, or (with firstBeatMs) never beats, ends in
       await w.point(a);
       const run = w.start({ graceMs: 500, heartbeat: FAST, backoff: { giveUpAfter: 2 } });
       // bounded: a hang that is not counted as a short run would restart forever
-      await w.waitFor("the crash-loop exit", () => w.events.some((e) => e.kind === "ended"), 120_000);
+      await w.waitFor("the crash-loop exit", () => w.events.some((e) => e.kind === "ended"), CRASH_LOOP_WAIT_MS);
       const result = await run.done;
       assert.equal(result.code, SUPERVISOR_EXIT.crashLoop);
       assert.equal(w.events.filter((e) => e.kind === "hung").length, 2);
@@ -566,7 +604,7 @@ test("a controller that always hangs, or (with firstBeatMs) never beats, ends in
       await w.point(a);
       const run = w.start({ graceMs: 500, heartbeat: { ...FAST, firstBeatMs: 1 }, backoff: { giveUpAfter: 2 } });
       // bounded: a hang that is not counted as a short run would restart forever
-      await w.waitFor("the crash-loop exit", () => w.events.some((e) => e.kind === "ended"), 120_000);
+      await w.waitFor("the crash-loop exit", () => w.events.some((e) => e.kind === "ended"), CRASH_LOOP_WAIT_MS);
       const result = await run.done;
       assert.equal(result.code, SUPERVISOR_EXIT.crashLoop);
       const hung = w.events.filter((e) => e.kind === "hung") as { thresholdMs: number }[];
