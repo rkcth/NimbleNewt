@@ -555,22 +555,30 @@ for (const backend of backends) {
         executeCall: async (_p: unknown, cmd: { toolCallId: string }) => {
           const n = (asked[cmd.toolCallId] = (asked[cmd.toolCallId] ?? 0) + 1);
           if (cmd.toolCallId === "fenced") throw new DomainError("fenced", "the attempt has been replaced");
-          if (n <= 2) throw new DomainError("effect_busy", "effect eff-busy is already being run by this executor");
+          if (n <= 2 || cmd.toolCallId === "stuck") throw new DomainError("effect_busy", "effect eff-busy is already being run by this executor");
           return { effectId: "eff-busy", status: "confirmed", evidence: { ok: true, result: { from: "ledger" } } } as never;
         },
       },
       callCheck: async () => ({ check: true, require: false }),
+      // Short steps so the end of the wait is reached here (the default is 200 ms steps for at most 30 s).
+      busyWait: { stepMs: 5, totalMs: 50 },
     });
     const out: Record<string, BridgeResponse> = {};
     c.worker.script = async ({ order, gateway }) => {
       out["busy"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "busy", args });
       out["fenced"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "fenced", args });
+      out["stuck"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "stuck", args });
       return { status: "completed", text: "x" };
     };
     await c.tick();
     assert.deepEqual(good(out["busy"]!), { from: "ledger" });
     assert.deepEqual([asked["busy"], asked["fenced"], executed], [3, 1, 0]);
     assert.equal(bad(out["fenced"]!).code, "fenced");
+    // A first request that never ends within the wait: the call is refused as busy (11 asks: at 0, 5, ..., 50 ms), nothing was run, and the model is told not to make the call again under a new call ID.
+    assert.equal(asked["stuck"], 11);
+    assert.equal(bad(out["stuck"]!).code, "effect_busy");
+    assert.match(bad(out["stuck"]!).message, /Do not make the call again under a new call ID/);
+    assert.equal(executed, 0);
   });
 
   suite("card L05d: a recorded call is bound to the operation it is presented for (name and arguments); the owner can turn that off", async (c) => {
