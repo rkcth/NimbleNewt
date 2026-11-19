@@ -10,8 +10,8 @@ import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend,
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { evidenceControlDirs, releaseLeftovers, sandboxRunning } from "./windows-cleanup.js";
-import { ownerFromProbe, packageFromProbe, signatureFromProbe } from "./windows-real.js";
-import { MICROSOFT_STORE_PUBLISHER_ID, SANDBOX_PACKAGES, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
+import { accessFromProbe, ownerFromProbe, packageFromProbe, signatureFromProbe } from "./windows-real.js";
+import { ACCEPTED_SIGNATURE_KINDS, MICROSOFT_STORE_PUBLISHER_ID, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
 // Windows Sandbox itself confines anything. That is windows-real.test.ts, which runs only on a Windows machine with NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
@@ -265,6 +265,72 @@ describe("Windows launcher: pure rules", () => {
     const afterSummary = ["C:\\x NT AUTHORITY\\SYSTEM:(F)", "", "Successfully processed 1 files", "PC\\erin:(F)"].join("\r\n");
     assert.deepEqual(parseIcaclsWritable(afterSummary, "C:\\x"), ["PC\\erin"], "an entry after the summary still counts");
   });
+
+  test("inherit-only entries: one passed on to nothing is not a writer; one passed on to files or folders inside still is (a folder's list stands for what it holds)", () => {
+    const head = "C:\\x NT AUTHORITY\\SYSTEM:(OI)(CI)(F)";
+    const one = (entry: string): string[] => parseIcaclsWritable([head, `      ${entry}`, "", "Successfully processed 1 files"].join("\r\n"), "C:\\x");
+    // INHERIT_ONLY_ACE gives nothing on the object itself; with neither (OI) nor (CI) it is passed on to nothing either.
+    assert.deepEqual(one("PC\\erin:(IO)(M)"), []);
+    assert.deepEqual(one("PC\\erin:(IO)(NP)(F)"), []);
+    assert.deepEqual(one("S-1-15-3-1024-1:(IO)(W)"), []);
+    // Passed on to files ((OI)) or folders ((CI)) inside: still reported, on a folder those become writable.
+    for (const entry of ["PC\\erin:(OI)(IO)(M)", "PC\\erin:(CI)(IO)(W)", "PC\\erin:(OI)(CI)(IO)(F)", "PC\\erin:(OI)(CI)(NP)(IO)(WD)", "PC\\erin:(I)(OI)(CI)(IO)(GA)"]) assert.deepEqual(one(entry), ["PC\\erin"], entry);
+    // Without (IO) nothing changes: an inherited or explicit write right is a writer.
+    for (const entry of ["PC\\erin:(M)", "PC\\erin:(I)(F)", "PC\\erin:(NP)(W)"]) assert.deepEqual(one(entry), ["PC\\erin"], entry);
+    // The rights stay with each writer for the findings; unreadable output is reported the same way.
+    assert.deepEqual(icaclsWriterEntries([head, "      S-1-15-3-1024-1:(I)(OI)(CI)(RX,W)", "      CREATOR OWNER:(OI)(CI)(IO)(F)", "      PC\\erin:(IO)(M)", "", "Successfully processed 1 files"].join("\r\n"), "C:\\x"),
+      [{ account: "S-1-15-3-1024-1", rights: "(I)(OI)(CI)(RX,W)" }]);
+    assert.deepEqual(icaclsWriterEntries("", "C:\\x"), [{ problem: "no access entry could be read" }]);
+  });
+
+  test("access lists by SID: rights written as icacls writes them, and who can change the object read the same way as the icacls reader", () => {
+    assert.deepEqual(rightsTokens(0x1f01ff), ["F"]);
+    assert.deepEqual(rightsTokens(0x1301bf), ["M"]);
+    assert.deepEqual(rightsTokens(0x1200a9), ["RX"]);
+    assert.deepEqual(rightsTokens(0x120089), ["R"]);
+    assert.deepEqual(rightsTokens(0x100116), ["W"]);
+    assert.deepEqual(rightsTokens(0x10000000), ["GA"]);
+    assert.deepEqual(rightsTokens(0x80000000), ["GR"]);
+    assert.deepEqual(rightsTokens(-0x80000000), ["GR"], "PowerShell's signed form of the same mask");
+    assert.deepEqual(rightsTokens(0x1200a9 | 0x2), ["RD", "WD", "REA", "X", "RA", "RC", "S"]);
+    assert.deepEqual(rightsTokens(0x10000), ["DE"]);
+    assert.deepEqual(rightsTokens(0x200), ["0x200"]);
+    assert.deepEqual(rightsTokens(0), ["none"]);
+    const base = { sid: "S-1-15-3-1024-1", allow: true, rights: 0x1200a9, inherited: false, objectInherit: false, containerInherit: false, noPropagate: false, inheritOnly: false };
+    assert.equal(entryTokens({ ...base, inherited: true, objectInherit: true, containerInherit: true, rights: 0x1301bf }), "(I)(OI)(CI)(M)");
+    assert.equal(entryTokens({ ...base, allow: false, rights: 0x100116 }), "(DENY)(W)");
+    assert.equal(entryTokens({ ...base, objectInherit: true, containerInherit: true, noPropagate: true, inheritOnly: true, rights: 0x10000000 }), "(OI)(CI)(NP)(IO)(GA)");
+    // Readers stay readers; each write, delete, permission or ownership right is a change; a bit with no name counts as one (unknown is never read as harmless).
+    assert.equal(entryWrites(base), false);
+    for (const rights of [0x2, 0x4, 0x40, 0x10000, 0x40000, 0x80000, 0x10000000, 0x40000000, 0x1f01ff, 0x1301bf, 0x100116, 0x200, 0x4000000]) assert.equal(entryWrites({ ...base, rights }), true, rights.toString(16));
+    for (const rights of [0x1, 0x8, 0x10, 0x20, 0x80, 0x100, 0x20000, 0x100000, 0x80000000, 0x20000000]) assert.equal(entryWrites({ ...base, rights }), false, rights.toString(16));
+    // Deny entries, the trusted accounts by SID, and an inherit-only entry passed on to nothing are not writers; inherit-only passed on to files or folders still is.
+    assert.equal(entryWrites({ ...base, allow: false, rights: 0x1f01ff }), false);
+    for (const sid of ["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "S-1-3-0"]) assert.equal(entryWrites({ ...base, sid, rights: 0x1f01ff }), false, sid);
+    for (const sid of ["S-1-5-19", "S-1-5-32-545", "S-1-5-80-1-2", "S-1-5-18-1", "S-1-5-21-1-2-3-1001", "S-1-15-2-1"]) assert.equal(entryWrites({ ...base, sid, rights: 0x1301bf }), true, sid);
+    assert.equal(entryWrites({ ...base, rights: 0x1f01ff, inheritOnly: true }), false);
+    assert.equal(entryWrites({ ...base, rights: 0x1f01ff, inheritOnly: true, noPropagate: true }), false);
+    assert.equal(entryWrites({ ...base, rights: 0x1f01ff, inheritOnly: true, objectInherit: true }), true);
+    assert.equal(entryWrites({ ...base, rights: 0x1f01ff, inheritOnly: true, containerInherit: true }), true);
+  });
+
+  test("the access-list probe's answer is read strictly: an exact count, a SID, a 32-bit mask, Allow or Deny and known flags, or an error", () => {
+    const path = "C:\\x";
+    const e = { sid: "S-1-15-3-1024-1", rights: 1179817, type: "Allow", inherited: true, inheritance: 3, propagation: 0 };
+    assert.deepEqual(accessFromProbe({ count: 1, entries: [e] }, path), [{ sid: "S-1-15-3-1024-1", allow: true, rights: 0x1200a9, inherited: true, objectInherit: true, containerInherit: true, noPropagate: false, inheritOnly: false }]);
+    // A list of one written as a single object, an empty list in its forms, a negative (signed) mask, a deny, inherit-only and no-propagate flags.
+    assert.equal(accessFromProbe({ count: 1, entries: e }, path).length, 1);
+    for (const empty of [{ count: 0, entries: [] }, { count: 0, entries: null }, { count: 0 }]) assert.deepEqual(accessFromProbe(empty, path), [], JSON.stringify(empty));
+    const two = accessFromProbe({ count: 2, entries: [{ ...e, rights: -2147483648, type: "Deny", inheritance: 2, propagation: 2 }, { ...e, sid: "S-1-5-18", inheritance: 1, propagation: 1, inherited: false }] }, path);
+    assert.deepEqual(two[0], { sid: "S-1-15-3-1024-1", allow: false, rights: 0x80000000, inherited: true, objectInherit: true, containerInherit: false, noPropagate: false, inheritOnly: true });
+    assert.deepEqual(two[1], { sid: "S-1-5-18", allow: true, rights: 0x1200a9, inherited: false, objectInherit: false, containerInherit: true, noPropagate: true, inheritOnly: false });
+    const bad: unknown[] = [null, [], "x", 5, {}, { count: "1", entries: [e] }, { count: 1.5, entries: [e] }, { count: -1, entries: [] }, { count: 2, entries: [e] }, { count: 1, entries: [e, e] }, { count: 0, entries: [e] }, { count: 2, entries: e },
+      { count: 1, entries: [null] }, { count: 1, entries: [[e]] }, { count: 1, entries: "S-1-5-18" },
+      ...[{ sid: "NT AUTHORITY\\SYSTEM" }, { sid: "S-1-5-18 " }, { sid: "" }, { sid: undefined }, { rights: "1179817" }, { rights: 1.5 }, { rights: 2 ** 32 }, { rights: -(2 ** 31) - 1 }, { rights: undefined },
+        { type: "allow" }, { type: "AllowCallback" }, { type: 0 }, { type: undefined }, { inherited: "true" }, { inherited: 1 }, { inheritance: 4 }, { inheritance: -1 }, { inheritance: "3" }, { propagation: 1.5 }, { propagation: undefined }]
+        .map((change) => ({ count: 1, entries: [{ ...e, ...change }] }))];
+    for (const raw of bad) assert.throws(() => accessFromProbe(raw, path), /the access list of C:\\x was not reported in the expected form/, JSON.stringify(raw));
+  });
 });
 
 describe("Windows launcher: configuration (nothing is on by default)", () => {
@@ -489,7 +555,7 @@ describe("Windows launcher: the client package and its signatures (exact allowli
       assert.match(v.reason, sig.subject === undefined ? /signer none/ : /signer CN=Microsoft Corporation/);
       if (sig.statusMessage !== undefined) assert.ok(v.reason.includes(sig.statusMessage));
       // A broken or untrusted signature is never explained away by the package: the package proof is asked for only when the file has no signature at all.
-      assert.doesNotMatch(v.reason, /part of Windows/);
+      assert.doesNotMatch(v.reason, /Microsoft's instead/);
     }
     const otherSigner = new SimHost(); otherSigner.sigs.set(key(SERVER), { valid: true, status: "Valid", subject: "CN=Evil Corp, O=Evil Corp", signatureType: "Authenticode" });
     await refused(otherSigner, /WindowsSandboxServer\.exe does not carry a valid Microsoft signature \(status Valid, type Authenticode, signer CN=Evil Corp, O=Evil Corp\)/, "valid but not Microsoft");
@@ -497,22 +563,32 @@ describe("Windows launcher: the client package and its signatures (exact allowli
     await refused(lookalikeSigner, /signer CN=Microsoft Corporation Ltd/, "lookalike signer");
   });
 
-  test("a file with no signature at all is accepted only on the exact system-package proof: signature kind System, state Ok, nothing but administrators can write the file or the folder", async () => {
+  test("a file with no signature at all is accepted only on the exact Microsoft-package proof: one of the two allowlisted packages, signature kind System or Store, state Ok, nothing but administrators can write the file or the folder", async () => {
     const unsigned: WindowsSignature = { valid: false, status: "NotSigned", statusMessage: "The file <file> is not digitally signed.", signatureType: "None" };
     const host = new SimHost(); host.sigs.set(key(WSB), unsigned);
     const v = await verify(host);
     assert.equal(v.ok, true, v.ok ? "" : v.reason);
-    if (v.ok) assert.equal(v.value.proof, "wsb.exe: system-package; WindowsSandboxServer.exe: authenticode");
+    if (v.ok) assert.equal(v.value.proof, "wsb.exe: microsoft-package; WindowsSandboxServer.exe: authenticode");
     const both = new SimHost(); both.sigs.set(key(WSB), unsigned); both.sigs.set(key(SERVER), unsigned);
     const b = await verify(both);
     assert.equal(b.ok, true);
-    if (b.ok) assert.equal(b.value.proof, "wsb.exe: system-package; WindowsSandboxServer.exe: system-package");
+    if (b.ok) assert.equal(b.value.proof, "wsb.exe: microsoft-package; WindowsSandboxServer.exe: microsoft-package");
 
     const variant = (extra: Partial<WindowsPackageInfo>, sig: WindowsSignature = unsigned): SimHost => { const h = withPkg(extra); h.sigs.set(key(WSB), sig); return h; };
-    for (const signatureKind of ["Store", "Developer", "Enterprise", "None", "system", "SYSTEM", "System ", ""]) await refused(variant({ signatureKind }), new RegExp(`status NotSigned.*not proven to be part of Windows instead: Windows reports the package's signature kind as ${signatureKind === "" ? "" : signatureKind.trim()}`), `kind ${JSON.stringify(signatureKind)}`);
+    // Store is accepted as well as System, for both allowlisted packages: the owner's machine (own-hardware run 44467707810) reports the Windows-provided package
+    // MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy 0.8.114.0 with SignatureKind Store, both programs NotSigned.
+    for (const p of SANDBOX_PACKAGES) for (const signatureKind of ["System", "Store"]) {
+      const h = variant({ name: p.name, publisherId: p.publisherId, familyName: packageFamilyName(p), signatureKind }); h.sigs.set(key(SERVER), unsigned);
+      const r = await verify(h);
+      assert.equal(r.ok, true, `${packageFamilyName(p)} ${signatureKind}: ${r.ok ? "" : r.reason}`);
+      if (r.ok) assert.equal(r.value.proof, "wsb.exe: microsoft-package; WindowsSandboxServer.exe: microsoft-package");
+    }
+    for (const signatureKind of ["Developer", "Enterprise", "None", "system", "SYSTEM", "System ", "store", "STORE", "Store ", " Store", "Store\u0000", "StoreX", "System,Store", "Unknown", "0", "4", ""]) await refused(variant({ signatureKind }), new RegExp(`status NotSigned.*not proven to be Microsoft's instead: Windows reports the package's signature kind as ${signatureKind.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")}.*, not System or Store`), `kind ${JSON.stringify(signatureKind)}`);
     const noKind = new SimHost(); noKind.pkg = { name: noKind.pkg!.name, publisherId: noKind.pkg!.publisherId, familyName: noKind.pkg!.familyName, version: noKind.pkg!.version, installLocation: INSTALL, status: "Ok" }; noKind.sigs.set(key(WSB), unsigned);
-    await refused(noKind, /signature kind as not reported, not System/, "kind not reported");
-    for (const status of ["Tampered", "Modified", "LicenseIssue", "ok", "Ok "]) await refused(variant({ status }), new RegExp(`package's state as ${status.trim()}`), `state ${status}`);
+    await refused(noKind, /signature kind as not reported, not System or Store/, "kind not reported");
+    assert.deepEqual([...ACCEPTED_SIGNATURE_KINDS], ["System", "Store"]);
+    assert.ok(Object.isFrozen(ACCEPTED_SIGNATURE_KINDS));
+    for (const signatureKind of ["System", "Store"]) for (const status of ["Tampered", "Modified", "LicenseIssue", "ok", "OK", "Ok ", "NeedsRemediation", "Servicing", ""]) await refused(variant({ status, signatureKind }), new RegExp(`package's state as ${status.trim() === "" ? "" : status.trim()}.*not Ok`), `state ${JSON.stringify(status)} with ${signatureKind}`);
     const noStatus = new SimHost(); noStatus.pkg = { name: noStatus.pkg!.name, publisherId: noStatus.pkg!.publisherId, familyName: noStatus.pkg!.familyName, version: noStatus.pkg!.version, installLocation: INSTALL, signatureKind: "System" }; noStatus.sigs.set(key(WSB), unsigned);
     await refused(noStatus, /state as not reported, not Ok/, "state not reported");
     const writableFile = variant({}); writableFile.writable.set(key(WSB), ["PC\\robert"]);
@@ -535,7 +611,14 @@ describe("Windows launcher: the client package and its signatures (exact allowli
     await refused(ownerUnreadable, /the owner of .*cw5n1h2txyewy could not be read: Attempted to perform an unauthorized operation\./, "folder owner unreadable");
     // Only the exact status NotSigned opens the package proof.
     for (const status of ["notsigned", "NotSigned ", "Incompatible", "NotSupportedFileFormat"]) await refused(variant({}, { ...unsigned, status }), /does not carry a valid Microsoft signature/, `status ${status}`);
-    for (const status of ["notsigned", "Incompatible"]) { const h = variant({}, { ...unsigned, status }); const r = await verify(h); assert.ok(!r.ok && !/part of Windows/.test(r.reason)); }
+    for (const status of ["notsigned", "Incompatible"]) { const h = variant({ signatureKind: "Store" }, { ...unsigned, status }); const r = await verify(h); assert.ok(!r.ok && !/Microsoft's instead/.test(r.reason)); }
+    // A Store-kind package still needs every other part of the proof: no foreign writer, a trusted owner, no link.
+    const storeWritable = variant({ signatureKind: "Store" }); storeWritable.writable.set(key(INSTALL), ["S-1-15-3-1024-1"]);
+    await refused(storeWritable, /can be changed by S-1-15-3-1024-1/, "Store kind, folder writable by another SID");
+    const storeOwner = variant({ signatureKind: "Store" }); storeOwner.owners.set(key(WSB), "S-1-5-21-1-2-3-1001");
+    await refused(storeOwner, /is owned by S-1-5-21-1-2-3-1001/, "Store kind, owned by a user");
+    const storeLink = variant({ signatureKind: "Store" }); storeLink.links.add(key(WSB));
+    await refused(storeLink, /is a link, a junction or a short name/, "Store kind, link");
     // A contradictory answer (valid, but NotSigned and no signer) is refused, not given the package proof (the real host never reports it, see the probe parsing test).
     await refused(variant({}, { ...unsigned, valid: true }), /does not carry a valid Microsoft signature \(status NotSigned/, "valid but NotSigned");
   });
@@ -546,7 +629,7 @@ describe("Windows launcher: the client package and its signatures (exact allowli
     assert.equal(backend.auditDetails!()["clientProof"], "unverified");
     const h = await backend.health();
     assert.equal(h.healthy, true, h.reason);
-    assert.equal(backend.auditDetails!()["clientProof"], "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy (wsb.exe: system-package; WindowsSandboxServer.exe: authenticode)");
+    assert.equal(backend.auditDetails!()["clientProof"], "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy (wsb.exe: microsoft-package; WindowsSandboxServer.exe: authenticode)");
   });
 
   test("the real probes' answers are read exactly: package fields, signature status, Windows' message without the file's path", () => {
@@ -555,6 +638,10 @@ describe("Windows launcher: the client package and its signatures (exact allowli
       { name: "MicrosoftWindows.WindowsSandbox", publisherId: "cw5n1h2txyewy", familyName: "MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy", version: "0.8.107.0", installLocation: INSTALL, signatureKind: "System", status: "Ok" });
     // Missing or odd fields: required ones become empty (and are refused), optional ones absent.
     assert.deepEqual(packageFromProbe({ name: 5, publisherId: null, version: "1.0", installLocation: INSTALL, signatureKind: "", status: 0 }), { name: "", publisherId: "", familyName: "", version: "1.0", installLocation: INSTALL });
+    // NonRemovable and IsFramework are recorded only as true/false; anything else is absent.
+    const flags = (nonRemovable: unknown, isFramework: unknown): WindowsPackageInfo | undefined => packageFromProbe({ name: "n", publisherId: "p", familyName: "n_p", version: "1.0", installLocation: INSTALL, nonRemovable, isFramework });
+    assert.deepEqual([flags(true, false)?.nonRemovable, flags(true, false)?.isFramework], [true, false]);
+    for (const v of ["true", 1, null, undefined, "False"]) { const f = flags(v, v)!; assert.ok(!("nonRemovable" in f) && !("isFramework" in f), JSON.stringify(v)); }
     const path = "C:\\Program Files\\WindowsApps\\MicrosoftWindows.WindowsSandbox_0.8.107.0_x64__cw5n1h2txyewy\\wsb.exe";
     assert.deepEqual(signatureFromProbe({ valid: true, status: "Valid", statusMessage: "Signature verified.", signatureType: "Catalog", subject: "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" }, path),
       { valid: true, status: "Valid", statusMessage: "Signature verified.", signatureType: "Catalog", subject: "CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" });

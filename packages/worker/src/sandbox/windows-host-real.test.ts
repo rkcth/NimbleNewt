@@ -11,7 +11,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { checkWindowsHostPath, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
+import { checkWindowsHostPath, entryTokens, entryWrites, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
 import { windowsRealHost } from "./windows-real.js";
 
 // Card A03b: the Windows launcher's own parts on a REAL Windows machine, without Windows Sandbox itself. They run on every Windows CI cell (GitHub's hosted Windows runners,
@@ -109,6 +109,28 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     writeFileSync(mine, "x");
     assert.match(await host.ownerSid(mine), /^S-1-\d+(?:-\d+)+$/);
     await assert.rejects(host.ownerSid(join(dir("owner"), "absent.txt")));
+  });
+
+  test("access lists by SID (recorded by the real-run findings): a Windows system program's list reads, both readers agree on whether anyone else can change it, and what it holds is recorded", async (t) => {
+    const icacls = `${sysRoot()}\\System32\\icacls.exe`;
+    const entries = await host.accessEntries!(icacls);
+    assert.ok(entries.length > 0);
+    for (const e of entries) assert.match(e.sid, /^S-1-\d+(?:-\d+)+$/);
+    // The two readers must give the same answer. What the answer is depends on the runner image (hosted images could differ), so it is recorded, not required: on the
+    // standard System32 list TrustedInstaller has full control and nobody else can change the file.
+    const bySid = entries.filter(entryWrites), byName = await host.writableBy(icacls);
+    assert.equal(bySid.length === 0, byName.length === 0, `by SID ${JSON.stringify(bySid)}, by name ${JSON.stringify(byName)}`);
+    t.diagnostic(`icacls.exe: TrustedInstaller full control ${String(entries.some((e) => e.allow && e.sid === TRUSTED_OWNER_SIDS[2] && e.rights === 0x1f01ff))}; other writers by SID ${JSON.stringify(bySid.map((e) => `${e.sid} ${entryTokens(e)}`))}, by name ${JSON.stringify(byName)}`);
+    // A fresh folder inherits its entries; one explicit grant to NETWORK SERVICE shows up by SID as a writer, as it does for the icacls reader.
+    const folder = dir("bysid");
+    execFileSync(`${sysRoot()}\\System32\\icacls.exe`, [folder, "/grant", "*S-1-5-20:(OI)(CI)(IO)(M)"], { windowsHide: true });
+    const after = await host.accessEntries!(folder);
+    const mine = after.filter((e) => e.sid === "S-1-5-20" && !e.inherited);
+    assert.equal(mine.length, 1, JSON.stringify(after));
+    assert.deepEqual([mine[0]!.inheritOnly, mine[0]!.objectInherit, mine[0]!.containerInherit, entryWrites(mine[0]!)], [true, true, true, true]);
+    assert.equal(entryTokens(mine[0]!), "(OI)(CI)(IO)(M)");
+    assert.ok((await host.writableBy(folder)).includes("NT AUTHORITY\\NETWORK SERVICE"));
+    await assert.rejects(host.accessEntries!(join(folder, "absent.txt")));
   });
 
   // Each PowerShell probe has its own limit (PROBE_TIMEOUT_MS) and one retry on a timeout. The ceiling that governs here is not a per-test one: the package runner's

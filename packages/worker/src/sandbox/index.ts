@@ -8,7 +8,7 @@ export { SandboxLauncher, type Capacity, type LaunchRecord, type LaunchRequest, 
 export { listQuarantined, quarantine, readQuarantined, type QuarantineHooks, type QuarantineRecord } from "./quarantine.js";
 export { DEFAULT_HEADROOM, LIMIT_BOUNDS, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, type Headroom, type LimitCapabilities, type LimitEnforcement, type LimitName, type LimitedPlan, type ResourceLimits } from "./limits.js";
 export { windowsSandboxBackend, AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, type AutologonOptIn, type WindowsSandboxOptions } from "./windows.js";
-export type { WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
+export type { WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 export { windowsRealHost } from "./windows-real.js";
 export { evidenceControlDirs, releaseLeftovers, sandboxRunning, type LeftoverResult } from "./windows-cleanup.js";
 export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";

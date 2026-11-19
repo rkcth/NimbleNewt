@@ -16,6 +16,30 @@ export interface WindowsPackageInfo {
   readonly signatureKind?: string;
   /** The package's state as Windows reports it (`Status`: Ok, or a problem such as Tampered or Modified). Absent when not reported. */
   readonly status?: string;
+  /** Whether Windows marks the package as one that cannot be removed (`NonRemovable`, part of the system image). Absent when not reported as a true/false value. Recorded only. */
+  readonly nonRemovable?: boolean;
+  /** Whether the package is a framework package (`IsFramework`). Absent when not reported as a true/false value. Recorded only. */
+  readonly isFramework?: boolean;
+}
+
+/** One entry of an access list, read by SID (the same in every language). */
+export interface WindowsAccessEntry {
+  /** The account's SID, exactly as Windows reports it, for example `S-1-5-18`. */
+  readonly sid: string;
+  /** True for an allow entry, false for a deny entry. */
+  readonly allow: boolean;
+  /** The access mask as an unsigned 32-bit number (FileSystemRights, generic rights included). */
+  readonly rights: number;
+  /** Inherited from the parent folder (icacls `(I)`). */
+  readonly inherited: boolean;
+  /** Passed on to files created inside (icacls `(OI)`). */
+  readonly objectInherit: boolean;
+  /** Passed on to folders created inside (icacls `(CI)`). */
+  readonly containerInherit: boolean;
+  /** Passed on one level only (icacls `(NP)`). */
+  readonly noPropagate: boolean;
+  /** Inherit-only: gives nothing on the object itself, only shapes what is inside (icacls `(IO)`). */
+  readonly inheritOnly: boolean;
 }
 
 /** What `Get-AuthenticodeSignature` says about one file. */
@@ -90,6 +114,11 @@ export interface WindowsHost {
   lockTask(taskName: string): Promise<WindowsLockTask>;
   /** The accounts other than SYSTEM, Administrators and TrustedInstaller that can write to the path (from its ACL). */
   writableBy(path: string): Promise<readonly string[]>;
+  /**
+   * The path's access list by SID (`Get-Acl`). Optional and recorded only, by the real-run findings: no trust decision reads it yet (the decisions use `writableBy`). Throws when
+   * the list cannot be read or is not in the expected form.
+   */
+  accessEntries?(path: string): Promise<readonly WindowsAccessEntry[]>;
   /** The SID of the path's owner (for example `S-1-5-18`), read from its security descriptor. Throws when it cannot be read or is not a SID. */
   ownerSid(path: string): Promise<string>;
   /** Starts a program (no shell) and waits for it. Used for wsb.exe and icacls.exe. */

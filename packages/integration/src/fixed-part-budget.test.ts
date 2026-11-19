@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_CONTEXT_TOKENS, DEFAULT_ROUTE_FLOOR_CHARS, MIN_STARTABLE_WINDOW, MIN_WORKABLE_CONTEXT_TOKENS, PRACTICAL_STARTABLE_WINDOW, ROUTE_FLOOR_DEFAULTS, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_TOKENS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "@nimblenewt/controller";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_REPLY_TOKENS, DEFAULT_CONTEXT_TOKENS, DEFAULT_ROUTE_FLOOR_CHARS, MIN_STARTABLE_WINDOW, MIN_WORKABLE_CONTEXT_TOKENS, PRACTICAL_STARTABLE_WINDOW, ROUTE_FLOOR_DEFAULTS, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_TOKENS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "@nimblenewt/controller";
 import { MIN_WORKABLE_WINDOW, PI_AGENT_LAYOUT, composeTools, createBridge, sharedSystemText, toolSchemaCharsOf } from "@nimblenewt/pi-adapter";
 
 // Card "Fixed-part sizing after T08": the real worker's fixed part (its system text and the schemas of every bridge tool), measured as the worker measures it at start (process.ts reports
@@ -62,4 +65,17 @@ test("the smallest window that can start a task, and the warning for an accepted
   assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 6,800 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
   assert.equal(smallWindowWarning(MIN_STARTABLE_WINDOW), undefined);
   assert.equal(smallWindowWarning(65_536), undefined);
+});
+
+// Follow-up of the card's reviews: the hosts the scripts start (the launcher's local host and the remote host) give the worker the controller's figures for a route without its own window or reply limit, not
+// literals of their own that a raise of the fixed part would leave behind (they said 32,768 tokens, which no longer starts a task, and 4,096).
+test("the scripts' hosts take the fallback window and the reply room from the controller, and that window starts a task with that room", () => {
+  const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  for (const file of ["local-host.mjs", "remote-host.mjs"]) {
+    const source = readFileSync(join(repository, "scripts", file), "utf8");
+    assert.match(source, /contextWindow: entry\?\.contextTokens \?\? controller\.DEFAULT_CONTEXT_TOKENS, maxTokens: entry\?\.maxTokens \?\? controller\.DEFAULT_REPLY_TOKENS,/, file);
+    assert.doesNotMatch(source, /FALLBACK_WINDOW|32_768|\?\? 4096/, `${file} keeps a literal window or reply room; ${RAISE}`);
+  }
+  const r = real();
+  assert.equal(windowCanStartTask(DEFAULT_CONTEXT_TOKENS, r.systemPromptChars + r.toolSchemaChars, DEFAULT_REPLY_TOKENS), true, derived(r));
 });

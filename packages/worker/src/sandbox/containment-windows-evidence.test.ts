@@ -127,7 +127,9 @@ test("redacting a report hides names in its free text only; the gate judges the 
   };
   const red = redactReport({ ...original, windows: { ...original.windows!, serviceIdentity: { account: "ACME\\alice.smith", session: "service" } } }, { users: ["alice.smith"], hosts: ["ACME"] });
   const text = raw(red);
-  for (const leak of ["alice", "smith", "ACME", "S-1-5-21", "192.168"]) assert.ok(!text.includes(leak), `${leak} is gone`);
+  for (const leak of ["alice", "smith", "ACME", "1-2-3-1001", "192.168"]) assert.ok(!text.includes(leak), `${leak} is gone`);
+  // A machine SID keeps only its class (windows-redact.ts, card A03b): its domain and account numbers go.
+  assert.ok(text.includes("S-1-5-21-<domain>-<account>"), text);
   assert.equal(red.windows!.serviceIdentity.account, "<user>");
   assert.deepEqual([red.implementationCommit, red.generatedAt, red.platform, red.osVersion, red.cases.map((c) => [c.id, c.verdict])], [original.implementationCommit, original.generatedAt, original.platform, original.osVersion, original.cases.map((c) => [c.id, c.verdict])]);
   assert.ok("report" in parseReport(text));
