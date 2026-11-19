@@ -95,6 +95,27 @@ test("the patch ID of the reviewed base and tree is computed by the host from it
   } finally { await w.done(); }
 });
 
+test("a change in whitespace alone (a re-indented line, the spacing inside a string) is a different patch, so a review does not carry over to it (card P09 second review)", { skip }, async () => {
+  const { launcher } = fakeLauncher(() => ({ exitCode: 0 }));
+  const w = await world({ launcher });
+  try {
+    const base = w.g("rev-parse", "HEAD");
+    await writeFile(join(w.made.checkout, "src", "b.py"), "for i in r:\n    a()\n    b()\nrun(\"-x\", \"a b\")\n");
+    const reviewed = await w.ws.stageWork(scope);
+    // After the review the author moves b() out of the loop and joins "a b": git's plain --stable patch ID strips all whitespace, so it would call these the same patch.
+    await writeFile(join(w.made.checkout, "src", "b.py"), "for i in r:\n    a()\nb()\nrun(\"-x\", \"ab\")\n");
+    const later = await w.ws.stageWork(scope);
+    w.g("commit", "-q", "-m", "work");
+    const stripped = (tree: string) => execFileSync("git", ["patch-id", "--stable"], { input: sh(w.made.checkout, "--git-dir", w.made.gitDir, "diff", "--binary", "--full-index", "--no-renames", base, tree) + "\n", encoding: "utf8" }).trim().split(/\s+/)[0];
+    assert.equal(stripped(reviewed.tree), stripped(later.tree), "the whitespace-stripping ID would not tell them apart");
+    assert.notEqual(later.patchId, reviewed.patchId);
+    const report = await w.ws.port.landingChecks!({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: reviewed.tree } });
+    assert.equal(report.reviewedPatchId, reviewed.patchId);
+    assert.equal(report.change?.patchId, later.patchId);
+    assert.notEqual(report.change?.patchId, report.reviewedPatchId, "the landed change is not the reviewed patch");
+  } finally { await w.done(); }
+});
+
 test("each test command runs in the sandbox on a fresh copy of the integrated tree, never the checkout: uncommitted files are not in it, the git directory is not mounted, the copy is removed; endings map to passed, failed and not run (card P09)", { skip }, async () => {
   const base = await mkdtemp(join(tmpdir(), "nn-p09-copies-"));
   const { launcher, seen } = fakeLauncher((req, files) => {

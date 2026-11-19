@@ -596,8 +596,10 @@ export class GitBridge {
   }
 
   /**
-   * The stable patch ID (`git patch-id --stable`) of what the checkout's index holds against `base` (card H12n): call it right after `stage`, so it names the same change as the staged tree. Binary files are included in full
-   * (`--binary`, full object names), so two different binary changes never share an ID. `undefined` when the index holds no change against the base.
+   * The stable patch ID of what the checkout's index holds against `base` (card H12n): call it right after `stage`, so it names the same change as the staged tree. Binary files are included in full
+   * (`--binary`, full object names), so two different binary changes never share an ID. `undefined` when the index holds no change against the base. It is `git patch-id --verbatim` (stable, git 2.39 or later): the plain
+   * `--stable` ID strips all whitespace from each line, so a change that only re-indents a line (Python, YAML, Makefiles) or alters the spacing inside a string would keep the ID of what was reviewed, and a review
+   * would carry over to it at landing (card P09 second review).
    */
   async patchId(options: { gitDir: string; base: string; /** Card P09: a commit or tree to compare the base with instead of the index (the committed change a landing would carry). The diff has the same form, so the same change gives the same ID. */ to?: string }): Promise<string | undefined> {
     if (!COMMIT.test(options.base)) throw new WorkspaceError("invalid_path", "a patch ID is taken against a full base commit");
@@ -612,7 +614,7 @@ export class GitBridge {
     });
     const diff = await run(["diff", ...(options.to === undefined ? ["--cached"] : []), "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base, ...(options.to === undefined ? [] : [options.to])]);
     if (diff.length === 0) return undefined;
-    const out = (await run(["patch-id", "--stable"], diff)).toString("utf8").trim();
+    const out = (await run(["patch-id", "--verbatim"], diff)).toString("utf8").trim();
     const id = out.split(/\s+/)[0] ?? "";
     if (!/^[0-9a-f]{40,64}$/.test(id)) throw new WorkspaceError("unavailable", "git patch-id gave no ID for the staged change");
     return id;
@@ -775,7 +777,7 @@ export class GitBridge {
    * and too many files refuse the whole plan. A change of mode alone is listed as `modeOnly` (not carried).
    */
   /**
-   * The committed change a landing would carry (card P09): the checkout's base, its head commit, the head's tree and the stable patch ID of base..head (the same form as `patchId` of a staged change, so an unchanged
+   * The committed change a landing would carry (card P09): the checkout's base, its head commit, the head's tree and the stable (verbatim) patch ID of base..head (the same form as `patchId` of a staged change, so an unchanged
    * change keeps its ID across a refresh onto a newer base). A landing is made only while the base is the landing branch's head, so the head's tree is the tree the landing branch holds once it has landed. Only committed
    * objects are read; the working tree is never looked at. `patchId` is absent when the head is the base (nothing to land).
    */

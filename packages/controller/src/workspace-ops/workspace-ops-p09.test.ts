@@ -70,7 +70,7 @@ for (const backend of backends) {
       const now = await contracts.get(owner, task);
       await contracts.setContract(by, { commandId: `c-${by.id}-${now?.version ?? 0}`, taskId: task, expectedVersion: now?.version ?? 0, checks });
     };
-    return { store, owner, ann, project, task, approvals, host, calls, told, toldAttempts, setTellFails: (v: boolean) => { tellFails = v; }, integration, service, land, recorded, setChecks };
+    return { store, owner, ann, project, task, approvals, host, calls, told, toldAttempts, setTellFails: (v: boolean) => { tellFails = v; }, integration, contracts, service, land, recorded, setChecks };
   };
 
   test(`${backend.name}: a failing test command refuses the landing before anything is written; the results are recorded bound to the integrated tree and go back to the author (card P09)`, async () => {
@@ -180,9 +180,9 @@ for (const backend of backends) {
       const unknown = await r.land(r.service(), "r2c", S1);
       assert.deepEqual([unknown.state, unknown.checks!.results[1]!.result], ["refused", "not_run"]);
       r.host.reviewedPatch = PATCH;
-      // The submitter (ann, not the assignee bob) loosens its own contract (no test commands): the owner's version still runs, and still fails.
+      // The submitter (ann, not the assignee bob) loosens its own contract (a command that always passes): the owner's version still runs, and still fails.
       r.host.exit.set("unit", "failed");
-      await r.setChecks(r.ann, []);
+      await r.setChecks(r.ann, [{ name: "trivial", run: ["true"] }]);
       const loosened = await r.land(r.service(), "r3", S1);
       assert.equal(loosened.state, "refused");
       assert.deepEqual([loosened.checks!.contractVersion, loosened.checks!.results[0]!.result], [1, "fail"]);
@@ -190,6 +190,16 @@ for (const backend of backends) {
       // The same when ann is the assignee and the landing names no submission.
       const asAssignee = await r.land(r.service({ assignee: async () => "agent:ann" }), "r4");
       assert.deepEqual([asAssignee.state, asAssignee.checks!.contractVersion, asAssignee.checks!.results[0]!.result], ["refused", 1, "fail"]);
+      // Someone else then stores a version that changes another field (the owner's priority): the checks it carries forward are still ann's, so they still do not count (second review).
+      await r.contracts.setContract(r.owner, { commandId: "prio", taskId: r.task, expectedVersion: 2, priority: 7 });
+      const carried2 = await r.land(r.service(), "r5", S1);
+      assert.deepEqual([carried2.state, carried2.checks!.contractVersion, carried2.checks!.results[0]!.result], ["refused", 1, "fail"]);
+      assert.deepEqual(r.calls.checks.at(-1)!.checks.map((c) => c.name), ["unit"]);
+      // The owner sets the checks itself: from then on they are the owner's, whoever stores a later version that leaves them alone.
+      await r.setChecks(r.owner, [{ name: "unit", run: ["npm", "test"] }, { name: "lint", run: ["lint"] }]);
+      await r.contracts.setContract(r.ann, { commandId: "crit", taskId: r.task, expectedVersion: 4, acceptanceCriteria: ["the unit tests pass"] });
+      const owners = await r.land(r.service(), "r6", S1);
+      assert.deepEqual([owners.checks!.contractVersion, r.calls.checks.at(-1)!.checks.map((c) => c.name)], [5, ["unit", "lint"]]);
     } finally { await r.store.close(); }
   });
 
