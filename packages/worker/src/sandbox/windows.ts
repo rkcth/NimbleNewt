@@ -7,8 +7,8 @@ import { randomUUID } from "node:crypto";
 import { EXIT_BUSY, jobDirFor, jobFile, lockFile, releaseJob, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import type { WindowsHost } from "./windows-host.js";
 import {
-  AUTOLOGON_ACKNOWLEDGEMENT, DEFAULT_MIN_VERSION, GUEST_PATHS, LOCK_TASK_NAME, MICROSOFT_PUBLISHER_ID, SANDBOX_PACKAGE, VM_FALLBACK_DECISION,
-  capabilityNotes, checkIdentity, checkWindowsHostPath, checkWindowsProgramPath, compareVersions, guestCommand, guestPathFor, launchScript, overlapsWin, sameAccount, sharesFor, verifyClient, verifySession,
+  AUTOLOGON_ACKNOWLEDGEMENT, DEFAULT_MIN_VERSION, GUEST_PATHS, LOCK_TASK_NAME, VM_FALLBACK_DECISION,
+  capabilityNotes, checkIdentity, packageFamilyName, checkWindowsHostPath, checkWindowsProgramPath, compareVersions, guestCommand, guestPathFor, launchScript, overlapsWin, sameAccount, sharesFor, verifyClient, verifySession,
   type WindowsMode, type WindowsSettings,
 } from "./windows-plan.js";
 
@@ -84,12 +84,13 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
   const minVersion = options.minVersion ?? DEFAULT_MIN_VERSION;
   compareVersions(minVersion, "0.0");
   const settings: WindowsSettings = {
-    controlDir, shareIdentity: checkIdentity("shareIdentity", options.shareIdentity), owner: checkIdentity("owner", options.owner), minVersion, packageName: SANDBOX_PACKAGE, publisherId: MICROSOFT_PUBLISHER_ID, mode,
+    controlDir, shareIdentity: checkIdentity("shareIdentity", options.shareIdentity), owner: checkIdentity("owner", options.owner), minVersion, mode,
     lockTask: options.autologonLock?.lockTask ?? LOCK_TASK_NAME, ...(options.autologonLock === undefined ? {} : { lockHelper: options.autologonLock.lockHelper }),
   };
   const aclPolicy = options.supervisorAcl ?? "strict";
   const node = options.nodeExecutable ?? "C:\\Program Files\\nodejs\\node.exe";
   let clientVersion = "unverified";
+  let clientProof = "unverified";
   let lastHealthy = 0;
 
   const guestView = (recipe: NormalizedRecipe): GuestView => ({
@@ -127,6 +128,7 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
     const client = await verifyClient(host, settings);
     if (!client.ok) return no(client.reason);
     clientVersion = client.value.package.version;
+    clientProof = `${packageFamilyName(client.value.package)} (${client.value.proof})`;
     const session = await verifySession(host, settings);
     if (!session.ok) return no(session.reason);
     // The supervisor's files must not be writable by the guest's account or a broad group.
@@ -193,7 +195,7 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
       windowsMode: mode,
       sessionDependent: "true",
       ...(mode === "autologon-lock" ? { autologonAuthority: options.autologonLock!.authority, lockChecked: "at admission and again before the command starts" } : { autologon: "off (never a default)" }),
-      clientVersion, minClientVersion: minVersion, shareIdentity: settings.shareIdentity, supervisorAcl: aclPolicy, vmFallback: VM_FALLBACK_DECISION.split(":")[0]!,
+      clientVersion, clientProof, minClientVersion: minVersion, shareIdentity: settings.shareIdentity, supervisorAcl: aclPolicy, vmFallback: VM_FALLBACK_DECISION.split(":")[0]!,
     }),
     async release(spawnPlan: SpawnPlan): Promise<void> {
       const jobDir = spawnPlan.env["NIMBLENEWT_WSB_JOB"];

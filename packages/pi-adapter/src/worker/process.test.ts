@@ -796,6 +796,45 @@ test("W04: a restart between nudges resumes the count from the conversation's do
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("G04 follow-up review: a restarted process presents the bridge call the old one left open under the call ID the controller saw before (it is seeded before the hold is released), and numbers the next reuse of the provider ID on", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-g04w-"));
+  try {
+    const storage = () => openNodeJsonlStorage(dir, BACKGROUND_CONTEXT);
+    const read = (id: string) => fauxAssistantMessage(fauxToolCall("nimblenewt__desk-read", { recordId: "dsk-aaaaaaaaaaaaaaaaaaaa" }, { id }), { stopReason: "toolUse" });
+    const reply = { ok: true as const, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa" } } };
+    // The first process: a provider that counts from zero uses call_0 twice; the second call is with the controller when the process goes away.
+    const one = createOfflineModels();
+    one.faux.setResponses([read("call_0"), read("call_0"), fauxAssistantMessage("never reached")]);
+    const first = host({ models: () => one.models, storage });
+    first.send({ t: "start", v: 1, start: offlineStart });
+    await first.next("ready");
+    first.send({ t: "run", requestId: "req-1", content: "read twice" });
+    const a = await first.next("bridge");
+    first.send({ t: "bridge.reply", id: a.id, reply });
+    const b = await first.next("bridge", first.seen.indexOf(a) + 1);
+    assert.equal(a.request.callId, "call_0");
+    assert.match(b.request.callId, /^d:[0-9a-f]{40}$/);
+    first.end();
+    await first.done;
+    // The second process, told the earlier work was reviewed: Pi presents the open call again at once, under the ID the controller already has; the model's next call_0 is a new call.
+    const two = createOfflineModels();
+    two.faux.setResponses([read("call_0"), fauxAssistantMessage("done")]);
+    const second = host({ models: () => two.models, storage });
+    second.send({ t: "start", v: 1, start: { ...offlineStart, recover: { reason: "test restart" } } });
+    const again = await second.next("bridge");
+    assert.equal(again.request.callId, b.request.callId, "the interrupted call keeps its ID");
+    second.send({ t: "bridge.reply", id: again.id, reply });
+    await second.next("ready");
+    second.send({ t: "run", requestId: "req-1", content: "read twice" });
+    const next = await second.next("bridge", second.seen.indexOf(again) + 1);
+    assert.ok(![a.request.callId, b.request.callId].includes(next.request.callId), next.request.callId);
+    second.send({ t: "bridge.reply", id: next.id, reply });
+    assert.equal((await second.next("result")).status, "completed");
+    second.send({ t: "close" });
+    await second.done;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("G09: a start's selected updates are placed before the turn, once by request ID across processes; while earlier work is held nothing is placed and the turn fails on the held work as before", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-g09-"));
   try {

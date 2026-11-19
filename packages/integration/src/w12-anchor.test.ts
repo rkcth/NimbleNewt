@@ -21,9 +21,9 @@ const skipOrFail = (t: { skip(why: string): void }, why: string): void => { if (
 const AGENT = "agt-abcdefghijklmnopqrst";
 const until = async (ok: () => boolean | Promise<boolean>, ms: number, why: string): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(why); await new Promise((r) => setTimeout(r, 50)); } };
 
-// The model's window: its startup share (a quarter) holds the real process's fixed part (the system text and every bridge tool's schema, about 17,600 characters since card T08's toolbox tools) beside the
+// The model's window: its startup share (a quarter) holds the real process's fixed part (the system text and every bridge tool's schema, about 20,250 characters since card P03b's service and deliverable tools) beside the
 // anchor and the task, so the first call is sent. The large input the provider reports later is past Pi's blocking threshold for this window (the window less a 5,120-token reserve), so the process cuts.
-const WINDOW = 32_768;
+const WINDOW = 36_864;
 const REPORTED_LARGE = 30_000;
 interface Step { readonly text?: string; readonly call?: { readonly name: string; readonly args: object } }
 interface Model { readonly server: Server; readonly url: string; readonly seen: { readonly body: { messages: { role: string; content: unknown }[] } }[] }

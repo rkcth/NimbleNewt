@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "database-transfer" | "defect";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -128,6 +128,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "defect.override": { verb: "Decide a defect yourself (outcome accept-as-is, keeping the finding on the record, or repair-again, keeping the cycle count; reason in the owner's words)", mode: "propose", revision: "defect" },
   // QA evidence (card Q02): invalidating evidence whose criteria or owner decisions changed, and scheduling its re-check, only applies what the records already say; it applies at once.
   "qa.evidence.check": { verb: "Check whether a task's QA evidence still holds (its acceptance criteria and the owner decisions it was judged against unchanged); evidence that no longer holds is invalidated and a re-check is scheduled", mode: "apply" },
+  // Documentation obligations (card Q03): each names an agent who gets update tasks or record IDs the interpreter picked from the docs view, so each is shown first. A replacement or a verification is pinned to the obligation's revision.
+  "doc.obligation.record": { verb: "Record which document must be kept true to which work (title, where it lives, audience user, developer, support or promotional, the agent keeping it, the version it applies to, the tasks it describes, and any capability it claims with the task behind it); or, with obligationId, replace one", mode: "propose", revision: "doc-obligation", needsProject: true },
+  "doc.obligation.verify": { verb: "Mark a document as checked against tested work (the docs role's document change, and for every task it describes code whose QA gate passes)", mode: "propose", revision: "doc-obligation" },
+  "doc.impact.check": { verb: "Find the documents a task's new tested code affects; each affected or unverified document gets an update task assigned to the agent keeping it", mode: "propose" },
+  "doc.release.check": { verb: "Flag every document (user and developer docs, support guidance, promotional assets) that applies to another version than the release, each with an update task for the agent keeping it", mode: "propose", needsProject: true },
   // Guided setup (card U14): a provider decides where the team's data may go and what it may spend, so it is shown first in every profile. Only the NAME of a credential is ever in the chat; the key goes into the secret store on the machine.
   "routing.provider.add": { verb: "Add or replace model providers (each: name, location local or cloud, endpoint address, models, contextTokens, paid, kind = what the model server is: llama-cpp, vllm, radiance, strata, openai, openai-compatible, claude or generic, which decides how a route's reply limit and reasoning cap are sent; credentialName = the NAME of a secret, never a key); the team needs at least two routes on two different servers", mode: "propose" },
   "workers.limits.change": { verb: "Change the limits for local agents", mode: "propose" },
@@ -190,6 +195,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Requiring an approved candidate narrows and applies at once; dropping the requirement and any other setting change widens or is shown first (provisional, see the notes).
   "release.stage": { verb: "Stage a release", mode: "apply" },
   "release.activate": { verb: "Activate a staged release", mode: "propose" },
+  // A maintenance window (card K07) is a standing word to activate one exact release at a stated time: always shown first. Cancelling one only stops it: the safe direction, applied at once.
+  "release.window.set": { verb: "Set a maintenance window that activates a staged release at a stated time", mode: "propose" },
+  "release.window.cancel": { verb: "Cancel a maintenance window", mode: "apply" },
   "release.stage.remove": { verb: "Remove a staged release", mode: "propose" },
   "release.activation.resolve": { verb: "Resolve an interrupted release switch", mode: "propose" },
   "release.rollback": { verb: "Roll back to the previous release", mode: "propose" },
@@ -606,9 +614,14 @@ export const STREAM_SWITCH_EXEMPT: ReadonlySet<string> = new Set(["enable", "dis
  * "ship the guide as it is" or "that is a big problem", the interpreter chooses the ID and the value, and the service refuses an unknown or unreadable one. The finding and the reason are still the owner's own words.
  */
 export const DEFECT_EXEMPT: ReadonlySet<string> = new Set(["id", "deliverableId", "outcome", "severity"]);
+/**
+ * The documentation commands (card Q03) name records the docs and overview views showed the owner (the obligation, the agent keeping a document, the tasks it describes, the document and code submissions)
+ * and the audience from a fixed list the service checks. The title, where the document lives, the versions and the claims are still the owner's own words.
+ */
+export const DOC_EXEMPT: ReadonlySet<string> = new Set(["obligationId", "owner", "implementationRefs", "audience", "documentSubmissionId", "evidence", "submissionId"]);
 export const ROUTE_SETTING_EXEMPT: ReadonlySet<string> = new Set(["enable", "disable", "unset"]);
 /** Release-test IDs are not record references the owner picked: for the release commands they must be in the owner's own words (cancel applies at once, so a model must not choose which test). */
-export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId"]);
+export const RELEASE_ID_KEYS: ReadonlySet<string> = new Set(["attemptId", "candidateId", "windowId"]);
 /** The request a maintenance command names is the owner's word, not a record the interpreter picked. */
 export const MAINTENANCE_ID_KEYS: ReadonlySet<string> = new Set(["maintenanceId"]);
 

@@ -74,7 +74,7 @@ function lockHeld(host: WindowsHost, controlDir: string): boolean {
   try { const pid = (JSON.parse(text) as { pid?: unknown }).pid; return typeof pid === "number" && pid !== host.pid && host.pidAlive(pid); } catch { return false; }
 }
 
-const settingsFor = (controlDir: string, identity: { readonly owner: string; readonly shareIdentity: string }): WindowsSettings => ({ controlDir, owner: identity.owner, shareIdentity: identity.shareIdentity, minVersion: "0.0", packageName: "MicrosoftWindows.WindowsSandbox", publisherId: "8wekyb3d8bbwe", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" });
+const settingsFor = (controlDir: string, identity: { readonly owner: string; readonly shareIdentity: string }): WindowsSettings => ({ controlDir, owner: identity.owner, shareIdentity: identity.shareIdentity, minVersion: "0.0", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" });
 
 /** Whether any Windows Sandbox is running now (`unknown` when the verified client could not list them). Read only: nothing is stopped. */
 export async function sandboxRunning(host: WindowsHost, identity: { readonly owner: string; readonly shareIdentity: string }): Promise<"none" | "running" | "unknown"> {
