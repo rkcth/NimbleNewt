@@ -6,6 +6,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "../dispatch/testing/world.js";
 import type { Grant } from "../security/index.js";
+import { DomainError } from "../domain/errors.js";
 import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
@@ -534,6 +535,42 @@ for (const backend of backends) {
     await c.tick();
     assert.deepEqual(given, { own: true, other: false });
     for (const k of ["own", "other"]) assert.match(bad(out[k]!).message, /may or may not have happened/);
+  });
+
+  suite("G04 follow-up, second review: a call presented again while its first request is still being run (the effect is busy) waits for it and is answered from the ledger, never told busy and never run; another refusal is not waited on", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("t", ann);
+    const args = { tool: "a_aaaaaaaaaaaaaaaa.x", input: {} };
+    const verdict = { recorded: true, ok: true, runId: "grun-x", number: 1, callId: "c", name: "nimblenewt__tool-invoke", args: JSON.stringify(args), state: "complete" };
+    const asked: Record<string, number> = {};
+    let executed = 0;
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async () => { executed++; return ({ v: 1, op: "x", ok: true, result: {} }) as never; } },
+      isLocalHost: () => true,
+      generations: {
+        checkCall: async () => verdict as never,
+        admitCall: async (_p: unknown, cmd: { callId: string }) => ({ effectId: `eff-${cmd.callId}`, runId: "grun-x", toolCallId: cmd.callId, replayed: true }),
+        // `busy`: the first request still holds the effect for two asks, then it has settled and the ledger answers. `fenced`: a refusal that waiting cannot change.
+        executeCall: async (_p: unknown, cmd: { toolCallId: string }) => {
+          const n = (asked[cmd.toolCallId] = (asked[cmd.toolCallId] ?? 0) + 1);
+          if (cmd.toolCallId === "fenced") throw new DomainError("fenced", "the attempt has been replaced");
+          if (n <= 2) throw new DomainError("effect_busy", "effect eff-busy is already being run by this executor");
+          return { effectId: "eff-busy", status: "confirmed", evidence: { ok: true, result: { from: "ledger" } } } as never;
+        },
+      },
+      callCheck: async () => ({ check: true, require: false }),
+    });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = async ({ order, gateway }) => {
+      out["busy"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "busy", args });
+      out["fenced"] = await svc.handle(order.credential, gateway, { op: "tool.invoke", callId: "fenced", args });
+      return { status: "completed", text: "x" };
+    };
+    await c.tick();
+    assert.deepEqual(good(out["busy"]!), { from: "ledger" });
+    assert.deepEqual([asked["busy"], asked["fenced"], executed], [3, 1, 0]);
+    assert.equal(bad(out["fenced"]!).code, "fenced");
   });
 
   suite("card L05d: a recorded call is bound to the operation it is presented for (name and arguments); the owner can turn that off", async (c) => {

@@ -55,6 +55,12 @@ export function pushTarget(world: SliceWorld): EffectBridge {
   };
 }
 
+/**
+ * The effect claim lease of every process here: an hour, longer than the restart's clock advance (10 minutes), so a claim the killed process held is still unexpired when the new process meets it. Only the primary epoch frees it
+ * (G04 follow-up: a claim of an older epoch is given up at once); with the slice's default lease of 1 ms that rule would never be exercised by the kill sweep.
+ */
+export const TOOL_EFFECT_LEASE_MS = 60 * 60_000;
+
 /** The controller side the tool talks to, set once the process has started its services (the adapter, and so the tool, exists before them). */
 export interface ToolController { gen: GenerationService; world: SliceWorld; taskId: string; fence: Fence }
 
@@ -227,7 +233,7 @@ export async function cleanToolRun(spec: StoreSpec, directory: string, replay?: 
   try {
     const spy = new OperationSpy();
     const chaos = new Chaos();
-    const world: SliceWorld = { storage: spy.wrap(storage), directory, chaos, clock: new Clock().now, conversation: () => piConversation(adapter) };
+    const world: SliceWorld = { storage: spy.wrap(storage), directory, chaos, clock: new Clock().now, conversation: () => piConversation(adapter), effectLeaseMs: TOOL_EFFECT_LEASE_MS };
     const slice = await harness.startProcess(world, "child");
     const { text } = await toolPath(slice, world, (c) => { controller = c; });
     const state = await toolState(slice, world, adapter, text);
@@ -242,7 +248,7 @@ export async function cleanToolRun(spec: StoreSpec, directory: string, replay?: 
 export async function childToolRun(storage: ControllerStorage, directory: string, chaos: InstanceType<typeof Chaos>, replay?: "safe"): Promise<{ close(): Promise<void> }> {
   let controller: ToolController | undefined;
   const { adapter } = await openToolAdapter(join(directory, "pi"), () => controller!, replay);
-  const world: SliceWorld = { storage, directory, chaos, clock: new Clock().now, conversation: () => piConversation(adapter) };
+  const world: SliceWorld = { storage, directory, chaos, clock: new Clock().now, conversation: () => piConversation(adapter), effectLeaseMs: TOOL_EFFECT_LEASE_MS };
   const slice = await harness.startProcess(world, "child");
   await toolPath(slice, world, (c) => { controller = c; });
   return { close: () => adapter.close() };
@@ -264,7 +270,7 @@ export async function killToolAndRestart(spec: StoreSpec, directory: string, cle
     const problems = (await acknowledgedSurvive(storage, clean, crashAt)).map((p) => `${label}: ${p}`);
     const clock = new Clock();
     clock.advance(10 * 60_000);
-    const world: SliceWorld = { storage, directory, chaos: new Chaos(), clock: clock.now, conversation: () => piConversation(adapter) };
+    const world: SliceWorld = { storage, directory, chaos: new Chaos(), clock: clock.now, conversation: () => piConversation(adapter), effectLeaseMs: TOOL_EFFECT_LEASE_MS };
     const slice = await harness.startProcess(world, "restarted");
     const { text } = await toolPath(slice, world, (c) => { controller = c; });
     const state = await toolState(slice, world, adapter, text);
