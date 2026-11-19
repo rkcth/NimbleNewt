@@ -67,6 +67,8 @@ export interface SubmissionApproval {
   readonly base: string;
   readonly tree: string;
   readonly submittedBy: string;
+  /** When the submission was recorded. */
+  readonly submittedAt: string;
   readonly approved: boolean;
   readonly approvedBy?: string;
   /** The review submission that approved it, when a reviewer did. */
@@ -388,7 +390,7 @@ export class SubmissionService {
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
     const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
     const newest = reviews[reviews.length - 1];
-    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, submittedBy: found.submittedBy };
+    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, submittedBy: found.submittedBy, submittedAt: found.submittedAt };
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id } : { ...base, approved: false, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };

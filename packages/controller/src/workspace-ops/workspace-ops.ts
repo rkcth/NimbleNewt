@@ -510,8 +510,10 @@ export class WorkspaceOpService {
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
         // A queued submission leaves the queue only when the host confirms it landed exactly that submission (card P10); a landing it does not confirm is said so, and the entry stays.
-        const unconfirmed = body.operation === "landing" && body.queued !== undefined && detail?.["landed"] === true && !this.#landedExactly(body.queued, detail);
-        const summary = `${safe(outcome.summary, unconfirmed ? WORKSPACE_LIMITS.summary - 160 : WORKSPACE_LIMITS.summary)}${unconfirmed ? `; the host did not confirm that exactly submission ${body.queued!.submissionId} landed, so it stays in the landing queue` : ""}`;
+        // Also a landing that wrote files but could not mark the checkout, or found nothing to land: the entry stays at the head until it is taken out (a repeat is refused by the host while the landed files wait uncommitted,
+        // and after they are committed the branch is no longer at the submission's base).
+        const unconfirmed = body.operation === "landing" && body.queued !== undefined && !this.#landedExactly(body.queued, detail);
+        const summary = `${safe(outcome.summary, unconfirmed ? WORKSPACE_LIMITS.summary - 220 : WORKSPACE_LIMITS.summary)}${unconfirmed ? `; the host did not confirm that exactly submission ${body.queued!.submissionId} landed, so it stays in the landing queue (landing.queue.remove takes it out)` : ""}`;
         return done("done", { summary, ...(detail === undefined ? {} : { detail }), ...more });
       }
       return done("refused", { summary: `the host did not do it: ${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts });

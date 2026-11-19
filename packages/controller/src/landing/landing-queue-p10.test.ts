@@ -272,4 +272,48 @@ for (const backend of backends) {
       assert.deepEqual((await r.queued()).map((e) => [e[1], e[2]]), [[s4, t2], [sbm(3), t3]], "the newer approved submission keeps the task's place");
     } finally { await r.close(); }
   });
+
+  test(`${backend.name}: second review: a landed submission is not queued again, an older submission does not take a newer one's place, and a landing the host does not confirm says the entry stays (card P10, queue)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2] = [await r.task("one"), await r.task("two")];
+      const lease = await r.leaseOps.acquire(ivy, { commandId: "l1", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      const land = (commandId: string, taskId: string) => r.workspace().request(ivy, { commandId, operation: "landing", taskId, reason: "land it", leaseId: lease.leaseId, fence: lease.fence });
+      // Task one's first submission lands; a later review approving it again (or a hand add) does not put it back at the head.
+      const s1 = r.approve(1, t1);
+      assert.equal(await r.ops.queueApproved(s1, "rev-1"), true);
+      assert.equal((await land("w1", t1)).state, "done");
+      assert.deepEqual(await r.queued(), []);
+      assert.equal(await r.ops.queueApproved(s1, "rev-2"), false, "a second approval of landed work is not queued");
+      await refuses("invalid_transition", () => r.ops.add(ivy, { commandId: "a1", submissionId: s1 }), /already landed/);
+      assert.deepEqual(await r.queued(), []);
+      // Task two: a newer submission is queued; the older one, approved late, does not take its place; a newer one still does.
+      const at = (n: number, t: string, when: string): string => { r.approve(n, t); r.approvals.set(sbm(n), { ...r.approvals.get(sbm(n))!, submittedAt: when }); return sbm(n); };
+      const older = at(2, t2, "2026-01-01T00:00:01.000Z"), newer = at(3, t2, "2026-01-01T00:00:02.000Z"), newest = at(4, t2, "2026-01-01T00:00:03.000Z");
+      assert.equal(await r.ops.queueApproved(newer, "rev-3"), true);
+      assert.equal(await r.ops.queueApproved(older, "rev-4"), false, "the older approval does not replace the newer");
+      await refuses("invalid_transition", () => r.ops.add(r.w.owner, { commandId: "a2", submissionId: older }), /already has a newer submission/);
+      assert.deepEqual(await r.queued(), [[1, newer, t2]]);
+      assert.equal((await r.ops.add(r.w.owner, { commandId: "a3", submissionId: newest })).replaced, newer);
+      assert.deepEqual(await r.queued(), [[1, newest, t2]]);
+      // The host wrote the files but could not mark the checkout (landed: false): the entry stays at the head and the summary says so.
+      r.setAnswer(async (call) => ({ ok: true, summary: "1 file(s) landed; the checkout could not be marked as landed", detail: { landed: false, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }));
+      const unmarked = await land("w2", t2);
+      assert.equal(unmarked.state, "done");
+      assert.match(unmarked.summary ?? "", /did not confirm that exactly submission .* stays in the landing queue \(landing\.queue\.remove takes it out\)/);
+      assert.deepEqual(await r.queued(), [[1, newest, t2]]);
+      // A submission taken out during its landing that the host then lands is still noted as landed.
+      r.setAnswer(async (call) => ({ ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }));
+      const svc = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, {
+        quiesce: { around: async (_scope, _op, run) => run({ attempts: [] } as never) },
+        portOf: async () => ({ run: async (call) => { await r.ops.remove(r.w.owner, { commandId: "out-during", taskId: t2, reason: "taken out" }); return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; } }),
+        landingLease: (by, call) => r.leaseOps.checkLanding(by, { ...call, branch: "main" }),
+        landingQueue: { check: (by, call) => r.ops.checkLanding(by, call), landedChanges: (p, b, s) => r.ops.landedChanges(p, b, s) },
+      }, { clock: r.w.clock.now, pause: async () => undefined });
+      assert.equal((await svc.request(ivy, { commandId: "w3", operation: "landing", taskId: t2, reason: "land it", leaseId: lease.leaseId, fence: lease.fence })).state, "done");
+      assert.deepEqual(await r.queued(), []);
+      await refuses("invalid_transition", () => r.ops.add(r.w.owner, { commandId: "a4", submissionId: newest }), /already landed/);
+    } finally { await r.close(); }
+  });
 }

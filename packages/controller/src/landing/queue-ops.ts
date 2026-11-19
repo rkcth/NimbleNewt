@@ -22,6 +22,8 @@ export interface QueueApproval {
   readonly base: string;
   readonly tree: string;
   readonly submittedBy: string;
+  /** When the submission was recorded: an older submission of a task never takes a newer one's place in the queue. */
+  readonly submittedAt?: string;
   readonly approved: boolean;
   readonly reason?: string;
 }
@@ -61,7 +63,7 @@ export class LandingQueueOps {
     if (a === undefined || !(author || this.#integrator(by, a.projectId))) throw refused(`submission ${command.submissionId}`);
     if (!a.approved) throw new DomainError("review_invalid", `submission ${command.submissionId} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); only approved work is queued to land`, { field: "submissionId" });
     const branch = await this.#branch(a.taskId, a.projectId);
-    const r = await this.#queue.enqueue({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId: a.projectId, branch, submissionId: command.submissionId, taskId: a.taskId, base: a.base, tree: a.tree, author: a.submittedBy });
+    const r = await this.#queue.enqueue({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId: a.projectId, branch, submissionId: command.submissionId, taskId: a.taskId, base: a.base, tree: a.tree, author: a.submittedBy, ...(a.submittedAt === undefined ? {} : { submittedAt: a.submittedAt }) });
     return { ...r, branch };
   }
 
@@ -76,7 +78,7 @@ export class LandingQueueOps {
       if (a === undefined || !a.approved) return false;
       const branch = await this.#options.landingBranch({ taskId: a.taskId, projectId: a.projectId });
       if (branch === undefined) return false;
-      await this.#queue.enqueue({ commandId: `lq-auto:${cause}`, actor: "service:landing-queue", projectId: a.projectId, branch, submissionId, taskId: a.taskId, base: a.base, tree: a.tree, author: a.submittedBy });
+      await this.#queue.enqueue({ commandId: `lq-auto:${cause}`, actor: "service:landing-queue", projectId: a.projectId, branch, submissionId, taskId: a.taskId, base: a.base, tree: a.tree, author: a.submittedBy, ...(a.submittedAt === undefined ? {} : { submittedAt: a.submittedAt }) });
       return true;
     } catch { return false; }
   }

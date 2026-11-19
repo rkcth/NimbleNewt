@@ -13,7 +13,7 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
  *
  * The service takes no caller: who may add, remove or read is decided by its door (`LandingQueueOps`).
  */
-export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200 } as const;
+export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200, landed: 200 } as const;
 const KIND = "landing-queue";
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SUBMISSION = /^sbm-[a-z2-7]{20}$/;
@@ -32,6 +32,8 @@ export interface LandingQueueEntry {
   readonly queuedBy: string;
   /** The submission this one replaced in the task's place, when it did. */
   readonly replaced?: string;
+  /** When the submission was recorded (`SubmissionService`), when known: an older submission never takes a newer one's place. */
+  readonly submittedAt?: string;
 }
 export interface LandingQueueBody {
   readonly projectId: string;
@@ -39,6 +41,8 @@ export interface LandingQueueBody {
   readonly nextSeq: number;
   /** Oldest first. */
   readonly entries: readonly LandingQueueEntry[];
+  /** The submissions that landed from this queue, newest last (at most `LANDING_QUEUE_LIMITS.landed`): a landed submission is not queued again (a later review approving it again would put work that is already in the branch at the head). */
+  readonly landed?: readonly string[];
 }
 export interface LandingQueue extends LandingQueueBody { readonly queueId: string; readonly revision: number }
 
@@ -77,13 +81,14 @@ export class LandingQueueService {
    * Puts an approved submission in the queue. A submission already queued is left where it is (`already`); a task already queued has its entry's submission replaced in place (it keeps its turn); anything else goes to the
    * back. At most `entries` entries; one more is refused `unavailable`.
    */
-  async enqueue(command: { commandId: string; actor: string; projectId: string; branch: string; submissionId: string; taskId: string; base: string; tree: string; author: string }): Promise<{ entry: LandingQueueEntry; position: number; already: boolean; replaced?: string }> {
+  async enqueue(command: { commandId: string; actor: string; projectId: string; branch: string; submissionId: string; taskId: string; base: string; tree: string; author: string; submittedAt?: string }): Promise<{ entry: LandingQueueEntry; position: number; already: boolean; replaced?: string }> {
     const projectId = text(command.projectId, "projectId", { min: 1, max: 100 });
     const branch = text(command.branch, "branch", { min: 1, max: LANDING_QUEUE_LIMITS.branch });
     const taskId = checkTaskId(command.taskId);
     if (typeof command.submissionId !== "string" || !SUBMISSION.test(command.submissionId)) throw new DomainError("invalid_command", "submissionId: is not a submission ID", { field: "submissionId" });
     if (!OID.test(command.base) || !OID.test(command.tree)) throw new DomainError("invalid_command", "submission: must name a base commit and a tree", { field: "submissionId" });
     const author = text(command.author, "author", { min: 1, max: 200 });
+    const submittedAt = typeof command.submittedAt === "string" && command.submittedAt.length <= 40 ? command.submittedAt : undefined;
     const queueId = LandingQueueService.queueIdOf(projectId, branch);
     let outcome: { already: boolean; replaced?: string } = { already: false };
     await retried(() => this.#runner.command("landing.queue.add", { commandId: command.commandId, actor: command.actor }, async () => ({
@@ -94,22 +99,27 @@ export class LandingQueueService {
         const entries = [...(q?.entries ?? [])];
         const nextSeq = q?.nextSeq ?? 1;
         const now = this.#runner.now();
+        const landed = q?.landed ?? [];
         const same = entries.findIndex((e) => e.submissionId === command.submissionId);
         const ofTask = entries.findIndex((e) => e.taskId === taskId);
+        const kept = { projectId, branch, ...(landed.length === 0 ? {} : { landed }) };
         let next: LandingQueueBody;
+        if (landed.includes(command.submissionId)) throw new DomainError("invalid_transition", `submission ${command.submissionId} already landed from the landing queue of branch ${branch}; it is not queued again`);
         if (same >= 0) {
           outcome = { already: true };
-          next = { projectId, branch, nextSeq, entries };
+          next = { ...kept, nextSeq, entries };
         } else if (ofTask >= 0) {
           const old = entries[ofTask]!;
+          // Only a newer submission takes the task's place: an older one approved late (or added by hand) would put superseded work back at the task's turn.
+          if (submittedAt !== undefined && old.submittedAt !== undefined && submittedAt < old.submittedAt) throw new DomainError("invalid_transition", `task ${taskId} already has a newer submission (${old.submissionId}) in the landing queue of branch ${branch}; an older one does not take its place (take that one out first)`);
           outcome = { already: false, replaced: old.submissionId };
-          entries[ofTask] = { seq: old.seq, submissionId: command.submissionId, taskId, base: command.base, tree: command.tree, author, queuedAt: old.queuedAt, queuedBy: command.actor, replaced: old.submissionId };
-          next = { projectId, branch, nextSeq, entries };
+          entries[ofTask] = { seq: old.seq, submissionId: command.submissionId, taskId, base: command.base, tree: command.tree, author, queuedAt: old.queuedAt, queuedBy: command.actor, replaced: old.submissionId, ...(submittedAt === undefined ? {} : { submittedAt }) };
+          next = { ...kept, nextSeq, entries };
         } else {
           if (entries.length >= LANDING_QUEUE_LIMITS.entries) throw new DomainError("unavailable", `the landing queue of branch ${branch} already holds ${entries.length} submissions, at most ${LANDING_QUEUE_LIMITS.entries}; land or remove some first`);
           outcome = { already: false };
-          entries.push({ seq: nextSeq, submissionId: command.submissionId, taskId, base: command.base, tree: command.tree, author, queuedAt: now, queuedBy: command.actor });
-          next = { projectId, branch, nextSeq: nextSeq + 1, entries };
+          entries.push({ seq: nextSeq, submissionId: command.submissionId, taskId, base: command.base, tree: command.tree, author, queuedAt: now, queuedBy: command.actor, ...(submittedAt === undefined ? {} : { submittedAt }) });
+          next = { ...kept, nextSeq: nextSeq + 1, entries };
         }
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return {
@@ -159,13 +169,15 @@ export class LandingQueueService {
 
   /**
    * The change that takes a landed submission out of the queue, for the landing's own write (the workspace service records the landing and this in one write, so a landing is never recorded without its entry leaving the
-   * queue, nor the other way round). Nothing when the submission is not queued (taken out meanwhile).
+   * queue, nor the other way round). The submission is also noted as landed, so that it is not queued again (also when it was taken out meanwhile); nothing when it is noted already or the queue was never written.
    */
   async landedChanges(projectId: string, branch: string, submissionId: string): Promise<Change[]> {
     const queueId = LandingQueueService.queueIdOf(projectId, branch);
     const current = await this.#runner.get(KIND, queueId);
     const q = current?.body as unknown as LandingQueueBody | undefined;
-    if (current === undefined || q === undefined || !q.entries.some((e) => e.submissionId === submissionId)) return [];
-    return [{ type: "update", ref: { kind: KIND, id: queueId }, expectedRevision: current.revision, body: json({ ...q, entries: q.entries.filter((e) => e.submissionId !== submissionId) }) }];
+    const queued = q?.entries.some((e) => e.submissionId === submissionId) === true;
+    if (current === undefined || q === undefined || (!queued && (q.landed ?? []).includes(submissionId))) return [];
+    const landed = [...(q.landed ?? []).filter((s) => s !== submissionId), submissionId].slice(-LANDING_QUEUE_LIMITS.landed);
+    return [{ type: "update", ref: { kind: KIND, id: queueId }, expectedRevision: current.revision, body: json({ ...q, entries: q.entries.filter((e) => e.submissionId !== submissionId), landed }) }];
   }
 }
