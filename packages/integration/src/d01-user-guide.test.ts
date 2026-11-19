@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadConfig } from "@nimblenewt/config";
-import { launch, runTerminalChat, setupGreeting, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
+import { launch, runTerminalChat, setupGreeting, STANDARD_ROLES, type EnvironmentFacts, type FilesystemDetector, type LauncherConfig, type LauncherSecrets } from "@nimblenewt/controller";
 
 // Card D01: the owner's user guide (docs/nimblenewt/user-guide.md) is kept true by running it. The example conversation in the guide is fed, line by line, to the real launcher and the real terminal chat; the
 // model behind the chat is a scripted stand-in (no model is called), so the test proves that every step the guide shows exists, is shown first where the guide says so, and ends where the guide says it ends,
@@ -104,7 +104,7 @@ const RIGHTS = ["attempt.work", "effect.perform", "review.request", "task.read",
 const TASK = "Add a greeting to the README";
 function understanding(lastProposals: () => string[]): Record<string, () => unknown[]> {
   const yes = (words: string) => () => lastProposals().map((proposalId) => ({ kind: "apply_proposal", proposalId, evidence: words, basis: "owner" }));
-  const rights = "Give Ann the rights attempt.work, effect.perform, review.request, task.read, desk.write, desk.read and message.receive in the project Garden, because Ann works on Garden";
+  const rights = "Let Ann work on Garden";
   const project = "My project is called Garden. Its code is in /home/me/garden and we keep it on our own Gitea server with Woodpecker CI.";
   return {
     "help me get started": () => [intent("status", { request: { kind: "setup" } }, "help me get started")],
@@ -116,7 +116,8 @@ function understanding(lastProposals: () => string[]): Record<string, () => unkn
     "yes, do that": yes("yes, do that"),
     "Add an agent called Ann as an author": () => [intent("command", { op: "agent.create", args: { friendlyName: "Ann", roles: ["author"] } }, "Add an agent called Ann")],
     "yes, add her": yes("yes, add her"),
-    [rights]: () => RIGHTS.map((action) => intent("command", { op: "grant.create", args: { agentName: "Ann", action, projectName: "Garden", basis: "Ann works on Garden" } }, rights)),
+    // One plain sentence asks for the bundle of Ann's role (author); the chat lists the rights it stands for.
+    [rights]: () => [intent("command", { op: "grant.create", args: { agentName: "Ann", projectName: "Garden", bundle: "roles" } }, rights)],
     "yes, give them": yes("yes, give them"),
     [`Add a task to Garden: ${TASK}`]: () => [intent("command", { op: "task.create", args: { title: TASK, projectName: "Garden" } }, "Add a task to Garden")],
     "yes, add it": yes("yes, add it"),
@@ -174,7 +175,10 @@ test("the guide's example conversation, run line by line through the launcher an
     const ann = (await call(live, "agent.list")).result.items[0];
     assert.deepEqual([ann.friendlyName, ann.roles], ["Ann", ["author"]]);
     const grants = ((await call(live, "grant.list", { limit: 100 })).result.items as { grantee: string; action: string; project: string; state: string }[]).filter((g) => g.grantee === `agent:${ann.id}`);
-    assert.deepEqual(grants.map((g) => g.action).sort(), [...RIGHTS].sort());
+    // "Let Ann work on Garden" gave the author template's rights, which hold the seven a task needs to run on the worker host (the U14e test's list).
+    const author = STANDARD_ROLES.find((r) => r.name === "author")!.capabilities;
+    assert.deepEqual(grants.map((g) => g.action).sort(), [...author].sort());
+    for (const right of RIGHTS) assert.ok(author.includes(right), `the author bundle holds ${right}`);
     assert.ok(grants.every((g) => g.project === project.id && g.state === "active"), "each right is in Garden only");
     const task = (await call(live, "task.list", { projectId: project.id })).result.items[0];
     assert.deepEqual([task.title, task.state], [TASK, "ready"]);
