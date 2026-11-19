@@ -8,7 +8,7 @@ import { PiAdapter, type AdapterConversation } from "../adapter.js";
 import { RequestIdConflictError } from "../errors.js";
 import { assertWorkableWindow, compactionThresholds } from "../compaction-thresholds.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
-import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
+import { boundTransport, composeTools, createBridge, toolSchemaCharsOf, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
 import { DEFAULT_MAX_CONTINUATIONS, type ContinuationPolicy } from "../continuation.js";
 import { PI_AGENT_LAYOUT, sharedSystemText, volatileContext } from "../prompt-layout.js";
 import { processClock } from "./clock.js";
@@ -326,7 +326,7 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
     const cache = start.cache === undefined ? undefined : { policy: () => ({ ...(start.cache!.key === undefined ? {} : { key: start.cache!.key }), ...(start.cache!.retention === undefined ? {} : { retention: start.cache!.retention }) }) };
     bridge = createBridge(transport);
     const tools = composeTools(bridge, [], start.namespaceId);
-    toolSchemaChars = JSON.stringify(tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }))).length;
+    toolSchemaChars = toolSchemaCharsOf(tools);
     const contextPolicy = contextPolicyOf(start.context, (note) => send({ t: "compacted", ...note }), async (firstKept) => (adapter === undefined ? [] : anchorsFrom(adapter, firstKept)));
     // Card W04: a turn that yields without a tool call and without work.end is continued, at most three times, with a fixed nudge. Each continuation is asked of the controller first (bridge `turn.continue`): a pause, a stop, a replaced or
     // frozen attempt, or a controller that does not know the operation refuses it, and the answer then ends the turn as it ended (W03 takes it from there). Nothing is continued once the lease is gone, the host has closed the process or work.end

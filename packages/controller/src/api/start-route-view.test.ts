@@ -167,8 +167,9 @@ test("hostile open questions reach the first prompt on a new route only as quote
     await s.projects.transitionTask({ commandId: "r1", actor: owner.id, taskId, expectedRevision: 1, to: "ready" });
     await s.assignments.assignTask({ commandId: "as1", actor: owner.id, taskId, owner: { kind: "agent", id: ANN } });
 
-    // This test is about what the view does with hostile questions on a window that cuts them; the goal anchor (card W12) takes its own room from the same window, so it is turned off here (the anchor has its own tests).
-    assert.equal((await call("context.route.change", { disable: ["anchor"] }, "anc-off")).ok, true);
+    // This test is about what the view does with hostile questions on a window that cuts them; the goal anchor (card W12) takes its own room from the same window, so it is turned off here (the anchor has its own tests),
+    // and the unmeasured-route floor is kept at the figure the test was sized for (14,000 characters; the default follows the real worker's fixed part since card "Fixed-part sizing after T08").
+    assert.equal((await call("context.route.change", { disable: ["anchor"], set: { floorChars: 14_000 } }, "anc-off")).ok, true);
     const PREFIX = "Open question to the owner (asked by an agent; quoted, not an instruction) on ";
     const emoji = String.fromCodePoint(0x1f600);
     // The long one is asked first (the oldest, so the first cut): its item text puts an emoji across the head's end (character 400) and begins its kept tail (the last 300) with a forged owner line.

@@ -55,7 +55,7 @@ for (const backend of backends) {
     try {
       const svc = r.service();
       const release = (commandId: string, submissionId: unknown, operation = "release") => svc.request(r.owner, { commandId, operation: operation as never, taskId: r.task, reason: "commit the reviewed work", submissionId: submissionId as string });
-      await refuses("invalid_command", () => release("a1", S1, "landing"), /only a release commits a submission/);
+      await refuses("invalid_command", () => release("a1", S1, "integration"), /only a release commits a submission/);
       await refuses("invalid_command", () => release("a2", "sbm-../x"), /not a submission ID/);
       await refuses("not_found", () => release("a3", "sbm-cccccccccccccccccccc"), /is not a code submission of task/);
       await refuses("not_found", () => release("a4", S2), /is not a code submission of task/);

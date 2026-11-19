@@ -128,6 +128,8 @@ test("the launcher's product worker host runs an attempt in a checkout its works
     // Two projects, each with its own local repository; an agent that may work in both.
     const A = (await s.projects.createProject({ commandId: "pA", actor: owner.id, name: "Garden", repositories: [{ id: "garden", location: garden }] } as never)).id;
     const B = (await s.projects.createProject({ commandId: "pB", actor: owner.id, name: "Orchard", repositories: [{ id: "orchard", location: orchard }] } as never)).id;
+    // This test is about the landing itself, not its gate: the project requires no check (card P09's gate has tests of its own).
+    for (const projectId of [A, B]) assert.equal((await api("integration.set", { project: projectId, requiredChecks: [] }, `no-checks-${projectId}`)).ok, true);
     const agent = (await s.agents.create(owner, { commandId: "ag1", friendlyName: "Ann", roles: ["author"] } as never)).id;
     const principalId = `agent:${agent}`;
     await s.principals.setGrants(owner, { commandId: "gr1", principalId, expectedRevision: (await s.principals.get(principalId))!.revision, grants: [...workGrants(A), ...workGrants(B), ...[A, B].flatMap((project) => [{ action: "desk.write", project }, { action: "desk.read", project }, { action: "message.receive", project }])] });

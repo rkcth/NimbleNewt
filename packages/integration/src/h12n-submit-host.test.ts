@@ -113,7 +113,7 @@ test("work.end { submit: true } is checked and staged by the host that holds the
     const sub = await api(c, boot.token, "submission.get", { submissionId: rec.submissionId });
     assert.equal(sub.ok, true, JSON.stringify(sub));
     const g = (...args: string[]): string => execFileSync("git", ["--git-dir", where1.gitDir, "--work-tree", where1.checkout, ...args], { encoding: "utf8" }).trim();
-    const patch = execFileSync("git", ["patch-id", "--stable"], { input: execFileSync("git", ["--git-dir", where1.gitDir, "diff", "--cached", "--binary", "--full-index", base], { encoding: "utf8" }), encoding: "utf8" }).trim().split(/\s+/)[0];
+    const patch = execFileSync("git", ["patch-id", "--verbatim"], { input: execFileSync("git", ["--git-dir", where1.gitDir, "diff", "--cached", "--binary", "--full-index", base], { encoding: "utf8" }), encoding: "utf8" }).trim().split(/\s+/)[0];
     assert.deepEqual([sub.result.item.kind, sub.result.item.role, sub.result.item.base, sub.result.item.tree, sub.result.item.patchId], ["code", "author", base, g("write-tree"), patch], "the submission carries what the host staged");
     assert.equal(g("diff", "--cached", "--name-only", base), "src/a.ts\nsrc/b.ts");
 
