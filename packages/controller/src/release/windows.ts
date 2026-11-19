@@ -72,6 +72,8 @@ export interface WindowBody {
   readonly status: WindowStatus;
   /** The release current when the window activated (the way back), when there was one. */
   readonly from?: string;
+  /** Written before the activation is called (controller clock): a window that crashed after this point is settled from the activation record, never assumed not to have switched. */
+  readonly activatingAt?: string;
   readonly waiting?: string;
   readonly reason?: string;
   /** When the owner was told the window's outcome (set once the notice was filed). */
@@ -138,13 +140,12 @@ export class ReleaseWindowService {
     const closes = opens + durationMinutes * MINUTE;
     const now = this.#now();
     const windowId = `rwin-${createHash("sha256").update(scopedCommandId(owner.id, command.commandId)).digest("hex").slice(0, 20)}`;
-    const existing = await this.#runner.get(WINDOW, windowId);
-    if (existing === undefined) {
-      if (closes <= now) bad("date", "the window would already be over; name a time in the future");
-      if (opens - now > WINDOW_LIMITS.horizonDays * 86_400_000) bad("date", "the window must open within a year");
-    }
     return this.#serial(async () => {
+      // Read inside the serial section, so two copies of the same command sent at once are one window and a replay, not a refusal of the second as "another window is open".
+      const existing = await this.#runner.get(WINDOW, windowId);
       if (existing === undefined) {
+        if (closes <= now) bad("date", "the window would already be over; name a time in the future");
+        if (opens - now > WINDOW_LIMITS.horizonDays * 86_400_000) bad("date", "the window must open within a year");
         if (await this.#runner.get(QUARANTINE, candidateId) !== undefined) throw new DomainError("invalid_transition", "that release is quarantined (it failed before); submit a new candidate instead");
         const open = (await this.#all()).filter((w) => OPEN_STATES.has(w.body.status));
         if (open.length > 0) throw new DomainError("invalid_transition", `window ${open[0]!.body.windowId} is still open (${open[0]!.body.status}); cancel it or wait for it to end first`);
@@ -187,8 +188,11 @@ export class ReleaseWindowService {
       if (found === undefined) throw new DomainError("not_found", "no such maintenance window");
       const w = found.body as unknown as WindowBody;
       const commandId = scopedCommandId(owner.id, command.commandId);
-      if (w.status === "cancelled") { await this.#write(found.revision, w, w, "release.window.cancel", commandId, owner.id, { reason }).catch(() => undefined); return { windowId, status: w.status }; }
+      // Already cancelled (a repeat, or a second word to the same effect): nothing more to record.
+      if (w.status === "cancelled") return { windowId, status: w.status };
       if (w.status !== "scheduled" && w.status !== "prepared") throw new DomainError("invalid_transition", w.status === "activated" ? "the release was already activated by this window; roll it back with release.rollback instead" : `the window has already ended (${w.status})`);
+      // The switch was called (the controller stopped before recording how it went): a cancel must not claim nothing happened when the release did switch.
+      if (w.activatingAt !== undefined && (await this.#took(w)) !== undefined) throw new DomainError("invalid_transition", "this window already switched to the release (or is switching); roll it back with release.rollback instead");
       await this.#write(found.revision, w, this.#next(w, "cancelled", reason), "release.window.cancel", commandId, owner.id, { reason });
       return { windowId, status: "cancelled" };
     });
@@ -236,6 +240,13 @@ export class ReleaseWindowService {
     const closes = Date.parse(w.closesAt);
     const cid = (what: string): string => `rwin:${w.windowId}:${what}`;
     if (w.status === "activated") return this.#outcome(rev, w);
+    // The activation was called before a crash or a failed write: what it did is read from the activation record, not assumed (it may have switched, and the launcher may even have
+    // started and fallen back since). Only a switch that never happened lets the window go on (or close as missed).
+    if (w.activatingAt !== undefined) {
+      const took = await this.#took(w);
+      if (took === "pending") return false;
+      if (took !== undefined) { await this.#write(rev, w, this.#activated(w, took.from), "release.window.activate", cid("activated")); return true; }
+    }
     // A window that closed before the update started never deploys afterwards.
     if (now >= closes) {
       const next = w.waiting !== undefined && w.status === "prepared"
@@ -266,7 +277,8 @@ export class ReleaseWindowService {
     if (live > 0) {
       const waiting = `${live} agent attempt(s) running`;
       if (w.waiting === waiting) return false;
-      await this.#write(rev, w, { ...w, waiting, history: [...w.history, { at: this.#runner.now(), event: "waiting", reason: waiting }].slice(-WINDOW_LIMITS.history) }, "release.window.wait", cid(`wait-${live}-${w.history.length}`));
+      // Named by the revision it moves from (the history is capped, so its length repeats).
+      await this.#write(rev, w, { ...w, waiting, history: [...w.history, { at: this.#runner.now(), event: "waiting", reason: waiting }].slice(-WINDOW_LIMITS.history) }, "release.window.wait", cid(`wait-${rev}`));
       return true;
     }
     // The checks of preparation are made again just before the switch (a file changed since is caught here, not after).
@@ -277,6 +289,12 @@ export class ReleaseWindowService {
       await this.#tell(saved, next);
       return true;
     }
+    // The intent is saved before the switch, so a crash between the switch and its record is settled from the activation record (above) rather than read as "never activated".
+    if (w.activatingAt === undefined) {
+      const marked: WindowBody = { ...w, activatingAt: this.#runner.now() };
+      rev = await this.#write(rev, w, marked, "release.window.activating", cid("activating"));
+      w = marked;
+    }
     try {
       await this.#o.activation.activate(WINDOW_ACTOR, { commandId: cid("activate"), candidateId: w.candidateId, digest: w.digest, ...(w.migrationPlan === undefined ? {} : { migrationPlan: w.migrationPlan }) });
     } catch (error) {
@@ -286,11 +304,26 @@ export class ReleaseWindowService {
       await this.#tell(saved, next);
       return true;
     }
-    // The way back is the release the activation kept as the previous one (also right when the activation above was a replay after a crash).
-    const from = (await this.#o.activation.status(WINDOW_ACTOR)).previous?.id;
-    const { waiting: _w, ...rest } = w;
-    await this.#write(rev, w, { ...this.#next(rest as WindowBody, "activated", "activated; the launcher runs it at the controller's next start"), ...(from === undefined || from === w.candidateId ? {} : { from }) }, "release.window.activate", cid("activated"));
+    // The way back is the release the activation recorded as the one it switched from.
+    const took = await this.#took(w);
+    await this.#write(rev, w, this.#activated(w, took === undefined || took === "pending" ? (await this.#o.activation.status(WINDOW_ACTOR)).previous?.id : took.from), "release.window.activate", cid("activated"));
     return true;
+  }
+
+  #activated(w: WindowBody, from: string | undefined): WindowBody {
+    const { waiting: _w, ...rest } = w;
+    return { ...this.#next(rest as WindowBody, "activated", "activated; the launcher runs it at the controller's next start"), ...(from === undefined || from === w.candidateId ? {} : { from }) };
+  }
+
+  /** Whether this window's activation took effect: "pending" while its switch is still open in the journal; the release it switched from when it did; undefined when it did not. */
+  async #took(w: WindowBody): Promise<{ from?: string } | "pending" | undefined> {
+    const s = await this.#o.activation.status(WINDOW_ACTOR);
+    if (s.journal !== undefined && s.journal.kind === "activate" && s.journal.to.id === w.candidateId) return "pending";
+    const since = w.activatingAt ?? "";
+    const e = [...s.history].reverse().find((h) => (h.kind === "activated" || h.kind === "recovered") && h.to === w.candidateId && h.by === WINDOW_ACTOR.id && h.at >= since);
+    if (e !== undefined) return e.from === undefined ? {} : { from: e.from };
+    if (s.current?.id === w.candidateId) return s.previous === undefined ? {} : { from: s.previous.id };
+    return undefined;
   }
 
   /** After activation: committed once the launcher confirmed the release's start, reverted when it recorded the start as failed (and fell back). */

@@ -1655,7 +1655,6 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
-  /** The agents woken for a meeting (card M04h), one line each, owner only. A read that fails is said in one line. */
   /** Card K07: the maintenance windows in plain lines, owner only (a holder of release.manage reads them through release.window.list). */
   async releaseWindowLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.releaseWindows === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
@@ -1674,6 +1673,7 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines };
   }
 
+  /** The agents woken for a meeting (card M04h), one line each, owner only. A read that fails is said in one line. */
   async wakeLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.wakes === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     let wakes: readonly WakeView[] | undefined;

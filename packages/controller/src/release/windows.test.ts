@@ -222,4 +222,109 @@ for (const backend of backends) {
     assert.equal((await plain.get(c.owner, later.windowId)).status, "cancelled");
     assert.equal(c.pointer(), v1.id, "the cancelled window activated nothing");
   });
+
+  suite("local times across summer-time changes: a skipped time happens just after the gap, a repeated one is the first; a holder of release.manage reads the list", async (c) => {
+    const r = await c.ready("v1");
+    const w = c.win();
+    // New York springs forward on 2027-03-14: 02:30 does not exist and comes to 03:30 EDT (07:30 UTC).
+    const spring = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2027-03-14", "02:30", "America/New_York") });
+    assert.deepEqual([spring.opensAt, spring.closesAt], ["2027-03-14T07:30:00.000Z", "2027-03-14T08:30:00.000Z"]);
+    await w.cancel(c.owner, { commandId: cid("x"), windowId: spring.windowId });
+    // New York falls back on 2027-11-07: 01:30 happens twice; the first (EDT, 05:30 UTC) is the one.
+    const fall = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2027-11-07", "01:30", "America/New_York") });
+    assert.equal(fall.opensAt, "2027-11-07T05:30:00.000Z");
+    await w.cancel(c.owner, { commandId: cid("x"), windowId: fall.windowId });
+    // London in summer is an hour ahead of UTC.
+    const summer = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2027-07-01", "02:00") });
+    assert.equal(summer.opensAt, "2027-07-01T01:00:00.000Z");
+    const listed = await w.list(c.agent);
+    assert.deepEqual(listed.windows.map((x) => x.status), ["cancelled", "scheduled", "cancelled"], "newest opening first (November, July, March)");
+    await refuses("invalid_command", () => w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2027-12-01") }), /within a year/);
+  });
+
+  /** The real activation, with a process that stops right after (`after`) or right before (`before`) the switch: the window's record of the activation is then never written by that sweep. */
+  const crashing = (c: W, where: "before" | "after", failedStart?: () => string | undefined) => {
+    const state = { armed: true };
+    return { state, activation: {
+      verify: c.act.verify.bind(c.act), rollbackCheck: c.act.rollbackCheck.bind(c.act),
+      status: async (by: Principal) => { const s = await c.act.status(by); const f = failedStart?.(); return f === undefined ? s : { ...s, failedStarts: [...s.failedStarts, { id: f, at: "x", reason: "exited before confirming" }] }; },
+      activate: async (by: Principal, command: Parameters<ReleaseActivationService["activate"]>[1]) => {
+        if (state.armed && where === "before") { state.armed = false; throw new Error("the controller stopped"); }
+        const r = await c.act.activate(by, command);
+        if (state.armed) { state.armed = false; throw new Error("the controller stopped"); }
+        return r;
+      },
+    } };
+  };
+
+  suite("a controller that stops right after the switch, before the window recorded it: the next sweep settles it as activated from the activation record, even after the window closed, and cancel is refused", async (c) => {
+    const v1 = await c.ready("v1");
+    await c.act.activate(c.owner, { commandId: cid("a"), candidateId: v1.id, digest: v1.digest });
+    const v2 = await c.ready("v2");
+    const first = crashing(c, "after");
+    const { windowId } = await c.win({ activation: first.activation }).set(c.owner, { commandId: cid("w"), candidateId: v2.id, digest: v2.digest, ...at() });
+    c.clock.t = OPENS + MIN;
+    await assert.rejects(() => c.win({ activation: first.activation }).tick(), /controller stopped/);
+    assert.equal(c.pointer(), v2.id, "the switch happened");
+    const restarted = c.win();
+    const half = await restarted.get(c.owner, windowId);
+    assert.equal(half.status, "prepared");
+    assert.ok(half.activatingAt !== undefined, "the intent was saved before the switch");
+    await refuses("invalid_transition", () => restarted.cancel(c.owner, { commandId: cid("x"), windowId }), /already switched/);
+    c.clock.t = OPENS + 2 * 60 * MIN;
+    await restarted.tick();
+    const settled = await restarted.get(c.owner, windowId);
+    assert.deepEqual([settled.status, settled.from], ["activated", v1.id], "not missed: the release did switch");
+    assert.deepEqual(c.told, [], "nothing false was told");
+    await c.act.confirm(c.owner, { commandId: cid("c"), releaseId: v2.id });
+    await restarted.tick();
+    assert.equal((await restarted.get(c.owner, windowId)).status, "committed");
+  });
+
+  suite("a stop after the switch whose release then failed to start is reverted and quarantined, not failed; a stop before the switch, found after the close, is missed and switches nothing", async (c) => {
+    const v1 = await c.ready("v1");
+    const fell = { id: undefined as string | undefined };
+    const first = crashing(c, "after", () => fell.id);
+    const { windowId } = await c.win({ activation: first.activation }).set(c.owner, { commandId: cid("w"), candidateId: v1.id, digest: v1.digest, ...at() });
+    c.clock.t = OPENS + MIN;
+    await assert.rejects(() => c.win({ activation: first.activation }).tick(), /controller stopped/);
+    fell.id = v1.id;
+    // The controller comes back only after the window closed: the switch it made is still what is settled.
+    c.clock.t = OPENS + 3 * 60 * MIN;
+    const restarted = c.win({ activation: first.activation });
+    await restarted.tick();
+    assert.equal((await restarted.get(c.owner, windowId)).status, "activated");
+    await restarted.tick();
+    const r = await restarted.get(c.owner, windowId);
+    assert.equal(r.status, "reverted", r.reason);
+    assert.deepEqual((await restarted.list(c.owner)).quarantined.map((q) => q.candidateId), [v1.id]);
+    assert.deepEqual(c.told.map((t) => t.level), ["needs-you"]);
+
+    const v2 = await c.ready("v2");
+    const early = crashing(c, "before");
+    const second = await c.win({ activation: early.activation }).set(c.owner, { commandId: cid("w"), candidateId: v2.id, digest: v2.digest, ...at("2026-11-21") });
+    c.clock.t = Date.parse("2026-11-21T02:01:00.000Z");
+    await assert.rejects(() => c.win({ activation: early.activation }).tick(), /controller stopped/);
+    c.clock.t = Date.parse("2026-11-21T03:01:00.000Z");
+    const again = c.win();
+    await again.tick();
+    const m = await again.get(c.owner, second.windowId);
+    assert.equal(m.status, "missed", m.reason);
+    assert.equal(c.pointer(), v1.id, "the late sweep switched nothing");
+    await again.tick();
+    assert.equal(c.pointer(), v1.id);
+  });
+
+  suite("a long wait whose count of running attempts goes up and down keeps saying what it waits for (no repeated step names after the history is full)", async (c) => {
+    const r = await c.ready("v1");
+    const w = c.win();
+    const { windowId } = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at(undefined, undefined, undefined), durationMinutes: 180 });
+    c.clock.t = OPENS + MIN;
+    for (let i = 0; i < 30; i++) { c.live.n = 1 + (i % 2); await w.tick(); }
+    const got = await w.get(c.owner, windowId);
+    assert.deepEqual([got.status, got.waiting], ["prepared", "2 agent attempt(s) running"]);
+    c.live.n = 0;
+    await w.tick();
+    assert.equal((await w.get(c.owner, windowId)).status, "activated");
+  });
 }
