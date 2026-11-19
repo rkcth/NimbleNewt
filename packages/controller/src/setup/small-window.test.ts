@@ -55,7 +55,11 @@ test("routing.provider.add accepts a window too small to start a task, warns wit
 test("the figures: the floor covers the measured fixed part, every accepted window under the startable one warns, the guide's words come from the constants", () => {
   assert.ok(DEFAULT_ROUTE_FLOOR_CHARS >= WORKER_FIXED_PART_CHARS, "an unmeasured route counts at least the real fixed part");
   assert.equal(DEFAULT_ROUTE_FLOOR_CHARS, ROUTE_FLOOR_DEFAULTS.systemPromptChars + ROUTE_FLOOR_DEFAULTS.toolSchemaChars);
-  for (let w = MIN_WORKABLE_CONTEXT_TOKENS; w < MIN_STARTABLE_WINDOW; w += 512) { assert.equal(windowCanStartTask(w), false, String(w)); assert.ok(smallWindowWarning(w) !== undefined, String(w)); }
+  // Every window from the accepted minimum up: warned exactly when it cannot start a task (a window a few tokens under the 1,024-multiple MIN_STARTABLE_WINDOW may start one, and is not warned).
+  for (let w = MIN_WORKABLE_CONTEXT_TOKENS; w <= MIN_STARTABLE_WINDOW + 1_024; w++) assert.equal(smallWindowWarning(w) === undefined, windowCanStartTask(w), String(w));
+  for (let w = MIN_WORKABLE_CONTEXT_TOKENS; w < MIN_STARTABLE_WINDOW; w += 1_024) assert.equal(windowCanStartTask(w), false, String(w));
+  const exact = Array.from({ length: 1_024 }, (_, i) => MIN_STARTABLE_WINDOW - 1_023 + i).find((w) => windowCanStartTask(w))!;
+  assert.ok(exact > MIN_STARTABLE_WINDOW - 1_024 && smallWindowWarning(exact) === undefined && smallWindowWarning(exact - 1) !== undefined, String(exact));
   for (const w of [MIN_STARTABLE_WINDOW, 32_768, 40_960, 131_072]) { assert.equal(windowCanStartTask(w), true, String(w)); assert.equal(smallWindowWarning(w), undefined, String(w)); }
   const q = SETUP_GUIDE["model-route"].question;
   assert.ok(q.includes("about 5,900 tokens") && q.includes("32,768 or more is needed in practice") && !q.includes("4,200"), q);

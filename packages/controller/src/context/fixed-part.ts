@@ -57,8 +57,11 @@ export const grouped = (n: number): string => String(n).replace(/\B(?=(\d{3})+(?
 /** The plain words the owner reads about the fixed part and the smallest workable window, from the figures above (setup's guide, the interpreter's prompt, the warning of `routing.provider.add`). */
 export const FIXED_PART_WORDS = `the team's fixed instructions and tools take about ${grouped(WORKER_FIXED_PART_ABOUT_TOKENS)} tokens and a task's first call must fit in a quarter of the window, so ${grouped(PRACTICAL_STARTABLE_WINDOW)} or more is needed in practice`;
 
-/** What `routing.provider.add` tells the owner about a route whose window is accepted (at least `MIN_WORKABLE_CONTEXT_TOKENS`) but too small to start any task; undefined when the window can start one. */
+/**
+ * What `routing.provider.add` tells the owner about a route whose window is accepted (at least `MIN_WORKABLE_CONTEXT_TOKENS`) but too small to start any task; undefined when the window can start one. Judged on the
+ * window itself, not on `MIN_STARTABLE_WINDOW` (a multiple of 1,024): a window a few tokens under that figure may still start a task, and is then not told that none can.
+ */
 export function smallWindowWarning(window: number): string | undefined {
-  if (!Number.isSafeInteger(window) || window >= MIN_STARTABLE_WINDOW) return undefined;
+  if (!Number.isSafeInteger(window) || window >= MIN_STARTABLE_WINDOW || windowCanStartTask(window)) return undefined;
   return `a context window of ${grouped(window)} tokens is accepted, but no task can start on it: ${FIXED_PART_WORDS}; with the goal anchor and the smallest task the first call needs a window of at least ${grouped(MIN_STARTABLE_WINDOW)} tokens. Give the model's real context window, or add a model with a larger one`;
 }

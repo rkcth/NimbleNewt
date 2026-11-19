@@ -188,12 +188,14 @@ for (const backend of backends) {
     const before = await enf.routeMoved(owner, { taskId: t, attemptId: "att-1", route: "local/small", window: 65_536, items });
     assert.deepEqual([before.measured, before.rebuilt], [false, true]);
     // A first call on the route measures its system prompt and tool schemas (for every task, kept per route).
-    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route: contextRouteKey("local/small"), call: { systemPromptChars: 12_000, toolSchemaChars: 9_000, startupTokens: 500, replyReserveTokens: 1_000 } });
-    assert.deepEqual(await enf.fixedPartOf("local/small", 65_536), { systemPromptChars: 12_000, toolSchemaChars: 9_000, tokens: 7_000 });
+    await enf.admit(owner, { taskId: t2, attemptId: "att-1", window: 65_536, route: contextRouteKey("local/small"), call: { systemPromptChars: 12_000, toolSchemaChars: 18_000, startupTokens: 500, replyReserveTokens: 1_000 } });
+    // The measured figure is well over the unmeasured-route floor (which follows the real worker's fixed part, card "Fixed-part sizing after T08"), so it leaves less room than the floor did.
+    assert.ok(30_000 > DEFAULT_ROUTE_FLOOR_CHARS + 5_000);
+    assert.deepEqual(await enf.fixedPartOf("local/small", 65_536), { systemPromptChars: 12_000, toolSchemaChars: 18_000, tokens: 10_000 });
     assert.equal(await enf.fixedPartOf("other/route", 65_536), undefined);
     const after = await enf.routeMoved(owner, { taskId: t, attemptId: "att-2", route: "local/small", window: 65_536, items });
     assert.equal(after.measured, true);
-    assert.ok(after.rebuilt && after.startup.tokens + 7_000 <= contextBudget(65_536).startupTokens, "the view is built around the real fixed part");
+    assert.ok(after.rebuilt && after.startup.tokens + 10_000 <= contextBudget(65_536).startupTokens, "the view is built around the real fixed part");
     assert.ok(after.startup.tokens < before.startup.tokens, "a larger fixed part leaves less room, so more is cut");
     // The cut text can be read back by digest.
     const cut = after.startup.cuts[0]!;
