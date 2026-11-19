@@ -8,7 +8,7 @@ import { PiAdapter, type AdapterConversation } from "../adapter.js";
 import { RequestIdConflictError } from "../errors.js";
 import { assertWorkableWindow, compactionThresholds } from "../compaction-thresholds.js";
 import type { AdapterContextPolicy } from "../context-policy.js";
-import { boundTransport, composeTools, createBridge, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
+import { boundTransport, composeTools, createBridge, seedFromConversation, type Bridge, type BridgeReply, type BridgeTransport } from "../bridge.js";
 import { DEFAULT_MAX_CONTINUATIONS, type ContinuationPolicy } from "../continuation.js";
 import { PI_AGENT_LAYOUT, sharedSystemText, volatileContext } from "../prompt-layout.js";
 import { processClock } from "./clock.js";
@@ -353,14 +353,15 @@ export async function runWorker(io: WorkerIo, hooks: WorkerHooks = {}): Promise<
       // Pi keeps the newest part of a conversation verbatim when it compacts; its default would be larger than a small model's whole startup share, so nothing would ever be cut. A tenth of the window is kept (provisional, card H12f).
       settings: { compaction: { keepRecentTokens: Math.max(500, Math.floor(start.model.contextWindow * KEEP_RECENT_SHARE)), ...compactionThresholds(start.model.contextWindow, start.model.maxTokens) } },
     });
-    // Work an earlier process of this attempt left unfinished stays held (Pi refuses to make progress) until the controller has reviewed it; the host says so in the start when it has (a recipe restart, a resume after loss). Interrupted tool calls are not run again:
-    // the bridge answers a repeated call from the controller's ledger, and the model sees what happened to them.
+    // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them, and the calls a crash interrupted keep their IDs (G04 follow-up). Told before the hold is released,
+    // because the release presents those calls again at once.
+    try { await seedFromConversation(bridge, adapter.root()); } catch { /* a new conversation has none */ }
+    // Work an earlier process of this attempt left unfinished stays held (Pi refuses to make progress) until the controller has reviewed it; the host says so in the start when it has (a recipe restart, a resume after loss). Interrupted bridge calls
+    // are presented again under their own call IDs (the bridge tools are replay-safe): the controller answers each from its ledger, so a write is never done twice and one that was done is reported as done.
     if (start.recover !== undefined) {
       const found = await adapter.interrupted();
       if (found.held) await adapter.recover({ abandon: [], reason: start.recover.reason, decidedBy: "local-worker-restart" });
     }
-    // A conversation resumed from the store already used some provider call IDs; the bridge goes on numbering after them.
-    try { bridge.seed((await adapter.root().transcript()).flatMap((e) => e.toolCallIds)); } catch { /* a new conversation has none */ }
     // Card G09: the updates a side line of work selected for the task go into the conversation before the turn, each as an update entry that keeps where it came from. The request ID names the update, so one this
     // conversation already holds (a restart, the next round of the same attempt) is applied once. One that cannot be placed fails the start: the turn never runs without it.
     // While work an earlier process left unfinished is still held (this start brought no review of it), nothing is placed: the turn then fails on the held work exactly as it does without updates (Pi refuses any progress), and

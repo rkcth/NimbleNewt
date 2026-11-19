@@ -293,6 +293,51 @@ for (const backend of backends) {
     assert.ok(results.some((r) => r.status === "fulfilled"));
   });
 
+  suite("G04 follow-up: a claim taken under an older primary epoch is given up at once (a restarted controller is not refused as busy), and recovery still never applies the effect twice", async ({ make, world, clock }) => {
+    const outside = new Outside();
+    const a = make("exec-a", losingFirstSettlement(world.storage, { dead: true }));
+    const made = await a.intend(intent("e"));
+    await assert.rejects(a.run(made.id, askable(outside)));
+    assert.equal(outside.applications.length, 1);
+    // The same epoch: the lease holds (the existing rule).
+    await refuses("effect_busy", () => make("exec-b").run(made.id, askable(outside)));
+    // A new primary (a restart): the dead controller's claim is given up at once, without waiting out the lease; the target is asked, not run again.
+    const { epoch } = await world.storage.acquireEpoch({ holder: "c2", at: new Date(clock.now).toISOString() });
+    const restarted = EffectService.withEpoch(world.storage, epoch, undefined, { holder: "exec-c", clock: () => new Date(clock.now).toISOString(), pause: async () => undefined });
+    const recovered = await restarted.run(made.id, askable(outside));
+    assert.deepEqual([recovered.status, outside.applications.length, outside.executeCalls], ["confirmed", 1, 1]);
+  });
+
+  suite("G04 follow-up: closeUnbridged leaves a tool bridge call's effect to its attempt while that attempt holds the task, then closes a never-started one as failed and marks one an executor vanished from uncertain, running nothing", async ({ effects, make, projects, assign, world, clock }) => {
+    const { taskId, fence } = await ownedTask(projects, assign);
+    const outside = new Outside();
+    const bridgeIntent = (label: string) => intent(label, { kind: "bridge", target: "desk.write", taskId, fence });
+    const unstarted = await effects.intend(bridgeIntent("never"));
+    const vanished = await effects.intend(bridgeIntent("vanished"));
+    await assert.rejects(make("exec-x", losingFirstSettlement(world.storage, { dead: true })).run(vanished.id, keyed(outside)));
+    const pending = await effects.intend(bridgeIntent("pending"));
+    outside.failBefore = 1;
+    assert.equal((await effects.run(pending.id, keyed(outside))).status, "pending", "an idempotent target that did not answer leaves the effect pending, its claim given back");
+    const calls = outside.executeCalls;
+    // The attempt holds the task: everything is left to it (the claim of the vanished executor too, once its lease has passed).
+    for (const e of [unstarted, vanished, pending]) assert.equal(await effects.closeUnbridged(e.id), undefined);
+    clock.now += 6 * 60_000;
+    for (const e of [unstarted, vanished, pending]) assert.equal(await effects.closeUnbridged(e.id), undefined);
+    // The attempt loses the task: nothing will present these calls again.
+    const rev = (await assign.getAssignment(taskId))!.revision;
+    await assign.releaseTask({ commandId: cid("rel"), actor: me, taskId, expectedRevision: rev });
+    const closed = await effects.closeUnbridged(unstarted.id);
+    assert.deepEqual([closed?.status, closed?.evidence?.["reason"]], ["failed", "superseded before it started"]);
+    assert.equal((await effects.closeUnbridged(vanished.id))?.status, "uncertain");
+    assert.equal(await effects.closeUnbridged(pending.id), undefined, "a pending effect whose claim was given back is not judged here");
+    assert.deepEqual([(await world.storage.getEffect(unstarted.id))?.status, (await world.storage.getEffect(vanished.id))?.status, (await world.storage.getEffect(pending.id))?.status], ["failed", "uncertain", "intended"]);
+    assert.equal(outside.executeCalls, calls, "nothing was executed by closing");
+    assert.deepEqual(outside.applications, [vanished.id], "the vanished executor's push stays the only one");
+    // Final states are not touched again.
+    assert.equal(await effects.closeUnbridged(unstarted.id), undefined);
+    await refuses("effect_uncertain", () => effects.run(vanished.id, keyed(outside)));
+  });
+
   suite("a second run of an effect already running is refused, so a non-idempotent target is not applied twice", async ({ effects }) => {
     const outside = new Outside();
     const gate = deferred<void>();

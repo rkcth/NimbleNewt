@@ -8,7 +8,7 @@ import {
   type ControllerStorage, type EffectBridge, type Fence, type JsonObject, type Principal,
 } from "@nimblenewt/controller";
 import * as harness from "@nimblenewt/controller/testing";
-import { PiAdapter, type AdapterTool } from "@nimblenewt/pi-adapter";
+import { BRIDGE_REPLAY, PiAdapter, type AdapterTool } from "@nimblenewt/pi-adapter";
 import { piConversation } from "./conversation.js";
 import { Chaos, Clock, OperationSpy, acknowledgedSurvive, describe, openStore, operationsOf, runChild, type Clean, type Slice, type SliceWorld, type StoreSpec } from "./g04-fixture.js";
 
@@ -31,9 +31,15 @@ const executedLog = (dir: string): string => join(dir, "executed.log");
 const outsideLog = (dir: string): string => join(dir, "outside.log");
 
 /**
+ * What the production bridge tools declare to Pi about an interrupted call (G04 follow-up: `"safe"`, present it again under its own call ID). The `push` tool here takes it from the bridge itself, so the test follows
+ * the production setting; `undefined` is the setting of a call that is not presented again (every bridge tool before the follow-up, or a conversation whose interrupted work was abandoned).
+ */
+export const PRODUCTION_REPLAY: "safe" | undefined = BRIDGE_REPLAY;
+
+/**
  * The outside target, the same as the S09 slice's (`executed.log` counts every arrival, `outside.log` holds each applied key once): it honours the key and
  * can be asked whether a key was applied. Its two steps are boundaries. The production controller composes the reconciler with no bridges, so this
- * target is reached only by the tool's own call (and by the call's repetition, which Pi never makes for an interrupted call).
+ * target is reached only by the tool's own call (and by the same call presented again after a restart).
  */
 export function pushTarget(world: SliceWorld): EffectBridge {
   return {
@@ -53,11 +59,9 @@ export function pushTarget(world: SliceWorld): EffectBridge {
 export interface ToolController { gen: GenerationService; world: SliceWorld; taskId: string; fence: Fence }
 
 /**
- * The `push` tool the model calls. Like the production bridge tools (`pi-adapter/src/bridge.ts`) it declares no `replay`, so Pi never runs an
- * interrupted call again; the model is told it was interrupted. Its body is the L05d route: begin, record the complete call, complete the
- * generation, admit the call as an effect and run it through the ledger. Every command ID is derived from the attempt and the call ID.
- * `replay: "safe"` (the second test) lets Pi run an interrupted call again after a restart, with the same call ID: what the route does when a call is
- * presented again.
+ * The `push` tool the model calls. Its body is the L05d route: begin, record the complete call, complete the generation, admit the call as an effect and run it through the ledger. Every command ID is derived from the
+ * attempt and the call ID. `replay: "safe"` (the production bridge tools' setting, `PRODUCTION_REPLAY`) lets Pi present an interrupted call again after a restart, with the same call ID; with no `replay` Pi tells the model
+ * the call was interrupted and never presents it again.
  */
 export function pushTool(controller: () => ToolController, replay?: "safe"): AdapterTool {
   return {
@@ -132,8 +136,8 @@ export async function toolPath(slice: Slice, world: SliceWorld, bind: (c: ToolCo
 export interface ToolState {
   /** Raw arrivals at the target, and keys it applied. */
   readonly executed: number; readonly applied: number;
-  /** Effects in the ledger with their status and whether they started. */
-  readonly effects: readonly { readonly id: string; readonly status: string; readonly started: boolean }[];
+  /** Effects in the ledger with their status, whether they started and whether an open `effect_uncertain` blocker tells the owner about them. */
+  readonly effects: readonly { readonly id: string; readonly status: string; readonly started: boolean; readonly reported: boolean }[];
   /** The tool call's state in its generation, if it was recorded. */
   readonly call: string | undefined;
   /** What the model said at the end, and what the attempt's recovery point holds. */
@@ -145,10 +149,11 @@ export interface ToolState {
 }
 
 export async function toolState(slice: Slice, world: SliceWorld, adapter: PiAdapter, text: string): Promise<ToolState> {
-  const effects: { id: string; status: string; started: boolean }[] = [];
+  const effects: { id: string; status: string; started: boolean; reported: boolean }[] = [];
   for (const a of await world.storage.listAggregates("effect", { limit: 100 })) {
     const record = await world.storage.getEffect(a.id);
-    effects.push({ id: a.id, status: record?.status ?? "missing", started: (a.body as { started?: boolean }).started === true });
+    const reported = (await slice.blockers.openFor("effect_uncertain", { kind: "effect", id: a.id })) !== undefined;
+    effects.push({ id: a.id, status: record?.status ?? "missing", started: (a.body as { started?: boolean }).started === true, reported });
   }
   const runs = await world.storage.listAggregates("generation-run", { limit: 100 });
   const calls = runs.flatMap((r) => ((r.body as { toolCalls?: { id: string; state: string }[] }).toolCalls ?? []).filter((c) => c.id === "p1").map((c) => c.state));
@@ -167,6 +172,7 @@ export async function toolState(slice: Slice, world: SliceWorld, adapter: PiAdap
  * What every run must satisfy, whatever boundary it died at: the protected effect reached the outside world at most once and at most one effect
  * exists; the model was never told "pushed" unless the target applied it; the path finished (task done, attempt succeeded, one task message and one
  * final answer in the transcript, the answer kept in the recovery point); and an effect that is settled agrees with the outside world.
+ * G04 follow-up guarantees: no effect is left open (`intended`) once the path has finished, and an effect that may or may not have happened (`uncertain`) is shown to the owner by an open blocker.
  */
 export function toolInvariants(s: ToolState): string[] {
   const problems: string[] = [];
@@ -176,10 +182,14 @@ export function toolInvariants(s: ToolState): string[] {
   expect(s.effects.length <= 1, `${s.effects.length} effects in the ledger`);
   expect(s.text !== DONE_TEXT || s.applied === 1, "the model was told the push happened but the outside world does not hold it");
   expect(s.effects.length > 0 || s.executed === 0, "the target was reached with no effect in the ledger");
+  // The admission records the call as admitted and creates its effect in one commit: a call's state and the ledger agree.
+  expect((s.effects.length === 1) === (s.call === "admitted"), `the call is ${s.call ?? "not recorded"} while the ledger holds ${s.effects.length} effect(s)`);
   for (const e of s.effects) {
     if (e.status === "confirmed") expect(s.applied === 1, `effect ${e.id} is confirmed but nothing was applied`);
     if (e.status === "failed") expect(s.applied === 0, `effect ${e.id} failed but the push was applied`);
-    if (e.status === "intended" && !e.started) expect(s.applied === 0, `effect ${e.id} never started but the push was applied`);
+    expect(e.status !== "intended", `effect ${e.id} is left open (${e.started ? "started" : "never started"}): nothing settles or reports it`);
+    if (e.status === "uncertain") expect(e.reported, `effect ${e.id} is uncertain and the owner is not told`);
+    if (e.status === "failed") expect(!e.started, `effect ${e.id} started and was closed as failed: it may have happened`);
   }
   expect(s.taskState === "done" && s.attemptState === "succeeded", `task ${s.taskState}, attempt ${s.attemptState}`);
   expect(s.inputs === 1, `the task is ${s.inputs} user message(s) in the transcript`);
@@ -189,8 +199,8 @@ export function toolInvariants(s: ToolState): string[] {
 }
 
 /**
- * How a run ended, in words, for the evidence: the clean outcome; the call cut before any effect existed or before it started (nothing pushed, the
- * model told it did not finish); pushed but the model told it did not finish; or an effect that started and that nothing settles afterwards.
+ * How a run ended, in words, for the evidence: the clean outcome (pushed once, confirmed, the model told); the call cut before any effect existed; an effect admitted but never started and closed as failed; one that
+ * started, was never settled and was marked uncertain with the owner told; pushed and confirmed while the model was told it did not finish; or an effect left open (which the invariants refuse).
  */
 export function outcomeOf(s: ToolState): string {
   // Every part of the sentence is read from the state (nothing is assumed from the branch), so a change in what is pushed, what the model is told
@@ -199,11 +209,12 @@ export function outcomeOf(s: ToolState): string {
   const pushed = s.applied === 0 ? "nothing pushed" : `${s.applied} pushed`;
   const told = s.text === DONE_TEXT ? "model told it was pushed" : s.text === NOT_DONE_TEXT ? "model told it did not finish" : `model said ${JSON.stringify(s.text)}`;
   const blocked = s.blockers.length === 0 ? "no blocker" : `blockers ${[...s.blockers].sort().join(", ")}`;
-  if (s.text === DONE_TEXT && e?.status === "confirmed" && s.applied === 1 && s.blockers.length === 0) return "pushed once, model told";
+  if (s.text === DONE_TEXT && e?.status === "confirmed" && s.applied === 1 && s.blockers.length === 0 && s.call === "admitted") return "pushed once, model told";
   if (e === undefined) return `cut before the call was admitted: ${pushed}, ${blocked}, ${told}`;
-  if (e.status === "intended" && !e.started) return `admitted, never started: ${pushed}, the intent stays open, ${blocked}, ${told}`;
-  if (e.status === "intended" && e.started) return `started, never settled (${s.applied === 1 ? "pushed" : "not pushed"}): ${blocked}, ${told}`;
-  if (e.status === "confirmed" && s.applied === 1) return `pushed once and confirmed, ${blocked}, but the ${told}`;
+  if (e.status === "intended") return `left open (${e.started ? "started" : "never started"}): ${pushed}, ${blocked}, ${told}`;
+  if (e.status === "failed" && !e.started) return `admitted, never started: closed as failed once the attempt ended, ${pushed}, ${blocked}, ${told}`;
+  if (e.status === "uncertain") return `started, never settled: marked uncertain once the attempt ended, ${pushed}, ${e.reported ? "the owner told by its blocker" : "the owner NOT told"}, ${blocked}, ${told}`;
+  if (e.status === "confirmed" && s.applied === 1) return `pushed once and confirmed, but the call was not presented again: ${blocked}, ${told}`;
   return `effect ${e.status}${e.started ? " (started)" : ""}, ${pushed}, ${blocked}, ${told}`;
 }
 

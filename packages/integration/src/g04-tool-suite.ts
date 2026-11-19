@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { HEAVY_SKIP, describe, engines, stopServer, withEngine } from "./g04-fixture.js";
-import { DONE_TEXT, cleanToolRun, killToolAndRestart, toolBoundaries, type ToolKilled } from "./g04-tool.js";
+import { DONE_TEXT, PRODUCTION_REPLAY, cleanToolRun, killToolAndRestart, toolBoundaries, type ToolKilled } from "./g04-tool.js";
 
-/** The outcome of a kill at each boundary of the tool route when Pi does not run an interrupted call again (the production bridge tools' setting), by the boundary's label. */
-export function expectedWithoutReplay(label: string): string {
-  if (/after generation\.admit|before effect\.claim/.test(label)) return "admitted, never started: nothing pushed, the intent stays open, no blocker, model told it did not finish";
-  if (/after effect\.claim|outside: before applying/.test(label)) return "started, never settled (not pushed): no blocker, model told it did not finish";
-  if (/outside: after applying|before effect\.settle/.test(label)) return "started, never settled (pushed): no blocker, model told it did not finish";
-  if (/after effect\.settle|tool: outcome known/.test(label)) return "pushed once and confirmed, no blocker, but the model told it did not finish";
+/**
+ * The outcome of a kill at each boundary of the tool route when the interrupted call is NOT presented again (a tool that is not replay-safe, or a conversation whose interrupted work was abandoned), by the boundary's label.
+ * G04 follow-up: once the attempt has ended, nothing is left open. A call admitted but never started is closed as failed; one that started is marked uncertain and the owner is told by a blocker; it is never run again.
+ */
+export function expectedNotPresentedAgain(label: string): string {
+  if (/after generation\.admit|before effect\.claim/.test(label)) return "admitted, never started: closed as failed once the attempt ended, nothing pushed, no blocker, model told it did not finish";
+  if (/after effect\.claim|outside: before applying/.test(label)) return "started, never settled: marked uncertain once the attempt ended, nothing pushed, the owner told by its blocker, blockers effect_uncertain, model told it did not finish";
+  if (/outside: after applying|before effect\.settle/.test(label)) return "started, never settled: marked uncertain once the attempt ended, 1 pushed, the owner told by its blocker, blockers effect_uncertain, model told it did not finish";
+  if (/after effect\.settle|tool: outcome known/.test(label)) return "pushed once and confirmed, but the call was not presented again: no blocker, model told it did not finish";
   return "cut before the call was admitted: nothing pushed, no blocker, model told it did not finish";
 }
 
@@ -39,21 +42,23 @@ export function defineToolKillTests(engineName: string, heavy = false): void {
     assert.deepEqual(points.map((p) => describe(clean, p).replace(/^\d+ /, "")), [...ROUTE_STEPS]);
     const runs: ToolKilled[] = [];
     for (const point of points) runs.push(await withEngine(engine, (spec, dir) => killToolAndRestart(spec, dir, clean, point, replay)));
-    for (const r of runs) console.log(`# g04 tool${replay === undefined ? "" : " replayed"}[${engine.name}] ${r.label}: ${r.outcome} (model asked ${r.modelCalls} time(s) after the restart)`);
+    for (const r of runs) console.log(`# g04 tool${replay === undefined ? " not presented again" : ""}[${engine.name}] ${r.label}: ${r.outcome} (model asked ${r.modelCalls} time(s) after the restart)`);
     assert.deepEqual(runs.flatMap((r) => r.problems), []);
     return { runs, points, first: describe(clean, points[0]!), last: describe(clean, points.at(-1)!) };
   };
 
-  test(`${engine.name}: a real SIGKILL at every boundary of a protected tool call the Pi model makes (admission, the effect ledger, the target) never pushes twice, never reports a push that did not happen and loses no acknowledged operation; an interrupted call is not run again, so a started effect stays unsettled and a finished one is reported to the model as not finished`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
-    const { runs, points, first, last } = await sweep(undefined);
+  test(`${engine.name}: a real SIGKILL at every boundary of a protected tool call the Pi model makes (admission, the effect ledger, the target), with the production bridge tools' setting (an interrupted call is presented again under its own call ID), ends every time exactly like the uncrashed run: pushed once, confirmed and reported to the model as pushed, the call admitted, no effect left open, no blocker, never pushed twice, nothing acknowledged lost`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
+    assert.equal(PRODUCTION_REPLAY, "safe", "the production bridge tools present an interrupted call again (G04 follow-up)");
+    const { runs, points, first, last } = await sweep(PRODUCTION_REPLAY);
     assert.equal(points.length, ROUTE_STEPS.length);
-    assert.deepEqual(runs.map((r) => `${r.label}: ${r.outcome}`), runs.map((r) => `${r.label}: ${expectedWithoutReplay(r.label)}`));
-    console.log(`# g04 tool[${engine.name}]: ${points.length} boundaries of the tool route (SIGKILL), ${first} to ${last}, database read before restart, restarted and checked`);
+    assert.deepEqual(runs.filter((r) => r.outcome !== "pushed once, model told").map((r) => `${r.label}: ${r.outcome}`), []);
+    console.log(`# g04 tool[${engine.name}]: ${points.length} boundaries of the tool route (SIGKILL), ${first} to ${last}, database read before restart, restarted, every one finished as the uncrashed run`);
   });
 
-  test(`${engine.name}: when Pi runs the interrupted call again with the same call ID, the same admission and the effect ledger finish it: a real SIGKILL at every boundary of the route ends with the push applied once, confirmed and reported to the model`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
-    const { runs, points, first, last } = await sweep("safe");
-    assert.deepEqual(runs.filter((r) => r.outcome !== "pushed once, model told").map((r) => `${r.label}: ${r.outcome}`), []);
-    console.log(`# g04 tool replayed[${engine.name}]: ${points.length} boundaries of the tool route (SIGKILL), ${first} to ${last}, every one finished as the uncrashed run`);
+  test(`${engine.name}: when an interrupted call is NOT presented again (a tool that is not replay-safe, or abandoned work), a real SIGKILL at every boundary still never pushes twice and leaves nothing open: once the attempt ends, an admitted call that never started is closed as failed and one that started is marked uncertain and reported to the owner, never run again`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
+    const { runs, points, first, last } = await sweep(undefined);
+    assert.equal(points.length, ROUTE_STEPS.length);
+    assert.deepEqual(runs.map((r) => `${r.label}: ${r.outcome}`), runs.map((r) => `${r.label}: ${expectedNotPresentedAgain(r.label)}`));
+    console.log(`# g04 tool not presented again[${engine.name}]: ${points.length} boundaries of the tool route (SIGKILL), ${first} to ${last}, every effect closed or reported`);
   });
 }

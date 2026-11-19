@@ -14,8 +14,12 @@ const safeCallId = (id: string): string => (/^[A-Za-z0-9._:-]{1,120}$/.test(id) 
  *
  * What the extension holds is a `BridgeTransport` and nothing else: one function that sends a request to the controller's execution service, already bound to the worker's own scoped credential and the
  * attempt's gateway. It has no service object, no admin method and no way to name a principal; everything is checked by the controller, so a tampered extension can only send requests the controller
- * would refuse or answer exactly as it would for the worker. The extension never says whether a call is replay-safe: the tools it declares carry no such flag, and the controller takes it from the
- * approved manifest.
+ * would refuse or answer exactly as it would for the worker.
+ *
+ * Every bridge tool is declared replay-safe to Pi (G04 follow-up): after a crash Pi presents an interrupted bridge call again, under its own call ID, instead of telling the model it was interrupted. Presenting a call again
+ * is safe because the controller decides what it means: a write admitted as an effect of its generation (card L05d) is answered from the effect ledger (done once: its recorded result; never started: it runs now, once; started
+ * and unsettled: it is reconciled, never run blindly), every other operation is keyed by the attempt and the call ID, and a catalogue tool's own restart policy stays the controller's, from the approved manifest. So a
+ * push that happened is reported as done, and the model has no reason to make it again under a new call ID.
  */
 
 export interface BridgeRequest { readonly op: string; readonly callId: string; readonly args?: Record<string, unknown> }
@@ -66,6 +70,9 @@ const SPECS: readonly Spec[] = [
   { op: "work.note", description: "Keep a running note as you work; your report is built from them.", parameters: obj({ kind: text("did, found, left or could-not"), text: text("the note") }, ["kind", "text"]) },
   { op: "work.refresh", description: "Before you submit, bring your checkout up to the landing branch head. Your changes are re-applied, never resolved for you: overlapping edits keep conflict markers and are listed; fix them yourself.", parameters: obj({}) },
 ];
+
+/** What the bridge tools declare to Pi about an interrupted call (G04 follow-up): present it again after a restart. */
+export const BRIDGE_REPLAY = "safe" as const;
 
 /** The wire name of an operation: `nimblenewt__desk-read`. */
 export const bridgeToolName = (op: string): string => wireName(`nimblenewt.${op.replace(".", "-")}`);
@@ -146,28 +153,52 @@ export interface Bridge {
   readonly tools: readonly AdapterTool[];
   /** Declarations per model request. */
   readonly declarations: DeclarationBoard;
-  /** Tells the bridge which provider call IDs the stored conversation already holds (an attempt resumed in a new process). */
-  seed(ids: readonly string[]): void;
+  /**
+   * Tells the bridge which provider call IDs the stored conversation already holds (an attempt resumed in a new process), in order. `open`: those of them that have no result yet (calls a crash interrupted, which Pi
+   * presents again when it resumes); each keeps the ID the bridge gave it before, so the controller sees the same call, not a new one.
+   */
+  seed(ids: readonly string[], open?: readonly string[]): void;
 }
 
 /** Builds the protected extension for one worker from its transport. The result is frozen; nothing in it can be switched off. */
 export function createBridge(transport: BridgeTransport, options: { maxTools?: number } = {}): Bridge {
   // A provider may hand out the same tool call ID twice (some local servers count from zero in every reply). The controller treats a call ID as one request, so the second use gets another one: a digest of the ID and its number, which no provider ID can
-  // equal by accident. `seed` is told the IDs already in the stored conversation when an attempt resumes in a new process, so the numbering goes on where it stopped (an interrupted bridge call is never run again by Pi, so nothing replays under an old number).
+  // equal by accident. `seed` is told the IDs already in the stored conversation when an attempt resumes in a new process, so the numbering goes on where it stopped; an interrupted call Pi presents again takes back the number it had
+  // (`kept`), so it reaches the controller under the same ID as before the crash.
   const used = new Map<string, number>();
+  const kept = new Map<string, number[]>();
+  const numbered = (base: string, n: number): string => (n === 1 ? base : `d:${createHash("sha256").update(`${base}\0${n}`).digest("hex").slice(0, 40)}`);
   const unique = (id: string): string => {
     const base = safeCallId(id);
+    const again = kept.get(base);
+    if (again !== undefined && again.length > 0) {
+      const n = again.shift()!;
+      if (again.length === 0) kept.delete(base);
+      return numbered(base, n);
+    }
     const n = (used.get(base) ?? 0) + 1;
     used.set(base, n);
-    return n === 1 ? base : `d:${createHash("sha256").update(`${base}\0${n}`).digest("hex").slice(0, 40)}`;
+    return numbered(base, n);
   };
-  const seed = (ids: readonly string[]): void => { for (const id of ids) { const base = safeCallId(id); used.set(base, (used.get(base) ?? 0) + 1); } };
+  const seed = (ids: readonly string[], open: readonly string[] = []): void => {
+    for (const id of ids) { const base = safeCallId(id); used.set(base, (used.get(base) ?? 0) + 1); }
+    // An open call is the newest use of its ID (Pi runs only the calls of the newest reply); several open uses of one ID take the newest numbers, in order.
+    const openCount = new Map<string, number>();
+    for (const id of open) { const base = safeCallId(id); openCount.set(base, (openCount.get(base) ?? 0) + 1); }
+    for (const [base, k] of openCount) {
+      const total = used.get(base) ?? 0;
+      const from = Math.max(1, total - k + 1);
+      const numbers = Array.from({ length: Math.max(0, total - from + 1) }, (_, i) => from + i);
+      if (numbers.length > 0) kept.set(base, [...(kept.get(base) ?? []), ...numbers]);
+    }
+  };
   const tools = SPECS.map((spec): AdapterTool => Object.freeze({
     name: bridgeToolName(spec.op),
     description: spec.description,
     parameters: spec.parameters,
     shared: true,
-    // No `replay`: whether a call may be run again after a restart is the controller's decision from the approved manifest.
+    // Presented again after a crash, under its own call ID: the controller answers it from its records (see above).
+    replay: BRIDGE_REPLAY,
     execute: async (args: unknown, context: { readonly callId: string }) => {
       const callId = unique(context.callId);
       // A memory read that cannot be delivered (a controller that is gone or a wire that fails) is an answer in words, not a fault of the worker.
@@ -181,6 +212,14 @@ export function createBridge(transport: BridgeTransport, options: { maxTools?: n
     },
   }));
   return Object.freeze({ tools: Object.freeze(tools), declarations: new DeclarationBoard(transport, options), seed });
+}
+
+/**
+ * Tells the bridge what a conversation resumed from the store already holds (G04 follow-up): every provider call ID in it, and the calls a crash left without a result, which keep their IDs when Pi presents them again.
+ * Call it before the hold is released (`PiAdapter.recover` / `releaseHold`), because the release presents those calls at once.
+ */
+export async function seedFromConversation(bridge: Pick<Bridge, "seed">, conversation: { transcript(): Promise<readonly { readonly toolCallIds: readonly string[] }[]>; openToolCalls(): Promise<readonly string[]> }): Promise<void> {
+  bridge.seed((await conversation.transcript()).flatMap((e) => e.toolCallIds), await conversation.openToolCalls());
 }
 
 /**
