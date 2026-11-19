@@ -8,10 +8,10 @@ const BASE = "b".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), P
 const TASK = "tsk-aaaaaaaaaaaaaaaaaaaa", SUB = "sbm-aaaaaaaaaaaaaaaaaaaa";
 
 const gate = (o: { required?: readonly Check[]; tests?: ContractTests | undefined; approval?: ReviewedSubmission | undefined | (() => Promise<ReviewedSubmission | undefined>) } = {}) => {
-  const seen: { tests: { taskId: string; author: string | undefined }[] } = { tests: [] };
+  const seen: { tests: { taskId: string; authors: readonly string[] }[] } = { tests: [] };
   const g = new LandingGate({
     requiredChecks: async () => o.required ?? ["tests", "review"],
-    tests: async (taskId, author) => { seen.tests.push({ taskId, author }); return o.tests; },
+    tests: async (taskId, authors) => { seen.tests.push({ taskId, authors }); return o.tests; },
     approvalOf: async (id) => (typeof o.approval === "function" ? o.approval() : id === SUB ? o.approval : undefined),
     now: () => "2026-11-18T10:00:00.000Z",
   });
@@ -19,11 +19,11 @@ const gate = (o: { required?: readonly Check[]; tests?: ContractTests | undefine
 };
 const host = (report: { [K in keyof LandingCheckHostReport]?: LandingCheckHostReport[K] | undefined } | ((call: Parameters<NonNullable<LandingCheckHost["landingChecks"]>>[0]) => LandingCheckHostReport | Promise<LandingCheckHostReport>)) => {
   const calls: Parameters<NonNullable<LandingCheckHost["landingChecks"]>>[0][] = [];
-  const h: LandingCheckHost = { landingChecks: async (call) => { calls.push(call); return typeof report === "function" ? report(call) : { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: call.checks.map((c) => ({ name: c.name, state: "passed" as const, exitCode: 0, ms: 5 })), ...report } as LandingCheckHostReport; } };
+  const h: LandingCheckHost = { landingChecks: async (call) => { calls.push(call); return typeof report === "function" ? report(call) : { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: call.checks.map((c) => ({ name: c.name, state: "passed" as const, exitCode: 0, ms: 5 })), ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH }), ...report } as LandingCheckHostReport; } };
   return { h, calls };
 };
 const unit: ContractTests = { version: 3, checks: [{ name: "unit", run: ["/opt/node/bin/node", "--test"], timeoutSeconds: 30 }, { name: "lint", run: ["lint"] }] };
-const approved: ReviewedSubmission = { taskId: TASK, tree: TREE, patchId: PATCH, approved: true, approvedBy: "agent:rev", newest: "approve" };
+const approved: ReviewedSubmission = { taskId: TASK, base: BASE, tree: TREE, patchId: PATCH, approved: true, approvedBy: "agent:rev", newest: "approve", submittedBy: "agent:sam" };
 
 test("every required check passes on the integrated tree: the landing may go ahead, each result bound to that tree, the contract's commands asked of the host with their time limits (card P09)", async () => {
   const { g, seen } = gate({ tests: unit, approval: approved });
@@ -33,7 +33,8 @@ test("every required check passes on the integrated tree: the landing may go ahe
   assert.deepEqual([r.tree, r.base, r.patchId, r.submissionId, r.contractVersion], [TREE, BASE, PATCH, SUB, 3]);
   assert.deepEqual(r.results.map((x) => [x.check, x.result, x.boundTo]), [["tests", "pass", TREE], ["review", "pass", TREE]]);
   assert.deepEqual(calls[0]!.checks, [{ name: "unit", run: ["/opt/node/bin/node", "--test"], timeoutMs: 30_000 }, { name: "lint", run: ["lint"], timeoutMs: 600_000 }]);
-  assert.deepEqual(seen.tests, [{ taskId: TASK, author: "agent:ann" }], "the author is named, so its own contract change is left out");
+  assert.deepEqual(seen.tests, [{ taskId: TASK, authors: ["agent:ann", "agent:sam"] }], "the assignee and the submitter are named, so neither's own contract change is used");
+  assert.deepEqual(calls[0]!.reviewed, { base: BASE, tree: TREE }, "the host is asked for the patch ID of the reviewed base and tree");
 });
 
 test("not run counts as failed: no host that can check, a host that throws, no checkout, an unreadable change, nothing to land, no test commands, a command not run (card P09)", async () => {
@@ -81,7 +82,8 @@ test("a failing test command fails the gate with its output, redacted and cut; a
 });
 
 test("a reviewer's approval carries over to another tree only while the patch ID is unchanged; an unreviewed, rejected or foreign submission does not pass (card P09)", async () => {
-  const review = async (approval: ReviewedSubmission | undefined, submissionId: string | null = SUB) => (await gate({ required: ["review"], approval }).g.evaluate({ taskId: TASK, projectId: "proj-x", ...(submissionId === null ? {} : { submissionId }), host: host({}).h })).results[0]!;
+  // The host computes the reviewed patch ID from the submission's base and tree: by default what the submission names.
+  const review = async (approval: ReviewedSubmission | undefined, submissionId: string | null = SUB, computed: { reviewedPatchId?: string | undefined; reviewedProblem?: string } = { reviewedPatchId: approval?.patchId }) => (await gate({ required: ["review"], approval }).g.evaluate({ taskId: TASK, projectId: "proj-x", ...(submissionId === null ? {} : { submissionId }), host: host(computed).h })).results[0]!;
   const same = await review(approved);
   assert.deepEqual([same.result, same.boundTo], ["pass", TREE]);
   assert.match(same.summary, /approved by agent:rev for this tree/);
@@ -95,10 +97,23 @@ test("a reviewer's approval carries over to another tree only while the patch ID
   assert.match(changed.summary, /approved for patch c{12}, the landing carries patch a{12}; a new review is needed/);
   assert.equal((await review({ ...approved, tree: TREE, patchId: OTHER_PATCH })).result, "fail", "the same tree with a different patch is not the reviewed change");
   const { patchId: _p, ...noPatch } = approved; void _p;
-  assert.equal((await review(noPatch)).result, "fail");
+  assert.equal((await review(noPatch, SUB, { reviewedPatchId: PATCH })).result, "fail");
+  // The submission names the landed patch, but its own base and tree make another: the submitter's word is not taken.
+  const claimed = await review(approved, SUB, { reviewedPatchId: OTHER_PATCH });
+  assert.equal(claimed.result, "fail");
+  assert.match(claimed.summary, /names patch a{12}, but its base and tree make patch c{12}/);
+  // The host could not compute it (objects missing, a host that does not know the field): not run.
+  const unknown = await review(approved, SUB, { reviewedPatchId: undefined, reviewedProblem: "bad object" });
+  assert.equal(unknown.result, "not_run");
+  assert.match(unknown.summary, /could not compute the patch ID of what was reviewed in sbm-a+: bad object/);
+  assert.equal((await review(approved, SUB, { reviewedPatchId: undefined })).result, "not_run", "a host that answers no reviewed patch ID");
+  // A review that asked for changes while the tests ran: read again after the host's run.
+  let reads = 0;
+  const late = await gate({ required: ["review"], approval: async () => (reads++ === 0 ? approved : { ...approved, approved: false, newest: "changes", reason: "its newest review says changes" }) }).g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
+  assert.equal(late.results[0]!.result, "fail");
   // Not reviewed yet: not run; the newest review asks for changes: failed.
-  assert.equal((await review({ taskId: TASK, tree: TREE, patchId: PATCH, approved: false, reason: "no reviewer has approved it yet" })).result, "not_run");
-  const asked = await review({ taskId: TASK, tree: TREE, patchId: PATCH, approved: false, newest: "changes", reason: "its newest review (sbm-x) says changes" });
+  assert.equal((await review({ taskId: TASK, base: BASE, tree: TREE, patchId: PATCH, approved: false, reason: "no reviewer has approved it yet" })).result, "not_run");
+  const asked = await review({ taskId: TASK, base: BASE, tree: TREE, patchId: PATCH, approved: false, newest: "changes", reason: "its newest review (sbm-x) says changes" });
   assert.equal(asked.result, "fail");
   assert.match(asked.summary, /says changes/);
   assert.equal((await review(undefined)).result, "not_run");

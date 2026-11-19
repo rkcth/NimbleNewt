@@ -915,7 +915,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     });
     const landingGate = new LandingGate({
       requiredChecks: async (projectId) => (await integration.effective(projectId)).requiredChecks,
-      tests: (taskId, author) => contracts.landingTests(taskId, author),
+      tests: (taskId, authors) => contracts.landingTests(taskId, authors),
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
       now: () => new Date().toISOString(),
     });

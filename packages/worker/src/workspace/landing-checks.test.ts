@@ -67,6 +67,34 @@ test("the committed change a landing would carry: base, head, the head's tree, a
   } finally { await w.done(); }
 });
 
+test("the patch ID of the reviewed base and tree is computed by the host from its own objects, not taken from the submission; one it cannot read is a problem, not an ID (card P09)", { skip }, async () => {
+  const { launcher } = fakeLauncher(() => ({ exitCode: 0 }));
+  const w = await world({ launcher });
+  try {
+    const base = w.g("rev-parse", "HEAD");
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    const staged = await w.ws.stageWork(scope);
+    w.g("commit", "-q", "-m", "work");
+    const port = w.ws.port.landingChecks!;
+    const same = await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: staged.tree } });
+    assert.deepEqual([same.reviewedPatchId, same.reviewedProblem, same.change?.patchId], [staged.patchId, undefined, staged.patchId]);
+    // Another reviewed tree (the work as it was before a later change): its own patch ID, which differs from the landed one.
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    const later = await w.ws.stageWork(scope);
+    w.g("commit", "-q", "-m", "more");
+    const old = await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: staged.tree } });
+    assert.equal(old.reviewedPatchId, staged.patchId);
+    assert.notEqual(old.change?.patchId, staged.patchId);
+    assert.equal(old.change?.patchId, (await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: later.tree } })).reviewedPatchId);
+    const missing = await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: "9".repeat(40) } });
+    assert.equal(missing.reviewedPatchId, undefined);
+    assert.match(String(missing.reviewedProblem), /could not be read/);
+    const empty = await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: w.g("rev-parse", `${base}^{tree}`) } });
+    assert.match(String(empty.reviewedProblem), /hold no change/);
+    assert.equal((await port({ ...scope, checks: [], maxOutputBytes: 1000 })).reviewedPatchId, undefined, "not asked: not computed");
+  } finally { await w.done(); }
+});
+
 test("each test command runs in the sandbox on a fresh copy of the integrated tree, never the checkout: uncommitted files are not in it, the git directory is not mounted, the copy is removed; endings map to passed, failed and not run (card P09)", { skip }, async () => {
   const base = await mkdtemp(join(tmpdir(), "nn-p09-copies-"));
   const { launcher, seen } = fakeLauncher((req, files) => {

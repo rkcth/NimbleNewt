@@ -40,14 +40,14 @@ for (const backend of backends) {
     ]);
     const gate = new LandingGate({ requiredChecks: async (p) => (await integration.effective(p)).requiredChecks, tests: (t, a) => contracts.landingTests(t, a), approvalOf: async (id) => approvals.get(id), now: options.clock });
     // The host: what the landing would carry and how each test command ended; every call is kept.
-    const host = { change: { base: BASE, head: HEAD, tree: TREE, patchId: PATCH } as LandingCheckHostReport["change"], exit: new Map<string, "passed" | "failed" | "not-run">(), landingChecks: true, throws: false };
+    const host = { change: { base: BASE, head: HEAD, tree: TREE, patchId: PATCH } as LandingCheckHostReport["change"], exit: new Map<string, "passed" | "failed" | "not-run">(), landingChecks: true, throws: false, reviewedPatch: PATCH as string | undefined };
     const calls: { checks: Parameters<NonNullable<WorkspacePort["landingChecks"]>>[0][]; runs: WorkspaceCall[] } = { checks: [], runs: [] };
     const port = (): WorkspacePort => ({
       run: async (call) => { calls.runs.push(call); return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1 } }; },
       ...(host.landingChecks ? { landingChecks: async (call: Parameters<NonNullable<WorkspacePort["landingChecks"]>>[0]) => {
         calls.checks.push(call);
         if (host.throws) throw new Error("the host went away");
-        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit.get(c.name) ?? "passed", exitCode: host.exit.get(c.name) === "failed" ? 1 : 0, ...(host.exit.get(c.name) === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
+        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit.get(c.name) ?? "passed", exitCode: host.exit.get(c.name) === "failed" ? 1 : 0, ...(host.exit.get(c.name) === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
       } } : {}),
     });
     const told: { commandId: string; taskId: string; to: string; text: string }[] = [];
@@ -83,6 +83,7 @@ for (const backend of backends) {
       assert.match(out.summary!, /^the required checks did not all pass on the integrated tree e{12} \(tests failed; a check that did not run counts as failed\), so nothing was landed/);
       assert.equal(r.calls.runs.length, 0, "the host was never asked to land");
       assert.deepEqual(r.calls.checks.map((c) => c.checks.map((x) => x.name)), [["unit", "lint"]], "the contract's commands, from the owner's version");
+      assert.deepEqual(r.calls.checks[0]!.reviewed, { base: BASE, tree: TREE }, "the host computes the patch ID of the reviewed base and tree");
       const checks = out.checks!;
       assert.deepEqual([checks.passed, checks.tree, checks.patchId, checks.base, checks.submissionId, checks.required], [false, TREE, PATCH, BASE, S1, ["tests", "review"]]);
       assert.deepEqual(checks.results.map((x) => [x.check, x.result, x.boundTo]), [["tests", "fail", TREE], ["review", "pass", TREE]]);
@@ -170,13 +171,25 @@ for (const backend of backends) {
       assert.equal(changed.checks!.results[1]!.result, "fail");
       assert.match(changed.checks!.results[1]!.summary, /a new review is needed/);
       r.host.change = { base: BASE, head: HEAD, tree: TREE, patchId: PATCH };
-      // The author loosens its own contract (no test commands): the owner's version still runs, and still fails.
+      // The submission names the landed patch but its base and tree, read by the host, make another: refused.
+      r.host.reviewedPatch = NEW_PATCH;
+      const claimed = await r.land(r.service(), "r2b", S1);
+      assert.equal(claimed.state, "refused");
+      assert.match(claimed.checks!.results[1]!.summary, /names patch a{12}, but its base and tree make patch f{12}/);
+      r.host.reviewedPatch = undefined;
+      const unknown = await r.land(r.service(), "r2c", S1);
+      assert.deepEqual([unknown.state, unknown.checks!.results[1]!.result], ["refused", "not_run"]);
+      r.host.reviewedPatch = PATCH;
+      // The submitter (ann, not the assignee bob) loosens its own contract (no test commands): the owner's version still runs, and still fails.
       r.host.exit.set("unit", "failed");
       await r.setChecks(r.ann, []);
-      const loosened = await r.land(r.service({ assignee: async () => "agent:ann" }), "r3", S1);
+      const loosened = await r.land(r.service(), "r3", S1);
       assert.equal(loosened.state, "refused");
       assert.deepEqual([loosened.checks!.contractVersion, loosened.checks!.results[0]!.result], [1, "fail"]);
       assert.deepEqual(r.calls.checks.at(-1)!.checks.map((c) => c.name), ["unit"]);
+      // The same when ann is the assignee and the landing names no submission.
+      const asAssignee = await r.land(r.service({ assignee: async () => "agent:ann" }), "r4");
+      assert.deepEqual([asAssignee.state, asAssignee.checks!.contractVersion, asAssignee.checks!.results[0]!.result], ["refused", 1, "fail"]);
     } finally { await r.store.close(); }
   });
 

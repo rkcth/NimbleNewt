@@ -14500,3 +14500,19 @@ Before this slice the integration policy's `requiredChecks` (P08) were stored an
 - ASSUMPTION: an approval with no review given yet is `not_run`, one whose newest review asks for changes or rejects is `fail`; both refuse the landing.
 - ASSUMPTION: the author told is the submitter of the named code submission, else the assignee; the notice is advice in its inbox (it does not wake it), and a quiet running attempt is told directly.
 - ASSUMPTION: the existing composed landing tests opt out of the gate (`requiredChecks: []`) instead of being rewritten around it; the new P09 test covers the gated path end to end.
+
+### P09 first slice, first Opus review (Claude agent, 2026-11-18)
+
+**Fixed.**
+1. **The review check took the submitter's word for the patch ID.** `submission.record` accepts any `patchId` an agent names next to its base and tree, and the gate compared only that claim with the landed patch: a code submission whose named patch ID did not belong to its reviewed tree could carry an approval to a different change. Now the gate reads the named submission before asking the host and passes its base and tree (`landingChecks` `reviewed`); the host computes their stable patch ID from the checkout's own objects (`GitBridge.patchId` with `to`, answered as `reviewedPatchId`, or `reviewedProblem`). `review` passes only when that computed ID equals both the ID the submission names and the landed change's; a mismatch is `fail` ("names patch X, but its base and tree make patch Y"), an ID the host cannot compute (objects missing, a host that does not answer the field) is `not_run`. The approval is read again after the host's run, so a review that asked for changes while the tests ran still refuses.
+2. **The author's own contract versions were skipped only for the assignee.** The gate named only `assignee` as the author, so when the agent that made the reviewed submission was not the assignee, a contract version it stored itself (for example one with no test commands) was used. `ContractService.landingTests` now takes a list of authors and the gate names both the assignee and the submitter of the landed submission. The controller test now covers it with the submitter not the assignee (it only passed before because the test set the assignee to the submitter).
+3. The `tests` summary for "no usable contract" said the task had no contract even when it had one stored only by its author; it now says the author's own versions are not used.
+
+**Tests added.** Gate: the host is asked for the reviewed base and tree; a claimed patch ID that its base and tree do not make fails; an uncomputable one is not run; a review turned to changes during the run fails; both authors are named. Controller (4 backends): the submitter's loosened contract is not used, the claimed/computed mismatch and the missing computed ID refuse the landing. Worker (real git): the reviewed patch ID equals the staged one, differs for an older reviewed tree, and a missing object or an empty change is a problem, not an ID.
+
+**Mutants on the compiled code (each restored, through `/tmp/nn-slot.sh`).** Author's contract version not skipped: 4 failures; the landed patch comparison removed: 5; the claimed-vs-computed comparison removed: 5; not run counted as passed: 10; the host's `checkedTree` comparison removed: 1 (worker); `checkedTree` not sent: 4.
+
+**Left for follow-up.**
+1. When the gate gives up waiting for the host (the commands' time plus a minute), the host's check processes are not stopped; they keep running on their own copies after the landing was refused and the quiet lifted.
+2. A task whose only contract versions were stored by its own author can never pass `tests`: the author is told, the owner is not (no needs-you notice); someone else has to set the contract.
+3. `GitBridge.patchId` takes only a 40-hex base, so on a SHA-256 repository every `review` is `not_run` (fails closed).

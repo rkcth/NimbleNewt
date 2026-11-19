@@ -21,6 +21,8 @@ export interface LandingCheckCall {
   readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[];
   /** Each stream of a check is cut at this many bytes. */
   readonly maxOutputBytes: number;
+  /** The reviewed code submission's base commit and tree: their stable patch ID is computed here from this checkout's own objects (`reviewedPatchId`), so the controller does not rely on the patch ID the submitter named. */
+  readonly reviewed?: { readonly base: string; readonly tree: string };
 }
 export interface LandingCheckRun { readonly name: string; readonly state: "passed" | "failed" | "not-run"; readonly exitCode?: number | null; readonly signal?: string | null; readonly timedOut?: boolean; readonly output?: string; readonly reason?: string; readonly ms?: number }
 export interface LandingCheckReport {
@@ -32,6 +34,9 @@ export interface LandingCheckReport {
   readonly problem?: string;
   /** One per check asked for, in order; each ran on `change.tree`. */
   readonly checks: readonly LandingCheckRun[];
+  /** When `reviewed` was asked: the stable patch ID of its base..tree, or why it could not be computed. */
+  readonly reviewedPatchId?: string;
+  readonly reviewedProblem?: string;
 }
 export interface LandingChecksOptions {
   readonly git: GitBridge;
@@ -66,8 +71,15 @@ export function landingChecks(options: LandingChecksOptions): (call: LandingChec
     let change: LandingCheckReport["change"];
     try { change = await options.git.committedChange({ gitDir: where.gitDir }); } catch (error) { return { checkout: true, problem: reason(error), checks: notRun(`the checkout's committed change could not be read: ${reason(error)}`) }; }
     const ran: LandingCheckRun[] = [];
+    let reviewed: { reviewedPatchId: string } | { reviewedProblem: string } | Record<string, never> = {};
+    if (call.reviewed !== undefined) {
+      try {
+        const id = await options.git.patchId({ gitDir: where.gitDir, base: String(call.reviewed?.base), to: String(call.reviewed?.tree) });
+        reviewed = id === undefined ? { reviewedProblem: "the reviewed base and tree hold no change" } : { reviewedPatchId: id };
+      } catch (error) { reviewed = { reviewedProblem: `the reviewed change could not be read: ${reason(error)}` }; }
+    }
     for (const check of asked) ran.push(await runOne(options, where, change!.tree, check, call.maxOutputBytes));
-    return { checkout: true, change, checks: ran };
+    return { checkout: true, change, checks: ran, ...reviewed };
   };
 }
 

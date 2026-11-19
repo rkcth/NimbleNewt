@@ -167,14 +167,15 @@ export class ContractService {
   }
 
   /**
-   * The test commands a landing runs (card P09): the contract's `checks` in its newest version that `author` did not make itself (a version the author stored is skipped, back to the one before), so an author holding
+   * The test commands a landing runs (card P09): the contract's `checks` in its newest version that none of `authors` made (a version an author stored is skipped, back to the one before), so an author holding
    * `task.contract.write` cannot loosen the checks its own landing runs. At most `CONTRACT_LIMITS.checks` versions are looked back; `undefined` when the task has no contract (or only versions the author made). It takes no
    * caller and is not an API operation: whoever asks has been checked already (a landing needs `workspace.manage`).
    */
-  async landingTests(taskId: string, author: string | undefined): Promise<{ version: number; checks: readonly ContractCheck[] } | undefined> {
+  async landingTests(taskId: string, authors: readonly string[]): Promise<{ version: number; checks: readonly ContractCheck[] } | undefined> {
     const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
+    const by = new Set(authors.map(bare).filter((a) => a !== ""));
     let found = (await this.#runner.get("task-contract", checkTaskId(taskId)))?.body as unknown as ContractBody | undefined;
-    for (let steps = 0; found !== undefined && author !== undefined && bare(found.changedBy) === bare(author); steps++) {
+    for (let steps = 0; found !== undefined && by.has(bare(found.changedBy)); steps++) {
       if (found.version <= 1 || steps >= CONTRACT_LIMITS.checks) return undefined;
       found = (await this.#runner.get("task-contract-version", `${taskId}.${found.version - 1}`))?.body as unknown as ContractBody | undefined;
     }
