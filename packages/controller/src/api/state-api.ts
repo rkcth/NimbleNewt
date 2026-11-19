@@ -9,7 +9,7 @@ import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseActivationService, ReleaseService } from "../release/index.js";
-import type { AcceptanceService, SubmissionService } from "../submissions/index.js";
+import type { AcceptanceService, QaEvidenceService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
 import type { SwarmService } from "../swarm/index.js";
@@ -148,6 +148,8 @@ export interface StateApiDeps {
   readonly taskArtifacts?: Pick<TaskArtifactPublisher, "publish">;
   readonly serviceOps?: Pick<ServiceOperations, "operate" | "observe">;
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
+  /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
+  readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, landing, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
@@ -394,6 +396,7 @@ export class StateApi {
         ...(this.#deps.incidents === undefined ? {} : { incidents: this.#deps.incidents }),
         ...(this.#deps.submissions === undefined ? {} : { submissions: this.#deps.submissions }),
         ...(this.#deps.acceptance === undefined ? {} : { acceptance: this.#deps.acceptance }),
+        ...(this.#deps.qaEvidence === undefined ? {} : { qaEvidence: this.#deps.qaEvidence }),
         ...(this.#deps.taskArtifacts === undefined ? {} : { taskArtifacts: this.#deps.taskArtifacts }),
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),
         ...(this.#deps.release === undefined ? {} : { release: this.#deps.release }),
