@@ -39,6 +39,7 @@ import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/
 import type { ArtifactBody } from "../artifacts/service.js";
 import type { StaleDeliverable } from "../submissions/acceptance.js";
 import type { DefectService } from "../submissions/defects.js";
+import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
@@ -276,6 +277,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
+  qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
   start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
@@ -382,6 +384,7 @@ export type StatusRequest =
   | { readonly kind: "start_size"; readonly taskId: string }
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
+  | { readonly kind: "qa"; readonly taskId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
@@ -711,6 +714,8 @@ export interface StatusDeps {
   readonly deliverables?: { contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }> };
   /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
   readonly defects?: Pick<DefectService, "forTask">;
+  /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
+  readonly qa?: Pick<QaEvidenceService, "list" | "gate">;
 }
 
 export interface StatusOptions extends RunnerOptions {
@@ -928,6 +933,7 @@ export class StatusService {
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
+      case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
@@ -2018,6 +2024,39 @@ export class StatusService {
       }
       if (d.defects.length > 20) lines.push(line(`${d.defects.length - 20} more defects of ${d.id} are not shown; defect.list lists them all.`, cite("deliverable", d.id)));
     }
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * What QA checked on a task (card Q02): the gate of each checked submission (newest first, at most 5), then each evidence record (newest first, at most 20) with its tree, source, environment,
+   * times, criteria revision, decisions and results kept apart, and whether it still holds; then the pending re-checks. The QA service's read rule applies (the task's read right).
+   */
+  async qaLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined) return undefined;
+    const body = task.body as unknown as TaskBody;
+    if (!this.#mayReadTask(by, body.projectId, taskId)) return undefined;
+    const at = this.#runner.now();
+    if (this.#deps.qa === undefined) return { observedAt: at, lines: [line("QA evidence is not kept on this controller.", cite("task", taskId))] };
+    let list: Awaited<ReturnType<QaEvidenceService["list"]>>;
+    try { list = await this.#deps.qa.list(by, taskId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    if (list.items.length === 0) return { observedAt: at, lines: [line(`No QA evidence has been recorded for ${shown(body.title)}: its QA gate fails until an independent check is recorded.`, cite("task", taskId))] };
+    const lines: Line[] = [];
+    const subs = [...new Set(list.items.map((e) => e.submissionId))].slice(0, 5);
+    for (const sid of subs) {
+      const g = await this.#deps.qa.gate(by, sid);
+      const parts = [`passed ${g.counts.passed}`, `failed ${g.counts.failed}`, `blocked ${g.counts.blocked}`, `not run ${g.counts.notRun}`, `missing ${g.counts.missing}`].join(", ");
+      const why = g.verdict === "passed" ? "" : ` (${g.reasons.join(", ").replace(/_/g, " ")}${g.checks.filter((c) => c.result !== "passed").length === 0 ? "" : `: ${g.checks.filter((c) => c.result !== "passed").slice(0, 10).map((c) => `${quoted(c.name, 80)} ${c.result}`).join("; ")}`})`;
+      lines.push(line(`QA gate for tree ${g.tree.slice(0, 12)} (submission ${g.submissionId}) ${g.verdict === "passed" ? "passes" : "fails"} against contract version ${g.criteriaRevision}: ${parts}${why}.${g.pendingRechecks.length === 0 ? "" : ` Re-check pending: ${g.pendingRechecks.join(", ")}.`}`, cite("submission", sid), cite("task", taskId)));
+    }
+    for (const e of list.items.slice(0, 20)) {
+      const n = (r: string): number => e.checks.filter((c) => c.result === r).length;
+      const state = e.state === "invalidated" ? ` Invalidated at ${e.invalidatedAt ?? "?"}: ${(e.reasons ?? []).map(qaReasonText).join("; ")}.` : e.staleNow.length > 0 ? ` No longer holds (not yet invalidated): ${e.staleNow.map(qaReasonText).join("; ")}.` : "";
+      lines.push(line(`${e.source === "self" ? "Self-check" : "Independent QA"} ${e.id} by ${shown(e.recordedBy, 80)} on tree ${e.tree.slice(0, 12)}, run ${e.observedAt} in ${quoted(e.environment, 200)}, against contract version ${e.criteriaRevision}${e.decisions.length === 0 ? "" : ` and decisions ${e.decisions.map((d) => `${d.id} (v${d.version})`).join(", ")}`}: passed ${n("passed")}, failed ${n("failed")}, blocked ${n("blocked")}, not run ${n("not-run")}.${state}`, cite("qa-evidence", e.id, e.revision), cite("task", taskId)));
+    }
+    if (list.items.length > 20) lines.push(line(`${list.items.length - 20} older QA record(s) are not shown here (qa.evidence.list has them all).`, cite("task", taskId)));
+    for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.`, cite("qa-recheck", r.id), cite("task", taskId)));
     return { observedAt: at, lines };
   }
 
