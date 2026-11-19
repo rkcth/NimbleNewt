@@ -48,11 +48,12 @@ for (const backend of backends) {
       }, options);
       let limit = 2;
       const notices: { defectId: string; text: string; commandId: string }[] = [];
+      let failNotify = false;
       const svc = DefectService.withEpoch(world.storage, projects.epoch, {
         rolesOf: async (id) => roles.get(id) ?? [],
         mayReadDeliverable: async (by, id) => (await acc.get(by, id)) !== undefined,
         cycleLimit: async () => limit,
-        notify: async (x) => { notices.push(x); },
+        notify: async (x) => { if (failNotify) throw new Error("notice not sent"); notices.push(x); },
       }, options);
       const ann = await agent("ann", ["author", "docs"]);
       const rev = await agent("rev", ["reviewer"]);
@@ -132,7 +133,7 @@ for (const backend of backends) {
       assert.equal(notices[0]!.defectId, d1);
       assert.match(notices[0]!.text, /waits for your decision/);
       await svc.review(rev, { commandId: "chk-2", id: d1, verdict: "not-fixed", reason: "the step is there but wrong" });
-      assert.equal(notices.length, 1, "a repeat tells nobody again");
+      assert.deepEqual([...new Set(notices.map((x) => x.commandId))], [notices[0]!.commandId], "a repeat sends the notice again only under the same command ID (recorded once)");
       await refuses("invalid_transition", () => svc.repair(ann, { commandId: cid("rp"), id: d1, version: v3 }), /escalated/);
 
       // A QA agent reports a second finding in the current version.
@@ -165,24 +166,41 @@ for (const backend of backends) {
         await svc.review(rev, { commandId: cid("rv"), id: d2, verdict: "not-fixed", reason: `round ${i}` });
       }
       assert.equal((await svc.get(owner, d2))!["state"], "escalated");
-      await svc.override(owner, { commandId: cid("o"), id: d2, outcome: "repair-again", reason: "One more try." });
-      got = (await svc.get(owner, d2))!;
-      assert.deepEqual([got["state"], got["cycles"]], ["open", 2], "the count is kept");
+      // The notice lost to a stop between the check and the notice: the repeat of the check sends it.
+      const told = notices.length;
+      failNotify = true;
       let v = await newVersion();
+      await svc.override(owner, { commandId: cid("o"), id: d2, outcome: "repair-again", reason: "Try again." });
+      await svc.repair(ann, { commandId: cid("rp"), id: d2, version: v });
+      // repair-again does not drop a repair that waits for its check.
+      await refuses("invalid_transition", () => svc.override(owner, { commandId: cid("o"), id: d2, outcome: "repair-again", reason: "go on" }), /waiting for its check/);
+      const lost = { commandId: cid("rv"), id: d2, verdict: "not-fixed", reason: "round 2" };
+      assert.equal((await svc.review(rev, lost)).state, "escalated");
+      assert.equal(notices.length, told, "the notice failed");
+      failNotify = false;
+      assert.equal((await svc.review(rev, lost)).replayed, true);
+      assert.equal(notices.length, told + 1, "the repeat of the check tells the owner");
+      assert.match(notices.at(-1)!.text, /failed 3 repair check\(s\), the limit of 2/);
+      await svc.override(owner, { commandId: cid("o"), id: d2, outcome: "repair-again", reason: "One more try." });
+      // Once the owner decided, a repeat of the check answers as before but tells the owner nothing (the defect no longer waits for them).
+      assert.deepEqual([(await svc.review(rev, lost)).replayed, notices.length], [true, told + 1], "no notice after the decision");
+      got = (await svc.get(owner, d2))!;
+      assert.deepEqual([got["state"], got["cycles"]], ["open", 3], "the count is kept");
+      v = await newVersion();
       await svc.repair(ann, { commandId: cid("rp"), id: d2, version: v });
       const c3 = await svc.review(rev, { commandId: cid("rv"), id: d2, verdict: "not-fixed", reason: "still a typo" });
-      assert.deepEqual([c3.state, c3.cycles], ["escalated", 3]);
+      assert.deepEqual([c3.state, c3.cycles], ["escalated", 4]);
       // The owner raises the limit; a repair then passes and resolves the defect.
       limit = 5;
       await svc.override(owner, { commandId: cid("o"), id: d2, outcome: "repair-again", reason: "Last try." });
       v = await newVersion();
       await svc.repair(ann, { commandId: cid("rp"), id: d2, version: v });
       const fixed = await svc.review(quinn, { commandId: cid("rv"), id: d2, verdict: "fixed" });
-      assert.deepEqual([fixed.state, fixed.cycles, fixed.limit], ["resolved", 3, 5]);
+      assert.deepEqual([fixed.state, fixed.cycles, fixed.limit], ["resolved", 4, 5]);
       got = (await svc.get(owner, d2))!;
-      assert.deepEqual((got["checks"] as JsonObject[]).map((c) => c["verdict"]), ["not-fixed", "not-fixed", "not-fixed", "fixed"]);
+      assert.deepEqual((got["checks"] as JsonObject[]).map((c) => c["verdict"]), ["not-fixed", "not-fixed", "not-fixed", "not-fixed", "fixed"]);
       assert.equal((got["resolution"] as JsonObject)["kind"], "fixed");
-      assert.equal((got["overrideRecords"] as JsonObject[]).length, 2);
+      assert.equal((got["overrideRecords"] as JsonObject[]).length, 3);
 
       // A QA agent that made the repair is one of its contributors and cannot pass it.
       const qa = await acc.draft(quinn, { commandId: cid("d"), taskId: task, type: "report", title: "QA notes", artifacts: [{ artifactId: a1 }] });

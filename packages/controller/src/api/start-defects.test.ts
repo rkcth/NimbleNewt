@@ -74,6 +74,10 @@ test("through the running controller a defect is linked to its version and findi
     const told = inbox.items.filter((i) => i.ref.kind === "defect" && i.ref.id === defect);
     assert.equal(told.length, 1, JSON.stringify(inbox.items.map((i) => i.ref)));
     assert.equal(told[0]!.level, "needs-you");
+    // A repeat of the check sends the notice again under the same command ID: the owner's inbox still holds it once.
+    assert.equal((await call(rev.token, "defect.review", { id: defect, verdict: "not-fixed", reason: "the backup step is still missing" }, "rv1")).result.replayed, true);
+    const again = (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "defect" && i.ref.id === defect);
+    assert.deepEqual(again.map((i) => [i.id, i.count]), [[told[0]!.id, told[0]!.count]], "told once");
 
     // The owner asks in chat by the task's title; the answer is the same as the state API's.
     await c.chat!.setFocus(boot.token, { commandId: "f1", projectId: project });
@@ -83,7 +87,7 @@ test("through the running controller a defect is linked to its version and findi
     assert.equal(asked[0].status, "answered", JSON.stringify(asked));
     const lines = (asked[0].lines as { text: string }[]).map((l) => l.text);
     assert.match(lines[0]!, new RegExp(`^Deliverable ${id} "Install guide": version 2 is submitted; 1 defect\\(s\\) found, 1 unresolved\\.$`));
-    assert.match(lines[1]!, new RegExp(`^Defect ${defect} \\(major, found in version 1, repair in version 2\\): escalated to you: it waits for your decision .*; 1 of 1 repair and review cycles used\\. Finding: "The guide skips the backup step\\."\\.$`));
+    assert.match(lines[1]!, new RegExp(`^Defect ${defect} \\(major, found in version 1, repair in version 2\\): escalated to you: it waits for your decision .*; 1 of 1 repair and review cycles used\\. Finding: "The guide skips the backup step\\."\\. Latest check: version 2 found not fixed by ${rev.id} \\("the backup step is still missing"\\)\\.$`));
     const viewed = await call(boot.token, "status.ask", { request: { kind: "defects", taskId: task } });
     assert.deepEqual(viewed.result.item.lines.map((l: any) => l.text), lines);
     assert.equal((await call(far.token, "status.ask", { request: { kind: "defects", taskId: task } })).error.code, "not_found");

@@ -115,6 +115,8 @@ const object = (command: unknown, known: readonly string[]): void => {
   if (command === null || typeof command !== "object" || Array.isArray(command)) throw new DomainError("invalid_command", "a command is an object");
   for (const k of Object.keys(command)) if (!known.includes(k)) bad(k, "is not a field of this command");
 };
+const escalationText = (id: string, severity: DefectSeverity, deliverableId: string, cycles: number, limit: number): string =>
+  `Defect ${id} (${severity}) in deliverable ${deliverableId} failed ${cycles} repair check(s), the limit of ${limit}: it waits for your decision (accept as is, or repair again).`;
 const revisionOf = (value: unknown): number | undefined => {
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < 1) bad("expectedRevision", "must be the revision you read");
@@ -309,7 +311,7 @@ export class DefectService {
         const state: DefectState = fixed ? "resolved" : escalated ? "escalated" : "open";
         const next: DefectBody = { ...body, state, cycles, checkSeq: seq, ...(fixed ? { resolution: { kind: "fixed" as const, by: by.id, at, ref: `${command.id}.${seq}` } } : {}) };
         outcome = { state, cycles, limit };
-        if (escalated) escalation = { projectId: body.projectId, text: `Defect ${command.id} (${body.severity}) in deliverable ${body.deliverableId} failed ${cycles} repair check(s), the limit of ${limit}: it waits for your decision (accept as is, or repair again).` };
+        if (escalated) escalation = { projectId: body.projectId, text: escalationText(command.id, body.severity, body.deliverableId, cycles, limit) };
         const ref = { kind: "defect", id: command.id };
         return { ref, creates: false, changes: [
           { type: "update", ref, expectedRevision: agg.revision, body: next as unknown as JsonObject },
@@ -326,7 +328,14 @@ export class DefectService {
     const now = (await this.#runner.get("defect", command.id))?.body as unknown as DefectBody | undefined;
     for (let seq = now?.checkSeq ?? 0; seq >= 1; seq--) {
       const c = (await this.#runner.get("defect-check", `${command.id}.${seq}`))?.body as unknown as DefectCheckBody | undefined;
-      if (c !== undefined && c.defectRevision === result.revision) return { id: result.id, revision: result.revision, replayed: true, state: c.verdict === "fixed" ? "resolved" : c.escalated ? "escalated" : "open", cycles: c.cycles, limit: c.limit };
+      if (c !== undefined && c.defectRevision === result.revision) {
+        // The notice of an escalation is sent again under the same command ID, which records it once: a controller stopped between the check and the notice still tells the owner when the command is repeated.
+        // Only while that escalation still waits for the owner: once the owner decided (or anything came after this check), "it waits for your decision" would no longer be true.
+        if (c.escalated && now !== undefined && now.state === "escalated" && now.checkSeq === c.seq && this.#ports.notify !== undefined) {
+          await this.#ports.notify({ commandId: `defect-escalated:${command.id}:${result.revision}`, defectId: command.id, projectId: now.projectId, text: escalationText(command.id, now.severity, now.deliverableId, c.cycles, c.limit) }).catch(() => undefined);
+        }
+        return { id: result.id, revision: result.revision, replayed: true, state: c.verdict === "fixed" ? "resolved" : c.escalated ? "escalated" : "open", cycles: c.cycles, limit: c.limit };
+      }
     }
     throw new DomainError("integrity", `the check recorded by this command on ${command.id} is missing`);
   }
@@ -352,6 +361,8 @@ export class DefectService {
         if (expected !== undefined && agg.revision !== expected) throw new DomainError("stale_revision", `the defect is at revision ${agg.revision}, not ${expected}`, { currentRevision: agg.revision });
         if (body.state === "resolved" || body.state === "overridden") throw new DomainError("invalid_transition", `the defect is already ${body.state}`);
         if (command.outcome === "repair-again" && body.state === "open") throw new DomainError("invalid_transition", "the defect is open already: its repair goes on");
+        // A submitted repair waits for its check: sending the defect back to `open` would drop that repair unchecked (the next repair must name a newer version).
+        if (command.outcome === "repair-again" && body.state === "repair-submitted") throw new DomainError("invalid_transition", "the defect has a repair waiting for its check: its repair goes on");
         const lastVerdict = async (id: string, seq: number): Promise<"fixed" | "not-fixed" | undefined> => (seq === 0 ? undefined : ((await this.#runner.get("defect-check", `${id}.${seq}`))?.body as unknown as DefectCheckBody | undefined)?.verdict);
         const index = await this.#runner.get("defect-index", body.deliverableId);
         const ids = ((index?.body as unknown as { ids: string[] } | undefined)?.ids) ?? [];
@@ -424,10 +435,10 @@ export class DefectService {
   }
 
   /**
-   * For the chat's `defects` status: the task's deliverables the caller may read, each with its newest version and state, and their defects (state, severity, cycles against the limit, the finding).
+   * For the chat's `defects` status: the task's deliverables the caller may read, each with its newest version and state, and their defects (state, severity, cycles against the limit, the finding, the latest check of a repair).
    * `undefined` when the task is missing or the caller may read none of it. At most 100 deliverables and 100 defects each (the per-task and per-deliverable caps).
    */
-  async forTask(by: Principal, taskIdValue: string): Promise<{ readonly title: string; readonly limit: number; readonly deliverables: readonly { readonly id: string; readonly title: string; readonly version: number; readonly state: string; readonly defects: readonly (DefectBody & { readonly id: string })[] }[] } | undefined> {
+  async forTask(by: Principal, taskIdValue: string): Promise<{ readonly title: string; readonly limit: number; readonly deliverables: readonly { readonly id: string; readonly title: string; readonly version: number; readonly state: string; readonly defects: readonly (DefectBody & { readonly id: string; readonly lastCheck?: DefectCheckBody })[] }[] } | undefined> {
     const taskId = checkTaskId(taskIdValue);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as { projectId: string; title: string } | undefined;
     if (task === undefined || (by.kind !== "owner" && by.kind !== "agent")) return undefined;
@@ -439,8 +450,14 @@ export class DefectService {
       const d = agg.body as unknown as DeliverableBody;
       if (!(await this.#readable(by, d, id))) continue;
       const dids = ((await this.#runner.get("defect-index", id))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
-      const defects: (DefectBody & { id: string })[] = [];
-      for (const x of dids) { const f = await this.#runner.get("defect", x); if (f !== undefined) defects.push({ id: x, ...(f.body as unknown as DefectBody) }); }
+      const defects: (DefectBody & { id: string; lastCheck?: DefectCheckBody })[] = [];
+      for (const x of dids) {
+        const f = await this.#runner.get("defect", x);
+        if (f === undefined) continue;
+        const b = f.body as unknown as DefectBody;
+        const last = b.checkSeq === 0 ? undefined : (await this.#runner.get("defect-check", `${x}.${b.checkSeq}`))?.body as unknown as DefectCheckBody | undefined;
+        defects.push({ id: x, ...b, ...(last === undefined ? {} : { lastCheck: last }) });
+      }
       deliverables.push({ id, title: d.title, version: d.currentVersion, state: d.state, defects });
     }
     if (deliverables.length === 0 && by.kind !== "owner") return undefined;

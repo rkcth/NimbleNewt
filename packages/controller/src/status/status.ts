@@ -2014,7 +2014,7 @@ export class StatusService {
       const open = d.defects.filter((x) => x.state !== "resolved" && x.state !== "overridden").length;
       lines.push(line(`Deliverable ${d.id} ${quoted(d.title, 80)}: version ${d.version} is ${d.state}; ${d.defects.length === 0 ? "no defect was found in it" : `${d.defects.length} defect(s) found, ${open} unresolved`}.`, cite("deliverable", d.id)));
       for (const x of d.defects.slice(0, 20)) {
-        lines.push(line(`Defect ${x.id} (${x.severity}, found in version ${x.version}${x.repairVersion === undefined ? "" : `, repair in version ${x.repairVersion}`}): ${words[x.state] ?? x.state}; ${x.cycles} of ${found.limit} repair and review cycles used. Finding: ${quoted(x.finding.text, 160)}.`, cite("defect", x.id), cite("deliverable", d.id)));
+        lines.push(line(`Defect ${x.id} (${x.severity}, found in version ${x.version}${x.repairVersion === undefined ? "" : `, repair in version ${x.repairVersion}`}): ${words[x.state] ?? x.state}; ${x.cycles} of ${found.limit} repair and review cycles used. Finding: ${quoted(x.finding.text, 160)}.${x.lastCheck === undefined ? " No repair of it has been checked yet." : ` Latest check: version ${x.lastCheck.version} ${x.lastCheck.verdict === "fixed" ? "found fixed" : "found not fixed"} by ${x.lastCheck.by}${x.lastCheck.reason === undefined ? "" : ` (${quoted(x.lastCheck.reason, 120)})`}.`}`, cite("defect", x.id), cite("deliverable", d.id)));
       }
       if (d.defects.length > 20) lines.push(line(`${d.defects.length - 20} more defects of ${d.id} are not shown; defect.list lists them all.`, cite("deliverable", d.id)));
     }
