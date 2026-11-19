@@ -11,13 +11,15 @@ after(stopServer);
 const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ kind: "command", op, args, evidence, basis: "owner" });
 const AUTHOR = STANDARD_ROLES.find((r) => r.name === "author")!.capabilities;
 const REVIEWER = STANDARD_ROLES.find((r) => r.name === "reviewer")!.capabilities;
+// The grant service of the world under test: a right with terms is given through it, since the state API's grant.create takes none.
+let grantsNow: GrantService | undefined;
 
 // Card D01: "let Ann work on Garden" is one plain sentence. The chat draws up every right Ann's own roles stand for (the role templates), only in the project named, one line each, shown first.
 for (const backend of backends) {
   const suite = (name: string, body: (w: World, script: Record<string, unknown>) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
       const script: Record<string, unknown> = {};
-      const w = await openWorld(backend, script, undefined, ((storage, epoch) => ({ grants: GrantService.withEpoch(storage, epoch, options) })) as ApiExtra);
+      const w = await openWorld(backend, script, undefined, ((storage, epoch) => ({ grants: (grantsNow = GrantService.withEpoch(storage, epoch, options)) })) as ApiExtra);
       try { await w.agents.seedStandardRoles(); await body(w, script); } finally { await w.close(); }
     });
   const say = (w: World, text: string) => w.chat().submit(w.ownerToken, { messageId: cid("m"), text });
@@ -107,6 +109,52 @@ for (const backend of backends) {
     await refused("let Ann do everything on Garden", { agentName: "Ann", projectName: "Garden", bundle: "everything" }, "invalid_command", /bundle must be one of roles/);
     await refused("let Ann work", { agentName: "Ann", bundle: "roles" }, "invalid_command", /Which project/);
     assert.deepEqual([...(await rightsOf(w, ann)), ...(await rightsOf(w, bob))], []);
+  });
+
+  suite("first review: a bundle never covers every project, a template with a wildcard is refused, a right held only under terms is not held for good, a no gives nothing, and a template changed after the proposal changes nothing the yes gives", async (w, script) => {
+    const garden = await w.project("Garden");
+    const ann = (await w.agents.create(w.owner, { commandId: cid("a"), friendlyName: "Ann", roles: ["author"] })).id;
+    const refusedWith = async (words: string, args: Record<string, unknown>, message: RegExp) => {
+      script[words] = [cmd("grant.create", args, words)];
+      const o = (await say(w, words)).outcomes[0]!;
+      assert.deepEqual([o.status, o.code], ["refused", "invalid_command"], `${words}: ${JSON.stringify(o)}`);
+      assert.match(o.message ?? "", message, words);
+    };
+    await refusedWith("let Ann work on every project", { agentName: "Ann", project: "*", bundle: "roles" }, /covers one project, never every project/);
+    assert.deepEqual(await rightsOf(w, ann), []);
+    // A right held only in one environment is not held for good: it is still drawn up.
+    await grantsNow!.grant(w.owner, { commandId: cid("g"), grantee: `agent:${ann}`, action: "task.read", project: garden, source: "direct", basis: "Ann reads Garden in development", terms: { environments: ["development"] } });
+    assert.deepEqual((await rightsOf(w, ann)).map((g) => g.action), ["task.read"], "the right with terms is held");
+    const words = "let Ann work on Garden";
+    script[words] = [cmd("grant.create", { agentName: "Ann", projectName: "Garden", bundle: "roles" }, words)];
+    const first = (await say(w, words)).outcomes[0]!;
+    assert.equal(first.status, "proposed", JSON.stringify(first));
+    const lines = ((first as { preview?: readonly string[] }).preview ?? []).filter((l) => l.startsWith("Grant right"));
+    assert.equal(lines.length, AUTHOR.length, lines.join("\n"));
+    assert.ok(lines.some((l) => /\): action=task\.read(,|$)/.test(l)), "a right held only in one environment is drawn up");
+    // A no gives nothing.
+    await w.chat().discardProposal(w.ownerToken, { commandId: cid("dp"), proposalId: first.proposalId! });
+    assert.deepEqual((await rightsOf(w, ann)).map((g) => g.action), ["task.read"]);
+    // The template changed after the proposal was shown: the yes gives what was shown, nothing the new template adds.
+    const second = (await say(w, words)).outcomes[0]!;
+    assert.equal(second.status, "proposed", JSON.stringify(second));
+    const role = await w.agents.getRole(w.owner, "author");
+    await w.agents.defineRole(w.owner, { commandId: cid("r"), name: "author", capabilities: [...AUTHOR, "grant.create", "agent.manage"], expectedRevision: role!.revision });
+    await apply(w, second.proposalId!);
+    const given = (await rightsOf(w, ann)).map((g) => g.action);
+    assert.ok(!given.includes("grant.create") && !given.includes("agent.manage"), JSON.stringify(given));
+    assert.deepEqual([...new Set(given)].sort(), [...AUTHOR].sort());
+    // A template holding a wildcard is refused, whole: nothing is drawn up for the rest of it either.
+    const now = await w.agents.getRole(w.owner, "author");
+    await w.agents.defineRole(w.owner, { commandId: cid("r"), name: "author", capabilities: ["task.read", "desk.*"], expectedRevision: now!.revision });
+    const bob = (await w.agents.create(w.owner, { commandId: cid("b"), friendlyName: "Bob", roles: ["author"] })).id;
+    await refusedWith("let Bob work on Garden", { agentName: "Bob", projectName: "Garden", bundle: "roles" }, /"desk\.\*", which covers more than one right/);
+    assert.deepEqual(await rightsOf(w, bob), []);
+    // A template holding an approval is refused, whole: a plain sentence never lets an agent's actions through without asking.
+    const third = await w.agents.getRole(w.owner, "author");
+    await w.agents.defineRole(w.owner, { commandId: cid("r"), name: "author", capabilities: ["task.read", "approve.deploy"], expectedRevision: third!.revision });
+    await refusedWith("set Bob up for Garden", { agentName: "Bob", projectName: "Garden", bundle: "roles" }, /"approve\.deploy", an approval that lets actions through without asking you/);
+    assert.deepEqual(await rightsOf(w, bob), []);
   });
 
   suite("the bundle follows the role template as it stands: an owner who redefined the role gets their own list", async (w, script) => {

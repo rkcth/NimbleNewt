@@ -1163,7 +1163,9 @@ export class ChatService {
           labels[found.id] = found.name;
         } else return refuse("invalid_command", "Which project should this right cover, or should it cover every project?");
         if (bundle !== undefined && namedGrantee !== undefined) {
-          const drawn = await this.#rightsBundle(token, namedGrantee, args, typeof scope === "string" && scope !== "*" ? labels[scope] ?? scope : undefined);
+          // A bundle is for one project (first review): a plain "let Ann work" sentence never reaches every project at once; rights for every project are named one by one.
+          if (scope === "*") return refuse("invalid_command", `a bundle of rights covers one project, never every project. Which project should ${quotedText(namedGrantee.name, 80)} work on? To give rights in every project, name each right.`);
+          const drawn = await this.#rightsBundle(token, namedGrantee, args, typeof scope === "string" ? labels[scope] ?? scope : "");
           if (!drawn.ok) return drawn;
           // One grant.create per right, each with the same grantee, scope, times and reason; the last is the command's own step, pushed at the end like every other command's.
           // The action is put first, so each line of the proposal starts with the right it gives.
@@ -2169,13 +2171,12 @@ export class ChatService {
     throw new DomainError(response.error.code === "unauthenticated" ? "unauthenticated" : "unavailable", response.error.message);
   }
 
-  /** Every item of a list operation, bounded (five pages). */
   /**
    * The rights a bundle stands for (card D01): every capability of the agent's own roles, as the role templates list them now, in the order the roles and their capabilities are written, each once.
-   * A right the agent already holds in exactly that scope for good (active, no start, no end, no idle window, not derived) is left out, so saying it twice gives nothing twice.
-   * An agent with no role, a role with no template, or nothing left to give is refused with what to do instead; nothing is guessed.
+   * A right the agent already holds in exactly that scope for good (active, no start, no end, no idle window, no terms, not derived) is left out, so saying it twice gives nothing twice.
+   * An agent with no role, a role with no template, a template holding a wildcard or an approval, or nothing left to give is refused with what to do instead; nothing is guessed.
    */
-  async #rightsBundle(token: string, agent: { principal: string; name: string; roles: readonly string[] }, args: Readonly<Record<string, unknown>>, projectName: string | undefined): Promise<{ ok: true; actions: string[]; note: string } | ReturnType<typeof refuse>> {
+  async #rightsBundle(token: string, agent: { principal: string; name: string; roles: readonly string[] }, args: Readonly<Record<string, unknown>>, projectName: string): Promise<{ ok: true; actions: string[]; note: string } | ReturnType<typeof refuse>> {
     const who = quotedText(agent.name, 80);
     if (agent.roles.length === 0) return refuse("invalid_command", `${who} has no role, so there is no bundle of rights to give. Give ${who} a role first (for example "make ${agent.name} an author"), or name the rights one by one.`);
     const templates = new Map((await this.#listAll(token, "role.list", {})).map((r) => [String(r["name"]), Array.isArray(r["capabilities"]) ? (r["capabilities"] as unknown[]).filter((c): c is string => typeof c === "string") : []]));
@@ -2183,12 +2184,18 @@ export class ChatService {
     if (unknown !== undefined) return refuse("not_found", `the role ${quotedText(unknown, 60)} of ${who} has no template, so what it stands for is not known. Name the rights one by one, or define the role first.`);
     const actions = [...new Set(agent.roles.flatMap((r) => templates.get(r) ?? []))];
     if (actions.length === 0) return refuse("invalid_command", `the roles of ${who} (${agent.roles.join(", ")}) stand for no rights, so there is nothing to give. Name the rights one by one.`);
-    // A right held for good already covers whatever times the new one would have; one that starts later, ends, lapses or rests on another right does not.
+    // A template may hold a wildcard (`*`, `task.*`); a plain sentence never draws one up (first review): each line of a bundle names one exact right, so the owner sees what each one gives.
+    const wide = actions.find((a) => a === "*" || a.endsWith(".*"));
+    if (wide !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(wide, 60)}, which covers more than one right, so no bundle was drawn up. Name the rights one by one.`);
+    // An approval right (`approve.…`) lets an agent's action through without asking the owner; a plain "let Ann work" sentence never gives one (first review), as an agent never derives one and a meeting never grants one.
+    const waiver = actions.find((a) => a.startsWith("approve."));
+    if (waiver !== undefined) return refuse("invalid_command", `the roles of ${who} stand for ${quotedText(waiver, 60)}, an approval that lets actions through without asking you, so no bundle was drawn up. Name the rights one by one.`);
+    // A right held for good already covers whatever times the new one would have; one that starts later, ends, lapses, rests on another right or holds only under terms (hours, environments, a spend limit) does not.
     const held = new Set((await this.#listAll(token, "grant.list", { grantee: agent.principal }))
-      .filter((g) => g["state"] === "active" && g["project"] === args["project"] && g["resource"] === undefined && g["notBefore"] === undefined && g["expiresAt"] === undefined && g["idleDays"] === undefined && g["parentId"] === undefined)
+      .filter((g) => g["state"] === "active" && g["project"] === args["project"] && g["resource"] === undefined && g["notBefore"] === undefined && g["expiresAt"] === undefined && g["idleDays"] === undefined && g["parentId"] === undefined && g["terms"] === undefined)
       .map((g) => String(g["action"])));
     const fresh = actions.filter((a) => !held.has(a));
-    const where = projectName === undefined ? "every project" : quotedText(projectName, 80);
+    const where = quotedText(projectName, 80);
     if (fresh.length === 0) return refuse("invalid_command", `${who} already holds every right of the role${agent.roles.length === 1 ? "" : "s"} ${agent.roles.join(", ")} in ${where}, so nothing was drawn up.`);
     if (fresh.length > GRANT_BUNDLE_LIMIT) return refuse("invalid_command", `the roles of ${who} stand for ${String(fresh.length)} rights, more than the ${String(GRANT_BUNDLE_LIMIT)} one proposal can show. Name the rights you want in smaller groups.`);
     const skipped = actions.filter((a) => held.has(a));
@@ -2196,6 +2203,7 @@ export class ChatService {
     return { ok: true, actions: fresh, note };
   }
 
+  /** Every item of a list operation, bounded (five pages). */
   async #listAll(token: string, op: string, args: Record<string, unknown>): Promise<Record<string, unknown>[]> {
     return (await this.#listPages(token, op, args)).items;
   }
