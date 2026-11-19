@@ -8,6 +8,8 @@ export interface FileIo {
   writeFile(path: string, data: Uint8Array, mode: number): Promise<void>;
   /** Free bytes on the file system holding `path`; `undefined` when it cannot be told (then the space is not pre-checked and a full disk shows as a failed write). */
   freeBytes(path: string): Promise<number | undefined>;
+  /** Reads a symbolic link (default: the real readlink). Injectable so a test can stage a link that is briefly unreadable while another writer replaces it. */
+  readlink?(path: string): Promise<string>;
 }
 export const realIo: FileIo = {
   async writeFile(path, data, mode) { await writeFile(path, data, { mode, flag: "wx" }); await chmod(path, mode); },

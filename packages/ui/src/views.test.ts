@@ -454,14 +454,22 @@ test("the Secrets form is write only: the value is sent once, the field is empti
   assert.match(text(bv), /secret store on the computer\. Never type it in chat/); assert.ok(!bv.buttons().some((b) => b.textContent === "Save the secret"));
 });
 
+// The model route item's detail at the length the setup readiness keeps it within (240 characters): routes too small to start a task, named and counted.
+const MODEL_ROUTE_DETAIL = `2 enabled provider(s), 5 usable route(s); no task can start on any of them: ${"q".repeat(57)}... (65,536 tokens with a reply limit of 40,000; needs 74,752) and 4 more`.padEnd(240, "x");
+
 test("the first-run page lists what is set up, explains the profiles in plain words, recommends derived for testing and development, and asks once (card U08)", async () => {
   const readiness = (profile: string) => ({ item: { ready: false, next: { id: "model-route", label: "A model route", how: "Add a provider on the Providers section." }, items: [
     { id: "owner", label: "Owner identity and credential", state: "done", required: true, detail: "rob" },
+    { id: "project", label: "A project", state: "done", required: true, detail: "y".repeat(241) },
     { id: "profile", label: "Approval profile", state: profile === "strict" ? "default" : "done", required: false, detail: profile },
-    { id: "model-route", label: "A model route", state: "missing", required: true, detail: "none" } ] } });
+    { id: "model-route", label: "A model route", state: "missing", required: true, detail: MODEL_ROUTE_DETAIL } ] } });
   const page = boot({ "admin-setup": { readiness: readiness("strict (the default for a new installation)"), suggestion: { item: { due: true, preview: ["Approvals would be decided by rule first."] } }, sandbox: sandboxFixture(true) } });
   const view = await admin(page, "setup", "First run");
   const t = text(view);
+  // A detail is shown whole up to the 240 characters the setup status kind shows too (the model route item's list of routes too small to start a task is kept within that); a longer one is cut.
+  const cells = view.find((e) => e.tag === "td").map((c) => c.textContent);
+  assert.ok(cells.includes(MODEL_ROUTE_DETAIL), cells.join(" | "));
+  assert.ok(cells.includes(`${"y".repeat(237)}...`), "a detail over 240 characters is cut");
   assert.match(t, /Owner identity and credential.*done/s); assert.match(t, /Next: A model route\. Add a provider/);
   assert.match(t, /Strict asks at every consequential step\. Derived lets what you say authorize what it reasonably needs/);
   assert.match(t, /For testing and development work the derived profile is recommended/);

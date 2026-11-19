@@ -432,6 +432,35 @@ describe("security", () => {
     await assert.rejects(() => w.runtime.activePackages(AGENT));
   });
 
+  test("a link that reads as 'not a link' for a moment while another writer replaces it is asked again; one that stays not a link is corrupt (CI fix, macOS EINVAL)", { skip: POSIX_STORE }, async () => {
+    let failures = 0; let calls = 0;
+    const einval = (): NodeJS.ErrnoException => Object.assign(new Error("EINVAL: invalid argument, readlink"), { code: "EINVAL" });
+    const io: FileIo = { ...realIo, readlink: async (path) => { calls++; if (failures > 0) { failures--; throw einval(); } return readlinkSync(path); } };
+    const w = world({ io }); const a = w.add("a");
+    assert.equal((await reloadOf(w, 1, [ref(a)], spec(a))).ok, true);
+    // Three brief failures: read again, the real answer.
+    failures = 3; calls = 0;
+    assert.equal(await w.runtime.environments.active(AGENT), 1);
+    assert.equal(calls, 4, "three refused reads and one that answered");
+    // As many failures as it will wait through, plus one: never a link, so corrupt (not a raw EINVAL, not undefined), and bounded.
+    failures = 1000; calls = 0;
+    await assert.rejects(() => w.runtime.environments.active(AGENT), (e: Error & { code?: string }) => e.name === "EnvironmentStoreError" && e.code === "corrupt" && /active link of agent:ann is not a link/.test(e.message));
+    assert.equal(calls, 6, "the first read and five more, then it stops");
+    failures = 0;
+    // The real thing: a plain file where the link should be stays not a link through every retry.
+    const link = join(w.runtime.environments.agentDir(AGENT), "previous");
+    writeFileSync(link, "not a link");
+    await assert.rejects(() => w.runtime.environments.active(AGENT, "previous"), /previous link of agent:ann is not a link/);
+    // Another error is not retried and passes through.
+    const eacces = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    const denied = world({ io: { ...realIo, readlink: async () => { calls++; throw eacces; } } });
+    calls = 0;
+    await assert.rejects(() => denied.runtime.environments.active(AGENT), /EACCES/);
+    assert.equal(calls, 1);
+    // No link at all: none was ever activated, at once.
+    assert.equal(await world().runtime.environments.active(AGENT), undefined);
+  });
+
   test("validate reports a revision other than the active one and a worker that cannot say", { skip: POSIX_STORE }, async () => {
     const w = world(); const a = w.add("a");
     assert.equal((await reloadOf(w, 1, [ref(a)], spec(a))).ok, true);

@@ -145,7 +145,7 @@ test("each test command runs in the sandbox on a fresh copy of the integrated tr
     const first = seen[0]!;
     assert.deepEqual(first.files, { "src/a.ts": "export const a = 2;\n" });
     assert.notEqual(first.req.recipe.workdir, w.made.checkout);
-    assert.ok(first.req.recipe.workdir.startsWith(realpathSync(base)), first.req.recipe.workdir);
+    assert.ok(first.req.recipe.workdir.startsWith(realpathSync.native(base)), first.req.recipe.workdir);
     assert.deepEqual(first.req.recipe.readOnly, [{ host: "/usr", guest: "/opt/tools" }]);
     assert.deepEqual([first.req.recipe.env, first.req.recipe.network, first.req.timeoutMs, first.req.maxOutputBytes, first.req.limits, first.req.requireEnforced], [{ CI: "1" }, "none", 5000, 4096, { memoryMb: 256 }, true]);
     assert.ok(![first.req.recipe.workdir, first.req.recipe.home, first.req.recipe.scratch].some((p) => p.startsWith(w.made.gitDir)));

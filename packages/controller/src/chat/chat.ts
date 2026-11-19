@@ -18,6 +18,9 @@ import { docVerifyCode } from "../submissions/doc-obligations.js";
 import { probeUrl } from "../projects/probes.js";
 import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
+import { DEFAULT_REPLY_TOKENS, smallWindowWarning } from "../context/fixed-part.js";
+import { MIN_WORKABLE_CONTEXT_TOKENS, PROVIDER_NAME } from "../setup/providers.js";
+import { ROUTING_LIMITS } from "../routing/index.js";
 import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
@@ -1825,6 +1828,24 @@ export class ChatService {
       const first = found.ok ? (found.result["items"] as Reliance[] | undefined)?.[0] : undefined;
       if (first !== undefined) notes.push(...relianceLines(first));
       else if (!found.ok && found.error.code !== "not_found" && found.error.code !== "invalid_command") notes.push("Which running work relies on this right could not be checked just now; work that does may stop at its next check.");
+    }
+    // A model window too small to start a task (card "Fixed-part sizing after T08", follow-up): the owner reads the warning in the proposal, before saying yes, not only in the answer after it. The same rule as the
+    // first-call admission decides it (`smallWindowWarning`): a new provider's routes have no reply limit, so the hosts' usual reply room counts; a reply limit counts with the route's stored window.
+    if (intent.op === "routing.provider.add" && Array.isArray(args["providers"])) {
+      for (const p of args["providers"].slice(0, 10)) {
+        if (p === null || typeof p !== "object") continue;
+        const { name, contextTokens } = p as Record<string, unknown>;
+        if (typeof contextTokens !== "number" || !Number.isSafeInteger(contextTokens) || contextTokens < MIN_WORKABLE_CONTEXT_TOKENS || contextTokens > ROUTING_LIMITS.contextTokens) continue;
+        const warning = smallWindowWarning(contextTokens);
+        if (warning !== undefined) notes.push(`Provider ${typeof name === "string" && PROVIDER_NAME.test(name) ? name : "(unnamed)"}: ${warning}`);
+      }
+    }
+    if (intent.op === "routing.budget.set" && typeof args["route"] === "string" && Object.hasOwn(args, "maxTokens")) {
+      const limit = args["maxTokens"];
+      const read = limit === null || (typeof limit === "number" && Number.isSafeInteger(limit) && limit >= 1 && limit <= ROUTING_LIMITS.maxTokens) ? await this.#deps.api.handle(token, { v: API_VERSION, op: "routing.budgets", args: {} }) : undefined;
+      const entry = read?.ok === true ? (read.result["routes"] as { route: string; contextTokens: number }[] | undefined)?.find((r) => r.route === args["route"]) : undefined;
+      const warning = entry === undefined ? undefined : smallWindowWarning(entry.contextTokens, limit === null ? DEFAULT_REPLY_TOKENS : (limit as number));
+      if (warning !== undefined) notes.push(`Route ${entry!.route}: ${warning}`);
     }
     if (intent.op === "catalog.policy.change") {
       const standing = await this.#get(token, "catalog.policy.get", {});
