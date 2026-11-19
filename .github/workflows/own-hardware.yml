@@ -21,7 +21,9 @@ jobs:
     name: Probe ${{ matrix.label }}
     if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, "${{ matrix.label }}"]
-    timeout-minutes: 60
+    # One run of the whole suite takes about 21 minutes on the Mac and about twice that on the Windows runner, and a slow Windows run was
+    # cancelled at 60 minutes part way through (CI, 2026-11-19). One limit for both machines: the Mac finishes far below it.
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:

@@ -53,6 +53,15 @@ test("own-hardware: the Windows evidence job runs only by hand from main, every 
   assert.ok(j.indexOf("Use Git Bash for bash steps") < j.indexOf("id: fs"));
 });
 
+test("own-hardware: the probe job (one run of the whole suite on each own machine) has room for the slower Windows runner; the evidence job keeps its own limit", () => {
+  const text = read("own-hardware.yml");
+  const probe = job(text, "probe");
+  // A Windows run takes about twice the Mac's 21 minutes and one was cancelled at 60 (CI, 2026-11-19).
+  assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(probe)?.[1]), 150);
+  assert.match(probe, /label: \[nimblenewt-mac, nimblenewt-windows\]/);
+  assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(job(text, "sandbox-windows"))?.[1]), 420);
+});
+
 test("own-hardware: the outcome step, run as bash runs it on the runner, passes only when every evidence step succeeded", { skip: process.platform === "win32" ? "runs the step with a POSIX bash" : false }, () => {
   const j = job(read("own-hardware.yml"), "sandbox-windows");
   const from = j.indexOf("- name: Job summary and outcome");

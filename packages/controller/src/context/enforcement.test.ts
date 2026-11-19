@@ -693,13 +693,14 @@ for (const backend of backends) {
   suite("a compaction that loses the race for the chain is closed as superseded, not left started, and is not an overflow", async ({ enf, owner, note, ann, setup, t }) => {
     await setup();
     const src = await note(ann, "d", "x");
-    const gates: (() => void)[] = [];
-    const gated = (route: string, out: string): Summariser => ({ route, summarise: () => new Promise<string>((resolve) => { gates.push(() => resolve(out)); }) });
+    // Each summariser's gate is kept under its own route, so a is released first and b second whichever reached its summariser first.
+    const gates = new Map<string, () => void>();
+    const gated = (route: string, out: string): Summariser => ({ route, summarise: () => new Promise<string>((resolve) => { gates.set(route, () => resolve(out)); }) });
     const a = enf.compact(owner, compactCmd(t, "ka", [src]), [gated("a", "Summary A.")]);
     const b = enf.compact(owner, { ...compactCmd(t, "kb", [src]), attemptId: "att-2" }, [gated("b", "Summary B.")]);
-    while (gates.length < 2) await new Promise((r) => setTimeout(r, 5));
-    gates[0]!(); const first = await a;
-    gates[1]!(); const second = await b;
+    while (!(gates.has("a") && gates.has("b"))) await new Promise((r) => setTimeout(r, 5));
+    gates.get("a")!(); const first = await a;
+    gates.get("b")!(); const second = await b;
     assert.deepEqual([first.kind, second.kind], ["summary", "superseded"]);
     const rec = (await enf.getCompaction(owner, second.id))!;
     assert.deepEqual([rec.state, rec.superseded], ["failed", true]);
