@@ -119,5 +119,18 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     const asked = "how are the maintenance windows doing";
     const answer = JSON.stringify(await turn("m3", asked, [{ kind: "status", request: { kind: "release_windows" }, evidence: asked, basis: "owner" }]));
     assert.ok(answer.includes(windowId) && answer.includes("committed"), answer);
+
+    // Once a release ran here it stays staged for going back, but it is never taken as "the update waiting": with the first release current, the loose words take the second one; once the second
+    // was installed too (the first is now the previous release), nothing is waiting and the owner is told so instead of being offered the first one back.
+    const next = await turn("n1", loose, [{ kind: "command", op: "release.window.set", args: { date: later, time: "03:00", timeZone: "Europe/London", durationMinutes: 90 }, evidence: loose, basis: "owner" }]);
+    assert.equal(next[0]!.status, "proposed", JSON.stringify(next));
+    assert.ok(JSON.stringify(next[0]).includes(`Release ${id2}`) && !JSON.stringify(next[0]).includes(`Release ${id}:`), JSON.stringify(next[0]));
+    assert.ok((await owner("release.approve", { candidateId: id2 }, "ap2")).ok);
+    const digest2 = (await owner("release.verify", { releaseId: id2 })).result.digest as string;
+    assert.ok((await owner("release.activate", { candidateId: id2, digest: digest2 }, "ac2")).ok);
+    assert.equal((await owner("release.status", {})).result.item.previous?.id, id);
+    const after = await turn("n2", loose, [{ kind: "command", op: "release.window.set", args: { date: later, time: "03:00", timeZone: "Europe/London", durationMinutes: 90 }, evidence: loose, basis: "owner" }]);
+    assert.equal(after[0]!.status, "refused", JSON.stringify(after));
+    assert.match(JSON.stringify(after), /No staged release is waiting/);
   } finally { await c.close(); unlockAll(join(root, "releases")); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

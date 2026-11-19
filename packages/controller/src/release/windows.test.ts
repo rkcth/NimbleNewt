@@ -342,6 +342,22 @@ for (const backend of backends) {
     assert.deepEqual([settled.status, settled.from], ["activated", v1.id], settled.reason);
   });
 
+  suite("a window whose activation is refused because the owner already made its release current is failed, not reported as having switched it", async (c) => {
+    const v1 = await c.ready("v1");
+    await c.act.activate(c.owner, { commandId: cid("a"), candidateId: v1.id, digest: v1.digest });
+    const v2 = await c.ready("v2");
+    const w = c.win();
+    const { windowId } = await w.set(c.owner, { commandId: cid("w"), candidateId: v2.id, digest: v2.digest, ...at() });
+    // Before the window opens, the owner installs the same release by hand.
+    await c.act.activate(c.owner, { commandId: cid("b"), candidateId: v2.id, digest: v2.digest });
+    c.clock.t = OPENS + MIN;
+    await w.tick();
+    const got = await w.get(c.owner, windowId);
+    assert.equal(got.status, "failed", got.reason);
+    assert.equal(got.from, undefined, "the window names no release it switched from");
+    assert.equal(c.pointer(), v2.id);
+  });
+
   suite("a window is found among many ended ones (the scan reads every page), and set refuses a second open window however many have ended", async (c) => {
     const r = await c.ready("v1");
     // One record per page: a window that is not the first by ID is reached only by reading further pages.

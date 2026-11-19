@@ -17,6 +17,7 @@ import { quoted as quotedText } from "../status/explain.js";
 import { probeUrl } from "../projects/probes.js";
 import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
+import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
@@ -1013,15 +1014,20 @@ export class ChatService {
     if (intent.op === "release.window.set") {
       delete args["digest"];
       let wanted = args["candidateId"];
-      // No release named ("put the update on tonight at 2"): the one staged release that is not running now, is not quarantined and never failed to start is meant; with several, the owner is asked which.
+      // No release named ("put the update on tonight at 2"): the one staged release that never ran here (not current, previous, last known good or in the activation history), is not quarantined and never failed to start is meant; with several, the owner is asked which.
       if (wanted === undefined) {
         const st = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.status", args: {} });
         if (!st.ok) return refuse(st.error.code, st.error.message);
-        const s = st.result["item"] as { current?: { id: string }; failedStarts?: { id: string }[]; staged?: { candidateId: string }[] };
+        const s = st.result["item"] as { current?: { id: string }; previous?: { id: string }; lastKnownGood?: { id: string }; history?: { to?: string; from?: string }[]; failedStarts?: { id: string }[]; staged?: { candidateId: string }[] };
         const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
-        const quarantined = new Set(wl.ok ? ((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId) : []);
+        if (!wl.ok) return refuse(wl.error.code, wl.error.message);
+        const quarantined = new Set(((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId));
         const failed = new Set((s.failedStarts ?? []).map((f) => f.id));
-        const eligible = (s.staged ?? []).map((x) => x.candidateId).filter((id) => id !== s.current?.id && !quarantined.has(id) && !failed.has(id));
+        // A release that already ran here (the current one, the one before it, the last known good, any the activation history names) stays staged for going back; it is not an update waiting.
+        const ran = new Set([s.current?.id, s.previous?.id, s.lastKnownGood?.id, ...(s.history ?? []).flatMap((h) => [h.to, h.from])].filter((x): x is string => typeof x === "string"));
+        const eligible = (s.staged ?? []).map((x) => x.candidateId).filter((id) => !ran.has(id) && !quarantined.has(id) && !failed.has(id));
+        // The status lists a bounded page of staged releases: when it is full, others may be waiting too, so the owner is asked rather than one picked.
+        if ((s.staged ?? []).length >= ACTIVATION_LIMITS.listed && eligible.length > 0) return refuse("invalid_command", `Many staged releases are kept (${(s.staged ?? []).length} or more): which one should the window install? Name its rcn- ID.`);
         if (eligible.length !== 1) return refuse("invalid_command", eligible.length === 0 ? "No staged release is waiting to be installed (stage one first with release.stage), so there is nothing for a maintenance window to install." : `${eligible.length} staged releases could be installed (${eligible.slice(0, 5).join(", ")}${eligible.length > 5 ? ", ..." : ""}): which one should the window install?`);
         wanted = eligible[0]!;
         args["candidateId"] = wanted;
