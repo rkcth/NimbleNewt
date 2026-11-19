@@ -43,6 +43,26 @@ function icacls(host: WindowsHost): string {
   return `${host.env("SystemRoot") ?? "C:\\Windows"}\\System32\\icacls.exe`;
 }
 
+/**
+ * After an access-denied `wsb start`: each folder the configuration maps (guest path, host path, read-only or writable) with its access list as icacls reads it back at that
+ * moment (the job's grants are still in place; they are given back only when the job is released). One line per folder, each list cut to 600 characters, so the next run shows
+ * whether the share account's grant was there, which deny entries applied, and who else is listed, without anyone having to reproduce the failure. Never throws.
+ */
+export async function sharedFolderReadback(host: WindowsHost, shares: readonly Share[]): Promise<string[]> {
+  const lines: string[] = [];
+  for (const s of shares) {
+    const head = `shared ${s.guest} <- ${s.host} (${s.readOnly ? "read-only" : "writable"}, ${s.why})`;
+    const r = await host.run(icacls(host), [s.host], { timeoutMs: 30_000 }).catch((error: unknown) => ({ code: null, stdout: "", stderr: (error as Error).message, timedOut: false }));
+    if (r.code !== 0) { lines.push(`${head}: access list not readable (icacls exit ${String(r.code)})`); continue; }
+    // icacls prints the path, then the entries one per line until the first blank line, then a summary in the system's language.
+    const block = r.stdout.replace(/\r/g, "").split("\n\n")[0] ?? "";
+    const first = block.toLowerCase().startsWith(s.host.toLowerCase()) ? block.slice(s.host.length) : block;
+    const entries = first.split("\n").map((l) => l.trim()).filter((l) => l !== "").join("; ");
+    lines.push(`${head}: ${entries.length > 600 ? `${entries.slice(0, 600)}…` : entries || "no entry read"}`);
+  }
+  return lines;
+}
+
 /** The checks that every job repeats at the moment it starts (the health check may be old): the client, the session, and that no shared folder reaches the supervisor's files. */
 export async function admit(host: WindowsHost, settings: WindowsSettings, shares: readonly Share[], supervisorPaths: readonly string[]) {
   const client = await verifyClient(host, settings);
@@ -188,7 +208,9 @@ async function execute(host: WindowsHost, job: WindowsJob, supervisorPaths: read
       const why = /0x8000401A/i.test(text) ? "Windows Sandbox could not start because no user session is available (0x8000401A, the server's configured identity)"
         : denied ? `Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit ${String(started.code)}): ${describeWsbAccessDenied(session)}`
         : `wsb start failed (exit ${String(started.code)}): ${text.trim().slice(0, 300)}`;
-      return { exitCode: EXIT_FAILED, stdout: "", stderr: `failed: ${why}\n` };
+      // The reason stays on the first line (callers that summarise read only that); the folders and their access lists follow, one per line.
+      const readback = denied ? await sharedFolderReadback(host, shares) : [];
+      return { exitCode: EXIT_FAILED, stdout: "", stderr: `failed: ${why}\n${readback.map((l) => `${l}\n`).join("")}` };
     }
     // The session conditions are checked again between start and exec: the start takes long enough for a lock to be undone.
     const again = await verifySession(host, settings);

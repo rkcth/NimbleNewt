@@ -40,7 +40,7 @@ export const VM_FALLBACK_DECISION =
 
 /**
  * What the owner is told when `wsb start` answers E_ACCESSDENIED (0x80070005, exit 2147942405) and this process is not known to run in the active console session as the console
- * user, as for the own-hardware runner of run 44501483353 (most likely installed as a service; not confirmed on that machine).
+ * user, as for the own-hardware runner of run 44501483353 (whose cause was not established).
  */
 export const INTERACTIVE_RUNNER_HINT = "start the runner interactively with run.cmd as the console user (not as a service)";
 

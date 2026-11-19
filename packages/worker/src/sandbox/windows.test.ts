@@ -1011,7 +1011,20 @@ describe("Windows launcher: running a job", () => {
       const d = new SimHost(); d.startFailure = failure;
       const pd = prepared(d); d.sess = { consoleUser: "PC\\robert", locked: false, processInConsoleSession: false, processIsConsoleUser: false };
       const od = await runWindowsJob(d, pd.job, [], pd.jobDir);
-      assert.equal(od.stderr, `failed: Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit ${String(failure.code)}): ${describeWsbAccessDenied(d.sess)}\n`);
+      const [first, ...rest] = od.stderr.trimEnd().split("\n");
+      assert.equal(first, `failed: Windows Sandbox refused the start (access denied, 0x80070005; wsb start exit ${String(failure.code)}): ${describeWsbAccessDenied(d.sess)}`);
+      // Then every mapped folder, with its access list read back while the job's grants are still in place (the share account's grant and the .git deny are visible).
+      const shares = sharesFor(pd.job.recipe, `${pd.jobDir}\\guest`);
+      assert.equal(rest.length, shares.length, od.stderr);
+      for (const [i, s] of shares.entries()) assert.ok(rest[i]!.startsWith(`shared ${s.guest} <- ${s.host} (${s.readOnly ? "read-only" : "writable"}, ${s.why}): NT AUTHORITY\\SYSTEM:(OI)(CI)(F); `), rest[i]);
+      assert.match(rest.find((l) => l.includes(", work)"))!, /robert:\(OI\)\(CI\)M$/i);
+      assert.match(rest.find((l) => l.includes(", protected)"))!, /robert:\(DENY\)\(OI\)\(CI\)\(W,DC\)$/i);
+      assert.equal(d.runs.filter((r) => r.file.toLowerCase().endsWith("icacls.exe") && r.args.length === 1).length, shares.length, "one read-back per mapped folder");
+      // The health probe's reason is the first line only, whole; the read-back stays out of it.
+      const dh = new SimHost(); dh.startFailure = failure;
+      const hr = (await windowsSandboxBackend(options(dh)).health()).reason!;
+      assert.match(hr, /refused the start \(access denied.*check that Windows Sandbox may use the shared folders \(the research of 2026-10-16 saw this error from an output folder it could not use\)$/);
+      assert.doesNotMatch(hr, /shared C:\\nn/);
       assert.match(od.stderr, /in the active console session: no; the console user: no\): start the runner interactively with run\.cmd as the console user \(not as a service\); otherwise check that Windows Sandbox may use the shared folders/);
     }
     // In the console session as the console user, the shared folders are named instead; a session that cannot be read leaves both facts undetermined.
