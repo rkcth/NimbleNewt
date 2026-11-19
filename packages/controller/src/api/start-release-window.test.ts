@@ -56,14 +56,48 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     const time = now.toISOString().slice(11, 16);
     const text = `set a maintenance window for release ${id} today now for an hour, keep 0 bytes free`;
     const turn = async (mid: string, words: string, intents: unknown[]) => { say[words] = intents; return (await c.chat!.submit(boot.token, { messageId: mid, text: words })).outcomes; };
+
+    // Loose words, no IDs typed (no magic phrases): "cancel the maintenance window" with none open says so; "install the update ..." takes the one staged release waiting to be installed, and the
+    // proposal shows every number it would be set with (length, preparation lead, free space, the UTC instants); "cancel the maintenance window" then cancels the one open window.
+    const none = await turn("l0", "cancel the maintenance window", [{ kind: "command", op: "release.window.cancel", args: {}, evidence: "cancel the maintenance window", basis: "owner" }]);
+    assert.equal(none[0]!.status, "refused", JSON.stringify(none));
+    assert.match(JSON.stringify(none), /No maintenance window is open/);
+    const later = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+    const loose = "install the update the day after tomorrow at 3am London time for 90 minutes";
+    const proposed = await turn("l1", loose, [{ kind: "command", op: "release.window.set", args: { date: later, time: "03:00", timeZone: "Europe/London", durationMinutes: 90 }, evidence: loose, basis: "owner" }]);
+    assert.equal(proposed[0]!.status, "proposed", JSON.stringify(proposed));
+    const seen = JSON.stringify(proposed[0]);
+    for (const part of [id, staged.digest, "lasts 90 minutes", "60 (the default) minutes before", `${1024 ** 3} (the default) bytes free`, " UTC"]) assert.ok(seen.includes(part), `${part} in ${seen}`);
+    const yes = await turn("l2", "yes, set that window", [{ kind: "apply_proposal", proposalId: proposed[0]!.proposalId, evidence: "set that window", basis: "owner" }]);
+    assert.equal(yes[0]!.status, "applied", JSON.stringify(yes));
+    const set = (await owner("release.window.list", {})).result.windows;
+    assert.deepEqual(set.map((w: { candidateId: string; status: string; durationMinutes: number }) => [w.candidateId, w.status, w.durationMinutes]), [[id, "scheduled", 90]]);
+    const cancelled = await turn("l3", "actually, cancel the maintenance window", [{ kind: "command", op: "release.window.cancel", args: {}, evidence: "cancel the maintenance window", basis: "owner" }]);
+    assert.equal(cancelled[0]!.status, "applied", JSON.stringify(cancelled));
+    assert.equal((await owner("release.window.get", { windowId: set[0].windowId })).result.status, "cancelled");
+    // A window ID the owner never wrote is not taken from the interpreter.
+    const invented = await turn("l4", "cancel that window", [{ kind: "command", op: "release.window.cancel", args: { windowId: set[0].windowId }, evidence: "cancel that window", basis: "owner" }]);
+    assert.equal(invented[0]!.status, "refused", JSON.stringify(invented));
+    // With two staged releases waiting, which one is asked, never guessed.
+    const files2 = { "nn.js": "v2", "compat.json": files["compat.json"] };
+    const artifacts2 = Object.fromEntries(Object.entries(files2).map(([k, v]) => [k, sha(v)]));
+    const id2 = (await owner("release.submit", { manifest: { ...manifest, artifacts: artifacts2 } }, "sub2")).result.candidateId as string;
+    const att2 = (await owner("release.issue", { candidateId: id2, cell: { os: "linux", arch: "x64" }, hostId: "lx", workerId: builder.id, timeoutSeconds: 600, memoryMb: 2048 }, "iss2")).result.attemptId as string;
+    assert.ok((await call(builderToken, "release.report", { attemptId: att2, sourceCommit: "c".repeat(40), suiteRevision: "s1", artifactHashes: artifacts2, dependencyLockHashes: { lock: sha("lock") }, environment: { os: "linux", arch: "x64" }, outcome: "pass", counts: { passed: 1, failed: 0, skipped: 0 }, logDigest: sha("log"), summary: "ok" }, "rep2")).ok);
+    for (const [k, v] of Object.entries(files2)) { mkdirSync(join(root, "incoming", id2), { recursive: true }); writeFileSync(join(root, "incoming", id2, k), v); }
+    assert.ok((await owner("release.stage", { candidateId: id2 }, "st2")).ok);
+    const two = await turn("l5", loose, [{ kind: "command", op: "release.window.set", args: { date: later, time: "03:00", timeZone: "Europe/London", durationMinutes: 90 }, evidence: loose, basis: "owner" }]);
+    assert.equal(two[0]!.status, "refused", JSON.stringify(two));
+    assert.ok(JSON.stringify(two).includes(id) && JSON.stringify(two).includes(id2) && /which one/.test(JSON.stringify(two)), JSON.stringify(two));
+
     const shown = await turn("m1", text, [{ kind: "command", op: "release.window.set", args: { candidateId: id, digest: sha("an invented digest"), date, time, timeZone: "UTC", durationMinutes: 60, minFreeBytes: 0 }, evidence: text, basis: "owner" }]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
     assert.ok(JSON.stringify(shown[0]!.preview).includes(staged.digest), "the staged digest is filled in by the controller");
     assert.ok(!JSON.stringify(shown[0]!.preview).includes(sha("an invented digest")));
-    assert.equal((await owner("release.window.list", {})).result.windows.length, 0, "a proposal sets nothing");
+    assert.equal((await owner("release.window.list", {})).result.windows.length, 1, "a proposal sets nothing (only the cancelled window is there)");
     const applied = await turn("m2", "yes, set it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "set it", basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
-    const listed = (await owner("release.window.list", {})).result.windows;
+    const listed = (await owner("release.window.list", {})).result.windows.filter((w: { status: string }) => w.status !== "cancelled");
     assert.equal(listed.length, 1);
     const windowId = listed[0].windowId as string;
     assert.deepEqual([listed[0].status, listed[0].digest], ["scheduled", staged.digest]);

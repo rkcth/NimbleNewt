@@ -9,6 +9,7 @@ import { CommandRunner, type Built } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import type { ControllerStorage } from "../storage/types.js";
 import { ReleaseActivationService, ReleaseService, ReleaseWindowService, type WindowNotice, type WindowOptions } from "./index.js";
 
 /**
@@ -37,6 +38,7 @@ interface W {
   /** A submitted, staged and approved candidate; returns its ID and staged digest. */
   ready: (content: string, approve?: boolean) => Promise<{ id: string; digest: string }>;
   pointer: () => string | undefined;
+  storage: ControllerStorage; epoch: number;
 }
 
 for (const backend of backends) {
@@ -67,7 +69,7 @@ for (const backend of backends) {
           return { id: candidateId, digest: s.digest };
         };
         const pointer = (): string | undefined => existsSync(join(root, "current.json")) ? (JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release : undefined;
-        await body({ owner, agent, act, root, clock, live, free, told, win, ready, pointer });
+        await body({ owner, agent, act, root, clock, live, free, told, win, ready, pointer, storage: world.storage, epoch: projects.epoch });
       } finally { await world.close(); unlockAll(join(root, "releases")); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
     });
   };
@@ -313,6 +315,53 @@ for (const backend of backends) {
     assert.equal(c.pointer(), v1.id, "the late sweep switched nothing");
     await again.tick();
     assert.equal(c.pointer(), v1.id);
+  });
+
+  suite("an activation that reports an error after its switch began (the switch left open in the journal) is not failed: the window waits and is settled from the activation record once restart recovery finished it", async (c) => {
+    const v1 = await c.ready("v1");
+    await c.act.activate(c.owner, { commandId: cid("a"), candidateId: v1.id, digest: v1.digest });
+    const v2 = await c.ready("v2");
+    const trip = { armed: true };
+    // The same release root and records, with an error raised right after the pointer was written and before the switch was committed (a storage failure there, say).
+    const broken = ReleaseActivationService.withEpoch(c.storage, c.epoch, { root: c.root, switcher: "pointer", platform: linux, runner: options, hook: (p) => { if (p === "afterSwitch" && trip.armed) { trip.armed = false; throw new DomainError("unavailable", "the commit could not be written"); } } });
+    const w = c.win({ activation: broken });
+    const { windowId } = await w.set(c.owner, { commandId: cid("w"), candidateId: v2.id, digest: v2.digest, ...at() });
+    c.clock.t = OPENS + MIN;
+    await w.tick();
+    const open = await w.get(c.owner, windowId);
+    assert.equal(open.status, "prepared", open.reason);
+    assert.equal(c.pointer(), v2.id, "the pointer was switched");
+    await w.tick();
+    assert.equal((await w.get(c.owner, windowId)).status, "prepared", "still waiting on the open switch");
+    assert.deepEqual(c.told, [], "nothing told while it is unsettled");
+    // The controller restarts: K02's recovery finishes the open switch (even after the window closed), and the window settles as activated, not failed or missed.
+    assert.equal((await broken.recover()).resolved, "committed");
+    c.clock.t = OPENS + 3 * 60 * MIN;
+    await w.tick();
+    const settled = await w.get(c.owner, windowId);
+    assert.deepEqual([settled.status, settled.from], ["activated", v1.id], settled.reason);
+  });
+
+  suite("a window is found among many ended ones (the scan reads every page), and set refuses a second open window however many have ended", async (c) => {
+    const r = await c.ready("v1");
+    // One record per page: a window that is not the first by ID is reached only by reading further pages.
+    const w = c.win({ scanPage: 1 });
+    const ended: string[] = [];
+    let open = "";
+    for (let i = 1; i <= 8; i++) {
+      const s = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at(`2026-12-0${i}`) });
+      if (i >= 4 && ended.some((e) => e < s.windowId)) { open = s.windowId; break; }
+      await w.cancel(c.owner, { commandId: cid("x"), windowId: s.windowId });
+      ended.push(s.windowId);
+    }
+    assert.ok(open !== "" && ended.some((e) => e < open), "the open window is not on the first page");
+    const ids = [...ended, open];
+    await refuses("invalid_transition", () => w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2026-12-09") }), /still open/);
+    c.clock.t = Date.parse((await w.get(c.owner, open)).opensAt) + MIN;
+    await w.tick();
+    assert.equal((await w.get(c.owner, open)).status, "activated", "the open window was reached by the sweep");
+    assert.equal((await w.list(c.owner)).windows.length, ids.length);
+    assert.equal(c.pointer(), r.id);
   });
 
   suite("a long wait whose count of running attempts goes up and down keeps saying what it waits for (no repeated step names after the history is full)", async (c) => {

@@ -81,14 +81,14 @@ Not built: service-manager units (launchd, systemd, Windows service), running it
 
 ### Maintenance windows (card K07, first slice)
 
-The owner sets a window for one exact staged release (`release.window.set`, or in chat, where it is always shown first with the staged digest filled in from the record and the time it understood): a local date and time in a named time zone, how long it lasts, an optional channel label, the preparation lead (default 60 minutes) and the free space the release root must have (default 1 GiB). One window is open at a time. The controller's dispatcher then:
+The owner sets a window for one exact staged release (`release.window.set`, or in chat in any words, where it is always shown first with the staged digest filled in from the record, the time it understood with its UTC instants, the length, the preparation lead and the free space it needs; without a release named, the one staged release waiting to be installed is meant, and with several the chat asks which): a local date and time in a named time zone, how long it lasts, an optional channel label, the preparation lead (default 60 minutes) and the free space the release root must have (default 1 GiB). One window is open at a time. The controller's dispatcher then:
 
 1. **Prepares** from the lead time before the opening: verifies the staged files against the digest the owner named, checks the release is not quarantined and that there is room.
 2. **Waits** while any agent attempt is running; nothing is stopped.
 3. **Activates** while the window is open, through the same journalled `release.activate` and all its checks (approval, signature, platform, targets, migration plan, compatibility).
 4. Marks the window **committed** once the release confirmed its start, or **reverted** (and quarantines the release) when the launcher recorded a failed start and fell back.
 
-A window that closes before the update started ends **missed** (or **deferred** when work never went quiet) and never deploys later. A release whose files or digest changed is quarantined, so no later window can bring it back. The owner is told each outcome once. `release.window.cancel` ends a window that has not activated yet; `release.window.list` and the chat status "how are the maintenance windows" show them, with whether the earlier release could still come back.
+A window that closes before the update started ends **missed** (or **deferred** when work never went quiet) and never deploys later. A release whose files or digest changed is quarantined, so no later window can bring it back. The owner is told each outcome once. `release.window.cancel` (in chat simply "cancel the maintenance window": the one open window) ends a window that has not activated yet; `release.window.list` and the chat status "how are the maintenance windows" show them, with whether the earlier release could still come back.
 
 Not built yet: suspending workers without release, the checkpoint, the migration test on an isolated copy, the quarantined start with dispatch and effects disabled, the verification run and its health deadline (recorded only; the launcher's startup window decides today), state commit-or-revert, a restart after activation, bounded recovery mode, recurring windows, narrower scopes, the UI and the fault matrix on macOS, Linux and Windows.
 

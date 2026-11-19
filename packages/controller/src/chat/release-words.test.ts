@@ -100,3 +100,15 @@ test("an administrator the chat names for the owner is an agent ID the owner sai
   assert.equal(foreignValue({ administrators: ["agt-ops1"] }, own), "administrators[0]", "agt-ops12 does not name agt-ops1");
   assert.equal(foreignValue({ administrators: ["agt-ops12", "agt-eve"] }, own), "administrators[1]", "an agent the owner never named is foreign");
 });
+
+test("a maintenance window proposal shows its numbers and the UTC instants, and says when the local time is skipped or repeated by a clock change (card K07)", async () => {
+  const { windowTimeNote } = await import("./chat.js");
+  const plain = windowTimeNote({ date: "2026-11-20", time: "02:00", timeZone: "Europe/London", durationMinutes: 45, minFreeBytes: 0 });
+  assert.match(plain, /= 2026-11-20 02:00 UTC until 2026-11-20 02:45 UTC; it lasts 45 minutes\. Preparation starts 60 \(the default\) minutes before it opens and needs 0 bytes free/);
+  assert.doesNotMatch(plain, /clocks/);
+  // New York springs forward on 2027-03-14 (02:30 does not exist) and falls back on 2027-11-07 (01:30 happens twice).
+  assert.match(windowTimeNote({ date: "2027-03-14", time: "02:30", timeZone: "America/New_York", durationMinutes: 60, prepareLeadMinutes: 15 }), /does not exist that day.*opens at 2027-03-14 03:30 local time instead\) = 2027-03-14 07:30 UTC.*15 minutes before.*1073741824 \(the default\) bytes/);
+  assert.match(windowTimeNote({ date: "2027-11-07", time: "01:30", timeZone: "America/New_York", durationMinutes: 60 }), /happens twice.*first of the two\) = 2027-11-07 05:30 UTC/);
+  // What the model gave that is not a number is shown as text, not hidden.
+  assert.match(windowTimeNote({ date: "2027-11-07", time: "01:30", timeZone: "America/New_York", durationMinutes: "an hour" }), /lasts "an hour" minutes/);
+});

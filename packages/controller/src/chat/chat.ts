@@ -15,6 +15,8 @@ import type { Cite, StatusRequest } from "../status/index.js";
 // A task title is checked text without C0 controls, but an agent's sub-task (swarm) or a meeting task may carry C1 controls, bidirectional overrides or line separators: it is shown quoted.
 import { quoted as quotedText } from "../status/explain.js";
 import { probeUrl } from "../projects/probes.js";
+import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
+import { WINDOW_DEFAULTS } from "../release/windows.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
@@ -198,6 +200,27 @@ export interface ChatDeps {
  * every other command that changes things still is. They need nothing from the model, so a provider outage does not stand between the owner and a stop.
  */
 const RECOVERY_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "lifecycle.force", "lifecycle.choose", "lifecycle.advance", "grant.revoke", "routing.disable", "routing.drain", "routing.cutover", "routing.reenable"]);
+
+/**
+ * What a maintenance window proposal (card K07) shows about its time and limits: the owner's local time and zone, the instants it comes to in UTC (a time the clocks skip, or one they pass twice, is
+ * said so), how long it lasts, how early preparation starts and how much free space it needs, with the defaults filled in, so every number the window would be set with is on the proposal.
+ */
+export function windowTimeNote(args: Readonly<Record<string, unknown>>): string {
+  const num = (v: unknown, fallback: number): string => (v === undefined ? `${fallback} (the default)` : typeof v === "number" ? String(v) : quotedText(String(v), 20));
+  const parts = [`The window opens on ${quotedText(String(args["date"]), 20)} at ${quotedText(String(args["time"]), 10)} in ${quotedText(String(args["timeZone"]), 64)}`];
+  const zone = knownZone(args["timeZone"]);
+  const minutes = args["durationMinutes"];
+  if (zone !== undefined && isLocalDate(args["date"]) && isLocalTime(args["time"])) {
+    const opens = instantOf(args["date"], args["time"], zone);
+    const wall = wallClock(opens, zone);
+    const shownAt = `${wall.date} ${String(wall.hour).padStart(2, "0")}:${String(wall.minute).padStart(2, "0")}`;
+    if (shownAt !== `${args["date"]} ${args["time"]}`) parts.push(`(that time does not exist that day, because the clocks go forward; it opens at ${shownAt} local time instead)`);
+    else if (wallClock(opens + 3_600_000, zone).hour === wall.hour && wallClock(opens + 3_600_000, zone).minute === wall.minute && wallClock(opens + 3_600_000, zone).date === wall.date) parts.push("(that time happens twice that night, because the clocks go back; it opens at the first of the two)");
+    parts.push(`= ${new Date(opens).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+    if (typeof minutes === "number" && Number.isSafeInteger(minutes)) parts.push(`until ${new Date(opens + minutes * 60_000).toISOString().slice(0, 16).replace("T", " ")} UTC`);
+  }
+  return `${parts.join(" ")}; it lasts ${typeof minutes === "number" ? String(minutes) : quotedText(String(minutes), 20)} minutes. Preparation starts ${num(args["prepareLeadMinutes"], WINDOW_DEFAULTS.prepareLeadMinutes)} minutes before it opens and needs ${num(args["minFreeBytes"], WINDOW_DEFAULTS.minFreeBytes)} bytes free under the release folder. Check that this is the time you meant.`;
+}
 
 const MESSAGE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PROJECT_ID = /^proj-[a-z2-7]{20}$/;
@@ -989,13 +1012,36 @@ export class ChatService {
     // A maintenance window names the digest from the staged record too (card K07); its date, time and zone are the interpreter's reading of the owner's words, so the proposal shows them before anything is set.
     if (intent.op === "release.window.set") {
       delete args["digest"];
-      const wanted = args["candidateId"];
+      let wanted = args["candidateId"];
+      // No release named ("put the update on tonight at 2"): the one staged release that is not running now, is not quarantined and never failed to start is meant; with several, the owner is asked which.
+      if (wanted === undefined) {
+        const st = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.status", args: {} });
+        if (!st.ok) return refuse(st.error.code, st.error.message);
+        const s = st.result["item"] as { current?: { id: string }; failedStarts?: { id: string }[]; staged?: { candidateId: string }[] };
+        const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
+        const quarantined = new Set(wl.ok ? ((wl.result["quarantined"] ?? []) as { candidateId: string }[]).map((q) => q.candidateId) : []);
+        const failed = new Set((s.failedStarts ?? []).map((f) => f.id));
+        const eligible = (s.staged ?? []).map((x) => x.candidateId).filter((id) => id !== s.current?.id && !quarantined.has(id) && !failed.has(id));
+        if (eligible.length !== 1) return refuse("invalid_command", eligible.length === 0 ? "No staged release is waiting to be installed (stage one first with release.stage), so there is nothing for a maintenance window to install." : `${eligible.length} staged releases could be installed (${eligible.slice(0, 5).join(", ")}${eligible.length > 5 ? ", ..." : ""}): which one should the window install?`);
+        wanted = eligible[0]!;
+        args["candidateId"] = wanted;
+        fillNotes.push(`Release ${wanted}: the one staged release waiting to be installed (you did not name one).`);
+      }
       if (typeof wanted !== "string") return refuse("invalid_command", "Which staged release should the window activate? Nothing in your message names one.");
       const found = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.verify", args: { releaseId: wanted } });
       if (!found.ok) return refuse(found.error.code, found.error.message);
       args["digest"] = String(found.result["digest"]);
       fillNotes.push(`Digest of the staged release, filled in from its record: ${String(found.result["digest"])}${found.result["ok"] === true ? "" : " (its files do not match this digest now; the window will fail its preparation)"}`);
-      fillNotes.push(`The window opens on ${quotedText(String(args["date"]), 20)} at ${quotedText(String(args["time"]), 10)} in ${quotedText(String(args["timeZone"]), 64)} and lasts ${quotedText(String(args["durationMinutes"]), 10)} minutes; check that this is the time you meant.`);
+      if (args["durationMinutes"] === undefined) return refuse("invalid_command", "How long should the maintenance window last (15 minutes to 24 hours)?");
+      fillNotes.push(windowTimeNote(args));
+    }
+    // Cancelling a maintenance window without naming it ("cancel the maintenance window") means the one window that is open; there is at most one, and with none the owner is told so.
+    if (intent.op === "release.window.cancel" && args["windowId"] === undefined) {
+      const wl = await this.#deps.api.handle(token, { v: API_VERSION, op: "release.window.list", args: {} });
+      if (!wl.ok) return refuse(wl.error.code, wl.error.message);
+      const open = ((wl.result["windows"] ?? []) as { windowId: string; status: string }[]).filter((w) => w.status === "scheduled" || w.status === "prepared" || w.status === "activated");
+      if (open.length !== 1) return refuse(open.length === 0 ? "not_found" : "invalid_command", open.length === 0 ? "No maintenance window is open, so there is nothing to cancel." : `${open.length} maintenance windows are open (${open.slice(0, 5).map((w) => w.windowId).join(", ")}): which one should be cancelled?`);
+      args["windowId"] = open[0]!.windowId;
     }
     if (intent.op === "release.activate") {
       delete args["digest"];

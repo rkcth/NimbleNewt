@@ -97,6 +97,8 @@ export interface WindowOptions {
   /** The clock windows are judged on (milliseconds); default `Date.now`. */
   readonly now?: () => number;
   readonly runner?: RunnerOptions;
+  /** How many window records one page of the scan reads (default `WINDOW_LIMITS.scanned`); tests make it small. */
+  readonly scanPage?: number;
 }
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -299,6 +301,11 @@ export class ReleaseWindowService {
       await this.#o.activation.activate(WINDOW_ACTOR, { commandId: cid("activate"), candidateId: w.candidateId, digest: w.digest, ...(w.migrationPlan === undefined ? {} : { migrationPlan: w.migrationPlan }) });
     } catch (error) {
       if (!(error instanceof DomainError)) throw error;
+      // An error after the journal opened (the commit could not be written, the switch's undo failed) can leave the switch open, or even done: K02's restart recovery may then finish it. Such a
+      // window is settled from the activation record like one that stopped mid-switch, never reported failed when the release did (or may yet) switch.
+      const took = await this.#took(w, true);
+      if (took === "pending") return false;
+      if (took !== undefined) { await this.#write(rev, w, this.#activated(w, took.from), "release.window.activate", cid("activated")); return true; }
       const next = this.#next(w, "failed", `activation was refused: ${errorText(error)}`);
       const saved = await this.#write(rev, w, next, "release.window.activate", cid("activate-refused"));
       await this.#tell(saved, next);
@@ -315,14 +322,17 @@ export class ReleaseWindowService {
     return { ...this.#next(rest as WindowBody, "activated", "activated; the launcher runs it at the controller's next start"), ...(from === undefined || from === w.candidateId ? {} : { from }) };
   }
 
-  /** Whether this window's activation took effect: "pending" while its switch is still open in the journal; the release it switched from when it did; undefined when it did not. */
-  async #took(w: WindowBody): Promise<{ from?: string } | "pending" | undefined> {
+  /**
+   * Whether this window's activation took effect: "pending" while its switch is still open in the journal; the release it switched from when it did; undefined when it did not. `own` counts only
+   * the window's own recorded switch (after a refusal, a release someone else made current is not this window's doing).
+   */
+  async #took(w: WindowBody, own = false): Promise<{ from?: string } | "pending" | undefined> {
     const s = await this.#o.activation.status(WINDOW_ACTOR);
     if (s.journal !== undefined && s.journal.kind === "activate" && s.journal.to.id === w.candidateId) return "pending";
     const since = w.activatingAt ?? "";
     const e = [...s.history].reverse().find((h) => (h.kind === "activated" || h.kind === "recovered") && h.to === w.candidateId && h.by === WINDOW_ACTOR.id && h.at >= since);
     if (e !== undefined) return e.from === undefined ? {} : { from: e.from };
-    if (s.current?.id === w.candidateId) return s.previous === undefined ? {} : { from: s.previous.id };
+    if (!own && s.current?.id === w.candidateId) return s.previous === undefined ? {} : { from: s.previous.id };
     return undefined;
   }
 
@@ -398,8 +408,16 @@ export class ReleaseWindowService {
     return { ...w, revision };
   }
 
+  /** Every window, read page by page: the records are listed by ID (a hash), not by age, so a single bounded page could leave out the one open window once many have ended. */
   async #all(): Promise<{ revision: number; body: WindowBody }[]> {
-    return (await this.#runner.list(WINDOW, { limit: WINDOW_LIMITS.scanned })).map((a) => ({ revision: a.revision, body: a.body as unknown as WindowBody }));
+    const out: { revision: number; body: WindowBody }[] = [];
+    for (let afterId: string | undefined; ;) {
+      const size = this.#o.scanPage ?? WINDOW_LIMITS.scanned;
+      const page = await this.#runner.list(WINDOW, { limit: size, ...(afterId === undefined ? {} : { afterId }) });
+      for (const a of page) out.push({ revision: a.revision, body: a.body as unknown as WindowBody });
+      if (page.length < size) return out;
+      afterId = page[page.length - 1]!.id;
+    }
   }
 
   #lock: Promise<unknown> = Promise.resolve();
