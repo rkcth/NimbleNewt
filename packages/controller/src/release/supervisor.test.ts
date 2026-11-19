@@ -110,7 +110,7 @@ const CRASH_LOOP_WAIT_MS = process.platform === "win32" ? 240_000 : 120_000;
 /** The errors Windows gives for a folder a process that was killed a moment ago still holds (its working directory, an open file). */
 const STILL_HELD = new Set(["EBUSY", "EPERM", "EACCES", "ENOTEMPTY"]);
 /**
- * Removes a world's folder. `rmSync`'s own retries do not cover a folder whose first removal fails with EBUSY (Node gives that error at once), so the removal is tried again here, with a
+ * Removes a world's folder. `rmSync`'s own retries do not cover a folder whose first removal fails with EBUSY (Node 22's JavaScript rimraf gives that error at once), so the removal is tried again here, with a
  * growing pause, about 15 s in all; another error, or the last one, is thrown.
  */
 async function removeRoot(root: string): Promise<void> {
@@ -184,7 +184,9 @@ async function world(body: (w: World) => Promise<void>): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([Promise.allSettled(runs), new Promise((r) => { timer = setTimeout(r, 15_000); })]);
   clearTimeout(timer);
-  for (const f of readdirSync(pids)) if (f.endsWith(".pids") || f.endsWith(".gpids")) for (const p of readFileSync(join(pids, f), "utf8").split("\n").filter(Boolean).map(Number)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
+  try {
+    for (const f of readdirSync(pids)) if (f.endsWith(".pids") || f.endsWith(".gpids")) for (const p of readFileSync(join(pids, f), "utf8").split("\n").filter(Boolean).map(Number)) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
+  } catch (error) { if (failed === undefined) throw error; console.error(`# the test failed, and its process files could not be read afterwards either: ${(error as Error).message}`); }
   for (const c of running) c.kill("SIGKILL");
   // On Windows a process killed a moment ago can still hold its working directory (a release folder) for a little while.
   try { await removeRoot(root); } catch (error) {
