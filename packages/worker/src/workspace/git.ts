@@ -32,6 +32,8 @@ const wipLastRef = (remote: string, ref: string): string => `refs/nn/wip-last/${
 
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** A full object ID (SHA-1 or SHA-256). */
+const OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 /** What `snapshot` says of a name with nothing at it. */
 const ABSENT_FILE = "absent";
 /** A file's identity, size and times (nanoseconds): any write to it, or its replacement, changes this. */
@@ -600,11 +602,14 @@ export class GitBridge {
   }
 
   /**
-   * The stable patch ID (`git patch-id --stable`) of what the checkout's index holds against `base` (card H12n): call it right after `stage`, so it names the same change as the staged tree. Binary files are included in full
-   * (`--binary`, full object names), so two different binary changes never share an ID. `undefined` when the index holds no change against the base.
+   * The stable patch ID of what the checkout's index holds against `base` (card H12n): call it right after `stage`, so it names the same change as the staged tree. Binary files are included in full
+   * (`--binary`, full object names), so two different binary changes never share an ID. `undefined` when the index holds no change against the base. It is `git patch-id --verbatim` (stable, git 2.39 or later): the plain
+   * `--stable` ID strips all whitespace from each line, so a change that only re-indents a line (Python, YAML, Makefiles) or alters the spacing inside a string would keep the ID of what was reviewed, and a review
+   * would carry over to it at landing (card P09 second review).
    */
-  async patchId(options: { gitDir: string; base: string }): Promise<string | undefined> {
+  async patchId(options: { gitDir: string; base: string; /** Card P09: a commit or tree to compare the base with instead of the index (the committed change a landing would carry). The diff has the same form, so the same change gives the same ID. */ to?: string }): Promise<string | undefined> {
     if (!COMMIT.test(options.base)) throw new WorkspaceError("invalid_path", "a patch ID is taken against a full base commit");
+    if (options.to !== undefined && !OBJECT.test(options.to)) throw new WorkspaceError("invalid_path", "a patch ID is taken up to a full object ID");
     const run = (args: readonly string[], input?: Buffer): Promise<Buffer> => new Promise((resolveRun, reject) => {
       const child = execFile(this.#git, ["--git-dir", options.gitDir, ...this.#flags(), ...args], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.output * 4, timeout: GIT_LIMITS.timeoutMs, windowsHide: true, cwd: this.#empty }, (error, stdout, stderr) => {
         if (error === null) return resolveRun(stdout as unknown as Buffer);
@@ -613,9 +618,9 @@ export class GitBridge {
       child.stdin?.on("error", () => undefined);
       child.stdin?.end(input ?? Buffer.alloc(0));
     });
-    const diff = await run(["diff", "--cached", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base]);
+    const diff = await run(["diff", ...(options.to === undefined ? ["--cached"] : []), "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base, ...(options.to === undefined ? [] : [options.to])]);
     if (diff.length === 0) return undefined;
-    const out = (await run(["patch-id", "--stable"], diff)).toString("utf8").trim();
+    const out = (await run(["patch-id", "--verbatim"], diff)).toString("utf8").trim();
     const id = out.split(/\s+/)[0] ?? "";
     if (!/^[0-9a-f]{40,64}$/.test(id)) throw new WorkspaceError("unavailable", "git patch-id gave no ID for the staged change");
     return id;
@@ -777,6 +782,36 @@ export class GitBridge {
    * is never read, so a file written after the checks (by a process still running in the sandbox) cannot change what is landed. A Git-named path, a link or submodule, a path with a name problem, a file over the size limit
    * and too many files refuse the whole plan. A change of mode alone is listed as `modeOnly` (not carried).
    */
+  /**
+   * The committed change a landing would carry (card P09): the checkout's base, its head commit, the head's tree and the stable (verbatim) patch ID of base..head (the same form as `patchId` of a staged change, so an unchanged
+   * change keeps its ID across a refresh onto a newer base). A landing is made only while the base is the landing branch's head, so the head's tree is the tree the landing branch holds once it has landed. Only committed
+   * objects are read; the working tree is never looked at. `patchId` is absent when the head is the base (nothing to land).
+   */
+  async committedChange(options: { gitDir: string }): Promise<{ base: string; head: string; tree: string; patchId?: string }> {
+    const base = await this.#base(options.gitDir);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    const tree = (await this.#run(["rev-parse", "--verify", `${head}^{tree}`], { gitDir: options.gitDir })).stdout.trim();
+    if (!OBJECT.test(base) || !OBJECT.test(head) || !OBJECT.test(tree)) throw new WorkspaceError("unavailable", "the checkout's base, head or tree could not be read");
+    if (base === head) return { base, head, tree };
+    const patchId = await this.patchId({ gitDir: options.gitDir, base, to: head });
+    return { base, head, tree, ...(patchId === undefined ? {} : { patchId }) };
+  }
+
+  /**
+   * Writes exactly the files of `tree` (an object of the checkout's own repository) into the empty folder `into` (card P09: the landing's checks run on a copy of the integrated tree, never on the checkout). A throwaway index
+   * in the git directory is used and removed; the neutral attribute file applies, so the files hold the committed bytes; links are written as plain files (`core.symlinks=false`).
+   */
+  async exportTree(options: { gitDir: string; tree: string; into: string }): Promise<void> {
+    if (!OBJECT.test(options.tree)) throw new WorkspaceError("invalid_path", "a tree is exported by its full object ID");
+    if ((await readdir(options.into)).length > 0) throw new WorkspaceError("invalid_path", "the folder a tree is exported into must be empty");
+    await this.#neutralAttributes(options.gitDir);
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    try {
+      await this.#run(["read-tree", "--reset", "-u", options.tree], { gitDir: options.gitDir, workTree: options.into, env: { GIT_INDEX_FILE: index } });
+    } finally { await rm(index, { force: true }); }
+    await rm(join(options.into, ".git"), { recursive: true, force: true });
+  }
+
   async landingPlan(options: { gitDir: string }): Promise<{ base: string; head: string; files: { path: string; op: "write" | "delete"; expectedVersion: string; content?: Buffer; modeOnly: boolean; executable?: boolean }[] }> {
     const base = await this.#base(options.gitDir);
     const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();

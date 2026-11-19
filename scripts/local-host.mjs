@@ -118,6 +118,13 @@ export function localHostBuilder(setup) {
       landing: (call) => (composed === undefined ? undefined : composed.landingPolicy(call)),
       // The worker-side security hook (card U11d), reported to the owner's Urgent watch.
       security: (event) => { composed?.reportSecurity(event); },
+      // The landing gate's test commands (card P09): each runs in the sandbox on a fresh copy of the tree the landing would make, with Node.js as /opt/node, no network and the owner's limits and best-effort setting. Before the
+      // controller has built the host there are no limits to read, so a check is not run (the landing is refused).
+      checks: {
+        launcher, readOnly: [{ host: nodeRoot, guest: "/opt/node" }], base: join(base, "landing-checks"),
+        limits: async () => { if (composed === undefined) throw new Error("the host is not built yet"); return composed.currentLimits(); },
+        bestEffort: async () => composed !== undefined && (await composed.bestEffortAllowed()) === true,
+      },
     });
     // The optional work-in-progress backup (card P02b) over the same checkouts. The scan (credential shapes plus every secret value the installation uses, read from the secret store at each scan) is required; the push credential is a
     // secret the OWNER named, read by name at the moment of a push or restore and handed to that one git process (an ssh remote uses this computer's ssh agent). Nothing is read, kept or printed here.
@@ -190,7 +197,7 @@ export function localHostBuilder(setup) {
               hostId: LOCAL_HOST_ID, resources: ATTEMPT_RESOURCES, version: "launcher", guards: services.guards, ownerPolicy: parts.ownerPolicy,
               schedule: (beat) => { const timer = setInterval(() => { void beat(); }, 1000); timer.unref?.(); return () => clearInterval(timer); },
               sandbox: parts.sandbox, runtimes: { open: (order, call, from) => parts.runtimes.open(order, call, from) },
-              workspace: { run: async (call) => { await refreshShared(); return workspaces.port.run(call); } },
+              workspace: { run: async (call) => { await refreshShared(); return workspaces.port.run(call); }, landingChecks: async (call) => { await refreshShared(); return workspaces.port.landingChecks(call); } },
               progress: (scope) => workspaces.progress(scope),
               // The check of a done (card W05): the state of the checkout this port made, and the contract's checks run in the attempt's sandbox. Without it a done of a task whose contract names evidence or checks is never verified.
               verify: async (attemptId, scope, request) => { await refreshShared(); return verifyDone(attemptId, scope, request); },

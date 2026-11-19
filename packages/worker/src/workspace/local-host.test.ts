@@ -367,8 +367,8 @@ test("submitView and stageWork: the base, the landing branch's head and the chan
     assert.equal(staged.base, base);
     assert.deepEqual([...staged.files].sort(), [".gitignore", "src/a.ts", "src/c.ts"]);
     assert.equal(staged.tree, g("write-tree").trim(), "the tree is what the checkout's index now holds");
-    // The patch ID is git's own stable patch ID of the staged change.
-    const expected = execFileSync("git", ["patch-id", "--stable"], { input: g("diff", "--cached", "--binary", "--full-index", base), encoding: "utf8" }).trim().split(/\s+/)[0];
+    // The patch ID is git's own stable patch ID of the staged change, whitespace kept (--verbatim).
+    const expected = execFileSync("git", ["patch-id", "--verbatim"], { input: g("diff", "--cached", "--binary", "--full-index", base), encoding: "utf8" }).trim().split(/\s+/)[0];
     assert.match(staged.patchId, /^[0-9a-f]{40}$/);
     assert.equal(staged.patchId, expected);
     assert.deepEqual(await w.ws.stageWork(scope), staged, "staging again with nothing changed gives the same tree and patch ID");
