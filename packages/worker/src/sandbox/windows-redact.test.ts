@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { WITHHELD, redact, redactAndCut, scrub, scrubDeep } from "./windows-redact.js";
+import { WITHHELD, redact, redactAccountName, redactAndCut, redactSid, scrub, scrubDeep, sidClass } from "./windows-redact.js";
 
 const names = { users: ["JimBob", "NimbleNewtRunner"], hosts: ["DESKTOP-4F2K9"] };
 
@@ -19,8 +19,40 @@ test("home directories go, in every form they appear", () => {
   assert.ok(!/Smith|Zed/.test(redact('"C:\\Users\\Alice Smith\\x" and C:\\\\Users\\\\Zed Q\\\\y', names)));
 });
 
-test("SIDs go, with and without the icacls asterisk", () => {
-  assert.equal(redact("owner S-1-5-21-111-222-333-1001 and *S-1-5-18", names), "owner <sid> and <sid>");
+test("SIDs are redacted by class, with and without the icacls asterisk: machine, domain and account parts go, well-known kinds of account stay", () => {
+  assert.equal(redact("owner S-1-5-21-111-222-333-1001 and *S-1-5-18", names), "owner S-1-5-21-<domain>-<account> and *S-1-5-18");
+  // Well-known, machine-independent SIDs stay exactly: system accounts, built-in groups, the service SID of TrustedInstaller, app packages, capabilities, the SERVICE group.
+  const kept = ["S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-6", "S-1-5-32-544", "S-1-5-32-545", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "S-1-15-2-1", "S-1-15-2-2",
+    "S-1-15-2-1430448594-2639229838-973813799-439329657-1197984847-4069167804-1277922394", "S-1-15-3-1024-3635283841-2530182609-996808640-1887759898-3848208603-3313616867-983405619-2501854204", "S-1-5-83-0", "S-1-1-0", "S-1-3-0"];
+  for (const sid of kept) { assert.equal(redactSid(sid), sid); assert.equal(redact(`x ${sid}:(I)(RX)`, names), `x ${sid}:(I)(RX)`); assert.equal(scrub(`writer ${sid} (I)(OI)(CI)(M)`, names), `writer ${sid} (I)(OI)(CI)(M)`); }
+  // Machine and domain SIDs keep their class, and only a built-in RID below 1000; Azure AD accounts, logon sessions and anything unknown keep only their kind.
+  assert.equal(redactSid("S-1-5-21-111-222-333-500"), "S-1-5-21-<domain>-500");
+  assert.equal(redactSid("S-1-5-21-111-222-333-504"), "S-1-5-21-<domain>-504");
+  assert.equal(redactSid("S-1-5-21-111-222-333-1001"), "S-1-5-21-<domain>-<account>");
+  assert.equal(redactSid("S-1-5-21-111-222-1001"), "S-1-5-21-<domain>-<account>", "a machine SID of another shape keeps no number");
+  assert.equal(redactSid("s-1-5-21-111-222-333-1001"), "S-1-5-21-<domain>-<account>");
+  assert.equal(redactSid("S-1-12-1-1111-2222-3333-4444"), "S-1-12-1-<account>");
+  assert.equal(redactSid("S-1-5-5-0-123456"), "S-1-5-5-<session>");
+  assert.equal(redactSid("S-1-9-1-2"), "S-1-9-<other>");
+  assert.equal(redactSid("S-1-5-1234"), "S-1-5-<other>", "an unknown S-1-5 SID is not kept");
+  assert.equal(redactSid("S-1-5-21"), "S-1-5-<other>");
+  for (const notSid of ["", "S-1", "S-1-5", "NT AUTHORITY\\SYSTEM", "S-1-5-18 ", "S-1-5-x"]) assert.equal(redactSid(notSid), "<sid>", JSON.stringify(notSid));
+  // A prefix that merely looks well-known is not: S-1-5-320 is not S-1-5-32-, S-1-15-20 is not S-1-15-2-.
+  assert.equal(redactSid("S-1-5-320-1"), "S-1-5-<other>");
+  assert.equal(redactSid("S-1-15-20-1"), "S-1-15-<other>");
+  assert.equal(sidClass("S-1-15-3-1024-1"), "app capability");
+  assert.equal(sidClass("S-1-15-2-5-6"), "app package");
+  assert.equal(sidClass("S-1-5-80-1-2"), "service (per-service SID)");
+  assert.equal(sidClass("S-1-5-21-1-2-3-1001"), "machine or domain account or group");
+  assert.equal(sidClass("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"), "TrustedInstaller");
+  assert.equal(sidClass("x"), "not a SID");
+  // In text and in the last gate: a machine SID is replaced (with its asterisk kept), the result is stable when redacted again, and an access-list line with a kept SID keeps it.
+  const once = redact("C:\\x S-1-5-21-111-222-333-1001:(OI)(CI)(F)\r\n    *S-1-15-3-1024-1-2:(RX)\r\n    S-1-5-21-111-222-333-1001-5", names);
+  assert.ok(!/111|222|333|1001/.test(once), once);
+  assert.match(once, /S-1-15-3-1024-1-2:\(RX\)/);
+  assert.equal(redact(once, names), once, "redacting twice changes nothing");
+  assert.equal(scrub(once, names), once, "the gate accepts the redacted forms");
+  assert.equal(scrub("S-1-5-21-<domain>-500 and S-1-12-1-<account> and S-1-9-<other>", names), "S-1-5-21-<domain>-500 and S-1-12-1-<account> and S-1-9-<other>");
 });
 
 test("known user and machine names go as whole words, in quotes too, and case does not matter", () => {
@@ -76,7 +108,7 @@ test("the last gate withholds a field that still looks personal, and cleans nest
   // An underscore is a separator, not part of a name.
   assert.equal(scrub("tmp_Quentinx1", { users: ["Quentinx1"] }), "tmp_<user>");
   const nested = scrubDeep({ a: "C:\\Users\\Alice\\x", b: ["mail me@host.example"], c: 5, d: { key: "S-1-5-21-1-2-3-1001" } }, names);
-  assert.deepEqual(nested, { a: "<home>\\x", b: ["mail <email>"], c: 5, d: { key: "<sid>" } });
+  assert.deepEqual(nested, { a: "<home>\\x", b: ["mail <email>"], c: 5, d: { key: "S-1-5-21-<domain>-<account>" } });
   assert.equal(WITHHELD, "<withheld: possible personal data>");
 });
 
@@ -85,8 +117,8 @@ test("surnames, split names, lower-case SIDs, short names and DNS suffixes", () 
   for (const text of ["Hostetter said", "D:\\Data\\Hostetter\\x", "Robert.Hostetter", "robert_hostetter.log", "user Robert\nHostetter split", "user Robert   \r\n  Hostetter"]) assert.ok(!/hostetter/i.test(redact(text, full)), text);
   assert.ok(!/hostetter/i.test(redactAndCut("user Robert\nHostetter split", full)));
   assert.equal(scrub("Hostetter", { users: ["Robert Hostetter"] }), "<user>");
-  assert.ok(!/s-1-5/i.test(redact("s-1-5-21-1-2-3-1001 *s-1-5-18", full)));
-  assert.equal(scrub("x s-1-5-21-1-2-3-1001", full), "x <sid>");
+  assert.equal(redact("s-1-5-21-1-2-3-1001 *s-1-5-18", full), "S-1-5-21-<domain>-<account> *S-1-5-18");
+  assert.equal(scrub("x s-1-5-21-1-2-3-1001", full), "x S-1-5-21-<domain>-<account>");
   for (const text of ["at ROBERT~1 and ROBERT~1.DES", "ROBERT~1\\AppData", "robert~2"]) assert.ok(!/robert/i.test(redact(text, full)), text);
   const ms = { users: ["DESKTOP-4F2K9\\rober"], hosts: ["DESKTOP-4F2K9"] };
   assert.equal(redact("rober~1 and ROBER~1.TXT", ms), "<user> and <user>");
@@ -106,12 +138,26 @@ test("redaction is applied before the cut, so a cut cannot leave half a name; th
   assert.ok(!out.includes("Ali"), out.slice(-60));
   assert.match(out, /\[cut, \d+ more characters\]$/);
   assert.equal(redactAndCut("short", names), "short");
-  const once = redact("C:\\Users\\Alice S-1-5-18 and S-1-5-19", names);
-  assert.ok(!/Alice|S-1-5/.test(once), once);
+  const once = redact("C:\\Users\\Alice S-1-5-21-7-8-9-1001 and S-1-5-19", names);
+  assert.ok(!/Alice|7-8-9/.test(once), once);
   assert.equal(redact(once, names), once, "redacting twice changes nothing");
 });
 
 test("plain system text is left alone", () => {
   const text = "C:\\Windows\\System32\\icacls.exe exit 5: Access is denied. C:\\Program Files\\WindowsApps\\X_0.8.107.0_x64__8wekyb3d8bbwe";
   assert.equal(redact(text, names), text);
+});
+
+test("access-list findings as the real run writes them pass the last gate whole, and account names in them are kept only when they are fixed names", () => {
+  // The by-SID line of the facts: redacted SID, its kind, icacls-style rights. Every kind of SID gives a line the gate keeps as it is, and no machine or account number is left.
+  for (const sid of ["S-1-15-3-1024-3635283841-2530182609-996808640-1887759898-3848208603-3313616867-983405619-2501854204", "S-1-5-80-1-2-3-4-5", "S-1-5-21-111-222-333-1001", "S-1-5-21-111-222-333-500", "S-1-12-1-1-2-3-4", "S-1-5-5-0-1", "S-1-9-1"]) {
+    const line = `${redactSid(sid)} [${sidClass(sid)}] (I)(OI)(CI)(IO)(M) inherit-only`;
+    assert.equal(scrub(line, names), line, line);
+    assert.ok(!/111|222|333|1001/.test(line), line);
+  }
+  // icacls account names: SIDs by class; well-known names and names under authorities whose names are fixed stay; machine and domain accounts become <user>.
+  assert.equal(redactAccountName("*S-1-5-21-1-2-3-1001"), "*S-1-5-21-<domain>-<account>");
+  assert.equal(redactAccountName("S-1-15-3-1024-1"), "S-1-15-3-1024-1");
+  for (const kept of ["NT AUTHORITY\\SYSTEM", "BUILTIN\\Users", "NT SERVICE\\TrustedInstaller", "NT SERVICE\\WaaSMedicSvc", "APPLICATION PACKAGE AUTHORITY\\ALL APPLICATION PACKAGES", "NT VIRTUAL MACHINE\\Virtual Machines", "Everyone", "CREATOR OWNER"]) assert.equal(redactAccountName(kept), kept);
+  for (const gone of ["PC\\erin", "DESKTOP-4F2K9\\JimBob", "erin", "MYDOMAIN\\Erin Lee", "NT SERVICE\\a\\b", "NT SERVICE\\x:(F)", "", "NT SERVICE\\line\nbreak", "MicrosoftAccount\\me@example.com"]) assert.equal(redactAccountName(gone), "<user>", JSON.stringify(gone));
 });

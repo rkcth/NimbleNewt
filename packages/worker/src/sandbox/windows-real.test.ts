@@ -10,8 +10,8 @@ import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import { windowsRealHost } from "./windows-real.js";
 import type { WindowsHost } from "./windows-host.js";
-import { scrub, scrubDeep, type RedactionNames } from "./windows-redact.js";
-import { describeSignature, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, verifyClient, type WindowsSettings } from "./windows-plan.js";
+import { redactAccountName, redactSid, scrub, scrubDeep, sidClass, type RedactionNames } from "./windows-redact.js";
+import { describeSignature, entryTokens, entryWrites, icaclsWriterEntries, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, verifyClient, type WindowsSettings } from "./windows-plan.js";
 
 // Real Windows Sandbox tests (card A03b). They need a Windows machine with the Windows Sandbox feature, an owner signed in at the console, and NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
 // Everywhere else they are skipped with the message below, and windows.test.ts (simulated host) covers the rules. They run from the `sandbox-windows` job of .github/workflows/own-hardware.yml.
@@ -48,7 +48,8 @@ const clean = (text: string): string => scrub(text, redactNames as RedactionName
 function recording(inner: WindowsHost): WindowsHost {
   const wrapped = { ...inner } as unknown as Record<string, unknown>;
   const quiet = new Set(["autologon", "lockTask"]);
-  for (const m of ["findPackage", "signature", "session", "autologon", "lockTask", "writableBy", "ownerSid"] as const) {
+  for (const m of ["findPackage", "signature", "session", "autologon", "lockTask", "writableBy", "ownerSid", "accessEntries"] as const) {
+    if (inner[m] === undefined) continue;
     wrapped[m] = async (...args: unknown[]) => {
       try { const v = await (inner[m] as (...a: unknown[]) => Promise<unknown>)(...args); calls.push({ step: m, ok: true }); return v; }
       catch (error) { calls.push({ step: m, ok: false, detail: quiet.has(m) ? "failed" : (error as Error).message }); throw error; }
@@ -149,6 +150,8 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
       sub["package family"] = pkg.familyName;
       sub["package signature kind"] = pkg.signatureKind ?? "not reported";
       sub["package status"] = pkg.status ?? "not reported";
+      sub["package NonRemovable"] = pkg.nonRemovable === undefined ? "not reported" : String(pkg.nonRemovable);
+      sub["package IsFramework"] = pkg.isFramework === undefined ? "not reported" : String(pkg.isFramework);
       sub["version at least the qualified one"] = /^\d+(\.\d+){1,3}$/.test(pkg.version);
       sub["package folder under WindowsApps"] = pkg.installLocation.toLowerCase().includes("\\windowsapps\\");
       sub["wsb.exe visible to this account"] = host.exists(`${pkg.installLocation}\\wsb.exe`);
@@ -169,14 +172,27 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
       // who else can change the folder and the files (the access-list reader's answer; it goes to the redacted detail only).
       const wellKnown: Record<string, string> = { "S-1-5-18": "SYSTEM", "S-1-5-32-544": "Administrators", [TRUSTED_OWNER_SIDS[2]!]: "TrustedInstaller" };
       const access: Record<string, unknown> = {};
+      const writersWithRights: Record<string, unknown> = {};
+      const bySid: Record<string, unknown> = {};
       for (const [label, p] of [["package folder", pkg.installLocation], ["wsb.exe", `${pkg.installLocation}\\wsb.exe`], ["WindowsSandboxServer.exe", `${pkg.installLocation}\\WindowsSandboxServer.exe`]] as const) {
         const ownerSid = await attempt(`${label} owner readable`, () => host.ownerSid(p));
         if (ownerSid !== undefined) sub[`${label} owner`] = wellKnown[ownerSid] ?? "another account";
         const others = await attempt(`${label} access list readable`, () => host.writableBy(p));
-        if (others !== undefined) { sub[`${label} changeable only by SYSTEM, Administrators, TrustedInstaller`] = others.length === 0; access[label] = others.map(clean); }
+        if (others !== undefined) { sub[`${label} changeable only by SYSTEM, Administrators, TrustedInstaller`] = others.length === 0; access[label] = others.map((a) => clean(/^(?:unrecognised entry |no access entry)/.test(a) ? a : redactAccountName(a))); }
+        // Who the other writers are, without personal data: icacls' own rights for each (inherit-only shows as (IO)), and the whole access list by SID (Get-Acl), each SID
+        // redacted by class (well-known kinds of account stay, machine and account parts of the others go; windows-redact.ts redactSid).
+        const icaclsOut = await attempt(`${label} icacls output readable`, async () => { const r = await host.run(`${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\icacls.exe`, [p], { timeoutMs: 30_000 }); if (r.code !== 0) throw new Error(`icacls exit ${String(r.code)}`); return r.stdout; });
+        if (icaclsOut !== undefined) { const w = icaclsWriterEntries(icaclsOut, p).map((x) => clean("problem" in x ? x.problem : `${redactAccountName(x.account)} ${x.rights}`)); writersWithRights[label] = w; sub[`${label} other writers (icacls)`] = w.length === 0 ? "none" : w.join("; "); }
+        const entries = host.accessEntries === undefined ? undefined : await attempt(`${label} access list by SID readable`, () => host.accessEntries!(p));
+        if (entries !== undefined) {
+          const describe = (e: (typeof entries)[number]): string => `${redactSid(e.sid)} [${sidClass(e.sid)}] ${entryTokens(e)}${e.inheritOnly ? " inherit-only" : ""}`;
+          const writers = entries.filter(entryWrites);
+          sub[`${label} other writers (by SID)`] = writers.length === 0 ? "none" : writers.map(describe).join("; ");
+          bySid[label] = entries.map((e) => ({ sid: redactSid(e.sid), kind: sidClass(e.sid), rights: entryTokens(e), allow: e.allow, inherited: e.inherited, inheritOnly: e.inheritOnly, writes: entryWrites(e) }));
+        }
       }
       // The detail artifact gets the same, whether or not the test fails, so the next real run shows exactly why a signature was or was not accepted.
-      details["client facts"] = { family: pkg.familyName, signatureKind: pkg.signatureKind ?? "not reported", status: pkg.status ?? "not reported", version: pkg.version, signatures, access };
+      details["client facts"] = { family: pkg.familyName, signatureKind: pkg.signatureKind ?? "not reported", status: pkg.status ?? "not reported", nonRemovable: pkg.nonRemovable ?? "not reported", isFramework: pkg.isFramework ?? "not reported", version: pkg.version, signatures, access, writersWithRights, accessBySid: bySid };
       writeDetail();
     }
     const client = await verifyClient(host, settings);

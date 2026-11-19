@@ -1,6 +1,6 @@
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
-import type { WindowsHost, WindowsPackageInfo, WindowsSignature } from "./windows-host.js";
+import type { WindowsAccessEntry, WindowsHost, WindowsPackageInfo, WindowsSignature } from "./windows-host.js";
 import type { NormalizedRecipe } from "./recipe.js";
 
 /** Microsoft's publisher id for packages that ship with Windows itself (publisher `CN=Microsoft Windows, O=Microsoft Corporation, ...`). */
@@ -226,9 +226,27 @@ const WRITE_RIGHTS = new Set(["F", "M", "W", "D", "WD", "AD", "DC", "DE", "GA", 
  * (`name:(`) but is not one in the expected form is reported as `unrecognised entry "..."`, so a caller that requires an empty list refuses it rather than skipping it. The same
  * holds for any other text inside the block of entries (from the first line to the first blank line, which separates the entries from the summary icacls prints in the system's
  * language), and an output with no readable entry at all is reported as `no access entry could be read`: neither is ever read as "nobody else can write".
+ * Inherit-only entries: an entry marked `(IO)` gives nothing on the object it is attached to (Windows' INHERIT_ONLY_ACE: "does not control access to the object to which it is
+ * attached"); it only shapes what children inherit, through `(OI)` (files) and `(CI)` (folders). An `(IO)` entry with neither `(OI)` nor `(CI)` therefore gives no right to anything
+ * and is not a writer. An `(IO)` entry WITH `(OI)` or `(CI)` is still reported: on a folder it makes the files and folders inside writable (inherited), and the callers use a
+ * folder's list as the proof for what the folder holds (the package proof checks only two of the package's files one by one, not the libraries next to them).
  */
 export function parseIcaclsWritable(output: string, path: string): string[] {
   const found = new Set<string>();
+  for (const item of scanIcacls(output, path)) found.add("problem" in item ? item.problem : item.account);
+  return [...found];
+}
+
+/**
+ * The same reading as `parseIcaclsWritable`, but each writer keeps its rights as icacls printed them (`{ account: "PC\\erin", rights: "(I)(OI)(CI)(M)" }`), for the findings of a
+ * real run. Unreadable output is reported the same way (`{ problem: 'unrecognised entry "..."' }`, `{ problem: "no access entry could be read" }`).
+ */
+export function icaclsWriterEntries(output: string, path: string): ({ readonly account: string; readonly rights: string } | { readonly problem: string })[] {
+  return scanIcacls(output, path);
+}
+
+function scanIcacls(output: string, path: string): ({ readonly account: string; readonly rights: string } | { readonly problem: string })[] {
+  const found: ({ readonly account: string; readonly rights: string } | { readonly problem: string })[] = [];
   let entries = 0, started = false, inBlock = false;
   for (const raw of output.split(/\r?\n/)) {
     let line = raw.trim();
@@ -238,15 +256,61 @@ export function parseIcaclsWritable(output: string, path: string): string[] {
     if (line.toLowerCase().startsWith(path.toLowerCase())) line = line.slice(path.length).trim();
     if (line === "") continue;
     const m = /^(.+?):((?:\([^)]*\))+)$/.exec(line);
-    if (m === null) { if (inBlock || line.includes(":(")) found.add(`unrecognised entry ${JSON.stringify(line.slice(0, 120))}`); continue; }
+    if (m === null) { if (inBlock || line.includes(":(")) found.push({ problem: `unrecognised entry ${JSON.stringify(line.slice(0, 120))}` }); continue; }
     entries++;
     const tokens = [...m[2]!.matchAll(/\(([^)]*)\)/g)].flatMap((t) => t[1]!.split(","));
     if (tokens.includes("DENY")) continue;
+    if (tokens.includes("IO") && !tokens.includes("OI") && !tokens.includes("CI")) continue;
     if (TRUSTED.test(m[1]!)) continue;
-    if (tokens.some((t) => WRITE_RIGHTS.has(t))) found.add(m[1]!);
+    if (tokens.some((t) => WRITE_RIGHTS.has(t))) found.push({ account: m[1]!, rights: m[2]! });
   }
-  if (entries === 0) found.add("no access entry could be read");
-  return [...found];
+  if (entries === 0) found.push({ problem: "no access entry could be read" });
+  return found;
+}
+
+// ---------- access lists by SID (Get-Acl), recorded by the real-run findings ----------
+
+/** icacls' simple rights, each an exact access mask. */
+const SIMPLE_RIGHTS: readonly (readonly [string, number])[] = [["F", 0x1f01ff], ["M", 0x1301bf], ["RX", 0x1200a9], ["R", 0x120089], ["W", 0x100116]];
+/** icacls' specific and generic rights, by bit. */
+const RIGHT_BITS: readonly (readonly [string, number])[] = [
+  ["RD", 0x1], ["WD", 0x2], ["AD", 0x4], ["REA", 0x8], ["WEA", 0x10], ["X", 0x20], ["DC", 0x40], ["RA", 0x80], ["WA", 0x100],
+  ["DE", 0x10000], ["RC", 0x20000], ["WDAC", 0x40000], ["WO", 0x80000], ["S", 0x100000], ["AS", 0x1000000], ["MA", 0x2000000],
+  ["GA", 0x10000000], ["GE", 0x20000000], ["GW", 0x40000000], ["GR", 0x80000000],
+];
+/** The bits that let an account change a file or folder, the same rights `parseIcaclsWritable` counts: WD, AD, DC, DE, WDAC, WO, GA, GW. */
+const WRITE_MASK = 0x2 | 0x4 | 0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+const KNOWN_MASK = RIGHT_BITS.reduce((m, [, bit]) => (m | bit) >>> 0, 0);
+/** SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER by SID: the same accounts `parseIcaclsWritable` trusts by English name. */
+const TRUSTED_WRITER_SIDS: readonly string[] = Object.freeze(["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "S-1-3-0"]);
+
+/** An access mask as icacls writes it: one simple right when the mask is exactly one, otherwise each specific right; a bit icacls has no name for is written in hex. */
+export function rightsTokens(mask: number): string[] {
+  const m = mask >>> 0;
+  const simple = SIMPLE_RIGHTS.find(([, v]) => v === m);
+  if (simple !== undefined) return [simple[0]];
+  const out = RIGHT_BITS.filter(([, bit]) => (m & bit) !== 0).map(([name]) => name);
+  const rest = (m & ~KNOWN_MASK) >>> 0;
+  if (rest !== 0) out.push(`0x${rest.toString(16)}`);
+  return out.length === 0 ? ["none"] : out;
+}
+
+/** An entry's flags and rights as icacls prints them: `(DENY)(I)(OI)(CI)(NP)(IO)(RX,W)`. */
+export function entryTokens(e: WindowsAccessEntry): string {
+  const flags = [!e.allow ? "(DENY)" : "", e.inherited ? "(I)" : "", e.objectInherit ? "(OI)" : "", e.containerInherit ? "(CI)" : "", e.noPropagate ? "(NP)" : "", e.inheritOnly ? "(IO)" : ""].join("");
+  return `${flags}(${rightsTokens(e.rights).join(",")})`;
+}
+
+/**
+ * Whether an entry lets its account change the object or what it holds, read the same way as `parseIcaclsWritable`: an allow entry with a write, delete, change-permission or
+ * take-ownership right (or a right that has no name, which counts as a change), not for SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER, and not an inherit-only
+ * entry that is passed on to nothing.
+ */
+export function entryWrites(e: WindowsAccessEntry): boolean {
+  if (!e.allow || TRUSTED_WRITER_SIDS.includes(e.sid)) return false;
+  if (e.inheritOnly && !e.objectInherit && !e.containerInherit) return false;
+  const m = e.rights >>> 0;
+  return (m & WRITE_MASK) !== 0 || (m & ~KNOWN_MASK) >>> 0 !== 0;
 }
 
 /** The accounts accepted as the owner of a client file or its package folder on the package proof, by well-known SID (the same in every language): SYSTEM, Administrators, TrustedInstaller. */
@@ -261,7 +325,7 @@ export interface VerifiedClient {
   /** The full path of wsb.exe; always started with `cwd` as its working directory. */
   readonly wsb: string;
   readonly cwd: string;
-  /** How each client file was proven to be Microsoft's, for the audit: `wsb.exe: authenticode; WindowsSandboxServer.exe: system-package`. */
+  /** How each client file was proven to be Microsoft's, for the audit: `wsb.exe: authenticode; WindowsSandboxServer.exe: microsoft-package`. */
   readonly proof: string;
 }
 
@@ -284,18 +348,26 @@ export function shortStatusMessage(message: string, path: string): string {
   return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 }
 
+/** The package signature kinds the Microsoft-package proof accepts, exactly (with case): `System` (signed by Windows itself) and `Store` (signed through the Microsoft Store). */
+export const ACCEPTED_SIGNATURE_KINDS: readonly string[] = Object.freeze(["System", "Store"]);
+
 /**
- * The second accepted proof for a client file (card A03b, publisher follow-up). Files inside a package can carry no Authenticode signature of their own: the package as a whole is
- * signed and Windows checks it. Such a file is accepted only when all of this holds, exactly:
+ * The second accepted proof for a client file (card A03b, publisher and Store follow-ups). Files inside a package can carry no Authenticode signature of their own: the package as
+ * a whole is signed and Windows checks it. Such a file is accepted only when all of this holds, exactly:
  * - `Get-AuthenticodeSignature` says `NotSigned` (no signature at all; any other failure, such as HashMismatch or NotTrusted, is refused, never explained away);
- * - Windows says the package is signed by Windows itself (`SignatureKind` exactly `System`) and its state is exactly `Ok` (not Tampered, Modified or anything else);
+ * - the package is one of the two allowlisted pairs in `SANDBOX_PACKAGES` (name, publisher id and family name exact; checked again here, not only by the caller);
+ * - Windows says the package is signed by Windows itself or through the Microsoft Store (`SignatureKind` exactly `System` or `Store`; Developer, Enterprise, None, an empty or
+ *   missing value and anything else are refused) and its state is exactly `Ok` (not Tampered, Modified or anything else);
  * - neither the package folder nor the file is a link, a junction or a short name (their real paths are the paths themselves);
  * - the file and the package folder can be written by nobody but SYSTEM, Administrators and TrustedInstaller (their access lists, read with icacls);
  * - the file and the package folder are owned by one of those three, by SID (`TRUSTED_OWNER_SIDS`; an owner can rewrite an access list without any entry in it).
- * The package's name, publisher and family and its folder under `%ProgramFiles%\WindowsApps` were already checked before this is asked.
+ * The package's folder under `%ProgramFiles%\WindowsApps` was already checked before this is asked.
+ * The own-hardware run 44467707810 found the Windows-provided package (`MicrosoftWindows.WindowsSandbox_cw5n1h2txyewy` 0.8.114.0) reported with `SignatureKind` `Store`, not
+ * `System`, which is why `Store` is accepted for these two exact packages.
  */
-async function systemPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, location: string, file: string): Promise<Verdict> {
-  if (pkg.signatureKind !== "System") return { ok: false, reason: `Windows reports the package's signature kind as ${pkg.signatureKind ?? "not reported"}, not System` };
+async function microsoftPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, location: string, file: string): Promise<Verdict> {
+  if (!SANDBOX_PACKAGES.some((p) => p.name === pkg.name && p.publisherId === pkg.publisherId && packageFamilyName(p) === pkg.familyName)) return { ok: false, reason: `the package ${pkg.familyName} is not one of ${SANDBOX_PACKAGES.map(packageFamilyName).join(", ")}` };
+  if (pkg.signatureKind === undefined || !ACCEPTED_SIGNATURE_KINDS.includes(pkg.signatureKind)) return { ok: false, reason: `Windows reports the package's signature kind as ${pkg.signatureKind ?? "not reported"}, not System or Store` };
   if (pkg.status !== "Ok") return { ok: false, reason: `Windows reports the package's state as ${pkg.status ?? "not reported"}, not Ok` };
   // The file and the folder must be the package's own, not reached through a link, a junction (here or higher up) or a short name: the access lists read below are then the
   // ones of the file that is started. The real host fails closed (a path whose real path cannot be read counts as a link).
@@ -316,7 +388,7 @@ async function systemPackageProof(host: WindowsHost, pkg: WindowsPackageInfo, lo
 /**
  * The Windows Sandbox client must be one of the exact Microsoft packages in `SANDBOX_PACKAGES` (name, publisher id and family name all exact), at or above the qualified version, in
  * the protected packages folder, with its two programs proven to be Microsoft's: a valid Authenticode signature by Microsoft, or (only for a file with no signature at all) the
- * system-package proof above. It is started from its own folder (the research found it fails from any other). Every refusal says exactly what was found.
+ * Microsoft-package proof above. It is started from its own folder (the research found it fails from any other). Every refusal says exactly what was found.
  */
 export async function verifyClient(host: WindowsHost, settings: WindowsSettings): Promise<Verdict<VerifiedClient>> {
   let pkg: WindowsPackageInfo | undefined;
@@ -343,9 +415,9 @@ export async function verifyClient(host: WindowsHost, settings: WindowsSettings)
     const name = win32.basename(file);
     if (sig.valid && sig.subject !== undefined && MICROSOFT_SUBJECT.test(sig.subject)) { proofs.push(`${name}: authenticode`); continue; }
     if (!sig.valid && sig.status === "NotSigned") {
-      const system = await systemPackageProof(host, pkg, location, file);
-      if (system.ok) { proofs.push(`${name}: system-package`); continue; }
-      return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)}), and the package is not proven to be part of Windows instead: ${system.reason}` };
+      const packaged = await microsoftPackageProof(host, pkg, location, file);
+      if (packaged.ok) { proofs.push(`${name}: microsoft-package`); continue; }
+      return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)}), and the package is not proven to be Microsoft's instead: ${packaged.reason}` };
     }
     return { ok: false, reason: `${file} does not carry a valid Microsoft signature (${describeSignature(sig)})` };
   }

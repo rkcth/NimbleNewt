@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { win32 } from "node:path";
 import { SANDBOX_PACKAGES, parseIcaclsWritable, shortStatusMessage } from "./windows-plan.js";
-import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
+import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 
 /**
  * The real Windows implementation of `WindowsHost` (card A03b). Only meaningful on Windows; it is exercised by the real tests (NIMBLENEWT_REAL_WINDOWS_SANDBOX=1), not by the unit tests.
@@ -39,7 +39,8 @@ $plain = ($null -ne $k.DefaultPassword) -and ("$($k.DefaultPassword)" -ne '')
 const PACKAGE_SCRIPT = `
 $found = @(foreach ($n in ($env:NN_NAMES -split ';')) { if ($n) { Get-AppxPackage -AllUsers -Name $n } })
 $p = $found | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
-if ($null -eq $p) { 'null' } else { @{ name = $p.Name; publisherId = $p.PublisherId; familyName = $p.PackageFamilyName; version = $p.Version.ToString(); installLocation = $p.InstallLocation; signatureKind = "$($p.SignatureKind)"; status = "$($p.Status)" } | ConvertTo-Json -Compress }
+$flag = { param($o, $n) if ($o.PSObject.Properties[$n] -and ($o.$n -is [bool])) { $o.$n } else { $null } }
+if ($null -eq $p) { 'null' } else { @{ name = $p.Name; publisherId = $p.PublisherId; familyName = $p.PackageFamilyName; version = $p.Version.ToString(); installLocation = $p.InstallLocation; signatureKind = "$($p.SignatureKind)"; status = "$($p.Status)"; nonRemovable = (& $flag $p 'NonRemovable'); isFramework = (& $flag $p 'IsFramework') } | ConvertTo-Json -Compress }
 `;
 // SignatureType exists from Windows PowerShell 5.1 on; where it does not, it is reported as absent.
 const SIGNATURE_SCRIPT = `
@@ -54,12 +55,20 @@ $a = Get-Acl -LiteralPath $env:NN_PATH
 $o = $a.GetOwner([System.Security.Principal.SecurityIdentifier])
 @{ owner = if ($null -eq $o) { $null } else { $o.Value } } | ConvertTo-Json -Compress
 `;
+// The access list by SID (the same in every language), explicit and inherited entries, for the findings. The count is sent next to the list so that a list PowerShell turned
+// into a single object, or cut short, is noticed. Rights are the raw access mask (generic rights included), flags their numeric values; nothing is translated here.
+const ACCESS_SCRIPT = `
+$a = Get-Acl -LiteralPath $env:NN_PATH
+$rules = @($a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
+$out = @(foreach ($r in $rules) { @{ sid = $r.IdentityReference.Value; rights = [int64]$r.FileSystemRights.value__; type = "$($r.AccessControlType)"; inherited = [bool]$r.IsInherited; inheritance = [int]$r.InheritanceFlags.value__; propagation = [int]$r.PropagationFlags.value__ } })
+ConvertTo-Json -Compress -Depth 4 -InputObject @{ count = $rules.Count; entries = $out }
+`;
 const TASK_SCRIPT = `
 $t = Get-ScheduledTask -TaskName $env:NN_TASK -ErrorAction SilentlyContinue
 if ($null -eq $t) { '{"present":false}' } else { @{ present = $true; enabled = [bool]$t.Settings.Enabled -and ($t.State -ne 'Disabled'); executable = $t.Actions[0].Execute } | ConvertTo-Json -Compress }
 `;
 
-type RawPackage = { name?: unknown; publisherId?: unknown; familyName?: unknown; version?: unknown; installLocation?: unknown; signatureKind?: unknown; status?: unknown };
+type RawPackage = { name?: unknown; publisherId?: unknown; familyName?: unknown; version?: unknown; installLocation?: unknown; signatureKind?: unknown; status?: unknown; nonRemovable?: unknown; isFramework?: unknown };
 type RawSignature = { valid?: unknown; subject?: unknown; status?: unknown; statusMessage?: unknown; signatureType?: unknown };
 const text = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
 
@@ -70,7 +79,34 @@ export function packageFromProbe(raw: RawPackage | null): WindowsPackageInfo | u
   return {
     name: text(raw.name) ?? "", publisherId: text(raw.publisherId) ?? "", familyName: text(raw.familyName) ?? "", version: text(raw.version) ?? "", installLocation: text(raw.installLocation) ?? "",
     ...(signatureKind === undefined ? {} : { signatureKind }), ...(status === undefined ? {} : { status }),
+    ...(typeof raw.nonRemovable === "boolean" ? { nonRemovable: raw.nonRemovable } : {}), ...(typeof raw.isFramework === "boolean" ? { isFramework: raw.isFramework } : {}),
   };
+}
+
+/**
+ * The access-list probe's answer, read strictly: an object with a whole-number `count` and `entries`, a list of exactly that many entries (one entry alone may come as an object,
+ * which is how PowerShell can write a list of one), each with a SID of the usual form, an access mask that fits in 32 bits, the type exactly `Allow` or `Deny`, `inherited` true
+ * or false and the inheritance and propagation flags as numbers from 0 to 3. Anything else throws, so a list that is not in this exact form is never recorded as an answer.
+ */
+export function accessFromProbe(raw: unknown, path: string): WindowsAccessEntry[] {
+  const fail = (why: string): never => { throw new Error(`the access list of ${path} was not reported in the expected form: ${why}`); };
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return fail("not an object");
+  const { count, entries } = raw as { count?: unknown; entries?: unknown };
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return fail("no entry count");
+  const list: unknown[] = Array.isArray(entries) ? entries : count === 1 && entries !== null && typeof entries === "object" ? [entries] : count === 0 && (entries === null || entries === undefined) ? [] : fail("the entries are not a list");
+  if (list.length !== count) return fail(`${String(list.length)} entries for a count of ${String(count)}`);
+  return list.map((item, i) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return fail(`entry ${String(i)} is not an object`);
+    const e = item as { sid?: unknown; rights?: unknown; type?: unknown; inherited?: unknown; inheritance?: unknown; propagation?: unknown };
+    if (typeof e.sid !== "string" || !/^S-1-\d+(?:-\d+)+$/.test(e.sid)) return fail(`entry ${String(i)} has no SID`);
+    if (typeof e.rights !== "number" || !Number.isInteger(e.rights) || e.rights < -0x80000000 || e.rights > 0xffffffff) return fail(`entry ${String(i)} has no access mask`);
+    if (e.type !== "Allow" && e.type !== "Deny") return fail(`entry ${String(i)} is neither Allow nor Deny`);
+    if (typeof e.inherited !== "boolean") return fail(`entry ${String(i)} does not say whether it is inherited`);
+    const flag = (v: unknown, name: string): number => (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 3 ? v : fail(`entry ${String(i)} has no ${name} flags`));
+    const inheritance = flag(e.inheritance, "inheritance"), propagation = flag(e.propagation, "propagation");
+    // InheritanceFlags: ContainerInherit 1, ObjectInherit 2. PropagationFlags: NoPropagateInherit 1, InheritOnly 2.
+    return { sid: e.sid, allow: e.type === "Allow", rights: e.rights >>> 0, inherited: e.inherited, objectInherit: (inheritance & 2) !== 0, containerInherit: (inheritance & 1) !== 0, noPropagate: (propagation & 1) !== 0, inheritOnly: (propagation & 2) !== 0 };
+  });
 }
 
 /** The signature probe's answer: valid only when the probe said so and the status is exactly Valid; Windows' message is shortened and the file's path in it replaced. */
@@ -190,6 +226,9 @@ export function windowsRealHost(): WindowsHost {
       const out = await run(`${sysRoot()}\\System32\\icacls.exe`, [path], { timeoutMs: 30_000 });
       if (out.code !== 0) throw new Error(`icacls ${path} failed: ${out.stderr.trim().slice(0, 200)}`);
       return parseIcaclsWritable(out.stdout, path);
+    },
+    async accessEntries(path) {
+      return accessFromProbe(await powershell<unknown>(ACCESS_SCRIPT, { NN_PATH: path }), path);
     },
     async ownerSid(path) {
       return ownerFromProbe(await powershell<{ owner?: unknown } | null>(OWNER_SCRIPT, { NN_PATH: path }), path);
