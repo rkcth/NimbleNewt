@@ -205,7 +205,9 @@ test("property: no machine, domain, account, session or virtual-machine number s
     else if (rnd() < 0.05) s = s.replace(/\d/g, (c) => String.fromCharCode(0xff10 + Number(c)));
     const text = pick(wraps)(s);
     for (const out of [scrub(text, names), JSON.stringify(scrubDeep({ a: [text], b: { c: text } }, names))]) {
-      assert.ok(!secret.some((p) => out.includes(p)), `${JSON.stringify(text)} -> ${out}`);
+      // Read back with full-width digits as plain ones, so a SID written in full-width digits is checked too, not only its ASCII spelling.
+      const plain = out.normalize("NFKC");
+      assert.ok(!secret.some((p) => plain.includes(p)), `${JSON.stringify(text)} -> ${out}`);
     }
   }
   // The kept kinds stay readable, and a virtual machine's own SID and account name are redacted (only the Virtual Machines group is fixed).
@@ -215,4 +217,10 @@ test("property: no machine, domain, account, session or virtual-machine number s
   assert.equal(redact("C:\\x S-1-5-83-1-1111-2222-3333-4444:(RX)", names), "C:\\x S-1-5-83-<vm>:(RX)");
   // A SID written with dash lookalikes is withheld whole by the gate.
   assert.equal(scrub("owner S\u20101\u20105\u201021\u2010111\u2010222\u2010333\u20101001", names), WITHHELD);
+  // So is one written in full-width digits, and one with a full-width minus sign; a fixed SID in either form is still not personal data and is kept.
+  const wide = (t: string): string => t.replace(/\d/g, (c) => String.fromCharCode(0xff10 + Number(c)));
+  assert.equal(scrub(`owner ${wide("S-1-5-21-111-222-333-1001")}`, names), WITHHELD);
+  assert.equal(scrub("owner S\uFF0D1\uFF0D5\uFF0D21\uFF0D111\uFF0D222\uFF0D333\uFF0D1001", names), WITHHELD);
+  assert.equal(scrub("owner S\u22121\u22125\u221221\u2212111\u2212222\u2212333\u22121001", names), WITHHELD);
+  assert.equal(scrub(`owner ${wide("S-1-5-18")}`, names), `owner ${wide("S-1-5-18")}`);
 });
