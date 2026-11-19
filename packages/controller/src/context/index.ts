@@ -18,4 +18,4 @@ export { RecallReader, type RecallReaderDeps } from "./recall-source.js";
 export { RecallService, type RecallReply, type RecallServiceDeps, type RecallSettings } from "./recall-service.js";
 export { RECALL_LINE, cleanText } from "./anchor.js";
 export { handoffId } from "./enforcement.js";
-export { FIXED_PART_WORDS, MIN_STARTABLE_WINDOW, MIN_TASK_CHARS, PRACTICAL_STARTABLE_WINDOW, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_CHARS, WORKER_FIXED_PART_TOKENS, smallWindowWarning, startableWindow, windowCanStartTask } from "./fixed-part.js";
+export { FIXED_PART_WORDS, MIN_STARTABLE_WINDOW, MIN_TASK_CHARS, PRACTICAL_STARTABLE_WINDOW, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_CHARS, WORKER_FIXED_PART_TOKENS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "./fixed-part.js";

@@ -41,8 +41,15 @@ export function startableWindow(fixedChars: number = WORKER_FIXED_PART_CHARS): n
   return 100_000_000;
 }
 export const MIN_STARTABLE_WINDOW = startableWindow();
-/** The usual model window size at or above `MIN_STARTABLE_WINDOW` (the next power of two): what the owner is told is needed in practice. */
-export const PRACTICAL_STARTABLE_WINDOW = 2 ** Math.ceil(Math.log2(MIN_STARTABLE_WINDOW));
+/** Windows the owner is told about are rounded up to a multiple of this many tokens (32,768, 36,864, 40,960, ...): a round figure, but never far above what is needed. */
+const PRACTICAL_STEP = 4_096;
+/**
+ * The window the owner is told is needed in practice for a smallest startable window `min`: `min` rounded up to a multiple of 4,096 tokens. Not the next power of two: a fixed part a little over the 32,768 line
+ * (35,840 tokens with card P03b's four tools) would then be told "65,536 or more" although 36,864 works.
+ */
+export function practicalWindow(min: number): number { return Math.ceil(min / PRACTICAL_STEP) * PRACTICAL_STEP; }
+/** What the owner is told is needed in practice: `MIN_STARTABLE_WINDOW` rounded up to a multiple of 4,096 tokens (32,768 at the measured figures). */
+export const PRACTICAL_STARTABLE_WINDOW = practicalWindow(MIN_STARTABLE_WINDOW);
 
 /** A whole number with thousands separated by commas (no locale data needed). */
 export const grouped = (n: number): string => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");

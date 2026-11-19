@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_CONTEXT_TOKENS, DEFAULT_ROUTE_FLOOR_CHARS, MIN_STARTABLE_WINDOW, MIN_WORKABLE_CONTEXT_TOKENS, PRACTICAL_STARTABLE_WINDOW, ROUTE_FLOOR_DEFAULTS, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_TOKENS, smallWindowWarning, startableWindow, windowCanStartTask } from "@nimblenewt/controller";
+import { DEFAULT_CONTEXT_TOKENS, DEFAULT_ROUTE_FLOOR_CHARS, MIN_STARTABLE_WINDOW, MIN_WORKABLE_CONTEXT_TOKENS, PRACTICAL_STARTABLE_WINDOW, ROUTE_FLOOR_DEFAULTS, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_TOKENS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "@nimblenewt/controller";
 import { MIN_WORKABLE_WINDOW, PI_AGENT_LAYOUT, composeTools, createBridge, sharedSystemText, toolSchemaCharsOf } from "@nimblenewt/pi-adapter";
 
 // Card "Fixed-part sizing after T08": the real worker's fixed part (its system text and the schemas of every bridge tool), measured as the worker measures it at start (process.ts reports
@@ -14,7 +14,7 @@ const real = (): { systemPromptChars: number; toolSchemaChars: number } => {
 const RAISE = "see RAISING THE FIXED PART in packages/controller/src/context/fixed-part.ts";
 const derived = (r: { systemPromptChars: number; toolSchemaChars: number }): string => {
   const chars = r.systemPromptChars + r.toolSchemaChars, tokens = Math.ceil(chars / 3), min = startableWindow(chars);
-  return `measured: system text ${r.systemPromptChars}, bridge tool schemas ${r.toolSchemaChars} characters (${chars}, about ${Math.round(tokens / 100) * 100} tokens); smallest startable window ${min}, ${2 ** Math.ceil(Math.log2(min))} in practice, 32,768 ${windowCanStartTask(32_768, chars) ? "still starts" : "NO LONGER starts"} a task; ${RAISE}`;
+  return `measured: system text ${r.systemPromptChars}, bridge tool schemas ${r.toolSchemaChars} characters (${chars}, about ${Math.round(tokens / 100) * 100} tokens); smallest startable window ${min}, ${practicalWindow(min)} in practice, 32,768 ${windowCanStartTask(32_768, chars) ? "still starts" : "NO LONGER starts"} a task; ${RAISE}`;
 };
 
 test("the real worker's fixed part stays within its budget, so a new tool or rule is a deliberate step", () => {

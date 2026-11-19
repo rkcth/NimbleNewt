@@ -11,7 +11,7 @@ import { DEFAULT_ROUTE_FLOOR_CHARS, ROUTE_FLOOR_DEFAULTS } from "../context/rout
 import { anchorBudget } from "../context/anchor.js";
 import { contextBudget } from "../context/budget.js";
 import { admitFirstCall } from "../context/dispatch.js";
-import { MIN_STARTABLE_WINDOW, WORKER_FIXED_PART, WORKER_FIXED_PART_CHARS, smallWindowWarning, windowCanStartTask } from "../context/fixed-part.js";
+import { MIN_STARTABLE_WINDOW, PRACTICAL_STARTABLE_WINDOW, WORKER_FIXED_PART, WORKER_FIXED_PART_CHARS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "../context/fixed-part.js";
 import { SETUP_GUIDE } from "./readiness.js";
 import { MIN_WORKABLE_CONTEXT_TOKENS, SetupProviderService } from "./providers.js";
 
@@ -87,4 +87,20 @@ test("the smallest startable window is what the first-call admission itself deci
   for (let w = MIN_WORKABLE_CONTEXT_TOKENS; w <= 2 * MIN_STARTABLE_WINDOW; w += 256) assert.equal(windowCanStartTask(w), !startupRefused(w), String(w));
   assert.equal(startupRefused(MIN_STARTABLE_WINDOW), false);
   assert.equal(startupRefused(MIN_STARTABLE_WINDOW - 1_024), true);
+});
+
+test("the window the owner is told is needed in practice is the startable one rounded up to a multiple of 4,096, not the next power of two", () => {
+  assert.equal(PRACTICAL_STARTABLE_WINDOW, practicalWindow(MIN_STARTABLE_WINDOW));
+  for (const [min, told] of [[30_720, 32_768], [32_768, 32_768], [33_792, 36_864], [35_840, 36_864], [36_864, 36_864], [37_888, 40_960]] as const) assert.equal(practicalWindow(min), told, String(min));
+  // A fixed part a little over the 32,768 line (card P03b's first slice: 2,537 + 18,242 characters): the startable window is 35,840, and the owner is told 36,864, which starts a task, not 65,536.
+  const p03b = 2_537 + 18_242;
+  assert.equal(windowCanStartTask(32_768, p03b), false);
+  assert.equal(startableWindow(p03b), 35_840);
+  assert.equal(practicalWindow(startableWindow(p03b)), 36_864);
+  assert.equal(windowCanStartTask(36_864, p03b), true);
+  // Whatever the fixed part, the figure told is a window that starts a task and is less than 4,096 tokens above the smallest one.
+  for (let chars = 1_000; chars <= 60_000; chars += 777) {
+    const min = startableWindow(chars), told = practicalWindow(min);
+    assert.ok(windowCanStartTask(told, chars) && told >= min && told - min < 4_096 && told % 4_096 === 0, `${chars}: ${min} -> ${told}`);
+  }
 });
