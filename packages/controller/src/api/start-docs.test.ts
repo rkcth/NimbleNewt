@@ -107,7 +107,12 @@ test("documentation obligations through the running controller and the owner's c
     assert.equal((await turn("m5", "yes, do that", [{ kind: "apply_proposal", proposalId: rel[0].proposalId, evidence: "do that", basis: "owner" }]))[0].status, "applied");
     const flagged = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
     assert.deepEqual([flagged.releaseVersion, flagged.updates.length], ["2.0", 2]);
-    const v2 = await call(dora.token, "doc.obligation.verify", { obligationId: obligation, expectedRevision: flagged.revision, documentSubmissionId: document.result.id, evidence: [sub2], applicableVersion: "2.0" }, "v2");
+    const before = await call(dora.token, "doc.obligation.verify", { obligationId: obligation, expectedRevision: flagged.revision, documentSubmissionId: document.result.id, evidence: [sub2], applicableVersion: "2.0" }, "v2a");
+    assert.equal(before.error?.code, "invalid_command", JSON.stringify(before));
+    assert.match(before.error.message, /before the document was flagged/, "the document change made before the flag does not answer it");
+    const updated = await call(dora.token, "submission.record", { taskId: task, kind: "document", role: "docs", artifactDigest: `sha256:${"f".repeat(64)}` }, "doc2");
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    const v2 = await call(dora.token, "doc.obligation.verify", { obligationId: obligation, expectedRevision: flagged.revision, documentSubmissionId: updated.result.id, evidence: [sub2], applicableVersion: "2.0" }, "v2");
     assert.equal(v2.ok, true, JSON.stringify(v2));
     assert.equal(v2.result.settled.length, 2);
     assert.equal((await call(boot.token, "doc.obligation.list", { projectId: project })).result.items[0].state, "verified");

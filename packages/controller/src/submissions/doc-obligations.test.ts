@@ -199,4 +199,103 @@ for (const backend of backends) {
       await world.close();
     }
   });
+
+  test(`${backend.name}: a flag is answered only by a document change made since it, re-recording keeps it, a command ID is not reused for other arguments, the update task text is redacted and a half-opened update task is finished (card Q03)`, async () => {
+    const world = await backend.open();
+    try {
+      // A clock that moves, so a document change can be older than a flag.
+      let at = Date.parse("2026-11-19T10:00:00.000Z");
+      const moving = { clock: () => new Date((at += 1000)).toISOString(), pause: async () => undefined };
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...moving });
+      const assignments = AssignmentService.withEpoch(world.storage, projects.epoch, projects, moving);
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, moving);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const login = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Login" })).id;
+      const roles = new Map<string, string[]>();
+      const agent = async (nm: string, held: string[]): Promise<Principal> => {
+        await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }] });
+        const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
+        roles.set(p.id, held);
+        return p;
+      };
+      const runner = new CommandRunner(world.storage, projects.epoch, moving);
+      const plant = async (kind: string, id: string, body: object): Promise<void> => {
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: true, changes: [{ type: "create" as const, ref: { kind, id }, body: body as JsonObject }], detail: {} }) }));
+      };
+      const rolesOf = async (id: string): Promise<string[]> => roles.get(id) ?? [];
+      const qa = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf }, moving);
+      let failReady = false;
+      const docs = DocObligationService.withEpoch(world.storage, projects.epoch, {
+        rolesOf,
+        gate: (by, sub) => qa.gate(by, sub),
+        newestChecked: async (by, t) => (await qa.list(by, t)).items.find((e) => e.source === "independent")?.submissionId,
+        // Making an update task ready fails once, as a crash between the steps of opening it would.
+        projects: { createTask: (c) => projects.createTask(c), transitionTask: async (c) => { if (failReady) { failReady = false; throw new Error("stopped between steps"); } return projects.transitionTask(c); } },
+        assignments,
+      }, moving);
+      const ann = await agent("ann", ["author"]);
+      const quinn = await agent("quinn", ["qa"]);
+      const dora = await agent("dora", ["docs"]);
+      const code = async (tree: string): Promise<string> => {
+        const id = derivedId("sbm", cid("code"));
+        await plant("submission", id, { taskId: login, projectId: project, kind: "code", role: "author", submittedBy: ann.id, submittedAt: "2026-11-19T09:00:00.000Z", makesCommit: true, base: "c".repeat(40), tree, patchId: "d".repeat(40), evidence: [] });
+        await qa.record(quinn, { commandId: cid("qa"), submissionId: id, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-19T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] });
+        return id;
+      };
+      const docChange = async (): Promise<string> => {
+        const id = derivedId("sbm", cid("doc"));
+        await plant("submission", id, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
+        return id;
+      };
+      const get = async (id: string) => (await docs.get(owner, id)) as unknown as { revision: number; state: string; title: string; location: string; reasons?: { tree?: string }[]; releaseVersion?: string; updates: { taskId: string; state: string }[] };
+
+      // The title and the place are kept redacted, like the claims, and so is the update task's text made from them.
+      const shaped = "token=abcdefghijklmnop0123456789";
+      const page = await docs.record(owner, { commandId: cid("r"), projectId: project, title: `Landing page ${shaped}`, location: `site/index.html?${shaped}`, audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login }] });
+      const recorded = await get(page.id);
+      assert.ok(!recorded.title.includes("abcdefghijklmnop0123456789") && !recorded.location.includes("abcdefghijklmnop0123456789"), "title and location are redacted");
+      assert.match(recorded.title, /^Landing page /);
+      const sub1 = await code(treeA);
+      const first = await docChange();
+      await docs.verify(dora, { commandId: cid("v"), obligationId: page.id, expectedRevision: recorded.revision, documentSubmissionId: first, evidence: [sub1] });
+
+      // New tested code, and the step that makes the update task ready stops: the flag is written, the task stays proposed. The next check with nothing new finishes it.
+      const sub2 = await code(treeB);
+      failReady = true;
+      await assert.rejects(() => docs.impact(owner, { commandId: "impact-a", taskId: login, submissionId: sub2 }), /stopped between steps/);
+      const half = (await get(page.id)).updates.find((u) => u.state === "open")!.taskId;
+      const halfTask = (await runner.get("task", half))?.body as unknown as { state: string; title: string; description: string };
+      assert.equal(halfTask.state, "proposed");
+      assert.ok(!`${halfTask.title}\n${halfTask.description}`.includes("abcdefghijklmnop0123456789"), "the update task's text carries no secret-shaped text");
+      const finish = await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: sub2 });
+      assert.deepEqual([finish.flagged, finish.tasks], [[], [{ obligationId: page.id, taskId: half, assigned: true }]], "nothing new is flagged; the half-opened task is opened");
+      assert.equal(((await runner.get("task", half))?.body as unknown as { state: string }).state, "ready");
+      assert.equal(((await runner.get("assignment", assignmentIdOf(half)))?.body as unknown as { owner: { id: string } }).owner.id, "dora");
+
+      // The same command ID with other arguments is refused even when nothing new is to be written, for the impact check and the release check alike.
+      await refuses("command_conflict", () => docs.impact(owner, { commandId: "impact-a", taskId: login, submissionId: sub1 }));
+      assert.equal((await docs.impact(owner, { commandId: "impact-a", taskId: login, submissionId: sub2 })).replayed, true, "the same command again is a replay");
+      await docs.release(owner, { commandId: "rel-a", projectId: project, version: "2.0" });
+      await refuses("command_conflict", () => docs.release(owner, { commandId: "rel-a", projectId: project, version: "1.0" }));
+
+      // Re-recording the flagged document with another claim makes it unverified but keeps what flagged it: the old code, the old version and the old document change still do not verify it.
+      const flagged = await get(page.id);
+      assert.deepEqual([flagged.state, flagged.releaseVersion, flagged.reasons?.map((r) => r.tree)], ["stale", "2.0", [treeB, undefined]]);
+      const replaced = await docs.record(dora, { commandId: cid("r"), obligationId: page.id, expectedRevision: flagged.revision, projectId: project, title: "Landing page", location: "site/index.html", audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey or a code", taskId: login }] });
+      assert.equal(replaced.state, "unverified");
+      const kept = await get(page.id);
+      assert.deepEqual([kept.releaseVersion, kept.reasons?.map((r) => r.tree)], ["2.0", [treeB, undefined]], "re-recording keeps the flags");
+      const fresh = await docChange();
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: page.id, expectedRevision: kept.revision, documentSubmissionId: fresh, evidence: [sub1], applicableVersion: "2.0" }), /verify it against that tree/);
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: page.id, expectedRevision: kept.revision, documentSubmissionId: fresh, evidence: [sub2] }), /version 2\.0/);
+      await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), obligationId: page.id, expectedRevision: kept.revision, documentSubmissionId: first, evidence: [sub2], applicableVersion: "2.0" }), /before the document was flagged/);
+      const done = await docs.verify(dora, { commandId: cid("v"), obligationId: page.id, expectedRevision: kept.revision, documentSubmissionId: fresh, evidence: [sub2], applicableVersion: "2.0" });
+      assert.equal(done.settled.length, 2);
+      const after = (await docs.get(owner, page.id)) as unknown as { state: string; flaggedAt?: string; reasons?: unknown };
+      assert.deepEqual([after.state, after.flaggedAt, after.reasons], ["verified", undefined, undefined], "a verification clears the flags");
+    } finally {
+      await world.close();
+    }
+  });
 }

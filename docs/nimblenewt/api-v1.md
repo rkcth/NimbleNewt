@@ -7784,7 +7784,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.verify`
 
-Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
+Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged, and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
 
 Arguments:
 

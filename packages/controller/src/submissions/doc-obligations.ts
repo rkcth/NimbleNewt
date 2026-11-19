@@ -74,6 +74,8 @@ export interface DocObligationBody {
   readonly reasons?: readonly DocReason[];
   /** A release flagged it: a verification must name this version. */
   readonly releaseVersion?: string;
+  /** When it was last flagged (a reason noted): a verification needs a document change submitted no earlier, not one made before the flag. */
+  readonly flaggedAt?: string;
   readonly updates: readonly DocUpdate[];
   /** How many update tasks the document was ever given (the settled ones beyond the limit are dropped from `updates`). */
   readonly updateCount?: number;
@@ -182,8 +184,9 @@ export class DocObligationService {
   async record(by: Principal, command: NoActor & { projectId: string; obligationId?: string; expectedRevision?: number; title: string; location: string; audience: string; owner: string; applicableVersion: string; implementationRefs: readonly string[]; claims?: readonly { text: string; taskId: string }[] }): Promise<{ id: string; revision: number; replayed: boolean; state: DocState }> {
     only(command, ["commandId", "projectId", "obligationId", "expectedRevision", "title", "location", "audience", "owner", "applicableVersion", "implementationRefs", "claims"]);
     const commandId = checkCommandId(command.commandId);
-    const title = text(command.title, "title", { min: 1, max: DOC_LIMITS.title });
-    const location = text(command.location, "location", { min: 1, max: DOC_LIMITS.location });
+    // Kept redacted, like the claims: the title and the place reach the update tasks' text, the status view and every reader of the project.
+    const title = redactText(text(command.title, "title", { min: 1, max: DOC_LIMITS.title }));
+    const location = redactText(text(command.location, "location", { min: 1, max: DOC_LIMITS.location }));
     if (!(DOC_AUDIENCES as readonly unknown[]).includes(command.audience)) bad("audience", `must be one of ${DOC_AUDIENCES.join(", ")}`);
     const audience = command.audience as DocAudience;
     if (typeof command.owner !== "string" || !AGENT.test(command.owner)) bad("owner", "must be an agent's ID (agent:<id>)");
@@ -233,8 +236,11 @@ export class DocObligationService {
           const claimKey = (c: readonly DocClaim[]): string => JSON.stringify(c.map((x) => [x.taskId, x.text]));
           const same = JSON.stringify(b.implementationRefs) === JSON.stringify(refs) && claimKey(b.claims) === claimKey(claims) && b.applicableVersion === applicableVersion;
           state = same ? b.state : "unverified";
+          // A replacement keeps what flagged the document (the reasons on tasks it still describes, a release, when): re-recording it does not clear a flag, only a verification against the flagged work does.
+          const reasons = (b.reasons ?? []).filter((r) => r.kind === "release_changed" || refs.includes(r.taskId));
           const next: DocObligationBody = same ? { ...b, title, location, audience, owner: command.owner, changedAt: now }
-            : { projectId, title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: b.recordedBy, recordedAt: b.recordedAt, changedAt: now, state: "unverified", updates: b.updates, ...(b.updateCount === undefined ? {} : { updateCount: b.updateCount }) };
+            : { projectId, title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: b.recordedBy, recordedAt: b.recordedAt, changedAt: now, state: "unverified", updates: b.updates, ...(b.updateCount === undefined ? {} : { updateCount: b.updateCount }),
+              ...(reasons.length === 0 ? {} : { reasons }), ...(b.releaseVersion === undefined ? {} : { releaseVersion: b.releaseVersion }), ...(b.flaggedAt === undefined ? {} : { flaggedAt: b.flaggedAt }) };
           changes.push({ type: "update", ref: { kind: "doc-obligation", id }, expectedRevision: current.revision, body: json(next) });
           return { ref: { kind: "doc-obligation", id }, creates: false, changes, detail: { projectId, state } };
         }
@@ -279,6 +285,8 @@ export class DocObligationService {
         const doc = docFound?.body as unknown as SubmissionBody | undefined;
         if (doc === undefined || doc.projectId !== b.projectId) bad("documentSubmissionId", "is not a submission of this project");
         if (doc!.kind !== "document" || doc!.artifactDigest === undefined) bad("documentSubmissionId", `is a ${doc!.kind} submission: the docs role submits a document change (kind document)`);
+        // A flagged document is answered by a document change made since the flag, not by one submitted before it (the document as it was when it went out of date).
+        if (b.flaggedAt !== undefined && docFound!.createdAt < b.flaggedAt) bad("documentSubmissionId", `was submitted at ${docFound!.createdAt}, before the document was flagged at ${b.flaggedAt}: submit the updated document (kind document) and verify with that`);
         const target = version ?? b.applicableVersion;
         if (b.releaseVersion !== undefined && target !== b.releaseVersion) bad("applicableVersion", `a release flagged this document for version ${b.releaseVersion}: verify it for that version`);
         const evidence: DocEvidence[] = [];
@@ -306,8 +314,8 @@ export class DocObligationService {
         const now = this.#runner.now();
         settled = b.updates.filter((u) => u.state === "open").map((u) => u.taskId);
         const updates = b.updates.map((u) => (u.state === "open" ? { ...u, state: "settled" as const, settledAt: now } : u));
-        const { reasons: _r, releaseVersion: _v, ...rest } = b;
-        void _r; void _v;
+        const { reasons: _r, releaseVersion: _v, flaggedAt: _f, ...rest } = b;
+        void _r; void _v; void _f;
         const next: DocObligationBody = { ...rest, applicableVersion: target, state: "verified", verification: { documentSubmissionId: command.documentSubmissionId, artifactDigest: doc!.artifactDigest!, evidence, version: target, verifiedBy: by.id, verifiedAt: now }, updates };
         return { ref: { kind: "doc-obligation", id: current.id }, creates: false, changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }], detail: { settled } };
       },
@@ -409,12 +417,15 @@ export class DocObligationService {
     let flagged: string[] = [];
     let replayed = false;
     let wrote = false;
-    if ((await plan()).length > 0) {
+    // The command always goes through the runner, so a command ID used before is answered with its result, or refused as `command_conflict` when it was used with other arguments, even when there is
+    // nothing new to write now. Nothing new (asked again, or a concurrent check wrote the same flags first) is not an error: the open update tasks are finished below.
+    const nothing = new DomainError("not_found", "no document has anything new to flag");
+    try {
       const result = await this.#runner.command(type, { commandId: scoped, actor: by.id }, async () => ({
         payload,
         build: async () => {
           const found = await plan();
-          if (found.length === 0) throw new DomainError("stale_revision", "the documents changed meanwhile; ask again");
+          if (found.length === 0) throw nothing;
           const now = this.#runner.now();
           const changes: Change[] = [];
           made = [];
@@ -433,7 +444,7 @@ export class DocObligationService {
             for (let i = 0; kept.length + added.length > DOC_LIMITS.updates && i < kept.length;) { if (kept[i]!.state === "settled") kept.splice(i, 1); else i++; }
             const releaseTo = [...f.reasons].reverse().find((r): r is Extract<DocReason, { kind: "release_changed" }> => r.kind === "release_changed")?.to;
             const state: DocState = f.body.state === "unverified" ? "unverified" : "stale";
-            const next: DocObligationBody = { ...f.body, state, reasons: [...(f.body.reasons ?? []), ...f.reasons].slice(-DOC_LIMITS.updates), ...(releaseTo === undefined ? {} : { releaseVersion: releaseTo }), updates: [...kept, ...added], updateCount: count };
+            const next: DocObligationBody = { ...f.body, state, reasons: [...(f.body.reasons ?? []), ...f.reasons].slice(-DOC_LIMITS.updates), ...(releaseTo === undefined ? {} : { releaseVersion: releaseTo }), flaggedAt: now, updates: [...kept, ...added], updateCount: count };
             changes.push({ type: "update", ref: { kind: "doc-obligation", id: f.id }, expectedRevision: f.revision, body: json(next) });
           }
           flagged = found.map((f) => f.id);
@@ -442,21 +453,30 @@ export class DocObligationService {
       }));
       replayed = result.replayed;
       wrote = !result.replayed;
+    } catch (error) {
+      if (error !== nothing) throw error;
     }
     if (!wrote) {
-      // A replay, or nothing new: finish the update tasks the project's documents still have open and unopened.
+      // A replay, or nothing new: finish the update tasks the project's documents still have open and not fully opened (not created, still proposed, or ready with no assignment: a failure between steps).
       made = [];
       flagged = [];
       const ids = new Set<string>();
       const projectId = (payload["projectId"] as string | undefined) ?? (await this.#task(payload["taskId"] as string))?.projectId;
       for (const id of projectId === undefined ? [] : (await this.#index(projectId)).body.ids) {
         const b = (await this.#runner.get("doc-obligation", id))?.body as unknown as DocObligationBody | undefined;
-        for (const u of b?.updates ?? []) if (u.state === "open" && !ids.has(u.taskId) && (await this.#task(u.taskId)) === undefined) { ids.add(u.taskId); made.push({ obligationId: id, taskId: u.taskId, create: createCommandOf(id, u.seq), projectId: b!.projectId, owner: b!.owner, ...this.#describe(id, b!, u.reason) }); }
+        for (const u of b?.updates ?? []) if (u.state === "open" && !ids.has(u.taskId) && (await this.#unopened(u.taskId))) { ids.add(u.taskId); made.push({ obligationId: id, taskId: u.taskId, create: createCommandOf(id, u.seq), projectId: b!.projectId, owner: b!.owner, ...this.#describe(id, b!, u.reason) }); }
       }
     }
     const tasks: { obligationId: string; taskId: string; assigned: boolean }[] = [];
     for (const m of made) tasks.push({ obligationId: m.obligationId, taskId: m.taskId, assigned: await this.#open(by, m) });
     return { flagged, tasks, replayed };
+  }
+
+  /** An update task some step of opening has not reached: not created, still proposed, or ready without an assignment. */
+  async #unopened(taskId: string): Promise<boolean> {
+    const t = await this.#task(taskId);
+    if (t === undefined || t.state === "proposed") return true;
+    return t.state === "ready" && (await this.#runner.get("assignment", assignmentIdOf(taskId))) === undefined;
   }
 
   #describe(id: string, b: DocObligationBody, r: DocReason): { title: string; description: string } {
