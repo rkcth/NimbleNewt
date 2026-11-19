@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, lstatSync, openSync, readSync, readlinkSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readlinkSync, statSync } from "node:fs";
 import { posix } from "node:path";
 import { SandboxError } from "./errors.js";
 
@@ -14,6 +14,10 @@ export interface LibraryProbe {
   readonly stamp: (path: string) => string;
   /** The first four bytes of a file as lower-case hex ("" when shorter or unreadable). */
   readonly magic: (path: string) => string;
+  /** True only for a regular file (after following links). */
+  readonly isFile: (path: string) => boolean;
+  /** The OpenSSL directory compiled into a libcrypto (the `OPENSSLDIR: "<dir>"` text it carries), or undefined when there is none or it cannot be read. */
+  readonly opensslDir: (library: string) => string | undefined;
 }
 
 const fsFailure = (what: string, path: string, error: unknown): SandboxError => new SandboxError("invalid_recipe", `${what} ${posix.basename(path)} failed (${(error as NodeJS.ErrnoException).code ?? "error"})`, { cause: error });
@@ -29,7 +33,29 @@ export const realProbe: LibraryProbe = {
     let fd: number | undefined;
     try { fd = openSync(p, "r"); const b = Buffer.alloc(4); const n = readSync(fd, b, 0, 4, 0); return n === 4 ? b.toString("hex") : ""; } catch { return ""; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* nothing to do */ } }
   },
+  isFile: (p) => { try { return statSync(p).isFile(); } catch { return false; } },
+  opensslDir: (p) => { try { return statSync(p).size > MAX_SCAN_BYTES ? undefined : opensslDirIn(readFileSync(p)); } catch { return undefined; } },
 };
+
+/** A libcrypto larger than this is not scanned for its OpenSSL directory. */
+const MAX_SCAN_BYTES = 256 * 1024 * 1024;
+const OPENSSLDIR_MARK = Buffer.from('OPENSSLDIR: "', "latin1");
+
+/**
+ * The directory OpenSSL was built with, from the text `OPENSSLDIR: "<dir>"` that every OpenSSL 1.1 and 3 libcrypto carries (what `openssl version -d` prints). Only a plain absolute path of
+ * printable characters counts; anything else is undefined. Read from the file, never by running anything.
+ */
+export function opensslDirIn(bytes: Buffer): string | undefined {
+  const at = bytes.indexOf(OPENSSLDIR_MARK);
+  if (at < 0) return undefined;
+  const start = at + OPENSSLDIR_MARK.length;
+  const end = bytes.indexOf(0x22, start);
+  if (end < 0 || end - start > 1024) return undefined;
+  const dir = bytes.subarray(start, end).toString("latin1");
+  // Printable, absolute and already normal (no "..", "." or doubled slashes): a trailing slash is the only difference allowed.
+  if (!/^\/[\x20-\x7e]*$/.test(dir) || posix.normalize(dir).replace(/(.)\/+$/, "$1") !== dir.replace(/(.)\/+$/, "$1")) return undefined;
+  return dir.replace(/(.)\/+$/, "$1");
+}
 
 /** Mach-O (32 and 64 bit, either byte order) and universal ("fat") file signatures. */
 const MACH_O_MAGICS = new Set(["feedface", "feedfacf", "cefaedfe", "cffaedfe", "cafebabe", "bebafeca", "cafebabf", "bfbafeca"]);
@@ -204,6 +230,18 @@ export function dependentLibraryReads(executable: string, probe: LibraryProbe, a
     }
   };
   visit(executable, []);
+  // Homebrew's node links Homebrew's OpenSSL, which reads <OPENSSLDIR>/openssl.cnf when node starts; a refused read (not a missing file) stops node at launch. That one file is added, read
+  // only, with its links, when it exists, is a regular file and lies in the same allowed places as the libraries (found on Rob's Mac, CI run 44453704944).
+  for (const lib of [...seen].filter((p) => /^libcrypto[.-]/.test(posix.basename(p)) && !skip(p)).sort()) {
+    const dir = probe.opensslDir(lib);
+    if (dir === undefined) continue;
+    const config = posix.join(dir, "openssl.cnf");
+    if (skip(config) || !probe.exists(config)) continue;
+    const { links, real } = symlinkChain(config, probe);
+    const paths = [config, ...links, real].filter((p) => !skip(p));
+    if (paths.some((p) => under(p, writable) || !under(p, allowed)) || !probe.isFile(real)) continue;
+    paths.forEach((p) => reads.add(p));
+  }
   return [...reads].filter((p) => !skip(p)).sort();
 }
 

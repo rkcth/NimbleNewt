@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { SandboxError } from "./errors.js";
-import { cachedLibraryReads, dependentLibraryReads, parseDependents, parseRpaths, symlinkChain, type LibraryProbe } from "./libraries.js";
+import { cachedLibraryReads, dependentLibraryReads, opensslDirIn, parseDependents, parseRpaths, realProbe as hostProbe, symlinkChain, type LibraryProbe } from "./libraries.js";
 import { normalizeRecipe } from "./recipe.js";
 import { profileFor, seatbeltBackend } from "./seatbelt.js";
 
@@ -13,7 +13,7 @@ const header = (file: string): string => `${file}:\n`;
 const dep = (p: string): string => `\t${p} (compatibility version 1.0.0, current 1.0.0)\n`;
 
 /** A fake Homebrew: opt/<formula> are links into the Cellar; node links libuv by its opt path and icu through @rpath. */
-function fakeBrew(overrides: { otoolFails?: string; missing?: string[]; links?: Record<string, string>; files?: string[]; out?: Record<string, { L: string; l?: string }>; magic?: Record<string, string> } = {}): LibraryProbe & { calls: string[] } {
+function fakeBrew(overrides: { otoolFails?: string; missing?: string[]; links?: Record<string, string>; files?: string[]; out?: Record<string, { L: string; l?: string }>; magic?: Record<string, string>; ssldir?: Record<string, string>; dirs?: string[] } = {}): LibraryProbe & { calls: string[] } {
   const links: Record<string, string> = {
     "/opt/homebrew/opt/libuv": "../Cellar/libuv/1.51.0",
     "/opt/homebrew/opt/icu4c@77": "../Cellar/icu4c@77/77.1",
@@ -44,6 +44,8 @@ function fakeBrew(overrides: { otoolFails?: string; missing?: string[]; links?: 
     exists: (p) => files.has(symlinkChain(p, { isSymlink, readlink }).real),
     stamp: () => "1:1",
     magic: (p) => overrides.magic?.[p] ?? (files.has(symlinkChain(p, { isSymlink, readlink }).real) ? "cffaedfe" : ""),
+    isFile: (p) => { const r = symlinkChain(p, { isSymlink, readlink }).real; return files.has(r) && !(overrides.dirs ?? []).includes(r); },
+    opensslDir: (p) => { calls.push(`ssldir ${p}`); return overrides.ssldir?.[p]; },
   };
 }
 
@@ -250,6 +252,101 @@ describe("the remembered answer (review of 89ac770)", () => {
     const n = probe.calls.length;
     reads("/opt/homebrew/bin/p65", []); assert.equal(probe.calls.length, n);
     reads("/opt/homebrew/bin/p0", []); assert.ok(probe.calls.length > n);
+  });
+});
+
+const CRYPTO_OPT = "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib";
+const CRYPTO = "/opt/homebrew/Cellar/openssl@3/3.6.3/lib/libcrypto.3.dylib";
+const SSLDIR = "/opt/homebrew/etc/openssl@3";
+const CNF = `${SSLDIR}/openssl.cnf`;
+/** Rob's Mac as the CI run saw it: node links Homebrew's openssl@3 by its opt path, and that libcrypto was built with OPENSSLDIR /opt/homebrew/etc/openssl@3, which holds openssl.cnf. */
+const brewWithOpenssl = (o: { ssldir?: string | null; files?: string[]; links?: Record<string, string>; dirs?: string[]; missingCnf?: boolean } = {}): ReturnType<typeof fakeBrew> => fakeBrew({
+  files: [CRYPTO, ...(o.missingCnf === true ? [] : [CNF]), ...(o.files ?? [])],
+  links: { "/opt/homebrew/opt/openssl@3": "../Cellar/openssl@3/3.6.3", ...o.links },
+  dirs: o.dirs ?? [],
+  ssldir: o.ssldir === null ? {} : { [CRYPTO]: o.ssldir ?? SSLDIR },
+  out: { [NODE]: nodeWith(dep(CRYPTO_OPT)), [CRYPTO]: { L: header(CRYPTO) + dep("/usr/lib/libSystem.B.dylib") } },
+});
+
+describe("Homebrew OpenSSL's configuration file (macOS probe on Rob's Mac, run 44453704944)", () => {
+  test("a node linked to Homebrew's libcrypto gets exactly <OPENSSLDIR>/openssl.cnf added, read only; nothing else in that directory", () => {
+    const probe = brewWithOpenssl({ files: [`${SSLDIR}/cert.pem`] });
+    const reads = dependentLibraryReads(NODE, probe, []);
+    assert.deepEqual(reads, ["/opt/homebrew/Cellar/openssl@3/3.6.3/lib/libcrypto.3.dylib", "/opt/homebrew/opt/openssl@3", CRYPTO_OPT, CNF].sort());
+    assert.deepEqual(probe.calls.filter((c) => c.startsWith("ssldir")), [`ssldir ${CRYPTO}`]);
+  });
+
+  test("the profile allows that one file by a literal parameter, read only; the rest of the profile is unchanged", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-ssl-")));
+    try {
+      for (const d of ["w", "h", "s"]) mkdirSync(join(root, d));
+      const r = normalizeRecipe({ mode: "sandboxed", workdir: join(root, "w"), home: join(root, "h"), scratch: join(root, "s"), readOnly: [], network: "none", env: {}, protectedSubpaths: [] }, []);
+      const reads = dependentLibraryReads(NODE, brewWithOpenssl(), []);
+      const plan = seatbeltBackend({ libraryReads: () => reads }).plan(r, [NODE, "worker.js"]);
+      const defined = plan.args.filter((_, i) => plan.args[i - 1] === "-D");
+      const k = reads.indexOf(CNF);
+      assert.ok(k >= 0 && defined.includes(`LIB${k}=${CNF}`));
+      assert.equal(defined.filter((d) => d.includes("/opt/homebrew/etc")).length, 1);
+      const profile = plan.args[plan.args.indexOf("-p") + 1]!;
+      const lines = profile.split("\n").filter((l) => l.includes(`"LIB${k}"`));
+      assert.deepEqual(lines, [`(allow file-read* (literal (param "LIB${k}")))`]);
+      assert.ok(!profile.includes("/opt/homebrew") && profile.split("\n").filter((l) => l.includes('(param "LIB')).every((l) => /^\(allow file-read\* \(literal \(param "LIB\d+"\)\)\)$/.test(l)));
+      const without = seatbeltBackend({ libraryReads: () => reads.filter((p) => p !== CNF) }).plan(r, [NODE, "worker.js"]);
+      const linesOf = (p: string): string[] => p.split("\n").filter((l) => !l.includes('(param "LIB'));
+      assert.deepEqual(linesOf(profile), linesOf(without.args[without.args.indexOf("-p") + 1]!));
+      assert.deepEqual(plan.env, without.env);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("only when node is linked that way: no libcrypto, or a libcrypto without an OpenSSL directory, adds nothing and scans nothing", () => {
+    const plain = fakeBrew({ files: [CNF] });
+    assert.ok(!dependentLibraryReads(NODE, plain).includes(CNF));
+    assert.equal(plain.calls.filter((c) => c.startsWith("ssldir")).length, 0);
+    assert.ok(!dependentLibraryReads(NODE, brewWithOpenssl({ ssldir: null })).includes(CNF));
+  });
+
+  test("a missing configuration adds nothing and does not refuse (OpenSSL ignores a missing file); a directory of that name adds nothing", () => {
+    assert.ok(!dependentLibraryReads(NODE, brewWithOpenssl({ missingCnf: true })).some((p) => p.startsWith("/opt/homebrew/etc")));
+    assert.ok(!dependentLibraryReads(NODE, brewWithOpenssl({ dirs: [CNF] })).some((p) => p.startsWith("/opt/homebrew/etc")));
+  });
+
+  test("a configuration outside the allowed places, reached through a link to there, or in the agent's writable places is not added", () => {
+    assert.ok(!dependentLibraryReads(NODE, brewWithOpenssl({ ssldir: "/Users/owner/.ssh", files: ["/Users/owner/.ssh/openssl.cnf"] })).some((p) => p.startsWith("/Users")));
+    const linked = brewWithOpenssl({ missingCnf: true, files: [SECRET], links: { [CNF]: SECRET } });
+    assert.ok(!dependentLibraryReads(NODE, linked).some((p) => p === CNF || p === SECRET));
+    assert.ok(!dependentLibraryReads(NODE, brewWithOpenssl(), [], { writable: [SSLDIR] }).includes(CNF));
+    // A system place the profile already reads (Intel Homebrew's /usr/local is under /usr) needs nothing added.
+    assert.ok(!dependentLibraryReads(NODE, brewWithOpenssl({ ssldir: "/usr/local/etc/openssl@3", files: ["/usr/local/etc/openssl@3/openssl.cnf"] })).some((p) => p.includes("/etc/")));
+  });
+
+  test("a configuration that is a link inside Homebrew adds the link and its target", () => {
+    const real = "/opt/homebrew/Cellar/openssl@3/3.6.3/.bottle/etc/openssl@3/openssl.cnf";
+    const reads = dependentLibraryReads(NODE, brewWithOpenssl({ missingCnf: true, files: [real], links: { [CNF]: "../../Cellar/openssl@3/3.6.3/.bottle/etc/openssl@3/openssl.cnf" } }));
+    assert.ok(reads.includes(CNF) && reads.includes(real));
+  });
+
+  test("the OpenSSL directory is read from the library's own text, only as a plain absolute path", () => {
+    const b = (s: string): Buffer => Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(s, "latin1"), Buffer.from([0])]);
+    assert.equal(opensslDirIn(b('OPENSSLDIR: "/opt/homebrew/etc/openssl@3"')), "/opt/homebrew/etc/openssl@3");
+    assert.equal(opensslDirIn(b('OPENSSLDIR: "/usr/lib/ssl/"')), "/usr/lib/ssl");
+    for (const bad of ["no mark here", 'OPENSSLDIR: "relative/dir"', 'OPENSSLDIR: "/opt/../etc"', 'OPENSSLDIR: "/opt//etc"', 'OPENSSLDIR: "/opt/homebrew/etc', 'OPENSSLDIR: "/opt/\x01x"', `OPENSSLDIR: "/${"a".repeat(2000)}"`]) assert.equal(opensslDirIn(b(bad)), undefined, bad);
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-ssl-scan-")));
+    try {
+      writeFileSync(join(root, "libcrypto.3.dylib"), b('OPENSSLDIR: "/opt/homebrew/etc/openssl@3"'));
+      assert.equal(hostProbe.opensslDir(join(root, "libcrypto.3.dylib")), "/opt/homebrew/etc/openssl@3");
+      assert.equal(hostProbe.opensslDir(join(root, "gone.dylib")), undefined);
+      assert.equal(hostProbe.isFile(join(root, "libcrypto.3.dylib")), true);
+      assert.equal(hostProbe.isFile(root), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  const hostCrypto = ["/usr/lib/x86_64-linux-gnu/libcrypto.so.3", "/usr/lib/aarch64-linux-gnu/libcrypto.so.3", "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib", "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib"].find((p) => existsSync(p));
+  test("this machine's OpenSSL library gives the same directory as its openssl program", { skip: hostCrypto === undefined ? "no OpenSSL 3 library in a known place" : false }, async () => {
+    const { execFileSync } = await import("node:child_process");
+    const prog = hostCrypto!.startsWith("/usr/lib") ? "/usr/bin/openssl" : join(hostCrypto!, "..", "..", "bin", "openssl");
+    if (!existsSync(prog)) return;
+    const said = /OPENSSLDIR: "(.*)"/.exec(execFileSync(prog, ["version", "-d"], { encoding: "utf8" }))?.[1];
+    assert.equal(hostProbe.opensslDir(hostCrypto!), said);
   });
 });
 
