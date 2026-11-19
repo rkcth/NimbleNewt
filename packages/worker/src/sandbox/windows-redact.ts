@@ -19,13 +19,14 @@ export const WITHHELD = "<withheld: possible personal data>";
 /** A SID: revision 1, an authority and one to fifteen sub-authorities (Windows allows at most 15). */
 const SID_SHAPE = /^S-1-\d+(?:-\d+){1,15}$/;
 /** SIDs that are the same on every Windows machine and name a kind of account, never a person. */
-const FIXED_SIDS = new Set(["S-1-0-0", "S-1-1-0", "S-1-2-0", "S-1-2-1", "S-1-3-0", "S-1-3-1", "S-1-3-2", "S-1-3-3", "S-1-3-4", "S-1-5-1", "S-1-5-2", "S-1-5-3", "S-1-5-4", "S-1-5-6", "S-1-5-7", "S-1-5-8", "S-1-5-9", "S-1-5-10", "S-1-5-11", "S-1-5-12", "S-1-5-13", "S-1-5-14", "S-1-5-15", "S-1-5-17", "S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-33", "S-1-5-113", "S-1-5-114"]);
+const FIXED_SIDS = new Set(["S-1-0-0", "S-1-1-0", "S-1-2-0", "S-1-2-1", "S-1-3-0", "S-1-3-1", "S-1-3-2", "S-1-3-3", "S-1-3-4", "S-1-5-1", "S-1-5-2", "S-1-5-3", "S-1-5-4", "S-1-5-6", "S-1-5-7", "S-1-5-8", "S-1-5-9", "S-1-5-10", "S-1-5-11", "S-1-5-12", "S-1-5-13", "S-1-5-14", "S-1-5-15", "S-1-5-17", "S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-33", "S-1-5-83-0", "S-1-5-113", "S-1-5-114"]);
 /**
- * Prefixes whose SIDs are derived from a fixed name (a built-in group, a service name, a package family or capability name, a mandatory label, a virtual machine), never from a
- * person: built-in groups (S-1-5-32-), service SIDs (S-1-5-80-), app packages (S-1-15-2-), capabilities (S-1-15-3-), virtual machines (S-1-5-83-), restricted services
- * (S-1-5-99-), driver hosts (S-1-5-84-, S-1-5-90-, S-1-5-96-), authentication packages (S-1-5-64-) and integrity labels (S-1-16-).
+ * Prefixes whose SIDs are derived from a fixed name (a built-in group, a service name, a package family or capability name, a mandatory label), never from a person: built-in
+ * groups (S-1-5-32-), service SIDs (S-1-5-80-), app packages (S-1-15-2-), capabilities (S-1-15-3-), restricted services (S-1-5-99-), driver hosts (S-1-5-84-, S-1-5-90-,
+ * S-1-5-96-), authentication packages (S-1-5-64-) and integrity labels (S-1-16-). Not virtual machines: only their group (S-1-5-83-0) is fixed; one machine's SID
+ * (S-1-5-83-1-...) is made from that machine's own random id, so it is redacted (`S-1-5-83-<vm>`).
  */
-const FIXED_PREFIXES = ["S-1-5-32-", "S-1-5-80-", "S-1-15-2-", "S-1-15-3-", "S-1-5-83-", "S-1-5-99-", "S-1-5-84-", "S-1-5-90-", "S-1-5-96-", "S-1-5-64-", "S-1-16-"];
+const FIXED_PREFIXES = ["S-1-5-32-", "S-1-5-80-", "S-1-15-2-", "S-1-15-3-", "S-1-5-99-", "S-1-5-84-", "S-1-5-90-", "S-1-5-96-", "S-1-5-64-", "S-1-16-"];
 
 /** The kind of account a SID names, in plain words (for the findings). */
 export function sidClass(sid: string): string {
@@ -50,7 +51,7 @@ export function sidClass(sid: string): string {
  * A SID as it may be written to a public record. Well-known, machine-independent SIDs (`FIXED_SIDS`, `FIXED_PREFIXES`) stay as they are. A machine or domain SID
  * (`S-1-5-21-<three numbers>-<RID>`) keeps only its class and, for the built-in accounts and groups below 1000 (500 Administrator, 501 Guest, 504 WDAGUtilityAccount, 513
  * None/Domain Users...), the RID: `S-1-5-21-<domain>-500`; any other RID is `<account>`. Azure AD accounts are `S-1-12-1-<account>`, logon sessions `S-1-5-5-<session>`, and
- * anything else keeps only its authority: `S-1-<n>-<other>`. Text that is not a SID at all becomes `<sid>`.
+ * one virtual machine's SID `S-1-5-83-<vm>`, anything else keeps only its authority: `S-1-<n>-<other>`. Text that is not a SID at all becomes `<sid>`.
  */
 export function redactSid(sid: string): string {
   const s = sid.toUpperCase();
@@ -63,6 +64,7 @@ export function redactSid(sid: string): string {
   }
   if (s.startsWith("S-1-12-1-")) return "S-1-12-1-<account>";
   if (s.startsWith("S-1-5-5-")) return "S-1-5-5-<session>";
+  if (s.startsWith("S-1-5-83-")) return "S-1-5-83-<vm>";
   return `S-1-${parts[2]!}-<other>`;
 }
 /** Authorities whose account names are fixed names (a service, a capability, a virtual machine), never a person's. */
@@ -70,7 +72,7 @@ const NAMED_AUTHORITIES = /^(?:nt service|application package authority|nt virtu
 /**
  * One account name from an access list as it may be written to a public record: a SID is redacted by class (`redactSid`); a name stays only when every part of it is a
  * well-known name, or when it is `<authority>\<name>` for an authority whose names are fixed (NT SERVICE, APPLICATION PACKAGE AUTHORITY, NT VIRTUAL MACHINE, NT AUTHORITY,
- * BUILTIN); anything else, a machine or domain account above all, is `<user>`. A name with a line break, a colon or a parenthesis is `<user>` too.
+ * BUILTIN; under NT VIRTUAL MACHINE only the `Virtual Machines` group, one machine's id becomes `<vm>`); anything else, a machine or domain account above all, is `<user>`. A name with a line break, a colon or a parenthesis is `<user>` too.
  */
 export function redactAccountName(account: string): string {
   const a = account.trim();
@@ -79,13 +81,14 @@ export function redactAccountName(account: string): string {
   if (a === "" || /[\r\n:()]/.test(a)) return "<user>";
   const parts = a.split("\\");
   if (parts.every((p) => WELL_KNOWN.test(p.trim()))) return a;
+  if (parts.length === 2 && /^nt virtual machine$/i.test(parts[0]!.trim())) return /^virtual machines$/i.test(parts[1]!.trim()) ? a : `${parts[0]!}\\<vm>`;
   if (parts.length === 2 && NAMED_AUTHORITIES.test(parts[0]!.trim()) && /^[A-Za-z0-9 ._$&'-]{1,80}$/.test(parts[1]!)) return a;
   return "<user>";
 }
 /** A SID in text, as long as it goes (up to 15 sub-authorities); a longer run of numbers is matched in parts, each judged on its own. */
 const SID_IN_TEXT = /(\*?)(S-1-\d+(?:-\d+){1,15})(?!\d)/gi;
-/** The heads `redactSid` writes in front of a placeholder (`S-1-5-21-<domain>-...`, `S-1-12-1-<account>`, `S-1-5-5-<session>`): only these, followed by `-<`, are left as they are. */
-const REDACTED_HEADS = new Set(["S-1-5-21", "S-1-12-1", "S-1-5-5"]);
+/** The heads `redactSid` writes in front of a placeholder (`S-1-5-21-<domain>-...`, `S-1-12-1-<account>`, `S-1-5-5-<session>`, `S-1-5-83-<vm>`): only these, followed by `-<`, are left as they are. */
+const REDACTED_HEADS = new Set(["S-1-5-21", "S-1-12-1", "S-1-5-5", "S-1-5-83"]);
 const isRedactedHead = (sid: string, after: string): boolean => after.startsWith("-<") && REDACTED_HEADS.has(sid.toUpperCase());
 const WELL_KNOWN = /^(?:nt authority|builtin|nt service|nt virtual machine|window manager|font driver host|everyone|users|administrators|guests|system|creator owner|authenticated users|all application packages|trustedinstaller|<host>|<user>)$/i;
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -148,7 +151,7 @@ export function redact(text: string, names: RedactionNames = {}): string {
     if (m === null) return line;
     const account = m[2]!.trim();
     // A SID here was already redacted by class above, so it stays (a well-known one, or its placeholder form).
-    const kept = account.split("\\").every((p) => WELL_KNOWN.test(p.trim())) || /^\*?S-1-\d+(?:-(?:\d+|<(?:domain|account|session|other)>))+$/.test(account) ? account : "<user>";
+    const kept = account.split("\\").every((p) => WELL_KNOWN.test(p.trim())) || /^\*?S-1-\d+(?:-(?:\d+|<(?:domain|account|session|vm|other)>))+$/.test(account) ? account : "<user>";
     return `${m[1]!}${kept}:${m[3]!}${cr}`;
   }).join("\n");
   return out;
@@ -166,7 +169,10 @@ export function scrub(text: string, names: RedactionNames = {}, limit = 2048): s
   const bare = out.replace(/<(?:user|host|home|sid|ip|email)>/g, "");
   const local = localNames();
   const watched = [...[...local.users, ...(names.users ?? [])].flatMap(withPieces), ...[...local.hosts, ...(names.hosts ?? [])].flatMap((n) => [n, n.split("\\")[0]!])].filter((n) => n.length >= 2);
-  const sidLeft = [...bare.matchAll(SID_IN_TEXT)].some((m) => !isRedactedHead(m[2]!, bare.slice(m.index + m[0].length)) && (redactSid(m[2]!) !== m[2]!.toUpperCase() || m[2]! !== m[2]!.toUpperCase()));
+  // Judged on a loosened copy too: dash lookalikes (U+2010 to U+2015, minus sign, small and full-width hyphen) and full-width letters and digits read as plain ones, so a SID
+  // written with them, which the text pattern above does not see, is withheld rather than passed (Windows does not write SIDs that way; this only fails closed).
+  const loose = bare.normalize("NFKC").replace(/[\p{Pd}\u2212]/gu, "-");
+  const sidLeft = [...loose.matchAll(SID_IN_TEXT)].some((m) => !isRedactedHead(m[2]!, loose.slice(m.index + m[0].length)) && (redactSid(m[2]!) !== m[2]!.toUpperCase() || m[2]! !== m[2]!.toUpperCase()));
   if (watched.some((n) => wholeWord(n).test(bare)) || new RegExp(EMAIL.source).test(bare) || sidLeft || bare.includes("\0")) return WITHHELD;
   return out;
 }

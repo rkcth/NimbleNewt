@@ -177,3 +177,42 @@ test("a SID is redacted whatever follows it and however long it is; only the red
   // An access-list account that only starts like a SID is not kept as one.
   assert.equal(redact("C:\\x S-1-robert:(F)", names), "C:\\x <user>:(F)");
 });
+
+test("property: no machine, domain, account, session or virtual-machine number survives the last gate, in any wrapping, case or dash form (seeded random)", () => {
+  let seed = 20261119;
+  const rnd = (): number => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
+  const pick = <T>(a: readonly T[]): T => a[Math.floor(rnd() * a.length)]!;
+  const num = (): string => String(100000 + Math.floor(rnd() * 4e9));
+  const nums = (k: number): string[] => Array.from({ length: k }, num);
+  // Each shape gives a SID and the numbers in it that must not be written out.
+  const shapes: (() => { sid: string; secret: string[] })[] = [
+    () => { const p = nums(3); return { sid: `S-1-5-21-${p.join("-")}-${String(1000 + Math.floor(rnd() * 9e5))}`, secret: p }; },
+    () => { const p = nums(5); return { sid: `S-1-5-21-${p.join("-")}`, secret: p }; },
+    () => { const p = nums(3); return { sid: `S-1-5-21-${p.join("-")}`, secret: p }; },
+    () => { const p = nums(3); return { sid: `S-1-5-21-${p.join("-")}-500`, secret: p }; },
+    () => { const p = nums(4); return { sid: `S-1-12-1-${p.join("-")}`, secret: p }; },
+    () => { const p = nums(2); return { sid: `S-1-5-5-${p.join("-")}`, secret: p }; },
+    () => { const p = nums(4); return { sid: `S-1-5-83-1-${p.join("-")}`, secret: p }; },
+    () => { const p = nums(2); return { sid: `S-1-7-${p.join("-")}`, secret: p }; },
+  ];
+  const wraps: ((s: string) => string)[] = [(s) => s, (s) => `*${s}`, (s) => `(${s})`, (s) => `[${s}]`, (s) => `"${s}"`, (s) => `'${s}'`, (s) => `${s}:(F)`, (s) => `C:\\x ${s}:(I)(OI)(CI)(M)`,
+    (s) => `    ${s}:(RX)\r\n`, (s) => `x:${s}:y`, (s) => JSON.stringify({ k: s }), (s) => `<${s}>`, (s) => `${s},${s}`, (s) => `a${s}b`, (s) => `${s}-<x>`, (s) => `S-1-5-18-${s}`, (s) => `${s}-`, (s) => encodeURIComponent(`"${s}"`)];
+  const dashes = ["\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2212", "\uFE63", "\uFF0D"];
+  for (let i = 0; i < 3000; i++) {
+    const { sid, secret } = pick(shapes)();
+    let s = rnd() < 0.3 ? sid.toLowerCase() : sid;
+    if (rnd() < 0.2) { const d = pick(dashes); s = s.replace(/-/g, d); }
+    else if (rnd() < 0.05) s = s.replace(/\d/g, (c) => String.fromCharCode(0xff10 + Number(c)));
+    const text = pick(wraps)(s);
+    for (const out of [scrub(text, names), JSON.stringify(scrubDeep({ a: [text], b: { c: text } }, names))]) {
+      assert.ok(!secret.some((p) => out.includes(p)), `${JSON.stringify(text)} -> ${out}`);
+    }
+  }
+  // The kept kinds stay readable, and a virtual machine's own SID and account name are redacted (only the Virtual Machines group is fixed).
+  assert.equal(scrub("S-1-5-83-0 S-1-5-83-<vm> S-1-15-3-1024-1-2", names), "S-1-5-83-0 S-1-5-83-<vm> S-1-15-3-1024-1-2");
+  assert.equal(redactSid("S-1-5-83-1-1111-2222-3333-4444"), "S-1-5-83-<vm>");
+  assert.equal(redactAccountName("NT VIRTUAL MACHINE\\1A2B3C4D-1111-2222-3333-444455556666"), "NT VIRTUAL MACHINE\\<vm>");
+  assert.equal(redact("C:\\x S-1-5-83-1-1111-2222-3333-4444:(RX)", names), "C:\\x S-1-5-83-<vm>:(RX)");
+  // A SID written with dash lookalikes is withheld whole by the gate.
+  assert.equal(scrub("owner S\u20101\u20105\u201021\u2010111\u2010222\u2010333\u20101001", names), WITHHELD);
+});
