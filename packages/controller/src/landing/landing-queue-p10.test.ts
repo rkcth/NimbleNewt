@@ -291,6 +291,63 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
+  test(`${backend.name}: second review: a repeat of a landing's command while the first call is at the host (the record then says uncertain) still holds its entry in the queue until the landing ends (card P10, in-progress take-out)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2] = [await r.task("one"), await r.task("two")];
+      const lease = await r.leaseOps.acquire(ivy, { commandId: "l1", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      const [s1, s2] = [r.approve(1, t1), r.approve(2, t2)];
+      await r.ops.add(ivy, { commandId: "q1", submissionId: s1 });
+      await r.ops.add(ivy, { commandId: "q2", submissionId: s2 });
+      let entered!: () => void, release!: () => void;
+      const reached = new Promise<void>((res) => { entered = res; });
+      const held = new Promise<void>((res) => { release = res; });
+      r.setAnswer(async (call) => { entered(); await held; return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; });
+      // One controller (one service): the repeat finds its own first call still running.
+      const svc = r.workspace();
+      const ask = { commandId: "w1", operation: "landing" as const, taskId: t1, reason: "land one", leaseId: lease.leaseId, fence: lease.fence };
+      const first = svc.request(ivy, ask);
+      try {
+        await reached;
+        const repeat = await svc.request(ivy, ask);
+        assert.deepEqual([repeat.state, repeat.replayed], ["uncertain", true]);
+        await refuses("invalid_transition", () => r.ops.remove(r.w.owner, { commandId: "out1", taskId: t1, reason: "not now" }), /being landed on branch main right now/);
+        assert.deepEqual(await r.queued(), [[1, s1, t1], [2, s2, t2]]);
+        await refuses("invalid_transition", () => r.workspace().request(ivy, { commandId: "w2", operation: "landing", taskId: t2, reason: "land two", leaseId: lease.leaseId, fence: lease.fence }), /oldest/);
+        assert.equal(r.calls.length, 1, "only the first landing is on the host");
+      } finally { release(); }
+      assert.equal((await first).state, "done");
+      assert.deepEqual(await r.queued(), [[1, s2, t2]]);
+      assert.equal((await r.ops.remove(r.w.owner, { commandId: "out2", taskId: t2, reason: "later" })).removed?.submissionId, s2);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: second review: a take-out that rewrites a task's open-request record while another workspace request of that task is being recorded does not make that request fail (card P10, in-progress take-out)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const t1 = await r.task("one");
+      const s1 = r.approve(1, t1);
+      await r.ops.add(ivy, { commandId: "q1", submissionId: s1 });
+      // The request reads task one's open-request record twice before it writes (resolving what was left open, then building its write); right after the second read the owner takes the entry out, which rewrites that record.
+      let reads = 0, takenOut: unknown;
+      const base = r.w.storage;
+      const storage = new Proxy(base, { get: (target, p) => {
+        if (p === "getAggregate") return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (ref.kind === "workspace-open" && ref.id === t1 && ++reads === 2) takenOut = (await r.ops.remove(r.w.owner, { commandId: "out", taskId: t1, reason: "not now" })).removed?.submissionId; return found; };
+        const v = Reflect.get(target, p, target) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } });
+      const svc = WorkspaceOpService.withEpoch(storage, r.w.epoch, { quiesce: { around: async (_scope, _op, run) => run({ attempts: [] } as never) }, portOf: async () => ({ run: async (call) => { r.calls.push(call); return { ok: true, summary: "refreshed", detail: { changed: false } }; } }) }, { clock: r.w.clock.now, pause: async () => undefined });
+      const out = await svc.request(r.w.owner, { commandId: "w1", operation: "refresh", taskId: t1, reason: "move it to the head" });
+      assert.equal(takenOut, s1, "the take-out went ahead (no landing was in progress)");
+      assert.equal(out.state, "done", out.summary);
+      assert.equal(r.calls.length, 1);
+      assert.deepEqual(await r.queued(), []);
+      assert.deepEqual((await r.w.storage.getAggregate({ kind: "workspace-open", id: t1 }))?.body, {});
+    } finally { await r.close(); }
+  });
+
   test(`${backend.name}: race: two integrators racing for the branch, and two landings racing for the queue, never both reach the host (card P10, queue)`, async () => {
     const r = await rig();
     try {
@@ -399,16 +456,17 @@ for (const backend of backends) {
       assert.equal(unmarked.state, "done");
       assert.match(unmarked.summary ?? "", /did not confirm that exactly submission .* stays in the landing queue \(landing\.queue\.remove takes it out\)/);
       assert.deepEqual(await r.queued(), [[1, newest, t2]]);
-      // A take-out during the landing is refused, and the submission the host then lands is noted as landed.
+      // A take-out during the landing is refused; a newer submission takes the task's place meanwhile, and the submission the host then lands is still noted as landed (it is no longer queued).
+      const latest = at(5, t2, "2026-01-01T00:00:04.000Z");
       r.setAnswer(async (call) => ({ ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }));
       const svc = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, {
         quiesce: { around: async (_scope, _op, run) => run({ attempts: [] } as never) },
-        portOf: async () => ({ run: async (call) => { await refuses("invalid_transition", () => r.ops.remove(r.w.owner, { commandId: "out-during", taskId: t2, reason: "taken out" }), /being landed/); return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; } }),
+        portOf: async () => ({ run: async (call) => { await refuses("invalid_transition", () => r.ops.remove(r.w.owner, { commandId: "out-during", taskId: t2, reason: "taken out" }), /being landed/); assert.equal((await r.ops.add(r.w.owner, { commandId: "a5", submissionId: latest })).replaced, newest); return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; } }),
         landingLease: (by, call) => r.leaseOps.checkLanding(by, { ...call, branch: "main" }),
         landingQueue: { check: (by, call) => r.ops.checkLanding(by, call), landedChanges: (p, b, s) => r.ops.landedChanges(p, b, s) },
       }, { clock: r.w.clock.now, pause: async () => undefined });
       assert.equal((await svc.request(ivy, { commandId: "w3", operation: "landing", taskId: t2, reason: "land it", leaseId: lease.leaseId, fence: lease.fence })).state, "done");
-      assert.deepEqual(await r.queued(), []);
+      assert.deepEqual(await r.queued(), [[1, latest, t2]]);
       await refuses("invalid_transition", () => r.ops.add(r.w.owner, { commandId: "a4", submissionId: newest }), /already landed/);
     } finally { await r.close(); }
   });

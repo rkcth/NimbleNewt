@@ -238,7 +238,7 @@ export class WorkspaceOpService {
       let assignee: string | undefined;
       try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
       const make: WorkspaceRecordBody = { operation, taskId, projectId, requestedBy: by.id, reason, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }), ...(intended.length === 0 ? {} : { held: intended }), ...(leased === undefined ? {} : { lease: { leaseId: leased.leaseId as string, fence: leased.fence as number } }), ...(submission === undefined ? {} : { submission }), ...(queued === undefined ? {} : { queued: { submissionId: queued.submissionId, base: queued.base, tree: queued.tree, branch: queued.branch } }), ...(landedSubmission === undefined ? {} : { landedSubmission }) };
-      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }), ...(queued === undefined ? {} : { submissionId: queued.submissionId }), ...(landedSubmission === undefined ? {} : { submissionId: landedSubmission }) }, body: () => make, also: () => this.#openChange(taskId, id) });
+      await this.#recordStart(id, () => this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation, taskId, reason, ...(leased === undefined ? {} : { leaseId: leased.leaseId as string, fence: leased.fence as number }), ...(submission === undefined ? {} : { submissionId: submission.id }), ...(queued === undefined ? {} : { submissionId: queued.submissionId }), ...(landedSubmission === undefined ? {} : { submissionId: landedSubmission }) }, body: () => make, also: () => this.#openChange(taskId, id) }));
       const started = (await this.#get(id))!;
       const pinned = leased;
       const approvedNow = submission;
@@ -311,7 +311,7 @@ export class WorkspaceOpService {
       let assignee: string | undefined;
       try { assignee = await this.#deps.assignee?.(taskId); } catch { assignee = undefined; }
       const make: WorkspaceRecordBody = { operation: "reapply", taskId, projectId: task.projectId, requestedBy: by.id, reason: `the author of attempt ${attemptId} refreshes its checkout onto the landing branch's head`, state: "started", at: this.#runner.now(), ...(assignee === undefined ? {} : { assignee }) };
-      await this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation: "reapply", taskId, attemptId }, body: () => make, also: () => this.#openChange(taskId, id) });
+      await this.#recordStart(id, () => this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation: "reapply", taskId, attemptId }, body: () => make, also: () => this.#openChange(taskId, id) }));
       const started = (await this.#get(id))!;
       const outcome = await this.#run(id, started.body);
       return await this.#settle(by.id, scoped, id, outcome);
@@ -439,12 +439,25 @@ export class WorkspaceOpService {
 
   async #markUncertain(actor: string, id: string, rec: { readonly body: WorkspaceRecordBody; readonly revision: number }, summary: string, commandId: string, clearOpen = true): Promise<WorkspaceRecordBody> {
     const body: WorkspaceRecordBody = { ...rec.body, state: "uncertain", finishedAt: this.#runner.now(), summary };
-    try {
-      await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: () => clearOpen ? this.#openChange(rec.body.taskId, null, id) : Promise.resolve([]) });
-      return body;
-    } catch (error) {
-      if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
-      return (await this.#get(id))?.body ?? body;
+    // A lost race on the open index alone (the landing queue's take-out rewrites it unchanged, card P10) is built again; one on the request itself means another writer settled it, and that is what is answered.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: () => clearOpen ? this.#openChange(rec.body.taskId, null, id) : Promise.resolve([]) });
+        return body;
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
+        const now = await this.#get(id);
+        if (now === undefined || now.revision !== rec.revision || attempt >= 5) return now?.body ?? body;
+      }
+    }
+  }
+
+  /** Records a request as started. A lost race on the task's open index alone (the landing queue's take-out rewrites it unchanged, card P10) is built again, so that it is not answered `stale_revision` before anything was done. */
+  async #recordStart(id: string, write: () => Promise<unknown>): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+      try { await write(); return; } catch (error) {
+        if (!(error instanceof DomainError && error.code === "stale_revision") || attempt >= 5 || (await this.#get(id)) !== undefined) throw error;
+      }
     }
   }
 
