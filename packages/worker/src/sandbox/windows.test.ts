@@ -9,12 +9,15 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { CHAIN_LABELS, CHAIN_NAMES, DIAGNOSTIC_TIMEOUT_MS, chainName, contextText, integrityWord } from "./windows-list.js";
-import type { RedactionNames } from "./windows-redact.js";
+import { redact, type RedactionNames } from "./windows-redact.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { evidenceControlDirs, releaseLeftovers, sandboxRunning, searchEvidenceDirs } from "./windows-cleanup.js";
 import { MARKER_NAME, createRecordedFolder, dropFinishedRecords, recordDirFrom } from "./windows-records.js";
 import { MINIMAL_ENV_NAMES, accessFromProbe, cmdLine, minimalEnv, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
 import { ACCEPTED_SIGNATURE_KINDS, INTERACTIVE_RUNNER_HINT, MICROSOFT_STORE_PUBLISHER_ID, describeWsbAccessDenied, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, isWsbAccessDenied, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
+
+/** Runner account names the public lines must survive whole: the own-hardware Mac probe's, GitHub's hosted runners' and similar. */
+const RUNNER_ACCOUNTS = ["nimblenewt-runner", "runner", "runner-worker", "github-runner", "actions-runner"];
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
 // Windows Sandbox itself confines anything. That is windows-real.test.ts, which runs only on a Windows machine with NIMBLENEWT_REAL_WINDOWS_SANDBOX=1.
@@ -1647,7 +1650,7 @@ describe("the launcher with a backend that reports details", () => {
     assert.equal(good.exists(`${BASE}\\control\\jobs\\job-1`), false);
     // Changeable by another account, a link, an unreadable list or an unreadable owner: nothing is released, and the reason is fixed text without names, paths or SIDs.
     const cases: Array<[string, (h: SimHost) => void, RegExp]> = [
-      ["another account", (h) => h.writable.set(key(BASE), ["PC\\robert", "NT AUTHORITY\\Authenticated Users"]), /can be changed by an account other than/],
+      ["another account", (h) => h.writable.set(key(BASE), ["PC\\robert", "NT AUTHORITY\\Authenticated Users"]), /can be changed by an account other than .*; left alone \(one-time fix: the paragraph The G05 base folder in own-hardware-runners\.md\)$/],
       ["a link", (h) => h.links.add(key(BASE)), /link or junction/],
       ["an unreadable list", (h) => { h.writableBy = async () => { throw new Error("icacls: Access is denied. C:\\secret"); }; }, /could not be read/],
       ["an unreadable owner", (h) => { h.ownerSid = async () => { throw new Error("denied"); }; }, /owner of the G05 test base folder could not be read/],
@@ -1659,6 +1662,8 @@ describe("the launcher with a backend that reports details", () => {
       assert.equal(found.held.length, 1, name);
       assert.match(found.held[0]!, re, name);
       assert.ok(!/D:|S-1-5|secret|Authenticated|robert/.test(found.held[0]!), `${name}: no names, paths or SIDs`);
+      // The log copy is redacted: the fixed text must stay whole for a runner account named like the Mac probe's or GitHub's (no "runner", no "nimblenewt" as a word).
+      for (const account of RUNNER_ACCOUNTS) assert.equal(redact(found.held[0]!, { users: [account] }), found.held[0]!, `${name}: account ${account}`);
       assert.equal(r.released, 0, name);
       assert.ok(h.exists(`${BASE}\\control\\jobs\\job-1\\acl.json`) && h.sandboxes.size === 2, `${name}: untouched`);
     }
@@ -1684,6 +1689,7 @@ describe("the launcher with a backend that reports details", () => {
     assert.deepEqual(fr.found.dirs, []);
     assert.equal(fr.found.held.length, 1);
     assert.match(fr.found.held[0]!, /owned neither by SYSTEM or Administrators nor by the owner of the records folder; left alone/);
+    for (const account of RUNNER_ACCOUNTS) assert.equal(redact(fr.found.held[0]!, { users: [account] }), fr.found.held[0]!, `account ${account}`);
     assert.ok(!/S-1-5|robert|D:/.test(fr.found.held[0]!));
     assert.equal(fr.r.released, 0);
     // The same with a believed records folder of another owner: still left alone. Owned by the records folder's owner (a runner not elevated): released.
