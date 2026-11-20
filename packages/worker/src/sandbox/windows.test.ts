@@ -1245,6 +1245,7 @@ describe("Windows launcher: running a job", () => {
     host.owners.set(key(remade), "S-1-5-21-1-2-3-1002");
     const found = await searchEvidenceDirs(host);
     assert.deepEqual(found.dirs, [`${good}\\control`]);
+    assert.equal(found.recordsProblem, undefined, "the records were read");
     assert.ok(found.distrusted.includes("nn-wsb-real-rema01"), "a folder whose owner is not its record's owner is not believed");
     assert.deepEqual([...found.unrecorded].sort(), [badRec.split("\\").pop(), foreign.split("\\").pop()].sort());
     assert.ok(found.distrusted.some((d) => d.includes("wron01")), "the wrong token is reported by name");
@@ -1290,18 +1291,60 @@ describe("Windows launcher: running a job", () => {
     const open = await searchEvidenceDirs(host);
     assert.deepEqual(open.dirs, []);
     assert.ok(open.distrusted.some((d) => /records folder can be changed/.test(d)));
+    assert.match(open.recordsProblem ?? "", /records folder can be changed/, "reported on its own, so the script can fail the step");
     assert.ok(open.unrecorded.includes("nn-wsb-real-plnt01"));
     host.writable.set(key(RECORDS), ["PC\\erin"]);
     assert.deepEqual((await searchEvidenceDirs(host)).dirs, []);
     host.writable.delete(key(RECORDS));
     host.writableBy = async () => { throw new Error("icacls: Access is denied."); };
-    assert.deepEqual((await searchEvidenceDirs(host)).dirs, []);
+    const unreadable = await searchEvidenceDirs(host);
+    assert.deepEqual(unreadable.dirs, []);
+    assert.match(unreadable.recordsProblem ?? "", /could not be read/);
     // Without a records folder nothing is recorded: every pattern folder is only reported.
     delete host.envMap["LOCALAPPDATA"];
     const none = await searchEvidenceDirs(host);
     assert.deepEqual(none.dirs, []);
     assert.equal(none.unrecorded.length, 5);
     assert.ok(none.distrusted.some((d) => /no records folder/.test(d)));
+    assert.match(none.recordsProblem ?? "", /no records folder/);
+  });
+
+  test("own-hardware cleanup with an elevated runner: folder, record and job entries all owned by Administrators are released; a folder whose owner differs from its record's is not", async () => {
+    const host = new SimHost();
+    const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
+    const ADMINS = "S-1-5-32-544";
+    const USER = "S-1-5-21-1-2-3-1001";
+    Object.assign(host.envMap, { LOCALAPPDATA: "C:\\Users\\robert\\AppData\\Local", USERNAME: "Robert", USERDOMAIN: "pc" });
+    const RECORDS = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
+    // icacls prints the account as DOMAIN\name in its own case; the comparison ignores case.
+    host.writable.set(key(RECORDS), ["PC\\robert"]);
+    const TOKEN = "0123456789abcdef0123456789abcdef";
+    const make = (base: string, sandbox: string, owner: string, recordOwner: string): string => {
+      const jobDir = `${base}\\control\\jobs\\job-1`;
+      host.writeText(`${jobDir}\\job.json`, "{}");
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: sandbox }));
+      host.sandboxes.add(sandbox);
+      host.writeText(`${base}\\${MARKER_NAME}`, TOKEN);
+      const rec = `${RECORDS}\\${base.split("\\").pop()}.json`;
+      host.writeText(rec, JSON.stringify({ path: base, token: TOKEN, jobId: "9" }));
+      for (const p of [base, `${base}\\control`, `${base}\\control\\jobs`, jobDir, `${jobDir}\\job.json`, `${jobDir}\\status.json`]) host.owners.set(key(p), owner);
+      host.owners.set(key(rec), recordOwner);
+      return jobDir;
+    };
+    const elevated = "C:\\ProgramData\\nn-wsb-real-elev01";
+    const mixed = "C:\\ProgramData\\nn-wsb-real-mixd01";
+    make(elevated, "00000000-0000-4000-8000-0000000000e1", ADMINS, ADMINS);
+    make(mixed, "00000000-0000-4000-8000-0000000000e2", USER, ADMINS);
+    const found = await searchEvidenceDirs(host);
+    assert.equal(found.recordsProblem, undefined);
+    assert.deepEqual(found.dirs, [`${elevated}\\control`]);
+    assert.equal(found.owners.get(elevated.toLowerCase()), ADMINS);
+    assert.deepEqual(found.distrusted, ["nn-wsb-real-mixd01"]);
+    const r = await releaseLeftovers(host, found.dirs, ident, found.owners);
+    assert.deepEqual([r.released, r.kept.length, r.removedBases], [1, 0, 1]);
+    assert.equal(host.exists(elevated), false);
+    assert.ok(host.sandboxes.has("00000000-0000-4000-8000-0000000000e2"), "the folder whose owner differs from its record's keeps its sandbox");
+    assert.ok(!host.sandboxes.has("00000000-0000-4000-8000-0000000000e1"));
   });
 
   test("a recorded folder is made with its marker and record, in the account's own records folder; without one nothing is made", () => {

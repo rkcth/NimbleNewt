@@ -67,6 +67,12 @@ export interface EvidenceFolders {
   readonly distrusted: readonly string[];
   /** Records whose folder no longer exists; they are dropped. */
   readonly dropped: number;
+  /**
+   * Why no record was believed at all (no records folder named, or one another account can change, or whose access list cannot be read), as a fixed text without names; undefined
+   * when the records were read. Also counted in `distrusted`. When set, the cleanup can act on nothing, so the caller reports it on its own (the account names icacls prints may
+   * simply differ from USERDOMAIN\USERNAME, which a run on that machine shows here first).
+   */
+  readonly recordsProblem?: string;
 }
 
 const ownerOf = async (host: WindowsHost, path: string): Promise<string | undefined> => { try { return await host.ownerSid(path); } catch { return undefined; } };
@@ -113,7 +119,7 @@ export async function scanEvidenceFolders(host: WindowsHost): Promise<EvidenceFo
     owners.set(rec.path.toLowerCase(), owner);
   }
   const unrecorded = host.listDir(data).filter((n) => FOLDER_NAME.test(n) && !vouched.has(n.toLowerCase()));
-  return { folders, owners, unrecorded, distrusted, dropped };
+  return { folders, owners, unrecorded, distrusted, dropped, ...(problem === undefined ? {} : { recordsProblem: problem }) };
 }
 
 /** Removes the records of folders that are gone (after a cleanup that removed them). */

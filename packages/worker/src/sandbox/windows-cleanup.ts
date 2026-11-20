@@ -21,6 +21,8 @@ export interface EvidenceSearch {
   readonly distrusted: readonly string[];
   /** The owner (SID) of each recorded folder, by lower-cased path, for `releaseLeftovers`. */
   readonly owners: ReadonlyMap<string, string>;
+  /** Why no record was believed at all (fixed text, no names), from `scanEvidenceFolders`; undefined when the records were read. */
+  readonly recordsProblem?: string;
 }
 
 /** The control folders the evidence runs use: those inside folders a run recorded (marker matching its token, same owner as its record), and the G05 base under the runner's temporary folder. */
@@ -32,7 +34,7 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
   }
   const g05 = host.env("NIMBLENEWT_G05_WSB_BASE") ?? (host.env("RUNNER_TEMP") === undefined ? undefined : `${host.env("RUNNER_TEMP")!}\\nn-g05-wsb`);
   if (g05 !== undefined && host.exists(`${g05}\\control`)) out.push(`${g05}\\control`);
-  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners: found.owners };
+  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners: found.owners, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };
 }
 
 export const evidenceControlDirs = async (host: WindowsHost): Promise<string[]> => (await searchEvidenceDirs(host)).dirs;

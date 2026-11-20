@@ -4,8 +4,10 @@
 //   node scripts/wsb-cleanup.mjs [--local DIR]
 // What it prints holds counts and fixed texts only (the job log is public); with --local the reasons for anything kept are written to DIR/wsb-cleanup.txt on the machine.
 // Only folders a run recorded (a record in %LOCALAPPDATA%\NimbleNewt\wsb-records, a matching marker token, the same owner) are acted on; others with the pattern's name are
-// reported and left alone (not an exit 1 by themselves). How to look at and remove those by hand: docs/nimblenewt/own-hardware-runners.md.
-// Exit 0 when nothing is left, 1 when something could not be released or a sandbox is still running, 2 on bad usage. Does nothing (exit 0) off Windows. Needs `npm run build` first.
+// reported and left alone (not an exit 1 by themselves). How to look at and remove those by hand: docs/nimblenewt/own-hardware-runners.md. When no record can be believed at all
+// (no records folder, or one whose access list names another account or cannot be read), the reason (a fixed text) is printed, and it is an exit 1 while pattern folders are left:
+// then every leftover would stay for good, which must not pass unnoticed.
+// Exit 0 when nothing is left, 1 when something could not be released, a sandbox is still running or the records cannot be used while folders are left, 2 on bad usage. Does nothing (exit 0) off Windows. Needs `npm run build` first.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,8 +30,10 @@ for (const n of found.distrusted) problems.push(`record not trusted, left alone:
 worker.dropFinishedRecords(host);
 const state = await worker.sandboxRunning(host, identity);
 const running = state === "running";
+const unusable = found.recordsProblem !== undefined && found.unrecorded.length > 0;
+if (unusable) problems.push(`the records could not be used (${found.recordsProblem}), so no test folder was acted on`);
 if (running) problems.push("a Windows Sandbox is still running");
 if (state === "unknown") problems.push("the running sandboxes could not be listed (the client could not be verified or the list failed)");
-console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}`);
+console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${found.recordsProblem === undefined ? "" : `; NO RECORD WAS BELIEVED: ${found.recordsProblem}`}${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}`);
 if (args[0] === "--local") { mkdirSync(resolve(args[1]), { recursive: true }); writeFileSync(join(resolve(args[1]), "wsb-cleanup.txt"), `${problems.join("\n")}\n`); }
-process.exit(result.kept.length > 0 || running ? 1 : 0);
+process.exit(result.kept.length > 0 || running || unusable ? 1 : 0);
