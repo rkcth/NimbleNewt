@@ -54,9 +54,17 @@ export function siblingWorktrees({ porcelain, roots = null, keep = [], workRoot,
   return out;
 }
 
-/** `git worktree list --porcelain -z` of the repository, or null when it cannot be listed. */
-export function listWorktrees(repo) {
-  try { return execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain", "-z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); } catch { return null; }
+/**
+ * `git worktree list --porcelain -z` of the repository, or null when it cannot be listed (git's reason goes to `onError`).
+ * The output buffer is large (about 150 bytes a worktree; the default 1 MB would fail at some 7,000 worktrees).
+ */
+export function listWorktrees(repo, { onError = () => {} } = {}) {
+  try {
+    return execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain", "-z"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 });
+  } catch (e) {
+    onError(String(e?.stderr || e?.message || e).trim());
+    return null;
+  }
 }
 
 /**

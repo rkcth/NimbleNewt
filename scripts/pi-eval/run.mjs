@@ -112,10 +112,11 @@ async function main() {
   const activeDirs = new Set();
   const isoDirs = new Set();
   // Other git worktrees of the repository (other cards' work) are hidden unless --hide says otherwise (lib/worktrees.mjs).
+  const warn = (m) => process.stderr.write(`warning: ${m}\n`);
   const hide = hideFolders({
-    hideOption: o.hide, list: () => listWorktrees(repo), keep: [repo, ...referenceDirs, resolve(o["deps-from"] ?? repo), here], workRoot,
+    hideOption: o.hide, list: () => listWorktrees(repo, { onError: (m) => warn(`git worktree list failed: ${m}`) }), keep: [repo, ...referenceDirs, resolve(o["deps-from"] ?? repo), here], workRoot,
     alreadyHidden: machineHidden().filter((p) => existsSync(p)),
-    warn: (m) => process.stderr.write(`warning: ${m}\n`),
+    warn,
   });
   process.stderr.write(`hiding ${hide.length} folder(s) from the agent besides the defaults${o.hide === undefined ? " (the repository's other worktrees)" : ""}\n`);
   const ctx = {

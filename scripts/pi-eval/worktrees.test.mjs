@@ -1,7 +1,7 @@
-// Offline: fake `git worktree list --porcelain` texts, no git, no Radiance, no model.
+// Offline: fake `git worktree list --porcelain` texts (git runs once, on a folder that does not exist), no Radiance, no model.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { COMMON_WORKTREE_ROOTS, hideFolders, parseWorktreeList, siblingWorktrees } from "./lib/worktrees.mjs";
+import { COMMON_WORKTREE_ROOTS, hideFolders, listWorktrees, parseWorktreeList, siblingWorktrees } from "./lib/worktrees.mjs";
 
 const id = (p) => p;
 const entries = [
@@ -87,4 +87,11 @@ test("hide option: nothing starts less hidden than asked by mistake", () => {
   // Nothing to hide is said, not silent.
   assert.deepEqual(hideFolders({ ...opts, list: () => "worktree /srv/code/repos/app\0\0", hideOption: undefined }), []);
   assert.match(warned[0], /no other git worktrees/);
+});
+
+test("listing: a folder git cannot list gives null and git's reason", () => {
+  const reasons = [];
+  assert.equal(listWorktrees("/nonexistent/pi-eval-worktrees-test", { onError: (m) => reasons.push(m) }), null);
+  assert.equal(reasons.length, 1);
+  assert.ok(reasons[0].length > 0);
 });
