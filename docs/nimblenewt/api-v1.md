@@ -7764,7 +7764,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.evidence.record`
 
-Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles its pending re-checks; the author's new self-check settles only the re-check of its own earlier self-check. Repeating the same command ID records once.
+Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles its pending re-checks; the author's new self-check settles only the re-check of its own earlier self-check. Independent evidence then runs the documentation impact check of the task by itself (card Q03, as `doc.impact.check` with this submission, by the controller): affected documents are flagged with update tasks for their keepers; a check that cannot run is told to the owner and the evidence stays recorded. Repeating the same command ID records once (and repeats the same documentation check, which flags nothing twice).
 
 Arguments:
 
@@ -7782,7 +7782,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.evidence.check`
 
-Looks at a task's current QA evidence against what it was bound to (card Q02). A record whose acceptance criteria, required evidence or checks changed in the task contract, whose owner decisions were superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, assigned to whoever recorded it; the owner is told. Anyone who may read the task; nothing stale writes nothing.
+Looks at a task's current QA evidence against what it was bound to (card Q02). A record whose acceptance criteria, required evidence or checks changed in the task contract, whose owner decisions were superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, assigned to whoever recorded it; the owner is told. Documents verified against code of the task whose QA gate no longer passes are then flagged by themselves (card Q03, `evidence_lost`, with an update task for each keeper). Anyone who may read the task; nothing stale writes nothing.
 
 Arguments:
 
@@ -7817,7 +7817,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.verify`
 
-Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged (`submission.documents` with `since` set to its `flaggedAt` lists them, and the `docs` status view shows them), and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
+Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged (`submission.documents` with `since` set to its `flaggedAt` lists them, and the `docs` status view shows them), and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. The QA records each gate was read from are checked in the same write: QA evidence recorded or invalidated, a task contract changed or an owner decision superseded meanwhile answers `stale_revision` (verify again). A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
 
 Arguments:
 
@@ -7834,7 +7834,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.impact.check`
 
-Which documents a task's new tested code affects (card Q03). `submissionId` names the code (a code submission of the task); without it, the newest independently QA-checked one is used. When that code's QA gate passes, every document of the project describing the task that was verified against another tree of it becomes `stale`, and every unverified one is flagged; a document whose own evidence for the task no longer passes QA becomes `stale` whatever the code (`verdict` says whether the named code passes). A flagged document gets an update task, created ready and assigned to the document's owner, whose text links the tested code: one open update task per task described (a further change of the same task is noted on the record, and the document must then be verified against the newest flagged tree). Asked again for the same code, nothing is repeated (unopened update tasks are opened); code the document was flagged for in an earlier, settled round flags it again. The owner, or a docs or director agent of the project.
+Which documents a task's new tested code affects (card Q03). `submissionId` names the code (a code submission of the task); without it, the newest independently QA-checked one is used. When that code's QA gate passes, every document of the project describing the task that was verified against another tree of it becomes `stale`, and every unverified one is flagged; a document whose own evidence for the task no longer passes QA becomes `stale` whatever the code (`verdict` says whether the named code passes). A flagged document gets an update task, created ready and assigned to the document's owner, whose text links the tested code: one open update task per task described (a further change of the same task is noted on the record, and the document must then be verified against the newest flagged tree). Asked again for the same code, nothing is repeated (unopened update tasks are opened); code the document was flagged for in an earlier, settled round flags it again. The controller runs this check by itself when independent QA evidence is recorded (`qa.evidence.record`), and checks for lost evidence when QA evidence is invalidated (`qa.evidence.check`), so asking is needed only to check again. The owner, or a docs or director agent of the project.
 
 Arguments:
 
@@ -7888,14 +7888,16 @@ Completion: finished when accepted (`completed: true`).
 
 #### `release.submit`
 
-Owner only: submits an immutable release candidate: source commit, built artifact hashes, dependency lock hashes, test-suite revision and the platforms (os, arch) it must pass on. The same manifest is the same candidate.
+Owner only: submits an immutable release candidate: source commit, built artifact hashes, dependency lock hashes, test-suite revision and the platforms (os, arch) it must pass on. The same manifest is the same candidate. With `projectId` and `version` (both or neither; the project must exist) the release carries that project's documentation (card Q03): after the candidate is recorded, `doc.release.check` runs by itself for that project and version (one check per candidate, project and version, so a repeat or the same candidate submitted again flags nothing twice and opens any update task not yet opened), and its result is `docs`. A command ID used before with another project or version is `command_conflict`.
 
 Arguments:
 
 - `manifest`: { sourceCommit, suiteRevision, artifacts: {name: sha256}, dependencyLocks: {name: sha256}, matrix: [{os, arch, osVersion?}], migrationPlan?: sha256, targets?: [installation name] }
+- `projectId` (optional): the project whose documents this release carries
+- `version` (optional): the version this release is (the owner's words, as `doc.release.check` takes it)
 - `commandId`: required
 
-Result: `{ candidateId, manifestDigest, replayed }`: `manifestDigest` is the full SHA-256 of the canonical manifest (the ID is its first 96 bits); a release signature covers both.
+Result: `{ candidateId, manifestDigest, replayed, docs? }`: `manifestDigest` is the full SHA-256 of the canonical manifest (the ID is its first 96 bits); a release signature covers both. `docs` (with `projectId` and `version`) is the documentation release check's result: `{ projectId, version, flagged, byAudience, tasks, replayed }`.
 
 #### `release.host`
 
