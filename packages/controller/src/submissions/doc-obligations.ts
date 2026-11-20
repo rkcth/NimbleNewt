@@ -357,6 +357,15 @@ export class DocObligationService {
    * noted on the record, and the verification must then be against the newest tested code). Asked again, nothing is repeated. The owner or a docs or director agent asks.
    */
   async impact(by: Principal, command: NoActor & { taskId: string; submissionId?: string }): Promise<{ taskId: string; submissionId: string; tree: string; verdict: "passed" | "failed"; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
+    return this.#impact(by, command, false);
+  }
+
+  /**
+   * `impact`; `newestOnly` (the automatic check after QA evidence) leaves a document that is already verified against, or flagged for, code of the task submitted after the code named: QA evidence recorded
+   * late on older code does not move the document back to that code (its keeper would have to verify against older code, and could not at all once that code's gate stopped passing). Going back to an
+   * old tree is a new code submission, so it still flags. Lost evidence is still looked for.
+   */
+  async #impact(by: Principal, command: NoActor & { taskId: string; submissionId?: string }, newestOnly: boolean): Promise<{ taskId: string; submissionId: string; tree: string; verdict: "passed" | "failed"; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
     only(command, ["commandId", "taskId", "submissionId"]);
     const commandId = checkCommandId(command.commandId);
     const taskId = checkTaskId(command.taskId);
@@ -371,6 +380,16 @@ export class DocObligationService {
     if (gate.taskId !== taskId) bad("submissionId", `is code of task ${gate.taskId}, not ${taskId}`);
     // Code whose QA gate does not pass is not tested behaviour: it flags nothing as changed (the update task would name untested code), but a document's own evidence is still checked.
     const tested = gate.verdict === "passed";
+    const submittedAt = async (id: string): Promise<string | undefined> => ((await this.#runner.get("submission", id))?.body as unknown as SubmissionBody | undefined)?.submittedAt;
+    const named = newestOnly && tested ? await submittedAt(submissionId!) : undefined;
+    // Whether the document is already verified against, or flagged for, code of the task submitted after the code named (the automatic check only).
+    const behind = async (b: DocObligationBody, was: DocEvidence | undefined): Promise<boolean> => {
+      if (named === undefined) return false;
+      const current = [...(b.reasons ?? [])].reverse().find((r): r is Extract<DocReason, { kind: "behavior_changed" }> => r.kind === "behavior_changed" && r.taskId === taskId)?.submissionId ?? was?.submissionId;
+      if (current === undefined || current === submissionId) return false;
+      const at = await submittedAt(current);
+      return at !== undefined && at > named;
+    };
     const plan = async (): Promise<Planned[]> => {
       const out: Planned[] = [];
       for (const id of (await this.#index(task!.projectId)).body.ids) {
@@ -379,8 +398,9 @@ export class DocObligationService {
         if (found === undefined || b === undefined || !b.implementationRefs.includes(taskId)) continue;
         const reasons: DocReason[] = [];
         const was = b.state === "unverified" ? undefined : b.verification?.evidence.find((e) => e.taskId === taskId);
-        if (was === undefined) { if (tested) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree }); }
-        else if (tested && was.tree !== gate.tree) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree, from: was.tree });
+        const newer = tested && (await behind(b, was));
+        if (was === undefined) { if (tested && !newer) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree }); }
+        else if (tested && !newer && was.tree !== gate.tree) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree, from: was.tree });
         else if ((was.submissionId === submissionId ? gate : await this.#ports.gate(by, was.submissionId)).verdict !== "passed") reasons.push({ kind: "evidence_lost", taskId, submissionId: was.submissionId });
         const p = this.#planned(id, found.revision, b, reasons);
         if (p !== undefined) out.push(p);
@@ -393,12 +413,12 @@ export class DocObligationService {
 
   /**
    * The automatic impact check after QA evidence is recorded (card Q03): independent evidence may change a task's QA gate, so the task's documents are checked against the code it names exactly as
-   * `impact` does when asked (as the controller, `DOC_AUTO_PRINCIPAL`). A self-check never counts for a gate and checks nothing. The command ID comes from the evidence record, so the repeat of the same
+   * `impact` does when asked (as the controller, `DOC_AUTO_PRINCIPAL`), except that a document already verified against, or flagged for, newer code of the task is left as it is. A self-check never counts for a gate and checks nothing. The command ID comes from the evidence record, so the repeat of the same
    * record (a crash after the record) is a repeat of the same check: nothing is flagged twice, and update tasks not yet opened are opened.
    */
   async afterQaEvidence(e: { readonly evidenceId: string; readonly taskId: string; readonly submissionId: string; readonly source: "self" | "independent" }): Promise<Awaited<ReturnType<DocObligationService["impact"]>> | undefined> {
     if (e.source !== "independent") return undefined;
-    return this.impact(DOC_AUTO_PRINCIPAL, { commandId: `doc-impact:${e.evidenceId}`, taskId: e.taskId, submissionId: e.submissionId });
+    return this.#impact(DOC_AUTO_PRINCIPAL, { commandId: `doc-impact:${e.evidenceId}`, taskId: e.taskId, submissionId: e.submissionId }, true);
   }
 
   /**

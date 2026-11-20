@@ -64,9 +64,9 @@ for (const backend of backends) {
       const ann = await agent("ann", ["author"]);
       const quinn = await agent("quinn", ["qa"]);
       const dora = await agent("dora", ["docs"]);
-      const code = async (task: string, tree: string): Promise<string> => {
+      const code = async (task: string, tree: string, submittedAt = "2026-11-20T09:00:00.000Z"): Promise<string> => {
         const id = derivedId("sbm", cid("code"));
-        await plant("submission", id, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: ann.id, submittedAt: "2026-11-20T09:00:00.000Z", makesCommit: true, base: "c".repeat(40), tree, patchId: "d".repeat(40), evidence: [] });
+        await plant("submission", id, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: ann.id, submittedAt, makesCommit: true, base: "c".repeat(40), tree, patchId: "d".repeat(40), evidence: [] });
         return id;
       };
       // The login task's contract (version 1); a later version changes what the work must be.
@@ -170,6 +170,28 @@ for (const backend of backends) {
       const repeat = await docs.afterQaInvalidation({ taskId: login, evidence: await Promise.all(inval.invalidated.map(async (id) => ({ evidenceId: id, submissionId: await of(id) }))) });
       assert.deepEqual(repeat.flagged, []);
       assert.equal((await read(guide)).updates.filter((u) => u.state === "open").length, 1);
+      assert.deepEqual(hookErrors, []);
+
+      // QA evidence recorded late on older code of a task (newer code was already tested) does not move the task's documents back to the older code: a document flagged for, or verified against, the
+      // newer code stays as it is, so its keeper verifies against the newest tested code. Going back to the old tree is a new code submission, which flags the document again.
+      const exportTask = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Export" })).id;
+      const exportDoc = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "Export help", location: "docs/export.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [exportTask] })).id;
+      const exportCheck = (sub: string) => qa.record(quinn, { commandId: cid("qa"), submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-20T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] });
+      const older = await code(exportTask, treeA, "2026-11-20T09:00:00.000Z");
+      const newer = await code(exportTask, treeB, "2026-11-20T09:10:00.000Z");
+      await exportCheck(newer);
+      await exportCheck(older);
+      let x = await read(exportDoc);
+      assert.deepEqual(x.reasons?.map((r) => (r as { submissionId: string }).submissionId), [newer], "late evidence on older code does not flag the document for that code");
+      const docX = await documentChange();
+      await docs.verify(dora, { commandId: cid("v"), obligationId: exportDoc, expectedRevision: x.revision, documentSubmissionId: docX, evidence: [newer] });
+      await exportCheck(older);
+      x = await read(exportDoc);
+      assert.deepEqual([x.state, x.reasons], ["verified", undefined], "a document verified against newer code stays verified");
+      const back = await code(exportTask, treeA, "2026-11-20T09:20:00.000Z");
+      await exportCheck(back);
+      x = await read(exportDoc);
+      assert.deepEqual([x.state, x.reasons?.map((r) => (r as { submissionId: string }).submissionId)], ["stale", [back]], "going back to the old tree in a new submission flags it");
       assert.deepEqual(hookErrors, []);
 
       // A release's documentation check has one command ID per candidate, project and version.
