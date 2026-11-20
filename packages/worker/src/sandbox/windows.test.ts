@@ -58,6 +58,12 @@ class SimHost implements WindowsHost {
   aclFailure = false;
   afterStart: (() => void) | undefined;
   lookups: string[] = [];
+  /** Answers for the next `wsb list` calls, in order; once used up, the real list. */
+  listScript: ProcessResult[] = [];
+  listLimits: number[] = [];
+  servers: { pid: number; started?: string }[] = [];
+  envNames(): string[] { return Object.keys(this.envMap); }
+  async serverProcesses(): Promise<readonly { pid: number; started?: string }[]> { return this.servers; }
 
   constructor() {
     for (const f of [`${INSTALL}\\wsb.exe`, `${INSTALL}\\WindowsSandboxServer.exe`, "C:\\Program Files\\NimbleNewt\\lock.exe"]) this.files.set(key(f), "");
@@ -82,7 +88,7 @@ class SimHost implements WindowsHost {
   /** Each path's owner by SID; SYSTEM unless set. */
   owners = new Map<string, string>();
   async ownerSid(path: string): Promise<string> { return this.owners.get(key(path)) ?? "S-1-5-18"; }
-  async run(file: string, args: readonly string[], options: { cwd?: string }): Promise<ProcessResult> {
+  async run(file: string, args: readonly string[], options: { cwd?: string; timeoutMs?: number }): Promise<ProcessResult> {
     this.runs.push({ file, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
     if (file.toLowerCase().endsWith("\\icacls.exe")) return this.icacls(args);
     assert.ok(file.toLowerCase().endsWith("\\wsb.exe"), `unexpected program ${file}`);
@@ -100,6 +106,8 @@ class SimHost implements WindowsHost {
       return this.guest(this.lastConfig(), args);
     }
     if (args[0] === "stop") { if (this.stopFailure) return { code: 1, stdout: "", stderr: "cannot stop", timedOut: false }; this.sandboxes.delete(args[2]!); return ok(); }
+    if (args[0] === "list") this.listLimits.push(options.timeoutMs ?? 0);
+    if (args[0] === "list" && this.listScript.length > 0) return this.listScript.shift()!;
     if (args[0] === "list") return ok([...this.sandboxes].join("\r\n"));
     return { code: 2, stdout: "", stderr: "bad command", timedOut: false };
   }
@@ -409,6 +417,58 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
     for (const entries of host.acl.values()) assert.deepEqual(entries, ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"], "the probe's ACL entries were removed");
     assert.deepEqual(host.listDir(STAGING), [], "the probe's folders are gone");
     assert.deepEqual(host.listDir(`${CONTROL}\\jobs`), [], "and so are its job files");
+  });
+
+  describe("wsb list: diagnostics and a bounded retry", () => {
+    const fast = { timeoutsMs: [50, 50, 50], pauseMs: 0 };
+    const hung: ProcessResult = { code: null, stdout: "", stderr: "", timedOut: true };
+
+    test("a slow first call (a cold server start) is retried and then succeeds; the calls are recorded", async () => {
+      const host = new SimHost();
+      host.servers = [{ pid: 777, started: "2026-11-19T10:00:00.000Z" }];
+      host.listScript = [hung];
+      const backend = windowsSandboxBackend(options(host, { listOptions: fast }));
+      host.guest = probeGuest(host);
+      const h = await backend.health();
+      assert.equal(h.healthy, true, h.reason);
+      assert.deepEqual(host.wsbCommands, ["list", "list", "start", "exec", "stop"]);
+      const d = backend.auditDetails!()["wsbListDiagnostics"]!;
+      assert.match(d, /call 1: timed out after \d+ ms \(limit 50 ms\); call 2: ok after \d+ ms/);
+      assert.match(d, /server before: pid 777 started 2026-11-19T10:00:00.000Z; server after: pid 777 started/);
+    });
+
+    test("the first call has a longer limit than the retries, and there are at most two retries", async () => {
+      const host = new SimHost();
+      host.listScript = [hung, hung, hung, hung];
+      host.guest = probeGuest(host);
+      await windowsSandboxBackend(options(host, { listOptions: { pauseMs: 0 } })).health();
+      assert.deepEqual(host.listLimits, [120_000, 60_000, 60_000]);
+    });
+
+    test("every call failing is no capacity: nothing is started, and the reason carries the diagnostics", async () => {
+      const host = new SimHost();
+      host.listScript = [hung, { code: 2148734208, stdout: "", stderr: "Cancelled", timedOut: false }, hung, hung];
+      host.guest = probeGuest(host);
+      const h = await windowsSandboxBackend(options(host, { listOptions: fast })).health();
+      assert.equal(h.healthy, false);
+      assert.match(h.reason!, /could not be listed after 3 attempt\(s\)/);
+      assert.match(h.reason!, /call 2: exit 2148734208/);
+      assert.deepEqual(host.wsbCommands, ["list", "list", "list"], "no sandbox was started");
+      assert.equal(host.sandboxes.size, 0);
+    });
+
+    test("environment variables are recorded by name, present or absent, never by value; personal values stay out", async () => {
+      const host = new SimHost();
+      Object.assign(host.envMap, { HTTP_PROXY: "http://proxyuser:hunter2@proxy.example:3128", GRPC_VERBOSITY: "debug-value", USERPROFILE: "C:\\Users\\robert", TEMP: "C:\\Temp" });
+      host.listScript = [hung, hung, hung];
+      const h = await windowsSandboxBackend(options(host, { listOptions: fast })).health();
+      const text = h.reason!;
+      for (const present of ["HTTP_PROXY=present", "GRPC_VERBOSITY=present", "USERPROFILE=present", "TEMP=present"]) assert.ok(text.includes(present), present);
+      for (const absent of ["HTTPS_PROXY=absent", "NO_PROXY=absent", "ALL_PROXY=absent", "HOME=absent", "APPDATA=absent", "LOCALAPPDATA=absent", "TMP=absent", "SESSIONNAME=absent"]) assert.ok(text.includes(absent), absent);
+      for (const value of ["hunter2", "proxyuser", "proxy.example", "debug-value", "robert", "C:\\Temp"]) assert.ok(!text.includes(value), `${value} must not appear`);
+      const none = new SimHost(); none.listScript = [hung, hung, hung];
+      assert.match((await windowsSandboxBackend(options(none, { listOptions: fast })).health()).reason!, /GRPC_\*=absent/);
+    });
   });
 
   test("not Windows, or Windows Sandbox missing: no capacity and a reason", async () => {

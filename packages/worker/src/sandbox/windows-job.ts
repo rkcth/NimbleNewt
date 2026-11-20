@@ -2,6 +2,7 @@ import { win32 } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { NormalizedRecipe } from "./recipe.js";
 import { GUEST_PATHS, aclSteps, describeWsbAccessDenied, isWsbAccessDenied, launchScript, overlapsWin, sharesFor, verifyClient, verifySession, wsbConfigXml, type AclStep, type Share, type WindowsSettings } from "./windows-plan.js";
+import { listSandboxes } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { cutWhole } from "./windows-redact.js";
 
@@ -165,8 +166,8 @@ export async function releaseJob(host: WindowsHost, settings: WindowsSettings, j
       const stopped = await host.run(client.value.wsb, ["stop", "--id", id], { cwd: client.value.cwd, timeoutMs: WSB_TIMEOUT_MS }).catch(() => undefined);
       if (stopped === undefined || stopped.code !== 0) {
         // A stop of a sandbox that is already gone fails too: only one that is still listed is a problem.
-        const listed = await host.run(client.value.wsb, ["list", "--raw"], { cwd: client.value.cwd, timeoutMs: WSB_TIMEOUT_MS }).catch(() => undefined);
-        if (listed === undefined || listed.code !== 0 || listed.stdout.toLowerCase().includes(id.toLowerCase())) problems.push(`the sandbox ${id} could not be stopped`);
+        const listed = await listSandboxes(host, client.value);
+        if (!listed.ok || listed.stdout.toLowerCase().includes(id.toLowerCase())) problems.push(`the sandbox ${id} could not be stopped`);
       }
     }
     if (problems.length === 0) host.remove(statusFile(jobDir));

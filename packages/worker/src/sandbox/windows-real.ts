@@ -9,6 +9,12 @@ import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, 
  * PowerShell is used for what has no plain program (the package list, signatures, the console session, the registry's auto-login flags, the scheduled task). Data goes to it in environment
  * variables, never spliced into the script text. Nothing here writes the registry, creates an account, or reads or prints a password: the auto-login check yields booleans only.
  */
+// The Sandbox server processes (id and start time only), for diagnosing a `wsb` call that does not answer. A start time that cannot be read is reported as null.
+const SERVER_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+$list = @(Get-Process -Name WindowsSandboxServer | ForEach-Object { $s = $null; try { $s = $_.StartTime.ToUniversalTime().ToString('o') } catch {}; [pscustomobject]@{ pid = $_.Id; started = $s } })
+ConvertTo-Json -InputObject $list -Compress
+`;
 const SESSION_SCRIPT = `
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
@@ -222,6 +228,12 @@ export function windowsRealHost(): WindowsHost {
     platform: process.platform,
     env: (name) => process.env[name],
     pid: process.pid,
+    envNames: () => Object.keys(process.env),
+    async serverProcesses() {
+      const raw = await powershell<{ pid?: unknown; started?: unknown }[] | { pid?: unknown; started?: unknown } | null>(SERVER_SCRIPT);
+      const list = Array.isArray(raw) ? raw : raw === null ? [] : [raw];
+      return list.filter((p) => typeof p.pid === "number").map((p) => ({ pid: p.pid as number, ...(typeof p.started === "string" ? { started: p.started } : {}) }));
+    },
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } },
     exists: (p) => existsSync(p),
     isLinkOrJunction: (p) => {
