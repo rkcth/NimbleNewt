@@ -188,21 +188,24 @@ for (const backend of backends) {
       const lease = await r.leaseOps.acquire(ivy, { commandId: "l1", taskId: t1, branch: "main", ttlMs: 10 * MIN });
       await r.ops.add(ivy, { commandId: "q1", submissionId: r.approve(1, t1) });
       await r.ops.add(ivy, { commandId: "q2", submissionId: r.approve(2, t2) });
-      // The owner tries to take the head out during the quiesce: refused while its landing is in progress (card P10, in-progress take-out), so the landing goes on and lands exactly the head.
+      // During the quiesce the owner tries to take the head out (refused while its landing is in progress, card P10 in-progress take-out), and a newer approved submission of task one takes the head's place:
+      // the queue moved, so the landing stops before the host is asked.
       let taking: unknown;
-      r.setBeforeRun(async () => { taking = await r.ops.remove(r.w.owner, { commandId: "out", taskId: t1, reason: "not now" }).catch((e: unknown) => e); });
+      r.setBeforeRun(async () => { taking = await r.ops.remove(r.w.owner, { commandId: "out", taskId: t1, reason: "not now" }).catch((e: unknown) => e); await r.ops.add(ivy, { commandId: "q1b", submissionId: r.approve(4, t1) }); });
       const a = await r.workspace().request(ivy, { commandId: "w1", operation: "landing", taskId: t1, reason: "x", leaseId: lease.leaseId, fence: lease.fence });
       assert.ok(taking instanceof DomainError && taking.code === "invalid_transition" && /being landed .* right now/.test(taking.message), String(taking));
-      assert.equal(a.state, "done");
-      assert.equal(r.calls.length, 1);
-      // The owner's landing of a task with nothing queued, while something is queued during the quiesce.
+      assert.equal(a.state, "refused");
+      assert.match(a.summary ?? "", /no longer the oldest approved one in the landing queue, so nothing was landed/);
+      assert.equal(r.calls.length, 0);
+      // The landing ended, so the head can be taken out now. The owner's landing of a task with nothing queued, while something is queued during the quiesce.
       r.setBeforeRun(async () => undefined);
+      await r.ops.remove(r.w.owner, { commandId: "out1", taskId: t1, reason: "not now" });
       await r.ops.remove(r.w.owner, { commandId: "out2", taskId: t2, reason: "empty it" });
       r.setBeforeRun(async () => { await r.ops.add(r.w.owner, { commandId: "q3", submissionId: r.approve(3, t2) }); });
       const b = await r.workspace().request(r.w.owner, { commandId: "w2", operation: "landing", taskId: t1, reason: "x" });
       assert.equal(b.state, "refused");
       assert.match(b.summary ?? "", /no longer the oldest approved one/);
-      assert.equal(r.calls.length, 1, "no host was asked for the second landing");
+      assert.equal(r.calls.length, 0, "no host was asked");
     } finally { await r.close(); }
   });
 
@@ -232,13 +235,59 @@ for (const backend of backends) {
       // The second entry never reaches the host meanwhile (it is not the oldest), and the other entry can be taken out: only the one on the host is held.
       await refuses("invalid_transition", () => r.workspace().request(ivy, { commandId: "w2", operation: "landing", taskId: t2, reason: "land two", leaseId: lease.leaseId, fence: lease.fence }), /oldest/);
       assert.equal(r.calls.length, 1, "only the first landing is on the host");
+      assert.equal((await r.ops.remove(r.w.owner, { commandId: "out-other", taskId: t2, reason: "later" })).removed?.submissionId, s2);
+      await r.ops.add(ivy, { commandId: "q2b", submissionId: s2 });
+      assert.deepEqual(await r.queued(), [[1, s1, t1], [2, s2, t2]]);
       release();
       assert.equal((await first).state, "done");
       assert.deepEqual(await r.queued(), [[1, s2, t2]]);
-      // After the landing ended the take-out is allowed (the entry of the next task, and a repeat of the refused command now works).
+      // After the landing ended the take-out is allowed again.
       assert.equal((await r.ops.remove(r.w.owner, { commandId: "out3", taskId: t2, reason: "not now" })).removed?.submissionId, s2);
       assert.deepEqual(await r.queued(), []);
       assert.equal(r.calls.length, 1);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a take-out that read a task with no open-request record yet, and a landing of that task that starts before the take-out writes, never both go ahead (card P10, in-progress take-out)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2] = [await r.task("one"), await r.task("two")];
+      const lease = await r.leaseOps.acquire(ivy, { commandId: "l1", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      const [s1, s2] = [r.approve(1, t1), r.approve(2, t2)];
+      await r.ops.add(ivy, { commandId: "q1", submissionId: s1 });
+      await r.ops.add(ivy, { commandId: "q2", submissionId: s2 });
+      assert.equal(await r.w.storage.getAggregate({ kind: "workspace-open", id: t1 }), undefined, "task one never had a workspace request");
+      // The take-out's first read of task one's open-request record is held (after reading that there is none) until the landing is at the host. Deterministic: each side waits for the other's step, no sleeps.
+      let readOpen!: () => void, letGo!: () => void;
+      const opened = new Promise<void>((res) => { readOpen = res; });
+      const go = new Promise<void>((res) => { letGo = res; });
+      let holding = true;
+      const base = r.w.storage;
+      const storage = new Proxy(base, { get: (target, p) => {
+        if (p === "getAggregate") return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (holding && ref.kind === "workspace-open" && ref.id === t1) { holding = false; readOpen(); await go; } return found; };
+        const v = Reflect.get(target, p, target) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } });
+      const heldOps = r.queueOps(LandingQueueService.withEpoch(storage, r.w.epoch, { clock: r.w.clock.now, pause: async () => undefined }));
+      const taking = heldOps.remove(r.w.owner, { commandId: "out", taskId: t1, reason: "not now" }).then(() => undefined, (e: unknown) => e);
+      await opened;
+      let entered!: () => void, release!: () => void;
+      const reached = new Promise<void>((res) => { entered = res; });
+      const held = new Promise<void>((res) => { release = res; });
+      r.setAnswer(async (call) => { entered(); await held; return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; });
+      const first = r.workspace().request(ivy, { commandId: "w1", operation: "landing", taskId: t1, reason: "land one", leaseId: lease.leaseId, fence: lease.fence });
+      await reached;
+      // The take-out goes on with what it read (no record): its write meets the record the landing created, it is built again, and it is refused.
+      letGo();
+      const outcome = await taking;
+      assert.ok(outcome instanceof DomainError && outcome.code === "invalid_transition" && /being landed/.test(outcome.message), String(outcome));
+      assert.deepEqual(await r.queued(), [[1, s1, t1], [2, s2, t2]]);
+      await refuses("invalid_transition", () => r.workspace().request(ivy, { commandId: "w2", operation: "landing", taskId: t2, reason: "land two", leaseId: lease.leaseId, fence: lease.fence }), /oldest/);
+      assert.equal(r.calls.length, 1, "only the first landing is on the host");
+      release();
+      assert.equal((await first).state, "done");
+      assert.deepEqual(await r.queued(), [[1, s2, t2]]);
     } finally { await r.close(); }
   });
 

@@ -159,6 +159,7 @@ export class LandingQueueService {
         removed = q.entries[at];
         // An entry whose landing is on its way to the host (or at it) stays until that landing ends: taking it out would make the next entry the oldest, and its landing could then reach the host too.
         // The task's open-request record is read, and written back unchanged, in this same write: a landing that starts at the same moment changes that record and so loses the race (this write is built again, or that landing fails before the host).
+        // A task with no such record yet gets an empty one (what a finished request leaves), created in this write: a landing that starts at the same moment creates it too, so there also exactly one of the two commits.
         const open = await this.#runner.get(OPEN, taskId);
         const openId = (open?.body as unknown as { requestId?: string } | undefined)?.requestId;
         const request = typeof openId === "string" && openId !== "" ? await this.#runner.get(REQUEST, openId) : undefined;
@@ -167,7 +168,7 @@ export class LandingQueueService {
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return {
           ref, creates: false,
-          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json({ ...q, entries: q.entries.filter((_, i) => i !== at) }) }, ...(open === undefined ? [] : [{ type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }])],
+          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json({ ...q, entries: q.entries.filter((_, i) => i !== at) }) }, open === undefined ? { type: "create" as const, ref: { kind: OPEN, id: taskId }, body: json({}) } : { type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }],
           detail: { branch: command.branch, taskId, submissionId: q.entries[at]!.submissionId, reason },
           contention: async () => new DomainError("stale_revision", RACE),
         };
