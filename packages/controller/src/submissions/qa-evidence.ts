@@ -63,9 +63,14 @@ export interface QaRecheckBody {
   readonly requestedBy: string;
   readonly requestedAt: string;
   readonly state: "pending" | "done";
-  /** The evidence for the same submission that settled it (independent evidence, or the author's new self-check for a re-check of a self-check). */
+  /**
+   * The evidence for the same submission that settled it (independent evidence, or the author's new self-check for a re-check of a self-check), once it, with the other evidence of that source on the
+   * submission that still holds, names again every check the invalidated record named (only those still required, when the contract names checks).
+   */
   readonly doneBy?: string;
   readonly doneAt?: string;
+  /** Settled because the author submitted a newer tree of the task: the newer code submission. The old tree is no longer the work, and the newer one is judged on its own evidence. */
+  readonly supersededBy?: string;
 }
 
 interface IndexBody { readonly ids: readonly string[]; readonly rechecks: readonly string[] }
@@ -88,6 +93,9 @@ export interface QaGate {
   readonly stale: readonly { readonly id: string; readonly reasons: readonly QaStaleReason[] }[];
   readonly pendingRechecks: readonly string[];
 }
+
+/** A re-check of the submission that new evidence did not settle: the checks the invalidated record named that no evidence of that source on the submission names again yet. */
+export interface QaOpenRecheck { readonly id: string; readonly missing: readonly string[] }
 
 /** What the QA evidence service needs from the rest of the controller. */
 export interface QaEvidencePorts {
@@ -119,11 +127,13 @@ const work = (c: Record<string, unknown> | undefined): Record<string, unknown> =
  *   it is kept and shown, never counted by the gate.
  * - **Bound to what it was judged on.** The contract version named must be the one in force, every decision named must be active and apply to the task, and every decision the task relies on
  *   (`decision.link`) must be named; a task relying on a superseded decision cannot be checked until it is revalidated (card C08).
- * - **Gate.** `gate` passes only when every required check (the contract's check names and required evidence items; with none, every check named in any current independent record) has a `passed` result in current
- *   independent evidence for that submission. Missing evidence fails, and so does evidence whose criteria or decisions changed since.
+ * - **Gate.** `gate` passes only when every required check (the contract's check names and required evidence items; with none, every check named in any current independent record, or in independent
+ *   evidence that no longer holds and is not yet re-checked) has a `passed` result in current independent evidence for that submission. Missing evidence fails, and so does evidence whose criteria or
+ *   decisions changed since.
  * - **Invalidation.** `check` compares every current record of a task with what it was bound to; one whose acceptance criteria, required evidence or checks changed, or whose decisions were
  *   superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, and the owner is told. New independent evidence
- *   for the same submission settles the re-check.
+ *   for the same submission that names its checks again settles the re-check; so does a newer code submission of the task (`submitted`). A check that loses a race with another answers with
+ *   what the other invalidated.
  */
 export class QaEvidenceService {
   readonly #runner: CommandRunner;
@@ -216,7 +226,7 @@ export class QaEvidenceService {
    * Records QA evidence on one code submission. `criteriaRevision` must be the task contract version in force (a stale one is `stale_revision` with the current version); `decisions` names the
    * owner decisions the work was judged against and must include every decision the task relies on.
    */
-  async record(by: Principal, command: NoActor & { submissionId: string; criteriaRevision: number; decisions?: readonly string[]; environment: string; observedAt: string; checks: readonly { name: string; result: string; detail?: string }[] }): Promise<{ id: string; revision: number; replayed: boolean; source: "self" | "independent"; settled: readonly string[] }> {
+  async record(by: Principal, command: NoActor & { submissionId: string; criteriaRevision: number; decisions?: readonly string[]; environment: string; observedAt: string; checks: readonly { name: string; result: string; detail?: string }[] }): Promise<{ id: string; revision: number; replayed: boolean; source: "self" | "independent"; settled: readonly string[]; open: readonly QaOpenRecheck[] }> {
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
     for (const k of Object.keys(command)) if (!["commandId", "submissionId", "criteriaRevision", "decisions", "environment", "observedAt", "checks"].includes(k)) bad(k, "is not a field of this command");
     const commandId = checkCommandId(command.commandId);
@@ -242,7 +252,7 @@ export class QaEvidenceService {
       return { name, result: o["result"] as QaResult, ...(detail === undefined ? {} : { detail: redactText(detail) }) };
     });
     if (by.kind !== "owner" && by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not record QA evidence`);
-    let outcome: { source: "self" | "independent"; settled: string[] } = { source: "independent", settled: [] };
+    let outcome: { source: "self" | "independent"; settled: string[]; open: QaOpenRecheck[] } = { source: "independent", settled: [], open: [] };
     const scoped = scopedCommandId(by.id, commandId);
     const id = derivedId("qae", scoped);
     const result = await this.#runner.command("qa.evidence.record", { commandId: scoped, actor: by.id }, async () => ({
@@ -278,33 +288,59 @@ export class QaEvidenceService {
         const now = this.#runner.now();
         const source = self ? "self" : "independent";
         const body: QaEvidenceBody = { taskId, projectId: task.projectId, submissionId: command.submissionId, tree: sub.tree, source, criteriaRevision: contract.version, decisions: cited, environment: redactText(environment), observedAt, recordedBy: by.id, recordedAt: now, checks, state: "current" };
-        // Independent evidence on the same submission settles its pending re-checks.
+        // What this record and the other evidence of the same source on the submission that still holds name: a re-check is settled only when they name again every check the invalidated
+        // record named (those still required, when the contract names checks), so a narrower re-check does not pass on fewer checks than were looked at before.
+        const required = this.#required(contract.body);
+        const covered = new Set(checks.map((c) => c.name));
+        for (const other of index.body.ids) {
+          const e = (await this.#runner.get("qa-evidence", other))?.body as unknown as QaEvidenceBody | undefined;
+          if (e === undefined || e.state !== "current" || e.submissionId !== command.submissionId || e.source !== source || (source === "self" && e.recordedBy !== by.id)) continue;
+          if ((await this.#staleness(e, contract, reliance)).length === 0) for (const c of e.checks) covered.add(c.name);
+        }
         const settled: string[] = [];
+        const open: QaOpenRecheck[] = [];
         const rechecks: string[] = [];
         for (const r of index.body.rechecks) {
           const found = await this.#runner.get("qa-recheck", r);
           const rb = found?.body as unknown as QaRecheckBody | undefined;
           if (found === undefined || rb === undefined) continue;
-          // Independent evidence settles every pending re-check of the submission; the author's new self-check settles only the re-check of its own earlier self-check.
-          if (rb.state === "pending" && rb.submissionId === command.submissionId && (source === "independent" || rb.assignee === by.id)) {
-            settled.push(r);
-            changes.push({ type: "update", ref: { kind: "qa-recheck", id: r }, expectedRevision: found.revision, body: json({ ...rb, state: "done", doneBy: id, doneAt: now }) });
-          }
           // Done re-checks stay listed (at most one per evidence record, so the index stays bounded).
           rechecks.push(r);
+          if (rb.state !== "pending") continue;
+          if (rb.submissionId !== command.submissionId) {
+            // A re-check on an older code submission of the task is settled by the newer tree (card Q02 follow-up): the old tree is no longer the work. Normally the submission itself settles it
+            // (`submitted`, best effort after the submission is recorded); this catches one that was missed.
+            const older = (await this.#runner.get("submission", rb.submissionId))?.body as unknown as SubmissionBody | undefined;
+            if (older !== undefined && older.submittedAt < sub.submittedAt) {
+              settled.push(r);
+              changes.push({ type: "update", ref: { kind: "qa-recheck", id: r }, expectedRevision: found.revision, body: json({ ...rb, state: "done", doneAt: now, supersededBy: command.submissionId }) });
+            }
+            continue;
+          }
+          // Independent evidence may settle every pending re-check of the submission; the author's new self-check only the re-check of its own earlier self-check.
+          if (source !== "independent" && rb.assignee !== by.id) continue;
+          const before = (await this.#runner.get("qa-evidence", rb.evidenceId))?.body as unknown as QaEvidenceBody | undefined;
+          const missing = (before?.checks ?? []).map((c) => c.name).filter((name) => (required.length === 0 || required.includes(name)) && !covered.has(name));
+          if (missing.length > 0) { open.push({ id: r, missing }); continue; }
+          settled.push(r);
+          changes.push({ type: "update", ref: { kind: "qa-recheck", id: r }, expectedRevision: found.revision, body: json({ ...rb, state: "done", doneBy: id, doneAt: now }) });
         }
         if (contract.revision !== undefined) changes.push({ type: "check", ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision });
         const nextIndex = json({ ids: [...index.body.ids, id], rechecks });
         changes.push(index.revision === undefined ? { type: "create", ref: { kind: "qa-evidence-index", id: taskId }, body: nextIndex } : { type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: nextIndex });
-        outcome = { source, settled };
-        return { ref: { kind: "qa-evidence", id }, creates: true, changes: [{ type: "create", ref: { kind: "qa-evidence", id }, body: json(body) }, ...changes], detail: { taskId, submissionId: command.submissionId, source, settled } };
+        outcome = { source, settled, open };
+        return {
+          ref: { kind: "qa-evidence", id }, creates: true, changes: [{ type: "create", ref: { kind: "qa-evidence", id }, body: json(body) }, ...changes], detail: { taskId, submissionId: command.submissionId, source, settled },
+          // A lost race on the index, a re-check or a cited record is another write of this task's QA records at the same moment, not a reused command ID.
+          contention: async () => ((await this.#runner.get("qa-evidence", id)) === undefined ? new DomainError("unavailable", "another QA write of this task was made at the same moment; send this one again") : new DomainError("command_conflict", `qa-evidence ${id} already exists, so this command ID was used by something else`)),
+        };
       },
     }));
     if (result.replayed) {
       const e = (await this.#runner.get("qa-evidence", result.id))?.body as unknown as QaEvidenceBody | undefined;
-      outcome = { source: e?.source ?? "independent", settled: [] };
+      outcome = { source: e?.source ?? "independent", settled: [], open: [] };
     }
-    return { id: result.id, revision: result.revision, replayed: result.replayed, source: outcome.source, settled: outcome.settled };
+    return { id: result.id, revision: result.revision, replayed: result.replayed, source: outcome.source, settled: outcome.settled, open: outcome.open };
   }
 
   // ---- invalidation and re-checks ----------------------------------------------------------------------------------------------
@@ -313,7 +349,7 @@ export class QaEvidenceService {
    * Looks at every current QA record of a task against what it was bound to. A record whose criteria or decisions changed is invalidated (kept, with the reasons) and a re-check is scheduled for
    * it, assigned to whoever recorded it; the owner is told. Anyone who may read the task may ask; what changed decides, not who asks. Nothing stale: nothing is written.
    */
-  async check(by: Principal, command: NoActor & { taskId: string }): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean }> {
+  async check(by: Principal, command: NoActor & { taskId: string }): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
     for (const k of Object.keys(command)) if (!["commandId", "taskId"].includes(k)) bad(k, "is not a field of this command");
     const commandId = checkCommandId(command.commandId);
@@ -333,9 +369,42 @@ export class QaEvidenceService {
       }
       return out;
     };
-    if ((await stale()).length === 0) return { taskId, invalidated: [], rechecks: [], replayed: false };
+    const seen = await stale();
+    if (seen.length === 0) return { taskId, invalidated: [], rechecks: [], replayed: false };
     const scoped = scopedCommandId(by.id, commandId);
-    const result = await this.#runner.command("qa.evidence.check", { commandId: scoped, actor: by.id }, async () => ({
+    // Another check of the same task at the same moment can do the work first: this one then answers with what that one invalidated (of what this one found stale), not "ask again".
+    // Something else that went stale meanwhile is looked at again, a few times at most.
+    const lostRace = async (): Promise<{ taskId: string; invalidated: string[]; rechecks: string[]; replayed: false; concurrent: true } | undefined> => {
+      if ((await stale()).length > 0) return undefined;
+      const invalidated: string[] = [];
+      const rechecks: string[] = [];
+      for (const f of seen) {
+        const now = (await this.#runner.get("qa-evidence", f.id))?.body as unknown as QaEvidenceBody | undefined;
+        if (now?.state !== "invalidated") continue;
+        invalidated.push(f.id);
+        if (now.recheckId !== undefined) rechecks.push(now.recheckId);
+      }
+      return { taskId, invalidated, rechecks, replayed: false, concurrent: true };
+    };
+    let result: Awaited<ReturnType<CommandRunner["command"]>> | undefined;
+    for (let round = 0; result === undefined; round++) {
+      try { result = await this.#runCheck(by, scoped, taskId, stale, (m) => { made = m; }); } catch (error) {
+        if (!(error instanceof DomainError) || error.code !== "stale_revision" || round >= 2) throw error;
+        const answer = await lostRace();
+        if (answer !== undefined) return answer;
+      }
+    }
+    if (result.replayed) return { taskId, invalidated: [], rechecks: [], replayed: true };
+    if (this.#ports.notify !== undefined) {
+      for (const r of made.rechecks) await this.#ports.notify({ commandId: `qa-recheck:${r.id}`, taskId, projectId: r.projectId, recheckId: r.id, text: r.text }).catch(() => undefined);
+    }
+    return { taskId, invalidated: made.invalidated, rechecks: made.rechecks.map((r) => r.id), replayed: false };
+  }
+
+  /** One attempt at the write of `check`: invalidates what is stale now and schedules its re-checks. */
+  async #runCheck(by: Principal, scoped: string, taskId: string, stale: () => Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]>, report: (made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[] }) => void): Promise<Awaited<ReturnType<CommandRunner["command"]>>> {
+    let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[] } = { invalidated: [], rechecks: [] };
+    return this.#runner.command("qa.evidence.check", { commandId: scoped, actor: by.id }, async () => ({
       payload: { taskId },
       build: async () => {
         const found = await stale();
@@ -359,14 +428,50 @@ export class QaEvidenceService {
         }
         if (index.revision === undefined) throw new DomainError("integrity", `the QA evidence index of ${taskId} is missing`);
         changes.push({ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks }) });
+        report(made);
         return { ref: { kind: "qa-evidence-index", id: taskId }, creates: false, changes, detail: { taskId, invalidated: made.invalidated } };
       },
     }));
-    if (result.replayed) return { taskId, invalidated: [], rechecks: [], replayed: true };
-    if (this.#ports.notify !== undefined) {
-      for (const r of made.rechecks) await this.#ports.notify({ commandId: `qa-recheck:${r.id}`, taskId, projectId: r.projectId, recheckId: r.id, text: r.text }).catch(() => undefined);
-    }
-    return { taskId, invalidated: made.invalidated, rechecks: made.rechecks.map((r) => r.id), replayed: false };
+  }
+
+  /**
+   * Told once a code submission is recorded (card Q02 follow-up; the controller calls it, best effort, after the submission is written): the pending re-checks of the task on code submitted
+   * before it are settled, since that tree is no longer the work and the newer tree is judged on its own evidence (it has none yet, so its gate fails until it is checked). Repeatable; a
+   * missed call is caught by the next QA evidence recorded on a newer submission of the task.
+   */
+  async submitted(submissionId: string): Promise<{ settled: readonly string[] }> {
+    if (typeof submissionId !== "string" || !SBM.test(submissionId)) bad("submissionId", "is not a submission ID");
+    const looks = async (): Promise<{ sub: SubmissionBody; index: { revision?: number; body: IndexBody }; due: { id: string; revision: number; body: QaRecheckBody }[] } | undefined> => {
+      const sub = (await this.#runner.get("submission", submissionId))?.body as unknown as SubmissionBody | undefined;
+      if (sub === undefined || sub.kind !== "code") return undefined;
+      const index = await this.#index(sub.taskId);
+      const due: { id: string; revision: number; body: QaRecheckBody }[] = [];
+      for (const r of index.body.rechecks) {
+        const found = await this.#runner.get("qa-recheck", r);
+        const rb = found?.body as unknown as QaRecheckBody | undefined;
+        if (found === undefined || rb === undefined || rb.state !== "pending" || rb.submissionId === submissionId) continue;
+        const older = (await this.#runner.get("submission", rb.submissionId))?.body as unknown as SubmissionBody | undefined;
+        if (older !== undefined && older.submittedAt < sub.submittedAt) due.push({ id: r, revision: found.revision, body: rb });
+      }
+      return { sub, index, due };
+    };
+    const first = await looks();
+    if (first === undefined || first.due.length === 0) return { settled: [] };
+    let settled: string[] = [];
+    const result = await this.#runner.command("qa.recheck.supersede", { commandId: `qa-sup:${submissionId}`, actor: "controller" }, async () => ({
+      payload: { submissionId },
+      build: async () => {
+        const seen = await looks();
+        if (seen === undefined || seen.due.length === 0) throw new DomainError("stale_revision", "the re-checks were settled meanwhile");
+        const now = this.#runner.now();
+        settled = seen.due.map((d) => d.id);
+        return {
+          ref: { kind: "qa-recheck", id: seen.due[0]!.id }, creates: false, detail: { taskId: seen.sub.taskId, submissionId, settled },
+          changes: seen.due.map((d) => ({ type: "update" as const, ref: { kind: "qa-recheck", id: d.id }, expectedRevision: d.revision, body: json({ ...d.body, state: "done", doneAt: now, supersededBy: submissionId }) })),
+        };
+      },
+    }));
+    return { settled: result.replayed ? [] : settled };
   }
 
   // ---- reading ---------------------------------------------------------------------------------------------------------------
@@ -405,8 +510,8 @@ export class QaEvidenceService {
 
   /**
    * Whether the independent QA evidence for one code submission passes, read only. Only current evidence that still holds counts: a self-check never does. Every required check needs a `passed`
-   * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so, and
-   * no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
+   * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so,
+   * and so is every check named by independent evidence that no longer holds and whose re-check is not done (it is `missing` until a re-check names it again); no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
    */
   async gate(by: Principal, submissionIdValue: string): Promise<QaGate> {
     const { sub, taskId } = await this.#submission(by, submissionIdValue);
@@ -424,9 +529,17 @@ export class QaEvidenceService {
       if (reasons.length > 0) stale.push({ id, reasons }); else usable.push({ ...e, id });
     }
     const pending: string[] = [];
+    // Check names of independent evidence on this submission that no longer holds and whose re-check is not done: with no required checks, the re-check must name them again (card Q02
+    // follow-up), so newer evidence on other checks alone does not pass.
+    const carried: string[] = [];
+    const awaiting = new Set<string>();
     for (const r of index.body.rechecks) {
       const b = (await this.#runner.get("qa-recheck", r))?.body as unknown as QaRecheckBody | undefined;
-      if (b !== undefined && b.state === "pending" && b.submissionId === submissionId) pending.push(r);
+      if (b !== undefined && b.state === "pending" && b.submissionId === submissionId) { pending.push(r); awaiting.add(b.evidenceId); }
+    }
+    for (const s of stale) {
+      const e = (await this.#runner.get("qa-evidence", s.id))?.body as unknown as QaEvidenceBody | undefined;
+      if (e !== undefined && (e.state === "current" || awaiting.has(s.id))) carried.push(...e.checks.map((c) => c.name));
     }
     const reasons = new Set<string>();
     if ((reliance?.links ?? []).some((l) => l.state !== "current")) reasons.add("decision_superseded");
@@ -434,7 +547,7 @@ export class QaEvidenceService {
     const required = this.#required(contract.body);
     // With no required checks, every check named in any current independent record is judged (by the newest record naming it): a later record that leaves a check out does not hide an
     // earlier failure of it.
-    const names = required.length > 0 ? required : [...new Set(newestFirst.flatMap((e) => e.checks.map((c) => c.name)))];
+    const names = required.length > 0 ? required : [...new Set([...newestFirst.flatMap((e) => e.checks.map((c) => c.name)), ...carried])];
     const checks: QaGateCheck[] = names.map((name) => {
       for (const e of newestFirst) { const c = e.checks.find((x) => x.name === name); if (c !== undefined) return { name, result: c.result, evidenceId: e.id }; }
       return { name, result: "missing" as const };

@@ -2145,7 +2145,11 @@ export class StatusService {
       lines.push(line(`${e.source === "self" ? "Self-check" : "Independent QA"} ${e.id} by ${shown(e.recordedBy, 80)} on tree ${e.tree.slice(0, 12)}, run ${e.observedAt} in ${quoted(e.environment, 200)}, against contract version ${e.criteriaRevision}${e.decisions.length === 0 ? "" : ` and decisions ${e.decisions.map((d) => `${d.id} (v${d.version})`).join(", ")}`}: passed ${n("passed")}, failed ${n("failed")}, blocked ${n("blocked")}, not run ${n("not-run")}.${state}`, cite("qa-evidence", e.id, e.revision), cite("task", taskId)));
     }
     if (list.items.length > 20) lines.push(line(`${list.items.length - 20} older QA record(s) are not shown here (qa.evidence.list has them all).`, cite("task", taskId)));
-    for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.`, cite("qa-recheck", r.id), cite("task", taskId)));
+    for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) {
+      // What the re-check must name again to be settled (card Q02 follow-up): the checks of the record that went stale.
+      const owed = (list.items.find((e) => e.id === r.evidenceId)?.checks ?? []).slice(0, 10).map((c) => quoted(c.name, 80));
+      lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.${owed.length === 0 ? "" : ` It must name again: ${owed.join(", ")}.`}`, cite("qa-recheck", r.id), cite("task", taskId)));
+    }
     return { observedAt: at, lines };
   }
 
