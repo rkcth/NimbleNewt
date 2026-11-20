@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { WHOLE, engines, partName, share } from "./g04-fixture.js";
+import { runsSweep } from "./g04-tool-suite.js";
 
 // The G04 sweeps divided among files (g04-kill-*-part2, g04-tool-*-not-again) must together run exactly the points one file ran before: none lost, none twice.
 test("the parts of a divided sweep are together exactly its points, each in one part, each spread over the whole list", () => {
@@ -55,4 +56,12 @@ test("the divided G04 kill and tool files together ask for every part and every 
   }
   // The worker-thread variant is the heavy one (skipped by default), as before the division.
   for (const map of [kill, tool]) for (const [engine, runs] of map) assert.equal(runs[0]!.heavy, String(engine === "SQLite on a worker thread"), `${engine}: heavy as before`);
+});
+
+// The choice each tool file makes is turned into the two tests by `runsSweep`: "both" runs both sweeps, each named sweep runs only itself, so the two
+// files of an engine (one per sweep, checked above) together run each sweep once.
+test("a tool file runs exactly the sweeps it names", () => {
+  assert.deepEqual([runsSweep("both", "presented again"), runsSweep("both", "not presented again")], [true, true]);
+  assert.deepEqual([runsSweep("presented again", "presented again"), runsSweep("presented again", "not presented again")], [true, false]);
+  assert.deepEqual([runsSweep("not presented again", "presented again"), runsSweep("not presented again", "not presented again")], [false, true]);
 });

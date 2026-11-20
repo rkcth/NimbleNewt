@@ -33,6 +33,8 @@ export const ROUTE_STEPS = [
  * for PostgreSQL), so the two together in one file needed more than the 300 s per-file limit there; each engine has a file for each.
  */
 export type ToolSweeps = "both" | "presented again" | "not presented again";
+/** Whether a file asking for `sweeps` runs `sweep` (checked in g04-share.test.ts: each file's choice runs exactly the sweeps it names). */
+export const runsSweep = (sweeps: ToolSweeps, sweep: "presented again" | "not presented again"): boolean => sweeps === "both" || sweeps === sweep;
 export function defineToolKillTests(engineName: string, heavy = false, sweeps: ToolSweeps = "both"): void {
   const engine = engines.find((e) => e.name === engineName)!;
   after(stopServer);
@@ -50,7 +52,7 @@ export function defineToolKillTests(engineName: string, heavy = false, sweeps: T
     return { runs, points, first: describe(clean, points[0]!), last: describe(clean, points.at(-1)!) };
   };
 
-  if (sweeps !== "not presented again") test(`${engine.name}: a real SIGKILL at every boundary of a protected tool call the Pi model makes (admission, the effect ledger, the target), with the production bridge tools' setting (an interrupted call is presented again under its own call ID), ends every time exactly like the uncrashed run: pushed once, confirmed and reported to the model as pushed, the call admitted, no effect left open, no blocker, never pushed twice, nothing acknowledged lost`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
+  if (runsSweep(sweeps, "presented again")) test(`${engine.name}: a real SIGKILL at every boundary of a protected tool call the Pi model makes (admission, the effect ledger, the target), with the production bridge tools' setting (an interrupted call is presented again under its own call ID), ends every time exactly like the uncrashed run: pushed once, confirmed and reported to the model as pushed, the call admitted, no effect left open, no blocker, never pushed twice, nothing acknowledged lost`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
     assert.equal(PRODUCTION_REPLAY, "safe", "the production bridge tools present an interrupted call again (G04 follow-up)");
     const { runs, points, first, last } = await sweep(PRODUCTION_REPLAY);
     assert.equal(points.length, ROUTE_STEPS.length);
@@ -58,7 +60,7 @@ export function defineToolKillTests(engineName: string, heavy = false, sweeps: T
     console.log(`# g04 tool[${engine.name}]: ${points.length} boundaries of the tool route (SIGKILL), ${first} to ${last}, database read before restart, restarted, every one finished as the uncrashed run`);
   });
 
-  if (sweeps !== "presented again") test(`${engine.name}: when an interrupted call is NOT presented again (a tool that is not replay-safe, or abandoned work), a real SIGKILL at every boundary still never pushes twice and leaves nothing open: once the attempt ends, an admitted call that never started is closed as failed and one that started is marked uncertain and reported to the owner, never run again`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
+  if (runsSweep(sweeps, "not presented again")) test(`${engine.name}: when an interrupted call is NOT presented again (a tool that is not replay-safe, or abandoned work), a real SIGKILL at every boundary still never pushes twice and leaves nothing open: once the attempt ends, an admitted call that never started is closed as failed and one that started is marked uncertain and reported to the owner, never run again`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
     const { runs, points, first, last } = await sweep(undefined);
     assert.equal(points.length, ROUTE_STEPS.length);
     assert.deepEqual(runs.map((r) => `${r.label}: ${r.outcome}`), runs.map((r) => `${r.label}: ${expectedNotPresentedAgain(r.label)}`));
