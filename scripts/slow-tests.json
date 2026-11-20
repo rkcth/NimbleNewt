@@ -6,8 +6,12 @@
     "storage/sqlite/worker-qualification.test.js",
     "storage/workload.test.js",
     "g04-kill-sqlite.test.js",
+    "g04-kill-sqlite-part2.test.js",
     "g04-kill-postgres.test.js",
+    "g04-kill-postgres-part2.test.js",
     "g04-tool-sqlite.test.js",
-    "g04-tool-postgres.test.js"
+    "g04-tool-sqlite-not-again.test.js",
+    "g04-tool-postgres.test.js",
+    "g04-tool-postgres-not-again.test.js"
   ]
 }

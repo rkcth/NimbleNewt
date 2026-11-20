@@ -52,6 +52,8 @@ export const backends: Backend[] = process.env["NIMBLENEWT_TIER"] === "typical" 
  * The backend of this name as a list, for a suite divided among test files by backend (one file per backend, so that a long suite stays well within the per-file
  * time limit on a slow CI machine). Empty when the typical tier leaves that backend out; a name that is no backend at all is a mistake.
  */
+/** Every backend's name, whatever the tier (backend-split.test.ts checks that each suite divided by backend has one file per name). */
+export const backendNames: readonly string[] = all.map((b) => b.name);
 export function backendsNamed(name: string): Backend[] {
   if (!all.some((b) => b.name === name)) throw new Error(`no backend named ${name}`);
   return backends.filter((b) => b.name === name);

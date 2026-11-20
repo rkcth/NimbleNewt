@@ -40,6 +40,19 @@ export function pickIndexes(count: number, key: readonly number[], stride: numbe
   return [...keep].sort((a, b) => a - b);
 }
 
+/**
+ * One file's share of a sweep divided among test files. Each point starts and kills a real process, which took 7 to 10 s a point on the Windows
+ * own-hardware runner, so one file with every point needed more than the 300 s per-file limit. Part `index` of `of` takes every `of`-th point from
+ * the `index`-th: the parts together are exactly the points, each in one part, and each part is spread over the whole path.
+ */
+export interface Part { readonly index: number; readonly of: number }
+export const WHOLE: Part = { index: 1, of: 1 };
+export function share<T>(points: readonly T[], part: Part): T[] {
+  if (!Number.isInteger(part.of) || part.of < 1 || !Number.isInteger(part.index) || part.index < 1 || part.index > part.of) throw new Error(`invalid part ${part.index} of ${part.of}`);
+  return points.filter((_, k) => k % part.of === part.index - 1);
+}
+export const partName = (part: Part): string => (part.of === 1 ? "" : ` (part ${part.index} of ${part.of})`);
+
 export type SliceWorld = harness.SliceWorld;
 export type Slice = harness.Slice;
 export type Clock = InstanceType<typeof harness.Clock>;
