@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent, each presented again after a crash (G04 follow-up: the controller answers it from its records)", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-propose", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-optin", "toolbox-pins", "toolbox-propose", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
@@ -261,7 +261,7 @@ test("dependency.record: sent as the call it is, with no way to name a task; an 
 test("the toolbox tools (card T08) are always there, name no task, project or agent, and say in words when an older controller does not have them", async () => {
   const sent: { op: string; args: Record<string, unknown> | undefined }[] = [];
   const current = createBridge({ send: async (r) => { sent.push({ op: r.op, args: r.args }); return { ok: true, result: { items: [] } }; } });
-  const names = ["toolbox.copies", "toolbox.copy", "toolbox.notices", "toolbox.propose", "toolbox.source"];
+  const names = ["toolbox.copies", "toolbox.copy", "toolbox.notices", "toolbox.optin", "toolbox.pins", "toolbox.propose", "toolbox.source"];
   for (const op of names) {
     const tool = current.tools.find((t) => t.name === bridgeToolName(op));
     assert.ok(tool !== undefined, op);
@@ -274,4 +274,10 @@ test("the toolbox tools (card T08) are always there, name no task, project or ag
   const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
   const source = old.tools.find((t) => t.name === bridgeToolName("toolbox.source"))!;
   assert.match(String(await source.execute({ name: "lint" }, { callId: "c2" } as never)), /^refused \(unknown_tool\): toolbox\.source is not available on this controller/);
+  // Opting in (card T08) names only the tool and the version: the agent moves itself, never another agent or everyone.
+  const optin = current.tools.find((t) => t.name === bridgeToolName("toolbox.optin"))!;
+  assert.deepEqual(Object.keys((optin.parameters as unknown as { properties: Record<string, unknown> }).properties).sort(), ["name", "version"]);
+  for (const p of ["everyone", "agentId"]) assert.ok(!Object.keys((optin.parameters as unknown as { properties: Record<string, unknown> }).properties).includes(p), `toolbox.optin takes no ${p}`);
+  const oldOptin = old.tools.find((t) => t.name === bridgeToolName("toolbox.optin"))!;
+  assert.match(String(await oldOptin.execute({ name: "lint" }, { callId: "c3" } as never)), /^refused \(unknown_tool\): toolbox\.optin is not available on this controller/);
 });
