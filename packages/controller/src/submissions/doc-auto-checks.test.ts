@@ -192,6 +192,9 @@ for (const backend of backends) {
       await exportCheck(back);
       x = await read(exportDoc);
       assert.deepEqual([x.state, x.reasons?.map((r) => (r as { submissionId: string }).submissionId)], ["stale", [back]], "going back to the old tree in a new submission flags it");
+      // The manual check naming older code is unchanged: it flags the document for that code even though it was flagged for newer code.
+      assert.deepEqual((await docs.impact(owner, { commandId: cid("i"), taskId: exportTask, submissionId: older })).flagged, [exportDoc], "a manual check naming older code still flags");
+      assert.deepEqual((await read(exportDoc)).reasons?.map((r) => (r as { submissionId: string }).submissionId), [back, older]);
       assert.deepEqual(hookErrors, []);
 
       // A release's documentation check has one command ID per candidate, project and version.
