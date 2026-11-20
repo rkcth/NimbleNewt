@@ -112,6 +112,8 @@ export interface WorkspaceRecordBody {
   readonly checks?: LandingChecksRecord;
   /** Card P09: the agent told (in its inbox) that its landing was refused by the checks, with the results. */
   readonly toldAuthor?: string;
+  /** Card P09 follow-up: the owner was sent a needs-you notice because the required tests had no test commands a landing can use (`checks.testsNeedOwner`), which the author cannot fix itself. */
+  readonly toldOwner?: boolean;
 }
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
 export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean }
@@ -123,7 +125,10 @@ export interface WorkspaceDeps {
   readonly portOf: (taskId: string) => Promise<WorkspacePort | undefined>;
   /** The live attempts of a task, what an attempt's freeze says (`undefined`: not frozen), and lifting it. For recovery. `tell` puts a text before a running agent (returns whether it reached a worker) and `stop` ends an attempt (card H12m). */
   readonly attempts?: { live(taskId: string): Promise<string[]>; frozenReason(attemptId: string): Promise<string | undefined>; release(attemptId: string): Promise<void>; tell?(attemptId: string, text: string): Promise<boolean>; stop?(attemptId: string, reason: string): Promise<void> };
-  /** Tells the owner (a needs-you notice, once per request): landed files wait uncommitted in the shared tree, or a landing was refused because the tree is not clean. */
+  /**
+   * Tells the owner (a needs-you notice, once per request): landed files wait uncommitted in the shared tree, or a landing was refused because the tree is not clean. Also (card P09 follow-up, once per task and contract
+   * version): a landing was refused because the required tests had no test commands a landing can use (none set, or set only by the task's own authors). The text is at most 200 characters.
+   */
   readonly notify?: (notice: { commandId: string; taskId: string; text: string }) => Promise<void>;
   /** An attempt as the dispatcher knows it (card H12p): its task, its agent, whether it is live and whether it was stopped. Needed for `reapply` (the author's own refresh); without it that operation is unavailable. */
   readonly attemptOf?: (attemptId: string) => Promise<{ readonly taskId: string; readonly agentId: string; readonly live: boolean; readonly stopped?: boolean } | undefined>;
@@ -530,7 +535,7 @@ export class WorkspaceOpService {
           if (!gated.passed) {
             gateRefused = true;
             const failed = gated.results.filter((r) => r.result !== "pass").map((r) => `${r.check} ${r.result === "fail" ? "failed" : "not run"}`);
-            return { ok: false as const, reason: `the required checks did not all pass on the integrated tree${gated.tree === undefined ? "" : ` ${gated.tree.slice(0, 12)}`} (${failed.join(", ")}; a check that did not run counts as failed), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; the author was sent the results` };
+            return { ok: false as const, reason: `the required checks did not all pass on the integrated tree${gated.tree === undefined ? "" : ` ${gated.tree.slice(0, 12)}`} (${failed.join(", ")}; a check that did not run counts as failed), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; the author was sent the results${gated.testsNeedOwner === undefined ? "" : gated.testsNeedOwner === "authors-only" ? "; the task's test commands were set only by its own authors, so the owner is asked to set or accept them" : "; the task has no test commands, so the owner is asked to set them"}` };
           }
           // The checks may have run for a while: the lease, the approval and the queue are shown once more, so a lease that ran out or a queue that moved during the checks still lands nothing.
           if (gated.required.length > 0 && stillLeased !== undefined) {
@@ -583,7 +588,14 @@ export class WorkspaceOpService {
         author ??= body.assignee;
         if (author !== undefined) { try { await this.#deps.tellAuthor({ commandId: `lgc-${id}`, taskId: body.taskId, to: author, text: landingChecksText(body.taskId, id, gated) }); toldAuthor = author; } catch { /* recorded as not told */ } }
       }
-      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }) };
+      // Required tests with no test commands a landing can use cannot be fixed by the author (its own contract changes do not count): the owner gets a needs-you notice, once per task and contract version (a repeat of the
+      // landing, or the next one, while nothing changed is not told again).
+      let toldOwner = false;
+      if (gateRefused && gated?.testsNeedOwner !== undefined && this.#deps.notify !== undefined) {
+        const text = gated.testsNeedOwner === "authors-only" ? `Task ${body.taskId} cannot land: its test commands were set only by its own agents, which a landing does not run. Set or accept them (contract.set checks).` : `Task ${body.taskId} cannot land: its project requires tests but the task has no test commands. Set them (contract.set checks) or change the required checks.`;
+        try { await this.#deps.notify({ commandId: `lgo-${body.taskId}-v${gated.contractVersion ?? 0}-${gated.testsNeedOwner}`, taskId: body.taskId, text: text.slice(0, 200) }); toldOwner = true; } catch { /* recorded as not told */ }
+      }
+      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
         // A queued submission leaves the queue only when the host confirms it landed exactly that submission (card P10); a landing it does not confirm is said so, and the entry stays.
@@ -593,7 +605,7 @@ export class WorkspaceOpService {
         const summary = `${safe(outcome.summary, unconfirmed ? WORKSPACE_LIMITS.summary - 220 : WORKSPACE_LIMITS.summary)}${unconfirmed ? `; the host did not confirm that exactly submission ${body.queued!.submissionId} landed, so it stays in the landing queue (landing.queue.remove takes it out)` : ""}`;
         return done("done", { summary, ...(detail === undefined ? {} : { detail }), ...more });
       }
-      return done("refused", { summary: `${gateRefused ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(told.length === 0 ? {} : { told }) });
+      return done("refused", { summary: `${gateRefused ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}), ...(told.length === 0 ? {} : { told }) });
     } catch (error) {
       if (error instanceof QuiesceRefused) return done("refused", { summary: safe(error.message, WORKSPACE_LIMITS.summary), ...(error.blockerId === undefined ? {} : { blocker: error.blockerId }) });
       // The host was asked and failed, or the answer was lost: it may have changed the checkout, so this is not a clean failure.

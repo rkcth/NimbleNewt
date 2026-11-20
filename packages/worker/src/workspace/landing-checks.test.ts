@@ -220,3 +220,83 @@ test("in the real sandbox: a test command reads the integrated tree at /work and
     assert.deepEqual(await readdir(base), []);
   } finally { await w.done(); await launcher.stop().catch(() => undefined); await rm(base, { recursive: true, force: true }); }
 });
+
+test("when the controller stops waiting (the call's signal is aborted), the running check is killed and no further check starts; the copies are removed (card P09 follow-up)", { skip }, async () => {
+  const base = await mkdtemp(join(tmpdir(), "nn-p09-stop-"));
+  const launched: string[] = [];
+  let kills = 0;
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  // A slow command: its result comes only when it is killed.
+  const launcher = {
+    async launch(req: LaunchRequest) {
+      launched.push(req.command.join(" "));
+      let end!: (r: RunResult) => void;
+      const result = new Promise<RunResult>((resolve) => { end = resolve; });
+      started();
+      return { result, kill: () => { kills++; end({ exitCode: null, signal: "SIGKILL", timedOut: false, killed: true, stdout: "", stderr: "", truncated: false, stdoutTruncated: false, durationMs: 5 }); } } as never;
+    },
+  };
+  const w = await world({ launcher, base });
+  try {
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    w.g("add", "-A"); w.g("commit", "-q", "-m", "work");
+    const stop = new AbortController();
+    const pending = w.ws.port.landingChecks!({ ...scope, checks: [{ name: "slow", run: ["slow"], timeoutMs: 600_000 }, { name: "next", run: ["next"], timeoutMs: 1000 }], maxOutputBytes: 100, signal: stop.signal });
+    await running;
+    stop.abort(new Error("the host did not answer"));
+    const report = await pending;
+    assert.equal(kills, 1, "the running check was killed");
+    assert.deepEqual(launched, ["slow"], "no further check was started");
+    assert.deepEqual(report.checks.map((c) => [c.name, c.state]), [["slow", "not-run"], ["next", "not-run"]]);
+    assert.match(report.checks[0]!.reason!, /stopped waiting/);
+    assert.match(report.checks[1]!.reason!, /stopped waiting/);
+    assert.deepEqual(await readdir(base), [], "every copy is removed");
+    // Already aborted before the call: nothing is launched.
+    const before = await w.ws.port.landingChecks!({ ...scope, checks: [{ name: "one", run: ["one"], timeoutMs: 1000 }], maxOutputBytes: 100, signal: stop.signal });
+    assert.deepEqual([before.checks[0]!.state, launched.length], ["not-run", 1]);
+  } finally { await w.done(); await rm(base, { recursive: true, force: true }); }
+});
+
+test("in the real sandbox: a check and the process it started are both gone once the controller stops waiting (card P09 follow-up)", { skip }, async (t) => {
+  const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
+  const launcher = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
+  const usable = launcher.capacity.available && launcher.capacity.backend === "bubblewrap" && !["/usr", "/bin", "/lib"].includes(nodeRoot) && existsSync("/proc/self/cmdline");
+  if (!usable) {
+    if (process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1" && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${launcher.capacity.reason ?? "?"}`);
+    t.skip("bubblewrap or a node install it can mount is unusable"); await launcher.stop().catch(() => undefined); return;
+  }
+  const marker = `nn-p09-stop-${process.pid}-${Date.now()}`;
+  /** Host processes whose command line names the marker. */
+  const withMarker = async (): Promise<number[]> => {
+    const found: number[] = [];
+    for (const e of await readdir("/proc")) {
+      if (!/^\d+$/.test(e) || Number(e) === process.pid) continue;
+      try { if ((await readFile(`/proc/${e}/cmdline`, "utf8")).includes(marker)) found.push(Number(e)); } catch { /* ended */ }
+    }
+    return found;
+  };
+  const base = await mkdtemp(join(tmpdir(), "nn-p09-real-stop-"));
+  const w = await world({ launcher, base, readOnly: [{ host: nodeRoot, guest: "/opt/node" }] });
+  try {
+    await writeFile(join(w.made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    w.g("add", "-A"); w.g("commit", "-q", "-m", "work");
+    // The check starts a second process (detached into its own session, as a stray test helper might) and both wait for ever.
+    const script = `require('node:child_process').spawn('/opt/node/bin/node', ['-e', 'setInterval(() => {}, 1000)', '${marker}-child'], { detached: true, stdio: 'ignore' }); setInterval(() => {}, 1000);`;
+    const stop = new AbortController();
+    const pending = w.ws.port.landingChecks!({ ...scope, checks: [{ name: "waits", run: ["/opt/node/bin/node", "-e", script, marker], timeoutMs: 600_000 }], maxOutputBytes: 1000, signal: stop.signal });
+    const deadline = Date.now() + 30_000;
+    while ((await withMarker()).length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok((await withMarker()).length >= 2, "the check and its child are running");
+    stop.abort(new Error("the host did not answer"));
+    const report = await pending;
+    assert.deepEqual(report.checks.map((c) => [c.name, c.state]), [["waits", "not-run"]]);
+    const gone = Date.now() + 10_000;
+    while ((await withMarker()).length > 0 && Date.now() < gone) await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(await withMarker(), [], "no process of the check is left");
+    assert.deepEqual(await readdir(base), []);
+  } finally {
+    for (const p of await withMarker()) { try { process.kill(p, "SIGKILL"); } catch { /* gone */ } }
+    await w.done(); await launcher.stop().catch(() => undefined); await rm(base, { recursive: true, force: true });
+  }
+});
