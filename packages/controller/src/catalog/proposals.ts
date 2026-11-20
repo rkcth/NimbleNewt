@@ -576,25 +576,29 @@ export class ToolboxProposalService {
    * The text of the parts the author wrote, read now from its records (checked by digest), to keep with the proposal (`PROPOSAL_TEXT_KIND`): the proposal stays decidable when the author later supersedes a record or retention
    * archives it. Undefined when the author wrote no part (a manifest-only change).
    */
-  async #keptText(id: string, p: Pick<ToolboxProposalBody, "kind" | "proposed" | "changes">): Promise<ProposalTextBody | undefined> {
+  async #keptText(id: string, p: Pick<ToolboxProposalBody, "kind" | "proposed" | "changes">): Promise<{ body: ProposalTextBody; checks: Change[] } | undefined> {
     const texts: { instructions?: string; executable?: string } = {};
     const sources: string[] = [];
+    const checks = new Map<string, Change>();
     for (const [part, ref, changed] of [["instructions", p.proposed.instructional, p.changes.instructions], ["executable", p.proposed.executable, p.changes.executable]] as const) {
       if (ref === undefined || !changed) continue;
-      const rec = (await this.#runner.get("desk-record", ref.recordId))?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
-      if (rec === undefined || rec.deleted !== undefined || typeof rec.body !== "string" || sha(rec.body) !== ref.digest) invalid(part === "instructions" ? "instructionsRecordId" : "executableRecordId", "the record is no longer as it was; write the work again");
+      const found = await this.#runner.get("desk-record", ref.recordId);
+      const rec = found?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
+      if (found === undefined || rec === undefined || rec.deleted !== undefined || typeof rec.body !== "string" || sha(rec.body) !== ref.digest) invalid(part === "instructions" ? "instructionsRecordId" : "executableRecordId", "the record is no longer as it was; write the work again");
       texts[part] = rec!.body as string; sources.push(ref.recordId);
+      checks.set(ref.recordId, { type: "check", ref: { kind: "desk-record", id: ref.recordId }, expectedRevision: found!.revision });
     }
     if (sources.length === 0) return undefined;
-    return { proposalId: id, digest: p.proposed.digest, sources: [...new Set(sources)], ...texts, at: this.#runner.now() };
+    // The write that keeps the text also checks each record is still at the revision read: an owner's deletion (or an archive) landing in between, which gathers kept text by `sources`, would not find this copy yet.
+    return { body: { proposalId: id, digest: p.proposed.digest, sources: [...new Set(sources)], ...texts, at: this.#runner.now() }, checks: [...checks.values()] };
   }
 
   /** The changes that put `kept` in place of the proposal's kept text (or remove it, `undefined`), read inside the write. */
-  async #replaceText(id: string, kept: ProposalTextBody | undefined): Promise<Change[]> {
+  async #replaceText(id: string, kept: { body: ProposalTextBody; checks: Change[] } | undefined): Promise<Change[]> {
     const ref = proposalTextRef(id);
     const cur = await this.#runner.get(ref.kind, ref.id);
     if (kept === undefined) return cur === undefined ? [] : [{ type: "delete", ref, expectedRevision: cur.revision }];
-    return [cur === undefined ? { type: "create", ref, body: kept as unknown as JsonObject } : { type: "update", ref, expectedRevision: cur.revision, body: kept as unknown as JsonObject }];
+    return [cur === undefined ? { type: "create", ref, body: kept.body as unknown as JsonObject } : { type: "update", ref, expectedRevision: cur.revision, body: kept.body as unknown as JsonObject }, ...kept.checks];
   }
 
   /**
@@ -626,7 +630,7 @@ export class ToolboxProposalService {
     return { proposed: { ...proposed, digest: digestOf(base.name, proposed) }, changes, permissionChanges: { added: [...after].filter((a) => !before.has(a)).sort(), removed: [...before].filter((a) => !after.has(a)).sort() } };
   }
 
-  async #create(by: Principal, op: string, commandId: string, id: string, body: ToolboxProposalBody, kept: ProposalTextBody | undefined): Promise<void> {
+  async #create(by: Principal, op: string, commandId: string, id: string, body: ToolboxProposalBody, kept: { body: ProposalTextBody; checks: Change[] } | undefined): Promise<void> {
     const ref: AggregateRef = { kind: PROPOSAL_KIND, id };
     const iref: AggregateRef = { kind: INDEX_KIND, id: derivedId("tpa", by.id) };
     await this.#runner.command(op, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
@@ -638,7 +642,7 @@ export class ToolboxProposalService {
         const nextIndex: AuthorIndex = { author: by.id, pending: [...pending, id] };
         return {
           ref, creates: true,
-          changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...(kept === undefined ? [] : [{ type: "create" as const, ref: proposalTextRef(id), body: kept as unknown as JsonObject }]), index === undefined ? { type: "create", ref: iref, body: nextIndex as unknown as JsonObject } : { type: "update", ref: iref, expectedRevision: index.revision, body: nextIndex as unknown as JsonObject }],
+          changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...(kept === undefined ? [] : [{ type: "create" as const, ref: proposalTextRef(id), body: kept.body as unknown as JsonObject }, ...kept.checks]), index === undefined ? { type: "create", ref: iref, body: nextIndex as unknown as JsonObject } : { type: "update", ref: iref, expectedRevision: index.revision, body: nextIndex as unknown as JsonObject }],
           detail: { target: body.target, kind: body.kind }, contention: async () => new DomainError("stale_revision", "your proposals changed at the same moment; propose again"),
         };
       },

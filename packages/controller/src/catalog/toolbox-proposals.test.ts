@@ -324,6 +324,54 @@ for (const backend of backends) {
     void readme;
   });
 
+  suite("slice 4, first review: the owner's deletion of a record landing between a proposal reading its text and writing the kept copy leaves no copy behind (the write checks the record is still at the revision read)", async (c) => {
+    const { cody, maya } = await cast(c);
+    const retention = RetentionService.withEpoch(c.storage, c.epoch, { settings: { effective: async () => ({ ...RETENTION_DEFAULTS, reserveBytes: 0, thinkingAuto: false }) } } as never, options);
+    // A proposal service whose reads of one desk record are counted; on the read numbered `at` the owner's deletion of that record runs, after the read has been answered as it was.
+    let watch: { id: string; reads: number; at?: number } | undefined;
+    const proxied = new Proxy(c.storage, { get: (t, k) => {
+      const v = Reflect.get(t, k, t) as unknown;
+      if (k !== "getAggregate") return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v;
+      return async (ref: { kind: string; id: string }) => {
+        const got = await t.getAggregate(ref);
+        if (watch !== undefined && ref.kind === "desk-record" && ref.id === watch.id && ++watch.reads === watch.at) {
+          const deleted = await retention.delete(c.owner, { commandId: cid("del"), recordId: watch.id, reason: "the owner asked" });
+          assert.equal(deleted.status, "deleted", JSON.stringify(deleted));
+        }
+        return got;
+      };
+    } });
+    const props = ToolboxProposalService.withEpoch(proxied, c.epoch, c.cat, c.desks, options);
+    const kept = async (id: string) => c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id });
+    const allKept = async () => JSON.stringify((await c.storage.listAggregates(PROPOSAL_TEXT_KIND, { limit: 1000 })).map((a) => a.body));
+    // How many times a proposal reads its record (the last read is the one whose text is kept).
+    const calib = await c.note(cody.p, "console.log('lint, counted')");
+    watch = { id: calib, reads: 0 };
+    const counted = (await props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: calib, rationale: "r", tests: "t" })).proposalId;
+    const reads = watch.reads;
+    assert.ok(reads >= 1 && (await kept(counted)) !== undefined, String(reads));
+    // The deletion lands right after the last read: the proposal is refused and no copy of the deleted text is left.
+    const gone = await c.note(cody.p, "console.log('lint, deleted meanwhile')");
+    watch = { id: gone, reads: 0, at: reads };
+    await assert.rejects(() => props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: gone, rationale: "r", tests: "t" }), (e: unknown) => e instanceof DomainError);
+    watch = undefined;
+    assert.ok(!(await allKept()).includes("deleted meanwhile"), await allKept());
+    assert.equal((await props.list(maya.p, { state: "all" })).items.length, 1, "only the counted proposal was made");
+    // The same for a revision that writes a new part.
+    const fresh = await c.note(cody.p, "console.log('lint, revised')");
+    watch = { id: fresh, reads: 0 };
+    const pR = (await props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: await c.note(cody.p, "console.log('lint, first')"), rationale: "r", tests: "t" })).proposalId;
+    watch = { id: fresh, reads: 0 };
+    await props.revise(cody.p, { commandId: cid("rv"), proposalId: pR, executableRecordId: fresh });
+    const reviseReads = watch.reads;
+    const gone2 = await c.note(cody.p, "console.log('lint, revised and deleted meanwhile')");
+    watch = { id: gone2, reads: 0, at: reviseReads };
+    await assert.rejects(() => props.revise(cody.p, { commandId: cid("rv"), proposalId: pR, executableRecordId: gone2 }), (e: unknown) => e instanceof DomainError);
+    watch = undefined;
+    assert.equal(((await kept(pR))?.body as { executable?: string } | undefined)?.executable, "console.log('lint, revised')", "the refused revision changed nothing");
+    assert.ok(!(await allKept()).includes("deleted meanwhile"), await allKept());
+  });
+
   suite("slice 4, the README validation walk (README 324-326): a coder's personal tool becomes a role-scoped shared version that survives its author's rename and retirement; only maintainers change it; a published version is immutable; update, rollback and revocation; nothing is granted by publishing", async (c) => {
     const cody = await c.agent("Cody", worker(c.a), { roles: ["coder"] });
     const kim = await c.agent("Kim", [...worker(c.a), { action: "tool.toolbox.fmt", project: c.a }], { roles: ["coder"] });

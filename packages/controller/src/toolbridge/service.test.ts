@@ -1494,11 +1494,16 @@ for (const backend of backends) {
     const props = ToolboxProposalService.withEpoch(c.storage, c.epoch, c.catalog, c.desks, c.options);
     const svc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, proposals: props, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, activity: async (step) => { steps.push(step.summary); }, isLocalHost: () => true });
     const bare = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true });
+    // The bridge's own refusal of anything but finish or cancel, before the catalog is asked (the catalog refuses a maintainer's pause as well; this pins the bridge's layer).
+    let revokeReached = 0;
+    const spied = new Proxy(c.catalog, { get: (t, k) => { if (k === "revoke") return async (...a: Parameters<typeof t.revoke>) => { revokeReached++; return t.revoke(...a); }; const v = Reflect.get(t, k, t) as unknown; return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(t) : v; } });
+    const spiedSvc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: spied, proposals: props, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true });
     const out: Record<string, BridgeResponse> = {};
     const ids: Record<string, string> = {};
     c.worker.script = c.session(async (s) => {
       const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
       const act = (action: string, args: JsonObject, callId: string) => send("toolbox.proposal", { action, ...args }, callId);
+      for (const [i, runningCalls] of ["pause", "stop", ""].entries()) out[`spied-revoke-${i}`] = await spiedSvc.handle(s.token, s.gateway, { op: "toolbox.revoke", callId: `ks${i}`, args: { name: "lint", version: "1.0.0", reason: "old", runningCalls } });
       const doc = good(await send("desk.write", { kind: "note", title: "lint", body: "Run lint.", visibility: "shared", status: "accepted" }, "w0"));
       const code = good(await send("desk.write", { kind: "note", title: "lint code", body: "console.log('lint')", visibility: "shared", status: "accepted" }, "w1"));
       const better = good(await send("desk.write", { kind: "note", title: "lint code 2", body: "console.log('lint 2')", visibility: "shared", status: "accepted" }, "w2"));
@@ -1550,6 +1555,8 @@ for (const backend of backends) {
     assert.match(bad(out["unknown"]!).message, /action: must be one of propose, promote, revise, rebase, withdraw, list, get, decide/);
     assert.equal(bad(out["extra"]!).code, "invalid_command");
     assert.match(bad(out["pause-revoke"]!).message, /finish or cancel/);
+    for (const i of [0, 1, 2]) assert.match(bad(out[`spied-revoke-${i}`]!).message, /runningCalls: must be finish or cancel/, String(i));
+    assert.equal(revokeReached, 0, "a runningCalls other than finish or cancel is refused by the bridge before the catalog is asked");
     assert.deepEqual(good(out["revoke"]!), { name: "toolbox.lint", version: "1.0.0", runningCalls: "finish" });
     assert.equal((await c.catalog.revocationOf("toolbox.lint", "1.0.0"))?.revokedBy, "agent:ann");
     assert.equal(bad(out["unavailable"]!).code, "unavailable");
