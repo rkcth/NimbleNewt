@@ -8,7 +8,8 @@ import { SandboxLauncher, stripTrailingSeparator, type LaunchRecord } from "./la
 import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
-import { CHAIN_NAMES, DIAGNOSTIC_TIMEOUT_MS, chainName, contextText, integrityWord } from "./windows-list.js";
+import { CHAIN_LABELS, CHAIN_NAMES, DIAGNOSTIC_TIMEOUT_MS, chainName, contextText, integrityWord } from "./windows-list.js";
+import type { RedactionNames } from "./windows-redact.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { evidenceControlDirs, releaseLeftovers, sandboxRunning, searchEvidenceDirs } from "./windows-cleanup.js";
 import { MARKER_NAME, createRecordedFolder, dropFinishedRecords, recordDirFrom } from "./windows-records.js";
@@ -504,8 +505,8 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
       const h = await windowsSandboxBackend(options(host, { listOptions: { ...fast, diagnosticTimeoutMs: 70 } })).health();
       assert.equal(h.healthy, false, "a diagnostic call that answers does not make the list answer");
       assert.match(h.reason!, /could not be listed after 3 attempt\(s\)/);
-      assert.ok(h.reason!.includes("context: this process elevated yes integrity high, session 1, console session 1, server session 1 elevated no integrity medium, process chain (this process first) node < cmd < Runner.Worker < other < cmd < other;"), h.reason);
-      assert.match(h.reason!, /diagnostic call through cmd with a minimal environment \(recorded only, the list stays failed\): ok after \d+ ms \(limit 70 ms\)/);
+      assert.ok(h.reason!.includes("context: this process elevated yes integrity high, session 1, console session 1, server session 1 elevated no integrity medium, process chain (this process first) nodeExe < cmdExe < RunnerWorkerExe < other < cmdExe < other;"), h.reason);
+      assert.match(h.reason!, /diagnostic call through cmdExe with a minimal environment \(recorded only, the list stays failed\): ok after \d+ ms \(limit 70 ms\)/);
       assert.deepEqual(host.wsbCommands, ["list", "list", "list"], "no sandbox was started");
       assert.equal(host.minimalRuns.length, 1, "one diagnostic call");
       assert.deepEqual(host.minimalRuns[0], { file: `${INSTALL}\\wsb.exe`, args: ["list", "--raw"], cwd: INSTALL, timeoutMs: 70 });
@@ -542,7 +543,7 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
       assert.match(thrown, /the list stays failed\): could not run after/);
       assert.ok(!thrown.includes("robert"), thrown);
       const absent = await reasonOf((h) => { delete h.runMinimalEnv; delete h.listContext; });
-      assert.match(absent, /context: not available; diagnostic call through cmd with a minimal environment \(recorded only, the list stays failed\): not available\)$/);
+      assert.match(absent, /context: not available; diagnostic call through cmdExe with a minimal environment \(recorded only, the list stays failed\): not available\)$/);
     });
 
     test("the context copies only fixed words and numbers, whatever the probe returned", async () => {
@@ -555,10 +556,10 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
         chain: ["C:\\Users\\robert\\node.exe", "NODE.EXE", "RUNNER.WORKER.exe", "pwsh", "PowerShell.exe", "bash.exe", "robert-tool.exe", 7, null, "cmd"],
       };
       const reason = (await windowsSandboxBackend(options(host, { listOptions: fast })).health()).reason!;
-      assert.ok(reason.includes("context: this process elevated unknown integrity unknown, session unknown, console session none, server session 2 elevated yes integrity system, session unknown elevated unknown integrity unknown, process chain (this process first) other < node < Runner.Worker < pwsh < powershell < bash < other < other;"), reason);
+      assert.ok(reason.includes("context: this process elevated unknown integrity unknown, session unknown, console session none, server session 2 elevated yes integrity system, session unknown elevated unknown integrity unknown, process chain (this process first) other < nodeExe < RunnerWorkerExe < pwshExe < powershellExe < bashExe < other < other;"), reason);
       for (const value of ["robert", "Users", "S-1-16", "NODE.EXE"]) assert.ok(!reason.includes(value), `${value} must not appear`);
       // At most 8 chain entries and 8 servers; one server reported as an object alone; nothing at all.
-      assert.equal(contextText({ chain: Array.from({ length: 12 }, () => "cmd.exe") }).split("process chain (this process first) ")[1], Array.from({ length: 8 }, () => "cmd").join(" < "));
+      assert.equal(contextText({ chain: Array.from({ length: 12 }, () => "cmd.exe") }).split("process chain (this process first) ")[1], Array.from({ length: 8 }, () => "cmdExe").join(" < "));
       const ten = contextText({ servers: Array.from({ length: 10 }, () => ({ sessionId: 1, elevated: 0, integrity: 0x2000 })) });
       assert.match(ten, /integrity medium and 2 more, process chain/);
       assert.equal(ten.split("session 1 elevated no integrity medium").length - 1, 8, "eight servers shown");
@@ -574,12 +575,53 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
     test("integrity words, chain names and the minimal environment and cmd line of the real host", () => {
       assert.deepEqual([0, 0x1000, 0x2000, 0x2100, 0x3000, 0x4000, 0x5000, -1, 1.5, "0x3000"].map(integrityWord), ["other", "low", "medium", "medium", "high", "system", "other", "unknown", "unknown", "unknown"]);
       assert.deepEqual(CHAIN_NAMES, ["node", "pwsh", "powershell", "cmd", "Runner.Worker", "bash"]);
-      assert.deepEqual(["node.exe", "Runner.Worker", "runner.worker.exe", "Runner.Listener.exe", "nodeX.exe", "node.exe.exe", "", undefined].map(chainName), ["node", "Runner.Worker", "Runner.Worker", "other", "other", "other", "other", "other"]);
+      // Each label is one run of ASCII letters (so the account-name redaction, which splits names at blanks, dots, underscores and dashes, matches it only as a whole).
+      assert.deepEqual(CHAIN_LABELS, ["nodeExe", "pwshExe", "powershellExe", "cmdExe", "RunnerWorkerExe", "bashExe"]);
+      for (const label of CHAIN_LABELS) assert.match(label, /^[A-Za-z]+$/);
+      assert.deepEqual(["node.exe", "Runner.Worker", "runner.worker.exe", "Runner.Listener.exe", "nodeX.exe", "node.exe.exe", "", undefined].map(chainName), ["nodeExe", "RunnerWorkerExe", "RunnerWorkerExe", "other", "other", "other", "other", "other"]);
       assert.deepEqual(MINIMAL_ENV_NAMES, ["SystemRoot", "windir", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "PATH"]);
       assert.deepEqual(minimalEnv({ SystemRoot: "C:\\Windows", PATH: "C:\\Windows\\System32", TEMP: "", HTTP_PROXY: "http://proxy", GRPC_VERBOSITY: "debug", HOME: "C:\\Users\\x" }), { SystemRoot: "C:\\Windows", PATH: "C:\\Windows\\System32" });
       assert.equal(cmdLine(`${INSTALL}\\wsb.exe`, ["list", "--raw"]), `/d /v:off /s /c ""${INSTALL}\\wsb.exe" list --raw"`);
       for (const bad of ["C:\\a\"b\\wsb.exe", "C:\\%TEMP%\\wsb.exe", "C:\\a\nb\\wsb.exe"]) assert.throws(() => cmdLine(bad, ["list"]), /cmd\.exe could change/);
       assert.throws(() => cmdLine(`${INSTALL}\\wsb.exe`, ["list & calc"]), /not a plain word/);
+    });
+
+    test("the line does not depend on the machine's account name: an account named like a process or the runner keeps every label, one named exactly like a label loses only that label", async () => {
+      // The account-name redaction reads USERNAME and USER (and the account of the process); LOGNAME is set too so that no reading of the name is left at the machine's value.
+      const keys = ["USER", "USERNAME", "LOGNAME"] as const;
+      const saved = keys.map((k) => process.env[k]);
+      const setAccount = (name: string): void => { for (const k of keys) process.env[k] = name; };
+      const reasonFor = async (names?: RedactionNames): Promise<string> => {
+        const host = new SimHost();
+        host.listScript = [hung, hung, hung];
+        host.minimalAnswer = ok("");
+        host.guest = probeGuest(host);
+        const reason = (await windowsSandboxBackend(options(host, { listOptions: { ...fast, diagnosticTimeoutMs: 70, ...(names === undefined ? {} : { names }) } })).health()).reason!;
+        return reason.replace(/after \d+ ms/g, "after N ms");
+      };
+      try {
+        setAccount("zq-account-under-test");
+        const baseline = await reasonFor();
+        assert.ok(baseline.includes("process chain (this process first) nodeExe < cmdExe < RunnerWorkerExe < other < cmdExe < other;"), baseline);
+        assert.ok(baseline.includes("diagnostic call through cmdExe with a minimal environment"), baseline);
+        assert.ok(!baseline.includes("<user>"), baseline);
+        // The account the own-hardware Mac probe runs as, the account of GitHub's hosted runners, and every process name the chain recognises, each as the account in the
+        // environment and as a name the caller adds.
+        for (const account of ["nimblenewt-runner", "runner", "worker", "node", "cmd", "pwsh", "powershell", "bash", "Runner.Worker", "runner-worker", "NODE", "nodejs"]) {
+          setAccount(account);
+          assert.equal(await reasonFor(), baseline, `account ${account} in the environment`);
+          assert.equal(await reasonFor({ users: [account] }), baseline, `account ${account} added by the caller`);
+        }
+        // An account named exactly like a label: the redaction wins (the label is the account's name, so it must not stay), and only that label is lost.
+        setAccount("cmdExe");
+        const named = await reasonFor();
+        assert.ok(!/cmdExe/i.test(named), named);
+        assert.ok(named.includes("process chain (this process first) nodeExe < <user> < RunnerWorkerExe < other < <user> < other;"), named);
+        assert.ok(named.includes("diagnostic call through <user> with a minimal environment"), named);
+        assert.equal(named.replaceAll("<user>", "cmdExe"), baseline);
+      } finally {
+        keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+      }
     });
   });
 
@@ -1641,7 +1683,7 @@ describe("the launcher with a backend that reports details", () => {
     const fr = await run(foreign);
     assert.deepEqual(fr.found.dirs, []);
     assert.equal(fr.found.held.length, 1);
-    assert.match(fr.found.held[0]!, /owned neither by SYSTEM or Administrators nor by the owner of the runner's records folder/);
+    assert.match(fr.found.held[0]!, /owned neither by SYSTEM or Administrators nor by the owner of the records folder; left alone/);
     assert.ok(!/S-1-5|robert|D:/.test(fr.found.held[0]!));
     assert.equal(fr.r.released, 0);
     // The same with a believed records folder of another owner: still left alone. Owned by the records folder's owner (a runner not elevated): released.
