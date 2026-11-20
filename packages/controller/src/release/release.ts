@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
-import { onlyKnown, text } from "../domain/model.js";
+import { onlyKnown, projectId as checkProjectId, text } from "../domain/model.js";
 import { CommandRunner, type Built, type RunnerOptions } from "../domain/runner.js";
 import { allows } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
@@ -245,15 +245,22 @@ export class ReleaseService {
   private constructor(runner: CommandRunner) { this.#runner = runner; }
   static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): ReleaseService { return new ReleaseService(new CommandRunner(storage, epoch, options)); }
 
-  async submit(owner: Principal, command: NoActor & { manifest: unknown }): Promise<{ candidateId: string; manifestDigest: string; replayed: boolean }> {
+  /**
+   * `projectId` with `version` (both or neither, card Q03) say which project's documents this release carries and the version it is: they are part of the command (a command ID used with another project
+   * or version is `command_conflict`), not of the manifest, so the candidate ID is the same. The project must exist. The caller then runs that project's documentation release check.
+   */
+  async submit(owner: Principal, command: NoActor & { manifest: unknown; projectId?: string; version?: string }): Promise<{ candidateId: string; manifestDigest: string; replayed: boolean; docs?: { projectId: string; version: string } }> {
     this.#owner(owner, "submit a release candidate");
-    onlyKnown(command, ["commandId", "manifest"]);
+    onlyKnown(command, ["commandId", "manifest", "projectId", "version"]);
     const manifest = checkManifest(command.manifest);
+    if ((command.projectId === undefined) !== (command.version === undefined)) bad(command.projectId === undefined ? "projectId" : "version", "projectId and version go together: the project whose documents this release carries, and the version it is");
+    const docs = command.projectId === undefined ? undefined : { projectId: checkProjectId(command.projectId), version: text(command.version, "version", { min: 1, max: 40 }) };
     const candidateId = candidateIdOf(manifest);
     const ref: AggregateRef = { kind: CANDIDATE, id: candidateId };
     const done = await this.#runner.command("release.submit", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
-      payload: { candidateId },
+      payload: { candidateId, ...(docs === undefined ? {} : { docs }) },
       build: async (): Promise<Built> => {
+        if (docs !== undefined && (await this.#runner.get("project", docs.projectId)) === undefined) throw new DomainError("not_found", "no such project", { field: "projectId" });
         const existing = await this.#runner.get(CANDIDATE, candidateId);
         // The same manifest again is the same candidate.
         if (existing !== undefined) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: existing.revision }], detail: { candidateId, existing: true } };
@@ -262,7 +269,7 @@ export class ReleaseService {
       },
     }));
     // The full manifest digest is what a release signature covers with the ID (K02b), so the publisher signs exactly what was submitted.
-    return { candidateId, manifestDigest: manifestDigestOf(manifest), replayed: done.replayed };
+    return { candidateId, manifestDigest: manifestDigestOf(manifest), replayed: done.replayed, ...(docs === undefined ? {} : { docs }) };
   }
 
   /**

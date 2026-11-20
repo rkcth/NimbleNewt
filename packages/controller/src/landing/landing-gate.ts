@@ -12,7 +12,8 @@ import { redactText } from "../security/redact.js";
  *   submission counts as an author too (its own contract versions are not used).
  * - `qa`, `docs`, `director`: not collected at landing yet, so they are `not_run` (counted as failed) when required.
  * `not_run` counts as failed: the landing passes only when every required check is `pass`. A host that cannot run the checks or read the change makes every required check `not_run`. A project that requires no check is not gated
- * and the host is not asked.
+ * and the host is not asked. When `tests` had no commands to run (none set, or only by the task's authors), the record says so (`testsNeedOwner`) so the owner can be told. When the gate stops waiting for the host, it aborts
+ * the call's `signal` so the host stops the checks' processes.
  */
 export type LandingCheckResult = "pass" | "fail" | "not_run";
 export interface LandingCheckRunShown { readonly name: string; readonly state: "passed" | "failed" | "not-run"; readonly exitCode?: number | null; readonly timedOut?: boolean; readonly ms?: number; /** The end of its output or why it did not run, redacted and cut. */ readonly note?: string }
@@ -38,6 +39,11 @@ export interface LandingChecksRecord {
   readonly contractVersion?: number;
   readonly results: readonly LandingCheckEntry[];
   readonly at: string;
+  /**
+   * `tests` was required but there were no test commands to run, which only someone other than the task's authors can fix: `authors-only` when the only versions that set the contract's checks were stored by its authors
+   * (the assignee or the submitter of the landed submission), `no-commands` when no contract names any (or it could not be read). The owner is then told (a needs-you notice), since the author cannot make the checks pass.
+   */
+  readonly testsNeedOwner?: "authors-only" | "no-commands";
 }
 
 /** What the host that holds the checkout answers (the worker package's `LocalWorkspaces.port.landingChecks`); restated here, the controller imports no worker code. */
@@ -52,10 +58,15 @@ export interface LandingCheckHostReport {
   readonly reviewedProblem?: string;
 }
 export interface LandingCheckHost {
-  landingChecks?(call: { readonly taskId: string; readonly projectId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly maxOutputBytes: number; /** The reviewed code submission's base commit and tree: the host computes their patch ID from its own objects. */ readonly reviewed?: { readonly base: string; readonly tree: string } }): Promise<LandingCheckHostReport>;
+  landingChecks?(call: { readonly taskId: string; readonly projectId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly maxOutputBytes: number; /** The reviewed code submission's base commit and tree: the host computes their patch ID from its own objects. */ readonly reviewed?: { readonly base: string; readonly tree: string }; /** Aborted when the gate stops waiting for the answer: the host then stops the checks' processes and starts no more. */ readonly signal?: AbortSignal }): Promise<LandingCheckHostReport>;
 }
 
-export interface ContractTests { readonly version: number; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutSeconds?: number }[] }
+export interface ContractTests {
+  readonly version: number;
+  readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutSeconds?: number }[];
+  /** True when the contract's checks were set only by the task's own authors (`checks` is then empty: none of them run). */
+  readonly onlyAuthors?: boolean;
+}
 export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
 export interface LandingGateDeps {
   /** The project's required checks (`IntegrationPolicyService.effective`). */
@@ -76,7 +87,9 @@ const clip = (text: string, max: number): string => { const clean = redactText(t
 
 export class LandingGate {
   readonly #deps: LandingGateDeps;
-  constructor(deps: LandingGateDeps) { this.#deps = deps; }
+  readonly #marginMs: number;
+  /** `marginMs` (tests only): how long past the commands' own time the gate waits for the host (default `LANDING_GATE_LIMITS.marginMs`). */
+  constructor(deps: LandingGateDeps, options: { readonly marginMs?: number } = {}) { this.#deps = deps; this.#marginMs = options.marginMs ?? LANDING_GATE_LIMITS.marginMs; }
 
   /** Judges one landing. Never throws for what the host or a record says: anything that cannot be looked at is `not_run`. It throws only when the required checks themselves cannot be read (nothing is then landed). */
   async evaluate(call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string; readonly author?: string; readonly host: LandingCheckHost | undefined }): Promise<LandingChecksRecord> {
@@ -95,16 +108,18 @@ export class LandingGate {
     const none = (why: string): LandingChecksRecord => ({ required, passed: false, ...sub, results: required.map((check) => ({ check, result: "not_run" as const, summary: clip(why, LANDING_GATE_LIMITS.summary) })), at });
     if (call.host?.landingChecks === undefined) return none("the host that holds the task's checkout cannot run landing checks, so nothing about the integrated tree is known");
     let report: LandingCheckHostReport;
+    // When the gate stops waiting, the host is told (the signal is aborted) so it stops the checks' processes instead of leaving them running on their copies after the landing was refused.
+    const stop = new AbortController();
     try {
-      const limit = commands.reduce((n, c) => n + c.timeoutMs, 0) + LANDING_GATE_LIMITS.marginMs;
+      const limit = commands.reduce((n, c) => n + c.timeoutMs, 0) + this.#marginMs;
       let timer: NodeJS.Timeout | undefined;
       try {
         report = await Promise.race([
-          call.host.landingChecks({ taskId: call.taskId, projectId: call.projectId, checks: commands, maxOutputBytes: LANDING_GATE_LIMITS.checkOutputBytes, ...(reviewed === undefined || !required.includes("review") ? {} : { reviewed: { base: reviewed.base, tree: reviewed.tree } }) }),
+          call.host.landingChecks({ taskId: call.taskId, projectId: call.projectId, checks: commands, maxOutputBytes: LANDING_GATE_LIMITS.checkOutputBytes, ...(reviewed === undefined || !required.includes("review") ? {} : { reviewed: { base: reviewed.base, tree: reviewed.tree } }), signal: stop.signal }),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the host did not answer within ${Math.round(limit / 1000)} s`)), limit); timer.unref?.(); }),
         ]);
       } finally { if (timer !== undefined) clearTimeout(timer); }
-    } catch (error) { return none(`the host could not run the landing checks: ${String((error as Error)?.message ?? error)}`); }
+    } catch (error) { stop.abort(error); /* gave up waiting, or the call failed: the host stops what it still runs */ return none(`the host could not run the landing checks: ${String((error as Error)?.message ?? error)}`); }
     if (report === null || typeof report !== "object" || report.checkout !== true) return none("the host holds no checkout for the task");
     const change = report.change;
     if (change === undefined || typeof change !== "object" || !OID.test(String(change.tree)) || !OID.test(String(change.base))) return none(`the change the landing would carry could not be read${typeof report.problem === "string" ? `: ${report.problem}` : ""}`);
@@ -118,11 +133,12 @@ export class LandingGate {
       else if (check === "review") results.push(await this.#review(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else results.push({ check, result: "not_run", ...bound, summary: `the ${check} check is not collected at landing yet, so it has not run for this tree` });
     }
-    return { required, passed: results.every((r) => r.result === "pass"), base: change.base, tree, ...(patchId === undefined ? {} : { patchId }), ...sub, ...(contract === undefined ? {} : { contractVersion: contract.version }), results, at };
+    const needOwner = patchId !== undefined && required.includes("tests") && commands.length === 0 ? { testsNeedOwner: contract?.onlyAuthors === true ? ("authors-only" as const) : ("no-commands" as const) } : {};
+    return { required, passed: results.every((r) => r.result === "pass"), base: change.base, tree, ...(patchId === undefined ? {} : { patchId }), ...sub, ...(contract === undefined ? {} : { contractVersion: contract.version }), results, at, ...needOwner };
   }
 
   #tests(contract: ContractTests | undefined, commands: readonly { name: string }[], report: LandingCheckHostReport, bound: { boundTo: string }): LandingCheckEntry {
-    if (commands.length === 0) return { check: "tests", result: "not_run", ...bound, summary: contract === undefined ? "the task has no contract naming test commands (contract.set checks) apart from versions its own author stored, which a landing does not use, so no tests ran" : "the task's contract names no test commands (contract.set checks), so no tests ran" };
+    if (commands.length === 0) return { check: "tests", result: "not_run", ...bound, summary: contract?.onlyAuthors === true ? "the task's test commands (contract.set checks) were set only by its own authors, which a landing does not use, so no tests ran; the owner (or another agent that may change the contract) has to set or accept them" : contract === undefined ? "the task has no contract naming test commands (contract.set checks), or its versions could not be read, so no tests ran" : "the task's contract names no test commands (contract.set checks), so no tests ran" };
     const got = Array.isArray(report.checks) ? report.checks : [];
     const runs: LandingCheckRunShown[] = commands.map((c, i) => {
       const r = got[i] !== undefined && got[i]!.name === c.name ? got[i]! : got.find((x) => x?.name === c.name);
@@ -161,6 +177,7 @@ export function landingChecksText(taskId: string, requestId: string, r: LandingC
     lines.push(`- ${e.check}: ${e.result === "not_run" ? "not run" : e.result === "fail" ? "failed" : "passed"}. ${e.summary}`);
     for (const run of e.runs ?? []) if (run.state !== "passed") lines.push(`  - ${run.name}: ${run.state === "not-run" ? "did not run" : run.timedOut === true ? "timed out" : `exit ${String(run.exitCode ?? "none")}`}${run.note === undefined ? "" : `: ${run.note}`}`);
   }
+  if (r.testsNeedOwner !== undefined) lines.push("The task has no test commands a landing can use, which you cannot change yourself (your own contract changes do not count); the owner was told.");
   lines.push("Fix what failed in your checkout and submit it again; the landing is asked for again after that.");
   const text = lines.join("\n");
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;

@@ -102,7 +102,17 @@ export interface QaEvidencePorts {
   readonly rolesOf: RolesOf;
   /** Tells the owner that evidence was invalidated and a re-check scheduled. Best effort: a failure never undoes the invalidation. */
   readonly notify?: (notice: { readonly commandId: string; readonly taskId: string; readonly projectId: string; readonly recheckId: string; readonly text: string }) => Promise<void>;
+  /**
+   * Called after evidence is recorded, also for a repeat of the same command (so work a crash cut short after the record is done on the repeat), never for a refused one (card Q03: the documents of the task are
+   * checked against the new evidence). Best effort: a failure never undoes the record and is not the recorder's error; the port reports its own failures.
+   */
+  readonly recorded?: (e: { readonly evidenceId: string; readonly taskId: string; readonly projectId: string; readonly submissionId: string; readonly source: "self" | "independent" }) => Promise<void>;
+  /** Called after `check` invalidated evidence (not for a repeat, which invalidated nothing new), with each record invalidated. Best effort, like `recorded`. */
+  readonly invalidated?: (e: { readonly taskId: string; readonly projectId: string; readonly evidence: readonly { readonly evidenceId: string; readonly submissionId: string }[] }) => Promise<void>;
 }
+
+/** A record a gate verdict was read from, at the revision read: a write that binds the verdict checks each is still there (card Q03: `doc.obligation.verify`). */
+export interface QaGateRead { readonly kind: string; readonly id: string; readonly revision: number }
 
 const SBM = /^sbm-[a-z2-7]{20}$/;
 const QAE = /^qae-[a-z2-7]{20}$/;
@@ -187,12 +197,14 @@ export class QaEvidenceService {
     return names;
   }
 
-  async #reliance(taskId: string): Promise<RelianceBody | undefined> {
-    return (await this.#runner.get("decision-reliance", relianceIdOf(taskId)))?.body as unknown as RelianceBody | undefined;
+  async #reliance(taskId: string, reads?: QaGateRead[]): Promise<RelianceBody | undefined> {
+    const found = await this.#runner.get("decision-reliance", relianceIdOf(taskId));
+    if (found !== undefined) reads?.push({ kind: "decision-reliance", id: relianceIdOf(taskId), revision: found.revision });
+    return found?.body as unknown as RelianceBody | undefined;
   }
 
   /** What changed since the record was made: its criteria (only the fields that say what the work must be) and its decisions. Empty: it still holds. */
-  async #staleness(e: QaEvidenceBody, now: { version: number; body: Record<string, unknown> | undefined }, reliance: RelianceBody | undefined): Promise<QaStaleReason[]> {
+  async #staleness(e: QaEvidenceBody, now: { version: number; body: Record<string, unknown> | undefined }, reliance: RelianceBody | undefined, reads?: QaGateRead[]): Promise<QaStaleReason[]> {
     const reasons: QaStaleReason[] = [];
     if (e.criteriaRevision !== now.version) {
       const then = e.criteriaRevision === 0 ? {} : ((await this.#runner.get("task-contract-version", `${e.taskId}.${e.criteriaRevision}`))?.body as unknown as Record<string, unknown> | undefined);
@@ -204,7 +216,9 @@ export class QaEvidenceService {
       }
     }
     for (const d of e.decisions) {
-      const found = (await this.#runner.get("decision", d.id))?.body as unknown as OwnerDecisionBody | undefined;
+      const record = await this.#runner.get("decision", d.id);
+      if (record !== undefined) reads?.push({ kind: "decision", id: d.id, revision: record.revision });
+      const found = record?.body as unknown as OwnerDecisionBody | undefined;
       if (found === undefined || found.state !== "active" || found.version !== d.version) reasons.push({ kind: "decision_superseded", decisionId: d.id, state: found?.state ?? "missing" });
     }
     for (const l of reliance?.links ?? []) {
@@ -340,6 +354,10 @@ export class QaEvidenceService {
       const e = (await this.#runner.get("qa-evidence", result.id))?.body as unknown as QaEvidenceBody | undefined;
       outcome = { source: e?.source ?? "independent", settled: [], open: [] };
     }
+    if (this.#ports.recorded !== undefined) {
+      const e = (await this.#runner.get("qa-evidence", result.id))?.body as unknown as QaEvidenceBody | undefined;
+      if (e !== undefined) await this.#ports.recorded({ evidenceId: result.id, taskId: e.taskId, projectId: e.projectId, submissionId: e.submissionId, source: e.source }).catch(() => undefined);
+    }
     return { id: result.id, revision: result.revision, replayed: result.replayed, source: outcome.source, settled: outcome.settled, open: outcome.open };
   }
 
@@ -354,7 +372,7 @@ export class QaEvidenceService {
     for (const k of Object.keys(command)) if (!["commandId", "taskId"].includes(k)) bad(k, "is not a field of this command");
     const commandId = checkCommandId(command.commandId);
     const { taskId } = await this.#readable(by, command.taskId);
-    let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[] } = { invalidated: [], rechecks: [] };
+    let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
     const stale = async (): Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]> => {
       const index = await this.#index(taskId);
       const contract = await this.#contract(taskId);
@@ -398,12 +416,13 @@ export class QaEvidenceService {
     if (this.#ports.notify !== undefined) {
       for (const r of made.rechecks) await this.#ports.notify({ commandId: `qa-recheck:${r.id}`, taskId, projectId: r.projectId, recheckId: r.id, text: r.text }).catch(() => undefined);
     }
+    if (this.#ports.invalidated !== undefined && made.evidence.length > 0) await this.#ports.invalidated({ taskId, projectId: made.evidence[0]!.projectId, evidence: made.evidence.map((e) => ({ evidenceId: e.evidenceId, submissionId: e.submissionId })) }).catch(() => undefined);
     return { taskId, invalidated: made.invalidated, rechecks: made.rechecks.map((r) => r.id), replayed: false };
   }
 
   /** One attempt at the write of `check`: invalidates what is stale now and schedules its re-checks. */
-  async #runCheck(by: Principal, scoped: string, taskId: string, stale: () => Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]>, report: (made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[] }) => void): Promise<Awaited<ReturnType<CommandRunner["command"]>>> {
-    let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[] } = { invalidated: [], rechecks: [] };
+  async #runCheck(by: Principal, scoped: string, taskId: string, stale: () => Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]>, report: (made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] }) => void): Promise<Awaited<ReturnType<CommandRunner["command"]>>> {
+    let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
     return this.#runner.command("qa.evidence.check", { commandId: scoped, actor: by.id }, async () => ({
       payload: { taskId },
       build: async () => {
@@ -413,7 +432,7 @@ export class QaEvidenceService {
         const now = this.#runner.now();
         const changes: Change[] = [];
         const rechecks = [...index.body.rechecks];
-        made = { invalidated: [], rechecks: [] };
+        made = { invalidated: [], rechecks: [], evidence: [] };
         for (const f of found) {
           const recheckId = derivedId("qrc", f.id);
           const exists = await this.#runner.get("qa-recheck", recheckId);
@@ -424,6 +443,7 @@ export class QaEvidenceService {
             rechecks.push(recheckId);
           }
           made.invalidated.push(f.id);
+          made.evidence.push({ evidenceId: f.id, submissionId: f.body.submissionId, projectId: f.body.projectId });
           made.rechecks.push({ id: recheckId, projectId: f.body.projectId, text: `QA evidence ${f.id} of task ${taskId} no longer holds (${[...new Set(f.reasons.map((r) => r.kind.replace(/_/g, " ")))].join(", ")}): re-check for ${f.body.recordedBy}`.slice(0, NOTICE_CHARS) });
         }
         if (index.revision === undefined) throw new DomainError("integrity", `the QA evidence index of ${taskId} is missing`);
@@ -513,19 +533,32 @@ export class QaEvidenceService {
    * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so,
    * and so is every check named by independent evidence that no longer holds and whose re-check is not done (it is `missing` until a re-check names it again); no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
    */
-  async gate(by: Principal, submissionIdValue: string): Promise<QaGate> {
+  async gate(by: Principal, submissionIdValue: string): Promise<QaGate> { return (await this.gateBound(by, submissionIdValue)).gate; }
+
+  /**
+   * The gate with the records its verdict was read from (card Q03): the task's evidence index, the contract and the decision reliance when they exist, and each independent record of the submission with
+   * the decisions it cites, and each re-check of the submission. A write that checks each at the revision read cannot be made on a verdict that changed meanwhile (new or invalidated evidence, a settled
+   * re-check, a changed contract, a superseded decision).
+   * Not bound: a contract or a reliance that does not exist yet (the storage has no guard for absence) and the contract versions (never rewritten).
+   */
+  async gateBound(by: Principal, submissionIdValue: string): Promise<{ gate: QaGate; reads: readonly QaGateRead[] }> {
     const { sub, taskId } = await this.#submission(by, submissionIdValue);
     const submissionId = submissionIdValue;
+    const reads: QaGateRead[] = [];
     const contract = await this.#contract(taskId);
-    const reliance = await this.#reliance(taskId);
+    if (contract.revision !== undefined) reads.push({ kind: "task-contract", id: taskId, revision: contract.revision });
+    const reliance = await this.#reliance(taskId, reads);
     const index = await this.#index(taskId);
+    if (index.revision !== undefined) reads.push({ kind: "qa-evidence-index", id: taskId, revision: index.revision });
     const usable: (QaEvidenceBody & { id: string })[] = [];
     const stale: { id: string; reasons: QaStaleReason[] }[] = [];
     for (const id of index.body.ids) {
-      const e = (await this.#runner.get("qa-evidence", id))?.body as unknown as QaEvidenceBody | undefined;
-      if (e === undefined || e.submissionId !== submissionId || e.source !== "independent") continue;
+      const found = await this.#runner.get("qa-evidence", id);
+      const e = found?.body as unknown as QaEvidenceBody | undefined;
+      if (found === undefined || e === undefined || e.submissionId !== submissionId || e.source !== "independent") continue;
+      reads.push({ kind: "qa-evidence", id, revision: found.revision });
       if (e.state !== "current") { stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }
-      const reasons = await this.#staleness(e, contract, reliance);
+      const reasons = await this.#staleness(e, contract, reliance, reads);
       if (reasons.length > 0) stale.push({ id, reasons }); else usable.push({ ...e, id });
     }
     const pending: string[] = [];
@@ -534,8 +567,10 @@ export class QaEvidenceService {
     const carried: string[] = [];
     const awaiting = new Set<string>();
     for (const r of index.body.rechecks) {
-      const b = (await this.#runner.get("qa-recheck", r))?.body as unknown as QaRecheckBody | undefined;
-      if (b === undefined || b.submissionId !== submissionId) continue;
+      const foundRecheck = await this.#runner.get("qa-recheck", r);
+      const b = foundRecheck?.body as unknown as QaRecheckBody | undefined;
+      if (foundRecheck === undefined || b === undefined || b.submissionId !== submissionId) continue;
+      reads.push({ kind: "qa-recheck", id: r, revision: foundRecheck.revision });
       if (b.state === "pending") { pending.push(r); awaiting.add(b.evidenceId); }
       // Settled by a newer tree, not by evidence naming its checks again: this tree's checks are still owed here, so its gate does not pass on narrower evidence once the newer tree came in.
       else if (b.doneBy === undefined) awaiting.add(b.evidenceId);
@@ -563,7 +598,9 @@ export class QaEvidenceService {
     if (counts.notRun > 0) reasons.add("check_not_run");
     if (counts.missing > 0) reasons.add("check_missing");
     const decisions: QaDecisionRef[] = (reliance?.links ?? []).filter((l) => l.state === "current").map((l) => ({ id: l.decisionId, version: l.version, topic: l.topic }));
-    return { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending };
+    const seen = new Set<string>();
+    const bound = reads.filter((r) => { const k = `${r.kind}\u0000${r.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
+    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending }, reads: bound };
   }
 }
 

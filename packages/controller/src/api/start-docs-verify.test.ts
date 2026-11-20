@@ -64,10 +64,13 @@ test("the owner's chat verifies a document (card Q03b): the docs view lists the 
     const rec = await call(dora.token, "doc.obligation.record", { projectId: project, title: "user guide", location: "docs/guide.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [task] }, "o1");
     assert.equal(rec.ok, true, JSON.stringify(rec));
     const guide = rec.result.id as string;
-    const old = await docChange(task, "e", "doc0");
+    // The first independent QA evidence flags the unverified guide by itself (Q03 next slice), so the document change that answers it is made after it.
     const sub1 = await code(treeA, "s1");
     await tested(sub1, "q1");
-    assert.equal((await call(dora.token, "doc.obligation.verify", { obligationId: guide, expectedRevision: 1, documentSubmissionId: old, evidence: [sub1] }, "v1")).ok, true);
+    const old = await docChange(task, "e", "doc0");
+    const first = (await call(boot.token, "doc.obligation.get", { id: guide })).result.item;
+    assert.equal(first.updates.length, 1, "flagged by the QA evidence itself");
+    assert.equal((await call(dora.token, "doc.obligation.verify", { obligationId: guide, expectedRevision: first.revision, documentSubmissionId: old, evidence: [sub1] }, "v1")).ok, true);
     // A document change in another project is never offered for this one.
     await docChange(elsewhere, "9", "docX");
 
@@ -88,7 +91,7 @@ test("the owner's chat verifies a document (card Q03b): the docs view lists the 
     assert.equal(nothing[0].status, "refused", JSON.stringify(nothing));
     assert.match(nothing[0].message, /already verified/);
 
-    // New tested code flags the guide (the owner asks by chat; shown first, then applied).
+    // New tested code flags the guide by itself; the owner also asks by chat (shown first, then applied), which finds nothing new.
     const sub2 = await code(treeB, "s2");
     await tested(sub2, "q2");
     await wait(5);

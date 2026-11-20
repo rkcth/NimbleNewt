@@ -6,6 +6,7 @@ import { commandId as checkCommandId, projectId as checkProjectId, taskId as che
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
 import { allows, inTaskScope } from "../security/access.js";
+import { createHash } from "node:crypto";
 import { scopedCommandId } from "../security/credentials.js";
 import { effectiveOf } from "../security/grants.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
@@ -86,8 +87,11 @@ interface IndexBody { readonly ids: readonly string[] }
 /** What the documentation obligation service needs from the rest of the controller. */
 export interface DocObligationPorts {
   readonly rolesOf: RolesOf;
-  /** The QA gate of one code submission (card Q02), read as the caller. */
-  readonly gate: (by: Principal, submissionId: string) => Promise<{ readonly verdict: "passed" | "failed"; readonly tree: string; readonly taskId: string }>;
+  /**
+   * The QA gate of one code submission (card Q02), read as the caller. `reads` (when given) are the records the verdict was read from at the revisions read: `verify` checks each in its write, so a
+   * verification is never written on a verdict that changed between the read and the write.
+   */
+  readonly gate: (by: Principal, submissionId: string) => Promise<{ readonly verdict: "passed" | "failed"; readonly tree: string; readonly taskId: string; readonly reads?: readonly { readonly kind: string; readonly id: string; readonly revision: number }[] }>;
   /** The newest code submission of a task that has independent QA evidence, when the caller names none. Absent: the caller names it. */
   readonly newestChecked?: (by: Principal, taskId: string) => Promise<string | undefined>;
   readonly projects: Pick<ProjectService, "createTask" | "transitionTask">;
@@ -99,6 +103,13 @@ const SBM = /^sbm-[a-z2-7]{20}$/;
 const AGENT = /^agent:[A-Za-z0-9._:-]{1,110}$/;
 /** Roles that keep documents: the docs role writes them, a director signs releases off. Holding the role is not enough: the agent must also read the project's tasks. */
 const KEEPERS = ["docs", "director"] as const;
+/**
+ * The controller's own name for the checks it runs by itself (card Q03, automatic impact and release): owner-level, because a check flags documents of the whole project and opens update tasks for
+ * their keepers, whoever recorded the QA evidence or submitted the release. It reads with the owner's view (QA gates included) and is the requester of the update tasks it opens.
+ */
+export const DOC_AUTO_PRINCIPAL: Principal = { id: "service:doc-checks", kind: "owner", name: "doc-checks", grants: [] } as unknown as Principal;
+/** The command ID of the documentation release check a release candidate's submission runs: one per candidate, project and version, so a repeat (or the same candidate submitted again) finds it. */
+export const releaseDocsCommandId = (candidateId: string, projectId: string, version: string): string => `release-docs:${candidateId}:${createHash("sha256").update(`${projectId}\u0000${version}`).digest("hex").slice(0, 24)}`;
 export const DOC_LIMITS = { perProject: 500, title: 200, location: 500, version: 40, refs: 20, claims: 20, claim: 300, updates: 20 } as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -291,8 +302,11 @@ export class DocObligationService {
         if (b.releaseVersion !== undefined && target !== b.releaseVersion) bad("applicableVersion", `a release flagged this document for version ${b.releaseVersion}: verify it for that version`);
         const evidence: DocEvidence[] = [];
         const unsupported: string[] = [];
+        // The records each QA gate was read from are checked in the write below: new or invalidated QA evidence, a changed task contract or a superseded decision between the read and the write refuses it.
+        const bound = new Map<string, { kind: string; id: string; revision: number }>();
         for (const s of ev) {
           const gate = await this.#ports.gate(by, s);
+          for (const r of gate.reads ?? []) if (!bound.has(`${r.kind}\u0000${r.id}`)) bound.set(`${r.kind}\u0000${r.id}`, r);
           if (!b.implementationRefs.includes(gate.taskId)) bad("evidence", `${s} is code of task ${gate.taskId}, which this document does not describe`);
           if (evidence.some((e) => e.taskId === gate.taskId)) bad("evidence", `names two code submissions of task ${gate.taskId}`);
           if (gate.verdict !== "passed") unsupported.push(gate.taskId);
@@ -317,7 +331,17 @@ export class DocObligationService {
         const { reasons: _r, releaseVersion: _v, flaggedAt: _f, ...rest } = b;
         void _r; void _v; void _f;
         const next: DocObligationBody = { ...rest, applicableVersion: target, state: "verified", verification: { documentSubmissionId: command.documentSubmissionId, artifactDigest: doc!.artifactDigest!, evidence, version: target, verifiedBy: by.id, verifiedAt: now }, updates };
-        return { ref: { kind: "doc-obligation", id: current.id }, creates: false, changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }], detail: { settled } };
+        const checks: Change[] = [...bound.values()].filter((r) => r.kind !== "doc-obligation" && !(r.kind === "submission" && r.id === command.documentSubmissionId)).map((r) => ({ type: "check", ref: { kind: r.kind, id: r.id }, expectedRevision: r.revision }));
+        return {
+          ref: { kind: "doc-obligation", id: current.id }, creates: false,
+          changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }, ...checks],
+          detail: { settled },
+          contention: async () => {
+            const now = await this.#runner.get("doc-obligation", current.id);
+            if (now !== undefined && now.revision !== current.revision) return new DomainError("stale_revision", `the obligation is at revision ${now.revision}`, { currentRevision: now.revision });
+            return new DomainError("stale_revision", "the QA evidence of the code named changed while it was being verified (new or invalidated evidence, a changed task contract or owner decision), or the document submission did: verify again", { currentRevision: current.revision });
+          },
+        };
       },
     }));
     if (result.replayed) settled = [];
@@ -333,6 +357,15 @@ export class DocObligationService {
    * noted on the record, and the verification must then be against the newest tested code). Asked again, nothing is repeated. The owner or a docs or director agent asks.
    */
   async impact(by: Principal, command: NoActor & { taskId: string; submissionId?: string }): Promise<{ taskId: string; submissionId: string; tree: string; verdict: "passed" | "failed"; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
+    return this.#impact(by, command, false);
+  }
+
+  /**
+   * `impact`; `newestOnly` (the automatic check after QA evidence) leaves a document that is already verified against, or flagged for, code of the task submitted after the code named: QA evidence recorded
+   * late on older code does not move the document back to that code (its keeper would have to verify against older code, and could not at all once that code's gate stopped passing). Going back to an
+   * old tree is a new code submission, so it still flags. Lost evidence is still looked for.
+   */
+  async #impact(by: Principal, command: NoActor & { taskId: string; submissionId?: string }, newestOnly: boolean): Promise<{ taskId: string; submissionId: string; tree: string; verdict: "passed" | "failed"; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
     only(command, ["commandId", "taskId", "submissionId"]);
     const commandId = checkCommandId(command.commandId);
     const taskId = checkTaskId(command.taskId);
@@ -347,6 +380,16 @@ export class DocObligationService {
     if (gate.taskId !== taskId) bad("submissionId", `is code of task ${gate.taskId}, not ${taskId}`);
     // Code whose QA gate does not pass is not tested behaviour: it flags nothing as changed (the update task would name untested code), but a document's own evidence is still checked.
     const tested = gate.verdict === "passed";
+    const submittedAt = async (id: string): Promise<string | undefined> => ((await this.#runner.get("submission", id))?.body as unknown as SubmissionBody | undefined)?.submittedAt;
+    const named = newestOnly && tested ? await submittedAt(submissionId!) : undefined;
+    // Whether the document is already verified against, or flagged for, code of the task submitted after the code named (the automatic check only).
+    const behind = async (b: DocObligationBody, was: DocEvidence | undefined): Promise<boolean> => {
+      if (named === undefined) return false;
+      const current = [...(b.reasons ?? [])].reverse().find((r): r is Extract<DocReason, { kind: "behavior_changed" }> => r.kind === "behavior_changed" && r.taskId === taskId)?.submissionId ?? was?.submissionId;
+      if (current === undefined || current === submissionId) return false;
+      const at = await submittedAt(current);
+      return at !== undefined && at > named;
+    };
     const plan = async (): Promise<Planned[]> => {
       const out: Planned[] = [];
       for (const id of (await this.#index(task!.projectId)).body.ids) {
@@ -355,8 +398,9 @@ export class DocObligationService {
         if (found === undefined || b === undefined || !b.implementationRefs.includes(taskId)) continue;
         const reasons: DocReason[] = [];
         const was = b.state === "unverified" ? undefined : b.verification?.evidence.find((e) => e.taskId === taskId);
-        if (was === undefined) { if (tested) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree }); }
-        else if (tested && was.tree !== gate.tree) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree, from: was.tree });
+        const newer = tested && (await behind(b, was));
+        if (was === undefined) { if (tested && !newer) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree }); }
+        else if (tested && !newer && was.tree !== gate.tree) reasons.push({ kind: "behavior_changed", taskId, submissionId: submissionId!, tree: gate.tree, from: was.tree });
         else if ((was.submissionId === submissionId ? gate : await this.#ports.gate(by, was.submissionId)).verdict !== "passed") reasons.push({ kind: "evidence_lost", taskId, submissionId: was.submissionId });
         const p = this.#planned(id, found.revision, b, reasons);
         if (p !== undefined) out.push(p);
@@ -365,6 +409,48 @@ export class DocObligationService {
     };
     const flagged = await this.#flag(by, commandId, "doc.impact.check", { taskId, submissionId: submissionId! }, plan);
     return { taskId, submissionId: submissionId!, tree: gate.tree, verdict: gate.verdict, ...flagged };
+  }
+
+  /**
+   * The automatic impact check after QA evidence is recorded (card Q03): independent evidence may change a task's QA gate, so the task's documents are checked against the code it names exactly as
+   * `impact` does when asked (as the controller, `DOC_AUTO_PRINCIPAL`), except that a document already verified against, or flagged for, newer code of the task is left as it is. A self-check never counts for a gate and checks nothing. The command ID comes from the evidence record, so the repeat of the same
+   * record (a crash after the record) is a repeat of the same check: nothing is flagged twice, and update tasks not yet opened are opened.
+   */
+  async afterQaEvidence(e: { readonly evidenceId: string; readonly taskId: string; readonly submissionId: string; readonly source: "self" | "independent" }): Promise<Awaited<ReturnType<DocObligationService["impact"]>> | undefined> {
+    if (e.source !== "independent") return undefined;
+    return this.#impact(DOC_AUTO_PRINCIPAL, { commandId: `doc-impact:${e.evidenceId}`, taskId: e.taskId, submissionId: e.submissionId }, true);
+  }
+
+  /**
+   * The automatic check after QA evidence was invalidated (card Q03): a document verified against code of the task whose QA gate no longer passes is flagged (`evidence_lost`) with an update task. Only lost
+   * evidence is looked for: the invalidated code is not new behaviour, so nothing is flagged as changed. One command per invalidated record.
+   */
+  async afterQaInvalidation(e: { readonly taskId: string; readonly evidence: readonly { readonly evidenceId: string; readonly submissionId: string }[] }): Promise<{ flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[] }> {
+    const by = DOC_AUTO_PRINCIPAL;
+    const taskId = checkTaskId(e.taskId);
+    const task = await this.#task(taskId);
+    if (task === undefined) return hidden("task");
+    const flagged = new Set<string>();
+    const tasks: { obligationId: string; taskId: string; assigned: boolean }[] = [];
+    for (const x of e.evidence) {
+      const plan = async (): Promise<Planned[]> => {
+        const out: Planned[] = [];
+        for (const id of (await this.#index(task!.projectId)).body.ids) {
+          const found = await this.#runner.get("doc-obligation", id);
+          const b = found?.body as unknown as DocObligationBody | undefined;
+          if (found === undefined || b === undefined || b.state === "unverified" || !b.implementationRefs.includes(taskId)) continue;
+          const was = b.verification?.evidence.find((v) => v.taskId === taskId);
+          if (was === undefined || (await this.#ports.gate(by, was.submissionId)).verdict === "passed") continue;
+          const p = this.#planned(id, found.revision, b, [{ kind: "evidence_lost", taskId, submissionId: was.submissionId }]);
+          if (p !== undefined) out.push(p);
+        }
+        return out;
+      };
+      const r = await this.#flag(by, `doc-evidence-lost:${x.evidenceId}`, "doc.impact.check", { taskId, invalidated: x.evidenceId, submissionId: x.submissionId }, plan);
+      for (const f of r.flagged) flagged.add(f);
+      for (const t of r.tasks) if (!tasks.some((y) => y.taskId === t.taskId)) tasks.push(t);
+    }
+    return { flagged: [...flagged], tasks };
   }
 
   /** A release of `version`: every document of the project that applies to another version (user, developer, support and promotional alike) is flagged stale with an update task for its owner. */
