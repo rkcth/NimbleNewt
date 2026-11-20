@@ -53,7 +53,7 @@ for (const backend of backends) {
         return { checkout: true, change, ...(call.reviewed === undefined ? {} : { reviewedPatchId: call.reviewed.tree === TREE1 ? PATCH1 : PATCH2 }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit, exitCode: host.exit === "failed" ? 1 : 0, ...(host.exit === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
       },
     };
-    // The integrator lease (card P10): `live` is what the lease service would answer; a landing asks it when the request is made and again after the checks.
+    // The integrator lease (card P10): `live` is what the lease service would answer; a landing asks it when the request is made, again once the task is quiet (before the checks) and again after the checks.
     const lease = { live: true, asked: 0 };
     const told: { commandId: string; to: string; text: string }[] = [];
     const service = WorkspaceOpService.withEpoch(store.storage, projects.epoch, {
@@ -142,7 +142,7 @@ for (const backend of backends) {
       // Not held at the start: refused before anything is recorded, frozen, checked or landed.
       r.lease.live = false;
       await refuses("invalid_transition", () => r.land("l0", r.t1), /lease expired/);
-      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.told.length], [0, 0, 0, 0]);
+      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.told.length, r.lease.asked], [0, 0, 0, 0, 1]);
       assert.deepEqual(await r.queued(), [[S1, r.t1], [S2, r.t2]]);
       // Held at the start, gone when the checks finish: the passing gate is not enough.
       r.lease.live = true;
@@ -151,7 +151,7 @@ for (const backend of backends) {
       assert.equal(out.state, "refused", out.summary);
       assert.match(out.summary!, /the integrator lease no longer holds, so nothing was landed/);
       assert.equal(out.checks!.passed, true, "the checks' results stay on the record");
-      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records()], [1, 0, 1]);
+      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.lease.asked], [1, 0, 1, 4], "asked at the request, once quiet, and after the checks");
       assert.deepEqual(await r.queued(), [[S1, r.t1], [S2, r.t2]], "the entry stays queued");
       assert.equal(r.told.length, 0, "a passing gate tells nobody");
       // With the lease held again the same head lands.
