@@ -98,11 +98,29 @@ function checkLayout(raw: unknown): SimulatedLayout {
   return out;
 }
 
+/** What an action on `ref` may change (`all`) and the neighbours it must leave alone (`guarded`), as the stand-in's world stands. */
+async function reachOf(sim: SimulatedServices, ref: ServiceRef, action: ServiceAction): Promise<{ all: readonly ServiceRef[]; guarded: readonly ServiceRef[] }> {
+  const reach = await sim.affects(ref, action);
+  const all = reach.some((r) => r.service === ref.service && r.resource === ref.resource) ? reach : [ref, ...reach];
+  const guarded = (await sim.neighbours(ref)).filter((n) => !all.some((a) => a.service === n.service && a.resource === n.resource));
+  return { all, guarded };
+}
+
+/** The stand-in's faults for one injected failure (a leak goes into the first guarded neighbour; with none there is nothing to leak into). */
+function faultsFor(inject: SimulationInject, guarded: readonly ServiceRef[]): SimulatedFaults {
+  switch (inject) {
+    case "refuse": return { refuseNext: "the simulated service refused the action (injected)" };
+    case "lose-answer": return { loseNextAnswer: true };
+    case "corrupt": return { corruptNext: true };
+    case "leak": return guarded[0] === undefined ? {} : { leakInto: guarded[0] };
+  }
+}
+
 /**
  * The scope's stand-in as the effect bridge sees it: every apply that reaches it (or might have, when its answer is lost) is saved to the scope's record before the
  * bridge goes on, so what the ledger later settles is what the record holds.
  */
-class ScopeWorld implements ServiceTarget {
+export class ScopeWorld implements ServiceTarget {
   /** Set when an apply could not be saved to the scope's record: the in-memory stand-in then holds a change the record does not, so it answers nothing more (review: a lost save never reads as confirmed). */
   #unsaved: unknown;
   constructor(readonly inner: SimulatedServices, private readonly save: () => Promise<void>) {}
@@ -250,7 +268,15 @@ export class SimulationService {
         // A closed scope runs nothing more: an operation it had not finished is only reported as the ledger has it.
         if (now.body.state !== "open") return this.#result(scopeId, effectId, { status: known.status, ...(known.evidence === undefined ? {} : { evidence: known.evidence }), ...(known.status === "confirmed" || known.status === "failed" ? {} : { note: "the simulation scope is closed, so this operation is not run further" }) });
         await this.#listEffect(scopeId, effectId);
-        return this.#result(scopeId, effectId, await this.#ports.effects.run(effectId, this.#bridge(scopeId, (await this.#scope(scopeId)).body.world)));
+        const world = (await this.#scope(scopeId)).body.world;
+        // An operation recorded and never started (the process stopped in between) runs now as it was asked, with its injected failure armed (follow-up to the second
+        // review). One that started is only finished: the fault was spent on its first run, and arming it again would misreport what the stand-in did.
+        let resumeFaults: SimulatedFaults = {};
+        if (known.status === "intended" && known.started === false && command.inject !== undefined) {
+          const { guarded } = await reachOf(SimulatedServices.fromSnapshot(world, () => this.#runner.now()), ref, action);
+          resumeFaults = faultsFor(command.inject as SimulationInject, guarded);
+        }
+        return this.#result(scopeId, effectId, await this.#ports.effects.run(effectId, this.#bridge(scopeId, world, resumeFaults)));
       }
       const s = await this.#scope(scopeId);
       if (s.body.state !== "open") throw new DomainError("invalid_command", "the simulation scope is closed");
@@ -258,9 +284,7 @@ export class SimulationService {
       const sim = SimulatedServices.fromSnapshot(s.body.world, () => this.#runner.now());
       const before = await sim.observe(ref);
       if (before === undefined) throw new DomainError("not_found", `${refKey(ref)} is not in this simulation scope`);
-      const reach = await sim.affects(ref, action);
-      const all = reach.some((r) => r.service === ref.service && r.resource === ref.resource) ? reach : [ref, ...reach];
-      const guarded = (await sim.neighbours(ref)).filter((n) => !all.some((a) => a.service === n.service && a.resource === n.resource));
+      const { all, guarded } = await reachOf(sim, ref, action);
       const baseline: Record<string, string> = {};
       for (const n of guarded) baseline[refKey(n)] = (await sim.observe(n))?.systemVersion ?? "absent";
       const input: JsonObject = {
@@ -269,13 +293,12 @@ export class SimulationService {
       };
       // The world after the change must fit the scope's record, or the change could be done on the stand-in and not kept: tried first on a copy (worst case of an injected fault).
       const trial = SimulatedServices.fromSnapshot(s.body.world, () => this.#runner.now());
-      if (command.inject === "leak" && guarded[0] !== undefined) trial.faults.leakInto = guarded[0];
-      if (command.inject === "corrupt") trial.faults.corruptNext = true;
+      if (command.inject === "leak" || command.inject === "corrupt") Object.assign(trial.faults, faultsFor(command.inject, guarded));
       try { await trial.apply(effectId, ref, action, { baseline: baseline as unknown as JsonObject }); } catch { /* refused on the copy: it will be refused (and change nothing) for real too */ }
       fits({ ...s.body, world: trial.snapshot(), effects: [...s.body.effects, effectId] }, "action");
       await this.#ports.effects.intend({ commandId: intentId, actor: by.id, kind: "service-op", target: `simulation:${scopeId}/service:${refKey(ref)}`, input, taskId: s.body.taskId, simulation: scopeId });
       await this.#listEffect(scopeId, effectId);
-      const faults: SimulatedFaults = command.inject === "refuse" ? { refuseNext: "the simulated service refused the action (injected)" } : command.inject === "lose-answer" ? { loseNextAnswer: true } : command.inject === "corrupt" ? { corruptNext: true } : command.inject === "leak" && guarded[0] !== undefined ? { leakInto: guarded[0] } : {};
+      const faults = command.inject === undefined ? {} : faultsFor(command.inject as SimulationInject, guarded);
       return this.#result(scopeId, effectId, await this.#ports.effects.run(effectId, this.#bridge(scopeId, (await this.#scope(scopeId)).body.world, faults)));
     });
   }
