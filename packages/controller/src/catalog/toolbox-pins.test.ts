@@ -8,7 +8,9 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { RetainedMaterial } from "../retention/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { CatalogService, TOOLBOX_MANAGE, versionIdOf, type HostFacts } from "./index.js";
+import { commitOperation } from "../storage/commit.js";
+import { pinsRef, type PinBody } from "./catalog.js";
+import { CATALOG_LIMITS, CatalogService, TOOLBOX_MANAGE, versionIdOf, type HostFacts } from "./index.js";
 
 // Card T08 (third slice): consumers stay on their pinned version of a shared tool until they opt in; the owner may move them; a revoked pin is refused, never silently replaced.
 after(stopServer);
@@ -25,7 +27,7 @@ const host: HostFacts = { os: "linux", arch: "x64", interpreters: { node: "22.19
 for (const backend of backends) {
   interface Agent { id: string; p: Principal }
   interface Ctx {
-    cat: CatalogService; owner: Principal; a: string; ta: string; storage: ControllerStorage;
+    cat: CatalogService; owner: Principal; a: string; ta: string; storage: ControllerStorage; epoch: number;
     ann: Agent; ben: Agent; rita: Agent; maint: Agent;
     /** Publishes `toolbox.lint` at this version (the maintainer), from fresh records of Ann's. */
     release(version: string): Promise<void>;
@@ -57,7 +59,7 @@ for (const backend of backends) {
         const maint = await agent("Maya", [...worker, { action: TOOLBOX_MANAGE, project: "*" }], []);
         const note = async (text: string): Promise<string> => (await desks.write(ann.p, { commandId: cid("w"), projectId: a, kind: "note", title: "work", body: text, visibility: "shared", status: "accepted" } as never)).id;
         await body({
-          cat, owner, a, ta, storage: world.storage, ann, ben, rita, maint,
+          cat, owner, a, ta, storage: world.storage, epoch: projects.epoch, ann, ben, rita, maint,
           release: async (version) => { await cat.register(maint.p, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version, manifest, instructionsRecordId: await note(`Run lint ${version}.`), executableRecordId: await note(`console.log('lint ${version}')`), audience: { roles: ["coder"] } } as never); },
           run: async (by, version) => {
             const r = await cat.authorizeRun(by.p, { commandId: cid("run"), name: "toolbox.lint", ...(version === undefined ? {} : { version }), taskId: ta, projectId: a, host });
@@ -189,5 +191,33 @@ for (const backend of backends) {
     const dropped = await c.cat.dropVersion(c.owner, { name: old.name, version: old.version, revision: old.revision, keep: 1 }, async (id) => (await RetainedMaterial.build(c.storage)).why("catalog-version", id));
     assert.equal(dropped.dropped, false);
     assert.equal(await c.run(c.ann), "1.0.0");
+  });
+  suite("first runs at the same moment pin every agent; at the limit of pinned consumers a run is never refused and the agent is pinned at a later run once there is room", async (c) => {
+    await c.release("1.0.0");
+    // Ann and Ben run for the first time together (Ann twice): each first-use pin is written (a lost race is asked again), the same agent twice gives one pin.
+    await Promise.all([c.run(c.ann), c.run(c.ben), c.run(c.ann)]);
+    assert.deepEqual((await c.cat.consumers(c.owner, "lint")).pins.map((p) => [p.agent, p.version]).sort(), [[c.ann.p.id, "1.0.0"], [c.ben.p.id, "1.0.0"]].sort());
+    // Fill the record to the limit with other agents (written directly: 1000 real agents would be slow).
+    const ref = pinsRef("toolbox.lint");
+    const write = async (pins: PinBody["pins"], label: string): Promise<void> => {
+      const found = (await c.storage.getAggregate(ref))!;
+      await commitOperation(c.storage, { operationId: `cmd:fx-pins-${label}-${n++}`, epoch: c.epoch, actor: "fixture", correlationId: `fx-pins-${label}`, at: options.clock(), changes: [{ type: "update", ref, expectedRevision: found.revision, body: { name: "toolbox.lint", pins } as never }], audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] }, { attempts: 3, pause: async () => undefined });
+    };
+    const filler = Array.from({ length: CATALOG_LIMITS.pins }, (_, i) => ({ agent: `agent:agt-${String(i).padStart(20, "0").replace(/[0-9]/g, (d) => "abcdefghij"[Number(d)]!)}`, version: "1.0.0", at: options.clock(), by: "fixture", how: "first-use" as const }));
+    await write(filler, "full");
+    await c.release("1.1.0");
+    const forAll = async (): Promise<void> => { await c.cat.setAudience(c.owner, { commandId: cid("aud"), name: "lint", audience: { all: true } }); };
+    await forAll();
+    // Rita's first run, at the limit: it is not refused, and she is not pinned. Her own opt-in is refused with the reason.
+    assert.equal(await c.run(c.rita), "1.1.0");
+    assert.equal((await c.cat.consumers(c.owner, "lint")).pins.some((p) => p.agent === c.rita.p.id), false);
+    await refuses("unavailable", () => c.cat.optIn(c.rita.p, { commandId: cid("o"), name: "lint", version: "1.0.0" }), /1000 pinned consumers/);
+    // Room again: her next run pins her (nothing was recorded under her first-use command at the limit).
+    await write(filler.slice(1), "room");
+    assert.equal(await c.run(c.rita), "1.1.0");
+    assert.deepEqual((await c.cat.consumers(c.owner, "lint")).pins.filter((p) => p.agent === c.rita.p.id).map((p) => [p.version, p.how]), [["1.1.0", "first-use"]]);
+    await c.release("1.2.0");
+    await forAll();
+    assert.equal(await c.run(c.rita), "1.1.0", "Rita stays on her pin after the next release");
   });
 }

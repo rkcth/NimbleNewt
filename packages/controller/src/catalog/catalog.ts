@@ -1314,7 +1314,7 @@ export class CatalogService {
 
   /**
    * Pins an agent to the version of its first run of a shared tool (card T08). Only when it has no pin yet; the command ID is derived from the agent and the tool, so once a first-use pin has been written this is answered from
-   * its record and never moves a pin again. Best effort: a write that fails (contention, the limit reached) is left for the next run, and the run itself is never refused for it.
+   * its record and never moves a pin again. Best effort: contention is asked again twice; a write that still fails (or the limit reached) records nothing and is left for the next run, and the run itself is never refused for it.
    */
   async #pinFirstUse(agent: string, name: string, version: string): Promise<void> {
     const ref = pinsRef(name);
@@ -1325,9 +1325,12 @@ export class CatalogService {
           build: async () => {
             const found = await this.#runner.get(ref.kind, ref.id);
             const pins = (found?.body as unknown as PinBody | undefined)?.pins ?? [];
-            if (found !== undefined && (pins.some((p) => p.agent === agent) || pins.length >= CATALOG_LIMITS.pins)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found.revision }], detail: { name, already: true } };
+            if (found !== undefined && pins.some((p) => p.agent === agent)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found.revision }], detail: { name, already: true } };
+            // At the limit nothing is recorded under this command ID (a refusal commits nothing), so a later run pins the agent once there is room; until then it follows the version in use.
+            if (pins.length >= CATALOG_LIMITS.pins) throw new DomainError("unavailable", `${name} already has ${CATALOG_LIMITS.pins} pinned consumers`);
             const body: PinBody = { name, pins: [...pins, { agent, version, at: this.#runner.now(), by: agent, how: "first-use" }] };
-            return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { name, version } };
+            // Two agents' first runs at the same moment: the one that loses (create or update) is asked again below.
+            return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { name, version }, contention: async () => new DomainError("stale_revision", `the pins of ${name} changed at the same moment`) };
           },
         }));
         return;
@@ -1344,7 +1347,7 @@ export class CatalogService {
     if (inUse === undefined) return;
     for (const p of await this.#pinsOf(name)) {
       if (compare(p.version, inUse) >= 0) continue;
-      try { await pushNotice(this.#runner, p.agent, { key: `newer|${name}|${inUse}`, kind: "release", name, version: inUse, text: `${name} ${inUse} is the version in use now. You stay on ${p.version}, your pinned version, until you opt in (toolbox.optin, name ${shortOf(name)}, version ${inUse}); compare them first with toolbox.source if you want.` }); } catch { /* the pin answer (toolbox.pins) still says a newer one is out */ }
+      try { await pushNotice(this.#runner, p.agent, { key: `newer|${name}|${inUse}`, kind: "release", name, version: inUse, text: `${name} ${inUse} is the version in use now. You stay on ${p.version}, your pinned version, until you opt in (toolbox.optin, name ${shortOf(name)}, version ${inUse}); compare them first with toolbox.source (naming version ${inUse}) if you want.` }); } catch { /* the pin answer (toolbox.pins) still says a newer one is out */ }
     }
   }
 

@@ -618,7 +618,7 @@ The read-only source of a shared tool version (or the caller's own personal one)
 Arguments:
 
 - `name`: `toolbox.<name>` or the short name
-- `version` (optional): major.minor.patch; default the version chosen now
+- `version` (optional): major.minor.patch; default the version chosen now (for an agent pinned to the tool, its pinned version)
 
 Result: `{ name, version, kind, digest, manifest, author, instructions, executable?, copiedFrom?, revoked? }`
 
@@ -3783,7 +3783,7 @@ An agent copies an exact shared version it may read into its own namespace (`a_<
 Arguments:
 
 - `name`: `toolbox.<name>` or the short name
-- `version` (optional): the shared version; default the one chosen now
+- `version` (optional): the shared version; default the one chosen now (for an agent pinned to the tool, its pinned version)
 - `as`: the short name of the personal copy
 - `copyVersion` (optional): the copy's own version (default 1.0.0; higher than the copy's latest when copying again)
 
