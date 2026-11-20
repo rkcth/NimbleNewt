@@ -416,10 +416,21 @@ for (const backend of backends) {
     const ret = only((await say(w, chat, "retire Annie")).outcomes);
     assert.equal(ret.status, "proposed");
     assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["state"], "active");
-    // a revision the interpreter supplied is dropped (Q04 follow-up): the controller pins the record's real revision itself, so a stale or invented one cannot refuse or mislead the command
+    // a revision only the interpreter supplied (not in the owner's words) is replaced (Q04 follow-up): the controller pins the record's real revision itself, so it cannot refuse or mislead the command
     script["stale revision Old"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 1, friendlyName: "Old" }, "stale revision")];
     assert.equal(only((await say(w, chat, "stale revision Old")).outcomes).status, "applied");
     assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Old");
+    assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["revision"], 3);
+    // a stale revision the owner did write themselves is the API's refusal, not replaced: the record moved since the version they decided on
+    script["as of revision 2 rename it to Elder"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 2, friendlyName: "Elder" }, "as of revision 2 rename it to Elder")];
+    assert.equal(only((await say(w, chat, "as of revision 2 rename it to Elder")).outcomes).code, "stale_revision");
+    assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Old");
+    // the owner's own revision that is current applies; a number of the message that is not the revision given (12 is not 1) does not count as the owner's
+    script["as of revision 3 rename it to Sage"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 3, friendlyName: "Sage" }, "as of revision 3 rename it to Sage")];
+    assert.equal(only((await say(w, chat, "as of revision 3 rename it to Sage")).outcomes).status, "applied");
+    script["rename it to Twelve 12"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 1, friendlyName: "Twelve" }, "rename it to Twelve")];
+    assert.equal(only((await say(w, chat, "rename it to Twelve 12")).outcomes).status, "applied");
+    assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Twelve");
   });
 
   suite("per-project conversation context is kept across switches, and a title resolves only in the focused project", async (w, script) => {

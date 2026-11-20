@@ -303,6 +303,8 @@ type Resolved =
  */
 /** The owner saying a running-call choice in their own words, with its usual endings ("cancel", "cancelled", "cancels"; "finish", "finished"; "pause", "paused"). */
 const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { finish: /\bfinish(?:ed|es|ing)?\b/i, cancel: /\bcancel(?:l?ed|s|l?ing)?\b/i, pause: /\bpause(?:d|s)?\b|\bpausing\b/i };
+/** True if `value` is a whole number the owner wrote as a number of its own in `text` ("revision 4", "v4"; not the 4 of "14" or "4.5"): a revision the owner quoted, as opposed to one the interpreter supplied. */
+const ownerWroteNumber = (text: string, value: unknown): boolean => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && (text.match(/(?<![\d.])\d+(?![\d.]?\d)/g) ?? []).some((n) => Number(n) === value);
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
 
@@ -1976,8 +1978,10 @@ export class ChatService {
     if (spec.revision !== undefined) {
       const filled = await this.#revisionFor(token, spec.revision, args, task, pending);
       if (!filled.ok) return filled;
-      // The controller's own reading always stands (ASSUMPTION, Q04 follow-up): a revision the interpreter supplied is dropped, so it can never be stale or invented.
-      if (filled.name !== undefined && filled.value !== undefined) args[filled.name] = filled.value;
+      // The controller's own reading stands unless the owner wrote the revision themselves (Q04 follow-up, first review): a number the interpreter supplied that is not in the owner's
+      // own words was invented or taken from elsewhere and is replaced, so it can neither refuse nor mislead the command. A revision the owner did write (one a view showed them,
+      // "accept it at revision 4") is the version they decided on and is kept as given, so a record that moved since they looked is refused as stale, never applied against the newer one.
+      if (filled.name !== undefined && filled.value !== undefined && !ownerWroteNumber(words, args[filled.name])) args[filled.name] = filled.value;
     }
 
     // A running task keeps its checkout: a different repository for a task that is in progress or has an owner is refused, and otherwise it is a proposal (it is an authority field).

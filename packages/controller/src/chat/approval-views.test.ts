@@ -79,12 +79,13 @@ for (const backend of backends) {
 
       // Accepting is shown first; the chat reads the revision itself; nothing is granted until the owner agrees.
       const said = "yes, let the commits for ann stand as a rule for a week";
-      // A revision the interpreter makes up is not trusted: the confirmed proposal is refused as stale, and nothing is granted.
+      // A revision the interpreter makes up (not in the owner's words) is not trusted (Q04 follow-up): the chat replaces it with the one it read, so the proposal is pinned to the
+      // standing-rule proposal as it is now. It is discarded here, and nothing is granted.
       const guessed = await turn("m2a", said, cmd("approval.proposal.accept", { proposalId: open[0]!.id, days: 7, expectedRevision: 999 }, said));
       assert.equal(guessed[0].status, "proposed", JSON.stringify(guessed));
-      const refused = await turn("m2b", "go ahead", [{ kind: "apply_proposal", proposalId: guessed[0].proposalId, evidence: "go ahead", basis: "owner" }]);
-      assert.equal(refused[0].status, "refused", JSON.stringify(refused));
-      assert.equal(refused[0].code, "stale_revision");
+      assert.deepEqual((await chat.getProposal(w.ownerToken, guessed[0].proposalId))!.steps.map((s) => s.args["expectedRevision"]), [open[0]!.revision]);
+      const dropped = await turn("m2b", "no, drop that", [{ kind: "discard_proposal", proposalId: guessed[0].proposalId, evidence: "drop that", basis: "owner" }]);
+      assert.equal(dropped[0].status, "discarded", JSON.stringify(dropped));
       assert.equal((await grantsApi.list(w.owner, {} as never)).items.length, 0);
       // Without it the chat reads the revision itself; the proposal is shown first and nothing is granted until the owner agrees.
       const shown = await turn("m2", said, cmd("approval.proposal.accept", { proposalId: open[0]!.id, days: 7 }, said));

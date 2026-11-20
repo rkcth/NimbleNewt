@@ -12,7 +12,7 @@ import { startController } from "./index.js";
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
 
-test("chat: a repair and a judgement in one owner message (either order), and an interpreter-supplied revision is ignored", async () => {
+test("chat: a repair and a judgement in one owner message (either order); a revision only the interpreter supplied is replaced, one the owner wrote is kept", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-q04-same-"));
   const say: Record<string, unknown[]> = {};
   const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], artifacts: { directory: join(d, "blobs") }, chat: { interpreter: new ScriptedInterpreter((input: { text: string }) => say[input.text] ?? []) } });
@@ -72,12 +72,20 @@ test("chat: a repair and a judgement in one owner message (either order), and an
     const st = await turn("m4", "yes, go", [{ kind: "apply_proposal", proposalId: out2[0].proposalId, evidence: "yes, go", basis: "owner" }]);
     assert.notEqual(st[0].status, "applied", JSON.stringify(st));
 
-    // An invented revision on a judgement is dropped: the controller pins the defect's real revision itself.
+    // An invented revision on a judgement (not in the owner's words) is replaced: the controller pins the defect's real revision itself.
     const d3 = (await call(rev.token, "defect.report", { deliverableId: id, version: 3, finding: "third typo", severity: "minor" }, "f3")).result.id;
     const cur4 = (await call(ann.token, "deliverable.record.get", { id })).result.item;
     const nv4 = await call(ann.token, "deliverable.version.new", { id, expectedRevision: cur4.revision, artifacts: [{ artifactId: art }] }, "n4");
     assert.ok((await call(ann.token, "deliverable.submit", { id, expectedRevision: nv4.result.revision, contractVersion: 0 }, "s4")).ok);
+    const seen = (await call(boot.token, "defect.get", { id: d3 })).result.item.revision as number;
     assert.ok((await call(ann.token, "defect.repair", { id: d3, version: 4 }, "rp4")).ok);
+    // A revision the owner wrote themselves (the one they looked at, before the repair arrived) is kept: the judgement is stale and nothing is recorded.
+    const wq = `as I saw it at revision ${seen}, the third typo is fixed`;
+    const outq = await turn("m5q", wq, [{ kind: "command", op: "defect.review", args: { id: d3, verdict: "fixed", expectedRevision: seen }, evidence: wq, basis: "owner" }]);
+    assert.equal(outq[0].status, "proposed", JSON.stringify(outq));
+    const apq = await turn("m6q", "yes, record it", [{ kind: "apply_proposal", proposalId: outq[0].proposalId, evidence: "yes, record it", basis: "owner" }]);
+    assert.notEqual(apq[0].status, "applied", JSON.stringify(apq));
+    assert.deepEqual((await call(boot.token, "defect.get", { id: d3 })).result.item.checks, []);
     const w3 = "the third typo fix works";
     const out3 = await turn("m5", w3, [{ kind: "command", op: "defect.review", args: { id: d3, verdict: "fixed", expectedRevision: 9999 }, evidence: w3, basis: "owner" }]);
     assert.equal(out3[0].status, "proposed", JSON.stringify(out3));
