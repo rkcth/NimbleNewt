@@ -51,6 +51,11 @@ export interface ContractBody extends ContractFields {
   /** 1 for the first stored contract; every change adds one. */
   readonly version: number;
   readonly changedBy: string;
+  /**
+   * Who named `checks` in the change that stored this version (card P09 follow-up), also when they were unchanged: naming the same checks someone else set accepts them as one's own, which counts for a landing (an author's
+   * own checks are not run at its landing until someone else sets or accepts them). Absent on a version whose change did not name `checks`, and on versions stored before this field existed.
+   */
+  readonly checksSetBy?: string;
 }
 
 /** One stored version, kept for ever (kind `task-contract-version`): the history. */
@@ -139,6 +144,7 @@ function parsePatch(source: Record<string, unknown>): Patch {
 }
 
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+const checksOf = (b: ContractBody): readonly ContractCheck[] => (Array.isArray(b.checks) ? b.checks : []);
 
 /**
  * Task contracts and the task dependency graph (card S10). A contract is versioned: every change stores a new version and keeps the old ones, so the history of what was promised is
@@ -175,28 +181,40 @@ export class ContractService {
    * the landing's tests do not pass) when the task has no contract, when only authors set its checks, past `LANDING_TEST_LOOKBACK` reads, or at a stored version that cannot be read. It takes no caller and is not an API
    * operation: whoever asks has been checked already (a landing needs `workspace.manage`).
    */
-  async landingTests(taskId: string, authors: readonly string[]): Promise<{ version: number; checks: readonly ContractCheck[] } | undefined> {
+  async landingTests(taskId: string, authors: readonly string[]): Promise<{ version: number; checks: readonly ContractCheck[]; onlyAuthors?: true } | undefined> {
     const bare = (id: string | undefined): string => (id ?? "").replace(/^agent:/, "");
     const by = new Set(authors.map(bare).filter((a) => a !== ""));
-    const checksOf = (b: ContractBody): readonly ContractCheck[] => (Array.isArray(b.checks) ? b.checks : []);
-    const same = (a: ContractBody, b: ContractBody): boolean => JSON.stringify(checksOf(a)) === JSON.stringify(checksOf(b));
-    const version = async (v: number): Promise<ContractBody | undefined> => (await this.#runner.get("task-contract-version", `${taskId}.${v}`))?.body as unknown as ContractBody | undefined;
-    let found = (await this.#runner.get("task-contract", checkTaskId(taskId)))?.body as unknown as ContractBody | undefined;
-    let reads = 0;
+    const newest = (await this.#runner.get("task-contract", checkTaskId(taskId)))?.body as unknown as ContractBody | undefined;
+    let found = newest;
+    const reads = { n: 0 };
     while (found !== undefined) {
-      let introduced = found;
-      while (introduced.version > 1) {
-        if (++reads > LANDING_TEST_LOOKBACK) return undefined;
-        const before = await version(introduced.version - 1);
-        if (before === undefined) return undefined;
-        if (!same(before, introduced)) break;
-        introduced = before;
-      }
+      const introduced = await this.#checksIntroduced(taskId, found, reads);
+      if (introduced === undefined) return undefined;
       if (!by.has(bare(introduced.changedBy))) return { version: found.version, checks: checksOf(found) };
-      if (introduced.version <= 1 || ++reads > LANDING_TEST_LOOKBACK) return undefined;
-      found = await version(introduced.version - 1);
+      // Only the task's authors set the checks this far back. At the first version, nobody else ever did: said so (`onlyAuthors`), so the owner can be told; checks nobody named at all are "no test commands", not this.
+      if (introduced.version <= 1) return checksOf(introduced).length > 0 || introduced.checksSetBy !== undefined ? { version: newest!.version, checks: [], onlyAuthors: true } : undefined;
+      if (++reads.n > LANDING_TEST_LOOKBACK) return undefined;
+      found = await this.#version(taskId, introduced.version - 1);
     }
     return undefined;
+  }
+
+  async #version(taskId: string, v: number): Promise<ContractBody | undefined> { return (await this.#runner.get("task-contract-version", `${taskId}.${v}`))?.body as unknown as ContractBody | undefined; }
+
+  /**
+   * The version that set the checks `from` holds: walking back while the version before holds the same checks, stopping at one whose change named them (`checksSetBy`, which also covers accepting unchanged checks).
+   * `undefined` past `LANDING_TEST_LOOKBACK` reads (shared through `reads`) or at a stored version that cannot be read.
+   */
+  async #checksIntroduced(taskId: string, from: ContractBody, reads: { n: number }): Promise<ContractBody | undefined> {
+    let introduced = from;
+    while (introduced.version > 1 && introduced.checksSetBy === undefined) {
+      if (++reads.n > LANDING_TEST_LOOKBACK) return undefined;
+      const before = await this.#version(taskId, introduced.version - 1);
+      if (before === undefined) return undefined;
+      if (!sameJson(checksOf(before), checksOf(introduced))) break;
+      introduced = before;
+    }
+    return introduced;
   }
 
   async history(by: Principal, taskId: string): Promise<View<ContractVersionBody>[] | undefined> {
@@ -235,7 +253,12 @@ export class ContractService {
           if (version !== command.expectedVersion) throw new DomainError("stale_revision", `the contract of ${taskId} is at version ${version}, not ${command.expectedVersion}`, { currentRevision: version });
           const base = before ?? { ...DEFAULT_CONTRACT, taskId, projectId: task.projectId, version: 0, changedBy: by.id };
           const next: Record<string, unknown> = { ...base };
+          delete next["checksSetBy"];
+          // Naming the checks a contract already holds accepts them when someone else set them (card P09 follow-up): an author's own checks are not run at its landing until someone else sets or accepts them, and an
+          // unchanged value would otherwise be refused as no change. Accepting needs the same authority as setting them.
+          const accepting = patch.checks !== undefined && before !== undefined && sameJson(patch.checks, base.checks ?? null) && (await this.#checksIntroduced(taskId, before, { n: 0 }))?.changedBy !== by.id;
           let changed = false;
+          if (accepting) { this.#authorize(by, "checks", task.projectId, taskId, false); changed = true; }
           for (const [key, value] of Object.entries(patch)) {
             if (sameJson(value, (base as unknown as Record<string, unknown>)[key] ?? null)) continue;
             const rank = (r: unknown): number => RECOVERY_REQUIREMENTS.indexOf((r ?? DEFAULT_CONTRACT.recovery) as RecoveryRequirement);
@@ -244,7 +267,7 @@ export class ContractService {
             if (value === null) delete next[key]; else next[key] = value;
           }
           if (!changed) invalid("fields", "the contract already has these values");
-          const body = { ...next, version: version + 1, changedBy: by.id } as unknown as ContractBody;
+          const body = { ...next, version: version + 1, changedBy: by.id, ...(patch.checks === undefined ? {} : { checksSetBy: by.id }) } as unknown as ContractBody;
           const ref: AggregateRef = { kind: "task-contract", id: taskId };
           const versionRef: AggregateRef = { kind: "task-contract-version", id: `${taskId}.${body.version}` };
           const stored: ContractVersionBody = { ...body, changedAt: this.#runner.now() };
@@ -252,7 +275,7 @@ export class ContractService {
             current === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: body as unknown as JsonObject },
             { type: "create", ref: versionRef, body: stored as unknown as JsonObject },
           ];
-          return { ref, creates: current === undefined, changes, detail: { task: taskId, version: body.version, fields: Object.keys(patch).join(",") }, contention: async () => new DomainError("stale_revision", `the contract of ${taskId} changed meanwhile; read it again`) };
+          return { ref, creates: current === undefined, changes, detail: { task: taskId, version: body.version, fields: Object.keys(patch).join(","), ...(accepting ? { acceptedChecks: true } : {}) }, contention: async () => new DomainError("stale_revision", `the contract of ${taskId} changed meanwhile; read it again`) };
         },
       };
     });
@@ -273,6 +296,7 @@ export class ContractService {
     const base = before ?? { ...DEFAULT_CONTRACT, taskId, projectId: task.projectId, version: 0, changedBy: actor };
     if ((base.difficulty ?? null) === difficulty) return undefined;
     const next: Record<string, unknown> = { ...base };
+    delete next["checksSetBy"];
     if (difficulty === null) delete next["difficulty"]; else next["difficulty"] = difficulty;
     const body = { ...next, version: version + 1, changedBy: actor } as unknown as ContractBody;
     const ref: AggregateRef = { kind: "task-contract", id: taskId };

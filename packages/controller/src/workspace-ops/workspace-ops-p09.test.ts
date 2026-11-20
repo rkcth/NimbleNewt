@@ -70,7 +70,7 @@ for (const backend of backends) {
       const now = await contracts.get(owner, task);
       await contracts.setContract(by, { commandId: `c-${by.id}-${now?.version ?? 0}`, taskId: task, expectedVersion: now?.version ?? 0, checks });
     };
-    return { store, owner, ann, project, task, approvals, host, calls, told, toldAttempts, setTellFails: (v: boolean) => { tellFails = v; }, integration, contracts, service, land, recorded, setChecks };
+    return { store, principals, owner, ann, project, task, approvals, host, calls, told, toldAttempts, setTellFails: (v: boolean) => { tellFails = v; }, integration, contracts, service, land, recorded, setChecks };
   };
 
   test(`${backend.name}: a failing test command refuses the landing before anything is written; the results are recorded bound to the integrated tree and go back to the author (card P09)`, async () => {
@@ -217,6 +217,75 @@ for (const backend of backends) {
       const out = await r.land(svc, "s5", S1);
       assert.deepEqual([out.state, out.landedSubmission, out.checks!.results[1]!.result], ["refused", S1, "fail"]);
       assert.match(out.checks!.results[1]!.summary, /says changes/);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: checks set only by the task's own authors: the owner gets a needs-you notice once per contract version, and naming the same checks accepts them so the landing runs them (card P09 follow-up)`, async () => {
+    const r = await rig();
+    try {
+      const owned: { commandId: string; taskId: string; text: string }[] = [];
+      let notifyFails = false;
+      const svc = () => r.service({ notify: async (n) => { if (notifyFails) throw new Error("notices down"); owned.push(n); } });
+      // No contract at all: the owner is asked to set test commands.
+      const none = await r.land(svc(), "o0", S1);
+      assert.deepEqual([none.state, none.checks!.testsNeedOwner, none.toldOwner], ["refused", "no-commands", true]);
+      assert.match(none.summary!, /the task has no test commands, so the owner is asked to set them/);
+      assert.deepEqual(owned.map((n) => n.commandId), [`lgo-${r.task}-v0-no-commands`]);
+      // Only ann (the submitter) set the checks: they do not run, ann is told, and so is the owner.
+      await r.setChecks(r.ann, [{ name: "trivial", run: ["true"] }]);
+      const out = await r.land(svc(), "o1", S1);
+      assert.equal(out.state, "refused", out.summary);
+      assert.deepEqual([out.checks!.testsNeedOwner, out.checks!.contractVersion, out.checks!.results[0]!.result, out.toldOwner, out.toldAuthor], ["authors-only", 1, "not_run", true, "agent:ann"]);
+      assert.match(out.summary!, /set only by its own authors, so the owner is asked to set or accept them/);
+      assert.deepEqual([owned[1]!.commandId, owned[1]!.taskId], [`lgo-${r.task}-v1-authors-only`, r.task]);
+      assert.ok(owned[1]!.text.length <= 200, owned[1]!.text);
+      assert.match(owned[1]!.text, /cannot land: its test commands were set only by its own agents.*Set or accept them \(contract\.set checks\)/);
+      assert.match(r.told.at(-1)!.text, /the owner was told/);
+      assert.equal(((await r.recorded("o1"))!.body as { toldOwner?: unknown }).toldOwner, true, "on the stored record");
+      // The next landing while nothing changed carries the same notice identity (the notice service answers a repeat once).
+      await r.land(svc(), "o2", S1);
+      assert.equal(owned[2]!.commandId, owned[1]!.commandId);
+      // The author naming its own checks again is no change and accepts nothing.
+      await refuses("invalid_command", () => r.contracts.setContract(r.ann, { commandId: "self", taskId: r.task, expectedVersion: 1, checks: [{ name: "trivial", run: ["true"] }] }), /already has these values/);
+      // The owner names the same checks: that accepts them, and the landing runs them.
+      const accepted = await r.contracts.setContract(r.owner, { commandId: "accept", taskId: r.task, expectedVersion: 1, checks: [{ name: "trivial", run: ["true"] }] });
+      assert.equal(accepted.revision, 2);
+      const v2 = (await r.contracts.history(r.owner, r.task))!.at(-1)! as unknown as { checksSetBy?: string; changedBy: string };
+      assert.deepEqual([v2.changedBy, v2.checksSetBy], [r.owner.id, r.owner.id]);
+      const landed = await r.land(svc(), "o3", S1);
+      assert.equal(landed.state, "done", landed.summary);
+      assert.deepEqual([landed.checks!.contractVersion, landed.checks!.testsNeedOwner, landed.toldOwner, r.calls.checks.at(-1)!.checks.map((c) => c.name)], [2, undefined, undefined, ["trivial"]]);
+      assert.equal(owned.length, 3, "a landing that passed tells the owner nothing");
+      // Accepted once: naming them again is no change.
+      await refuses("invalid_command", () => r.contracts.setContract(r.owner, { commandId: "again", taskId: r.task, expectedVersion: 2, checks: [{ name: "trivial", run: ["true"] }] }), /already has these values/);
+      // A later version that does not name the checks (ann's criteria) does not carry the acceptance mark, and the owner's acceptance still counts.
+      await r.contracts.setContract(r.ann, { commandId: "crit", taskId: r.task, expectedVersion: 2, acceptanceCriteria: ["it works"] });
+      assert.equal(((await r.contracts.history(r.owner, r.task))!.at(-1)! as unknown as { checksSetBy?: string }).checksSetBy, undefined);
+      // The author naming the owner's accepted checks is an acceptance of its own: it does not count, the owner's still does.
+      await r.contracts.setContract(r.ann, { commandId: "ann-accept", taskId: r.task, expectedVersion: 3, checks: [{ name: "trivial", run: ["true"] }] });
+      const still = await r.land(svc(), "o4", S1);
+      assert.deepEqual([still.state, still.checks!.contractVersion], ["done", 3], "ann's version 4 is skipped back to version 3, which carries the owner's accepted checks");
+      // A failing command is the author's to fix: the owner is not told.
+      r.host.exit.set("trivial", "failed");
+      const failing = await r.land(svc(), "o5", S1);
+      assert.deepEqual([failing.state, failing.checks!.testsNeedOwner, failing.toldOwner, owned.length], ["refused", undefined, undefined, 3]);
+      // A notice that cannot be sent is recorded as not told; the landing is still refused.
+      notifyFails = true;
+      await r.setChecks(r.ann, [{ name: "other", run: ["true"] }]);
+      const quiet = await r.land(svc(), "o6", S1);
+      assert.deepEqual([quiet.state, quiet.checks!.results[0]!.result, quiet.toldOwner], ["refused", "fail", undefined], "ann's new checks do not run; the owner's accepted ones still do");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: accepting checks needs the authority to set them (card P09 follow-up)`, async () => {
+    const r = await rig();
+    try {
+      await r.setChecks(r.ann, [{ name: "trivial", run: ["true"] }]);
+      // cid may read the task but not change its contract.
+      await r.principals.enroll(r.owner, { commandId: "e-cid", kind: "agent", name: "cid", grants: [{ action: "task.read", project: r.project }] });
+      const reader = await r.principals.authenticate((await r.principals.issueCredential(r.owner, "agent:cid")).token);
+      await refuses("forbidden", () => r.contracts.setContract(reader, { commandId: "cid-accept", taskId: r.task, expectedVersion: 1, checks: [{ name: "trivial", run: ["true"] }] }));
+      assert.equal((await r.contracts.get(r.owner, r.task))!.version, 1, "nothing stored");
     } finally { await r.store.close(); }
   });
 }

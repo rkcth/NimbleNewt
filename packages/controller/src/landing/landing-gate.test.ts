@@ -133,3 +133,38 @@ test("qa, docs and director are not collected at landing yet, so they do not pas
   const broken = new LandingGate({ requiredChecks: async () => { throw new Error("policy store down"); }, tests: async () => undefined, approvalOf: async () => undefined, now: () => "t" });
   await assert.rejects(broken.evaluate({ taskId: TASK, projectId: "proj-x", host: h }), /policy store down/);
 });
+
+test("tests with no command a landing can use say whether the owner is needed: set only by the task's authors, or none at all; not when there are commands or nothing to land (card P09 follow-up)", async () => {
+  const run = async (tests: ContractTests | undefined, report: Parameters<typeof host>[0] = {}, required?: readonly Check[]) => gate({ tests, approval: approved, ...(required === undefined ? {} : { required }) }).g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host(report).h });
+  const onlyAuthors = await run({ version: 4, checks: [], onlyAuthors: true });
+  assert.equal(onlyAuthors.testsNeedOwner, "authors-only");
+  assert.equal(onlyAuthors.contractVersion, 4);
+  assert.match(onlyAuthors.results[0]!.summary, /set only by its own authors.*set or accept them/);
+  assert.match(landingChecksText(TASK, "wsr-x", onlyAuthors), /the owner was told/);
+  assert.equal((await run(undefined)).testsNeedOwner, "no-commands");
+  assert.equal((await run({ version: 2, checks: [] })).testsNeedOwner, "no-commands");
+  const fine = await run(unit);
+  assert.equal(fine.testsNeedOwner, undefined);
+  assert.doesNotMatch(landingChecksText(TASK, "wsr-x", { ...fine, passed: false }), /owner was told/);
+  assert.equal((await run({ version: 4, checks: [], onlyAuthors: true }, { change: { base: BASE, head: BASE, tree: TREE } })).testsNeedOwner, undefined, "nothing to land: not the contract's fault");
+  assert.equal((await run(undefined, {}, ["review"])).testsNeedOwner, undefined, "tests not required");
+});
+
+test("when the gate stops waiting for the host, it aborts the call's signal so the host stops the check processes; a host that answers in time is not stopped (card P09 follow-up)", async () => {
+  const quick: ContractTests = { version: 1, checks: [{ name: "slow", run: ["slow"], timeoutSeconds: 0.02 }] };
+  const make = (h: LandingCheckHost) => new LandingGate({ requiredChecks: async () => ["tests"], tests: async () => quick, approvalOf: async () => undefined, now: () => "2026-11-18T10:00:00.000Z" }, { marginMs: 20 }).evaluate({ taskId: TASK, projectId: "proj-x", host: h });
+  let signal: AbortSignal | undefined;
+  let abortedWith: unknown;
+  // The gate's own timer does not hold the process open (it is unref'd); this one does while the test waits.
+  const keep = setInterval(() => undefined, 1000);
+  let r;
+  try { r = await make({ landingChecks: (call) => { signal = call.signal; call.signal?.addEventListener("abort", () => { abortedWith = call.signal?.reason; }); return new Promise(() => undefined); } }); } finally { clearInterval(keep); }
+  assert.equal(r.passed, false);
+  assert.match(r.results[0]!.summary, /did not answer within/);
+  assert.equal(signal?.aborted, true, "the host was told to stop");
+  assert.match(String((abortedWith as Error)?.message), /did not answer within/);
+  let inTime: AbortSignal | undefined;
+  const ok = await make({ landingChecks: async (call) => { inTime = call.signal; return { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [{ name: "slow", state: "passed" }] }; } });
+  assert.equal(ok.passed, true);
+  assert.equal(inTime?.aborted, false);
+});
