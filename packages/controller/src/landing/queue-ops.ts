@@ -4,7 +4,7 @@ import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import { LandingQueueService, type LandingQueueEntry } from "./landing-queue.js";
+import { LANDING_QUEUE_LIMITS, LandingQueueService, type LandingQueueEntry } from "./landing-queue.js";
 
 /**
  * Who may put a submission in a branch's landing queue, take one out and read it, and what a landing must show about the queue before it writes (card P10). The queue service itself takes no caller; this is its door.
@@ -15,6 +15,8 @@ import { LandingQueueService, type LandingQueueEntry } from "./landing-queue.js"
  */
 const SUBMISSION = /^sbm-[a-z2-7]{20}$/;
 const refused = (what: string): DomainError => new DomainError("not_found", `${what} does not exist or is not yours to manage`);
+/** A branch named by a caller: one line of at most 200 characters (the queue's own bound). */
+const branchName = (value: unknown): string => text(value, "branch", { min: 1, max: LANDING_QUEUE_LIMITS.branch, multiline: false });
 
 export interface QueueApproval {
   readonly taskId: string;
@@ -98,15 +100,24 @@ export class LandingQueueOps {
     } catch { return false; }
   }
 
-  /** Takes a task's submission out of the landing queue. */
-  async remove(by: Principal, command: NoActor & { taskId: string; reason: string }): Promise<{ taskId: string; branch: string; removed?: LandingQueueEntry; replayed: boolean }> {
-    onlyKnown(command, ["commandId", "taskId", "reason"]);
+  /**
+   * Takes a task's submission out of the landing queue: that of the project's landing branch, or of `branch` when given (P10 polish: an entry left in the queue of a branch that is no longer the landing
+   * branch, after the owner named another, can be taken out too). Who may is judged first: a caller who may take nothing out of the project is told nothing exists, also while the project names no landing
+   * branch (that configuration fact is told only to the owner and integrators).
+   */
+  async remove(by: Principal, command: NoActor & { taskId: string; reason: string; branch?: string }): Promise<{ taskId: string; branch: string; removed?: LandingQueueEntry; replayed: boolean }> {
+    onlyKnown(command, ["commandId", "taskId", "reason", "branch"]);
     const taskId = checkTaskId(command.taskId);
     const reason = text(command.reason, "reason", { min: 1, max: 300, multiline: false });
+    const named = command.branch === undefined ? undefined : branchName(command.branch);
     const projectId = await this.#options.projectOfTask(taskId);
     if (projectId === undefined) throw refused(`task ${taskId}`);
-    const branch = await this.#branch(taskId, projectId);
     const integrator = this.#integrator(by, projectId);
+    let branch: string;
+    try { branch = named ?? await this.#branch(taskId, projectId); } catch (error) {
+      if (!integrator && error instanceof DomainError && error.code === "forbidden") throw refused(`task ${taskId}`);
+      throw error;
+    }
     // The author of the entry may take its own work out, judged on the entry inside the queue's own write (not on an earlier read, which an entry added at the same moment could make stale). A repeat of the caller's
     // own recorded command is answered by the service; anything else is told nothing exists.
     const allowed = integrator ? undefined : (e: LandingQueueEntry): boolean => e.author === by.id && (by.taskScope === undefined || by.taskScope.taskId === taskId);
@@ -118,15 +129,21 @@ export class LandingQueueOps {
     }
   }
 
-  /** The landing queue of the project's landing branch, oldest first, with each entry's position. */
-  async list(by: Principal, query: { projectId: string }): Promise<{ branch: string; items: (LandingQueueEntry & { position: number })[] }> {
-    onlyKnown(query, ["projectId"]);
+  /**
+   * The landing queue of the project's landing branch (or of `branch` when given), oldest first, with each entry's position. `landingBranch` is the branch the owner's policy names now (empty when none);
+   * `others` lists the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another, or a task's own landing branch): nothing there lands
+   * on the landing branch, and `branch` reads one of them in full. `partial` says the walk over the queues stopped before the end.
+   */
+  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number })[]; others: { branch: string; entries: number }[]; partial?: true }> {
+    onlyKnown(query, ["projectId", "branch"]);
     if (typeof query.projectId !== "string" || !this.#integrator(by, query.projectId)) throw refused("that project");
-    let branch: string | undefined;
-    try { branch = await this.#options.landingBranch({ taskId: "", projectId: query.projectId }); } catch { throw new DomainError("unavailable", "the landing settings could not be read, so the landing queue's branch is not known"); }
-    if (branch === undefined) return { branch: "", items: [] };
-    const q = await this.#queue.get(query.projectId, branch);
-    return { branch, items: q.entries.map((e, i) => ({ ...e, position: i + 1 })) };
+    const named = query.branch === undefined ? undefined : branchName(query.branch);
+    let landing: string | undefined;
+    try { landing = await this.#options.landingBranch({ taskId: "", projectId: query.projectId }); } catch { throw new DomainError("unavailable", "the landing settings could not be read, so the landing queue's branch is not known"); }
+    const branch = named ?? landing;
+    const items = branch === undefined ? [] : (await this.#queue.get(query.projectId, branch)).entries.map((e, i) => ({ ...e, position: i + 1 }));
+    const all = await this.#queue.queuesOf(query.projectId);
+    return { branch: branch ?? "", landingBranch: landing ?? "", items, others: all.queues.filter((q) => q.branch !== branch), ...(all.partial ? { partial: true as const } : {}) };
   }
 
   /**

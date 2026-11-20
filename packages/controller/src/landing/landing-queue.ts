@@ -15,6 +15,8 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
  */
 export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200, landed: 200 } as const;
 const KIND = "landing-queue";
+/** How many pages of 200 queue records `queuesOf` reads at most (10,000 project branches). */
+const QUEUE_SCAN_PAGES = 50;
 /** The workspace service's records (see `WorkspaceOpService`): one open-request pointer per task, and the requests themselves. Read here only to tell that a task's landing is in progress. */
 const OPEN = "workspace-open";
 const REQUEST = "workspace-request";
@@ -78,6 +80,25 @@ export class LandingQueueService {
     const found = await this.#runner.get(KIND, queueId);
     if (found === undefined) return { queueId, projectId, branch, nextSeq: 1, entries: [], revision: 0 };
     return { ...(found.body as unknown as LandingQueueBody), queueId, revision: found.revision };
+  }
+
+  /**
+   * The queues of a project's branches that hold at least one entry, by branch name (P10 polish: the queue of a branch that is no longer the landing branch, after the owner named another, is not
+   * lost from sight). Reads the queue records in pages; at most `QUEUE_SCAN_PAGES` pages of 200 are read, and `partial` says when the walk stopped before the end.
+   */
+  async queuesOf(projectId: string): Promise<{ queues: { branch: string; entries: number }[]; partial: boolean }> {
+    const queues: { branch: string; entries: number }[] = [];
+    let afterId: string | undefined;
+    for (let page = 0; page < QUEUE_SCAN_PAGES; page++) {
+      const batch = await this.#runner.list(KIND, { ...(afterId === undefined ? {} : { afterId }), limit: 200 });
+      for (const a of batch) {
+        const q = a.body as unknown as LandingQueueBody;
+        if (q.projectId === projectId && q.entries.length > 0) queues.push({ branch: q.branch, entries: q.entries.length });
+      }
+      if (batch.length < 200) return { queues: queues.sort((x, y) => (x.branch < y.branch ? -1 : x.branch > y.branch ? 1 : 0)), partial: false };
+      afterId = batch[batch.length - 1]!.id;
+    }
+    return { queues: queues.sort((x, y) => (x.branch < y.branch ? -1 : x.branch > y.branch ? 1 : 0)), partial: true };
   }
 
   /**
