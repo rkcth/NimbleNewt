@@ -1078,6 +1078,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           if (typeof subject === "string") { if (e.verdict === "approve") await landingQueueOps.queueApproved(subject, e.submissionId); else await landingQueueOps.withdrawUnapproved(subject, e.submissionId); }
         }
       } catch { /* best effort: the queue is still reachable through landing.queue.add */ }
+      // Card Q02 follow-up: a newer tree of the task settles the QA re-checks still pending on its older code (best effort; the next QA evidence on the newer tree catches a missed one).
+      if (e.kind === "code") { try { await qaEvidence.submitted(e.submissionId); } catch { /* best effort */ } }
       await activity.record({ id: "service:submissions", kind: "service", name: "submissions", grants: [] } as Principal, { commandId: `sbm-act:${e.submissionId}`, taskId: e.taskId, kind: "submission", summary: `${e.submittedBy} (${e.role}) ${words}.`, manifest: { refs: [{ kind: "submission", id: e.submissionId }] }, outcome: e.kind === "code" ? "proposed" : "confirmed" } as never);
     } });
     // Operations on services (card P03): the effect ledger, the fence of the agent's current attempt, and the target. An operational outcome is accepted only if the ledger confirms and verified it.
