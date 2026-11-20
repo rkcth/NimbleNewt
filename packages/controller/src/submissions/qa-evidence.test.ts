@@ -267,6 +267,14 @@ for (const backend of backends) {
       assert.equal((await svc.record(qa, { commandId: cid("r"), ...ev(newest, 7) })).settled.length, 1);
       const g7 = await svc.gate(owner, newest);
       assert.deepEqual([g7.verdict, g7.checks.map((c) => c.name)], ["passed", ["smoke"]], "only checks of evidence still awaiting its re-check are owed");
+
+      // The older tree's re-checks were settled by the newer tree, not by evidence naming their checks again: on the older tree they are still owed, so a narrower record does not pass it.
+      const oldPerf = await svc.record(qa, { commandId: cid("r"), ...ev(old, 7), checks: [{ name: "perf", result: "passed" }] });
+      assert.deepEqual([oldPerf.settled, oldPerf.open], [[], []]);
+      const og = await svc.gate(owner, old);
+      assert.deepEqual([og.verdict, og.reasons, og.checks.find((c) => c.name === "smoke")?.result, og.pendingRechecks], ["failed", ["check_missing"], "missing", []], "a re-check settled by a newer tree leaves its checks owed on the older tree");
+      await svc.record(qa, { commandId: cid("r"), ...ev(old, 7) });
+      assert.equal((await svc.gate(owner, old)).verdict, "passed", "naming them again passes it");
     } finally { await world.close(); }
   });
 }

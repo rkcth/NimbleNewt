@@ -529,13 +529,16 @@ export class QaEvidenceService {
       if (reasons.length > 0) stale.push({ id, reasons }); else usable.push({ ...e, id });
     }
     const pending: string[] = [];
-    // Check names of independent evidence on this submission that no longer holds and whose re-check is not done: with no required checks, the re-check must name them again (card Q02
-    // follow-up), so newer evidence on other checks alone does not pass.
+    // Check names of independent evidence on this submission that no longer holds and whose re-check is not done by evidence (pending, or settled only by a newer tree): with no required
+    // checks, they must be named again (card Q02 follow-up), so newer evidence on other checks alone does not pass.
     const carried: string[] = [];
     const awaiting = new Set<string>();
     for (const r of index.body.rechecks) {
       const b = (await this.#runner.get("qa-recheck", r))?.body as unknown as QaRecheckBody | undefined;
-      if (b !== undefined && b.state === "pending" && b.submissionId === submissionId) { pending.push(r); awaiting.add(b.evidenceId); }
+      if (b === undefined || b.submissionId !== submissionId) continue;
+      if (b.state === "pending") { pending.push(r); awaiting.add(b.evidenceId); }
+      // Settled by a newer tree, not by evidence naming its checks again: this tree's checks are still owed here, so its gate does not pass on narrower evidence once the newer tree came in.
+      else if (b.doneBy === undefined) awaiting.add(b.evidenceId);
     }
     for (const s of stale) {
       const e = (await this.#runner.get("qa-evidence", s.id))?.body as unknown as QaEvidenceBody | undefined;
