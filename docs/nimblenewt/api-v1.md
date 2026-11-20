@@ -1819,14 +1819,14 @@ Result: `{ item }`: the summary.
 
 #### `landing.queue.list`
 
-The landing queue of a project's landing branch, or of `branch` when given, oldest first (card P10): each approved submission waiting to land, its task, the base and tree that will land and its position, and the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another: nothing there lands on the landing branch). Needs the owner or the right `integration.lease` on the project.
+The landing queue of a project's landing branch, or of `branch` when given, oldest first (card P10): each approved submission waiting to land, its task, the base and tree that will land and its position, and the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another: nothing there lands on the landing branch). Reserved places come first by their number: a task whose author reached the project's refresh-round cap (`integration.refreshRounds`) keeps its turn even while it has no approved entry, and while that place is first nothing else lands; `front` is the first place and since when (`escalated`: the director was told it held the branch for four hours while other work waited). Needs the owner or the right `integration.lease` on the project.
 
 Arguments:
 
 - `projectId`: the project
 - `branch`: optional: the branch whose queue is read (default: the project's landing branch)
 
-Result: `{ branch, landingBranch, items: [{ position, seq, submissionId, taskId, base, tree, author, queuedAt, queuedBy, replaced? }], others: [{ branch, entries }], partial? }`; `branch` and `landingBranch` are empty while the project names no landing branch and none is given; `partial` when not every queue record was read for `others`.
+Result: `{ branch, landingBranch, items: [{ position, seq, submissionId, taskId, base, tree, author, queuedAt, queuedBy, replaced?, reserved? }], reservations: [{ taskId, seq, since, round, cap, escalatedRound? }], front?: { taskId, since, escalated?, waitingForApproval }, others: [{ branch, entries }], partial? }`; `branch` and `landingBranch` are empty while the project names no landing branch and none is given; `partial` when not every queue record was read for `others`.
 
 #### `integrator.lease.list`
 
@@ -3953,7 +3953,7 @@ Arguments:
 - `landing` (optional): `integration-branch`, `main-automatic` or `human-promotes`
 - `integrator` (optional): `agent` or `human`
 - `requiredChecks` (optional): list of `tests`, `review`, `qa`, `docs`, `director`
-- `refreshRounds` (optional): 0 to 10
+- `refreshRounds` (optional): 0 to 10: how often an author refreshes onto a moved landing branch before its place in the landing queue is reserved (card P10)
 - `expectedRevision` (optional): the revision you read
 
 Result: `{ revision }`.
@@ -3969,7 +3969,7 @@ Arguments:
 - `landing` (optional): `integration-branch`, `main-automatic` or `human-promotes`
 - `integrator` (optional): `agent` or `human`
 - `requiredChecks` (optional): list of checks
-- `refreshRounds` (optional): 0 to 10
+- `refreshRounds` (optional): 0 to 10: how often an author refreshes onto a moved landing branch before its place in the landing queue is reserved (card P10)
 - `forbidMainAutomatic` (optional): true to forbid landing on main automatically everywhere
 - `expectedRevision` (optional): the revision you read
 
@@ -6191,7 +6191,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `landing.queue.add`
 
-Puts an approved code submission in the landing queue of its project's landing branch (card P10). The queue lands oldest first: a landing (`workspace.request` with `operation: landing`) lands only the task whose submission is the oldest entry, exactly its approved base and tree. An approval recorded by a reviewer (or a code submission that needs no review) is queued by the controller itself; this adds one by hand. A newer approved submission of a task already queued takes the old one's place and keeps its turn; a submission already queued is left where it is (`already`). Needs the owner, the right `integration.lease` on the project, or to be the submission's author. Refused `review_invalid` for work that is not approved, `invalid_transition` for a submission that already landed from the queue or one older than the task's queued submission, `forbidden` while the project names no landing branch, `unavailable` past 200 entries.
+Puts an approved code submission in the landing queue of its project's landing branch (card P10). The queue lands oldest first: a landing (`workspace.request` with `operation: landing`) lands only the task whose submission is the oldest entry, exactly its approved base and tree. An approval recorded by a reviewer (or a code submission that needs no review) is queued by the controller itself; this adds one by hand. A newer approved submission of a task already queued takes the old one's place and keeps its turn, and a task with a reserved place (its author reached the refresh-round cap) takes that place again; a submission already queued is left where it is (`already`). Needs the owner, the right `integration.lease` on the project, or to be the submission's author. Refused `review_invalid` for work that is not approved, `invalid_transition` for a submission that already landed from the queue or one older than the task's queued submission, `forbidden` while the project names no landing branch, `unavailable` past 200 entries.
 
 Arguments:
 
@@ -6204,7 +6204,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `landing.queue.remove`
 
-Takes a task's submission out of the landing queue of its project's landing branch (card P10), so the next one becomes the oldest; with `branch`, out of that branch's queue instead (an entry left on a branch that is no longer the landing branch). The owner or an integrator (the right `integration.lease` on the project) may take any out; an author its own. A submission whose newest review takes the approval back leaves the queue by itself. A submission whose landing is in progress (asked, not yet finished) cannot be taken out: it is refused `invalid_transition` with a reason telling the caller to wait for that landing to end, so the queue never has two landings at the host. A caller who may take nothing out is refused `not_found`, also while the project names no landing branch (`forbidden` is said only to the owner and integrators).
+Takes a task's submission out of the landing queue of its project's landing branch (card P10), so the next one becomes the oldest; with `branch`, out of that branch's queue instead (an entry left on a branch that is no longer the landing branch). The owner or an integrator (the right `integration.lease` on the project) may take any out; an author its own. A submission whose newest review takes the approval back leaves the queue by itself. A submission whose landing is in progress (asked, not yet finished) cannot be taken out: it is refused `invalid_transition` with a reason telling the caller to wait for that landing to end, so the queue never has two landings at the host. A caller who may take nothing out is refused `not_found`, also while the project names no landing branch (`forbidden` is said only to the owner and integrators). A director of the project may take out any entry too. Taking a task out also ends its reserved place (a task whose author reached the refresh-round cap keeps its turn, and while that place is first nothing else lands); a task with a reserved place and no entry can be taken out by the owner, an integrator or a director to end the reservation (`reservationEnded`).
 
 Arguments:
 
@@ -6213,7 +6213,7 @@ Arguments:
 - `branch`: optional: the branch whose queue holds it (default: the project's landing branch)
 - `commandId`: required
 
-Result: `{ taskId, branch, removed?, replayed }`; `removed` is the entry taken out (absent on a repeat).
+Result: `{ taskId, branch, removed?, reservationEnded?, replayed }`; `removed` is the entry taken out (absent on a repeat or when only a reservation ended).
 
 Completion: finished when accepted (`completed: true`).
 

@@ -899,9 +899,20 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
       landingBranch: async (call) => (await landingBranchOf(call)).branch,
       projectOfTask: (taskId) => integratorLeases.projectOfTask(taskId),
+      // Reservations and escalation (card P10): the project's refresh-round cap; the director (each director of the project, in its inbox) and the owner are told, the owner as needs-you when the project has no director.
+      refreshCap: async (projectId) => (await integration.effective(projectId)).refreshRounds,
+      isDirector: async (by, projectId) => { const now = new Date().toISOString(); return by.kind === "agent" && (await agents.directorsOf(projectId, now)).includes(by.id); },
+      escalate: async (n) => {
+        const directors = await agents.directorsOf(n.projectId, new Date().toISOString());
+        // Only a director that was actually told counts: when none could be (none in the project, or none can receive notices about this task), the owner is asked to decide.
+        let toldDirectors = 0;
+        for (const d of directors) { try { await messages.noticeFromController({ commandId: `${n.commandId}:${d}`.slice(0, 120), taskId: n.taskId, to: d, purpose: "the landing queue needs the director's decision", text: n.text }); toldDirectors++; } catch { /* the owner is still told */ } }
+        await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: toldDirectors === 0 ? "needs-you" : "notice", ref: { kind: "task", id: n.taskId }, projectId: n.projectId, detail: `Landing queue of ${n.branch.slice(0, 40)} waits on task ${n.taskId} (${n.why === "front" ? "first for too long" : "stale again after its reserved place"}). ${toldDirectors === 0 ? "No director could be told: you decide, or take it out." : "The director was told."}`.slice(0, 200) });
+      },
     });
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
       landingQueue: { check: (by, call) => landingQueueOps.checkLanding(by, call), landedChanges: (projectId, branch, submissionId) => landingQueueOps.landedChanges(projectId, branch, submissionId) },
+      onRound: async (r) => { await landingQueueOps.afterRound(r); },
       landingLease: async (by, call) => {
         let branch: string | undefined;
         try { branch = (await landingBranchOf(call)).branch; } catch { throw new DomainError("unavailable", "the landing settings could not be read, so no lease can be matched to the landing branch; nothing was landed"); }

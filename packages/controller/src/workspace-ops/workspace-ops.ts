@@ -161,6 +161,11 @@ export interface WorkspaceDeps {
    * refuses the landing. Absent: landings are not gated (unit rigs).
    */
   readonly landingGate?: (call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string; readonly author?: string; readonly host: WorkspacePort }) => Promise<LandingChecksRecord>;
+  /**
+   * Card P10: told after a refresh round of a task is counted (the author's own refresh moved its checkout onto a newer head), with the task's round count; the landing queue reserves the task's place at the
+   * refresh-round cap and tells the director when a reserved task needs another round. Best effort: a throw is ignored. Not told on a repeat of the call.
+   */
+  readonly onRound?: (round: { readonly taskId: string; readonly projectId: string; readonly round: number }) => Promise<void>;
   /** Card P09: tells the author agent (a notice in its inbox, delivered when it next reads) that its landing was refused by the checks, with the results. A throw is recorded as not told. */
   readonly tellAuthor?: (notice: { readonly commandId: string; readonly taskId: string; readonly to: string; readonly text: string }) => Promise<void>;
 }
@@ -319,7 +324,10 @@ export class WorkspaceOpService {
       await this.#recordStart(id, () => this.#write(by.id, scoped, "workspace.request", id, { creates: true, payload: { operation: "reapply", taskId, attemptId }, body: () => make, also: () => this.#openChange(taskId, id) }));
       const started = (await this.#get(id))!;
       const outcome = await this.#run(id, started.body);
-      return await this.#settle(by.id, scoped, id, outcome);
+      const settledAnswer = await this.#settle(by.id, scoped, id, outcome);
+      // A counted round may reserve the task's place in the landing queue, or tell the director (card P10). Best effort, after the round is recorded.
+      if (settledAnswer.round !== undefined && !settledAnswer.replayed && this.#deps.onRound !== undefined) { try { await this.#deps.onRound({ taskId, projectId: task.projectId, round: settledAnswer.round }); } catch { /* best effort */ } }
+      return settledAnswer;
     } finally { this.#busy.delete(taskId); }
   }
 

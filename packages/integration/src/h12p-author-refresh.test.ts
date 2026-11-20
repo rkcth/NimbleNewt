@@ -94,6 +94,12 @@ test("a running agent refreshes its own checkout through work.refresh: no quiesc
     const token = credentials.get(attempt)!;
     assert.ok(token !== undefined && token.length > 0, "the worker was given the attempt's own credential");
 
+    // Card P10: the project lands on main and lets an author refresh twice before its place in the landing queue is reserved.
+    assert.equal((await api(c, boot.token, "project.branches.change", { project, landing: "main" }, "lb-1")).ok, true);
+    const capped = await api(c, boot.token, "integration.set", { project, refreshRounds: 2 }, "is-1");
+    assert.equal(capped.ok, true, JSON.stringify(capped));
+    const reserved = async () => (await api(c, boot.token, "landing.queue.list", { projectId: project })).result.reservations.map((r: { taskId: string; round: number; cap: number }) => [r.taskId, r.round, r.cap]);
+
     // The agent's work: a changed file that the landing branch will also change, a changed file it will not, and a new file.
     await writeFile(join(where.checkout, "src", "a.ts"), "export const a = 'mine';\n");
     await writeFile(join(where.checkout, "doc.txt"), lines(20, [2, "mine two"]));
@@ -126,6 +132,7 @@ test("a running agent refreshes its own checkout through work.refresh: no quiesc
     assert.equal(ran.length, asked);
     const read = await api(c, boot.token, "workspace.get", { requestId: item.id });
     assert.deepEqual([read.result.item.operation, read.result.item.round, read.result.item.requestedBy], ["reapply", 1, `agent:${agent}`]);
+    assert.deepEqual(await reserved(), [], "one round is under the cap of 2: nothing is reserved");
 
     // At the head already: nothing changes and it is not a round. The agent fixes the conflict itself, the branch moves again: round 2.
     const same = await api(c, token, "work.refresh", { attemptId: attempt }, "rf-2");
@@ -135,6 +142,7 @@ test("a running agent refreshes its own checkout through work.refresh: no quiesc
     const second = await api(c, token, "work.refresh", { attemptId: attempt }, "rf-3");
     assert.deepEqual([second.result.item.state, second.result.item.round, second.result.item.detail.conflictCount], ["done", 2, 0], JSON.stringify(second));
     assert.equal(await readFile(join(where.checkout, "src", "a.ts"), "utf8"), "export const a = 'fixed';\n", "the agent's fix survives the refresh");
+    assert.deepEqual(await reserved(), [[task, 2, 2]], "the second round reaches the cap: the task's place in the landing queue is reserved (card P10)");
 
     // The owner cannot ask for it (it is the author's own tool), and a stranger's attempt is not found.
     assert.equal((await api(c, boot.token, "workspace.request", { operation: "reapply", taskId: task, reason: "refresh it" }, "o-1")).error?.code, "invalid_command");

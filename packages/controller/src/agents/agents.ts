@@ -471,6 +471,28 @@ export class AgentService {
     }
   }
 
+  /**
+   * The directors of one project (card P10, escalation of the landing queue): active agents holding the director role with a live grant naming THIS project (a project-wide `*` grant does not make a director, as in
+   * `decidersAvailableIn`). Principal IDs.
+   */
+  async directorsOf(projectId: string, now: string): Promise<string[]> {
+    const out: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const records = await this.#runner.list("agent", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const r of records) {
+        after = r.id;
+        const b = r.body as unknown as AgentBody;
+        if (b.state !== "active" || !b.roles.includes("director")) continue;
+        const principal = (await this.#runner.get("principal", b.principalId))?.body as unknown as PrincipalBody | undefined;
+        if (principal === undefined || principal.state !== "active") continue;
+        const effective = await effectiveOf(this.#runner, { id: b.principalId, kind: "agent", name: principal.name, grants: principal.grants, asOf: now } as Principal, now);
+        if (effective.grants.some((g) => g.project === projectId && (g.expiresAt === undefined || g.expiresAt > now) && !g.action.startsWith("tool."))) out.push(b.principalId);
+      }
+      if (records.length < 200) return out;
+    }
+  }
+
   /** One agent. The owner, a manager or reader, and the agent itself may ask; anyone else gets the answer a missing agent would get. */
   async get(by: Principal, id: string): Promise<View<AgentBody> | undefined> {
     const found = await this.#runner.get("agent", agentId(id));

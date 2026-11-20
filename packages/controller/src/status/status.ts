@@ -2107,11 +2107,17 @@ export class StatusService {
     const lines: Line[] = [];
     const which = q.branch === "" ? "" : q.branch === q.landingBranch ? `branch ${quoted(q.branch, 120)} (the project's landing branch)` : `branch ${quoted(q.branch, 120)} (not the landing branch${q.landingBranch === "" ? ": the project names none" : `, which is ${quoted(q.landingBranch, 120)}`}; nothing here lands there)`;
     if (q.branch === "") lines.push(line("The project names no landing branch, so nothing is queued to land (the owner sets the landing branch first).", cite("project", projectId)));
-    else if (q.items.length === 0) lines.push(line(`The landing queue of ${which} is empty.`, cite("project", projectId)));
+    else if (q.items.length === 0 && q.reservations.length === 0) lines.push(line(`The landing queue of ${which} is empty.`, cite("project", projectId)));
     else {
       lines.push(line(`The landing queue of ${which} holds ${q.items.length} approved submission(s), oldest first; the first lands next.`, cite("project", projectId)));
-      for (const e of q.items.slice(0, 30)) lines.push(line(`${e.position}. Task ${e.taskId}: submission ${e.submissionId} by ${shown(e.author, 80)}, queued ${e.queuedAt} by ${shown(e.queuedBy, 80)}${e.replaced === undefined ? "" : ` (took the place of ${e.replaced})`}.`, cite("task", e.taskId), cite("project", projectId)));
+      for (const e of q.items.slice(0, 30)) lines.push(line(`${e.position}. Task ${e.taskId}: submission ${e.submissionId} by ${shown(e.author, 80)}, queued ${e.queuedAt} by ${shown(e.queuedBy, 80)}${e.replaced === undefined ? "" : ` (took the place of ${e.replaced})`}${e.reserved === true ? "; its place is reserved" : ""}.`, cite("task", e.taskId), cite("project", projectId)));
       if (q.items.length > 30) lines.push(line(`${q.items.length - 30} more are not shown here (landing.queue.list has them all).`, cite("project", projectId)));
+      // Reserved places (card P10): a task whose author reached the refresh-round cap keeps its turn; while its place is first and it has no approved submission, nothing else lands.
+      for (const r of q.reservations.slice(0, 20)) {
+        const waiting = !q.items.some((e) => e.taskId === r.taskId);
+        lines.push(line(`Task ${r.taskId} has a reserved place since ${r.since}: its author reached the refresh-round cap (round ${r.round}, cap ${r.cap}), so it keeps its turn${waiting ? " and waits for an approved submission" : ""}${waiting && q.front?.taskId === r.taskId ? "; it is first, so nothing else lands until it lands or is taken out" : ""}${r.escalatedRound === undefined ? "" : `; the director was told it needed round ${r.escalatedRound}`}. Taking the task out of the queue ends the reservation.`, cite("task", r.taskId), cite("project", projectId)));
+      }
+      if (q.front?.escalated === true) lines.push(line(`Task ${q.front.taskId} has been first since ${q.front.since} and the director was told that it holds the branch while other work waits.`, cite("task", q.front.taskId), cite("project", projectId)));
     }
     for (const o of q.others.slice(0, 20)) lines.push(line(`Branch ${quoted(o.branch, 120)} also has ${o.entries} submission(s) waiting in its own queue${o.branch === q.landingBranch ? " (the landing branch)" : "; it is not the landing branch, so they do not land now: ask to see that branch's queue, to take one out of it, or to queue the submission on the landing branch"}.`, cite("project", projectId)));
     if (q.others.length > 20) lines.push(line(`${q.others.length - 20} more branches with queued work are not shown here.`, cite("project", projectId)));
