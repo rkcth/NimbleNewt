@@ -348,6 +348,74 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
+  test(`${backend.name}: re-check: a take-out that commits while a landing of that task is being recorded wins, and the landing, its start built again, stops before the host is asked (card P10, in-progress take-out)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2] = [await r.task("one"), await r.task("two")];
+      const lease = await r.leaseOps.acquire(ivy, { commandId: "l1", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      const [s1, s2] = [r.approve(1, t1), r.approve(2, t2)];
+      await r.ops.add(ivy, { commandId: "q1", submissionId: s1 });
+      await r.ops.add(ivy, { commandId: "q2", submissionId: s2 });
+      // The landing reads task one's open-request record twice before it writes (resolving what was left open, then building its start write); right after the second read the owner takes the entry out.
+      let reads = 0, takenOut: unknown;
+      const base = r.w.storage;
+      const storage = new Proxy(base, { get: (target, p) => {
+        if (p === "getAggregate") return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (ref.kind === "workspace-open" && ref.id === t1 && ++reads === 2) takenOut = (await r.ops.remove(r.w.owner, { commandId: "out", taskId: t1, reason: "not now" })).removed?.submissionId; return found; };
+        const v = Reflect.get(target, p, target) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } });
+      const svc = WorkspaceOpService.withEpoch(storage, r.w.epoch, {
+        quiesce: { around: async (_scope, _op, run) => run({ attempts: [] } as never) },
+        portOf: async () => ({ run: async (call) => { r.calls.push(call); return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; } }),
+        landingLease: (by, call) => r.leaseOps.checkLanding(by, { ...call, branch: "main" }),
+        landingQueue: { check: (by, call) => r.ops.checkLanding(by, call), landedChanges: (p, b, s) => r.ops.landedChanges(p, b, s) },
+      }, { clock: r.w.clock.now, pause: async () => undefined });
+      const out = await svc.request(ivy, { commandId: "w1", operation: "landing", taskId: t1, reason: "land one", leaseId: lease.leaseId, fence: lease.fence });
+      assert.equal(takenOut, s1, "the take-out went ahead (the landing was not recorded yet)");
+      assert.ok(reads >= 3, "the landing's start was built again after the take-out");
+      assert.equal(out.state, "refused", out.summary);
+      assert.match(out.summary ?? "", /no longer the oldest approved one in the landing queue, so nothing was landed/);
+      assert.equal(r.calls.length, 0, "no host was asked");
+      assert.deepEqual(await r.queued(), [[1, s2, t2]]);
+      assert.deepEqual((await r.w.storage.getAggregate({ kind: "workspace-open", id: t1 }))?.body, {});
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: re-check: a request left open by a stopped controller is still marked uncertain when a take-out rewrites the task's open-request record at that moment (card P10, in-progress take-out)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const t1 = await r.task("one");
+      const s1 = r.approve(1, t1);
+      await r.ops.add(ivy, { commandId: "q1", submissionId: s1 });
+      // The first controller's refresh is at the host (and stays there): to a second controller it is a request left open by a controller that stopped.
+      let entered!: () => void, release!: () => void;
+      const reached = new Promise<void>((res) => { entered = res; });
+      const held = new Promise<void>((res) => { release = res; });
+      const quiet = { around: async (_scope: unknown, _op: unknown, run: (q: never) => Promise<unknown>) => run({ attempts: [] } as never) } as never;
+      const options = { clock: r.w.clock.now, pause: async () => undefined };
+      const first = WorkspaceOpService.withEpoch(r.w.storage, r.w.epoch, { quiesce: quiet, portOf: async () => ({ run: async () => { entered(); await held; return { ok: true, summary: "refreshed", detail: { changed: false } }; } }) }, options);
+      const ask = { commandId: "w1", operation: "refresh" as const, taskId: t1, reason: "move it to the head" };
+      const running = first.request(r.w.owner, ask).catch((e: unknown) => e);
+      try {
+        await reached;
+        // The second controller's repeat marks it uncertain; right after it reads the open-request record to build that write, the owner takes the entry out (a refresh is not a landing), which rewrites that record.
+        let takenOut: unknown, armed = true;
+        const storage = new Proxy(r.w.storage, { get: (target, p) => {
+          if (p === "getAggregate") return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (armed && ref.kind === "workspace-open" && ref.id === t1) { armed = false; takenOut = (await r.ops.remove(r.w.owner, { commandId: "out", taskId: t1, reason: "not now" })).removed?.submissionId; } return found; };
+          const v = Reflect.get(target, p, target) as unknown;
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        } });
+        const second = WorkspaceOpService.withEpoch(storage, r.w.epoch, { quiesce: quiet, portOf: async () => ({ run: async () => { throw new Error("not asked"); } }) }, options);
+        const repeat = await second.request(r.w.owner, ask);
+        assert.equal(takenOut, s1, "the take-out went ahead");
+        assert.deepEqual([repeat.state, repeat.replayed], ["uncertain", true]);
+        assert.deepEqual((await r.w.storage.getAggregate({ kind: "workspace-open", id: t1 }))?.body, {});
+      } finally { release(); await running; }
+    } finally { await r.close(); }
+  });
+
   test(`${backend.name}: race: two integrators racing for the branch, and two landings racing for the queue, never both reach the host (card P10, queue)`, async () => {
     const r = await rig();
     try {
