@@ -1916,6 +1916,23 @@ export class ChatService {
         labels[String(exact[0]!["id"])] = named.trim();
       }
     }
+    // Moving an agent to another version of a shared tool (card T08): the agent named by its name (exactly one active agent, else asked or refused), or everyone pinned to the tool.
+    if (intent.op === "toolbox.optin") {
+      const named = args["agentName"];
+      delete args["agentName"];
+      if (named !== undefined && args["agentId"] !== undefined) return refuse("invalid_command", "the agent is named twice over, as an ID and by name; which one is meant has to be settled.");
+      if (named !== undefined && args["everyone"] !== undefined) return refuse("invalid_command", "one agent and everyone are both named; which one is meant has to be settled.");
+      if (named !== undefined) {
+        if (typeof named !== "string" || named.trim() === "") return refuse("invalid_command", "agentName must be the agent's name as the owner said it");
+        const agents = await this.#listAll(token, "agent.list", { state: "active" });
+        const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === named.trim().toLowerCase());
+        if (exact.length === 0) return refuse("not_found", `no active agent is called ${quotedText(named.trim(), 80)}`);
+        if (exact.length > 1) return { ok: false, kind: "ask", question: `More than one agent is called ${quotedText(named.trim(), 80)}. Which one do you mean?`, options: exact.slice(0, CHAT_LIMITS.options).map((a) => String(a["id"]).slice(0, 60)) };
+        args["agentId"] = String(exact[0]!["id"]);
+        labels[String(exact[0]!["id"])] = named.trim();
+      }
+      if (args["agentId"] === undefined && args["everyone"] === undefined) return refuse("invalid_command", "Which agent should move to that version, or should every agent using the tool move?");
+    }
     if (intent.op === "resume.retry" || intent.op === "resume.cancel") {
       // The owner names the task; the check is always the one the task has now, so what is shown (the task) and what is acted on (its check) are the same. A check ID the interpreter put in is
       // never acted on by itself: it must be the named task's current check. Nothing is guessed when the task has none.

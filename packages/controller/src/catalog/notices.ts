@@ -10,7 +10,8 @@ import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
  * personal copy of, are written here when they happen (in the decision's own write; for a revocation, right after it). The agent reads it with `toolbox.notices`. At most `kept` notices stay; older ones fall off.
  */
 export const NOTICE_LIMITS = { kept: 100, text: 600, page: 100 } as const;
-export type NoticeKind = "proposal" | "revocation";
+/** `release`: a newer version of a shared tool the agent is pinned to; `pin`: its pinned version was set aside, or the owner moved its pin (card T08). */
+export type NoticeKind = "proposal" | "revocation" | "release" | "pin";
 export interface ToolboxNotice {
   /** Increases by one per notice in this inbox; pass the last one seen as `after` to read only newer ones. */
   readonly seq: number;

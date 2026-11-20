@@ -320,7 +320,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   chat_budget: { keys: [], about: "owner only: the daily cap on the tokens the reviewing agents (the resume reviewer and the second agent that questions a done) may use (the chat itself is never stopped by it), who set it and when, and how many tokens and calls were used today (UTC day) and are left; the owner sets or removes the cap by chat" },
   grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
-  toolbox: { keys: [], about: "the shared tools (toolbox): for each one the version in use, who it is for (all agents, roles, teams or projects), the platforms it declares and how many agents keep a personal copy of it; who maintains them is a grant of toolbox.manage (status kind settings, or grant.create)" },
+  toolbox: { keys: [], about: "the shared tools (toolbox): for each one the version in use, who it is for (all agents, roles, teams or projects), the platforms it declares, how many agents keep a personal copy of it and which version the agents using it stay on (each keeps the version of its first run until it opts in); who maintains them is a grant of toolbox.manage (status kind settings, or grant.create)" },
   toolbox_proposals: { keys: ["state"], about: "owner only: the proposals agents made for the shared toolbox (improvements of a shared tool, or a personal tool offered to become a shared one): for each one the tool, the author, the version it is against and whether that is still the version in use, what it changes, the access it adds or drops and its state; by default those waiting (open, or with changes requested), with the number deferred; state names another (deferred, accepted, rejected, withdrawn or all). A maintainer or the owner decides with toolbox.proposal.decide" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -594,6 +594,8 @@ export interface StatusDeps {
   readonly toolbox?: {
     list(by: Principal): Promise<{ readonly items: readonly { readonly name: string; readonly kind: string; readonly latest: string; readonly os: readonly string[]; readonly arch: readonly string[]; readonly audience: { readonly all?: true; readonly roles?: readonly string[]; readonly teams?: readonly string[]; readonly projects?: readonly string[] } }[]; readonly partial?: true }>;
     forks(by: Principal, name: string): Promise<{ readonly forks: readonly { readonly baseRevoked: boolean }[] }>;
+    /** Who is pinned to which version of a shared tool (card T08). Absent: the view does not say. */
+    consumers?(by: Principal, name: string): Promise<{ readonly inUse?: string; readonly pins: readonly { readonly agent: string; readonly version: string; readonly revoked: boolean; readonly setAside: boolean }[] }>;
     /** Toolbox proposals (card T08). Absent: the proposals view is not offered. */
     proposals?(by: Principal, query: { state?: string; limit?: number }): Promise<{ readonly items: readonly { readonly id: string; readonly revision: number; readonly kind: string; readonly target: string; readonly author: string; readonly state: string; readonly round: number; readonly base?: { readonly version: string }; readonly from?: { readonly name: string; readonly version: string }; readonly changes: { readonly instructions: boolean; readonly executable: boolean; readonly manifest: boolean }; readonly permissionChanges: { readonly added: readonly string[]; readonly removed: readonly string[] }; readonly stale?: boolean; readonly current?: string; readonly released?: { readonly version: string } }[]; readonly next?: string; readonly partial?: true }>;
   };
@@ -1837,7 +1839,18 @@ export class StatusService {
       ].join(", ");
       let copies = "";
       try { const f = await this.#deps.toolbox.forks(by, t.name); copies = f.forks.length === 0 ? " No agent has copied it." : ` ${f.forks.length} personal cop${f.forks.length === 1 ? "y was" : "ies were"} made of it${f.forks.some((x) => x.baseRevoked) ? ", some of a version since revoked" : ""}.`; } catch { copies = ""; }
-      lines.push(line(`${shown(t.name, 80)} ${shown(t.latest, 20)} (${t.kind === "skill" ? "skill" : "tool"}) is for ${who}; it declares ${t.os.map((o) => shown(o, 10)).join(", ")} on ${t.arch.map((o) => shown(o, 10)).join(", ")}.${copies}`, cite("catalog-entry", derivedId("cat", t.name))));
+      // Which version its consumers stay on (card T08): each agent keeps the version of its first run until it opts in, so after a release some may still be on an older one.
+      let pinned = "";
+      try {
+        const c = this.#deps.toolbox.consumers === undefined ? undefined : await this.#deps.toolbox.consumers(by, t.name);
+        if (c !== undefined && c.pins.length > 0) {
+          const counts = new Map<string, { n: number; agents: string[]; revoked: boolean; setAside: boolean }>();
+          for (const p of c.pins) { const x = counts.get(p.version) ?? { n: 0, agents: [], revoked: p.revoked, setAside: p.setAside }; x.n += 1; if (x.agents.length < 3) x.agents.push(p.agent); counts.set(p.version, x); }
+          const parts = [...counts.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 5).map(([v, x]) => `${x.n} on ${shown(v, 20)}${v === c.inUse ? ", the version in use" : x.revoked ? ", revoked (their calls naming no version are refused until they opt in)" : x.setAside ? ", set aside" : ""}${x.n <= 3 ? ` (${x.agents.map((a) => shown(a, 60)).join(", ")})` : ""}`);
+          pinned = ` Agents using it stay on the version of their first run until they opt in: ${parts.join("; ")}.`;
+        }
+      } catch { pinned = ""; }
+      lines.push(line(`${shown(t.name, 80)} ${shown(t.latest, 20)} (${t.kind === "skill" ? "skill" : "tool"}) is for ${who}; it declares ${t.os.map((o) => shown(o, 10)).join(", ")} on ${t.arch.map((o) => shown(o, 10)).join(", ")}.${copies}${pinned}`, cite("catalog-entry", derivedId("cat", t.name))));
     }
     if (found.items.length > 50) lines.push(line(`${found.items.length - 50} more shared tool(s) are not shown.`, cite("installation", "installation")));
     if (found.partial === true) lines.push(line("The catalogue is larger than was looked through; there may be more shared tools.", cite("installation", "installation")));

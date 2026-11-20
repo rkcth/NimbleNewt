@@ -91,7 +91,18 @@ export interface HostFacts {
 }
 export interface HostCheck { readonly ok: boolean; readonly reasons: readonly string[] }
 
-export const CATALOG_LIMITS = { purpose: 500, schemaBytes: 8192, entryPoint: 200, dependencies: 50, access: 50, scan: 5000, page: 200, versions: 500, audience: 20, forks: 500 } as const;
+/**
+ * The versions consumers of one shared tool stay on (card T08: "consumers stay on their pinned version until they opt in"). An agent is pinned to the version of its first run of the tool; a call that names no version then
+ * resolves to the pin, not to the newest release. The pin moves only when the agent opts in (`toolbox.optin`) or the owner moves it. Keyed by the shared entry; bounded by `CATALOG_LIMITS.pins`.
+ */
+export interface PinEntry { readonly agent: string; readonly version: string; readonly at: string; /** Who set it: the agent itself, or the owner. */ readonly by: string; readonly how: "first-use" | "opt-in" }
+export interface PinBody { readonly name: string; readonly pins: readonly PinEntry[] }
+export const PINS_KIND = "catalog-pins";
+export const pinsRef = (canonical: string): AggregateRef => ({ kind: PINS_KIND, id: derivedId("cpn", canonical) });
+export const CATALOG_LIMITS = { purpose: 500, schemaBytes: 8192, entryPoint: 200, dependencies: 50, access: 50, scan: 5000, page: 200, versions: 500, audience: 20, forks: 500, pins: 1000 } as const;
+const AGENT_RECORD_ID = /^agt-[a-z2-7]{20}$/;
+/** The short name of a shared tool (`lint` for `toolbox.lint`), for the words of a notice. */
+const shortOf = (canonical: string): string => canonical.replace(/^toolbox\./, "");
 /** The action that lets an agent maintain shared toolbox entries (card T08). Granted for every project (`*`) it covers every audience; granted for one project it covers entries whose audience is only that project (or several it holds it in). */
 export const TOOLBOX_MANAGE = "toolbox.manage";
 const ROLE_NAME = /^[a-z][a-z0-9-]{0,39}$/;
@@ -437,6 +448,8 @@ export class CatalogService {
         };
       },
     }));
+    // Consumers pinned to an older version are told a newer one is in use now; they stay where they are until they opt in (card T08).
+    if (layer === "toolbox") await this.#noticeNewer(canonical);
     return { versionId, name: canonical, digest };
   }
 
@@ -530,7 +543,7 @@ export class CatalogService {
     }));
     // The listeners stop or let finish the calls running now; only the owner's revocation can pause their tasks (a maintainer gives no principal to pause them with).
     for (const listener of [...this.#revoked]) { try { listener(command.name, command.version, runningCalls, by.kind === "owner" ? by : undefined); } catch { /* the revocation stands whatever a listener does */ } }
-    if (parsed.layer === "toolbox") await this.#noticeForks(command.name, command.version, reason);
+    if (parsed.layer === "toolbox") { await this.#noticeForks(command.name, command.version, reason); await this.#noticeRevokedPins(command.name, command.version, reason); }
   }
 
   /**
@@ -607,6 +620,7 @@ export class CatalogService {
         return { ref: eref, creates: false, changes: [{ type: "update", ref: eref, expectedRevision: entry.revision, body: next as unknown as JsonObject }], detail: { name: command.name, version: command.version, setAside: add.length, reason }, contention: async () => new DomainError("stale_revision", "the catalog entry changed at the same moment; ask again") };
       },
     }));
+    if (parseName(command.name)?.layer === "toolbox") await this.#noticeSetAside(command.name, reason);
   }
 
   /**
@@ -807,7 +821,7 @@ export class CatalogService {
   }
 
   /** One version (or the latest live one), if the reader may see it: system and shared artifacts to any authenticated principal with `catalog.read`, a personal one only to its owner and the installation owner. */
-  async get(by: Principal, name: string, version?: string): Promise<(View<VersionBody> & { revoked?: RevocationBody }) | undefined> {
+  async get(by: Principal, name: string, version?: string): Promise<(View<VersionBody> & { revoked?: RevocationBody; /** The version is the caller's pin (card T08): no version was named and the caller is pinned to this one. */ pinned?: true }) | undefined> {
     const resolved = await this.#resolve(by, name, version);
     return resolved?.version;
   }
@@ -821,7 +835,9 @@ export class CatalogService {
         after = a.id;
         const e = a.body as unknown as EntryBody;
         if (!(await this.#mayReadEntry(by, e))) continue;
-        const live = await this.#latestLive(e.name);
+        // An agent pinned to a shared tool is shown the version a call that names none runs: its pin (card T08).
+        const pinned = await this.#pinnedVersion(by, e);
+        const live = pinned !== undefined ? { body: { version: pinned } } : await this.#latestLive(e.name);
         if (live !== undefined) out.push({ name: e.name, kind: e.kind, layer: e.layer, latest: live.body.version });
       }
       if (page.length < 200) return out;
@@ -870,6 +886,8 @@ export class CatalogService {
         return { ref, creates: true, changes: [{ type: "create", ref, body: usage as unknown as JsonObject }, { type: "check", ref: eref, expectedRevision: entry.revision }, { type: "check", ref: vref, expectedRevision: current.revision }], detail: { name: v.name, version: v.version, taskId, projectId }, contention: async () => new DomainError("stale_revision", "the catalog changed at the same moment; ask again") };
       },
     }));
+    // A consumer's first run of a shared tool pins it to that version (card T08). Best effort: the run is never refused for it; a pin that could not be written is written at the next run.
+    if (by.kind === "agent" && v.layer === "toolbox") await this.#pinFirstUse(by.id, v.name, v.version);
     return { ready: true, versionId: v.id, version: v.version, digest: v.digest };
   }
 
@@ -963,8 +981,8 @@ export class CatalogService {
    * The shared entries the reader may see (its audience), with what a reader needs to choose one: the version chosen now, every live version, the platforms and interpreter it declares (so an
    * incompatibility is visible before anyone runs it), its purpose and its audience. `maintainable` says whether the reader may change it.
    */
-  async toolbox(by: Principal): Promise<{ items: { name: string; kind: ArtifactKind; latest: string; versions: string[]; purpose: string; os: readonly string[]; arch: readonly string[]; interpreter?: { name: string; version: string }; audience: Audience; maintainable: boolean }[]; partial?: true }> {
-    const items: { name: string; kind: ArtifactKind; latest: string; versions: string[]; purpose: string; os: readonly string[]; arch: readonly string[]; interpreter?: { name: string; version: string }; audience: Audience; maintainable: boolean }[] = [];
+  async toolbox(by: Principal): Promise<{ items: { name: string; kind: ArtifactKind; latest: string; versions: string[]; purpose: string; os: readonly string[]; arch: readonly string[]; interpreter?: { name: string; version: string }; audience: Audience; maintainable: boolean; pinned?: string; pinRevoked?: true }[]; partial?: true }> {
+    const items: { name: string; kind: ArtifactKind; latest: string; versions: string[]; purpose: string; os: readonly string[]; arch: readonly string[]; interpreter?: { name: string; version: string }; audience: Audience; maintainable: boolean; pinned?: string; pinRevoked?: true }[] = [];
     let scanned = 0;
     for (let after: string | undefined; ;) {
       const page = await this.#runner.list("catalog-entry", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
@@ -975,7 +993,9 @@ export class CatalogService {
         const live = await this.#latestLive(e.name);
         if (live === undefined) continue;
         const m = live.body.manifest;
-        items.push({ name: e.name, kind: e.kind, latest: live.body.version, versions: e.versions.filter((v) => !e.revoked.includes(v)).sort(compare), purpose: m.purpose, os: m.os, arch: m.arch, ...(m.interpreter === undefined ? {} : { interpreter: m.interpreter }), audience: e.audience ?? { all: true }, maintainable: mayManage(by, e.audience) });
+        // The caller's own pin (card T08): the version a call naming none runs for it, which may be older than the one in use (or revoked: then it must opt in to another).
+        const pinned = await this.#pinnedVersion(by, e);
+        items.push({ name: e.name, kind: e.kind, latest: live.body.version, versions: e.versions.filter((v) => !e.revoked.includes(v)).sort(compare), purpose: m.purpose, os: m.os, arch: m.arch, ...(m.interpreter === undefined ? {} : { interpreter: m.interpreter }), audience: e.audience ?? { all: true }, maintainable: mayManage(by, e.audience), ...(pinned === undefined ? {} : { pinned, ...(e.revoked.includes(pinned) ? { pinRevoked: true as const } : {}) }) });
       }
       if (page.length < 200) break;
       if (scanned >= CATALOG_LIMITS.scan) return { items, partial: true };
@@ -1123,6 +1143,121 @@ export class CatalogService {
     return readNotices(this.#runner, by, query);
   }
 
+  /**
+   * Opts in to a version of a shared tool (card T08): the pin a consumer stays on until it opts in again. An agent moves its own pin, to a version of a tool it may read (default: the version in use now). The owner moves one
+   * agent's pin (`agentId`) or every consumer's (`everyone`), and the agents moved are told in their toolbox inbox. The version must be published and not revoked; an older one may be chosen (that is the agent's or the owner's
+   * choice). A maintainer has no say over consumers' pins: publishing a version never moves anyone. The entry is checked in the same write, so a revocation at that moment makes it ask again.
+   */
+  async optIn(by: Principal, command: NoActor & { name: string; version?: string; agentId?: string; everyone?: boolean }): Promise<{ name: string; version: string; moved: number; previous?: string }> {
+    onlyKnown(command, ["commandId", "name", "version", "agentId", "everyone"]);
+    const name = toolboxName(command.name);
+    if (command.version !== undefined && (typeof command.version !== "string" || !VERSION.test(command.version))) invalid("version", "must be major.minor.patch");
+    if (command.everyone !== undefined && command.everyone !== true) invalid("everyone", "must be true when given");
+    let targets: string;
+    if (by.kind === "agent") {
+      if (command.agentId !== undefined || command.everyone !== undefined) throw new DomainError("forbidden", `${by.id} opts in only for itself; moving another agent's version is the owner's`);
+      targets = by.id;
+    } else if (by.kind === "owner") {
+      if ((command.agentId === undefined) === (command.everyone === undefined)) invalid("agentId", "name the agent whose version moves, or everyone: true for every agent pinned to the tool");
+      if (command.agentId !== undefined) {
+        if (typeof command.agentId !== "string" || !AGENT_RECORD_ID.test(command.agentId)) invalid("agentId", "must be an agent ID (agt-...)");
+        if ((await this.#runner.get("agent", command.agentId)) === undefined) throw new DomainError("not_found", `no agent ${command.agentId}`);
+        targets = `agent:${command.agentId}`;
+      } else targets = "everyone";
+    } else throw new DomainError("forbidden", `${by.id} may not choose a shared tool's version for anyone`);
+    const eref: AggregateRef = { kind: "catalog-entry", id: derivedId("cat", name) };
+    const pref = pinsRef(name);
+    const outcome: { version?: string; moved: string[]; previous?: string } = { moved: [] };
+    await this.#runner.command("toolbox.optin", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+      payload: { name, version: command.version ?? null, targets },
+      build: async () => {
+        const entry = await this.#runner.get(eref.kind, eref.id);
+        const e = entry?.body as unknown as EntryBody | undefined;
+        // A tool the caller may not read is answered as one that does not exist.
+        if (entry === undefined || e === undefined || e.layer !== "toolbox" || !(await this.#mayReadEntry(by, e))) throw new DomainError("not_found", `no shared tool ${name} you may read`);
+        const version = command.version ?? chosenVersion(e) ?? invalid("name", `${name} has no version in use to opt in to; name one`);
+        if (!e.versions.includes(version)) throw new DomainError("not_found", `${name} has no version ${version}`);
+        if (e.revoked.includes(version)) invalid("version", `${name} ${version} was revoked; opt in to one that is not`);
+        const found = await this.#runner.get(pref.kind, pref.id);
+        const pins = (found?.body as unknown as PinBody | undefined)?.pins ?? [];
+        const at = this.#runner.now();
+        const moved: string[] = [];
+        let previous: string | undefined;
+        let next: PinEntry[];
+        if (targets === "everyone") {
+          next = pins.map((p) => { if (p.version === version) return p; moved.push(p.agent); return { agent: p.agent, version, at, by: by.id, how: "opt-in" as const }; });
+        } else {
+          const mine = pins.find((p) => p.agent === targets);
+          previous = mine?.version;
+          if (mine === undefined && pins.length >= CATALOG_LIMITS.pins) throw new DomainError("unavailable", `${name} already has ${CATALOG_LIMITS.pins} pinned consumers`);
+          if (mine?.version !== version) moved.push(targets);
+          next = [...pins.filter((p) => p.agent !== targets), { agent: targets, version, at, by: by.id, how: "opt-in" }];
+        }
+        outcome.version = version; outcome.moved = moved;
+        if (previous !== undefined) outcome.previous = previous;
+        const body: PinBody = { name, pins: next };
+        return {
+          ref: pref, creates: found === undefined,
+          changes: [
+            found === undefined ? { type: "create", ref: pref, body: body as unknown as JsonObject } : { type: "update", ref: pref, expectedRevision: found.revision, body: body as unknown as JsonObject },
+            { type: "check", ref: eref, expectedRevision: entry.revision },
+          ],
+          detail: { name, version, moved: moved.length, ...(targets === "everyone" ? { everyone: true } : { agent: targets }) },
+          contention: async () => new DomainError("stale_revision", `${name} changed at the same moment; opt in again`),
+        };
+      },
+    }));
+    if (outcome.version === undefined) {
+      // A repeat of a committed command is answered from its record (nothing was built): the pin as it stands now, and nobody is told again.
+      const pin = targets === "everyone" ? undefined : (await this.#pinsOf(name)).find((p) => p.agent === targets);
+      return { name, version: pin?.version ?? command.version ?? "", moved: 0 };
+    }
+    // The owner moving agents tells each one; an agent opting in for itself knows already.
+    if (by.kind === "owner") {
+      for (const agent of outcome.moved) {
+        try { await pushNotice(this.#runner, agent, { key: `optin|${name}|${outcome.version}|${scopedCommandId(by.id, command.commandId)}`, kind: "pin", name, version: outcome.version, text: `The owner moved you to ${name} ${outcome.version}: a call of it that names no version now runs that version.` }); } catch { /* the pin is the record */ }
+      }
+    }
+    return { name, version: outcome.version, moved: outcome.moved.length, ...(outcome.previous === undefined ? {} : { previous: outcome.previous }) };
+  }
+
+  /**
+   * The caller's own pins (an agent; card T08): each shared tool it is pinned to and may still read, the version it stays on, the version in use now, whether a newer one is out, and when its pinned version was revoked
+   * (with the reason: it must opt in to another before a call naming no version runs).
+   */
+  async pins(by: Principal): Promise<{ items: { name: string; version: string; inUse?: string; newer: boolean; setAside: boolean; revoked?: { reason: string; at: string } }[]; partial?: true }> {
+    if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} has no pinned tools; pins belong to agents`);
+    const items: { name: string; version: string; inUse?: string; newer: boolean; setAside: boolean; revoked?: { reason: string; at: string } }[] = [];
+    let scanned = 0; let partial = false;
+    for (let after: string | undefined; ;) {
+      const page = await this.#runner.list(PINS_KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const a of page) {
+        after = a.id; scanned += 1;
+        const b = a.body as unknown as PinBody;
+        const mine = b.pins.find((p) => p.agent === by.id);
+        if (mine === undefined) continue;
+        const e = await this.#entryOf(b.name);
+        if (e === undefined || !(await this.#mayReadEntry(by, e))) continue;
+        const inUse = chosenVersion(e);
+        const r = e.revoked.includes(mine.version) ? (await this.#runner.get("catalog-revocation", versionIdOf(b.name, mine.version)))?.body as unknown as RevocationBody | undefined : undefined;
+        items.push({ name: b.name, version: mine.version, ...(inUse === undefined ? {} : { inUse }), newer: inUse !== undefined && compare(inUse, mine.version) > 0, setAside: (e.deprecated ?? []).includes(mine.version), ...(r === undefined ? {} : { revoked: { reason: r.reason, at: r.at } }) });
+      }
+      if (page.length < 200) break;
+      if (scanned >= CATALOG_LIMITS.scan) { partial = true; break; }
+    }
+    return { items: items.sort((x, y) => (x.name < y.name ? -1 : 1)), ...(partial ? { partial: true as const } : {}) };
+  }
+
+  /** Who is pinned to which version of a shared tool (the owner, or a maintainer whose grant covers its audience; card T08), with whether that version is revoked or set aside and the version in use now. */
+  async consumers(by: Principal, name: string): Promise<{ name: string; inUse?: string; pins: (PinEntry & { revoked: boolean; setAside: boolean })[] }> {
+    const canonical = toolboxName(name);
+    const e = await this.#entryOf(canonical);
+    if (e === undefined || e.layer !== "toolbox" || !(await this.#mayReadEntry(by, e))) throw new DomainError("not_found", `${canonical} is not a shared tool you may read`);
+    if (!mayManage(by, e.audience)) throw new DomainError("forbidden", `${by.id} may not read who is pinned to ${canonical} (it needs ${TOOLBOX_MANAGE} covering that tool's audience)`);
+    const inUse = chosenVersion(e);
+    return { name: canonical, ...(inUse === undefined ? {} : { inUse }), pins: (await this.#pinsOf(canonical)).map((p) => ({ ...p, revoked: e.revoked.includes(p.version), setAside: (e.deprecated ?? []).includes(p.version) })) };
+  }
+
   // ---- internals ------------------------------------------------------------------------------------------------------------
 
   /**
@@ -1163,6 +1298,75 @@ export class CatalogService {
     const text = (snap?.body as unknown as SnapshotBody | undefined)?.[part];
     if (snap !== undefined && typeof text === "string" && sha(text) === source.digest) return { text, pin: { ref: snapshotRef(v.id), revision: snap.revision } };
     return "changed";
+  }
+
+  async #pinsOf(canonical: string): Promise<readonly PinEntry[]> {
+    const ref = pinsRef(canonical);
+    return ((await this.#runner.get(ref.kind, ref.id))?.body as unknown as PinBody | undefined)?.pins ?? [];
+  }
+
+  /** The version an agent is pinned to on a shared entry (card T08), when that version is still published; otherwise undefined (no pin, not an agent, not a shared entry, or retention dropped it despite the hold). */
+  async #pinnedVersion(by: Principal, e: EntryBody): Promise<string | undefined> {
+    if (by.kind !== "agent" || e.layer !== "toolbox") return undefined;
+    const pin = (await this.#pinsOf(e.name)).find((p) => p.agent === by.id);
+    return pin !== undefined && e.versions.includes(pin.version) ? pin.version : undefined;
+  }
+
+  /**
+   * Pins an agent to the version of its first run of a shared tool (card T08). Only when it has no pin yet; the command ID is derived from the agent and the tool, so once a first-use pin has been written this is answered from
+   * its record and never moves a pin again. Best effort: a write that fails (contention, the limit reached) is left for the next run, and the run itself is never refused for it.
+   */
+  async #pinFirstUse(agent: string, name: string, version: string): Promise<void> {
+    const ref = pinsRef(name);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await this.#runner.command("toolbox.pin", { commandId: `tpn-${sha(`${agent}\0${name}`).slice(0, 40)}`, actor: agent }, async () => ({
+          payload: { name },
+          build: async () => {
+            const found = await this.#runner.get(ref.kind, ref.id);
+            const pins = (found?.body as unknown as PinBody | undefined)?.pins ?? [];
+            if (found !== undefined && (pins.some((p) => p.agent === agent) || pins.length >= CATALOG_LIMITS.pins)) return { ref, creates: false, changes: [{ type: "check", ref, expectedRevision: found.revision }], detail: { name, already: true } };
+            const body: PinBody = { name, pins: [...pins, { agent, version, at: this.#runner.now(), by: agent, how: "first-use" }] };
+            return { ref, creates: found === undefined, changes: [found === undefined ? { type: "create", ref, body: body as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: body as unknown as JsonObject }], detail: { name, version } };
+          },
+        }));
+        return;
+      } catch (error) {
+        if (!(error instanceof DomainError && error.code === "stale_revision")) return;
+      }
+    }
+  }
+
+  /** Each agent pinned to an older version than the one now in use is told once that a newer one is out, and that it stays where it is until it opts in (card T08). Best effort, after the release committed. */
+  async #noticeNewer(name: string): Promise<void> {
+    const e = await this.#entryOf(name);
+    const inUse = e === undefined ? undefined : chosenVersion(e);
+    if (inUse === undefined) return;
+    for (const p of await this.#pinsOf(name)) {
+      if (compare(p.version, inUse) >= 0) continue;
+      try { await pushNotice(this.#runner, p.agent, { key: `newer|${name}|${inUse}`, kind: "release", name, version: inUse, text: `${name} ${inUse} is the version in use now. You stay on ${p.version}, your pinned version, until you opt in (toolbox.optin, name ${shortOf(name)}, version ${inUse}); compare them first with toolbox.source if you want.` }); } catch { /* the pin answer (toolbox.pins) still says a newer one is out */ }
+    }
+  }
+
+  /** Each agent pinned to a revoked version is told (card T08): a call naming no version is refused until it opts in to another; nothing is put in its place silently. */
+  async #noticeRevokedPins(name: string, version: string, reason: string): Promise<void> {
+    const e = await this.#entryOf(name);
+    const inUse = e === undefined ? undefined : chosenVersion(e);
+    for (const p of await this.#pinsOf(name)) {
+      if (p.version !== version) continue;
+      try { await pushNotice(this.#runner, p.agent, { key: `pin-revoked|${name}|${version}`, kind: "revocation", name, version, text: `${name} ${version}, the version you are pinned to, was revoked: ${reason}. A call of it that names no version is refused until you opt in to another version (toolbox.optin, name ${shortOf(name)})${inUse === undefined ? "; no version of it is in use now" : `; the version in use now is ${inUse}`}.` }); } catch { /* toolbox.pins still says so */ }
+    }
+  }
+
+  /** Each agent pinned to a version that is now set aside (deprecated, or above a rollback) is told once; it keeps running that version until it opts in (card T08). */
+  async #noticeSetAside(name: string, reason: string): Promise<void> {
+    const e = await this.#entryOf(name);
+    if (e === undefined) return;
+    const inUse = chosenVersion(e);
+    for (const p of await this.#pinsOf(name)) {
+      if (!(e.deprecated ?? []).includes(p.version)) continue;
+      try { await pushNotice(this.#runner, p.agent, { key: `aside|${name}|${p.version}`, kind: "pin", name, version: p.version, text: `${name} ${p.version}, the version you are pinned to, was set aside: ${reason}. It still runs for you until you opt in to another (toolbox.optin, name ${shortOf(name)})${inUse === undefined ? "" : `; the version in use now is ${inUse}`}.` }); } catch { /* toolbox.pins still says so */ }
+    }
   }
 
   async #entryOf(name: string): Promise<EntryBody | undefined> {
@@ -1228,16 +1432,20 @@ export class CatalogService {
     return undefined;
   }
 
-  async #resolve(by: Principal, name: string, version?: string, projectId?: string): Promise<{ version: View<VersionBody> & { revoked?: RevocationBody } } | undefined> {
+  async #resolve(by: Principal, name: string, version?: string, projectId?: string): Promise<{ version: View<VersionBody> & { revoked?: RevocationBody; pinned?: true } } | undefined> {
     const parsed = parseName(name);
     if (parsed === null) return undefined;
     const entry = (await this.#runner.get("catalog-entry", derivedId("cat", parsed.canonical)))?.body as unknown as EntryBody | undefined;
     if (entry === undefined || !(await this.#mayReadEntry(by, entry, projectId))) return undefined;
     let id: string;
+    let pinned = false;
     if (version === undefined) {
-      const live = await this.#latestLive(parsed.canonical);
-      if (live === undefined) return undefined;
-      id = live.id;
+      // A consumer stays on its pinned version until it opts in (card T08), even when that version was set aside or revoked: a revoked pin is refused by the caller (never silently replaced by another version).
+      const pin = await this.#pinnedVersion(by, entry);
+      const live = pin !== undefined ? undefined : await this.#latestLive(parsed.canonical);
+      if (pin === undefined && live === undefined) return undefined;
+      id = pin !== undefined ? versionIdOf(parsed.canonical, pin) : live!.id;
+      pinned = pin !== undefined;
     } else {
       if (!VERSION.test(version)) return undefined;
       id = derivedId("cav", `${parsed.canonical}|${version}`);
@@ -1246,6 +1454,6 @@ export class CatalogService {
     if (found === undefined) return undefined;
     const published = (found.body as unknown as VersionBody).version;
     const revoked = entry.revoked.includes(published) ? ((await this.#runner.get("catalog-revocation", id))?.body as unknown as RevocationBody | undefined) : undefined;
-    return { version: { ...view<VersionBody>(found), ...(revoked === undefined ? {} : { revoked }) } };
+    return { version: { ...view<VersionBody>(found), ...(revoked === undefined ? {} : { revoked }), ...(pinned ? { pinned: true as const } : {}) } };
   }
 }

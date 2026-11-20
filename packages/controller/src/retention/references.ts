@@ -1,4 +1,4 @@
-import { canonicalOfPath, versionIdOf } from "../catalog/catalog.js";
+import { canonicalOfPath, PINS_KIND, versionIdOf } from "../catalog/catalog.js";
 import { DISPATCH_KIND, operationKind } from "../dispatch/model.js";
 import type { Aggregate, ControllerStorage } from "../storage/types.js";
 
@@ -175,6 +175,12 @@ export class RetainedMaterial {
       if (typeof b.agentId !== "string" || typeof b.revision !== "number") return;
       const why = active.get(b.agentId) === b.revision ? `in the skill library of the active environment of ${b.agentId.slice(0, 80)}` : pinned.get(b.agentId)?.has(b.revision) === true ? `in the skill library of environment revision ${b.revision} that an attempt of a resumable task is pinned to` : undefined;
       if (why !== undefined) for (const id of strings(b.manifest?.skills)) out.#add("catalog-version", id, why);
+    });
+    // A shared tool version a consumer is pinned to (card T08) stays: the consumer runs it until it opts in to another, so dropping it would move the consumer without its say.
+    await scan(PINS_KIND, (a) => {
+      const b = a.body as { name?: unknown; pins?: { agent?: unknown; version?: unknown }[] };
+      if (typeof b.name !== "string") return;
+      for (const p of Array.isArray(b.pins) ? b.pins : []) if (typeof p?.version === "string") out.#add("catalog-version", versionIdOf(b.name, p.version), `${String(p.agent).slice(0, 80)} is pinned to ${b.name.slice(0, 80)} ${p.version.slice(0, 20)} until it opts in to another version`);
     });
     await scan("dependency-manifest", (a) => {
       const b = a.body as { taskId?: unknown; entries?: { kind?: unknown; key?: unknown }[] };

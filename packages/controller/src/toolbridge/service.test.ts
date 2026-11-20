@@ -1485,6 +1485,48 @@ for (const backend of backends) {
     assert.ok(steps.some((x) => /copied shared tool toolbox\.lint/.test(x)) && steps.some((x) => /proposed a change to shared tool toolbox\.lint/.test(x)), steps.join("\n"));
   });
 
+  suite("toolbox pins (card T08): a call naming no version runs the agent's pinned version after a newer release; it opts in through the bridge, for itself only; a revoked pin is refused with words to opt in, never replaced; opting in is a write a pause stops", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: "tool.toolbox.lint", project: c.project }]);
+    const { taskId } = await c.task("t", ann);
+    const steps: string[] = [];
+    const svc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, activity: async (step) => { steps.push(step.summary); }, isLocalHost: () => true });
+    const out: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
+      const doc = good(await s.send("desk.write", { kind: "note", title: "lint", body: "Run lint.", visibility: "shared", status: "accepted" }));
+      const one = good(await s.send("desk.write", { kind: "note", title: "lint 1", body: "console.log('{\"ok\":true}')", visibility: "shared", status: "accepted" }));
+      const two = good(await s.send("desk.write", { kind: "note", title: "lint 2", body: "console.log('{\"ok\":true}') // two", visibility: "shared", status: "accepted" }));
+      const release = (version: string, code: JsonObject) => c.catalog.register(c.owner, { commandId: uid("pub"), name: "toolbox.lint", kind: "tool", version, manifest: manifest(), instructionsRecordId: doc["id"] as string, executableRecordId: code["id"] as string, audience: { projects: [c.project] } } as never);
+      await release("1.0.0", one);
+      out["first"] = await c.invoke(s, { tool: "toolbox.lint", input: { url: "u" } });
+      await release("1.1.0", two);
+      out["pinned"] = await c.invoke(s, { tool: "toolbox.lint", input: { url: "u" } });
+      out["discover"] = await s.send("tool.discover", {});
+      out["pins"] = await send("toolbox.pins", {}, "r0");
+      out["everyone"] = await send("toolbox.optin", { name: "lint", everyone: true }, "o0");
+      out["optin"] = await send("toolbox.optin", { name: "lint" }, "o1");
+      out["moved"] = await c.invoke(s, { tool: "toolbox.lint", input: { url: "u" } });
+      await c.catalog.revoke(c.owner, { commandId: uid("rv"), name: "toolbox.lint", version: "1.1.0", reason: "breaks builds" });
+      out["revoked"] = await s.send("tool.invoke", { tool: "toolbox.lint", input: { url: "u" } });
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      out["paused-optin"] = await send("toolbox.optin", { name: "lint", version: "1.0.0" }, "o2");
+      out["paused-pins"] = await send("toolbox.pins", {}, "r1");
+    });
+    await c.tick();
+    assert.deepEqual(["first", "pinned", "moved"].map((k) => good(out[k]!)["version"]), ["1.0.0", "1.0.0", "1.1.0"]);
+    assert.deepEqual(c.runs.map((r) => r.tool.version), ["1.0.0", "1.0.0", "1.1.0"]);
+    assert.equal(((good(out["discover"]!)["tools"]) as JsonObject[]).find((t) => t["name"] === "toolbox.lint")?.["version"], "1.0.0", "the list shows the version a call naming none runs");
+    assert.deepEqual(((good(out["pins"]!)["items"]) as JsonObject[]).map((x) => [x["version"], x["inUse"], x["newer"]]), [["1.0.0", "1.1.0", true]]);
+    assert.equal(bad(out["everyone"]!).code, "invalid_command", "the bridge opts in for the agent itself only");
+    assert.deepEqual([good(out["optin"]!)["version"], good(out["optin"]!)["previous"]], ["1.1.0", "1.0.0"]);
+    const refused = bad(out["revoked"]!);
+    assert.equal(refused.code, "forbidden");
+    assert.match(refused.message, /1\.1\.0 was revoked \(breaks builds\); it is the version you are pinned to: opt in to another/);
+    assert.equal(bad(out["paused-optin"]!).code, "paused");
+    good(out["paused-pins"]!);
+    assert.ok(steps.some((x) => /opted in to shared tool toolbox\.lint 1\.1\.0/.test(x)), steps.join("\n"));
+  });
+
   suite("task.recall (card W13): the attempt and so the task come from the credential, a named task is refused, a call is a read that a pause does not stop, the cap refuses with a clear text, an answered call is answered again for free, and the owner sees a counts-only step", async (c) => {
     const ann = await c.agentFor("ann");
     const { taskId } = await c.task("t", ann);
