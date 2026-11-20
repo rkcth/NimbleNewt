@@ -303,8 +303,8 @@ type Resolved =
  */
 /** The owner saying a running-call choice in their own words, with its usual endings ("cancel", "cancelled", "cancels"; "finish", "finished"; "pause", "paused"). */
 const SAID_CHOICE: Readonly<Record<"finish" | "cancel" | "pause", RegExp>> = { finish: /\bfinish(?:ed|es|ing)?\b/i, cancel: /\bcancel(?:l?ed|s|l?ing)?\b/i, pause: /\bpause(?:d|s)?\b|\bpausing\b/i };
-/** True if `value` is a whole number the owner wrote as a number of its own in `text` ("revision 4", "v4"; not the 4 of "14" or "4.5"): a revision the owner quoted, as opposed to one the interpreter supplied. */
-const ownerWroteNumber = (text: string, value: unknown): boolean => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && (text.match(/(?<![\d.])\d+(?![\d.]?\d)/g) ?? []).some((n) => Number(n) === value);
+/** True if `value` is a whole number the owner wrote as a number of its own in `text` ("revision 4", "v4", "revision #4", full-width "４"; not the 4 of "14" or "4.5"): a revision the owner quoted, as opposed to one the interpreter supplied. Digits of other scripts and number words do not count. */
+const ownerWroteNumber = (text: string, value: unknown): boolean => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && (text.normalize("NFKC").match(/(?<![\d.])\d+(?![\d.]?\d)/g) ?? []).some((n) => Number(n) === value);
 /** The sentence of `text` that holds `value` as a whole word (a scope or a time limit counts only when said about the same right). */
 const sentenceWith = (text: string, value: string): string | undefined => text.split(/(?<=[.!?])\s+|\n+/).find((part) => wholeWord(part, value));
 

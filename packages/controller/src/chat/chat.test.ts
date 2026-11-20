@@ -425,9 +425,16 @@ for (const backend of backends) {
     script["as of revision 2 rename it to Elder"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 2, friendlyName: "Elder" }, "as of revision 2 rename it to Elder")];
     assert.equal(only((await say(w, chat, "as of revision 2 rename it to Elder")).outcomes).code, "stale_revision");
     assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Old");
+    // second review: the owner's number in full-width digits after a "#" is still theirs (refused as stale); the 1 of "1.5" is not a number of its own (replaced, applies)
+    script["as of revision #２ rename it to Elder"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 2, friendlyName: "Elder" }, "rename it to Elder")];
+    assert.equal(only((await say(w, chat, "as of revision #２ rename it to Elder")).outcomes).code, "stale_revision");
+    assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Old");
+    script["rename it to Older, 1.5 times older"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 1, friendlyName: "Older" }, "rename it to Older")];
+    assert.equal(only((await say(w, chat, "rename it to Older, 1.5 times older")).outcomes).status, "applied");
+    assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Older");
     // the owner's own revision that is current applies; a number of the message that is not the revision given (12 is not 1) does not count as the owner's
-    script["as of revision 3 rename it to Sage"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 3, friendlyName: "Sage" }, "as of revision 3 rename it to Sage")];
-    assert.equal(only((await say(w, chat, "as of revision 3 rename it to Sage")).outcomes).status, "applied");
+    script["as of revision 4 rename it to Sage"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 4, friendlyName: "Sage" }, "as of revision 4 rename it to Sage")];
+    assert.equal(only((await say(w, chat, "as of revision 4 rename it to Sage")).outcomes).status, "applied");
     script["rename it to Twelve 12"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 1, friendlyName: "Twelve" }, "rename it to Twelve")];
     assert.equal(only((await say(w, chat, "rename it to Twelve 12")).outcomes).status, "applied");
     assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Twelve");
