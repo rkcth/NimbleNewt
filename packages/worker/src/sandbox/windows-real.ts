@@ -50,10 +50,13 @@ public static class NNTok {
   }
 }
 '@
+# If the type could not be added, every token value stays -1 and the console session unknown, so the rest is still reported (indexing a missing result would end the script).
+function Get-NNInfo([int]$id) { $r = $null; try { $r = [NNTok]::Info($id) } catch {}; if ($null -eq $r -or $r.Count -ne 2) { $r = @(-1, -1) }; return ,$r }
 $me = [int]$env:NN_PID
-$self = [NNTok]::Info($me)
+$self = Get-NNInfo $me
 $selfSession = $null; try { $selfSession = [int](Get-Process -Id $me).SessionId } catch {}
-$servers = @(Get-Process -Name WindowsSandboxServer | Select-Object -First 8 | ForEach-Object { $p = $_; $i = [NNTok]::Info($p.Id); @{ sessionId = [int]$p.SessionId; elevated = $i[0]; integrity = $i[1] } })
+$console = $null; try { $console = [int64][NNTok]::WTSGetActiveConsoleSessionId() } catch {}
+$servers = @(Get-Process -Name WindowsSandboxServer | Select-Object -First 8 | ForEach-Object { $p = $_; $i = Get-NNInfo $p.Id; @{ sessionId = [int]$p.SessionId; elevated = $i[0]; integrity = $i[1] } })
 $all = @{}; foreach ($q in @(Get-CimInstance -ClassName Win32_Process)) { $all[[int]$q.ProcessId] = $q }
 $chain = @(); $cur = $all[$me]
 while ($cur -and $chain.Count -lt 8) {
@@ -62,7 +65,7 @@ while ($cur -and $chain.Count -lt 8) {
   if (-not $up -or [int]$up.ProcessId -eq [int]$cur.ProcessId -or $up.CreationDate -gt $cur.CreationDate) { break }
   $cur = $up
 }
-ConvertTo-Json -Compress -Depth 4 -InputObject @{ elevated = $self[0]; integrity = $self[1]; processSessionId = $selfSession; consoleSessionId = [int64][NNTok]::WTSGetActiveConsoleSessionId(); servers = $servers; chain = $chain }
+ConvertTo-Json -Compress -Depth 4 -InputObject @{ elevated = $self[0]; integrity = $self[1]; processSessionId = $selfSession; consoleSessionId = $console; servers = $servers; chain = $chain }
 `;
 const SESSION_SCRIPT = `
 $ErrorActionPreference = 'Stop'
