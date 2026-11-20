@@ -234,7 +234,7 @@ describe("the composed controller runs the real worker process (cards H12b, H12f
     // The two answers are sized for the window below: each attempt's first call fits the startup share alone, both together do not, and after the compaction (the older part only extracted) the call fits again.
     const answer = await model([{ text: big(1, 1050) }, { text: big(2, 1100) }, { text: "continued" }]);
     const x = await rig(real, answer);
-    // 98,304 tokens (card P03b's service and deliverable tools put the fixed part at about 6,800 tokens, `WORKER_FIXED_PART_ABOUT_TOKENS` in the controller; it was 65,536 from cards W06 and W10 at about 4,200, after 49,152 no longer fit, and still fit at card T08's 5,900).
+    // 98,304 tokens (card P03b's service and deliverable tools put the fixed part at about 6,800 tokens, about 7,200 since card T08's fourth slice (about 1,600 to spare), `WORKER_FIXED_PART_ABOUT_TOKENS` in the controller; it was 65,536 from cards W06 and W10 at about 4,200, after 49,152 no longer fit, and still fit at card T08's 5,900).
     // Why not 65,536 any more: the real process keeps the newest tenth of the window whole when it compacts (`keepRecentTokens`, counted at four characters to a token), so the compacted call is at least the fixed part,
     // the extract (up to 6,000 characters) and about 0.13 of the window; at 65,536 that came to 16,873 tokens, over the 16,384 startup share. A quarter less that tenth leaves room for both only from about
     // 93,000 tokens, and 98,304 (24 x 4,096) leaves about 2,000 to spare.

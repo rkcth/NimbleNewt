@@ -32,7 +32,7 @@ test("the figures the owner is told match the measured fixed part (within 5%)", 
   near(WORKER_FIXED_PART.systemPromptChars, r.systemPromptChars, "system text");
   near(WORKER_FIXED_PART.toolSchemaChars, r.toolSchemaChars, "bridge tool schemas");
   assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, Math.round(WORKER_FIXED_PART_TOKENS / 100) * 100);
-  assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, 6_800, `the words say about 6,800 tokens, pinned here on purpose; ${RAISE}`);
+  assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, 7_200, `the words say about 7,200 tokens, pinned here on purpose; ${RAISE}`);
 });
 
 test("a route nobody has measured counts at least the real fixed part", () => {
@@ -51,7 +51,7 @@ test("the smallest window that can start a task, and the warning for an accepted
   assert.ok(startableWindow(r.systemPromptChars + r.toolSchemaChars) <= PRACTICAL_STARTABLE_WINDOW, `the real fixed part starts a task on the window the owner is told; ${derived(r)}`);
   assert.ok(windowCanStartTask(MIN_STARTABLE_WINDOW) && !windowCanStartTask(MIN_STARTABLE_WINDOW - 1024));
   assert.equal(PRACTICAL_STARTABLE_WINDOW, 36_864, `pinned here on purpose; ${RAISE}`);
-  assert.equal(MIN_STARTABLE_WINDOW, 34_816, `the warning names it ("at least 34,816 tokens"), pinned here on purpose; ${RAISE}`);
+  assert.equal(MIN_STARTABLE_WINDOW, 36_864, `the warning names it ("at least 36,864 tokens"), pinned here on purpose; ${RAISE}`);
   // The window the tests that run the real process use (36,864 since card P03b's first slice; 32,768 before it, 24,576 before the CI fix) and the one the launcher assumes for a provider of the configuration document
   // can start a task on the REAL fixed part; 24,576 cannot.
   for (const [w, who] of [[36_864, "the real-process tests w12-anchor, w13-recall, g09-remote-updates, h12bf-composed and w03-rig-support (W03, W04, L04e, L04g)"], [DEFAULT_CONTEXT_TOKENS, "the launcher's DEFAULT_CONTEXT_TOKENS"]] as const) {
@@ -62,7 +62,7 @@ test("the smallest window that can start a task, and the warning for an accepted
   assert.equal(MIN_WORKABLE_CONTEXT_TOKENS, MIN_WORKABLE_WINDOW);
   assert.ok(MIN_STARTABLE_WINDOW > MIN_WORKABLE_CONTEXT_TOKENS);
   const w = smallWindowWarning(16_384);
-  assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 6,800 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
+  assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 7,200 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
   assert.equal(smallWindowWarning(MIN_STARTABLE_WINDOW), undefined);
   assert.equal(smallWindowWarning(65_536), undefined);
 });

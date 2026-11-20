@@ -1242,8 +1242,10 @@ export class RetentionService {
     for (const kind of ["meeting-summary", "standup-brief"]) {
       complete = (await scan(this.#runner, kind, (a) => { if (quotes(a.body)) others.set(`${kind}/${a.id}`, { kind, id: a.id }); })) && complete;
     }
-    // A shared tool's release keeps a snapshot of its text (card T08); one made from the record goes with it.
-    complete = (await scan(this.#runner, "catalog-snapshot", (a) => { const b = a.body as { sources?: unknown }; if (Array.isArray(b.sources) && b.sources.some((id) => typeof id === "string" && copyOf.has(id))) others.set(`catalog-snapshot/${a.id}`, { kind: "catalog-snapshot", id: a.id }); })) && complete;
+    // A shared tool's release keeps a snapshot of its text, and a waiting proposal the text of the parts its author wrote (card T08); one made from the record goes with it.
+    for (const kind of ["catalog-snapshot", "toolbox-proposal-text"]) {
+      complete = (await scan(this.#runner, kind, (a) => { const b = a.body as { sources?: unknown }; if (Array.isArray(b.sources) && b.sources.some((id) => typeof id === "string" && copyOf.has(id))) others.set(`${kind}/${a.id}`, { kind, id: a.id }); })) && complete;
+    }
     for (const o of plan?.others ?? []) if ((await this.#runner.get(o.kind, o.id)) !== undefined) others.set(`${o.kind}/${o.id}`, o);
     const archives: Aggregate[] = [];
     for (const id of [...copyOf, ...summaries.keys(), ...[...others.values()].map((o) => o.id)]) { const arc = await this.#runner.get("retention-archive", archiveIdOf(id)); if (arc !== undefined) archives.push(arc); }

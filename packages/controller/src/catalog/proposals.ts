@@ -10,7 +10,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { checkManifest, chosenVersion, compareVersions, maintainsAnywhere, mayManage, mayReadCatalogEntry, personalNamespace, toolboxName, versionIdOf, type ArtifactKind, type Audience, type CatalogService, type EntryBody, type Manifest, type SourceRef, type VersionBody } from "./catalog.js";
+import { checkManifest, chosenVersion, compareVersions, maintainsAnywhere, mayManage, mayReadCatalogEntry, personalNamespace, PROPOSAL_TEXT_KIND, proposalTextAudit, proposalTextRef, toolboxName, versionIdOf, type ArtifactKind, type Audience, type CatalogService, type EntryBody, type Manifest, type ProposalTextBody, type SourceRef, type VersionBody } from "./catalog.js";
 import { noticeChange } from "./notices.js";
 
 /**
@@ -128,7 +128,7 @@ export class ToolboxProposalService {
       kind: "improvement", target, author: by.id, base: { version: content.base.version, digest: content.base.digest }, ...(content.from === undefined ? {} : { from: content.from }), ...shaped,
       rationale, tests, ...(taskId === undefined ? {} : { taskId }), state: "open", round: 1, history: [{ at: now, by: by.id, event: "submitted" }], submittedAt: now, updatedAt: now,
     };
-    await this.#create(by, "toolbox.propose", command.commandId, id, body);
+    await this.#create(by, "toolbox.propose", command.commandId, id, body, await this.#keptText(id, body));
     return { proposalId: id, state: "open", base: body.base!, changes: body.changes, permissionChanges: body.permissionChanges };
   }
 
@@ -161,7 +161,7 @@ export class ToolboxProposalService {
       permissionChanges: { added: [...v.manifest.requestedAccess], removed: [] }, rationale, tests, ...(audience === undefined ? {} : { audience }), ...(taskId === undefined ? {} : { taskId }),
       state: "open", round: 1, history: [{ at: now, by: by.id, event: "submitted" }], submittedAt: now, updatedAt: now,
     };
-    await this.#create(by, "toolbox.promote", command.commandId, id, body);
+    await this.#create(by, "toolbox.promote", command.commandId, id, body, await this.#keptText(id, body));
     return { proposalId: id, state: "open", from: body.from! };
   }
 
@@ -194,12 +194,13 @@ export class ToolboxProposalService {
       next = { base: { version: base.version, digest: base.digest }, ...this.#shape(base, await this.#patch(by, base, command)) };
     }
     const asked = { instructionsRecordId: command.instructionsRecordId ?? null, executableRecordId: command.executableRecordId ?? null, manifest: (command.manifest ?? null) as JsonObject | null, fromVersion: command.fromVersion ?? null, onLatest: command.onLatest ?? null, rationale: command.rationale ?? null, tests: command.tests ?? null } as unknown as JsonObject;
+    const kept = await this.#keptText(found.id, { ...p, ...next });
     const done = await this.#update(by, "toolbox.proposal.revise", command.commandId, found.id, command.expectedRevision, { kind: "revise", asked }, async (cur) => {
       if (cur.state !== "open" && cur.state !== "changes_requested") throw new DomainError("invalid_command", `the proposal is ${cur.state}; only an open proposal, or one with changes requested, is revised`, { field: "proposalId" });
       // A rebase in between moved the base without a new round: the patch was computed against the base as read, so it is refused rather than moving the proposal back.
       if (cur.round !== p.round || cur.base?.version !== p.base?.version) throw new DomainError("stale_revision", "the proposal changed at the same moment; read it again");
       const body: ToolboxProposalBody = { ...cur, ...next, rationale, tests, state: "open", round: cur.round + 1, history: event(cur, { at: this.#runner.now(), by: by.id, event: "revised" }), updatedAt: this.#runner.now() };
-      return { body, changes: [] };
+      return { body, changes: await this.#replaceText(found.id, kept) };
     });
     return { proposalId: found.id, state: "open", round: done.round };
   }
@@ -234,7 +235,7 @@ export class ToolboxProposalService {
     if (p.changes.manifest && (old === undefined || canonicalJson(old.manifest as unknown as JsonObject) !== canonicalJson(now.manifest as unknown as JsonObject))) conflicts.push("manifest");
     if (conflicts.length > 0) throw new DomainError("command_conflict", `${p.target} ${latest} also changed the ${conflicts.join(" and ")} that the proposal changes; the author revises the patch against ${latest} (toolbox.proposal.revise with onLatest)`);
     // Rechecked: the author's own parts must still be exactly as proposed and still shared; the manifest is checked again against the rules in force.
-    for (const part of ["instructional", "executable"] as const) { const ref = p.proposed[part]; const changed = part === "instructional" ? p.changes.instructions : p.changes.executable; if (ref !== undefined && changed) await this.#stillShared(ref, part === "instructional" ? "instructions" : "executable"); }
+    for (const part of ["instructional", "executable"] as const) { const ref = p.proposed[part]; const changed = part === "instructional" ? p.changes.instructions : p.changes.executable; if (ref !== undefined && changed) await this.#stillProposed(found.id, ref, part === "instructional" ? "instructions" : "executable"); }
     const manifest = p.changes.manifest ? checkManifest(p.proposed.manifest, p.proposed.kind) : now.manifest;
     const proposed: Omit<ProposedContent, "digest"> = {
       kind: now.kind, manifest, instructional: p.changes.instructions ? p.proposed.instructional : now.instructional,
@@ -261,7 +262,7 @@ export class ToolboxProposalService {
     await this.#update(by, "toolbox.proposal.withdraw", command.commandId, found.id, command.expectedRevision, { kind: "withdraw" }, async (cur) => {
       if (!PENDING.includes(cur.state)) throw new DomainError("invalid_command", `the proposal is ${cur.state} already`, { field: "proposalId" });
       const at = this.#runner.now();
-      return { body: { ...cur, state: "withdrawn", history: event(cur, { at, by: by.id, event: "withdrawn", ...(reason === undefined ? {} : { reason }) }), updatedAt: at }, changes: [], final: true };
+      return { body: { ...cur, state: "withdrawn", history: event(cur, { at, by: by.id, event: "withdrawn", ...(reason === undefined ? {} : { reason }) }), updatedAt: at }, changes: await this.#replaceText(found.id, undefined), final: true };
     });
     return { proposalId: found.id, state: "withdrawn" };
   }
@@ -313,7 +314,7 @@ export class ToolboxProposalService {
       const version = command.version;
       const made = await this.#catalog.releaseProposal(by, {
         commandId: command.commandId, name: p.target, kind: p.proposed.kind, version, manifest: p.proposed.manifest, parts, ...(audience === undefined ? {} : { audience }),
-        expect: p.kind === "promotion" ? "absent" : { chosen: p.base!.version }, payload: { proposalId: found.id, decision, ...(reason === undefined ? {} : { reason }), expectedRevision: command.expectedRevision ?? null },
+        expect: p.kind === "promotion" ? "absent" : { chosen: p.base!.version }, payload: { proposalId: found.id, decision, ...(reason === undefined ? {} : { reason }), expectedRevision: command.expectedRevision ?? null }, proposalId: found.id,
       }, async (_prior, made) => {
         const fresh = await this.#runner.get(PROPOSAL_KIND, found.id);
         if (fresh === undefined) throw new DomainError("not_found", "no such proposal");
@@ -322,7 +323,8 @@ export class ToolboxProposalService {
         // The content released is the content that was read: a revision in between makes the decider look again.
         if (cur.proposed.digest !== p.proposed.digest || cur.round !== p.round) throw new DomainError("stale_revision", "the proposal was revised meanwhile; read it again before deciding");
         const out = await apply(cur, fresh.revision, { version, digest: made.digest, versionId: made.versionId });
-        return [{ type: "update", ref: { kind: PROPOSAL_KIND, id: found.id }, expectedRevision: fresh.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...(await this.#unindex(cur.author, found.id))];
+        // The released version keeps its own snapshot of the text; the proposal's goes in the same write.
+        return [{ type: "update", ref: { kind: PROPOSAL_KIND, id: found.id }, expectedRevision: fresh.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...(await this.#unindex(cur.author, found.id)), ...(await this.#replaceText(found.id, undefined))];
       });
       released = { name: made.name, version, digest: made.digest, versionId: made.versionId };
       await this.#tellOnTask(p, found.id, decision, noticeText(version));
@@ -337,7 +339,8 @@ export class ToolboxProposalService {
         if (chosen !== cur.base!.version) throw new DomainError("stale_revision", `${cur.target} is at ${chosen ?? "no version in use"}, not ${cur.base!.version}, which the proposal is against; rebase it first (toolbox.proposal.rebase)`);
       }
       const out = await apply(cur, revision);
-      return { ...out, final: to === "rejected" || to === "accepted" };
+      // A rejected proposal's text is not kept; an accepted one keeps it until a later acceptance releases it.
+      return { ...out, changes: [...out.changes, ...(to === "rejected" ? await this.#replaceText(found.id, undefined) : [])], final: to === "rejected" || to === "accepted" };
     });
     await this.#tellOnTask(p, found.id, decision, noticeText());
     return { proposalId: found.id, state: to, authorizes: ACCEPTANCE_LIMIT };
@@ -408,7 +411,7 @@ export class ToolboxProposalService {
     }
   }
 
-  /** One proposal with its history and the text of each part it changes (read back from the author's records by digest; a part whose record is gone or changed is listed under `unavailable`). */
+  /** One proposal with its history and the text of each part it changes (read back by digest from the author's records, or from the text kept with the proposal when a record moved on; a part the owner deleted, or whose text is gone, is listed under `unavailable`). */
   async get(by: Principal, proposalId: string): Promise<ProposalSummary & { rationale: string; tests: string; audience?: Audience; taskId?: string; history: readonly ProposalEvent[]; manifest: Manifest; instructions?: string; executable?: string; unavailable?: string[] }> {
     const found = await this.#visible(by, proposalId);
     const p = found.body;
@@ -416,9 +419,9 @@ export class ToolboxProposalService {
     const unavailable: string[] = [];
     for (const [part, ref, changed] of [["instructions", p.proposed.instructional, p.changes.instructions], ["executable", p.proposed.executable, p.changes.executable]] as const) {
       if (ref === undefined || !changed) continue;
-      const rec = (await this.#runner.get("desk-record", ref.recordId))?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
-      if (rec === undefined || rec.deleted !== undefined || typeof rec.body !== "string" || sha(rec.body) !== ref.digest) unavailable.push(part);
-      else texts[part] = rec.body;
+      const got = await this.#proposedText(found.id, ref, part);
+      if (typeof got === "string") unavailable.push(part);
+      else texts[part] = got.text;
     }
     return {
       ...(await this.#summary(by, found.id, found.revision, p, await this.#entry(p.target))), rationale: p.rationale, tests: p.tests, ...(p.audience === undefined ? {} : { audience: p.audience }), ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
@@ -569,6 +572,52 @@ export class ToolboxProposalService {
     if (r.visibility === "private") throw new DomainError("invalid_command", `${field}: private scratch cannot be proposed; publish it to the desk as shared first so the maintainers can read it`, { field });
   }
 
+  /**
+   * The text of the parts the author wrote, read now from its records (checked by digest), to keep with the proposal (`PROPOSAL_TEXT_KIND`): the proposal stays decidable when the author later supersedes a record or retention
+   * archives it. Undefined when the author wrote no part (a manifest-only change).
+   */
+  async #keptText(id: string, p: Pick<ToolboxProposalBody, "kind" | "proposed" | "changes">): Promise<ProposalTextBody | undefined> {
+    const texts: { instructions?: string; executable?: string } = {};
+    const sources: string[] = [];
+    for (const [part, ref, changed] of [["instructions", p.proposed.instructional, p.changes.instructions], ["executable", p.proposed.executable, p.changes.executable]] as const) {
+      if (ref === undefined || !changed) continue;
+      const rec = (await this.#runner.get("desk-record", ref.recordId))?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
+      if (rec === undefined || rec.deleted !== undefined || typeof rec.body !== "string" || sha(rec.body) !== ref.digest) invalid(part === "instructions" ? "instructionsRecordId" : "executableRecordId", "the record is no longer as it was; write the work again");
+      texts[part] = rec!.body as string; sources.push(ref.recordId);
+    }
+    if (sources.length === 0) return undefined;
+    return { proposalId: id, digest: p.proposed.digest, sources: [...new Set(sources)], ...texts, at: this.#runner.now() };
+  }
+
+  /** The changes that put `kept` in place of the proposal's kept text (or remove it, `undefined`), read inside the write. */
+  async #replaceText(id: string, kept: ProposalTextBody | undefined): Promise<Change[]> {
+    const ref = proposalTextRef(id);
+    const cur = await this.#runner.get(ref.kind, ref.id);
+    if (kept === undefined) return cur === undefined ? [] : [{ type: "delete", ref, expectedRevision: cur.revision }];
+    return [cur === undefined ? { type: "create", ref, body: kept as unknown as JsonObject } : { type: "update", ref, expectedRevision: cur.revision, body: kept as unknown as JsonObject }];
+  }
+
+  /**
+   * The text of a part the author wrote: its record while that still holds exactly the proposed bytes, otherwise the text kept with the proposal (checked by digest). A record the owner deleted answers `deleted` whatever was kept
+   * (the owner's deletion also removes the kept text).
+   */
+  async #proposedText(id: string, ref: SourceRef, part: "instructions" | "executable"): Promise<{ text: string } | "deleted" | "changed"> {
+    const rec = (await this.#runner.get("desk-record", ref.recordId))?.body as unknown as { body?: unknown; deleted?: unknown } | undefined;
+    if (rec?.deleted !== undefined) return "deleted";
+    if (rec !== undefined && typeof rec.body === "string" && sha(rec.body) === ref.digest) return { text: rec.body };
+    const text = ((await this.#runner.get(PROPOSAL_TEXT_KIND, id))?.body as unknown as ProposalTextBody | undefined)?.[part];
+    return typeof text === "string" && sha(text) === ref.digest ? { text } : "changed";
+  }
+
+  /** A part the author wrote, for a rebase: still exactly as proposed (and still accepted, original and shared), or else readable from the text kept with the proposal. */
+  async #stillProposed(id: string, ref: SourceRef, field: "instructions" | "executable"): Promise<void> {
+    const found = await this.#runner.get("desk-record", ref.recordId);
+    if (found !== undefined && found.revision === ref.revision && (found.body as { deleted?: unknown }).deleted === undefined) return this.#stillShared(ref, field);
+    const got = await this.#proposedText(id, ref, field);
+    if (got === "deleted") throw new DomainError("invalid_command", `${field}: the record was deleted by the owner; the author revises the proposal`, { field });
+    if (got === "changed") throw new DomainError("invalid_command", `${field}: the record is no longer as it was; write the work again`, { field });
+  }
+
   /** What a proposal changes against its base, the access it adds or drops, and its content digest. */
   #shape(base: VersionBody, proposed: Omit<ProposedContent, "digest">): Pick<ToolboxProposalBody, "proposed" | "changes" | "permissionChanges"> {
     const changes = { instructions: proposed.instructional.digest !== base.instructional.digest, executable: proposed.executable?.digest !== base.executable?.digest, manifest: canonicalJson(proposed.manifest as unknown as JsonObject) !== canonicalJson(base.manifest as unknown as JsonObject) };
@@ -577,7 +626,7 @@ export class ToolboxProposalService {
     return { proposed: { ...proposed, digest: digestOf(base.name, proposed) }, changes, permissionChanges: { added: [...after].filter((a) => !before.has(a)).sort(), removed: [...before].filter((a) => !after.has(a)).sort() } };
   }
 
-  async #create(by: Principal, op: string, commandId: string, id: string, body: ToolboxProposalBody): Promise<void> {
+  async #create(by: Principal, op: string, commandId: string, id: string, body: ToolboxProposalBody, kept: ProposalTextBody | undefined): Promise<void> {
     const ref: AggregateRef = { kind: PROPOSAL_KIND, id };
     const iref: AggregateRef = { kind: INDEX_KIND, id: derivedId("tpa", by.id) };
     await this.#runner.command(op, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
@@ -589,7 +638,7 @@ export class ToolboxProposalService {
         const nextIndex: AuthorIndex = { author: by.id, pending: [...pending, id] };
         return {
           ref, creates: true,
-          changes: [{ type: "create", ref, body: body as unknown as JsonObject }, index === undefined ? { type: "create", ref: iref, body: nextIndex as unknown as JsonObject } : { type: "update", ref: iref, expectedRevision: index.revision, body: nextIndex as unknown as JsonObject }],
+          changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...(kept === undefined ? [] : [{ type: "create" as const, ref: proposalTextRef(id), body: kept as unknown as JsonObject }]), index === undefined ? { type: "create", ref: iref, body: nextIndex as unknown as JsonObject } : { type: "update", ref: iref, expectedRevision: index.revision, body: nextIndex as unknown as JsonObject }],
           detail: { target: body.target, kind: body.kind }, contention: async () => new DomainError("stale_revision", "your proposals changed at the same moment; propose again"),
         };
       },
@@ -618,7 +667,8 @@ export class ToolboxProposalService {
         const out = await mutate(found.body as unknown as ToolboxProposalBody, found.revision);
         round = out.body.round;
         const unindex = out.final === true ? await this.#unindex(out.body.author, id) : [];
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex], detail: { proposalId: id, state: out.body.state }, contention: async () => new DomainError("stale_revision", "the proposal changed at the same moment; read it again") };
+        const audit = proposalTextAudit(out.changes, out.body.state);
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex], ...(audit.length === 0 ? {} : { audit }), detail: { proposalId: id, state: out.body.state }, contention: async () => new DomainError("stale_revision", "the proposal changed at the same moment; read it again") };
       },
     }));
     return { round };

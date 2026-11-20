@@ -8,7 +8,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { RETENTION_DEFAULTS, RetentionService } from "../retention/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
-import { ACCEPTANCE_LIMIT, CatalogService, SNAPSHOT_KIND, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace, versionIdOf } from "./index.js";
+import { ACCEPTANCE_LIMIT, CatalogService, PROPOSAL_TEXT_KIND, SNAPSHOT_KIND, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace, versionIdOf } from "./index.js";
 
 // Card T08 (second slice): improvement and promotion proposals with maintainer decisions, rebase and recheck, snapshots of released text, maintainer revocation and the notices pushed to authors and fork owners.
 after(stopServer);
@@ -186,6 +186,13 @@ for (const backend of backends) {
     const p5 = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", instructionsRecordId: docs5, rationale: "r", tests: "t" })).proposalId;
     await c.note(cody.p, "Run lint everywhere, three times.", { supersedes: docs5 });
     await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.4.0", manifest, instructionsRecordId: docs3, executableRecordId: exec3 } as never);
+    // Slice 4: the text the author wrote is kept with the proposal, so a superseded record no longer strands it; the rebase reads the kept text, checked by digest.
+    assert.equal((await c.props.rebase(cody.p, { commandId: cid("rb"), proposalId: p5 })).to, "1.4.0");
+    assert.equal((await c.props.get(maya.p, p5)).instructions, "Run lint everywhere, twice.");
+    // Text that is no longer as proposed, in the record and in what was kept (both changed under the service here), still fails the recheck.
+    await c.poke("desk-record", docs5, (b) => ({ ...b, body: "Run lint somewhere." }));
+    await c.poke(PROPOSAL_TEXT_KIND, p5, (b) => ({ ...b, instructions: "Run lint nowhere." }));
+    await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.5.0", manifest, instructionsRecordId: docs3, executableRecordId: exec2 } as never);
     await refuses("invalid_command", () => c.props.rebase(cody.p, { commandId: cid("rb"), proposalId: p5 }), /no longer as it was/);
   });
 
@@ -261,6 +268,60 @@ for (const backend of backends) {
     assert.equal(deleted.status, "deleted", JSON.stringify(deleted));
     assert.equal(await c.storage.getAggregate({ kind: SNAPSHOT_KIND, id: copy.versionId }), undefined);
     await refuses("not_found", () => c.cat.source(cody.p, copy.name), /removed/);
+  });
+
+  suite("slice 4: a proposal keeps the text its author wrote, so a superseded or archived record does not strand it; the kept text goes with a release, a rejection or a withdrawal, and with the owner's deletion of the record", async (c) => {
+    const { cody, maya, readme } = await cast(c);
+    const kept = async (id: string) => (await c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id }))?.body as { executable?: string; instructions?: string; sources: string[] } | undefined;
+    const exec2 = await c.note(cody.p, "console.log('lint, faster')");
+    const pA = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: exec2, rationale: "faster", tests: "ran it" })).proposalId;
+    assert.deepEqual([(await kept(pA))?.executable, (await kept(pA))?.instructions, (await kept(pA))?.sources], ["console.log('lint, faster')", undefined, [exec2]], "only the part the author wrote is kept");
+    // A change of the manifest alone writes no part: nothing is kept.
+    const pM = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", manifest: { ...manifest, purpose: "lint the changed code" }, rationale: "clearer", tests: "read it" })).proposalId;
+    assert.equal(await kept(pM), undefined);
+    // The author supersedes its record: the proposal is still read, rebased and released with the text as proposed.
+    await c.note(cody.p, "console.log('lint, faster still')", { supersedes: exec2 });
+    const got = await c.props.get(maya.p, pA);
+    assert.deepEqual([got.executable, got.unavailable], ["console.log('lint, faster')", undefined]);
+    const docs = await c.note(cody.p, "Run lint on the changed files only.");
+    await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.1.0", manifest, instructionsRecordId: docs, executableRecordId: (await c.cat.get(c.owner, "toolbox.lint", "1.0.0"))!.executable!.recordId } as never);
+    assert.equal((await c.props.rebase(cody.p, { commandId: cid("rb"), proposalId: pA })).to, "1.1.0");
+    const released = await c.props.decide(maya.p, { commandId: cid("d"), proposalId: pA, decision: "accept", version: "1.2.0" });
+    assert.equal(released.released?.version, "1.2.0");
+    const src = await c.cat.source(cody.p, "lint", "1.2.0");
+    assert.deepEqual([src.instructions, src.executable], ["Run lint on the changed files only.", "console.log('lint, faster')"]);
+    assert.equal(await kept(pA), undefined, "the release keeps its own snapshot; the proposal's kept text goes in the same write");
+    assert.equal(((await c.storage.getAggregate({ kind: SNAPSHOT_KIND, id: released.released!.versionId }))?.body as { executable?: string }).executable, "console.log('lint, faster')");
+    // An archived record (retention blanks a finished task's records, keeping the text in its archive) does not strand it either; a rejection removes the kept text.
+    const docs2 = await c.note(cody.p, "Run lint on the changed files, then on the tests.");
+    const pB = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", instructionsRecordId: docs2, rationale: "cover tests", tests: "read it" })).proposalId;
+    await c.poke("desk-record", docs2, (b) => ({ ...b, title: "(archived)", body: "", archived: { at: "2026-11-19T00:00:00.000Z", by: c.owner.id, archiveId: "x" } }));
+    assert.equal((await c.props.get(maya.p, pB)).instructions, "Run lint on the changed files, then on the tests.");
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: pB, decision: "accept" });
+    assert.notEqual(await kept(pB), undefined, "accepted without a release: the text is kept for the release that follows");
+    const pC = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", instructionsRecordId: await c.note(cody.p, "Run lint twice."), rationale: "r", tests: "t" })).proposalId;
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: pC, decision: "reject", reason: "not needed" });
+    assert.equal(await kept(pC), undefined, "a rejected proposal keeps no text");
+    // A revision replaces the kept text, and one that writes no part removes it; a withdrawal removes it.
+    const pD = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", instructionsRecordId: await c.note(cody.p, "Run lint once."), rationale: "r", tests: "t" })).proposalId;
+    await c.props.revise(cody.p, { commandId: cid("rv"), proposalId: pD, instructionsRecordId: await c.note(cody.p, "Run lint exactly once.") });
+    assert.equal((await kept(pD))?.instructions, "Run lint exactly once.");
+    await c.props.revise(cody.p, { commandId: cid("rv"), proposalId: pD, manifest: { ...manifest, purpose: "lint, once" } });
+    assert.equal(await kept(pD), undefined);
+    const pE = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", instructionsRecordId: await c.note(cody.p, "Run lint thrice."), rationale: "r", tests: "t" })).proposalId;
+    await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: pE });
+    assert.equal(await kept(pE), undefined, "a withdrawn proposal keeps no text");
+    // The owner deletes a record: the kept text goes with it (the owner's deletion removes the text everywhere), the part is unavailable, and the proposal cannot be released.
+    const execF = await c.note(cody.p, "console.log('lint, the deleted one')");
+    const pF = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: execF, rationale: "r", tests: "t" })).proposalId;
+    const retention = RetentionService.withEpoch(c.storage, c.epoch, { settings: { effective: async () => ({ ...RETENTION_DEFAULTS, reserveBytes: 0, thinkingAuto: false }) } } as never, options);
+    const deleted = await retention.delete(c.owner, { commandId: cid("del"), recordId: execF, reason: "the owner asked" });
+    assert.equal(deleted.status, "deleted", JSON.stringify(deleted));
+    assert.ok(deleted.derived.others.includes(`${PROPOSAL_TEXT_KIND}/${pF}`), JSON.stringify(deleted.derived));
+    assert.equal(await kept(pF), undefined);
+    assert.deepEqual((await c.props.get(maya.p, pF)).unavailable, ["executable"]);
+    await refuses("invalid_command", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: pF, decision: "accept", version: "1.3.0" }), /deleted by the owner/);
+    void readme;
   });
 
   suite("every decision reaches the author's inbox even after the proposal's history is at its limit (it keeps the last 50 events)", async (c) => {

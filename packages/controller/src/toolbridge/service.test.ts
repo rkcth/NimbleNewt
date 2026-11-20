@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { CatalogService, ToolboxProposalService, personalNamespace } from "../catalog/index.js";
+import { ACCEPTANCE_LIMIT, CatalogService, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace } from "../catalog/index.js";
 import { DeskService } from "../context/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
@@ -1483,6 +1483,80 @@ for (const backend of backends) {
     for (const op of ["paused-copy", "paused-propose"]) assert.equal(bad(out[op]!).code, "paused", op);
     good(out["paused-source"]!);
     assert.ok(steps.some((x) => /copied shared tool toolbox\.lint/.test(x)) && steps.some((x) => /proposed a change to shared tool toolbox\.lint/.test(x)), steps.join("\n"));
+  });
+
+  suite("toolbox proposals and revocation (card T08, slice 4): from a run the agent proposes, promotes, lists, reads, revises, rebases and withdraws its proposals, and as a maintainer decides others' and revokes a version; reads go on during a pause, writes stop", async (c) => {
+    const ann = await c.agentFor("ann", [{ action: TOOLBOX_MANAGE, project: "*" }]);
+    await c.agentFor("bob");
+    const bob = await c.principals.authenticate((await c.principals.issueCredential(c.owner, "agent:bob")).token);
+    const { taskId } = await c.task("t", ann);
+    const steps: string[] = [];
+    const props = ToolboxProposalService.withEpoch(c.storage, c.epoch, c.catalog, c.desks, c.options);
+    const svc = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, proposals: props, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, activity: async (step) => { steps.push(step.summary); }, isLocalHost: () => true });
+    const bare = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true });
+    const out: Record<string, BridgeResponse> = {};
+    const ids: Record<string, string> = {};
+    c.worker.script = c.session(async (s) => {
+      const send = (op: string, args: JsonObject, callId: string) => svc.handle(s.token, s.gateway, { op, callId, args });
+      const act = (action: string, args: JsonObject, callId: string) => send("toolbox.proposal", { action, ...args }, callId);
+      const doc = good(await send("desk.write", { kind: "note", title: "lint", body: "Run lint.", visibility: "shared", status: "accepted" }, "w0"));
+      const code = good(await send("desk.write", { kind: "note", title: "lint code", body: "console.log('lint')", visibility: "shared", status: "accepted" }, "w1"));
+      const better = good(await send("desk.write", { kind: "note", title: "lint code 2", body: "console.log('lint 2')", visibility: "shared", status: "accepted" }, "w2"));
+      const best = good(await send("desk.write", { kind: "note", title: "lint code 3", body: "console.log('lint 3')", visibility: "shared", status: "accepted" }, "w3"));
+      await c.catalog.register(c.owner, { commandId: uid("pub"), name: "toolbox.lint", kind: "tool", version: "1.0.0", manifest: manifest(), instructionsRecordId: doc["id"] as string, executableRecordId: code["id"] as string, audience: { projects: [c.project] } } as never);
+      out["named-task"] = await act("propose", { name: "lint", executableRecordId: better["id"] as string, rationale: "faster", tests: "ran it", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "p0");
+      out["propose"] = await act("propose", { name: "lint", executableRecordId: better["id"] as string, rationale: "faster", tests: "ran it" }, "p1");
+      ids["a"] = (out["propose"] as { result: JsonObject }).result["proposalId"] as string;
+      await c.install(s, "fmt", "1.0.0");
+      out["promote"] = await act("promote", { name: "formatter", from: "fmt", audience: { projects: [c.project] }, rationale: "everyone formats", tests: "ran it" }, "p2");
+      ids["p"] = (out["promote"] as { result: JsonObject }).result["proposalId"] as string;
+      // Bob, another agent, proposes clearer instructions (through the state API's service); Ann, a maintainer, accepts and releases them from her run.
+      const bdoc = await c.desks.write(bob, { commandId: uid("w"), projectId: c.project, kind: "note", title: "lint", body: "Run lint on the changed files.", visibility: "shared", status: "accepted" } as never);
+      ids["b"] = (await props.propose(bob, { commandId: uid("pp"), name: "lint", instructionsRecordId: bdoc.id, rationale: "clearer", tests: "read it" })).proposalId;
+      out["list"] = await act("list", {}, "r0");
+      out["get"] = await act("get", { proposalId: ids["b"]! }, "r1");
+      out["own-decide"] = await act("decide", { proposalId: ids["a"]!, decision: "accept" }, "d0");
+      out["decide"] = await act("decide", { proposalId: ids["b"]!, decision: "accept", version: "1.1.0" }, "d1");
+      // Her own proposal is now against an older base: she rebases it (1.1.0 changed the instructions only), revises it and withdraws her promotion.
+      out["rebase"] = await act("rebase", { proposalId: ids["a"]! }, "b0");
+      out["revise"] = await act("revise", { proposalId: ids["a"]!, executableRecordId: best["id"] as string }, "v0");
+      out["withdraw"] = await act("withdraw", { proposalId: ids["p"]!, reason: "later" }, "x0");
+      out["unknown"] = await act("approve", { proposalId: ids["a"]! }, "u0");
+      out["extra"] = await act("get", { proposalId: ids["a"]!, decision: "accept" }, "u1");
+      out["pause-revoke"] = await send("toolbox.revoke", { name: "lint", version: "1.0.0", reason: "old", runningCalls: "pause" }, "k0");
+      out["revoke"] = await send("toolbox.revoke", { name: "lint", version: "1.0.0", reason: "it deletes files", runningCalls: "finish" }, "k1");
+      out["unavailable"] = await bare.handle(s.token, s.gateway, { op: "toolbox.proposal", callId: "q0", args: { action: "list" } });
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      out["paused-list"] = await act("list", { state: "all" }, "r2");
+      out["paused-get"] = await act("get", { proposalId: ids["a"]! }, "r3");
+      out["paused-revise"] = await act("revise", { proposalId: ids["a"]!, executableRecordId: better["id"] as string }, "v1");
+      out["paused-withdraw"] = await act("withdraw", { proposalId: ids["a"]! }, "x1");
+      out["paused-propose"] = await act("propose", { name: "lint", executableRecordId: better["id"] as string, rationale: "again", tests: "ran it" }, "p3");
+      out["paused-revoke"] = await send("toolbox.revoke", { name: "lint", version: "1.1.0", reason: "x", runningCalls: "cancel" }, "k2");
+    });
+    await c.tick();
+    assert.equal(bad(out["named-task"]!).code, "invalid_command", "the task is the attempt's own, never one the request names");
+    assert.equal((await props.get(c.owner, ids["a"]!)).taskId, taskId);
+    assert.equal((await props.get(c.owner, ids["p"]!)).taskId, taskId, "a promotion names the attempt's own task too");
+    assert.equal(good(out["promote"]!)["name"], "toolbox.formatter");
+    assert.deepEqual(((good(out["list"]!)["items"]) as JsonObject[]).map((x) => x["id"]).sort(), [ids["a"], ids["b"], ids["p"]].sort(), "Ann sees her own proposals and the one she may decide");
+    assert.equal(good(out["get"]!)["instructions"], "Run lint on the changed files.");
+    assert.equal(bad(out["own-decide"]!).code, "forbidden");
+    const decided = good(out["decide"]!);
+    assert.deepEqual([decided["state"], (decided["released"] as JsonObject)["version"], decided["authorizes"]], ["accepted", "1.1.0", ACCEPTANCE_LIMIT]);
+    assert.deepEqual([good(out["rebase"]!)["from"], good(out["rebase"]!)["to"]], ["1.0.0", "1.1.0"]);
+    assert.equal(good(out["revise"]!)["round"], 2);
+    assert.equal(good(out["withdraw"]!)["state"], "withdrawn");
+    assert.match(bad(out["unknown"]!).message, /action: must be one of propose, promote, revise, rebase, withdraw, list, get, decide/);
+    assert.equal(bad(out["extra"]!).code, "invalid_command");
+    assert.match(bad(out["pause-revoke"]!).message, /finish or cancel/);
+    assert.deepEqual(good(out["revoke"]!), { name: "toolbox.lint", version: "1.0.0", runningCalls: "finish" });
+    assert.equal((await c.catalog.revocationOf("toolbox.lint", "1.0.0"))?.revokedBy, "agent:ann");
+    assert.equal(bad(out["unavailable"]!).code, "unavailable");
+    good(out["paused-list"]!); good(out["paused-get"]!);
+    for (const op of ["paused-revise", "paused-withdraw", "paused-propose", "paused-revoke"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const re of [/proposed a change to shared tool toolbox\.lint/, /offered its tool .*fmt as shared tool toolbox\.formatter/, /decided toolbox proposal .*accepted, released as 1\.1\.0/, /rebased toolbox proposal/, /revised toolbox proposal/, /withdrew toolbox proposal/, /revoked shared tool toolbox\.lint 1\.0\.0/]) assert.ok(steps.some((x) => re.test(x)), `${re}: ${steps.join("\n")}`);
+    assert.ok(!steps.some((x) => /read|listed/.test(x) && /toolbox proposal/.test(x)), "reads are not steps");
   });
 
   suite("toolbox pins (card T08): a call naming no version runs the agent's pinned version after a newer release; it opts in through the bridge, for itself only; a revoked pin is refused with words to opt in, never replaced; opting in is a write a pause stops", async (c) => {

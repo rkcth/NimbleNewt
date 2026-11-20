@@ -11,7 +11,7 @@ import { ACTIONS } from "../security/access.js";
 import { AGREED_GRANTABLE_ACTIONS, AGREED_GRANTABLE_ON_ONE_SERVICE, AGREED_GRANTABLE_ON_ONE_TASK } from "../security/grants.js";
 import { GrantService, PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
-import { CatalogService, TOOLBOX_MANAGE, mayManage, personalNamespace, toolboxName, type HostFacts } from "./index.js";
+import { CATALOG_LIMITS, CatalogService, TOOLBOX_MANAGE, mayManage, personalNamespace, toolboxName, type HostFacts } from "./index.js";
 
 // Card T08 (first slice): the scoped toolbox.manage permission, audiences, read-only source, personal copies with provenance and fork lineage.
 after(stopServer);
@@ -224,6 +224,42 @@ for (const backend of backends) {
     assert.notEqual(await c.cat.get(cody.p, mine), undefined);
     // A host or the owner keeps no personal copies.
     await refuses("forbidden", () => c.cat.copy(c.owner, { commandId: cid("cp"), name: "lint", as: "x" }));
+  });
+
+  suite("slice 4: fork lineage is bounded per agent, so one agent cannot fill a tool's lineage; copying the same base again into the same name replaces its entry; the bound counts only that agent", async (c) => {
+    const ann = await c.agent("Ann", worker(c.a));
+    const cody = await c.agent("Cody", worker(c.a));
+    const rita = await c.agent("Rita", worker(c.a));
+    const readme = await c.note(ann.p, "Run lint."); const code = await c.note(ann.p, "console.log('lint')"); const code2 = await c.note(ann.p, "console.log('lint 2')");
+    await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.0.0", manifest, instructionsRecordId: readme, executableRecordId: code, audience: { all: true } } as never);
+    const limit = CATALOG_LIMITS.forksPerAgent;
+    assert.ok(limit >= 2 && limit * 2 <= CATALOG_LIMITS.forks, "the per-agent bound is well under the tool's bound");
+    // Copying the same base again into the same name (a higher copyVersion) replaces that entry: the lineage does not grow.
+    await c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "c-0" });
+    await c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "c-0", copyVersion: "1.0.1" });
+    let forks = (await c.cat.forks(c.owner, "lint")).forks;
+    assert.deepEqual(forks.map((f) => [f.copy.split(".")[1], f.version, f.baseVersion]), [["c-0", "1.0.1", "1.0.0"]]);
+    for (let i = 1; i < limit; i++) await c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: `c-${i}` });
+    // At the bound a copy into a new name is refused for Cody alone; a copy again into a name it used for this base is still allowed.
+    await refuses("unavailable", () => c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "one-more" }), new RegExp(`already have ${limit} recorded copies of toolbox.lint`));
+    await c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "c-1", copyVersion: "1.0.1" });
+    const rcopy = await c.cat.copy(rita.p, { commandId: cid("cp"), name: "lint", as: "r-0" });
+    forks = (await c.cat.forks(c.owner, "lint")).forks;
+    assert.deepEqual([forks.filter((f) => f.owner === cody.p.id).length, forks.filter((f) => f.owner === rita.p.id).length], [limit, 1]);
+    // A new base version in an old name is a new entry (its older copy versions still run on the old base, so a revocation of either base must reach it): refused at the bound, allowed for Rita.
+    await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.1.0", manifest, instructionsRecordId: readme, executableRecordId: code2 } as never);
+    await refuses("unavailable", () => c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "c-0", copyVersion: "2.0.0" }), /recorded copies/);
+    await c.cat.copy(rita.p, { commandId: cid("cp"), name: "lint", as: "r-0", copyVersion: "2.0.0" });
+    forks = (await c.cat.forks(c.owner, "lint")).forks;
+    assert.deepEqual(forks.filter((f) => f.owner === rita.p.id).map((f) => [f.version, f.baseVersion]), [["1.0.0", "1.0.0"], ["2.0.0", "1.1.0"]]);
+    assert.equal(rcopy.copiedFrom.version, "1.0.0");
+    // The revocation of 1.0.0 still reaches every agent with a copy of it (both of Cody's entries for c-0 and c-1 were replaced, not dropped).
+    await c.cat.revoke(c.owner, { commandId: cid("rv"), name: "toolbox.lint", version: "1.0.0", reason: "it deletes files" });
+    const told = (p: Principal) => c.cat.notices(p).then((x) => x.items.filter((i) => i.kind === "revocation").map((i) => i.text));
+    assert.match((await told(cody.p)).join(" "), /c-0/);
+    assert.match((await told(rita.p)).join(" "), /r-0/);
+    forks = (await c.cat.forks(c.owner, "lint")).forks;
+    assert.deepEqual(forks.filter((f) => f.baseVersion === "1.0.0").map((f) => [f.copy.split(".")[1], f.baseRevoked]).sort(), [...Array.from({ length: limit }, (_, i) => [`c-${i}`, true]), ["r-0", true]].sort());
   });
 
   suite("dependency records judge a shared tool by its audience too: an agent outside it learns neither that a version exists nor whether a digest is right (review fix)", async (c) => {

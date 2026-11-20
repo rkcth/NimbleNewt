@@ -63,7 +63,7 @@ export interface VersionBody {
  */
 export interface Audience { readonly all?: true; readonly roles?: readonly string[]; readonly teams?: readonly string[]; readonly projects?: readonly string[] }
 export interface CopiedFrom { readonly name: string; readonly version: string; readonly digest: string }
-/** The fork lineage of one shared entry (card T08): every personal copy made of it, so a maintainer sees who forked which version and a revocation can be told to each fork. Bounded by `CATALOG_LIMITS.forks`. */
+/** The fork lineage of one shared entry (card T08): every personal copy made of it, so a maintainer sees who forked which version and a revocation can be told to each fork. One entry per agent, copy name and base version (the newest copy version); bounded by `CATALOG_LIMITS.forks` in all and `CATALOG_LIMITS.forksPerAgent` per agent. */
 export interface ForkBody { readonly name: string; readonly forks: readonly { readonly copy: string; readonly version: string; readonly owner: string; readonly baseVersion: string; readonly baseDigest: string; readonly at: string }[] }
 export interface EntryBody { readonly name: string; readonly layer: Layer; readonly kind: ArtifactKind; readonly owner?: string; readonly latest: string; /** Every published version, in publication order. */ readonly versions: readonly string[]; /** The versions revoked. Revoking changes the entry, so a run in flight notices. */ readonly revoked: readonly string[]; /** The versions no longer chosen when no version is named (a newer one was rolled back, or the owner set it aside). They still resolve by name and version, so a paused task resumes silently on the one it used. */ readonly deprecated?: readonly string[]; /** Shared entries only (card T08): who it is for. */ readonly audience?: Audience }
 /** What the owner chose for calls of a version that are running when it is revoked (owner decision, 2026-10-30): let them end, cancel them, or stop them and pause their tasks (`pause` was added by card T02c). Absent: nobody was asked (the caller is not chat, or gave no answer), and the policy in force answers (the operator's startup option, else the owner's standing setting, default `finish`). */
@@ -99,7 +99,7 @@ export interface PinEntry { readonly agent: string; readonly version: string; re
 export interface PinBody { readonly name: string; readonly pins: readonly PinEntry[] }
 export const PINS_KIND = "catalog-pins";
 export const pinsRef = (canonical: string): AggregateRef => ({ kind: PINS_KIND, id: derivedId("cpn", canonical) });
-export const CATALOG_LIMITS = { purpose: 500, schemaBytes: 8192, entryPoint: 200, dependencies: 50, access: 50, scan: 5000, page: 200, versions: 500, audience: 20, forks: 500, pins: 1000 } as const;
+export const CATALOG_LIMITS = { purpose: 500, schemaBytes: 8192, entryPoint: 200, dependencies: 50, access: 50, scan: 5000, page: 200, versions: 500, audience: 20, forks: 500, forksPerAgent: 20, pins: 1000 } as const;
 const AGENT_RECORD_ID = /^agt-[a-z2-7]{20}$/;
 /** The short name of a shared tool (`lint` for `toolbox.lint`), for the words of a notice. */
 const shortOf = (canonical: string): string => canonical.replace(/^toolbox\./, "");
@@ -150,6 +150,17 @@ export const compareVersions = compare;
 export interface SnapshotBody { readonly versionId: string; readonly name: string; readonly version: string; readonly digest: string; readonly sources: readonly string[]; readonly instructions: string; readonly executable?: string; readonly at: string }
 export const SNAPSHOT_KIND = "catalog-snapshot";
 export const snapshotRef = (versionId: string): AggregateRef => ({ kind: SNAPSHOT_KIND, id: versionId });
+/**
+ * The text of the parts a proposal's author wrote (card T08), kept with the proposal while it waits, so the author superseding a record or retention archiving it does not strand the proposal. Keyed by the proposal's ID. Only the
+ * parts the author wrote are kept (a part left as the base has it is the base's, with the base's own snapshot). Removed when the proposal is released, rejected or withdrawn; the owner's deletion of a source record removes it with
+ * the record (retention's deletion gathers it through `sources`, as for a release's snapshot), and the proposal's text is then unavailable.
+ */
+export interface ProposalTextBody { readonly proposalId: string; readonly digest: string; readonly sources: readonly string[]; readonly instructions?: string; readonly executable?: string; readonly at: string }
+export const PROPOSAL_TEXT_KIND = "toolbox-proposal-text";
+export const proposalTextRef = (proposalId: string): AggregateRef => ({ kind: PROPOSAL_TEXT_KIND, id: proposalId });
+/** The audit entries a write that removes kept proposal text carries (storage requires one per removed record). */
+export const proposalTextAudit = (changes: readonly { readonly type: string; readonly ref: AggregateRef }[], why: string): { type: string; subject: AggregateRef; detail: JsonObject }[] =>
+  changes.filter((c) => c.type === "delete" && c.ref.kind === PROPOSAL_TEXT_KIND).map((c) => ({ type: "toolbox.proposal.text.remove", subject: c.ref, detail: { proposalId: c.ref.id, why } }));
 function snapshotOf(v: VersionBody, texts: { instructions: string; executable?: string }, at: string): SnapshotBody {
   return { versionId: versionIdOf(v.name, v.version), name: v.name, version: v.version, digest: v.digest, sources: [...new Set([v.instructional.recordId, ...(v.executable === undefined ? [] : [v.executable.recordId])])], instructions: texts.instructions, ...(texts.executable === undefined ? {} : { executable: texts.executable }), at };
 }
@@ -438,12 +449,14 @@ export class CatalogService {
           changes: [
             { type: "create", ref: vref, body: full as unknown as JsonObject },
             ...(layer === "toolbox" ? [{ type: "create" as const, ref: snapshotRef(versionId), body: snapshotOf(full, texts, this.#runner.now()) as unknown as JsonObject }] : []),
-            // The source records must still be as they were read: retention may archive or remove one between that read and this write (it reads the catalog's sources just before its own write).
-            ...pins.filter((p, i, all) => all.findIndex((o) => o.ref.kind === p.ref.kind && o.ref.id === p.ref.id) === i).map((p) => ({ type: "check" as const, ref: p.ref, expectedRevision: p.revision })),
+            // The source records must still be as they were read: retention may archive or remove one between that read and this write (it reads the catalog's sources just before its own write). A record `extra` changes in
+            // this write (a proposal's text, removed at its release) is checked by that change's own revision.
+            ...pins.filter((p, i, all) => all.findIndex((o) => o.ref.kind === p.ref.kind && o.ref.id === p.ref.id) === i && !more.some((c) => c.ref.kind === p.ref.kind && c.ref.id === p.ref.id)).map((p) => ({ type: "check" as const, ref: p.ref, expectedRevision: p.revision })),
             entry === undefined ? { type: "create", ref: eref, body: nextEntry as unknown as JsonObject } : { type: "update", ref: eref, expectedRevision: entry.revision, body: nextEntry as unknown as JsonObject },
             ...more,
           ],
           detail: { name: canonical, version, kind, layer },
+          ...(proposalTextAudit(more, "released").length === 0 ? {} : { audit: proposalTextAudit(more, "released") }),
           contention: async () => new DomainError("stale_revision", `${canonical} changed at the same moment; ${op === "catalog.register" ? "register" : "ask"} again`),
         };
       },
@@ -462,6 +475,8 @@ export class CatalogService {
     commandId: string; name: string; kind: ArtifactKind; version: string; manifest: Manifest;
     parts: { instructions: { ref: SourceRef; base?: string }; executable?: { ref: SourceRef; base?: string } };
     audience?: Audience; expect: { chosen: string } | "absent"; payload: JsonObject;
+    /** The proposal whose kept text (`PROPOSAL_TEXT_KIND`) is read when an author's record has moved on since it was proposed. */
+    proposalId?: string;
   }, extra: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<readonly import("../storage/types.js").Change[]>): Promise<{ versionId: string; name: string; digest: string }> {
     const parsed = parseName(command.name);
     if (parsed === null || parsed.layer !== "toolbox") return invalid("name", "must be a shared tool name");
@@ -485,7 +500,15 @@ export class CatalogService {
         }
         const found = await this.#runner.get("desk-record", p.ref.recordId);
         const record = found?.body as unknown as { owner?: string; status?: string; visibility?: string; body?: unknown; origin?: unknown; copiedFrom?: unknown; archived?: unknown; deleted?: unknown } | undefined;
-        if (found === undefined || record === undefined || record.owner !== p.ref.author || found.revision !== p.ref.revision || typeof record.body !== "string" || sha(record.body) !== p.ref.digest) throw new DomainError("invalid_command", `the proposed ${part} is no longer as it was proposed; the author revises the proposal`);
+        if (record?.deleted !== undefined) throw new DomainError("invalid_command", `the proposed ${part} was deleted by the owner; the author revises the proposal`);
+        if (found === undefined || record === undefined || record.owner !== p.ref.author || found.revision !== p.ref.revision || typeof record.body !== "string" || sha(record.body) !== p.ref.digest) {
+          // The record moved on (superseded, archived): the text kept with the proposal when it was proposed, checked by digest.
+          const kept = command.proposalId === undefined ? undefined : await this.#runner.get(PROPOSAL_TEXT_KIND, command.proposalId);
+          const text = (kept?.body as unknown as ProposalTextBody | undefined)?.[part];
+          if (kept === undefined || typeof text !== "string" || sha(text) !== p.ref.digest) throw new DomainError("invalid_command", `the proposed ${part} is no longer as it was proposed; the author revises the proposal`);
+          texts[part] = text; pins.push({ ref: proposalTextRef(command.proposalId!), revision: kept.revision });
+          continue;
+        }
         if (record.visibility === "private" || record.status !== "accepted" || record.origin !== undefined || record.copiedFrom !== undefined || record.archived !== undefined || record.deleted !== undefined) throw new DomainError("invalid_command", `the proposed ${part} is no longer an accepted, shared, original desk record`);
         texts[part] = record.body; pins.push({ ref: { kind: "desk-record", id: found.id }, revision: found.revision });
       }
@@ -1077,8 +1100,15 @@ export class CatalogService {
         if ((prior?.versions.length ?? 0) >= CATALOG_LIMITS.versions) throw new DomainError("unavailable", `${canonical} already has ${CATALOG_LIMITS.versions} versions`);
         const forks = await this.#runner.get(fref.kind, fref.id);
         const lineage = (forks?.body as unknown as ForkBody | undefined)?.forks ?? [];
-        if (lineage.length >= CATALOG_LIMITS.forks) throw new DomainError("unavailable", `${base.name} already has ${CATALOG_LIMITS.forks} recorded copies`);
-        const nextForks: ForkBody = { name: base.name, forks: [...lineage, { copy: canonical, version, owner: by.id, baseVersion: base.version, baseDigest: base.digest, at: this.#runner.now() }] };
+        // A copy again into the same name from the same base replaces that entry (a revocation of the base reaches the same copy either way); anything else adds one. Each agent keeps at most `forksPerAgent` entries
+        // per tool, so one agent cannot fill the lineage and stop everyone else from copying the tool.
+        const same = (f: ForkBody["forks"][number]): boolean => f.owner === by.id && f.copy === canonical && f.baseVersion === base.version;
+        const kept = lineage.filter((f) => !same(f));
+        if (kept.length === lineage.length) {
+          if (kept.filter((f) => f.owner === by.id).length >= CATALOG_LIMITS.forksPerAgent) throw new DomainError("unavailable", `you already have ${CATALOG_LIMITS.forksPerAgent} recorded copies of ${base.name} (one per copy name and base version); a copy of ${base.version} again into a name you already copied it into replaces its entry`);
+          if (kept.length >= CATALOG_LIMITS.forks) throw new DomainError("unavailable", `${base.name} already has ${CATALOG_LIMITS.forks} recorded copies`);
+        }
+        const nextForks: ForkBody = { name: base.name, forks: [...kept, { copy: canonical, version, owner: by.id, baseVersion: base.version, baseDigest: base.digest, at: this.#runner.now() }] };
         const nextEntry: EntryBody = { name: canonical, layer: "agent", kind: base.kind, owner: by.id, latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }) };
         const eref: AggregateRef = { kind: "catalog-entry", id: entryId };
         return {
