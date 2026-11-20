@@ -25,7 +25,7 @@ const NO_ID = `tpp-${"a".repeat(20)}`;
 for (const backend of backends) {
   interface Agent { id: string; p: Principal; reauth(): Promise<Principal> }
   interface Ctx {
-    cat: CatalogService; props: ToolboxProposalService; desks: DeskService; principals: PrincipalService; owner: Principal; a: string; b: string; ta: string; storage: ControllerStorage; epoch: number; told: { taskId: string; to: string; text: string }[];
+    cat: CatalogService; props: ToolboxProposalService; desks: DeskService; principals: PrincipalService; agents: AgentService; owner: Principal; a: string; b: string; ta: string; storage: ControllerStorage; epoch: number; told: { taskId: string; to: string; text: string }[];
     agent(name: string, grants: Grant[], extra?: { roles?: string[] }): Promise<Agent>;
     note(by: Principal, body: string, extra?: Record<string, unknown>): Promise<string>;
     /** Changes a stored record directly (what no service allows: the test stands for a record changed under the catalogue). */
@@ -48,7 +48,7 @@ for (const backend of backends) {
         const told: { taskId: string; to: string; text: string }[] = [];
         const props = ToolboxProposalService.withEpoch(world.storage, projects.epoch, cat, desks, options, async (m) => { told.push({ taskId: m.taskId, to: m.to, text: m.text }); });
         await body({
-          cat, props, desks, principals, owner, a, b, ta, storage: world.storage, epoch: projects.epoch, told,
+          cat, props, desks, principals, agents, owner, a, b, ta, storage: world.storage, epoch: projects.epoch, told,
           agent: async (friendlyName, grants, extra = {}) => {
             const id = (await agents.create(owner, { commandId: cid("ag"), friendlyName, ...(extra.roles === undefined ? {} : { roles: extra.roles }) })).id;
             const pid = `agent:${id}`;
@@ -322,6 +322,63 @@ for (const backend of backends) {
     assert.deepEqual((await c.props.get(maya.p, pF)).unavailable, ["executable"]);
     await refuses("invalid_command", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: pF, decision: "accept", version: "1.3.0" }), /deleted by the owner/);
     void readme;
+  });
+
+  suite("slice 4, the README validation walk (README 324-326): a coder's personal tool becomes a role-scoped shared version that survives its author's rename and retirement; only maintainers change it; a published version is immutable; update, rollback and revocation; nothing is granted by publishing", async (c) => {
+    const cody = await c.agent("Cody", worker(c.a), { roles: ["coder"] });
+    const kim = await c.agent("Kim", [...worker(c.a), { action: "tool.toolbox.fmt", project: c.a }], { roles: ["coder"] });
+    const rita = await c.agent("Rita", [...worker(c.a), { action: "tool.toolbox.fmt", project: c.a }], { roles: ["reviewer"] });
+    const maya = await c.agent("Maya", [...worker(c.a), { action: TOOLBOX_MANAGE, project: "*" }]);
+    const host = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 4, memoryMb: 4096 };
+    const grantsOf = async () => Promise.all([cody, kim, rita, maya].map(async (x) => JSON.stringify((await c.principals.get(`agent:${x.id}`))!.grants)));
+    const before = await grantsOf();
+    // The coder's personal tool; publishing it under the shared name itself is refused (no toolbox.manage).
+    const readme = await c.note(cody.p, "Format the changed files."); const code = await c.note(cody.p, "console.log('fmt')");
+    const wide = { ...manifest, purpose: "format the code", requestedAccess: ["web.read"] };
+    await c.cat.register(cody.p, { commandId: cid("reg"), name: "fmt", kind: "tool", version: "1.0.0", manifest: wide, instructionsRecordId: readme, executableRecordId: code });
+    await refuses("forbidden", () => c.cat.register(cody.p, { commandId: cid("reg"), name: "toolbox.fmt", kind: "tool", version: "1.0.0", manifest: wide, instructionsRecordId: readme, executableRecordId: code, audience: { roles: ["coder"] } } as never), /toolbox\.manage/);
+    // Submitted for promotion, suggested for coders; the author is renamed while it waits; a maintainer accepts it for coders.
+    const promo = await c.props.promote(cody.p, { commandId: cid("pr"), name: "fmt", from: "fmt", audience: { roles: ["coder"] }, rationale: "every coder formats", tests: "ran it on the garden checkout" });
+    await c.agents.update(c.owner, { commandId: cid("ren"), agentId: cody.id, expectedRevision: 1, friendlyName: "Cody Renamed" });
+    const accepted = await c.props.decide(maya.p, { commandId: cid("d"), proposalId: promo.proposalId, decision: "accept", version: "1.0.0" });
+    assert.deepEqual([accepted.released?.name, accepted.authorizes], ["toolbox.fmt", ACCEPTANCE_LIMIT]);
+    // Eligible coders discover, read and run it; an excluded role neither finds nor runs it, even with a grant naming it. Reading the source needs no toolbox.manage.
+    assert.ok((await c.cat.list(kim.p)).some((x) => x.name === "toolbox.fmt"));
+    assert.equal((await c.cat.source(kim.p, "fmt")).executable, "console.log('fmt')");
+    assert.equal((await c.cat.authorizeRun(kim.p, { commandId: cid("run"), name: "toolbox.fmt", taskId: c.ta, projectId: c.a, host })).ready, true);
+    assert.equal(await c.cat.get(rita.p, "toolbox.fmt"), undefined);
+    await refuses("forbidden", () => c.cat.authorizeRun(rita.p, { commandId: cid("run"), name: "toolbox.fmt", taskId: c.ta, projectId: c.a, host }));
+    // Edits by agents that do not hold toolbox.manage fail: audience, deprecate, rollback, revoke (it can read the tool, so it is told it may not).
+    await refuses("forbidden", () => c.cat.setAudience(kim.p, { commandId: cid("aud"), name: "fmt", audience: { all: true } }));
+    await refuses("forbidden", () => c.cat.deprecate(kim.p, { commandId: cid("dep"), name: "toolbox.fmt", version: "1.0.0", reason: "x" }));
+    await refuses("forbidden", () => c.cat.rollback(kim.p, { commandId: cid("rb"), name: "toolbox.fmt", toVersion: "1.0.0", reason: "x" }));
+    await refuses("forbidden", () => c.cat.revoke(kim.p, { commandId: cid("rv"), name: "toolbox.fmt", version: "1.0.0", reason: "x", runningCalls: "finish" }));
+    // A published version is immutable: other content under it is refused, even for a maintainer; the author's later edit of its own tool and records changes nothing shared.
+    const code2 = await c.note(cody.p, "console.log('fmt 2')");
+    await refuses("command_conflict", () => c.cat.register(maya.p, { commandId: cid("reg"), name: "toolbox.fmt", kind: "tool", version: "1.0.0", manifest: wide, instructionsRecordId: readme, executableRecordId: code2 } as never), /immutable/);
+    await c.cat.register(cody.p, { commandId: cid("reg"), name: "fmt", kind: "tool", version: "1.1.0", manifest: wide, instructionsRecordId: readme, executableRecordId: code2 });
+    await c.note(cody.p, "console.log('fmt, rewritten')", { supersedes: code });
+    assert.equal((await c.cat.source(kim.p, "fmt")).executable, "console.log('fmt')");
+    // A second promotion waits while its author is retired: it is still decided and released from the text kept with it, and the first release still runs.
+    await c.props.promote(cody.p, { commandId: cid("pr"), name: "fmt-strict", from: "fmt", rationale: "a stricter formatter", tests: "ran it" }).then(async (second) => {
+      const agent = (await c.agents.get(c.owner, cody.id))!;
+      await c.agents.retire(c.owner, { commandId: cid("ret"), agentId: cody.id, expectedRevision: agent.revision });
+      const out = await c.props.decide(maya.p, { commandId: cid("d"), proposalId: second.proposalId, decision: "accept", version: "1.0.0", audience: { roles: ["coder"] } });
+      assert.equal(out.released?.name, "toolbox.fmt-strict");
+      assert.equal((await c.cat.source(kim.p, "fmt-strict")).executable, "console.log('fmt 2')");
+    });
+    assert.equal((await c.cat.source(kim.p, "fmt")).author, `agent:${cody.id}`, "the author stays recorded by its durable identity");
+    assert.equal((await c.cat.authorizeRun(kim.p, { commandId: cid("run"), name: "toolbox.fmt", taskId: c.ta, projectId: c.a, host })).ready, true);
+    // Update, rollback and revocation by the maintainer: a new version, back to the old one, and the new one withdrawn; the coder's call naming no version follows.
+    const kimCode = await c.note(kim.p, "console.log('fmt 3')");
+    await c.cat.register(maya.p, { commandId: cid("reg"), name: "toolbox.fmt", kind: "tool", version: "1.1.0", manifest: wide, instructionsRecordId: readme, executableRecordId: kimCode } as never);
+    assert.equal((await c.cat.source(c.owner, "fmt")).version, "1.1.0");
+    await c.cat.rollback(maya.p, { commandId: cid("rb"), name: "toolbox.fmt", toVersion: "1.0.0", reason: "1.1.0 breaks line endings" });
+    assert.equal((await c.cat.get(c.owner, "toolbox.fmt"))!.version, "1.0.0");
+    await c.cat.revoke(maya.p, { commandId: cid("rv"), name: "toolbox.fmt", version: "1.1.0", reason: "breaks line endings", runningCalls: "cancel" });
+    await refuses("forbidden", () => c.cat.authorizeRun(kim.p, { commandId: cid("run"), name: "toolbox.fmt", version: "1.1.0", taskId: c.ta, projectId: c.a, host }), /revoked/);
+    // Publishing a tool that asks for access, accepting proposals and releasing versions granted nobody anything.
+    assert.deepEqual(await grantsOf(), before);
   });
 
   suite("every decision reaches the author's inbox even after the proposal's history is at its limit (it keeps the last 50 events)", async (c) => {
