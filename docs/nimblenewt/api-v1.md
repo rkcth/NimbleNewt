@@ -603,13 +603,13 @@ Completion: finished when accepted (`completed: true`).
 
 #### `toolbox.list`
 
-The shared tools (`toolbox.<name>`) the caller may see: the owner sees all; an agent with `catalog.read` sees those whose audience includes it (all agents, one of its roles, its team, or a project it holds a grant in). Each shows the version chosen now, the live versions, its purpose, the platforms (os, arch) and interpreter it declares (a tool distributed to everyone does not run everywhere), its audience and whether the caller may maintain it.
+The shared tools (`toolbox.<name>`) the caller may see: the owner sees all; an agent with `catalog.read` sees those whose audience includes it (all agents, one of its roles, its team, or a project it holds a grant in). Each shows the version chosen now, the live versions, its purpose, the platforms (os, arch) and interpreter it declares (a tool distributed to everyone does not run everywhere), its audience and whether the caller may maintain it. For an agent pinned to the tool, `pinned` is the version a call naming none runs for it (and `pinRevoked` when that version was revoked).
 
 Arguments:
 
 - none
 
-Result: `{ items: [{ name, kind, latest, versions, purpose, os, arch, interpreter?, audience, maintainable }], partial? }`
+Result: `{ items: [{ name, kind, latest, versions, purpose, os, arch, interpreter?, audience, maintainable, pinned?, pinRevoked? }], partial? }`
 
 #### `toolbox.source`
 
@@ -644,7 +644,7 @@ Result: `{ name, forks: [{ copy, version, owner, baseVersion, baseDigest, at, ba
 
 #### `toolbox.notices`
 
-The caller's toolbox inbox (an agent): what it was told without asking, oldest first: decisions on its proposals (with the reason) and revocations of shared versions it keeps personal copies of. At most the last 100 are kept.
+The caller's toolbox inbox (an agent): what it was told without asking, oldest first: decisions on its proposals (with the reason), revocations of shared versions it keeps personal copies of or is pinned to, a newer version of a tool it is pinned to (`release`), and its pinned version set aside or moved by the owner (`pin`). At most the last 100 are kept.
 
 Arguments:
 
@@ -652,6 +652,26 @@ Arguments:
 - `limit` (optional): 1 to 100 (default 50)
 
 Result: `{ items: [{ seq, at, kind, name, version?, proposalId?, text }], last }`
+
+#### `toolbox.pins`
+
+The caller's own pinned shared tools (an agent): for each tool it may still read, the version it stays on, the version in use now, whether a newer one is out, whether its version was set aside, and a revocation (reason and time) when its version was revoked: a call naming no version is then refused until it opts in to another (`toolbox.optin`).
+
+Arguments:
+
+- none
+
+Result: `{ items: [{ name, version, inUse?, newer, setAside, revoked? }], partial? }`
+
+#### `toolbox.consumers`
+
+Who is pinned to which version of a shared tool (the owner, or a maintainer whose `toolbox.manage` covers the tool's audience): each agent, its version, when and by whom it was set (its first run or an opt-in), and whether that version is revoked or set aside, with the version in use now.
+
+Arguments:
+
+- `name`: `toolbox.<name>` or the short name
+
+Result: `{ name, inUse?, pins: [{ agent, version, at, by, how, revoked, setAside }] }`
 
 #### `toolbox.proposals`
 
@@ -3782,6 +3802,21 @@ Arguments:
 - `runningCalls` (optional): `finish` or `cancel` (required for a maintainer); the owner may also say `pause`
 
 Result: `{}`
+
+Completion: finished when accepted (`completed: true`).
+
+#### `toolbox.optin`
+
+Chooses the version of a shared tool a consumer stays on (card T08). An agent is pinned to the version of its first run of a shared tool, and a call that names no version runs that pinned version, not the newest release, until it opts in again: an agent opts in for itself (default: the version in use now); the owner moves one agent (`agentId`) or every agent pinned to the tool (`everyone`), and each agent moved is told in its toolbox inbox. The version must be published and not revoked; an older one may be chosen. A maintainer's release never moves anyone. A tool the caller may not read is answered as one that does not exist.
+
+Arguments:
+
+- `name`: `toolbox.<name>` or the short name
+- `version` (optional): major.minor.patch; default the version in use now
+- `agentId` (optional): owner only: the agent (agt-...) whose version moves
+- `everyone` (optional): owner only: true moves every agent pinned to the tool
+
+Result: `{ name, version, moved, previous? }`
 
 Completion: finished when accepted (`completed: true`).
 
