@@ -150,7 +150,7 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
     try { const holder = lockText === undefined ? {} : JSON.parse(lockText) as { pid?: number }; running = holder.pid !== undefined && holder.pid !== host.pid && host.pidAlive(holder.pid); } catch { running = false; }
     if (!running) {
       for (const leftover of host.listDir(`${controlDir}\\jobs`)) {
-        const result = await releaseJob(host, settings, `${controlDir}\\jobs\\${leftover}`);
+        const result = await releaseJob(host, settings, `${controlDir}\\jobs\\${leftover}`, options.listOptions);
         if (!result.ok) return no(`a job left changes behind and they could not be undone: ${result.reason}`);
       }
       const listed = await listSandboxes(host, client.value, options.listOptions);
@@ -209,7 +209,7 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
     async release(spawnPlan: SpawnPlan): Promise<void> {
       const jobDir = spawnPlan.env["NIMBLENEWT_WSB_JOB"];
       if (jobDir === undefined || !overlapsWin(jobDir, `${controlDir}\\jobs`) || jobDir === `${controlDir}\\jobs`) return;
-      const result = await releaseJob(host, settings, jobDir);
+      const result = await releaseJob(host, settings, jobDir, options.listOptions);
       if (!result.ok) throw new Error(`Windows Sandbox cleanup incomplete: ${result.reason}`);
     },
   };

@@ -168,6 +168,8 @@ export function ownerFromProbe(raw: { owner?: unknown } | null, path: string): s
 
 /** One PowerShell probe's time limit. Each probe starts a fresh powershell.exe, which on a busy machine, or in the bare environment the launcher gives its runner process, can be slow. */
 export const PROBE_TIMEOUT_MS = 60_000;
+/** The Sandbox server process probe (diagnostics around `wsb list`): one try, no retry. */
+export const SERVER_PROBE_TIMEOUT_MS = 30_000;
 
 /**
  * Runs a program with a hard time limit. At the limit the whole process tree is stopped first (`stopTree`: on Windows `taskkill /T /F`, which needs the parent still alive to find its
@@ -218,9 +220,10 @@ export function windowsRealHost(): WindowsHost {
   });
   const run = (file: string, args: readonly string[], options: { cwd?: string; timeoutMs: number; env?: Record<string, string> }): Promise<ProcessResult> =>
     runBounded(file, args, { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs, env: { ...process.env, ...options.env } }, stopTree);
-  const powershell = async <T>(script: string, vars: Record<string, string> = {}): Promise<T> => {
-    const out = await retryOnceOnTimeout(() => run(`${sysRoot()}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { timeoutMs: PROBE_TIMEOUT_MS, env: vars }));
-    if (out.timedOut) throw new Error(`PowerShell timed out twice (${String(PROBE_TIMEOUT_MS / 1000)} s each) and was stopped with everything it started`);
+  const powershell = async <T>(script: string, vars: Record<string, string> = {}, once?: { readonly timeoutMs: number }): Promise<T> => {
+    const attempt = (): Promise<ProcessResult> => run(`${sysRoot()}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { timeoutMs: once?.timeoutMs ?? PROBE_TIMEOUT_MS, env: vars });
+    const out = once === undefined ? await retryOnceOnTimeout(attempt) : await attempt();
+    if (out.timedOut) throw new Error(once === undefined ? `PowerShell timed out twice (${String(PROBE_TIMEOUT_MS / 1000)} s each) and was stopped with everything it started` : `PowerShell timed out (${String(once.timeoutMs / 1000)} s) and was stopped with everything it started`);
     if (out.code !== 0) throw new Error(`PowerShell failed (exit ${String(out.code)}): ${out.stderr.trim().slice(0, 300)}`);
     return JSON.parse(out.stdout.trim()) as T;
   };
@@ -230,7 +233,8 @@ export function windowsRealHost(): WindowsHost {
     pid: process.pid,
     envNames: () => Object.keys(process.env),
     async serverProcesses() {
-      const raw = await powershell<{ pid?: unknown; started?: unknown }[] | { pid?: unknown; started?: unknown } | null>(SERVER_SCRIPT);
+      // Recorded only (diagnostics), so one short try: it runs before and after every `wsb list` and must not add much to the list's own time bound.
+      const raw = await powershell<{ pid?: unknown; started?: unknown }[] | { pid?: unknown; started?: unknown } | null>(SERVER_SCRIPT, {}, { timeoutMs: SERVER_PROBE_TIMEOUT_MS });
       const list = Array.isArray(raw) ? raw : raw === null ? [] : [raw];
       return list.filter((p) => typeof p.pid === "number").map((p) => ({ pid: p.pid as number, ...(typeof p.started === "string" ? { started: p.started } : {}) }));
     },

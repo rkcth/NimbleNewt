@@ -1,4 +1,4 @@
-import { listSandboxes } from "./windows-list.js";
+import { listSandboxes, type ListOptions } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { releaseJob } from "./windows-job.js";
 import { verifyClient, type WindowsSettings } from "./windows-plan.js";
@@ -78,10 +78,10 @@ function lockHeld(host: WindowsHost, controlDir: string): boolean {
 const settingsFor = (controlDir: string, identity: { readonly owner: string; readonly shareIdentity: string }): WindowsSettings => ({ controlDir, owner: identity.owner, shareIdentity: identity.shareIdentity, minVersion: "0.0", mode: "owner-session", lockTask: "NimbleNewt-LockOnLogon" });
 
 /** Whether any Windows Sandbox is running now (`unknown` when the verified client could not list them). Read only: nothing is stopped. */
-export async function sandboxRunning(host: WindowsHost, identity: { readonly owner: string; readonly shareIdentity: string }): Promise<"none" | "running" | "unknown"> {
+export async function sandboxRunning(host: WindowsHost, identity: { readonly owner: string; readonly shareIdentity: string }, listOptions?: ListOptions): Promise<"none" | "running" | "unknown"> {
   const client = await verifyClient(host, settingsFor("", identity)).catch(() => undefined);
   if (client === undefined || !client.ok) return "unknown";
-  const listed = await listSandboxes(host, client.value);
+  const listed = await listSandboxes(host, client.value, listOptions);
   if (!listed.ok) return "unknown";
   return /[0-9a-f]{8}-[0-9a-f]{4}-/i.test(listed.stdout) ? "running" : "none";
 }

@@ -1049,6 +1049,32 @@ describe("Windows launcher: running a job", () => {
     assert.equal(host.exists(jobDir), false);
   });
 
+  test("a failed stop with a list that never answers is not taken as 'already gone': the record stays, health refuses, and the cleanup reports unknown", async () => {
+    const fast = { timeoutsMs: [50, 50, 50], pauseMs: 0 };
+    const hung: ProcessResult = { code: null, stdout: "", stderr: "", timedOut: true };
+    const host = new SimHost();
+    const { backend, plan, jobDir } = prepared(host, { listOptions: fast });
+    host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: "00000000-0000-4000-8000-000000000043" }));
+    host.sandboxes.add("00000000-0000-4000-8000-000000000043");
+    host.stopFailure = true;
+    host.listScript = [hung, hung, hung];
+    await assert.rejects(backend.release!(plan), /could not be stopped/);
+    assert.ok(host.exists(`${jobDir}\\status.json`), "the sandbox record is kept");
+    assert.equal(host.listScript.length, 0, "all three list calls were made");
+    // The next health check meets the same leftover and the same silent list: it refuses and starts nothing.
+    host.listScript = [hung, hung, hung];
+    host.guest = probeGuest(host);
+    const h = await backend.health();
+    assert.equal(h.healthy, false);
+    assert.match(h.reason!, /could not be undone/);
+    assert.equal(host.wsbCommands.filter((c) => c === "start").length, 0, "no sandbox was started");
+    // The leftover cleanup's final check: a list that fails is unknown, never none.
+    host.listScript = [hung, { code: 2148734208, stdout: "", stderr: "Cancelled", timedOut: false }, hung];
+    assert.equal(await sandboxRunning(host, { owner: "PC\\robert", shareIdentity: "PC\\robert" }, fast), "unknown");
+    host.listScript = [hung, hung];
+    assert.equal(await sandboxRunning(host, { owner: "PC\\robert", shareIdentity: "PC\\robert" }, fast), "running", "a retry that answers is used");
+  });
+
   test("health refuses while a sandbox this program did not start is running, and two health checks at once do not disturb each other", async () => {
     const host = new SimHost(); host.guest = probeGuest(host);
     host.sandboxes.add("00000000-0000-4000-8000-0000000000aa");

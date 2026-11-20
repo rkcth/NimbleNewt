@@ -2,7 +2,7 @@ import { win32 } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { NormalizedRecipe } from "./recipe.js";
 import { GUEST_PATHS, aclSteps, describeWsbAccessDenied, isWsbAccessDenied, launchScript, overlapsWin, sharesFor, verifyClient, verifySession, wsbConfigXml, type AclStep, type Share, type WindowsSettings } from "./windows-plan.js";
-import { listSandboxes } from "./windows-list.js";
+import { listSandboxes, type ListOptions } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { cutWhole } from "./windows-redact.js";
 
@@ -147,7 +147,7 @@ function liveOtherHolder(host: WindowsHost, settings: WindowsSettings, jobDir: s
  * It acts only for its own job: while another job holds the lock it touches nothing of that job's. If anything cannot be undone, the job directory (with the saved access lists) and
  * the lock are kept and the reason is returned, so nothing is forgotten and nothing else starts on top of it.
  */
-export async function releaseJob(host: WindowsHost, settings: WindowsSettings, jobDir: string): Promise<ReleaseResult> {
+export async function releaseJob(host: WindowsHost, settings: WindowsSettings, jobDir: string, listOptions?: ListOptions): Promise<ReleaseResult> {
   if (liveOtherHolder(host, settings, jobDir)) {
     // This launch never held the lock, so it never started anything; its directory holds only its job file.
     if (host.exists(statusFile(jobDir)) || host.exists(aclFile(jobDir))) return { ok: false, reason: `${jobDir} holds changes of a job that is not the one running; kept for the next health check` };
@@ -166,7 +166,7 @@ export async function releaseJob(host: WindowsHost, settings: WindowsSettings, j
       const stopped = await host.run(client.value.wsb, ["stop", "--id", id], { cwd: client.value.cwd, timeoutMs: WSB_TIMEOUT_MS }).catch(() => undefined);
       if (stopped === undefined || stopped.code !== 0) {
         // A stop of a sandbox that is already gone fails too: only one that is still listed is a problem.
-        const listed = await listSandboxes(host, client.value);
+        const listed = await listSandboxes(host, client.value, listOptions);
         if (!listed.ok || listed.stdout.toLowerCase().includes(id.toLowerCase())) problems.push(`the sandbox ${id} could not be stopped`);
       }
     }
