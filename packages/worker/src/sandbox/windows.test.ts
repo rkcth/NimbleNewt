@@ -559,7 +559,14 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
       for (const value of ["robert", "Users", "S-1-16", "NODE.EXE"]) assert.ok(!reason.includes(value), `${value} must not appear`);
       // At most 8 chain entries and 8 servers; one server reported as an object alone; nothing at all.
       assert.equal(contextText({ chain: Array.from({ length: 12 }, () => "cmd.exe") }).split("process chain (this process first) ")[1], Array.from({ length: 8 }, () => "cmd").join(" < "));
-      assert.match(contextText({ servers: Array.from({ length: 10 }, () => ({ sessionId: 1, elevated: 0, integrity: 0x2000 })) }), /integrity medium and 2 more, process chain/);
+      const ten = contextText({ servers: Array.from({ length: 10 }, () => ({ sessionId: 1, elevated: 0, integrity: 0x2000 })) });
+      assert.match(ten, /integrity medium and 2 more, process chain/);
+      assert.equal(ten.split("session 1 elevated no integrity medium").length - 1, 8, "eight servers shown");
+      // Only 1/0 and true/false are yes/no; text that reads like an answer is still unknown.
+      assert.deepEqual([1, 0, true, false, "yes", "1", 2, -1, null].map((elevated) => contextText({ elevated }).split(" integrity")[0]), [
+        "this process elevated yes", "this process elevated no", "this process elevated yes", "this process elevated no",
+        "this process elevated unknown", "this process elevated unknown", "this process elevated unknown", "this process elevated unknown", "this process elevated unknown",
+      ]);
       assert.match(contextText({ servers: { sessionId: 3, elevated: 0, integrity: 0x1000 } }), /server session 3 elevated no integrity low,/);
       assert.equal(contextText({}), "this process elevated unknown integrity unknown, session unknown, console session unknown, server none, process chain (this process first) unknown");
     });
