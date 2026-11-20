@@ -277,6 +277,26 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: the owner made the contract without checks and the author added them: authors-only, and a notice that cannot be sent is recorded as not told (card P09 follow-up, first review)`, async () => {
+    const r = await rig();
+    try {
+      let notifyFails = true;
+      const owned: string[] = [];
+      const svc = () => r.service({ notify: async (n) => { if (notifyFails) throw new Error("notices down"); owned.push(n.commandId); } });
+      await r.contracts.setContract(r.owner, { commandId: "own-crit", taskId: r.task, expectedVersion: 0, acceptanceCriteria: ["it works"] });
+      await r.setChecks(r.ann, [{ name: "trivial", run: ["true"] }]);
+      const failed = await r.land(svc(), "p1", S1);
+      assert.deepEqual([failed.state, failed.checks!.testsNeedOwner, failed.checks!.contractVersion, failed.toldOwner], ["refused", "authors-only", 2, undefined]);
+      assert.equal(((await r.recorded("p1"))!.body as { toldOwner?: unknown }).toldOwner, undefined, "not recorded as told");
+      notifyFails = false;
+      const told = await r.land(svc(), "p2", S1);
+      assert.deepEqual([told.checks!.testsNeedOwner, told.toldOwner, owned], ["authors-only", true, [`lgo-${r.task}-v2-authors-only`]]);
+      // The owner accepting them makes them count.
+      await r.contracts.setContract(r.owner, { commandId: "own-accept", taskId: r.task, expectedVersion: 2, checks: [{ name: "trivial", run: ["true"] }] });
+      assert.equal((await r.land(svc(), "p3", S1)).state, "done");
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: accepting checks needs the authority to set them (card P09 follow-up)`, async () => {
     const r = await rig();
     try {

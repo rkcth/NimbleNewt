@@ -187,12 +187,17 @@ export class ContractService {
     const newest = (await this.#runner.get("task-contract", checkTaskId(taskId)))?.body as unknown as ContractBody | undefined;
     let found = newest;
     const reads = { n: 0 };
+    // Whether a skipped (author's) version set checks that name something: when nobody else set any, that is "only authors" (the owner can set or accept them), not "no test commands". First review: this also holds when
+    // someone else's version before them names none (the owner made the contract with criteria only and the author added the checks), not only when an author stored version 1.
+    let authorsNamed = false;
+    const onlyAuthors = { version: newest?.version ?? 0, checks: [] as readonly ContractCheck[], onlyAuthors: true as const };
     while (found !== undefined) {
       const introduced = await this.#checksIntroduced(taskId, found, reads);
       if (introduced === undefined) return undefined;
-      if (!by.has(bare(introduced.changedBy))) return { version: found.version, checks: checksOf(found) };
-      // Only the task's authors set the checks this far back. At the first version, nobody else ever did: said so (`onlyAuthors`), so the owner can be told; checks nobody named at all are "no test commands", not this.
-      if (introduced.version <= 1) return checksOf(introduced).length > 0 || introduced.checksSetBy !== undefined ? { version: newest!.version, checks: [], onlyAuthors: true } : undefined;
+      if (!by.has(bare(introduced.changedBy))) return checksOf(found).length === 0 && authorsNamed ? onlyAuthors : { version: found.version, checks: checksOf(found) };
+      if (checksOf(introduced).length > 0) authorsNamed = true;
+      // Only the task's authors set the checks this far back. At the first version, nobody else ever did: said so (`onlyAuthors`) when they named any, so the owner can be told; checks nobody named are "no test commands".
+      if (introduced.version <= 1) return authorsNamed ? onlyAuthors : undefined;
       if (++reads.n > LANDING_TEST_LOOKBACK) return undefined;
       found = await this.#version(taskId, introduced.version - 1);
     }
