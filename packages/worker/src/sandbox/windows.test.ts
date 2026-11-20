@@ -705,7 +705,9 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
     assert.match((await health(other)).reason!, /not the configured owner/);
     const unlocked = new SimHost(); unlocked.sess = { ...ME, consoleUser: "PC\\robert", locked: false };
     assert.match((await health(unlocked, { autologonLock: OPT_IN })).reason!, /not locked/);
-    assert.equal(INTERACTIVE_RUNNER_HINT, "start the runner interactively with run.cmd as the console user (not as a service)");
+    assert.equal(INTERACTIVE_RUNNER_HINT, "start run.cmd interactively, as the console user (not as a service)");
+    // The log copy is redacted: the instruction must stay whole for a runner account named like the Mac probe's or GitHub's.
+    for (const account of RUNNER_ACCOUNTS) assert.equal(redact(describeWsbAccessDenied(undefined), { users: [account] }), describeWsbAccessDenied(undefined), `account ${account}`);
   });
 
   test("the probe must show confinement: each way the guest could get out makes the host unhealthy", async () => {
@@ -1273,7 +1275,7 @@ describe("Windows launcher: running a job", () => {
       const hr = (await windowsSandboxBackend(options(dh)).health()).reason!;
       assert.match(hr, /refused the start \(access denied.*check that Windows Sandbox may use the shared folders \(the research of 2026-10-16 saw this error from an output folder it could not use\)$/);
       assert.doesNotMatch(hr, /shared C:\\nn/);
-      assert.match(od.stderr, /in the active console session: no; the console user: no\): start the runner interactively with run\.cmd as the console user \(not as a service\); otherwise check that Windows Sandbox may use the shared folders/);
+      assert.match(od.stderr, /in the active console session: no; the console user: no\): start run\.cmd interactively, as the console user \(not as a service\); otherwise check that Windows Sandbox may use the shared folders/);
     }
     {
       // A read-back that fails, throws or times out leaves the start's reason in place and only marks that folder; a long list is cut between entries, never inside a name.
@@ -1302,8 +1304,8 @@ describe("Windows launcher: running a job", () => {
     }
     // In the console session as the console user, the shared folders are named instead; a session that cannot be read leaves both facts undetermined.
     assert.equal(describeWsbAccessDenied({ consoleUser: "PC\\robert", ...ME }), "this process (in the active console session: yes; the console user: yes) is where Windows Sandbox expects it; check that Windows Sandbox may use the shared folders (the research of 2026-10-16 saw this error from an output folder it could not use)");
-    assert.match(describeWsbAccessDenied(undefined), /^this process \(in the active console session: not determined; the console user: not determined\): start the runner interactively/);
-    assert.match(describeWsbAccessDenied({ consoleUser: "PC\\robert", processInConsoleSession: true }), /session: yes; the console user: not determined\): start the runner/);
+    assert.match(describeWsbAccessDenied(undefined), /^this process \(in the active console session: not determined; the console user: not determined\): start run\.cmd interactively/);
+    assert.match(describeWsbAccessDenied({ consoleUser: "PC\\robert", processInConsoleSession: true }), /session: yes; the console user: not determined\): start run\.cmd interactively/);
     const t = new SimHost(); t.startFailure = { code: 2147942405, stdout: "", stderr: "", timedOut: false };
     const pt = prepared(t); const plain = t.session.bind(t); let reads = 0;
     t.session = async () => { if (++reads > 1) throw new Error("wtsapi32 failed"); return plain(); };
