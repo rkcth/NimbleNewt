@@ -23,7 +23,7 @@ const identity = worker.evidenceIdentity(process.env, await worker.windowsConsol
 const found = await worker.searchEvidenceDirs(host);
 const dirs = found.dirs;
 const result = await worker.releaseLeftovers(host, dirs, identity, found.owners);
-const problems = [...result.kept];
+const problems = [...result.kept, ...found.held];
 // Folders with the runs' name pattern that no record vouches for (or whose record does not match) are left alone and reported by name only (the names are random, no account names).
 for (const n of found.unrecorded) problems.push(`not recorded by any run, left alone: ${n}`);
 for (const n of found.distrusted) problems.push(`record not trusted, left alone: ${n}`);
@@ -34,6 +34,6 @@ const unusable = found.recordsProblem !== undefined && found.unrecorded.length >
 if (unusable) problems.push(`the records could not be used (${found.recordsProblem}), so no test folder was acted on`);
 if (running) problems.push("a Windows Sandbox is still running");
 if (state === "unknown") problems.push("the running sandboxes could not be listed (the client could not be verified or the list failed)");
-console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${found.recordsProblem === undefined ? "" : `; NO RECORD WAS BELIEVED: ${found.recordsProblem}`}${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}`);
+console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length + found.held.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${found.recordsProblem === undefined ? "" : `; NO RECORD WAS BELIEVED: ${found.recordsProblem}`}${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}`);
 if (args[0] === "--local") { mkdirSync(resolve(args[1]), { recursive: true }); writeFileSync(join(resolve(args[1]), "wsb-cleanup.txt"), `${problems.join("\n")}\n`); }
-process.exit(result.kept.length > 0 || running || unusable ? 1 : 0);
+process.exit(result.kept.length > 0 || found.held.length > 0 || running || unusable ? 1 : 0);

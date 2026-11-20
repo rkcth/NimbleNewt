@@ -1474,6 +1474,71 @@ describe("the launcher with a backend that reports details", () => {
   }
   const request = (extra = "") => ({ recipe: { mode: "sandboxed" as const, workdir: dir(`w${extra}`), home: dir(`h${extra}`), scratch: dir(`s${extra}`), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] }, command: ["/work/x.exe"], timeoutMs: 20_000, maxOutputBytes: 10_000 });
 
+  test("own-hardware cleanup trusts the G05 base like a recorded folder: another account able to change it, a link, or an unreadable access list leaves everything alone and reported; a foreign-owned entry inside is left alone", async () => {
+    const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
+    const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
+    const BASE = "D:\\a\\_temp\\nn-g05-wsb";
+    const make = (): SimHost => {
+      const host = new SimHost();
+      host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
+      Object.assign(host.envMap, { USERNAME: "robert", USERDOMAIN: "PC", ProgramData: "C:\\ProgramData" });
+      for (const [job, sb] of [["job-1", "d1"], ["job-2", "d2"]] as const) {
+        const jobDir = `${BASE}\\control\\jobs\\${job}`;
+        const folder = `C:\\T\\${job}\\work`;
+        host.writeText(`${jobDir}\\job.json`, "{}");
+        host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: `00000000-0000-4000-8000-0000000000${sb}` }));
+        host.sandboxes.add(`00000000-0000-4000-8000-0000000000${sb}`);
+        host.writeText(`${jobDir}\\acl-0.txt`, "saved");
+        host.saved.set(key(`${jobDir}\\acl-0.txt`), orig); host.savedFor.set(key(`${jobDir}\\acl-0.txt`), folder);
+        host.writeText(`${jobDir}\\acl.json`, JSON.stringify([{ path: folder, parent: "C:\\T", file: `${jobDir}\\acl-0.txt` }]));
+        host.acl.set(key(folder), [...orig, "PC\\robert:(OI)(CI)M"]);
+      }
+      host.writable.set(key(BASE), ["PC\\robert"]);
+      return host;
+    };
+    const run = async (host: SimHost): Promise<{ found: Awaited<ReturnType<typeof searchEvidenceDirs>>; r: Awaited<ReturnType<typeof releaseLeftovers>> }> => {
+      const found = await searchEvidenceDirs(host);
+      return { found, r: await releaseLeftovers(host, found.dirs, ident, found.owners) };
+    };
+    // All good: released as before.
+    const good = make();
+    const ok = await run(good);
+    assert.deepEqual(ok.found.held, []);
+    assert.equal(ok.r.released, 2);
+    assert.equal(good.exists(`${BASE}\\control\\jobs\\job-1`), false);
+    // Changeable by another account, a link, an unreadable list or an unreadable owner: nothing is released, and the reason is fixed text without names, paths or SIDs.
+    const cases: Array<[string, (h: SimHost) => void, RegExp]> = [
+      ["another account", (h) => h.writable.set(key(BASE), ["PC\\robert", "NT AUTHORITY\\Authenticated Users"]), /can be changed by an account other than/],
+      ["a link", (h) => h.links.add(key(BASE)), /link or junction/],
+      ["an unreadable list", (h) => { h.writableBy = async () => { throw new Error("icacls: Access is denied. C:\\secret"); }; }, /could not be read/],
+      ["an unreadable owner", (h) => { h.ownerSid = async () => { throw new Error("denied"); }; }, /owner of the G05 test base folder could not be read/],
+    ];
+    for (const [name, mutate, re] of cases) {
+      const h = make(); mutate(h);
+      const { found, r } = await run(h);
+      assert.deepEqual(found.dirs, [], name);
+      assert.equal(found.held.length, 1, name);
+      assert.match(found.held[0]!, re, name);
+      assert.ok(!/D:|S-1-5|secret|Authenticated|robert/.test(found.held[0]!), `${name}: no names, paths or SIDs`);
+      assert.equal(r.released, 0, name);
+      assert.ok(h.exists(`${BASE}\\control\\jobs\\job-1\\acl.json`) && h.sandboxes.size === 2, `${name}: untouched`);
+    }
+    // One job file owned by another account: that job is left alone (kept), the other is released.
+    const mixed = make();
+    mixed.owners.set(key(`${BASE}\\control\\jobs\\job-2\\acl.json`), "S-1-5-21-1-2-3-1002");
+    const m = await run(mixed);
+    assert.equal(m.r.released, 1);
+    assert.equal(m.r.kept.length, 1);
+    assert.match(m.r.kept[0]!, /not owned by the account that made its test folder/);
+    assert.ok(mixed.exists(`${BASE}\\control\\jobs\\job-2\\acl.json`) && mixed.sandboxes.has("00000000-0000-4000-8000-0000000000d2"));
+    // A control folder owned by another account: nothing in it is touched.
+    const ctl = make();
+    ctl.owners.set(key(`${BASE}\\control`), "S-1-5-21-1-2-3-1002");
+    const c = await run(ctl);
+    assert.equal(c.r.released, 0);
+    assert.equal(c.r.kept.length, 1);
+  });
+
   test("the launch record carries the backend's mode details, the capacity carries its notes, and release runs after the run", async () => {
     const records: LaunchRecord[] = []; const released: SpawnPlan[] = [];
     const launcher = await SandboxLauncher.create({ backend: stub({ healthy: true, backend: "windows-sandbox", version: "0.8.107.0", notes: ["session-dependent: x"] }, released), protectedPaths: [], audit: (r) => { records.push(r); } });

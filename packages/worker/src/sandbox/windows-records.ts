@@ -77,15 +77,15 @@ export interface EvidenceFolders {
 
 const ownerOf = async (host: WindowsHost, path: string): Promise<string | undefined> => { try { return await host.ownerSid(path); } catch { return undefined; } };
 
-/** Why the records folder cannot be believed, or undefined when no account but this one (besides SYSTEM, Administrators and TrustedInstaller) can change it. */
-async function recordDirProblem(host: WindowsHost, recDir: string): Promise<string | undefined> {
-  if (host.isLinkOrJunction(recDir)) return "the records folder is or passes through a link or junction";
+/** Why a folder whose contents the cleanup would act on (the records folder, the G05 base) cannot be believed, or undefined when no account but this one (besides SYSTEM, Administrators and TrustedInstaller) can change it. Fixed texts. */
+export async function recordDirProblem(host: WindowsHost, recDir: string, label = "the records folder"): Promise<string | undefined> {
+  if (host.isLinkOrJunction(recDir)) return `${label} is or passes through a link or junction`;
   const user = host.env("USERNAME");
   const domain = host.env("USERDOMAIN");
   const me = user === undefined || user === "" ? undefined : domain === undefined || domain === "" ? user : `${domain}\\${user}`;
   let writers: readonly string[];
-  try { writers = await host.writableBy(recDir); } catch { return "the access list of the records folder could not be read"; }
-  if (writers.some((w) => me === undefined || !sameAccount(w, me))) return "the records folder can be changed by an account other than the one running the cleanup";
+  try { writers = await host.writableBy(recDir); } catch { return `the access list of ${label} could not be read`; }
+  if (writers.some((w) => me === undefined || !sameAccount(w, me))) return `${label} can be changed by an account other than the one running the cleanup`;
   return undefined;
 }
 

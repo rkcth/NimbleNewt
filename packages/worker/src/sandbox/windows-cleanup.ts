@@ -1,7 +1,7 @@
 import { listSandboxes, type ListOptions } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { releaseJob } from "./windows-job.js";
-import { scanEvidenceFolders } from "./windows-records.js";
+import { recordDirProblem, scanEvidenceFolders } from "./windows-records.js";
 import { verifyClient, type WindowsSettings } from "./windows-plan.js";
 
 /*
@@ -21,6 +21,8 @@ export interface EvidenceSearch {
   readonly distrusted: readonly string[];
   /** The owner (SID) of each recorded folder, by lower-cased path, for `releaseLeftovers`. */
   readonly owners: ReadonlyMap<string, string>;
+  /** Folders that were left alone and count as kept (fixed texts, no names, paths or SIDs): the G05 base when another account could change it or its owner cannot be read. */
+  readonly held: readonly string[];
   /** Why no record was believed at all (fixed text, no names), from `scanEvidenceFolders`; undefined when the records were read. */
   readonly recordsProblem?: string;
 }
@@ -33,8 +35,19 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
     for (const c of host.listDir(base)) if (/^control(?:-acl)?$/i.test(c)) out.push(`${base}\\${c}`);
   }
   const g05 = host.env("NIMBLENEWT_G05_WSB_BASE") ?? (host.env("RUNNER_TEMP") === undefined ? undefined : `${host.env("RUNNER_TEMP")!}\\nn-g05-wsb`);
-  if (g05 !== undefined && host.exists(`${g05}\\control`)) out.push(`${g05}\\control`);
-  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners: found.owners, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };
+  const owners = new Map(found.owners);
+  const held: string[] = [];
+  if (g05 !== undefined && host.exists(`${g05}\\control`)) {
+    // The runner's temporary folder can inherit write access from the drive root, so the G05 base gets the conditions recorded folders get: not a link, changeable by no other account,
+    // and everything the release reads inside it owned by the base's own owner (enforced by `releaseLeftovers` through `owners`). Unreadable: nothing is trusted.
+    const problem = await recordDirProblem(host, g05, "the G05 test base folder");
+    let owner: string | undefined;
+    try { owner = problem === undefined ? await host.ownerSid(g05) : undefined; } catch { owner = undefined; }
+    if (problem !== undefined) held.push(`${problem}; left alone`);
+    else if (owner === undefined) held.push("the owner of the G05 test base folder could not be read; left alone");
+    else { out.push(`${g05}\\control`); owners.set(g05.toLowerCase(), owner); }
+  }
+  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners, held, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };
 }
 
 export const evidenceControlDirs = async (host: WindowsHost): Promise<string[]> => (await searchEvidenceDirs(host)).dirs;
