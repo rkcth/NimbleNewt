@@ -41,6 +41,7 @@ import type { StaleDeliverable } from "../submissions/acceptance.js";
 import type { DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
+import type { LandingQueueOps } from "../landing/queue-ops.js";
 import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
@@ -279,6 +280,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
+  landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them)" },
   docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
@@ -390,6 +392,7 @@ export type StatusRequest =
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
   | { readonly kind: "docs"; readonly projectId: string }
+  | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
@@ -724,6 +727,8 @@ export interface StatusDeps {
   readonly defects?: Pick<DefectService, "forTask">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate">;
+  /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
+  readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list">;
   /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
@@ -949,6 +954,7 @@ export class StatusService {
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
       case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
+      case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
@@ -2062,6 +2068,31 @@ export class StatusService {
   }
 
   /**
+   * The landing queue of a project (card P10, polish): the landing branch's queue (or `branch`'s), oldest first, and the other branches whose queues still hold work. Read with the queue door's own rule (the
+   * owner or an integrator of the project); anyone else is answered nothing, as for a project they may not read.
+   */
+  async landingQueueLines(by: Principal, projectIdValue: string, branch?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.landingQueue === undefined) return { observedAt: at, lines: [line("Landing queues are not kept on this controller.", cite("project", projectId))] };
+    let q: Awaited<ReturnType<LandingQueueOps["list"]>>;
+    try { q = await this.#deps.landingQueue.list(by, { projectId, ...(branch === undefined ? {} : { branch }) }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const lines: Line[] = [];
+    const which = q.branch === "" ? "" : q.branch === q.landingBranch ? `branch ${quoted(q.branch, 120)} (the project's landing branch)` : `branch ${quoted(q.branch, 120)} (not the landing branch${q.landingBranch === "" ? ": the project names none" : `, which is ${quoted(q.landingBranch, 120)}`}; nothing here lands there)`;
+    if (q.branch === "") lines.push(line("The project names no landing branch, so nothing is queued to land (the owner sets the landing branch first).", cite("project", projectId)));
+    else if (q.items.length === 0) lines.push(line(`The landing queue of ${which} is empty.`, cite("project", projectId)));
+    else {
+      lines.push(line(`The landing queue of ${which} holds ${q.items.length} approved submission(s), oldest first; the first lands next.`, cite("project", projectId)));
+      for (const e of q.items.slice(0, 30)) lines.push(line(`${e.position}. Task ${e.taskId}: submission ${e.submissionId} by ${shown(e.author, 80)}, queued ${e.queuedAt} by ${shown(e.queuedBy, 80)}${e.replaced === undefined ? "" : ` (took the place of ${e.replaced})`}.`, cite("task", e.taskId), cite("project", projectId)));
+      if (q.items.length > 30) lines.push(line(`${q.items.length - 30} more are not shown here (landing.queue.list has them all).`, cite("project", projectId)));
+    }
+    for (const o of q.others.slice(0, 20)) lines.push(line(`Branch ${quoted(o.branch, 120)} also has ${o.entries} submission(s) waiting in its own queue${o.branch === q.landingBranch ? " (the landing branch)" : "; it is not the landing branch, so they do not land now: ask to see that branch's queue, to take one out of it, or to queue the submission on the landing branch"}.`, cite("project", projectId)));
+    if (q.others.length > 20) lines.push(line(`${q.others.length - 20} more branches with queued work are not shown here.`, cite("project", projectId)));
+    if (q.partial === true) lines.push(line("Not every landing queue was read, so other branches may hold queued work too.", cite("project", projectId)));
+    return { observedAt: at, lines };
+  }
+
+  /**
    * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
    * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
    */
@@ -2133,8 +2164,11 @@ export class StatusService {
     if (list.items.length === 0) return { observedAt: at, lines: [line(`No QA evidence has been recorded for ${shown(body.title)}: its QA gate fails until an independent check is recorded.`, cite("task", taskId))] };
     const lines: Line[] = [];
     const subs = [...new Set(list.items.map((e) => e.submissionId))].slice(0, 5);
+    // The checks the contract requires (the same for every submission of the task); empty when it names none.
+    let required: readonly string[] = [];
     for (const sid of subs) {
       const g = await this.#deps.qa.gate(by, sid);
+      required = g.required;
       const parts = [`passed ${g.counts.passed}`, `failed ${g.counts.failed}`, `blocked ${g.counts.blocked}`, `not run ${g.counts.notRun}`, `missing ${g.counts.missing}`].join(", ");
       const why = g.verdict === "passed" ? "" : ` (${g.reasons.join(", ").replace(/_/g, " ")}${g.checks.filter((c) => c.result !== "passed").length === 0 ? "" : `: ${g.checks.filter((c) => c.result !== "passed").slice(0, 10).map((c) => `${quoted(c.name, 80)} ${c.result}`).join("; ")}`})`;
       lines.push(line(`QA gate for tree ${g.tree.slice(0, 12)} (submission ${g.submissionId}) ${g.verdict === "passed" ? "passes" : "fails"} against contract version ${g.criteriaRevision}: ${parts}${why}.${g.pendingRechecks.length === 0 ? "" : ` Re-check pending: ${g.pendingRechecks.join(", ")}.`}`, cite("submission", sid), cite("task", taskId)));
@@ -2145,7 +2179,14 @@ export class StatusService {
       lines.push(line(`${e.source === "self" ? "Self-check" : "Independent QA"} ${e.id} by ${shown(e.recordedBy, 80)} on tree ${e.tree.slice(0, 12)}, run ${e.observedAt} in ${quoted(e.environment, 200)}, against contract version ${e.criteriaRevision}${e.decisions.length === 0 ? "" : ` and decisions ${e.decisions.map((d) => `${d.id} (v${d.version})`).join(", ")}`}: passed ${n("passed")}, failed ${n("failed")}, blocked ${n("blocked")}, not run ${n("not-run")}.${state}`, cite("qa-evidence", e.id, e.revision), cite("task", taskId)));
     }
     if (list.items.length > 20) lines.push(line(`${list.items.length - 20} older QA record(s) are not shown here (qa.evidence.list has them all).`, cite("task", taskId)));
-    for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.`, cite("qa-recheck", r.id), cite("task", taskId)));
+    for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) {
+      // What the re-check must name again to be settled (card Q02 follow-up), as qa.evidence.record judges it: the checks of the record that went stale (only those still required, when the
+      // contract names checks) that no other evidence of the same source on the submission that still holds names.
+      const before = list.items.find((e) => e.id === r.evidenceId);
+      const named = new Set(list.items.filter((e) => e.state === "current" && e.staleNow.length === 0 && e.submissionId === r.submissionId && e.source === before?.source && (e.source !== "self" || e.recordedBy === r.assignee)).flatMap((e) => e.checks.map((c) => c.name)));
+      const owed = [...new Set((before?.checks ?? []).map((c) => c.name))].filter((name) => (required.length === 0 || required.includes(name)) && !named.has(name)).slice(0, 10).map((name) => quoted(name, 80));
+      lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.${owed.length === 0 ? "" : ` It must name again: ${owed.join(", ")}.`}`, cite("qa-recheck", r.id), cite("task", taskId)));
+    }
     return { observedAt: at, lines };
   }
 

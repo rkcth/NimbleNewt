@@ -313,6 +313,12 @@ for (const backend of backends) {
         const repeat = await svc.request(ivy, ask);
         assert.deepEqual([repeat.state, repeat.replayed], ["uncertain", true]);
         await refuses("invalid_transition", () => r.ops.remove(r.w.owner, { commandId: "out1", taskId: t1, reason: "not now" }), /being landed on branch main right now/);
+        // P10 polish: the guard holds also when the entry is named by its branch (here after the owner named another landing branch meanwhile), for the owner and for the integrator.
+        r.setBranch("trunk");
+        try {
+          await refuses("invalid_transition", () => r.ops.remove(r.w.owner, { commandId: "out2", taskId: t1, reason: "not now", branch: "main" }), /being landed on branch main right now/);
+          await refuses("invalid_transition", () => r.ops.remove(ivy, { commandId: "out3", taskId: t1, reason: "not now", branch: "main" }), /being landed on branch main right now/);
+        } finally { r.setBranch("main"); }
         assert.deepEqual(await r.queued(), [[1, s1, t1], [2, s2, t2]]);
         await refuses("invalid_transition", () => r.workspace().request(ivy, { commandId: "w2", operation: "landing", taskId: t2, reason: "land two", leaseId: lease.leaseId, fence: lease.fence }), /oldest/);
         assert.equal(r.calls.length, 1, "only the first landing is on the host");
