@@ -1113,14 +1113,20 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "defect", id: n.defectId }, projectId: n.projectId, detail: n.text.slice(0, 200) }); },
     });
     // QA evidence bound to the exact tree, criteria and decisions (card Q02): roles as for deliverables; an invalidation tells the owner (best effort).
+    // Recorded or invalidated evidence runs the documentation impact check of its task by itself (card Q03); one that cannot run is told to the owner as a needs-you notice (the evidence stays recorded).
+    const docCheckFailed = async (commandId: string, ref: { kind: string; id: string }, projectId: string, what: string, error: unknown): Promise<void> => {
+      await notifications.emitFromController({ commandId, kind: "maintenance", level: "needs-you", ref, projectId, detail: `The documentation check after ${what} could not run (${error instanceof DomainError ? error.code : "error"}): ask for it again (doc.impact.check).`.slice(0, 200) }).catch(() => undefined);
+    };
     const qaEvidence = QaEvidenceService.withEpoch(storage, epoch, {
       rolesOf: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()),
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "notice", ref: { kind: "qa-recheck", id: n.recheckId }, detail: n.text, projectId: n.projectId }); },
+      recorded: async (e) => { try { await docObligations.afterQaEvidence(e); } catch (error) { await docCheckFailed(`doc-impact-failed:${e.evidenceId}`, { kind: "qa-evidence", id: e.evidenceId }, e.projectId, `QA evidence ${e.evidenceId} of task ${e.taskId}`, error); } },
+      invalidated: async (e) => { try { await docObligations.afterQaInvalidation(e); } catch (error) { await docCheckFailed(`doc-lost-failed:${e.evidence[0]!.evidenceId}`, { kind: "qa-evidence", id: e.evidence[0]!.evidenceId }, e.projectId, `QA evidence of task ${e.taskId} was invalidated`, error); } },
     });
     // Documentation obligations (card Q03): verified against code whose QA gate passes (read as the caller), the newest independently checked code of a task found in its QA evidence; update tasks are ordinary tasks, created ready and assigned to the document's owner.
     const docObligations = DocObligationService.withEpoch(storage, epoch, {
       rolesOf: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()),
-      gate: (by, submissionId) => qaEvidence.gate(by, submissionId),
+      gate: async (by, submissionId) => { const { gate, reads } = await qaEvidence.gateBound(by, submissionId); return { ...gate, reads }; },
       newestChecked: async (by, taskId) => (await qaEvidence.list(by, taskId)).items.find((e) => e.source === "independent")?.submissionId,
       projects, assignments,
     });

@@ -69,14 +69,24 @@ test("documentation obligations through the running controller and the owner's c
     const untested = await call(dora.token, "doc.obligation.verify", verify, "v0");
     assert.equal(untested.error.code, "invalid_command");
     assert.match(untested.error.message, /unsupported: "Sign in with a passkey"/);
+    // Independent QA evidence checks the documents by itself (Q03 next slice): the unverified page is flagged for that code with an update task for Dora, so the document change made before the flag no longer answers it.
     await tested(sub1, "q1");
-    const v1 = await call(dora.token, "doc.obligation.verify", verify, "v1");
+    const auto1 = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
+    assert.deepEqual([auto1.state, auto1.reasons[0].kind, auto1.reasons[0].submissionId, auto1.updates.length, auto1.updates[0].requestedBy], ["unverified", "behavior_changed", sub1, 1, "service:doc-checks"]);
+    assert.equal((await s.assignments.getAssignment(auto1.updates[0].taskId))?.owner?.id, dora.bare);
+    const early = await call(dora.token, "doc.obligation.verify", { ...verify, expectedRevision: auto1.revision }, "v1a");
+    assert.match(early.error?.message ?? "", /before the document was flagged/, JSON.stringify(early));
+    const document1 = await call(dora.token, "submission.record", { taskId: task, kind: "document", role: "docs", artifactDigest: `sha256:${"9".repeat(64)}` }, "doc1b");
+    assert.equal(document1.ok, true, JSON.stringify(document1));
+    const v1 = await call(dora.token, "doc.obligation.verify", { ...verify, expectedRevision: auto1.revision, documentSubmissionId: document1.result.id }, "v1");
     assert.equal(v1.ok, true, JSON.stringify(v1));
+    assert.equal(v1.result.settled.length, 1);
     assert.deepEqual((await call(boot.token, "doc.obligation.get", { id: obligation })).result.item.verification.evidence.map((e: any) => [e.submissionId, e.tree]), [[sub1, treeA]]);
 
-    // New tested code of the task: the owner asks by chat which documents it affects (shown first: it hands work to Dora).
+    // New tested code of the task: the page goes stale by itself; the owner still asks by chat which documents it affects (shown first: it hands work to Dora), which finds nothing new.
     const sub2 = await code(treeB, "s2");
     await tested(sub2, "q2");
+    assert.equal((await call(boot.token, "doc.obligation.get", { id: obligation })).result.item.state, "stale", "flagged by the QA evidence itself");
     await c.chat!.setFocus(boot.token, { commandId: "f1", projectId: project });
     const turn = async (mid: string, text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(boot.token, { messageId: mid, text })).outcomes as any[]; };
     const ask = "Fix the login has landed, which docs need updating?";
@@ -85,8 +95,8 @@ test("documentation obligations through the running controller and the owner's c
     const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: "do that", basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     const stale = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
-    assert.deepEqual([stale.state, stale.reasons[0].kind, stale.reasons[0].submissionId, stale.updates.length], ["stale", "behavior_changed", sub2, 1]);
-    const updateTask = stale.updates[0].taskId as string;
+    assert.deepEqual([stale.state, stale.reasons[0].kind, stale.reasons[0].submissionId, stale.updates.length, stale.updates.filter((u: any) => u.state === "open").length], ["stale", "behavior_changed", sub2, 2, 1], "asking again flags nothing twice");
+    const updateTask = stale.updates.find((u: any) => u.state === "open").taskId as string;
     const assignment = await s.assignments.getAssignment(updateTask);
     assert.equal(assignment?.owner?.id, dora.bare, "the update task is assigned to the document's owner");
     assert.match((await call(boot.token, "task.get", { taskId: updateTask })).result.item.description, new RegExp(sub2), "the update task links the tested code");
@@ -106,7 +116,7 @@ test("documentation obligations through the running controller and the owner's c
     assert.equal(rel[0].status, "proposed", JSON.stringify(rel));
     assert.equal((await turn("m5", "yes, do that", [{ kind: "apply_proposal", proposalId: rel[0].proposalId, evidence: "do that", basis: "owner" }]))[0].status, "applied");
     const flagged = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
-    assert.deepEqual([flagged.releaseVersion, flagged.updates.length], ["2.0", 2]);
+    assert.deepEqual([flagged.releaseVersion, flagged.updates.length], ["2.0", 3]);
     const before = await call(dora.token, "doc.obligation.verify", { obligationId: obligation, expectedRevision: flagged.revision, documentSubmissionId: document.result.id, evidence: [sub2], applicableVersion: "2.0" }, "v2a");
     assert.equal(before.error?.code, "invalid_command", JSON.stringify(before));
     assert.match(before.error.message, /before the document was flagged/, "the document change made before the flag does not answer it");
@@ -130,6 +140,18 @@ test("documentation obligations through the running controller and the owner's c
     // Every owner control of the card is a chat command, and the view is a status kind of the project in focus.
     for (const op of ["doc.obligation.record", "doc.obligation.verify", "doc.impact.check", "doc.release.check"]) assert.ok(CHAT_OPS[op], op);
     assert.deepEqual(STATUS_KINDS["docs"]?.keys, ["projectId"]);
+
+    // The task's acceptance criteria change: the QA check invalidates the evidence, and the verified page is flagged by itself as having lost it (Q03 next slice), with an update task for Dora.
+    const set = await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in with a passkey"] }, "c1");
+    assert.equal(set.ok, true, JSON.stringify(set));
+    const inval = await call(quinn.token, "qa.evidence.check", { taskId: task }, "k1");
+    assert.equal(inval.ok, true, JSON.stringify(inval));
+    assert.ok(inval.result.invalidated.length >= 1);
+    const lost = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
+    assert.deepEqual([lost.state, lost.reasons.map((r: any) => [r.kind, r.submissionId])], ["stale", [["evidence_lost", sub2]]]);
+    const lostTask = lost.updates.find((u: any) => u.state === "open");
+    assert.equal(lostTask.requestedBy, "service:doc-checks");
+    assert.equal((await s.assignments.getAssignment(lostTask.taskId))?.owner?.id, dora.bare);
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

@@ -12,7 +12,8 @@ import type { CheckoutLocation } from "./host.js";
  * The host side of the landing gate (card P09): the change a landing of the task's checkout would carry and the project's required test commands run on exactly the tree that landing would make. A landing is made only while
  * the checkout's base is the landing branch's head, so the tree of the checkout's head commit IS the integrated tree. Each check gets a fresh copy of that tree (`GitBridge.exportTree`, never the checkout itself, so a check
  * cannot change what is landed and leaves nothing in the checkout), an empty home and scratch of its own, no network and no git directory, in the sandbox (`SandboxLauncher`); the copy is removed afterwards. A check that
- * cannot be started, a launch the sandbox refuses or a copy that cannot be made is `not-run` with the reason, which the controller counts as failed.
+ * cannot be started, a launch the sandbox refuses or a copy that cannot be made is `not-run` with the reason, which the controller counts as failed. When the call's `signal` is aborted (the controller gave up waiting), the
+ * running check's processes are killed and no further check starts, so nothing keeps running on a copy after the landing was refused.
  */
 export interface LandingCheckCall {
   readonly taskId: string;
@@ -23,6 +24,8 @@ export interface LandingCheckCall {
   readonly maxOutputBytes: number;
   /** The reviewed code submission's base commit and tree: their stable patch ID is computed here from this checkout's own objects (`reviewedPatchId`), so the controller does not rely on the patch ID the submitter named. */
   readonly reviewed?: { readonly base: string; readonly tree: string };
+  /** Aborted when the controller stops waiting for the answer: the running check's whole process tree is killed (`SandboxRun.kill`) and no further check is started; each is then `not-run`. */
+  readonly signal?: AbortSignal;
 }
 export interface LandingCheckRun { readonly name: string; readonly state: "passed" | "failed" | "not-run"; readonly exitCode?: number | null; readonly signal?: string | null; readonly timedOut?: boolean; readonly output?: string; readonly reason?: string; readonly ms?: number }
 export interface LandingCheckReport {
@@ -59,6 +62,9 @@ export interface LandingChecksOptions {
 export const LANDING_CHECK_OUTPUT_CHARS = 2000;
 const MAX_RUN_MS = 24 * 60 * 60 * 1000;
 const tail = (text: string): string => (text.length <= LANDING_CHECK_OUTPUT_CHARS ? text : text.slice(-LANDING_CHECK_OUTPUT_CHARS));
+/** Read through a call so a check made earlier does not narrow it: the signal can be aborted at any await. */
+const stopped = (signal: AbortSignal | undefined): boolean => signal?.aborted === true;
+const STOPPED = "the controller stopped waiting for the landing checks, so this check was stopped";
 const reason = (error: unknown): string => String((error as Error)?.message ?? error).replace(/\s+/g, " ").slice(0, 300);
 
 export function landingChecks(options: LandingChecksOptions): (call: LandingCheckCall) => Promise<LandingCheckReport> {
@@ -78,12 +84,12 @@ export function landingChecks(options: LandingChecksOptions): (call: LandingChec
         reviewed = id === undefined ? { reviewedProblem: "the reviewed base and tree hold no change" } : { reviewedPatchId: id };
       } catch (error) { reviewed = { reviewedProblem: `the reviewed change could not be read: ${reason(error)}` }; }
     }
-    for (const check of asked) ran.push(await runOne(options, where, change!.tree, check, call.maxOutputBytes));
+    for (const check of asked) ran.push(stopped(call.signal) ? { name: String(check?.name ?? ""), state: "not-run", reason: STOPPED } : await runOne(options, where, change!.tree, check, call.maxOutputBytes, call.signal));
     return { checkout: true, change, checks: ran, ...reviewed };
   };
 }
 
-async function runOne(options: LandingChecksOptions, where: CheckoutLocation, tree: string, check: LandingCheckCall["checks"][number], maxOutputBytes: number): Promise<LandingCheckRun> {
+async function runOne(options: LandingChecksOptions, where: CheckoutLocation, tree: string, check: LandingCheckCall["checks"][number], maxOutputBytes: number, signal: AbortSignal | undefined): Promise<LandingCheckRun> {
   const name = String(check?.name ?? "");
   if (!Array.isArray(check?.run) || check.run.length === 0 || check.run.some((a) => typeof a !== "string" || a.includes("\0"))) return { name, state: "not-run", reason: "the check names no program" };
   let limits: ResourceLimits;
@@ -100,13 +106,19 @@ async function runOne(options: LandingChecksOptions, where: CheckoutLocation, tr
     const work = join(directory, "work"), home = join(directory, "home"), scratch = join(directory, "scratch");
     await mkdir(work); await mkdir(home); await mkdir(scratch);
     try { await options.git.exportTree({ gitDir: where.gitDir, tree, into: work }); } catch (error) { return { name, state: "not-run", reason: `the integrated tree could not be copied for the check: ${reason(error)}` }; }
+    if (stopped(signal)) return { name, state: "not-run", reason: STOPPED };
     let run;
     try {
       // The task's git directory is named so the sandbox refuses any mount that reaches it; nothing of it is mounted.
       const { recipe } = attemptSandbox({ checkout: work, gitDir: where.gitDir, home, scratch, readOnly: [...(options.readOnly ?? [])], env: { ...(options.env ?? {}) } }, { protectedPaths: [] });
       run = await options.launcher.launch({ recipe, command: [...check.run], timeoutMs, maxOutputBytes: Math.max(1, Math.min(64 * 1024 * 1024, Math.floor(maxOutputBytes) || 1)), ...(Object.keys(processLimits).length === 0 ? {} : { limits: processLimits }), requireEnforced: !bestEffort });
     } catch (error) { return { name, state: "not-run", reason: `the sandbox refused the check: ${reason(error)}` }; }
-    const result = await run.result;
+    // The controller giving up kills the whole process tree of this check (the launcher kills its process group and any survivor it found).
+    const stop = (): void => { try { run.kill(); } catch { /* already ended */ } };
+    if (stopped(signal)) stop(); else signal?.addEventListener("abort", stop, { once: true });
+    let result;
+    try { result = await run.result; } finally { signal?.removeEventListener("abort", stop); }
+    if (stopped(signal) && result.killed) return { name, state: "not-run", reason: STOPPED, ms: result.durationMs };
     const both = `${result.stdout}${result.stdout !== "" && result.stderr !== "" && !result.stdout.endsWith("\n") ? "\n" : ""}${result.stderr}`;
     const output = tail(both);
     const shown = { exitCode: result.exitCode, signal: result.signal, ms: result.durationMs, ...(output === "" ? {} : { output }) };
