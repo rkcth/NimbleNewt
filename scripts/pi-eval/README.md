@@ -155,7 +155,9 @@ it with the owner's home, keys and network. Since then every agent the bench sta
 - **The owner's folders hidden, no network, nothing writable outside the run (Linux, bubblewrap).** Second review,
   2026-11-17. The agent runs under `bwrap` with: the whole file system read-only (`--ro-bind / /`), except the run's
   checkout, its temporary folder and its artifacts, bound back writable; these hidden behind empty folders (more with
-  `--hide a,b`): the owner's home folder, `/srv/ai`, `/srv/code/team` (its `secrets` holds SSH deploy and server keys),
+  `--hide a,b`; with no `--hide` every other git worktree of the repository under `/srv/code/worktrees-pi` and
+  `/srv/code/worktrees` is hidden too, the bench's own checkout kept, so a run cannot read other cards' work; `--hide none` turns
+  that off, an explicit list replaces it): the owner's home folder, `/srv/ai`, `/srv/code/team` (its `secrets` holds SSH deploy and server keys),
   `/srv/code/test-postgres` (the test database's credentials), and in what stays readable (`/srv/code`, the reference
   repositories, the work root's parent) every file named like a key or login (`.env` and `.env.*` but not `.example`,
   `*.pem`, `*.key`, `id_rsa`/`id_ed25519` and the like, `.netrc`, `.git-credentials`, `.npmrc`, `.pgpass`,

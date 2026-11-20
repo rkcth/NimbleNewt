@@ -28,7 +28,10 @@
 //                        GET /stats and /v1/models before each run (key only in the Authorization header) and starts a
 //                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
-//   --hide PATHS         more folders (comma-separated) to hide from the agent, besides the owner's home folder, /srv/ai,
+//   --hide PATHS         more folders (comma-separated) to hide from the agent, besides every other git worktree of the
+//                        repository under /srv/code/worktrees-pi and /srv/code/worktrees (the default when --hide is not
+//                        given; the bench's own checkout is kept; an explicit list replaces that default, `--hide none`
+//                        turns it off), and besides the owner's home folder, /srv/ai,
 //                        the team's and test database's key folders and credential-like names and owner-only folders
 //                        in what stays readable, sockets and group-only files in the system's folders (/tmp, /run, /dev/shm
 //                        and /var/log are the agent's own; README "The agent's isolation")
@@ -43,6 +46,7 @@ import { fileURLToPath } from "node:url";
 import { runBatch } from "./lib/batch.mjs";
 import { radianceGate } from "./lib/radiance-gate.mjs";
 import { sandboxUsable } from "./lib/isolation.mjs";
+import { hideFolders, listWorktrees } from "./lib/worktrees.mjs";
 import { appendJsonl, calibrateOne, killProcessesInSync, runOne } from "./lib/runner.mjs";
 import { renderReport } from "./lib/stats.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
@@ -108,7 +112,7 @@ async function main() {
   const isoDirs = new Set();
   const ctx = {
     set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: o.label ?? agentPath, agentPath, batchId, benchCommit, children, activeDirs, isoDirs,
-    allowVisibleHome: o.flags.has("allow-visible-home"), hide: o.hide ? o.hide.split(",").filter(Boolean).map((p) => resolve(p)) : [],
+    allowVisibleHome: o.flags.has("allow-visible-home"), hide: hideFolders({ hideOption: o.hide, list: () => listWorktrees(repo), keep: [repo, resolve(o["deps-from"] ?? repo), here], workRoot }),
     testSlot: (o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT ?? "") ? [o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT] : null,
     keep: o.flags.has("keep"), skipShipped: o.flags.has("no-shipped"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
     log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`),
