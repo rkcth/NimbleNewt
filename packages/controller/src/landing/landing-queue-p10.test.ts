@@ -226,11 +226,17 @@ for (const backend of backends) {
       twoQueue.checkLanding = async (by, call) => { try { return await judgeCheck(by, call); } finally { judged.push(call.taskId); } };
       const one = r.workspace(), two = r.workspace(twoQueue);
       const racing = [ask(holder, one, "h1", t1), ask(loser, two, "x1", t1), ask(holder, two, "h2", t2)];
-      while (r.calls.length < 1) await new Promise((ok) => setTimeout(ok, 5));
-      // The later landing's queue check has finished (it is not the oldest) before the host answers; on a slow machine it would otherwise start after the oldest landed and find itself the oldest.
-      while (!judged.includes(t2)) await new Promise((ok) => setTimeout(ok, 5));
-      assert.equal(r.calls.length, 1, "only one landing reached the host");
-      go();
+      // A landing that ends before the point waited for (a fault before the host or before its queue check) ends the wait too, so the assertions report it instead of the file waiting for its timeout; the held host answer is
+      // released whatever happens, so a failed assertion does not leave the first landing waiting.
+      const ended = racing.map(() => false);
+      racing.forEach((p, i) => { void p.finally(() => { ended[i] = true; }); });
+      try {
+        while (r.calls.length < 1 && !ended[0]) await new Promise((ok) => setTimeout(ok, 5));
+        // The later landing's queue check has finished (it is not the oldest) before the host answers; on a slow machine it would otherwise start after the oldest landed and find itself the oldest.
+        while (!judged.includes(t2) && !ended[2]) await new Promise((ok) => setTimeout(ok, 5));
+        assert.ok(judged.includes(t2), "the later landing was judged against the queue while the oldest was on the host");
+        assert.equal(r.calls.length, 1, "only one landing reached the host");
+      } finally { go(); }
       const states = await Promise.all(racing);
       assert.deepEqual(states, ["done", "fenced", "invalid_transition"], JSON.stringify(states));
       assert.deepEqual(r.calls.map((c) => c.taskId), [t1]);
