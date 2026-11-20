@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -10,7 +10,7 @@ import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend,
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { evidenceControlDirs, releaseLeftovers, sandboxRunning, searchEvidenceDirs } from "./windows-cleanup.js";
-import { MARKER_NAME, dropFinishedRecords } from "./windows-records.js";
+import { MARKER_NAME, createRecordedFolder, dropFinishedRecords, recordDirFrom } from "./windows-records.js";
 import { accessFromProbe, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
 import { ACCEPTED_SIGNATURE_KINDS, INTERACTIVE_RUNNER_HINT, MICROSOFT_STORE_PUBLISHER_ID, describeWsbAccessDenied, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, isWsbAccessDenied, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
@@ -1206,7 +1206,9 @@ describe("Windows launcher: running a job", () => {
     const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
     const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
     host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
-    const RECORDS = "D:\\a\\_temp\\nn-wsb-records";
+    host.envMap["LOCALAPPDATA"] = "C:\\Users\\robert\\AppData\\Local";
+    Object.assign(host.envMap, { USERNAME: "robert", USERDOMAIN: "PC" });
+    const RECORDS = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
     const TOKEN = "0123456789abcdef0123456789abcdef";
     const leave = (base: string, job: string, sandbox: string): string => {
       const jobDir = `${base}\\control\\jobs\\${job}`;
@@ -1235,18 +1237,25 @@ describe("Windows launcher: running a job", () => {
     leave(badRec, "job-4", "00000000-0000-4000-8000-0000000000c4"); host.writeText(`${RECORDS}\\x.json`, "not json"); host.writeText(`${badRec}\\${MARKER_NAME}`, TOKEN);
     rec(gone, TOKEN, ""); // the folder was never there or is already removed
     host.writeText(`${RECORDS}\\elsewhere.json`, JSON.stringify({ path: "C:\\Users\\someone\\nn-wsb-real-away01", token: TOKEN, jobId: "7" }));
-    const found = searchEvidenceDirs(host);
+    // The records folder is the runner account's own: writable by that account (and SYSTEM and Administrators, which writableBy leaves out) only.
+    host.writable.set(key(RECORDS), ["PC\\robert"]);
+    // A recorded folder made again by another account after its run removed it: the marker can be read by any account, so it can carry the right token, but its owner differs.
+    const remade = "C:\\ProgramData\\nn-wsb-real-rema01";
+    leave(remade, "job-6", "00000000-0000-4000-8000-0000000000c6"); rec(remade, TOKEN, TOKEN);
+    host.owners.set(key(remade), "S-1-5-21-1-2-3-1002");
+    const found = await searchEvidenceDirs(host);
     assert.deepEqual(found.dirs, [`${good}\\control`]);
+    assert.ok(found.distrusted.includes("nn-wsb-real-rema01"), "a folder whose owner is not its record's owner is not believed");
     assert.deepEqual([...found.unrecorded].sort(), [badRec.split("\\").pop(), foreign.split("\\").pop()].sort());
     assert.ok(found.distrusted.some((d) => d.includes("wron01")), "the wrong token is reported by name");
-    assert.equal(found.distrusted.length, 3, "wrong token, unreadable record and a path outside ProgramData");
+    assert.equal(found.distrusted.length, 4, "wrong token, unreadable record, a path outside ProgramData and another owner");
     assert.equal(host.exists(`${RECORDS}\\nn-wsb-real-gone01.json`), false, "a record whose folder is gone is dropped quietly");
     assert.ok(!found.distrusted.join().includes("gone01") && !found.unrecorded.join().includes("gone01"));
-    const r = await releaseLeftovers(host, found.dirs, ident);
+    const r = await releaseLeftovers(host, found.dirs, ident, found.owners);
     assert.equal(r.released, 1);
     assert.equal(r.kept.length, 0);
     assert.equal(host.exists(good), false, "the recorded folder is cleaned");
-    for (const [base, job, sb] of [[foreign, "job-2", "c2"], [wrong, "job-3", "c3"], [badRec, "job-4", "c4"]] as const) {
+    for (const [base, job, sb] of [[foreign, "job-2", "c2"], [wrong, "job-3", "c3"], [badRec, "job-4", "c4"], [remade, "job-6", "c6"]] as const) {
       assert.ok(host.exists(`${base}\\control\\jobs\\${job}\\acl.json`), `${job} untouched`);
       assert.ok(host.sandboxes.has(`00000000-0000-4000-8000-0000000000${sb}`), `${job}'s sandbox still running`);
       assert.deepEqual(host.acl.get(key(`${base}\\w\\work`)), [...orig, "PC\\robert:(OI)(CI)M"], `${job}'s access list untouched`);
@@ -1254,11 +1263,63 @@ describe("Windows launcher: running a job", () => {
     assert.equal(dropFinishedRecords(host), 1, "the cleaned folder's record goes");
     assert.equal(host.exists(`${RECORDS}\\nn-wsb-real-good01.json`), false);
     assert.ok(host.exists(`${RECORDS}\\nn-wsb-host-wron01.json`), "a record that was not trusted is kept");
-    // Without a work area nothing is recorded: every pattern folder is only reported.
-    delete host.envMap["RUNNER_TEMP"];
-    const none = searchEvidenceDirs(host);
+    // Inside a recorded folder, any signed-in account can add entries (ProgramData lets every user create folders and files in the folders below it): a job folder, or a file in
+    // the run's own job folder, owned by another account is not acted on, and the base stays.
+    const planted = "C:\\ProgramData\\nn-wsb-real-plnt01";
+    const plantedJob = leave(planted, "job-7", "00000000-0000-4000-8000-0000000000c7"); rec(planted, TOKEN, TOKEN);
+    host.owners.set(key(plantedJob), "S-1-5-21-1-2-3-1002");
+    const ownJob = leave(planted, "job-8", "00000000-0000-4000-8000-0000000000c8");
+    host.owners.set(key(`${ownJob}\\acl.json`), "S-1-5-21-1-2-3-1002");
+    const inPlanted = await searchEvidenceDirs(host);
+    assert.deepEqual(inPlanted.dirs, [`${planted}\\control`]);
+    const p = await releaseLeftovers(host, inPlanted.dirs, ident, inPlanted.owners);
+    assert.deepEqual([p.released, p.removedBases], [0, 0]);
+    assert.equal(p.kept.length, 2);
+    assert.ok(p.kept.every((k) => /not owned by the account that made its test folder/.test(k)));
+    for (const [job, sb] of [["job-7", "c7"], ["job-8", "c8"]] as const) {
+      assert.ok(host.exists(`${planted}\\control\\jobs\\${job}\\acl.json`), `${job} untouched`);
+      assert.ok(host.sandboxes.has(`00000000-0000-4000-8000-0000000000${sb}`), `${job}'s sandbox still running`);
+    }
+    // A control folder another account made inside the recorded folder is not entered at all.
+    host.owners.set(key(`${planted}\\control`), "S-1-5-21-1-2-3-1002");
+    const ctl = await releaseLeftovers(host, inPlanted.dirs, ident, inPlanted.owners);
+    assert.deepEqual([ctl.released, ctl.removedBases, ctl.kept.length], [0, 0, 1]);
+    assert.match(ctl.kept[0]!, /is not owned by the account that made its test folder/);
+    // A records folder another account can change, or whose access list cannot be read, vouches for nothing: every pattern folder is only reported.
+    host.writable.set(key(RECORDS), ["PC\\robert", "BUILTIN\\Users"]);
+    const open = await searchEvidenceDirs(host);
+    assert.deepEqual(open.dirs, []);
+    assert.ok(open.distrusted.some((d) => /records folder can be changed/.test(d)));
+    assert.ok(open.unrecorded.includes("nn-wsb-real-plnt01"));
+    host.writable.set(key(RECORDS), ["PC\\erin"]);
+    assert.deepEqual((await searchEvidenceDirs(host)).dirs, []);
+    host.writable.delete(key(RECORDS));
+    host.writableBy = async () => { throw new Error("icacls: Access is denied."); };
+    assert.deepEqual((await searchEvidenceDirs(host)).dirs, []);
+    // Without a records folder nothing is recorded: every pattern folder is only reported.
+    delete host.envMap["LOCALAPPDATA"];
+    const none = await searchEvidenceDirs(host);
     assert.deepEqual(none.dirs, []);
-    assert.equal(none.unrecorded.length, 3);
+    assert.equal(none.unrecorded.length, 5);
+    assert.ok(none.distrusted.some((d) => /no records folder/.test(d)));
+  });
+
+  test("a recorded folder is made with its marker and record, in the account's own records folder; without one nothing is made", () => {
+    const root = mkdtempSync(join(tmpdir(), "nn-wsb-rec-"));
+    try {
+      const data = join(root, "ProgramData"); mkdirSync(data);
+      const records = join(root, "records");
+      assert.equal(recordDirFrom((n) => ({ LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local", RUNNER_TEMP: "D:\\t" } as Record<string, string>)[n]), "C:\\Users\\x\\AppData\\Local\\NimbleNewt\\wsb-records");
+      assert.equal(recordDirFrom((n) => ({ RUNNER_TEMP: "D:\\t", TEMP: "D:\\t" } as Record<string, string>)[n]), undefined, "the runner's temporary folder is emptied every job: never used for records");
+      assert.throws(() => createRecordedFolder("nn-wsb-real-", { ProgramData: data, RUNNER_TEMP: root }), /no records folder/);
+      assert.deepEqual(readdirSync(data), [], "nothing is made without a records folder");
+      const base = createRecordedFolder("nn-wsb-host-", { ProgramData: data, NIMBLENEWT_WSB_RECORDS: records, GITHUB_RUN_ID: "42" });
+      const name = base.split(/[\\/]/).pop()!;
+      assert.match(name, /^nn-wsb-host-[A-Za-z0-9]{6}$/);
+      const token = readFileSync(join(base, MARKER_NAME), "utf8");
+      assert.match(token, /^[0-9a-f]{32}$/);
+      assert.deepEqual(JSON.parse(readFileSync(join(records, `${name}.json`), "utf8")), { path: base, token, jobId: "42" });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test("own-hardware cleanup: jobs a killed evidence run left in its test folders are released (sandbox stopped, ACLs back) and the folder goes; a live or failing one is kept", async () => {
@@ -1278,7 +1339,8 @@ describe("Windows launcher: running a job", () => {
     const real = "C:\\ProgramData\\nn-wsb-real-ab12cd";
     const hostTest = "C:\\ProgramData\\nn-wsb-host-zz9yx8";
     host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
-    const RECORDS = "D:\\a\\_temp\\nn-wsb-records";
+    host.envMap["LOCALAPPDATA"] = "C:\\Users\\robert\\AppData\\Local";
+    const RECORDS = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
     const TOKEN = "0123456789abcdef0123456789abcdef";
     /** What a run does when it creates its folder: a record in the runner's work area and the same token in a marker inside the folder. */
     const record = (folder: string, token = TOKEN, markerToken = token): void => {
@@ -1295,7 +1357,7 @@ describe("Windows launcher: running a job", () => {
     // Unrelated folders are not looked at.
     host.mkdirp("C:\\ProgramData\\NimbleNewt\\control\\jobs\\other");
     host.mkdirp("C:\\ProgramData\\nn-wsb-real-toolong1\\control\\jobs\\other");
-    const dirs = evidenceControlDirs(host);
+    const dirs = await evidenceControlDirs(host);
     assert.deepEqual([...dirs].sort(), [`${hostTest}\\control`, `${hostTest}\\control-acl`, `${real}\\control`, "D:\\a\\_temp\\nn-g05-wsb\\control"].sort());
     assert.equal(await sandboxRunning(host, ident), "running");
     const r = await releaseLeftovers(host, dirs, ident);

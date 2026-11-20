@@ -3,7 +3,8 @@
 // go. Then it checks that no Windows Sandbox is still running; one that is (started by something this cannot tie to a job) is reported, never stopped.
 //   node scripts/wsb-cleanup.mjs [--local DIR]
 // What it prints holds counts and fixed texts only (the job log is public); with --local the reasons for anything kept are written to DIR/wsb-cleanup.txt on the machine.
-// Only folders a run recorded (record plus matching marker token) are acted on; others with the pattern's name are reported and left alone (not an exit 1 by themselves).
+// Only folders a run recorded (a record in %LOCALAPPDATA%\NimbleNewt\wsb-records, a matching marker token, the same owner) are acted on; others with the pattern's name are
+// reported and left alone (not an exit 1 by themselves). How to look at and remove those by hand: docs/nimblenewt/own-hardware-runners.md.
 // Exit 0 when nothing is left, 1 when something could not be released or a sandbox is still running, 2 on bad usage. Does nothing (exit 0) off Windows. Needs `npm run build` first.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -17,9 +18,9 @@ if (process.platform !== "win32") { console.log("not Windows: nothing to clean u
 const worker = await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href);
 const host = worker.windowsRealHost();
 const identity = worker.evidenceIdentity(process.env, await worker.windowsConsoleUser());
-const found = worker.searchEvidenceDirs(host);
+const found = await worker.searchEvidenceDirs(host);
 const dirs = found.dirs;
-const result = await worker.releaseLeftovers(host, dirs, identity);
+const result = await worker.releaseLeftovers(host, dirs, identity, found.owners);
 const problems = [...result.kept];
 // Folders with the runs' name pattern that no record vouches for (or whose record does not match) are left alone and reported by name only (the names are random, no account names).
 for (const n of found.unrecorded) problems.push(`not recorded by any run, left alone: ${n}`);
