@@ -416,9 +416,10 @@ for (const backend of backends) {
     const ret = only((await say(w, chat, "retire Annie")).outcomes);
     assert.equal(ret.status, "proposed");
     assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["state"], "active");
-    // a stale revision the owner did quote is the API's refusal, not overridden
+    // a revision the interpreter supplied is dropped (Q04 follow-up): the controller pins the record's real revision itself, so a stale or invented one cannot refuse or mislead the command
     script["stale revision Old"] = [cmd("agent.update", { agentId: agent.id, expectedRevision: 1, friendlyName: "Old" }, "stale revision")];
-    assert.equal(only((await say(w, chat, "stale revision Old")).outcomes).code, "stale_revision");
+    assert.equal(only((await say(w, chat, "stale revision Old")).outcomes).status, "applied");
+    assert.equal((await get(w, "agent.get", { agentId: agent.id! }))["friendlyName"], "Old");
   });
 
   suite("per-project conversation context is kept across switches, and a title resolves only in the focused project", async (w, script) => {

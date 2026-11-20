@@ -1976,7 +1976,8 @@ export class ChatService {
     if (spec.revision !== undefined) {
       const filled = await this.#revisionFor(token, spec.revision, args, task, pending);
       if (!filled.ok) return filled;
-      if (filled.name !== undefined && filled.value !== undefined && args[filled.name] === undefined) args[filled.name] = filled.value;
+      // The controller's own reading always stands (ASSUMPTION, Q04 follow-up): a revision the interpreter supplied is dropped, so it can never be stale or invented.
+      if (filled.name !== undefined && filled.value !== undefined) args[filled.name] = filled.value;
     }
 
     // A running task keeps its checkout: a different repository for a task that is in progress or has an owner is refused, and otherwise it is a proposal (it is an authority field).
