@@ -227,10 +227,10 @@ export function parseTapSummary(output) {
   const totals = {};
   for (let k = 0; k < names.length; k++) {
     const m = new RegExp(`^# ${names[k]} (\\d{1,9})$`).exec(tail[k] ?? "");
-    if (m === null) return { error: "the test runner's summary was not found at the end of its output" };
+    if (m === null) return { error: "the summary of node --test was not found at the end of its output" };
     totals[names[k]] = Number(m[1]);
   }
-  if (!/^# duration_ms \d+(\.\d+)?$/.test(tail[7] ?? "")) return { error: "the test runner's summary was not found at the end of its output" };
+  if (!/^# duration_ms \d+(\.\d+)?$/.test(tail[7] ?? "")) return { error: "the summary of node --test was not found at the end of its output" };
   for (const n of names) if (lines.filter((l) => l.startsWith(`# ${n} `) && /^# [a-z]+ \d+$/.test(l)).length !== 1) return { error: `the output holds more than one "# ${n}" line` };
   // Every SKIP directive, with its reason and whether it skipped a test or a whole suite. The reporter escapes "#" and "\\" in names and
   // prints a test's own output as "# ..." comments, so a directive cannot be forged by a test name or by printing. A skipped suite is in

@@ -6,14 +6,24 @@ import type { ProcessResult, WindowsHost, WindowsListContext } from "./windows-h
  * or times out is repeated at most twice. The answer stays fail-closed: when no attempt gives a list, the caller must treat it as "no sandbox capacity" and start nothing.
  * The detail records how long each call took, the Sandbox server process (id and start time) before and after, and which environment variables are present, by name only.
  * When every call failed, it also records the context (token elevation and integrity, session ids, the server's elevation and session, the process chain's names from a fixed
- * list) and the outcome of one diagnostic call through `cmd.exe /c` with a minimal environment. That call is marked as such and never changes the result.
+ * list, each shown as a label that the account-name redaction keeps unless an account has exactly that name: `CHAIN_LABELS`) and the outcome of one diagnostic call through `cmd.exe /c` with a minimal environment. That call is marked as such and never changes the result.
  */
 export const LIST_TIMEOUTS_MS: readonly number[] = [120_000, 60_000, 60_000];
 export const LIST_PAUSE_MS = 2_000;
 /** The diagnostic call's limit (one call, after the normal ones failed). */
 export const DIAGNOSTIC_TIMEOUT_MS = 60_000;
-/** Process names that are shown as themselves in the process chain (compared without `.exe`, case aside); any other name is shown as "other". */
+/** Process names that are recognised in the process chain (compared without `.exe`, case aside); any other name is shown as "other". */
 export const CHAIN_NAMES: readonly string[] = ["node", "pwsh", "powershell", "cmd", "Runner.Worker", "bash"];
+/**
+ * The label each of `CHAIN_NAMES` is shown as. The line passes through the account-name redaction (here and again where a record is written), which replaces the machine's
+ * account name and each of its parts of four or more characters (split at blanks, dots, underscores and dashes) wherever it stands as a whole word, that is, between
+ * characters that are not ASCII letters or digits. A plain label such as `node`, `cmd` or the `Runner` of `Runner.Worker` can equal such a part (an account `node`, `runner`
+ * or `nimblenewt-runner`) and would be shown as `<user>`. Each label is therefore one run of letters only, the process name with `Exe` added: it is replaced only when an
+ * account is named exactly that, which no account is expected to be, and then the redaction wins (nothing leaks, the label is only lost).
+ */
+export const CHAIN_LABELS: readonly string[] = ["nodeExe", "pwshExe", "powershellExe", "cmdExe", "RunnerWorkerExe", "bashExe"];
+/** How the diagnostic call through `cmd.exe` is named in the line (one run of letters, like the chain labels). */
+const DIAGNOSTIC_VIA = "cmdExe";
 /** Names whose presence can change how a local gRPC call behaves; only present or absent is recorded, never a value. */
 export const LIST_ENV_NAMES: readonly string[] = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "SESSIONNAME"];
 
@@ -66,11 +76,12 @@ export function integrityWord(rid: unknown): string {
   return rid >= 0x1000 && rid < 0x2000 ? "low" : rid >= 0x2000 && rid < 0x3000 ? "medium" : rid >= 0x3000 && rid < 0x4000 ? "high" : rid >= 0x4000 && rid < 0x5000 ? "system" : "other";
 }
 
-/** A process name from the fixed list (its own spelling), else "other". */
+/** The label of a process name from the fixed list (`CHAIN_LABELS`), else "other". */
 export function chainName(name: unknown): string {
   if (typeof name !== "string") return "other";
   const bare = name.replace(/\.exe$/i, "").toLowerCase();
-  return CHAIN_NAMES.find((n) => n.toLowerCase() === bare) ?? "other";
+  const at = CHAIN_NAMES.findIndex((n) => n.toLowerCase() === bare);
+  return at < 0 ? "other" : CHAIN_LABELS[at]!;
 }
 
 /** The context as fixed words and numbers only: whatever text the host returned is never copied (the line goes to logs of a public repository). */
@@ -134,7 +145,7 @@ export async function listSandboxes(host: WindowsHost, client: { readonly wsb: s
   }
   const after = await servers(host);
   // Only when every call failed: the context and one diagnostic call, both recorded and never used for the answer.
-  const failure = result !== undefined ? "" : `; context: ${await context(host)}; diagnostic call through cmd with a minimal environment (recorded only, the list stays failed): ${await diagnosticCall(host, client, options.diagnosticTimeoutMs ?? DIAGNOSTIC_TIMEOUT_MS)}`;
+  const failure = result !== undefined ? "" : `; context: ${await context(host)}; diagnostic call through ${DIAGNOSTIC_VIA} with a minimal environment (recorded only, the list stays failed): ${await diagnosticCall(host, client, options.diagnosticTimeoutMs ?? DIAGNOSTIC_TIMEOUT_MS)}`;
   const detail = redactAndCut(`wsb list: ${calls.join("; ")}; server before: ${before}; server after: ${after}; env: ${envPresence(host)}${failure}`, options.names ?? {}, 2500);
   return { ok: result !== undefined, stdout: result?.stdout ?? "", attempts: calls.length, detail };
 }

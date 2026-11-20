@@ -40,9 +40,10 @@ export const VM_FALLBACK_DECISION =
 
 /**
  * What the owner is told when `wsb start` answers E_ACCESSDENIED (0x80070005, exit 2147942405) and this process is not known to run in the active console session as the console
- * user, as for the own-hardware runner of run 44501483353 (whose cause was not established).
+ * user, as for the own-hardware runner of run 44501483353 (whose cause was not established). The public log copy is redacted with the machine's account name and its parts
+ * as whole words, so the hint names no word a runner account is commonly made of (`runner` in `runner`, `nimblenewt-runner`, `actions-runner`): it would read "start the <user>".
  */
-export const INTERACTIVE_RUNNER_HINT = "start the runner interactively with run.cmd as the console user (not as a service)";
+export const INTERACTIVE_RUNNER_HINT = "start run.cmd interactively, as the console user (not as a service)";
 
 /**
  * The explanation of an access-denied `wsb start`, from the session facts about this process at that moment (undefined when they could not be read). These facts are not a

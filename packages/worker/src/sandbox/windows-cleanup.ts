@@ -52,9 +52,9 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
     if (owner !== undefined && !TRUSTED_OWNER_SIDS.includes(owner) && found.recordsProblem === undefined && recDir !== undefined && host.exists(recDir)) {
       try { recOwner = await host.ownerSid(recDir); } catch { recOwner = undefined; }
     }
-    if (problem !== undefined) held.push(`${problem}; left alone${/changed by an account/.test(problem) ? " (one-time fix: docs/nimblenewt/own-hardware-runners.md, setting up a runner)" : ""}`);
+    if (problem !== undefined) held.push(`${problem}; left alone${/changed by an account/.test(problem) ? " (one-time fix: the paragraph The G05 base folder in own-hardware-runners.md)" : ""}`);
     else if (owner === undefined) held.push("the owner of the G05 test base folder could not be read; left alone");
-    else if (!TRUSTED_OWNER_SIDS.includes(owner) && owner !== recOwner) held.push("the G05 test base folder is owned neither by SYSTEM or Administrators nor by the owner of the runner's records folder; left alone");
+    else if (!TRUSTED_OWNER_SIDS.includes(owner) && owner !== recOwner) held.push("the G05 test base folder is owned neither by SYSTEM or Administrators nor by the owner of the records folder; left alone");
     else { out.push(`${g05}\\control`); owners.set(g05.toLowerCase(), owner); }
   }
   return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners, held, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };

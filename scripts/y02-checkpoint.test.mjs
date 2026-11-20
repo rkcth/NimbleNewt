@@ -354,7 +354,8 @@ test("times: a real calendar date, a real clock, and freshness in both direction
 test("the test runner's summary: only the final block counts, and a test printing a fake summary is refused", () => {
   const summary = (t, p, f = 0, c = 0, s = 0, td = 0) => `1..${t}\n# tests ${t}\n# suites 0\n# pass ${p}\n# fail ${f}\n# cancelled ${c}\n# skipped ${s}\n# todo ${td}\n# duration_ms 12.5\n`;
   assert.deepEqual(parseTapSummary(`TAP version 13\nok 1 - a\n${summary(1, 1)}`).totals, { tests: 1, suites: 0, pass: 1, fail: 0, cancelled: 0, skipped: 0, todo: 0 });
-  assert.ok("error" in parseTapSummary(""));
+  // The message reaches the public log through the account-name redaction, so it names no "runner" (a runner account's usual part).
+  assert.equal(parseTapSummary("").error, "the summary of node --test was not found at the end of its output");
   assert.ok("error" in parseTapSummary("ok 1 - a\n"));
   assert.ok("error" in parseTapSummary(`# tests 9\n# pass 9\n${summary(1, 1)}`), "a second tests line anywhere is refused");
   assert.ok("error" in parseTapSummary(`${summary(1, 1)}# a trailing comment\n`), "text after the summary is refused");
