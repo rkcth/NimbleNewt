@@ -2133,8 +2133,11 @@ export class StatusService {
     if (list.items.length === 0) return { observedAt: at, lines: [line(`No QA evidence has been recorded for ${shown(body.title)}: its QA gate fails until an independent check is recorded.`, cite("task", taskId))] };
     const lines: Line[] = [];
     const subs = [...new Set(list.items.map((e) => e.submissionId))].slice(0, 5);
+    // The checks the contract requires (the same for every submission of the task); empty when it names none.
+    let required: readonly string[] = [];
     for (const sid of subs) {
       const g = await this.#deps.qa.gate(by, sid);
+      required = g.required;
       const parts = [`passed ${g.counts.passed}`, `failed ${g.counts.failed}`, `blocked ${g.counts.blocked}`, `not run ${g.counts.notRun}`, `missing ${g.counts.missing}`].join(", ");
       const why = g.verdict === "passed" ? "" : ` (${g.reasons.join(", ").replace(/_/g, " ")}${g.checks.filter((c) => c.result !== "passed").length === 0 ? "" : `: ${g.checks.filter((c) => c.result !== "passed").slice(0, 10).map((c) => `${quoted(c.name, 80)} ${c.result}`).join("; ")}`})`;
       lines.push(line(`QA gate for tree ${g.tree.slice(0, 12)} (submission ${g.submissionId}) ${g.verdict === "passed" ? "passes" : "fails"} against contract version ${g.criteriaRevision}: ${parts}${why}.${g.pendingRechecks.length === 0 ? "" : ` Re-check pending: ${g.pendingRechecks.join(", ")}.`}`, cite("submission", sid), cite("task", taskId)));
@@ -2146,8 +2149,11 @@ export class StatusService {
     }
     if (list.items.length > 20) lines.push(line(`${list.items.length - 20} older QA record(s) are not shown here (qa.evidence.list has them all).`, cite("task", taskId)));
     for (const r of list.rechecks.filter((x) => x.state === "pending").slice(0, 10)) {
-      // What the re-check must name again to be settled (card Q02 follow-up): the checks of the record that went stale.
-      const owed = (list.items.find((e) => e.id === r.evidenceId)?.checks ?? []).slice(0, 10).map((c) => quoted(c.name, 80));
+      // What the re-check must name again to be settled (card Q02 follow-up), as qa.evidence.record judges it: the checks of the record that went stale (only those still required, when the
+      // contract names checks) that no other evidence of the same source on the submission that still holds names.
+      const before = list.items.find((e) => e.id === r.evidenceId);
+      const named = new Set(list.items.filter((e) => e.state === "current" && e.staleNow.length === 0 && e.submissionId === r.submissionId && e.source === before?.source && (e.source !== "self" || e.recordedBy === r.assignee)).flatMap((e) => e.checks.map((c) => c.name)));
+      const owed = [...new Set((before?.checks ?? []).map((c) => c.name))].filter((name) => (required.length === 0 || required.includes(name)) && !named.has(name)).slice(0, 10).map((name) => quoted(name, 80));
       lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.${owed.length === 0 ? "" : ` It must name again: ${owed.join(", ")}.`}`, cite("qa-recheck", r.id), cite("task", taskId)));
     }
     return { observedAt: at, lines };

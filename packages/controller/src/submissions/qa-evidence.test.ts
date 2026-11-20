@@ -183,12 +183,12 @@ for (const backend of backends) {
         await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
       };
       // A storage that, once armed, lets a second check run to its end just before the first one reads its own record (the build sees nothing stale) or commits (its write loses the race).
-      let armed: { at: "read" | "commit"; run: () => Promise<unknown> } | undefined;
+      let armed: { at: "read" | "commit"; run: () => Promise<unknown>; op?: string } | undefined;
       const fire = async (): Promise<void> => { const a = armed; armed = undefined; if (a !== undefined) await a.run(); };
       const racing = new Proxy(world.storage, { get(target, prop) {
         const v = Reflect.get(target, prop, target) as unknown;
         if (prop === "getOperation") return async (...args: unknown[]) => { if (armed?.at === "read") await fire(); return (v as (...a: unknown[]) => unknown).apply(target, args); };
-        if (prop === "applyOperation") return async (input: { audit: { type: string }[] }) => { if (armed?.at === "commit" && input.audit[0]?.type === "qa.evidence.check") await fire(); return (v as (i: unknown) => unknown).call(target, input); };
+        if (prop === "applyOperation") return async (input: { audit: { type: string }[] }) => { if (armed?.at === "commit" && input.audit[0]?.type === (armed.op ?? "qa.evidence.check")) await fire(); return (v as (i: unknown) => unknown).call(target, input); };
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
       } });
       const notices: string[] = [];
@@ -275,6 +275,22 @@ for (const backend of backends) {
       assert.deepEqual([og.verdict, og.reasons, og.checks.find((c) => c.name === "smoke")?.result, og.pendingRechecks], ["failed", ["check_missing"], "missing", []], "a re-check settled by a newer tree leaves its checks owed on the older tree");
       await svc.record(qa, { commandId: cid("r"), ...ev(old, 7) });
       assert.equal((await svc.gate(owner, old)).verdict, "passed", "naming them again passes it");
+
+      // A check that loses a race while something else went stale meanwhile tries again and invalidates that itself; the owner is told of each re-check once.
+      await setContract(8, ["works", "v8"]);
+      const told = notices.length;
+      let late: Awaited<ReturnType<QaEvidenceService["record"]>> | undefined;
+      armed = { at: "commit", run: async () => { won = await svc.check(owner, { commandId: cid("k"), taskId: task }); late = await svc.record(qa, { commandId: cid("r"), ...ev(newest, 8) }); await setContract(9, ["works", "v9"]); } };
+      const lost3 = await loser.check(qa, { commandId: cid("k"), taskId: task });
+      assert.ok((won?.invalidated.length ?? 0) > 0);
+      assert.deepEqual([lost3.invalidated, lost3.rechecks, lost3.concurrent], [[late!.id], [derivedId("qrc", late!.id)], undefined], "the second try writes what went stale after the winner");
+      assert.deepEqual(notices.slice(told), [...won!.rechecks, derivedId("qrc", late!.id)], "each re-check is told once");
+
+      // A record that loses a race on the task's QA records is asked to send again (not a reused command ID); sending it again records it.
+      const again = cid("r");
+      armed = { at: "commit", op: "qa.evidence.record", run: async () => { await svc.record(qa, { commandId: cid("r"), ...ev(newest, 9) }); } };
+      await refuses("unavailable", () => loser.record(qa, { commandId: again, ...ev(old, 9) }), /send this one again/);
+      assert.equal((await loser.record(qa, { commandId: again, ...ev(old, 9) })).replayed, false);
     } finally { await world.close(); }
   });
 }
