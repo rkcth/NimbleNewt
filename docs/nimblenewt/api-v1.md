@@ -2724,7 +2724,7 @@ Result: `{ item }`.
 
 #### `qa.evidence.gate`
 
-Whether the independent QA evidence for one code submission passes, read only (card Q02). Required checks are the task contract's check names and required evidence items; each needs `passed` in the newest current independent record that names it. `failed`, `blocked`, `not-run` and `missing` are each counted and each fail; no evidence fails; evidence whose criteria or decisions changed since does not count (`stale`), and a task relying on a superseded decision fails. With no required checks, every check named in any current independent record is judged the same way (a newer record that leaves a check out does not hide an earlier failure of it). Self-checks never count.
+Whether the independent QA evidence for one code submission passes, read only (card Q02). Required checks are the task contract's check names and required evidence items; each needs `passed` in the newest current independent record that names it. `failed`, `blocked`, `not-run` and `missing` are each counted and each fail; no evidence fails; evidence whose criteria or decisions changed since does not count (`stale`), and a task relying on a superseded decision fails. With no required checks, every check named in any current independent record is judged the same way (a newer record that leaves a check out does not hide an earlier failure of it), and so is every check named by independent evidence that no longer holds and is not yet re-checked (a re-check must name it again). Self-checks never count.
 
 Arguments:
 
@@ -7764,7 +7764,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.evidence.record`
 
-Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles its pending re-checks; the author's new self-check settles only the re-check of its own earlier self-check. Independent evidence then runs the documentation impact check of the task by itself (card Q03, as `doc.impact.check` with this submission, by the controller): affected documents are flagged with update tasks for their keepers; a check that cannot run is told to the owner and the evidence stays recorded. Repeating the same command ID records once (and repeats the same documentation check, which flags nothing twice).
+Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles a pending re-check once it, with the other independent evidence on the submission that still holds, names again every check the invalidated record named (only those the contract still requires, when it names checks); the author's new self-check settles only the re-check of its own earlier self-check, the same way. Evidence on a newer code submission of the task also settles the re-checks still pending on older ones (normally a new code submission already did). Independent evidence then runs the documentation impact check of the task by itself (card Q03, as `doc.impact.check` with this submission, by the controller): affected documents are flagged with update tasks for their keepers; a check that cannot run is told to the owner and the evidence stays recorded. Repeating the same command ID records once (and repeats the same documentation check, which flags nothing twice).
 
 Arguments:
 
@@ -7776,20 +7776,20 @@ Arguments:
 - `observedAt`: when the checks ran (UTC time)
 - `checks`: [{ name, result: `passed`, `failed`, `blocked` or `not-run`, detail? }] (1 to 50)
 
-Result: `{ id, revision, replayed, source (`self` or `independent`), settled (re-checks settled) }`.
+Result: `{ id, revision, replayed, source (`self` or `independent`), settled (re-checks settled), open (re-checks of this submission it did not settle, each `{ id, missing }`: the checks still to be named again) }`.
 
 Completion: finished when accepted (`completed: true`).
 
 #### `qa.evidence.check`
 
-Looks at a task's current QA evidence against what it was bound to (card Q02). A record whose acceptance criteria, required evidence or checks changed in the task contract, whose owner decisions were superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, assigned to whoever recorded it; the owner is told. Documents verified against code of the task whose QA gate no longer passes are then flagged by themselves (card Q03, `evidence_lost`, with an update task for each keeper). Anyone who may read the task; nothing stale writes nothing.
+Looks at a task's current QA evidence against what it was bound to (card Q02). A record whose acceptance criteria, required evidence or checks changed in the task contract, whose owner decisions were superseded, or that misses a decision the task now relies on, is invalidated (kept, with the reasons) and a re-check is scheduled for it, assigned to whoever recorded it; the owner is told. A re-check is settled by new evidence on the same submission that names its checks again, or by a newer code submission of the task. Documents verified against code of the task whose QA gate no longer passes are then flagged by themselves (card Q03, `evidence_lost`, with an update task for each keeper). Anyone who may read the task; nothing stale writes nothing. When another check of the task does the work at the same moment, this one answers with what that one invalidated (`concurrent: true`) instead of failing.
 
 Arguments:
 
 - `commandId`: required
 - `taskId`: the task
 
-Result: `{ taskId, invalidated, rechecks, replayed }`.
+Result: `{ taskId, invalidated, rechecks, replayed, concurrent? }`.
 
 Completion: finished when accepted (`completed: true`).
 

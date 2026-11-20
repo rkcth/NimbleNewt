@@ -135,7 +135,7 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in"] }, "c1");
     const dec = await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passkeys", wording: "we use passkeys for login", basedOn: 0 }, "d1");
     await call(boot.token, "decision.link", { taskId: task, subject: { kind: "task", id: task }, decisions: [dec.result.id] }, "l1");
-    const ev = { submissionId: sub, criteriaRevision: 1, decisions: [dec.result.id], environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }] };
+    const ev = { submissionId: sub, criteriaRevision: 1, decisions: [dec.result.id], environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }, { name: "audit note", result: "passed" }] };
     const first = await call(qa.token, "qa.evidence.record", ev, "q1");
     assert.equal(first.ok, true, JSON.stringify(first));
     assert.equal((await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item.verdict, "passed", "with no required checks, every check named in current independent evidence passed");
@@ -146,10 +146,10 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     assert.deepEqual([quiet.ok, quiet.result.invalidated], [true, []], JSON.stringify(quiet));
     assert.equal((await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item.verdict, "passed");
 
-    // The acceptance criteria change: the evidence no longer holds, even before anyone asks.
-    await call(boot.token, "contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["a user can log in", "a user can log out"] }, "c3");
+    // The acceptance criteria change, and the contract now requires only "login works": the evidence no longer holds, even before anyone asks.
+    await call(boot.token, "contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["a user can log in", "a user can log out"], checks: [{ name: "login works", run: ["true"] }] }, "c3");
     const before = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
-    assert.deepEqual([before.verdict, before.reasons, before.stale[0].reasons[0].kind, before.stale[0].reasons[0].fields], ["failed", ["stale_evidence"], "criteria_changed", ["acceptanceCriteria"]], "stale evidence never passes");
+    assert.deepEqual([before.verdict, before.reasons, before.stale[0].reasons[0].kind, before.stale[0].reasons[0].fields], ["failed", ["stale_evidence", "check_missing"], "criteria_changed", ["acceptanceCriteria", "checks"]], "stale evidence never passes, and its checks are owed again");
     const listed = (await call(qa.token, "qa.evidence.list", { taskId: task })).result;
     assert.equal(listed.items[0].staleNow[0].kind, "criteria_changed");
 
@@ -168,7 +168,9 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     const pend = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
     assert.deepEqual([pend.verdict, pend.pendingRechecks], ["failed", [recheckId]]);
     const view = await call(boot.token, "status.ask", { request: { kind: "qa", taskId: task } });
-    assert.match(view.result.item.lines.map((l: { text: string }) => l.text).join("\n"), new RegExp(`Re-check ${recheckId} .* scheduled for ${qa.id}.*acceptanceCriteria changed`));
+    const viewText = view.result.item.lines.map((l: { text: string }) => l.text).join("\n");
+    assert.match(viewText, new RegExp(`Re-check ${recheckId} .* scheduled for ${qa.id}.*acceptanceCriteria, checks changed`));
+    assert.match(viewText, /It must name again: "login works"\./, "only the checks the contract still requires are owed (not \"audit note\")");
 
     // The re-check is done by recording new independent evidence against the current criteria.
     const again = await call(qa.token, "qa.evidence.record", { ...ev, criteriaRevision: 3 }, "q2");
@@ -189,6 +191,15 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     assert.deepEqual(k2.result.invalidated, [again.result.id]);
     const r2 = (await call(boot.token, "qa.evidence.get", { id: k2.result.rechecks[0] })).result.item;
     assert.equal(r2.reasons[0].kind, "decision_superseded");
+    const owed = await call(boot.token, "status.ask", { request: { kind: "qa", taskId: task } });
+    assert.match(owed.result.item.lines.map((l: { text: string }) => l.text).join("\n"), /It must name again: "login works"\./, "the view tells what the re-check must cover");
+
+    // The author submits a newer tree: the re-check still pending on the older code is settled by it, and the newer tree is judged on its own (absent) evidence (card Q02 follow-up).
+    const sub2 = await w.code(tree2, "s2");
+    const settled = (await call(boot.token, "qa.evidence.get", { id: k2.result.rechecks[0] })).result.item;
+    assert.deepEqual([settled.state, settled.supersededBy], ["done", sub2]);
+    const g2 = (await call(boot.token, "qa.evidence.gate", { submissionId: sub2 })).result.item;
+    assert.deepEqual([g2.verdict, g2.reasons, g2.pendingRechecks], ["failed", ["decision_superseded", "no_evidence", "check_missing"], []], "the task still relies on the superseded decision");
     void s;
   } finally { await w.done(); }
 });
