@@ -29,9 +29,10 @@
 //                        run only when nothing is in flight, running or waiting and the pinned model is served; it never
 //                        loads, switches or restarts anything, and with the gate on runs go one at a time
 //   --hide PATHS         more folders (comma-separated) to hide from the agent, besides every other git worktree of the
-//                        repository under /srv/code/worktrees-pi and /srv/code/worktrees (the default when --hide is not
-//                        given; the bench's own checkout is kept; an explicit list replaces that default, `--hide none`
-//                        turns it off), and besides the owner's home folder, /srv/ai,
+//                        repository (`git worktree list`; the default when --hide is not given; the main checkout and
+//                        the bench's own checkouts are kept; it stops, starting nothing, when the worktrees cannot be
+//                        listed; an explicit list replaces that default, `--hide none` turns it off), and besides the
+//                        owner's home folder, /srv/ai,
 //                        the team's and test database's key folders and credential-like names and owner-only folders
 //                        in what stays readable, sockets and group-only files in the system's folders (/tmp, /run, /dev/shm
 //                        and /var/log are the agent's own; README "The agent's isolation")
@@ -45,7 +46,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runBatch } from "./lib/batch.mjs";
 import { radianceGate } from "./lib/radiance-gate.mjs";
-import { sandboxUsable } from "./lib/isolation.mjs";
+import { machineHidden, sandboxUsable } from "./lib/isolation.mjs";
 import { hideFolders, listWorktrees } from "./lib/worktrees.mjs";
 import { appendJsonl, calibrateOne, killProcessesInSync, runOne } from "./lib/runner.mjs";
 import { renderReport } from "./lib/stats.mjs";
@@ -110,9 +111,16 @@ async function main() {
   const children = new Set();
   const activeDirs = new Set();
   const isoDirs = new Set();
+  // Other git worktrees of the repository (other cards' work) are hidden unless --hide says otherwise (lib/worktrees.mjs).
+  const hide = hideFolders({
+    hideOption: o.hide, list: () => listWorktrees(repo), keep: [repo, ...referenceDirs, resolve(o["deps-from"] ?? repo), here], workRoot,
+    alreadyHidden: machineHidden().filter((p) => existsSync(p)),
+    warn: (m) => process.stderr.write(`warning: ${m}\n`),
+  });
+  process.stderr.write(`hiding ${hide.length} folder(s) from the agent besides the defaults${o.hide === undefined ? " (the repository's other worktrees)" : ""}\n`);
   const ctx = {
     set, repo, referenceDirs: [...new Set(referenceDirs)], depsFrom: resolve(o["deps-from"] ?? repo), workRoot, resultsDir, agent, agentLabel: o.label ?? agentPath, agentPath, batchId, benchCommit, children, activeDirs, isoDirs,
-    allowVisibleHome: o.flags.has("allow-visible-home"), hide: hideFolders({ hideOption: o.hide, list: () => listWorktrees(repo), keep: [repo, resolve(o["deps-from"] ?? repo), here], workRoot }),
+    allowVisibleHome: o.flags.has("allow-visible-home"), hide,
     testSlot: (o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT ?? "") ? [o["test-slot"] ?? process.env.PI_EVAL_TEST_SLOT] : null,
     keep: o.flags.has("keep"), skipShipped: o.flags.has("no-shipped"), timeoutMinutes: o["timeout-minutes"] ? Number(o["timeout-minutes"]) : undefined,
     log: (m) => process.stderr.write(`${new Date().toISOString()} ${m}\n`),
