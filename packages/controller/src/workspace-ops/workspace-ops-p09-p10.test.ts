@@ -146,12 +146,13 @@ for (const backend of backends) {
       assert.deepEqual(await r.queued(), [[S1, r.t1], [S2, r.t2]]);
       // Held at the start, gone when the checks finish: the passing gate is not enough.
       r.lease.live = true;
+      r.lease.asked = 0;
       r.host.duringChecks = async () => { r.lease.live = false; };
       const out = await r.land("l1", r.t1);
       assert.equal(out.state, "refused", out.summary);
       assert.match(out.summary!, /the integrator lease no longer holds, so nothing was landed/);
       assert.equal(out.checks!.passed, true, "the checks' results stay on the record");
-      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.lease.asked], [1, 0, 1, 4], "asked at the request, once quiet, and after the checks");
+      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.lease.asked], [1, 0, 1, 3], "asked at the request, once quiet, and after the checks");
       assert.deepEqual(await r.queued(), [[S1, r.t1], [S2, r.t2]], "the entry stays queued");
       assert.equal(r.told.length, 0, "a passing gate tells nobody");
       // With the lease held again the same head lands.
