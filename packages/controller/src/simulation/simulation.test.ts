@@ -11,6 +11,7 @@ import { ServiceOperations, SimulatedServices, operationBridge } from "../servic
 import { canonicalJson } from "../storage/json.js";
 import { LIMITS, type JsonObject } from "../storage/types.js";
 import { SIMULATION_SCOPE_LABEL, SimulationService } from "./index.js";
+import { ScopeWorld } from "./scopes.js";
 
 // Card P07 (first slice): a simulation scope where the effect ledger refuses any real write, send or spend, and every result is labelled simulated.
 
@@ -279,6 +280,83 @@ for (const backend of backends) {
       assert.equal(reread.status, "confirmed");
       assert.equal(reread.evidence?.["simulated"], true);
       assert.deepEqual(realTarget.calls, [], "the real target was never reached");
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: an operation recorded with an injected failure and never started runs with that failure when its command is sent again (card P07, follow-up)`, async () => {
+    const { w, owner, task, effects, sims } = await world(backend);
+    try {
+      const scopeId = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: LAYOUT })).id;
+      // The process stopped after the intent (with its `inject`) was recorded and before it ran.
+      const intendOnly = async (commandId: string, service: string, resource: string, fields: JsonObject, inject: string): Promise<string> => {
+        const input = { service, resource, action: { type: "set", params: { fields } }, allowed: [{ service, resource }], before: {}, baseline: {}, inject } as unknown as JsonObject;
+        return (await effects.intend({ commandId: `simop:${scopeId}:${scopedCommandId(owner.id, commandId)}`, actor: owner.id, kind: "service-op", target: `simulation:${scopeId}/service:${service}/${resource}`, input, taskId: task, simulation: scopeId })).id;
+      };
+      const send = (commandId: string, service: string, resource: string, fields: JsonObject, inject: string) => sims.operate(owner, { commandId, scopeId, service, resource, action: { type: "set", params: { fields } }, inject });
+
+      const corrupt = await intendOnly("rc-1", "shop", "cart", { replicas: 6 }, "corrupt");
+      const c = await send("rc-1", "shop", "cart", { replicas: 6 }, "corrupt");
+      assert.equal(c.effectId, corrupt);
+      assert.notEqual(c.status, "confirmed", "the wrong write is caught by the read-back");
+      assert.equal((await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).state["replicas"], "corrupted", "the stand-in was given the fault it was asked with");
+
+      const refused = await intendOnly("rc-2", "shop", "cart", { replicas: 8 }, "refuse");
+      const r = await send("rc-2", "shop", "cart", { replicas: 8 }, "refuse");
+      assert.equal(r.effectId, refused);
+      assert.equal(r.status, "failed", "the stand-in refused, as asked");
+      assert.equal((await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).state["replicas"], "corrupted", "nothing changed");
+
+      const apiBefore = (await sims.observe(owner, { scopeId, service: "billing", resource: "api" })).systemVersion;
+      const leaked = await intendOnly("rc-3", "billing", "db", { size: 11 }, "leak");
+      const l = await send("rc-3", "billing", "db", { size: 11 }, "leak");
+      assert.equal(l.effectId, leaked);
+      assert.notEqual(l.status, "confirmed", "the collateral check catches the leak");
+      assert.notEqual((await sims.observe(owner, { scopeId, service: "billing", resource: "api" })).systemVersion, apiBefore, "the neighbour was changed by the injected leak");
+
+      // Once run, a repeat is not run blindly again: the ledger asks for the uncertain change to be resolved, and the stand-in is not touched.
+      const cartBefore = (await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).systemVersion;
+      await refuses("effect_uncertain", () => send("rc-1", "shop", "cart", { replicas: 6 }, "corrupt"));
+      assert.equal((await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).systemVersion, cartBefore, "the fault was not armed a second time");
+      // The recorded fault is part of the command: resuming it without the fault is another command.
+      await intendOnly("rc-4", "shop", "cart", { replicas: 9 }, "corrupt");
+      await refuses("command_conflict", () => sims.operate(owner, { commandId: "rc-4", scopeId, service: "shop", resource: "cart", action: { type: "set", params: { fields: { replicas: 9 } } } }));
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: when the stand-in's world cannot be saved to the scope's record, the stand-in answers nothing more and the ledger never confirms the change (card P07, lost-save guard)`, async () => {
+    const { w, owner, task, effects, sims } = await world(backend);
+    try {
+      const ref = { service: "shop", resource: "cart" };
+      const action = { type: "set", params: { fields: { replicas: 2 } } } as never;
+      // A save that works: the stand-in answers as usual, and a lost answer is still saved (the change may have been made).
+      let saves = 0;
+      const kept = new ScopeWorld(new SimulatedServices(LAYOUT), async () => { saves += 1; });
+      await kept.apply("k-1", ref, action);
+      assert.equal(saves, 1);
+      assert.equal((await kept.observe(ref))?.state["replicas"], 2);
+      kept.inner.faults.loseNextAnswer = true;
+      await assert.rejects(kept.apply("k-2", ref, { type: "set", params: { fields: { replicas: 3 } } } as never), /connection dropped/);
+      assert.equal(saves, 2, "saved although the answer was lost");
+      assert.equal(await kept.applied("k-2"), true);
+
+      // A save that fails: the change is on the in-memory stand-in only, so it is not trusted any more.
+      const lost = new ScopeWorld(new SimulatedServices(LAYOUT), async () => { throw new Error("store unavailable"); });
+      await assert.rejects(lost.apply("l-1", ref, action), /store unavailable/);
+      assert.equal(lost.inner.calls.at(-1)?.applied, true, "the stand-in did make the change");
+      await assert.rejects(lost.observe(ref), /could not be saved.*store unavailable/);
+      await assert.rejects(lost.applied("l-1"), /could not be saved/);
+
+      // Through the ledger: an effect of a scope run on a stand-in whose saves fail is never confirmed, also when it is run again.
+      const scopeId = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: LAYOUT })).id;
+      const failing = new ScopeWorld(new SimulatedServices(LAYOUT), async () => { throw new Error("store unavailable"); });
+      const bridge: EffectBridge = { ...operationBridge(failing), simulated: true };
+      const before = await new SimulatedServices(LAYOUT).observe(ref);
+      const intended = await effects.intend({ commandId: cid("ls"), actor: owner.id, kind: "service-op", target: `simulation:${scopeId}/service:shop/cart`, input: { service: "shop", resource: "cart", action: action as unknown as JsonObject, allowed: [ref], before: before as unknown as JsonObject, baseline: {} } as JsonObject, taskId: task, simulation: scopeId });
+      const first = await effects.run(intended.id, bridge);
+      assert.notEqual(first.status, "confirmed", `a lost save never reads as confirmed (${first.status})`);
+      const second = await effects.run(intended.id, bridge);
+      assert.notEqual(second.status, "confirmed", `still not confirmed when run again (${second.status})`);
+      assert.equal(failing.inner.calls.filter((c) => c.applied).length, 1, "the stand-in was changed once, never again");
     } finally { await w.close(); }
   });
 }
