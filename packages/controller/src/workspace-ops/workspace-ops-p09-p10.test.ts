@@ -77,7 +77,7 @@ for (const backend of backends) {
     await queueOps.add(owner, { commandId: "q1", submissionId: S1 });
     await queueOps.add(owner, { commandId: "q2", submissionId: S2 });
     const records = async () => (await store.storage.listAggregates("workspace-request", { limit: 100 })).length;
-    return { store, owner, t1, t2, host, calls, told, land, queued, queueOps, lease, records };
+    return { store, owner, t1, t2, host, calls, told, land, queued, queueOps, approvals, lease, records };
   };
 
   test(`${backend.name}: the gate judges the queue's head; a failing gate keeps it queued and tells its author; a passing gate lands only the checked tree and dequeues; a non-head submission is refused (cards P09 and P10)`, async () => {
@@ -124,14 +124,16 @@ for (const backend of backends) {
     const r = await rig();
     try {
       r.host.exit = "passed";
-      // While the host runs the checks, the owner takes S1 out of the queue: the passing gate is not enough, the queue is shown again and the host is never asked to land.
-      r.host.duringChecks = async () => r.queueOps.remove(r.owner, { commandId: "out", taskId: r.t1, reason: "not this one after all" });
+      // While the host runs the checks, a newer submission of task one takes the head's place (a take-out of a head that is being landed is refused, card P10): the passing gate is not enough, the queue is shown again and the host is never asked to land.
+      let taking: unknown;
+      r.host.duringChecks = async () => { taking = await r.queueOps.remove(r.owner, { commandId: "out", taskId: r.t1, reason: "not this one after all" }).catch((e: unknown) => e); const S3 = `sbm-${"c".repeat(20)}`; r.approvals.set(S3, { ...r.approvals.get(S1)!, tree: TREE2, submittedAt: "2026-11-19T09:05:00.000Z" }); await r.queueOps.add(r.owner, { commandId: "newer", submissionId: S3 }); };
       const out = await r.land("m1", r.t1);
       assert.equal(out.state, "refused", out.summary);
       assert.match(out.summary!, /no longer the oldest approved one in the landing queue, so nothing was landed/);
       assert.equal(out.checks!.passed, true);
+      assert.ok(taking instanceof DomainError && /being landed/.test(taking.message), String(taking));
       assert.deepEqual([r.calls.checks.length, r.calls.runs.length], [1, 0]);
-      assert.deepEqual(await r.queued(), [[S2, r.t2]]);
+      assert.deepEqual((await r.queued()).map((e) => e[1]), [r.t1, r.t2]);
     } finally { await r.store.close(); }
   });
 

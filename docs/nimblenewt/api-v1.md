@@ -6168,7 +6168,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `landing.queue.remove`
 
-Takes a task's submission out of the landing queue of its project's landing branch (card P10), so the next one becomes the oldest. The owner or an integrator (the right `integration.lease` on the project) may take any out; an author its own. A submission whose newest review takes the approval back leaves the queue by itself.
+Takes a task's submission out of the landing queue of its project's landing branch (card P10), so the next one becomes the oldest. The owner or an integrator (the right `integration.lease` on the project) may take any out; an author its own. A submission whose newest review takes the approval back leaves the queue by itself. A submission whose landing is in progress (asked, not yet finished) cannot be taken out: it is refused `invalid_transition` with a reason telling the caller to wait for that landing to end, so the queue never has two landings at the host.
 
 Arguments:
 
