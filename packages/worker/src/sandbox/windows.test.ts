@@ -1537,6 +1537,35 @@ describe("the launcher with a backend that reports details", () => {
     const c = await run(ctl);
     assert.equal(c.r.released, 0);
     assert.equal(c.r.kept.length, 1);
+    // The base's own owner must be one only the runner's account can be. Owned (with everything in it) by another account, which then lists only the runner's account: left alone.
+    const OTHER = "S-1-5-21-1-2-3-1002", ME = "S-1-5-21-1-2-3-1001";
+    const ownAll = (h: SimHost, sid: string): void => { for (const p of [BASE, `${BASE}\\control`, `${BASE}\\control\\jobs`]) h.owners.set(key(p), sid); for (const j of ["job-1", "job-2"]) { const d = `${BASE}\\control\\jobs\\${j}`; h.owners.set(key(d), sid); for (const f of h.listDir(d)) h.owners.set(key(`${d}\\${f}`), sid); } };
+    const foreign = make(); ownAll(foreign, OTHER);
+    const fr = await run(foreign);
+    assert.deepEqual(fr.found.dirs, []);
+    assert.equal(fr.found.held.length, 1);
+    assert.match(fr.found.held[0]!, /owned neither by SYSTEM or Administrators nor by the owner of the runner's records folder/);
+    assert.ok(!/S-1-5|robert|D:/.test(fr.found.held[0]!));
+    assert.equal(fr.r.released, 0);
+    // The same with a believed records folder of another owner: still left alone. Owned by the records folder's owner (a runner not elevated): released.
+    const recDir = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
+    const withRecords = (sid: string): SimHost => { const h = make(); ownAll(h, sid); h.envMap["LOCALAPPDATA"] = "C:\\Users\\robert\\AppData\\Local"; h.mkdirp(recDir); h.writable.set(key(recDir), ["PC\\robert"]); h.owners.set(key(recDir), ME); return h; };
+    assert.equal((await run(withRecords(OTHER))).r.released, 0);
+    const mine = await run(withRecords(ME));
+    assert.deepEqual(mine.found.held, []);
+    assert.equal(mine.r.released, 2);
+    // Owned by Administrators (a runner started elevated), with everything in it: released.
+    const admin = make(); ownAll(admin, "S-1-5-32-544");
+    assert.equal((await run(admin)).r.released, 2);
+  });
+
+  test("a G05 base under a runner folder that inherits a default drive root's entries can be changed by Authenticated Users, so the cleanup leaves it alone", () => {
+    // What icacls prints for a folder made under C:\actions-runner on a default Windows install (the drive root's entries, inherited), and the same after the documented one-time fix.
+    const base = "C:\\actions-runner\\_work\\_temp\\nn-g05-wsb";
+    const inherited = [`${base} BUILTIN\\Administrators:(I)(OI)(CI)(F)`, "    NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)", "    BUILTIN\\Users:(I)(OI)(CI)(RX)", "    NT AUTHORITY\\Authenticated Users:(I)(M)", "    NT AUTHORITY\\Authenticated Users:(I)(OI)(CI)(IO)(M)", "", "Successfully processed 1 files; Failed processing 0 files"].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(inherited, base), ["NT AUTHORITY\\Authenticated Users"]);
+    const fixed = [`${base} NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)`, "    BUILTIN\\Administrators:(I)(OI)(CI)(F)", "    PC\\robert:(I)(OI)(CI)(F)", "", "Successfully processed 1 files; Failed processing 0 files"].join("\r\n");
+    assert.deepEqual(parseIcaclsWritable(fixed, base), ["PC\\robert"]);
   });
 
   test("the launch record carries the backend's mode details, the capacity carries its notes, and release runs after the run", async () => {

@@ -7,6 +7,8 @@
 // reported and left alone (not an exit 1 by themselves). How to look at and remove those by hand: docs/nimblenewt/own-hardware-runners.md. When no record can be believed at all
 // (no records folder, or one whose access list names another account or cannot be read), the reason (a fixed text) is printed, and it is an exit 1 while pattern folders are left:
 // then every leftover would stay for good, which must not pass unnoticed.
+// The G05 base under the runner's temporary folder is acted on only when no other account can change it and its owner is the runner's (windows-cleanup.ts); otherwise it is
+// left alone, its fixed-text reason is printed ("G05 BASE LEFT ALONE") and it is an exit 1. The usual cause, and its one-time fix: docs/nimblenewt/own-hardware-runners.md.
 // Exit 0 when nothing is left, 1 when something could not be released, a sandbox is still running or the records cannot be used while folders are left, 2 on bad usage. Does nothing (exit 0) off Windows. Needs `npm run build` first.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -34,6 +36,6 @@ const unusable = found.recordsProblem !== undefined && found.unrecorded.length >
 if (unusable) problems.push(`the records could not be used (${found.recordsProblem}), so no test folder was acted on`);
 if (running) problems.push("a Windows Sandbox is still running");
 if (state === "unknown") problems.push("the running sandboxes could not be listed (the client could not be verified or the list failed)");
-console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length + found.held.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${found.recordsProblem === undefined ? "" : `; NO RECORD WAS BELIEVED: ${found.recordsProblem}`}${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}`);
+console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length + found.held.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${found.recordsProblem === undefined ? "" : `; NO RECORD WAS BELIEVED: ${found.recordsProblem}`}${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}${found.held.length === 0 ? "" : `; G05 BASE LEFT ALONE: ${found.held.join("; ")}`}`);
 if (args[0] === "--local") { mkdirSync(resolve(args[1]), { recursive: true }); writeFileSync(join(resolve(args[1]), "wsb-cleanup.txt"), `${problems.join("\n")}\n`); }
 process.exit(result.kept.length > 0 || found.held.length > 0 || running || unusable ? 1 : 0);

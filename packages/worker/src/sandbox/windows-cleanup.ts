@@ -1,8 +1,8 @@
 import { listSandboxes, type ListOptions } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { releaseJob } from "./windows-job.js";
-import { recordDirProblem, scanEvidenceFolders } from "./windows-records.js";
-import { verifyClient, type WindowsSettings } from "./windows-plan.js";
+import { recordDirFrom, recordDirProblem, scanEvidenceFolders } from "./windows-records.js";
+import { TRUSTED_OWNER_SIDS, verifyClient, type WindowsSettings } from "./windows-plan.js";
 
 /*
  * After an evidence run on the owner's Windows machine (own-hardware.yml): what a run that was stopped hard (a step or job timeout, a cancelled run) left behind. A normal run releases
@@ -21,7 +21,7 @@ export interface EvidenceSearch {
   readonly distrusted: readonly string[];
   /** The owner (SID) of each recorded folder, by lower-cased path, for `releaseLeftovers`. */
   readonly owners: ReadonlyMap<string, string>;
-  /** Folders that were left alone and count as kept (fixed texts, no names, paths or SIDs): the G05 base when another account could change it or its owner cannot be read. */
+  /** Folders that were left alone and count as kept (fixed texts, no names, paths or SIDs): the G05 base when another account could change it, its owner cannot be read or is not one the runner's account can be. */
   readonly held: readonly string[];
   /** Why no record was believed at all (fixed text, no names), from `scanEvidenceFolders`; undefined when the records were read. */
   readonly recordsProblem?: string;
@@ -38,13 +38,23 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
   const owners = new Map(found.owners);
   const held: string[] = [];
   if (g05 !== undefined && host.exists(`${g05}\\control`)) {
-    // The runner's temporary folder can inherit write access from the drive root, so the G05 base gets the conditions recorded folders get: not a link, changeable by no other account,
-    // and everything the release reads inside it owned by the base's own owner (enforced by `releaseLeftovers` through `owners`). Unreadable: nothing is trusted.
+    // The runner's temporary folder can inherit write access for every signed-in account from the drive root (a default C:\ grants Authenticated Users Modify to every folder made
+    // under it, so a runner in C:\actions-runner fails this until the one-time fix in docs/nimblenewt/own-hardware-runners.md). So the G05 base gets the conditions recorded
+    // folders get: not a link, changeable by no other account, and everything the release reads inside it owned by the base's own owner (enforced by `releaseLeftovers` through
+    // `owners`). The base's owner itself must be one only the runner's account can be: SYSTEM, Administrators or TrustedInstaller (an elevated runner's folders are owned by
+    // Administrators), or the owner of the records folder that was just believed (the runner's own account when not elevated). Otherwise a folder another account made in its
+    // place, owned by that account, would pass every other check. Unreadable: nothing is trusted.
     const problem = await recordDirProblem(host, g05, "the G05 test base folder");
     let owner: string | undefined;
     try { owner = problem === undefined ? await host.ownerSid(g05) : undefined; } catch { owner = undefined; }
-    if (problem !== undefined) held.push(`${problem}; left alone`);
+    const recDir = recordDirFrom((n) => host.env(n));
+    let recOwner: string | undefined;
+    if (owner !== undefined && !TRUSTED_OWNER_SIDS.includes(owner) && found.recordsProblem === undefined && recDir !== undefined && host.exists(recDir)) {
+      try { recOwner = await host.ownerSid(recDir); } catch { recOwner = undefined; }
+    }
+    if (problem !== undefined) held.push(`${problem}; left alone${/changed by an account/.test(problem) ? " (one-time fix: docs/nimblenewt/own-hardware-runners.md, setting up a runner)" : ""}`);
     else if (owner === undefined) held.push("the owner of the G05 test base folder could not be read; left alone");
+    else if (!TRUSTED_OWNER_SIDS.includes(owner) && owner !== recOwner) held.push("the G05 test base folder is owned neither by SYSTEM or Administrators nor by the owner of the runner's records folder; left alone");
     else { out.push(`${g05}\\control`); owners.set(g05.toLowerCase(), owner); }
   }
   return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners, held, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };
