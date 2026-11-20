@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { DomainError } from "../domain/errors.js";
+import { CommandRunner } from "../domain/runner.js";
 import { derivedId } from "../domain/ids.js";
 import { ProjectService } from "../domain/service.js";
 import { LandingGate, type LandingCheckHostReport } from "../landing/index.js";
@@ -70,7 +71,7 @@ for (const backend of backends) {
       const now = await contracts.get(owner, task);
       await contracts.setContract(by, { commandId: `c-${by.id}-${now?.version ?? 0}`, taskId: task, expectedVersion: now?.version ?? 0, checks });
     };
-    return { store, principals, owner, ann, project, task, approvals, host, calls, told, toldAttempts, setTellFails: (v: boolean) => { tellFails = v; }, integration, contracts, service, land, recorded, setChecks };
+    return { store, epoch: projects.epoch, principals, owner, ann, project, task, approvals, host, calls, told, toldAttempts, setTellFails: (v: boolean) => { tellFails = v; }, integration, contracts, service, land, recorded, setChecks };
   };
 
   test(`${backend.name}: a failing test command refuses the landing before anything is written; the results are recorded bound to the integrated tree and go back to the author (card P09)`, async () => {
@@ -306,6 +307,33 @@ for (const backend of backends) {
       const reader = await r.principals.authenticate((await r.principals.issueCredential(r.owner, "agent:cid")).token);
       await refuses("forbidden", () => r.contracts.setContract(reader, { commandId: "cid-accept", taskId: r.task, expectedVersion: 1, checks: [{ name: "trivial", run: ["true"] }] }));
       assert.equal((await r.contracts.get(r.owner, r.task))!.version, 1, "nothing stored");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a difficulty version stored by someone else over the author's checks does not make them count, nor does a version that carries the author's checksSetBy under another changedBy (card P09 follow-up, second review)`, async () => {
+    const r = await rig();
+    try {
+      const runner = new CommandRunner(r.store.storage, r.epoch, options);
+      // Commits contract version changes the way difficulty.set does (one command), with the change built by the caller.
+      const commit = (commandId: string, build: () => Promise<{ changes: Parameters<CommandRunner["command"]>[2] extends (m: never) => Promise<{ build: () => Promise<infer B> }> ? B extends { changes: infer C } ? C : never : never; version: number }>) =>
+        runner.command("difficulty.set", { commandId, actor: "agent:par" }, async () => ({ payload: { taskId: r.task }, build: async () => { const c = await build(); return { ref: { kind: "task-contract", id: r.task }, creates: false, changes: c.changes, detail: { version: c.version } }; } }));
+      await r.setChecks(r.ann, [{ name: "trivial", run: ["true"] }]);
+      // The delegating parent sets the difficulty (contracts.difficultyChanges, as DifficultyService does): a version by someone else that does not name the checks.
+      await commit("diff-1", async () => (await r.contracts.difficultyChanges("agent:par", r.task, "hard", 1))!);
+      const v2 = (await r.contracts.history(r.owner, r.task))!.at(-1)! as unknown as { changedBy: string; checksSetBy?: string; difficulty?: string };
+      assert.deepEqual([v2.changedBy, v2.checksSetBy, v2.difficulty], ["agent:par", undefined, "hard"], "the difficulty version does not carry ann's checksSetBy");
+      const first = await r.land(r.service(), "d1", S1);
+      assert.deepEqual([first.state, first.checks!.testsNeedOwner, first.checks!.contractVersion, first.checks!.results[0]!.result], ["refused", "authors-only", 2, "not_run"]);
+      // A version that kept ann's checksSetBy while someone else stored it (as a writer that copied the body would): the checks are still ann's.
+      const now = (await r.store.storage.getAggregate({ kind: "task-contract", id: r.task }))!;
+      const carried = { ...(now.body as Record<string, unknown>), version: 3, changedBy: "agent:par", checksSetBy: "agent:ann", difficulty: "easy" };
+      await commit("carry-1", async () => ({ version: 3, changes: [{ type: "update", ref: { kind: "task-contract", id: r.task }, expectedRevision: now.revision, body: carried as never }, { type: "create", ref: { kind: "task-contract-version", id: `${r.task}.3` }, body: { ...carried, changedAt: options.clock() } as never }] }));
+      const second = await r.land(r.service(), "d2", S1);
+      assert.deepEqual([second.state, second.checks!.testsNeedOwner, second.checks!.contractVersion], ["refused", "authors-only", 3], "a carried checksSetBy is read as who set the checks");
+      // ann cannot accept them there (still its own), the owner can.
+      await refuses("invalid_command", () => r.contracts.setContract(r.ann, { commandId: "ann-again", taskId: r.task, expectedVersion: 3, checks: [{ name: "trivial", run: ["true"] }] }), /already has these values/);
+      await r.contracts.setContract(r.owner, { commandId: "own-accept", taskId: r.task, expectedVersion: 3, checks: [{ name: "trivial", run: ["true"] }] });
+      assert.equal((await r.land(r.service(), "d3", S1)).state, "done");
     } finally { await r.store.close(); }
   });
 }

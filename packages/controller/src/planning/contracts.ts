@@ -145,6 +145,9 @@ function parsePatch(source: Record<string, unknown>): Patch {
 
 const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 const checksOf = (b: ContractBody): readonly ContractCheck[] => (Array.isArray(b.checks) ? b.checks : []);
+/** Who set the checks a version holds: the one who named them in its change (`checksSetBy`), else (a version stored before that field) whoever stored it. Second review: read this way, a version that
+ * carried another's `checksSetBy` forward could not attribute an author's checks to someone else. */
+const checksSetterOf = (b: ContractBody): string => b.checksSetBy ?? b.changedBy;
 
 /**
  * Task contracts and the task dependency graph (card S10). A contract is versioned: every change stores a new version and keeps the old ones, so the history of what was promised is
@@ -194,7 +197,7 @@ export class ContractService {
     while (found !== undefined) {
       const introduced = await this.#checksIntroduced(taskId, found, reads);
       if (introduced === undefined) return undefined;
-      if (!by.has(bare(introduced.changedBy))) return checksOf(found).length === 0 && authorsNamed ? onlyAuthors : { version: found.version, checks: checksOf(found) };
+      if (!by.has(bare(checksSetterOf(introduced)))) return checksOf(found).length === 0 && authorsNamed ? onlyAuthors : { version: found.version, checks: checksOf(found) };
       if (checksOf(introduced).length > 0) authorsNamed = true;
       // Only the task's authors set the checks this far back. At the first version, nobody else ever did: said so (`onlyAuthors`) when they named any, so the owner can be told; checks nobody named are "no test commands".
       if (introduced.version <= 1) return authorsNamed ? onlyAuthors : undefined;
@@ -261,7 +264,7 @@ export class ContractService {
           delete next["checksSetBy"];
           // Naming the checks a contract already holds accepts them when someone else set them (card P09 follow-up): an author's own checks are not run at its landing until someone else sets or accepts them, and an
           // unchanged value would otherwise be refused as no change. Accepting needs the same authority as setting them.
-          const accepting = patch.checks !== undefined && before !== undefined && sameJson(patch.checks, base.checks ?? null) && (await this.#checksIntroduced(taskId, before, { n: 0 }))?.changedBy !== by.id;
+          const accepting = patch.checks !== undefined && before !== undefined && sameJson(patch.checks, base.checks ?? null) && (await this.#checksIntroduced(taskId, before, { n: 0 }).then((v) => (v === undefined ? undefined : checksSetterOf(v)))) !== by.id;
           let changed = false;
           if (accepting) { this.#authorize(by, "checks", task.projectId, taskId, false); changed = true; }
           for (const [key, value] of Object.entries(patch)) {
