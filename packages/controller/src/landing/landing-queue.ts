@@ -15,7 +15,7 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
  */
 export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200, landed: 200 } as const;
 const KIND = "landing-queue";
-/** How many pages of 200 queue records `queuesOf` reads at most (10,000 project branches). */
+/** How many pages of 200 queue records `queuesOf` reads at most: 10,000 queue records over all projects of the controller (every branch that ever held a queue, empty ones included). */
 const QUEUE_SCAN_PAGES = 50;
 /** The workspace service's records (see `WorkspaceOpService`): one open-request pointer per task, and the requests themselves. Read here only to tell that a task's landing is in progress. */
 const OPEN = "workspace-open";
@@ -84,12 +84,12 @@ export class LandingQueueService {
 
   /**
    * The queues of a project's branches that hold at least one entry, by branch name (P10 polish: the queue of a branch that is no longer the landing branch, after the owner named another, is not
-   * lost from sight). Reads the queue records in pages; at most `QUEUE_SCAN_PAGES` pages of 200 are read, and `partial` says when the walk stopped before the end.
+   * lost from sight). Reads the queue records in pages; at most `QUEUE_SCAN_PAGES` pages of 200 are read, and `partial` says when the walk stopped before the end (`pages` is lowered by tests only).
    */
-  async queuesOf(projectId: string): Promise<{ queues: { branch: string; entries: number }[]; partial: boolean }> {
+  async queuesOf(projectId: string, pages: number = QUEUE_SCAN_PAGES): Promise<{ queues: { branch: string; entries: number }[]; partial: boolean }> {
     const queues: { branch: string; entries: number }[] = [];
     let afterId: string | undefined;
-    for (let page = 0; page < QUEUE_SCAN_PAGES; page++) {
+    for (let page = 0; page < pages; page++) {
       const batch = await this.#runner.list(KIND, { ...(afterId === undefined ? {} : { afterId }), limit: 200 });
       for (const a of batch) {
         const q = a.body as unknown as LandingQueueBody;

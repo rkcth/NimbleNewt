@@ -133,6 +133,11 @@ for (const backend of backends) {
       const listed = await r.ops.list(r.w.owner, { projectId: r.w.project });
       assert.deepEqual([listed.branch, listed.others.length, listed.others.some((o) => o.branch === "main")], ["main", 230, false]);
       assert.equal((await r.queue.queuesOf(other)).queues.length, 20);
+      // The walk's bound: stopped after one page of 200 records, it says so and holds only what it read.
+      const one = await r.queue.queuesOf(r.w.project, 1);
+      assert.equal(one.partial, true);
+      assert.ok(one.queues.length < 230 && one.queues.length > 0, String(one.queues.length));
+      assert.equal((await r.queue.queuesOf(r.w.project, 2)).partial, false);
     } finally { await r.close(); }
   });
 }

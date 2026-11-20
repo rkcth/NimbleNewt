@@ -2068,10 +2068,6 @@ export class StatusService {
   }
 
   /**
-   * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
-   * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
-   */
-  /**
    * The landing queue of a project (card P10, polish): the landing branch's queue (or `branch`'s), oldest first, and the other branches whose queues still hold work. Read with the queue door's own rule (the
    * owner or an integrator of the project); anyone else is answered nothing, as for a project they may not read.
    */
@@ -2096,6 +2092,10 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
+  /**
+   * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
+   * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
+   */
   async docLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
     const at = this.#runner.now();
