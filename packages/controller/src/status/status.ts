@@ -1852,7 +1852,12 @@ export class StatusService {
         if (c !== undefined && c.pins.length > 0) {
           const counts = new Map<string, { n: number; agents: string[]; revoked: boolean; setAside: boolean }>();
           for (const p of c.pins) { const x = counts.get(p.version) ?? { n: 0, agents: [], revoked: p.revoked, setAside: p.setAside }; x.n += 1; if (x.agents.length < 3) x.agents.push(p.agent); counts.set(p.version, x); }
-          const parts = [...counts.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 5).map(([v, x]) => `${x.n} on ${shown(v, 20)}${v === c.inUse ? ", the version in use" : x.revoked ? ", revoked (their calls naming no version are refused until they opt in)" : x.setAside ? ", set aside" : ""}${x.n <= 3 ? ` (${x.agents.map((a) => shown(a, 60)).join(", ")})` : ""}`);
+          // An agent named is shown by its own name (quoted: words someone else wrote) with its ID, so "which version is Ann on" can be answered by name; an agent record that cannot be read shows the ID alone.
+          const named = async (agent: string): Promise<string> => {
+            const friendly = ((await this.#runner.get("agent", agent.replace(/^agent:/, "")).catch(() => undefined))?.body as unknown as { friendlyName?: unknown } | undefined)?.friendlyName;
+            return typeof friendly === "string" ? `${quoted(friendly, 40)} (${shown(agent, 60)})` : shown(agent, 60);
+          };
+          const parts = await Promise.all([...counts.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 5).map(async ([v, x]) => `${x.n} on ${shown(v, 20)}${v === c.inUse ? ", the version in use" : x.revoked ? ", revoked (their calls naming no version are refused until they opt in)" : x.setAside ? ", set aside" : ""}${x.n <= 3 ? ` (${(await Promise.all(x.agents.map(named))).join(", ")})` : ""}`));
           pinned = ` Agents using it stay on the version of their first run until they opt in: ${parts.join("; ")}.`;
         }
       } catch { pinned = ""; }

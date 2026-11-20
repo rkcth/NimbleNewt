@@ -61,7 +61,8 @@ test("shared toolbox pins (card T08): a consumer stays on its first version afte
     const status = (await say("m1", q, [{ kind: "status", request: { kind: "toolbox" }, evidence: q, basis: "owner" }]))[0];
     assert.equal(status.status, "answered", JSON.stringify(status));
     const text = status.lines.map((l: any) => l.text).join("\n");
-    assert.match(text, /Agents using it stay on the version of their first run until they opt in: 1 on 1\.0\.0 \(agent:agt-[a-z2-7]+\); 1 on 1\.1\.0, the version in use \(agent:agt-[a-z2-7]+\)\./);
+    // Each agent named by its own name (so "which version is Cody on" is answered by name) and its ID.
+    assert.match(text, /Agents using it stay on the version of their first run until they opt in: 1 on 1\.0\.0 \("Cody" \(agent:agt-[a-z2-7]+\)\); 1 on 1\.1\.0, the version in use \("Carl" \(agent:agt-[a-z2-7]+\)\)\./);
 
     // The owner moves Cody by name: shown first, applied on the owner's word, and Cody is told.
     const ask = "move Cody to lint 1.1.0";
