@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
+import { createRecordedFolder } from "./windows-records.js";
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { checkWindowsHostPath, entryTokens, entryWrites, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
@@ -57,7 +57,7 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
 
   before(async () => {
     // ProgramData, not the temporary folder: on the hosted runners the temporary folder is reached through a short (8.3) name, which the launcher rightly refuses.
-    base = realpathSync.native(mkdtempSync(join(process.env["ProgramData"] ?? tmpdir(), "nn-wsb-host-")));
+    base = createRecordedFolder("nn-wsb-host-");
     packagePresent = (await host.findPackage().catch(() => undefined)) !== undefined;
   });
   after(() => { if (base !== "") rmSync(base, { recursive: true, force: true }); });

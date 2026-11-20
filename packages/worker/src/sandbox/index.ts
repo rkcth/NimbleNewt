@@ -10,7 +10,8 @@ export { DEFAULT_HEADROOM, LIMIT_BOUNDS, checkHeadroom, checkLimits, detectLimit
 export { windowsSandboxBackend, AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, type AutologonOptIn, type WindowsSandboxOptions } from "./windows.js";
 export type { WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 export { windowsRealHost } from "./windows-real.js";
-export { evidenceControlDirs, releaseLeftovers, sandboxRunning, type LeftoverResult } from "./windows-cleanup.js";
+export { createRecordedFolder, dropFinishedRecords, scanEvidenceFolders } from "./windows-records.js";
+export { evidenceControlDirs, searchEvidenceDirs, releaseLeftovers, sandboxRunning, type LeftoverResult } from "./windows-cleanup.js";
 export { scriptRunner, type InterpreterInstall, type ScriptResult, type ScriptRun, type ScriptRunnerOptions } from "./script.js";
 export { jobLauncher, linuxOrphans, type JobEnd, type JobLauncherOptions, type JobRun } from "./job.js";
 export { linuxProcessTree, linuxStillRunning, splitRunTree, MAX_RUN_PROCESSES, type RunProcess } from "./proc.js";

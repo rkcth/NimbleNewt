@@ -84,7 +84,7 @@ jobs:
     if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, nimblenewt-windows]
     # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
-    # The job's limit is above the sum of every step's own limit (365 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
+    # The job's limit is above the sum of every step's own limit (380 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
     # (a self-hosted runner's job may run longer than a hosted one's 360 minutes).
     timeout-minutes: 420
     steps:
@@ -229,11 +229,15 @@ jobs:
           node scripts/y02-checkpoint.mjs run --out "$RUNNER_TEMP/y02-windows" 2>&1 | tee "$RUNNER_TEMP/y02-wsb-local/y02.log" | node scripts/redact-log.mjs
       # What a step stopped by its timeout (or a cancelled run) left behind: each leftover job's sandbox is stopped and its access lists restored through the backend's own release
       # (scripts/wsb-cleanup.mjs); a Windows Sandbox still running afterwards is reported, not stopped. Counts only in the log; the reasons stay in the local folder.
+      # Only test folders a run recorded (in the runner account's %LOCALAPPDATA%\NimbleNewt\wsb-records, which outlives the job) are acted on; others with the same name pattern are
+      # counted and left alone (how to handle them by hand: docs/nimblenewt/own-hardware-runners.md). Reading the owners of the recorded folders' entries adds a few seconds per job.
+      # 30 minutes: when `wsb list` does not answer, each list takes up to about 7 minutes (three calls, two 30 s server probes, and up to 20 s to stop each timed-out
+      # program; windows-list.ts), once per leftover whose stop failed and once for the final check.
       - name: Release leftovers of the Sandbox runs
         id: cleanup
         if: always()
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 30
         shell: bash
         run: |
           set -o pipefail

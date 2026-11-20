@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -9,7 +9,8 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { evidenceControlDirs, releaseLeftovers, sandboxRunning } from "./windows-cleanup.js";
+import { evidenceControlDirs, releaseLeftovers, sandboxRunning, searchEvidenceDirs } from "./windows-cleanup.js";
+import { MARKER_NAME, createRecordedFolder, dropFinishedRecords, recordDirFrom } from "./windows-records.js";
 import { accessFromProbe, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
 import { ACCEPTED_SIGNATURE_KINDS, INTERACTIVE_RUNNER_HINT, MICROSOFT_STORE_PUBLISHER_ID, describeWsbAccessDenied, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, isWsbAccessDenied, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
@@ -58,6 +59,12 @@ class SimHost implements WindowsHost {
   aclFailure = false;
   afterStart: (() => void) | undefined;
   lookups: string[] = [];
+  /** Answers for the next `wsb list` calls, in order; once used up, the real list. */
+  listScript: ProcessResult[] = [];
+  listLimits: number[] = [];
+  servers: { pid: number; started?: string }[] = [];
+  envNames(): string[] { return Object.keys(this.envMap); }
+  async serverProcesses(): Promise<readonly { pid: number; started?: string }[]> { return this.servers; }
 
   constructor() {
     for (const f of [`${INSTALL}\\wsb.exe`, `${INSTALL}\\WindowsSandboxServer.exe`, "C:\\Program Files\\NimbleNewt\\lock.exe"]) this.files.set(key(f), "");
@@ -82,7 +89,7 @@ class SimHost implements WindowsHost {
   /** Each path's owner by SID; SYSTEM unless set. */
   owners = new Map<string, string>();
   async ownerSid(path: string): Promise<string> { return this.owners.get(key(path)) ?? "S-1-5-18"; }
-  async run(file: string, args: readonly string[], options: { cwd?: string }): Promise<ProcessResult> {
+  async run(file: string, args: readonly string[], options: { cwd?: string; timeoutMs?: number }): Promise<ProcessResult> {
     this.runs.push({ file, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }) });
     if (file.toLowerCase().endsWith("\\icacls.exe")) return this.icacls(args);
     assert.ok(file.toLowerCase().endsWith("\\wsb.exe"), `unexpected program ${file}`);
@@ -100,6 +107,8 @@ class SimHost implements WindowsHost {
       return this.guest(this.lastConfig(), args);
     }
     if (args[0] === "stop") { if (this.stopFailure) return { code: 1, stdout: "", stderr: "cannot stop", timedOut: false }; this.sandboxes.delete(args[2]!); return ok(); }
+    if (args[0] === "list") this.listLimits.push(options.timeoutMs ?? 0);
+    if (args[0] === "list" && this.listScript.length > 0) return this.listScript.shift()!;
     if (args[0] === "list") return ok([...this.sandboxes].join("\r\n"));
     return { code: 2, stdout: "", stderr: "bad command", timedOut: false };
   }
@@ -409,6 +418,72 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
     for (const entries of host.acl.values()) assert.deepEqual(entries, ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"], "the probe's ACL entries were removed");
     assert.deepEqual(host.listDir(STAGING), [], "the probe's folders are gone");
     assert.deepEqual(host.listDir(`${CONTROL}\\jobs`), [], "and so are its job files");
+  });
+
+  describe("wsb list: diagnostics and a bounded retry", () => {
+    const fast = { timeoutsMs: [50, 50, 50], pauseMs: 0 };
+    const hung: ProcessResult = { code: null, stdout: "", stderr: "", timedOut: true };
+
+    test("a slow first call (a cold server start) is retried and then succeeds; the calls are recorded", async () => {
+      const host = new SimHost();
+      host.servers = [{ pid: 777, started: "2026-11-19T10:00:00.000Z" }];
+      host.listScript = [hung];
+      const backend = windowsSandboxBackend(options(host, { listOptions: fast }));
+      host.guest = probeGuest(host);
+      const h = await backend.health();
+      assert.equal(h.healthy, true, h.reason);
+      assert.deepEqual(host.wsbCommands, ["list", "list", "start", "exec", "stop"]);
+      const d = backend.auditDetails!()["wsbListDiagnostics"]!;
+      assert.match(d, /call 1: timed out after \d+ ms \(limit 50 ms\); call 2: ok after \d+ ms/);
+      assert.match(d, /server before: pid 777 started 2026-11-19T10:00:00.000Z; server after: pid 777 started/);
+    });
+
+    test("the server line copies only a whole process id and an ISO time; anything else the host returned is 'unknown', and a failing probe is 'not readable'", async () => {
+      const host = new SimHost();
+      host.servers = [{ pid: 12, started: "C:\\Users\\robert started this" }, { pid: 1.5, started: "2026-11-19T10:00:00.1234567Z" }];
+      host.listScript = [hung, hung, hung];
+      const reason = (await windowsSandboxBackend(options(host, { listOptions: fast })).health()).reason!;
+      assert.match(reason, /server before: pid 12 started unknown, pid unknown started 2026-11-19T10:00:00.1234567Z;/);
+      assert.ok(!reason.includes("robert") && !reason.includes("Users"), reason);
+      const failing = new SimHost(); failing.listScript = [hung, hung, hung];
+      failing.serverProcesses = async () => { throw new Error("PowerShell failed: C:\\Users\\robert"); };
+      const r2 = (await windowsSandboxBackend(options(failing, { listOptions: fast })).health()).reason!;
+      assert.match(r2, /server before: not readable; server after: not readable/);
+      assert.ok(!r2.includes("robert"), r2);
+    });
+
+    test("the first call has a longer limit than the retries, and there are at most two retries", async () => {
+      const host = new SimHost();
+      host.listScript = [hung, hung, hung, hung];
+      host.guest = probeGuest(host);
+      await windowsSandboxBackend(options(host, { listOptions: { pauseMs: 0 } })).health();
+      assert.deepEqual(host.listLimits, [120_000, 60_000, 60_000]);
+    });
+
+    test("every call failing is no capacity: nothing is started, and the reason carries the diagnostics", async () => {
+      const host = new SimHost();
+      host.listScript = [hung, { code: 2148734208, stdout: "", stderr: "Cancelled", timedOut: false }, hung, hung];
+      host.guest = probeGuest(host);
+      const h = await windowsSandboxBackend(options(host, { listOptions: fast })).health();
+      assert.equal(h.healthy, false);
+      assert.match(h.reason!, /could not be listed after 3 attempt\(s\)/);
+      assert.match(h.reason!, /call 2: exit 2148734208/);
+      assert.deepEqual(host.wsbCommands, ["list", "list", "list"], "no sandbox was started");
+      assert.equal(host.sandboxes.size, 0);
+    });
+
+    test("environment variables are recorded by name, present or absent, never by value; personal values stay out", async () => {
+      const host = new SimHost();
+      Object.assign(host.envMap, { HTTP_PROXY: "http://proxyuser:hunter2@proxy.example:3128", GRPC_VERBOSITY: "debug-value", USERPROFILE: "C:\\Users\\robert", TEMP: "C:\\Temp" });
+      host.listScript = [hung, hung, hung];
+      const h = await windowsSandboxBackend(options(host, { listOptions: fast })).health();
+      const text = h.reason!;
+      for (const present of ["HTTP_PROXY=present", "GRPC_VERBOSITY=present", "USERPROFILE=present", "TEMP=present"]) assert.ok(text.includes(present), present);
+      for (const absent of ["HTTPS_PROXY=absent", "NO_PROXY=absent", "ALL_PROXY=absent", "HOME=absent", "APPDATA=absent", "LOCALAPPDATA=absent", "TMP=absent", "SESSIONNAME=absent"]) assert.ok(text.includes(absent), absent);
+      for (const value of ["hunter2", "proxyuser", "proxy.example", "debug-value", "robert", "C:\\Temp"]) assert.ok(!text.includes(value), `${value} must not appear`);
+      const none = new SimHost(); none.listScript = [hung, hung, hung];
+      assert.match((await windowsSandboxBackend(options(none, { listOptions: fast })).health()).reason!, /GRPC_\*=absent/);
+    });
   });
 
   test("not Windows, or Windows Sandbox missing: no capacity and a reason", async () => {
@@ -989,6 +1064,32 @@ describe("Windows launcher: running a job", () => {
     assert.equal(host.exists(jobDir), false);
   });
 
+  test("a failed stop with a list that never answers is not taken as 'already gone': the record stays, health refuses, and the cleanup reports unknown", async () => {
+    const fast = { timeoutsMs: [50, 50, 50], pauseMs: 0 };
+    const hung: ProcessResult = { code: null, stdout: "", stderr: "", timedOut: true };
+    const host = new SimHost();
+    const { backend, plan, jobDir } = prepared(host, { listOptions: fast });
+    host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: "00000000-0000-4000-8000-000000000043" }));
+    host.sandboxes.add("00000000-0000-4000-8000-000000000043");
+    host.stopFailure = true;
+    host.listScript = [hung, hung, hung];
+    await assert.rejects(backend.release!(plan), /could not be stopped/);
+    assert.ok(host.exists(`${jobDir}\\status.json`), "the sandbox record is kept");
+    assert.equal(host.listScript.length, 0, "all three list calls were made");
+    // The next health check meets the same leftover and the same silent list: it refuses and starts nothing.
+    host.listScript = [hung, hung, hung];
+    host.guest = probeGuest(host);
+    const h = await backend.health();
+    assert.equal(h.healthy, false);
+    assert.match(h.reason!, /could not be undone/);
+    assert.equal(host.wsbCommands.filter((c) => c === "start").length, 0, "no sandbox was started");
+    // The leftover cleanup's final check: a list that fails is unknown, never none.
+    host.listScript = [hung, { code: 2148734208, stdout: "", stderr: "Cancelled", timedOut: false }, hung];
+    assert.equal(await sandboxRunning(host, { owner: "PC\\robert", shareIdentity: "PC\\robert" }, fast), "unknown");
+    host.listScript = [hung, hung];
+    assert.equal(await sandboxRunning(host, { owner: "PC\\robert", shareIdentity: "PC\\robert" }, fast), "running", "a retry that answers is used");
+  });
+
   test("health refuses while a sandbox this program did not start is running, and two health checks at once do not disturb each other", async () => {
     const host = new SimHost(); host.guest = probeGuest(host);
     host.sandboxes.add("00000000-0000-4000-8000-0000000000aa");
@@ -1100,6 +1201,170 @@ describe("Windows launcher: running a job", () => {
     assert.ok(host.exists("C:\\Jobs\\a\\keep.txt"), "a directory outside the jobs directory is never touched");
   });
 
+  test("own-hardware cleanup trusts only recorded folders: a matching name with no record, or a record with the wrong token, is left alone and reported; a record whose folder is gone is dropped", async () => {
+    const host = new SimHost();
+    const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
+    const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
+    host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
+    host.envMap["LOCALAPPDATA"] = "C:\\Users\\robert\\AppData\\Local";
+    Object.assign(host.envMap, { USERNAME: "robert", USERDOMAIN: "PC" });
+    const RECORDS = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
+    const TOKEN = "0123456789abcdef0123456789abcdef";
+    const leave = (base: string, job: string, sandbox: string): string => {
+      const jobDir = `${base}\\control\\jobs\\${job}`;
+      const folder = `${base}\\w\\work`;
+      host.writeText(`${jobDir}\\job.json`, "{}");
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: sandbox }));
+      host.sandboxes.add(sandbox);
+      host.writeText(`${jobDir}\\acl-0.txt`, "saved");
+      host.saved.set(key(`${jobDir}\\acl-0.txt`), orig); host.savedFor.set(key(`${jobDir}\\acl-0.txt`), folder);
+      host.writeText(`${jobDir}\\acl.json`, JSON.stringify([{ path: folder, parent: base, file: `${jobDir}\\acl-0.txt` }]));
+      host.acl.set(key(folder), [...orig, "PC\\robert:(OI)(CI)M"]);
+      return jobDir;
+    };
+    const rec = (base: string, token: string, marker: string): void => {
+      host.writeText(`${RECORDS}\\${base.split("\\").pop()}.json`, JSON.stringify({ path: base, token, jobId: "7" }));
+      if (marker !== "") host.writeText(`${base}\\${MARKER_NAME}`, marker);
+    };
+    const good = "C:\\ProgramData\\nn-wsb-real-good01";
+    const foreign = "C:\\ProgramData\\nn-wsb-real-fore01";
+    const wrong = "C:\\ProgramData\\nn-wsb-host-wron01";
+    const gone = "C:\\ProgramData\\nn-wsb-real-gone01";
+    const badRec = "C:\\ProgramData\\nn-wsb-real-badr01";
+    leave(good, "job-1", "00000000-0000-4000-8000-0000000000c1"); rec(good, TOKEN, TOKEN);
+    leave(foreign, "job-2", "00000000-0000-4000-8000-0000000000c2"); // no record at all
+    leave(wrong, "job-3", "00000000-0000-4000-8000-0000000000c3"); rec(wrong, TOKEN, "ffffffffffffffffffffffffffffffff");
+    leave(badRec, "job-4", "00000000-0000-4000-8000-0000000000c4"); host.writeText(`${RECORDS}\\x.json`, "not json"); host.writeText(`${badRec}\\${MARKER_NAME}`, TOKEN);
+    rec(gone, TOKEN, ""); // the folder was never there or is already removed
+    host.writeText(`${RECORDS}\\elsewhere.json`, JSON.stringify({ path: "C:\\Users\\someone\\nn-wsb-real-away01", token: TOKEN, jobId: "7" }));
+    // The records folder is the runner account's own: writable by that account (and SYSTEM and Administrators, which writableBy leaves out) only.
+    host.writable.set(key(RECORDS), ["PC\\robert"]);
+    // A recorded folder made again by another account after its run removed it: the marker can be read by any account, so it can carry the right token, but its owner differs.
+    const remade = "C:\\ProgramData\\nn-wsb-real-rema01";
+    leave(remade, "job-6", "00000000-0000-4000-8000-0000000000c6"); rec(remade, TOKEN, TOKEN);
+    host.owners.set(key(remade), "S-1-5-21-1-2-3-1002");
+    const found = await searchEvidenceDirs(host);
+    assert.deepEqual(found.dirs, [`${good}\\control`]);
+    assert.equal(found.recordsProblem, undefined, "the records were read");
+    assert.ok(found.distrusted.includes("nn-wsb-real-rema01"), "a folder whose owner is not its record's owner is not believed");
+    assert.deepEqual([...found.unrecorded].sort(), [badRec.split("\\").pop(), foreign.split("\\").pop()].sort());
+    assert.ok(found.distrusted.some((d) => d.includes("wron01")), "the wrong token is reported by name");
+    assert.equal(found.distrusted.length, 4, "wrong token, unreadable record, a path outside ProgramData and another owner");
+    assert.equal(host.exists(`${RECORDS}\\nn-wsb-real-gone01.json`), false, "a record whose folder is gone is dropped quietly");
+    assert.ok(!found.distrusted.join().includes("gone01") && !found.unrecorded.join().includes("gone01"));
+    const r = await releaseLeftovers(host, found.dirs, ident, found.owners);
+    assert.equal(r.released, 1);
+    assert.equal(r.kept.length, 0);
+    assert.equal(host.exists(good), false, "the recorded folder is cleaned");
+    for (const [base, job, sb] of [[foreign, "job-2", "c2"], [wrong, "job-3", "c3"], [badRec, "job-4", "c4"], [remade, "job-6", "c6"]] as const) {
+      assert.ok(host.exists(`${base}\\control\\jobs\\${job}\\acl.json`), `${job} untouched`);
+      assert.ok(host.sandboxes.has(`00000000-0000-4000-8000-0000000000${sb}`), `${job}'s sandbox still running`);
+      assert.deepEqual(host.acl.get(key(`${base}\\w\\work`)), [...orig, "PC\\robert:(OI)(CI)M"], `${job}'s access list untouched`);
+    }
+    assert.equal(dropFinishedRecords(host), 1, "the cleaned folder's record goes");
+    assert.equal(host.exists(`${RECORDS}\\nn-wsb-real-good01.json`), false);
+    assert.ok(host.exists(`${RECORDS}\\nn-wsb-host-wron01.json`), "a record that was not trusted is kept");
+    // Inside a recorded folder, any signed-in account can add entries (ProgramData lets every user create folders and files in the folders below it): a job folder, or a file in
+    // the run's own job folder, owned by another account is not acted on, and the base stays.
+    const planted = "C:\\ProgramData\\nn-wsb-real-plnt01";
+    const plantedJob = leave(planted, "job-7", "00000000-0000-4000-8000-0000000000c7"); rec(planted, TOKEN, TOKEN);
+    host.owners.set(key(plantedJob), "S-1-5-21-1-2-3-1002");
+    const ownJob = leave(planted, "job-8", "00000000-0000-4000-8000-0000000000c8");
+    host.owners.set(key(`${ownJob}\\acl.json`), "S-1-5-21-1-2-3-1002");
+    const inPlanted = await searchEvidenceDirs(host);
+    assert.deepEqual(inPlanted.dirs, [`${planted}\\control`]);
+    const p = await releaseLeftovers(host, inPlanted.dirs, ident, inPlanted.owners);
+    assert.deepEqual([p.released, p.removedBases], [0, 0]);
+    assert.equal(p.kept.length, 2);
+    assert.ok(p.kept.every((k) => /not owned by the account that made its test folder/.test(k)));
+    for (const [job, sb] of [["job-7", "c7"], ["job-8", "c8"]] as const) {
+      assert.ok(host.exists(`${planted}\\control\\jobs\\${job}\\acl.json`), `${job} untouched`);
+      assert.ok(host.sandboxes.has(`00000000-0000-4000-8000-0000000000${sb}`), `${job}'s sandbox still running`);
+    }
+    // A control folder another account made inside the recorded folder is not entered at all.
+    host.owners.set(key(`${planted}\\control`), "S-1-5-21-1-2-3-1002");
+    const ctl = await releaseLeftovers(host, inPlanted.dirs, ident, inPlanted.owners);
+    assert.deepEqual([ctl.released, ctl.removedBases, ctl.kept.length], [0, 0, 1]);
+    assert.match(ctl.kept[0]!, /is not owned by the account that made its test folder/);
+    // A records folder another account can change, or whose access list cannot be read, vouches for nothing: every pattern folder is only reported.
+    host.writable.set(key(RECORDS), ["PC\\robert", "BUILTIN\\Users"]);
+    const open = await searchEvidenceDirs(host);
+    assert.deepEqual(open.dirs, []);
+    assert.ok(open.distrusted.some((d) => /records folder can be changed/.test(d)));
+    assert.match(open.recordsProblem ?? "", /records folder can be changed/, "reported on its own, so the script can fail the step");
+    assert.ok(open.unrecorded.includes("nn-wsb-real-plnt01"));
+    host.writable.set(key(RECORDS), ["PC\\erin"]);
+    assert.deepEqual((await searchEvidenceDirs(host)).dirs, []);
+    host.writable.delete(key(RECORDS));
+    host.writableBy = async () => { throw new Error("icacls: Access is denied."); };
+    const unreadable = await searchEvidenceDirs(host);
+    assert.deepEqual(unreadable.dirs, []);
+    assert.match(unreadable.recordsProblem ?? "", /could not be read/);
+    // Without a records folder nothing is recorded: every pattern folder is only reported.
+    delete host.envMap["LOCALAPPDATA"];
+    const none = await searchEvidenceDirs(host);
+    assert.deepEqual(none.dirs, []);
+    assert.equal(none.unrecorded.length, 5);
+    assert.ok(none.distrusted.some((d) => /no records folder/.test(d)));
+    assert.match(none.recordsProblem ?? "", /no records folder/);
+  });
+
+  test("own-hardware cleanup with an elevated runner: folder, record and job entries all owned by Administrators are released; a folder whose owner differs from its record's is not", async () => {
+    const host = new SimHost();
+    const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
+    const ADMINS = "S-1-5-32-544";
+    const USER = "S-1-5-21-1-2-3-1001";
+    Object.assign(host.envMap, { LOCALAPPDATA: "C:\\Users\\robert\\AppData\\Local", USERNAME: "Robert", USERDOMAIN: "pc" });
+    const RECORDS = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
+    // icacls prints the account as DOMAIN\name in its own case; the comparison ignores case.
+    host.writable.set(key(RECORDS), ["PC\\robert"]);
+    const TOKEN = "0123456789abcdef0123456789abcdef";
+    const make = (base: string, sandbox: string, owner: string, recordOwner: string): string => {
+      const jobDir = `${base}\\control\\jobs\\job-1`;
+      host.writeText(`${jobDir}\\job.json`, "{}");
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: sandbox }));
+      host.sandboxes.add(sandbox);
+      host.writeText(`${base}\\${MARKER_NAME}`, TOKEN);
+      const rec = `${RECORDS}\\${base.split("\\").pop()}.json`;
+      host.writeText(rec, JSON.stringify({ path: base, token: TOKEN, jobId: "9" }));
+      for (const p of [base, `${base}\\control`, `${base}\\control\\jobs`, jobDir, `${jobDir}\\job.json`, `${jobDir}\\status.json`]) host.owners.set(key(p), owner);
+      host.owners.set(key(rec), recordOwner);
+      return jobDir;
+    };
+    const elevated = "C:\\ProgramData\\nn-wsb-real-elev01";
+    const mixed = "C:\\ProgramData\\nn-wsb-real-mixd01";
+    make(elevated, "00000000-0000-4000-8000-0000000000e1", ADMINS, ADMINS);
+    make(mixed, "00000000-0000-4000-8000-0000000000e2", USER, ADMINS);
+    const found = await searchEvidenceDirs(host);
+    assert.equal(found.recordsProblem, undefined);
+    assert.deepEqual(found.dirs, [`${elevated}\\control`]);
+    assert.equal(found.owners.get(elevated.toLowerCase()), ADMINS);
+    assert.deepEqual(found.distrusted, ["nn-wsb-real-mixd01"]);
+    const r = await releaseLeftovers(host, found.dirs, ident, found.owners);
+    assert.deepEqual([r.released, r.kept.length, r.removedBases], [1, 0, 1]);
+    assert.equal(host.exists(elevated), false);
+    assert.ok(host.sandboxes.has("00000000-0000-4000-8000-0000000000e2"), "the folder whose owner differs from its record's keeps its sandbox");
+    assert.ok(!host.sandboxes.has("00000000-0000-4000-8000-0000000000e1"));
+  });
+
+  test("a recorded folder is made with its marker and record, in the account's own records folder; without one nothing is made", () => {
+    const root = mkdtempSync(join(tmpdir(), "nn-wsb-rec-"));
+    try {
+      const data = join(root, "ProgramData"); mkdirSync(data);
+      const records = join(root, "records");
+      assert.equal(recordDirFrom((n) => ({ LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local", RUNNER_TEMP: "D:\\t" } as Record<string, string>)[n]), "C:\\Users\\x\\AppData\\Local\\NimbleNewt\\wsb-records");
+      assert.equal(recordDirFrom((n) => ({ RUNNER_TEMP: "D:\\t", TEMP: "D:\\t" } as Record<string, string>)[n]), undefined, "the runner's temporary folder is emptied every job: never used for records");
+      assert.throws(() => createRecordedFolder("nn-wsb-real-", { ProgramData: data, RUNNER_TEMP: root }), /no records folder/);
+      assert.deepEqual(readdirSync(data), [], "nothing is made without a records folder");
+      const base = createRecordedFolder("nn-wsb-host-", { ProgramData: data, NIMBLENEWT_WSB_RECORDS: records, GITHUB_RUN_ID: "42" });
+      const name = base.split(/[\\/]/).pop()!;
+      assert.match(name, /^nn-wsb-host-[A-Za-z0-9]{6}$/);
+      const token = readFileSync(join(base, MARKER_NAME), "utf8");
+      assert.match(token, /^[0-9a-f]{32}$/);
+      assert.deepEqual(JSON.parse(readFileSync(join(records, `${name}.json`), "utf8")), { path: base, token, jobId: "42" });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("own-hardware cleanup: jobs a killed evidence run left in its test folders are released (sandbox stopped, ACLs back) and the folder goes; a live or failing one is kept", async () => {
     const host = new SimHost();
     const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
@@ -1117,6 +1382,15 @@ describe("Windows launcher: running a job", () => {
     const real = "C:\\ProgramData\\nn-wsb-real-ab12cd";
     const hostTest = "C:\\ProgramData\\nn-wsb-host-zz9yx8";
     host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
+    host.envMap["LOCALAPPDATA"] = "C:\\Users\\robert\\AppData\\Local";
+    const RECORDS = "C:\\Users\\robert\\AppData\\Local\\NimbleNewt\\wsb-records";
+    const TOKEN = "0123456789abcdef0123456789abcdef";
+    /** What a run does when it creates its folder: a record in the runner's work area and the same token in a marker inside the folder. */
+    const record = (folder: string, token = TOKEN, markerToken = token): void => {
+      host.writeText(`${RECORDS}\\${folder.split("\\").pop()}.json`, JSON.stringify({ path: folder, token, jobId: "1" }));
+      host.writeText(`${folder}\\${MARKER_NAME}`, markerToken);
+    };
+    record(real); record(hostTest);
     leave(`${real}\\control`, "job-1", "00000000-0000-4000-8000-0000000000b1", `${real}\\job1\\work`);
     leave("D:\\a\\_temp\\nn-g05-wsb\\control", "job-2", "00000000-0000-4000-8000-0000000000b2", "C:\\T\\nn-g05-x\\work");
     // The host test's base has two control folders; one job there cannot be undone, so that base stays whole.
@@ -1126,7 +1400,7 @@ describe("Windows launcher: running a job", () => {
     // Unrelated folders are not looked at.
     host.mkdirp("C:\\ProgramData\\NimbleNewt\\control\\jobs\\other");
     host.mkdirp("C:\\ProgramData\\nn-wsb-real-toolong1\\control\\jobs\\other");
-    const dirs = evidenceControlDirs(host);
+    const dirs = await evidenceControlDirs(host);
     assert.deepEqual([...dirs].sort(), [`${hostTest}\\control`, `${hostTest}\\control-acl`, `${real}\\control`, "D:\\a\\_temp\\nn-g05-wsb\\control"].sort());
     assert.equal(await sandboxRunning(host, ident), "running");
     const r = await releaseLeftovers(host, dirs, ident);

@@ -53,10 +53,13 @@ for (const backend of backends) {
         return { checkout: true, change, ...(call.reviewed === undefined ? {} : { reviewedPatchId: call.reviewed.tree === TREE1 ? PATCH1 : PATCH2 }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit, exitCode: host.exit === "failed" ? 1 : 0, ...(host.exit === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
       },
     };
+    // The integrator lease (card P10): `live` is what the lease service would answer; a landing asks it when the request is made, again once the task is quiet (before the checks) and again after the checks.
+    const lease = { live: true, asked: 0 };
     const told: { commandId: string; to: string; text: string }[] = [];
     const service = WorkspaceOpService.withEpoch(store.storage, projects.epoch, {
       quiesce: { around: async (_scope, _op, run, after) => { const out = await run({ attempts: [{ attemptId: "att-1" }] } as never); await after?.("att-1"); return out; } },
       portOf: async () => port,
+      landingLease: async () => { lease.asked++; if (!lease.live) throw new DomainError("invalid_transition", "the integrator lease expired"); return { leaseId: "lse-1", fence: 1 }; },
       assignee: async () => "agent:bob",
       attempts: { live: async () => [], frozenReason: async () => undefined, release: async () => undefined, tell: async () => true },
       approvalOf: async (id) => approvals.get(id),
@@ -73,7 +76,8 @@ for (const backend of backends) {
     await setChecks(t1, "t1");
     await queueOps.add(owner, { commandId: "q1", submissionId: S1 });
     await queueOps.add(owner, { commandId: "q2", submissionId: S2 });
-    return { store, owner, t1, t2, host, calls, told, land, queued, queueOps };
+    const records = async () => (await store.storage.listAggregates("workspace-request", { limit: 100 })).length;
+    return { store, owner, t1, t2, host, calls, told, land, queued, queueOps, approvals, lease, records };
   };
 
   test(`${backend.name}: the gate judges the queue's head; a failing gate keeps it queued and tells its author; a passing gate lands only the checked tree and dequeues; a non-head submission is refused (cards P09 and P10)`, async () => {
@@ -85,6 +89,8 @@ for (const backend of backends) {
       await refuses("invalid_transition", () => r.land("n2", r.t2, S2), /number 2 in the landing queue/);
       await refuses("invalid_transition", () => r.land("n3", r.t1, S2), /is not the submission task .* has in the landing queue/);
       assert.deepEqual([r.calls.checks.length, r.calls.runs.length], [0, 0]);
+      assert.equal(await r.records(), 0, "a refusal before the gate writes no record");
+      assert.equal(r.told.length, 0);
 
       // The head with a failing test command: refused, nothing landed, the entry stays at the head, and S1's author (ann, not the assignee) gets the results. The landing names no submission: the gate judges the queue's.
       const failed = await r.land("f1", r.t1);
@@ -118,13 +124,43 @@ for (const backend of backends) {
     const r = await rig();
     try {
       r.host.exit = "passed";
-      // While the host runs the checks, the owner takes S1 out of the queue: the passing gate is not enough, the queue is shown again and the host is never asked to land.
-      r.host.duringChecks = async () => r.queueOps.remove(r.owner, { commandId: "out", taskId: r.t1, reason: "not this one after all" });
+      // While the host runs the checks, a newer submission of task one takes the head's place (a take-out of a head that is being landed is refused, card P10): the passing gate is not enough, the queue is shown again and the host is never asked to land.
+      let taking: unknown;
+      r.host.duringChecks = async () => { taking = await r.queueOps.remove(r.owner, { commandId: "out", taskId: r.t1, reason: "not this one after all" }).catch((e: unknown) => e); const S3 = `sbm-${"c".repeat(20)}`; r.approvals.set(S3, { ...r.approvals.get(S1)!, tree: TREE2, submittedAt: "2026-11-19T09:05:00.000Z" }); await r.queueOps.add(r.owner, { commandId: "newer", submissionId: S3 }); };
       const out = await r.land("m1", r.t1);
       assert.equal(out.state, "refused", out.summary);
       assert.match(out.summary!, /no longer the oldest approved one in the landing queue, so nothing was landed/);
       assert.equal(out.checks!.passed, true);
+      assert.ok(taking instanceof DomainError && /being landed/.test(taking.message), String(taking));
       assert.deepEqual([r.calls.checks.length, r.calls.runs.length], [1, 0]);
+      assert.deepEqual((await r.queued()).map((e) => e[1]), [r.t1, r.t2]);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a lease that is not held when asked is refused with no record; one that expires while the checks run lands nothing and keeps the entry queued (cards P09 and P10)`, async () => {
+    const r = await rig();
+    try {
+      r.host.exit = "passed";
+      // Not held at the start: refused before anything is recorded, frozen, checked or landed.
+      r.lease.live = false;
+      await refuses("invalid_transition", () => r.land("l0", r.t1), /lease expired/);
+      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.told.length, r.lease.asked], [0, 0, 0, 0, 1]);
+      assert.deepEqual(await r.queued(), [[S1, r.t1], [S2, r.t2]]);
+      // Held at the start, gone when the checks finish: the passing gate is not enough.
+      r.lease.live = true;
+      r.lease.asked = 0;
+      r.host.duringChecks = async () => { r.lease.live = false; };
+      const out = await r.land("l1", r.t1);
+      assert.equal(out.state, "refused", out.summary);
+      assert.match(out.summary!, /the integrator lease no longer holds, so nothing was landed/);
+      assert.equal(out.checks!.passed, true, "the checks' results stay on the record");
+      assert.deepEqual([r.calls.checks.length, r.calls.runs.length, await r.records(), r.lease.asked], [1, 0, 1, 3], "asked at the request, once quiet, and after the checks");
+      assert.deepEqual(await r.queued(), [[S1, r.t1], [S2, r.t2]], "the entry stays queued");
+      assert.equal(r.told.length, 0, "a passing gate tells nobody");
+      // With the lease held again the same head lands.
+      r.lease.live = true;
+      r.host.duringChecks = async () => undefined;
+      assert.equal((await r.land("l2", r.t1)).state, "done");
       assert.deepEqual(await r.queued(), [[S2, r.t2]]);
     } finally { await r.store.close(); }
   });
