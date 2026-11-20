@@ -153,7 +153,10 @@ export async function startEmbeddedServer(flags: readonly string[] = [], baseDir
   // cannot store the JSON text the controller keeps. Bind to the IPv4 loopback only: nothing outside this machine can reach the test server, and no name resolution is involved.
   // No Unix-domain socket (the tests connect by TCP only): otherwise every test server puts its socket and lock file in /tmp under its port number, where a
   // lock file left by a killed server whose process number was reused blocks that port for any later server (card 19).
-  const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C"], postgresFlags: ["-c", "listen_addresses=127.0.0.1", "-c", "unix_socket_directories=", ...flags], onLog: keep, onError: keep };
+  // initdb --no-sync: initdb does not flush the new cluster's files to disk before it returns. The cluster is thrown away after the run and no test crashes the
+  // operating system, so nothing a test sees changes; on the Windows own-hardware runner initdb took 21 to 23 s (0.5 s on Linux), and the flush of every file
+  // is expected to be a part of that there (not measured on Windows). The server itself keeps fsync, full_page_writes and synchronous_commit on, which the controller checks before it stores anything.
+  const settings = { databaseDir: join(directory, "data"), port, user: USER, password: PASSWORD, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C", "--no-sync"], postgresFlags: ["-c", "listen_addresses=127.0.0.1", "-c", "unix_socket_directories=", ...flags], onLog: keep, onError: keep };
   let server = new EmbeddedPostgres(settings);
   const url = (database = "nimblenewt_test") => `postgres://${USER}:${PASSWORD}@127.0.0.1:${port}/${database}`;
   // The library's own steps have no timeouts and reject with nothing when the server exits early; give each a deadline and the log.
