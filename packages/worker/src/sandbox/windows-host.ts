@@ -84,6 +84,19 @@ export interface WindowsLockTask {
   readonly executable?: string;
 }
 
+/**
+ * The list-context probe's raw answer. Every field is untrusted: elevation is 1, 0 or -1 (unknown), integrity the integrity level's RID (or -1), session ids numbers, `servers`
+ * one entry per WindowsSandboxServer process, `chain` the image names of this process and its parents, this process first.
+ */
+export interface WindowsListContext {
+  readonly elevated?: unknown;
+  readonly integrity?: unknown;
+  readonly processSessionId?: unknown;
+  readonly consoleSessionId?: unknown;
+  readonly servers?: unknown;
+  readonly chain?: unknown;
+}
+
 export interface ProcessResult {
   readonly code: number | null;
   readonly stdout: string;
@@ -101,6 +114,16 @@ export interface WindowsHost {
   envNames?(): readonly string[];
   /** The Windows Sandbox server processes running now (id and start time, ISO). Optional; recorded only, for diagnosing a `wsb` call that does not answer. */
   serverProcesses?(): Promise<readonly { readonly pid: number; readonly started?: string }[]>;
+  /**
+   * Facts about this process and the Sandbox server for a `wsb list` that did not answer: token elevation and integrity, session ids, the process chain's names. Optional and
+   * recorded only; the values come as the probe gave them and `windows-list.ts` turns them into fixed words and numbers.
+   */
+  listContext?(): Promise<WindowsListContext>;
+  /**
+   * Runs the program through `cmd.exe /c` with only SystemRoot, windir, USERPROFILE, LOCALAPPDATA, APPDATA, TEMP, TMP and PATH in its environment. Optional; used once, as a
+   * diagnostic, after every normal `wsb list` call failed. Its outcome never decides anything.
+   */
+  runMinimalEnv?(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
 
   exists(path: string): boolean;
   /** True when the path is, or passes through, a symbolic link, a junction or any other reparse point (its real path differs from the path). */

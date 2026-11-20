@@ -7,11 +7,12 @@ import type { BackendHealth, SandboxBackend, SpawnPlan } from "./backend.js";
 import { SandboxLauncher, stripTrailingSeparator, type LaunchRecord } from "./launcher.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
-import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
+import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
+import { CHAIN_NAMES, DIAGNOSTIC_TIMEOUT_MS, chainName, contextText, integrityWord } from "./windows-list.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { evidenceControlDirs, releaseLeftovers, sandboxRunning, searchEvidenceDirs } from "./windows-cleanup.js";
 import { MARKER_NAME, createRecordedFolder, dropFinishedRecords, recordDirFrom } from "./windows-records.js";
-import { accessFromProbe, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
+import { MINIMAL_ENV_NAMES, accessFromProbe, cmdLine, minimalEnv, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
 import { ACCEPTED_SIGNATURE_KINDS, INTERACTIVE_RUNNER_HINT, MICROSOFT_STORE_PUBLISHER_ID, describeWsbAccessDenied, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, isWsbAccessDenied, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
 // These tests run on every OS with a simulated Windows host: they prove the rules (what is refused, what is recorded, in what order things happen) but NOT that
@@ -65,6 +66,16 @@ class SimHost implements WindowsHost {
   servers: { pid: number; started?: string }[] = [];
   envNames(): string[] { return Object.keys(this.envMap); }
   async serverProcesses(): Promise<readonly { pid: number; started?: string }[]> { return this.servers; }
+  /** What the list-context probe answers: an elevated runner in the console session, the server unelevated in the same session. */
+  context: WindowsListContext = { elevated: 1, integrity: 0x3000, processSessionId: 1, consoleSessionId: 1, servers: [{ sessionId: 1, elevated: 0, integrity: 0x2000 }], chain: ["node.exe", "cmd.exe", "Runner.Worker.exe", "Runner.Listener.exe", "cmd.exe", "explorer.exe"] };
+  listContext?: () => Promise<WindowsListContext> = async () => this.context;
+  /** The diagnostic calls through cmd.exe with a minimal environment (kept apart from `runs`), and their answer. */
+  minimalRuns: { file: string; args: readonly string[]; cwd?: string; timeoutMs: number }[] = [];
+  minimalAnswer: ProcessResult = ok("");
+  runMinimalEnv?: (file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }) => Promise<ProcessResult> = async (file, args, options) => {
+    this.minimalRuns.push({ file, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs });
+    return this.minimalAnswer;
+  };
 
   constructor() {
     for (const f of [`${INSTALL}\\wsb.exe`, `${INSTALL}\\WindowsSandboxServer.exe`, "C:\\Program Files\\NimbleNewt\\lock.exe"]) this.files.set(key(f), "");
@@ -483,6 +494,85 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
       for (const value of ["hunter2", "proxyuser", "proxy.example", "debug-value", "robert", "C:\\Temp"]) assert.ok(!text.includes(value), `${value} must not appear`);
       const none = new SimHost(); none.listScript = [hung, hung, hung];
       assert.match((await windowsSandboxBackend(options(none, { listOptions: fast })).health()).reason!, /GRPC_\*=absent/);
+    });
+
+    test("when every call fails, the reason adds the context and one diagnostic call through cmd, which does not change the result", async () => {
+      const host = new SimHost();
+      host.listScript = [hung, hung, hung];
+      host.minimalAnswer = ok("");
+      host.guest = probeGuest(host);
+      const h = await windowsSandboxBackend(options(host, { listOptions: { ...fast, diagnosticTimeoutMs: 70 } })).health();
+      assert.equal(h.healthy, false, "a diagnostic call that answers does not make the list answer");
+      assert.match(h.reason!, /could not be listed after 3 attempt\(s\)/);
+      assert.ok(h.reason!.includes("context: this process elevated yes integrity high, session 1, console session 1, server session 1 elevated no integrity medium, process chain (this process first) node < cmd < Runner.Worker < other < cmd < other;"), h.reason);
+      assert.match(h.reason!, /diagnostic call through cmd with a minimal environment \(recorded only, the list stays failed\): ok after \d+ ms \(limit 70 ms\)/);
+      assert.deepEqual(host.wsbCommands, ["list", "list", "list"], "no sandbox was started");
+      assert.equal(host.minimalRuns.length, 1, "one diagnostic call");
+      assert.deepEqual(host.minimalRuns[0], { file: `${INSTALL}\\wsb.exe`, args: ["list", "--raw"], cwd: INSTALL, timeoutMs: 70 });
+      // The defaults: one 60 s diagnostic call.
+      const d = new SimHost(); d.listScript = [hung, hung, hung];
+      await windowsSandboxBackend(options(d, { listOptions: fast })).health();
+      assert.deepEqual(d.minimalRuns.map((r) => r.timeoutMs), [DIAGNOSTIC_TIMEOUT_MS]);
+      assert.equal(DIAGNOSTIC_TIMEOUT_MS, 60_000);
+    });
+
+    test("a list that answers records no context and makes no diagnostic call", async () => {
+      const host = new SimHost();
+      host.listScript = [hung];
+      let probed = 0;
+      host.listContext = async () => { probed++; return host.context; };
+      const backend = windowsSandboxBackend(options(host, { listOptions: fast }));
+      host.guest = probeGuest(host);
+      assert.equal((await backend.health()).healthy, true);
+      const d = backend.auditDetails!()["wsbListDiagnostics"]!;
+      assert.ok(!d.includes("context:") && !d.includes("diagnostic call"), d);
+      assert.equal(probed, 0);
+      assert.deepEqual(host.minimalRuns, []);
+    });
+
+    test("diagnostic call and context: timed out, failed, could not run, not readable, not available", async () => {
+      const reasonOf = async (setup: (h: SimHost) => void): Promise<string> => {
+        const h = new SimHost(); h.listScript = [hung, hung, hung]; setup(h);
+        return (await windowsSandboxBackend(options(h, { listOptions: { ...fast, diagnosticTimeoutMs: 50 } })).health()).reason!;
+      };
+      assert.match(await reasonOf((h) => { h.minimalAnswer = hung; }), /the list stays failed\): timed out after \d+ ms \(limit 50 ms\)/);
+      assert.match(await reasonOf((h) => { h.minimalAnswer = { code: 2148734208, stdout: "", stderr: "Cancelled C:\\Users\\robert", timedOut: false }; }), /the list stays failed\): exit 2148734208 after/);
+      const thrown = await reasonOf((h) => { h.runMinimalEnv = async () => { throw new Error("C:\\Users\\robert"); }; h.listContext = async () => { throw new Error("PowerShell failed: C:\\Users\\robert"); }; });
+      assert.match(thrown, /context: not readable;/);
+      assert.match(thrown, /the list stays failed\): could not run after/);
+      assert.ok(!thrown.includes("robert"), thrown);
+      const absent = await reasonOf((h) => { delete h.runMinimalEnv; delete h.listContext; });
+      assert.match(absent, /context: not available; diagnostic call through cmd with a minimal environment \(recorded only, the list stays failed\): not available\)$/);
+    });
+
+    test("the context copies only fixed words and numbers, whatever the probe returned", async () => {
+      const host = new SimHost();
+      host.listScript = [hung, hung, hung];
+      host.context = {
+        elevated: "yes C:\\Users\\robert", integrity: "S-1-16-12288", processSessionId: "1; robert", consoleSessionId: 0xffffffff,
+        // Windows PowerShell 5.1's wrapped list form; a server with junk values.
+        servers: { value: [{ sessionId: 2, elevated: 1, integrity: 0x4000 }, { sessionId: -1, elevated: "robert", integrity: 1.5 }], Count: 2 },
+        chain: ["C:\\Users\\robert\\node.exe", "NODE.EXE", "RUNNER.WORKER.exe", "pwsh", "PowerShell.exe", "bash.exe", "robert-tool.exe", 7, null, "cmd"],
+      };
+      const reason = (await windowsSandboxBackend(options(host, { listOptions: fast })).health()).reason!;
+      assert.ok(reason.includes("context: this process elevated unknown integrity unknown, session unknown, console session none, server session 2 elevated yes integrity system, session unknown elevated unknown integrity unknown, process chain (this process first) other < node < Runner.Worker < pwsh < powershell < bash < other < other;"), reason);
+      for (const value of ["robert", "Users", "S-1-16", "NODE.EXE"]) assert.ok(!reason.includes(value), `${value} must not appear`);
+      // At most 8 chain entries and 8 servers; one server reported as an object alone; nothing at all.
+      assert.equal(contextText({ chain: Array.from({ length: 12 }, () => "cmd.exe") }).split("process chain (this process first) ")[1], Array.from({ length: 8 }, () => "cmd").join(" < "));
+      assert.match(contextText({ servers: Array.from({ length: 10 }, () => ({ sessionId: 1, elevated: 0, integrity: 0x2000 })) }), /integrity medium and 2 more, process chain/);
+      assert.match(contextText({ servers: { sessionId: 3, elevated: 0, integrity: 0x1000 } }), /server session 3 elevated no integrity low,/);
+      assert.equal(contextText({}), "this process elevated unknown integrity unknown, session unknown, console session unknown, server none, process chain (this process first) unknown");
+    });
+
+    test("integrity words, chain names and the minimal environment and cmd line of the real host", () => {
+      assert.deepEqual([0, 0x1000, 0x2000, 0x2100, 0x3000, 0x4000, 0x5000, -1, 1.5, "0x3000"].map(integrityWord), ["other", "low", "medium", "medium", "high", "system", "other", "unknown", "unknown", "unknown"]);
+      assert.deepEqual(CHAIN_NAMES, ["node", "pwsh", "powershell", "cmd", "Runner.Worker", "bash"]);
+      assert.deepEqual(["node.exe", "Runner.Worker", "runner.worker.exe", "Runner.Listener.exe", "nodeX.exe", "node.exe.exe", "", undefined].map(chainName), ["node", "Runner.Worker", "Runner.Worker", "other", "other", "other", "other", "other"]);
+      assert.deepEqual(MINIMAL_ENV_NAMES, ["SystemRoot", "windir", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "PATH"]);
+      assert.deepEqual(minimalEnv({ SystemRoot: "C:\\Windows", PATH: "C:\\Windows\\System32", TEMP: "", HTTP_PROXY: "http://proxy", GRPC_VERBOSITY: "debug", HOME: "C:\\Users\\x" }), { SystemRoot: "C:\\Windows", PATH: "C:\\Windows\\System32" });
+      assert.equal(cmdLine(`${INSTALL}\\wsb.exe`, ["list", "--raw"]), `/d /v:off /s /c ""${INSTALL}\\wsb.exe" list --raw"`);
+      for (const bad of ["C:\\a\"b\\wsb.exe", "C:\\%TEMP%\\wsb.exe", "C:\\a\nb\\wsb.exe"]) assert.throws(() => cmdLine(bad, ["list"]), /cmd\.exe could change/);
+      assert.throws(() => cmdLine(`${INSTALL}\\wsb.exe`, ["list & calc"]), /not a plain word/);
     });
   });
 

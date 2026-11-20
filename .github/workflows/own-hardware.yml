@@ -231,8 +231,8 @@ jobs:
       # (scripts/wsb-cleanup.mjs); a Windows Sandbox still running afterwards is reported, not stopped. Counts only in the log; the reasons stay in the local folder.
       # Only test folders a run recorded (in the runner account's %LOCALAPPDATA%\NimbleNewt\wsb-records, which outlives the job) are acted on; others with the same name pattern are
       # counted and left alone (how to handle them by hand: docs/nimblenewt/own-hardware-runners.md). Reading the owners of the recorded folders' entries adds a few seconds per job.
-      # 30 minutes: when `wsb list` does not answer, each list takes up to about 7 minutes (three calls, two 30 s server probes, and up to 20 s to stop each timed-out
-      # program; windows-list.ts), once per leftover whose stop failed and once for the final check.
+      # 30 minutes: when `wsb list` does not answer, each list takes up to about 9 minutes (three calls, two 30 s server probes, one 45 s context probe, one 60 s diagnostic
+      # call, and up to 20 s to stop each timed-out program; windows-list.ts), once per leftover whose stop failed and once for the final check.
       - name: Release leftovers of the Sandbox runs
         id: cleanup
         if: always()

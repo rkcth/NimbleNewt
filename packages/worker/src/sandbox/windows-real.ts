@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { win32 } from "node:path";
 import { SANDBOX_PACKAGES, parseIcaclsWritable, shortStatusMessage } from "./windows-plan.js";
-import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
+import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 
 /**
  * The real Windows implementation of `WindowsHost` (card A03b). Only meaningful on Windows; it is exercised by the real tests (NIMBLENEWT_REAL_WINDOWS_SANDBOX=1), not by the unit tests.
@@ -15,6 +15,54 @@ const SERVER_SCRIPT = `
 $ErrorActionPreference = 'SilentlyContinue'
 $list = @(Get-Process -Name WindowsSandboxServer | ForEach-Object { $p = $_; $s = $null; try { $s = $p.StartTime.ToUniversalTime().ToString('o') } catch {}; [pscustomobject]@{ pid = $p.Id; started = $s } })
 ConvertTo-Json -InputObject $list -Compress
+`;
+// The context of a `wsb list` that did not answer (diagnostics only). For the process in NN_PID (the node process asking) and each WindowsSandboxServer process: token elevation
+// (1, 0, or -1 when the token cannot be read) and the integrity level's RID (-1 when unknown), and the session id; the console session id; and the image names of NN_PID and its
+// parents, this process first, at most 8. A "parent" started after its child is not followed (its id was reused). Names are sent as found; windows-list.ts keeps only a fixed list.
+const LIST_CONTEXT_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class NNTok {
+  [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool OpenProcessToken(IntPtr p, uint access, out IntPtr t);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr t, int cls, IntPtr buf, int len, out int ret);
+  [DllImport("advapi32.dll")] public static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+  [DllImport("advapi32.dll")] public static extern IntPtr GetSidSubAuthority(IntPtr sid, uint i);
+  // PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY; TokenElevation 20, TokenIntegrityLevel 25 (a TOKEN_MANDATORY_LABEL: the label SID's pointer first).
+  public static int[] Info(int pid) {
+    int[] r = new int[] { -1, -1 };
+    IntPtr p = OpenProcess(0x1000, false, pid); if (p == IntPtr.Zero) return r;
+    try {
+      IntPtr t; if (!OpenProcessToken(p, 8, out t)) return r;
+      try {
+        IntPtr b = Marshal.AllocHGlobal(256);
+        try {
+          int n;
+          if (GetTokenInformation(t, 20, b, 4, out n)) r[0] = Marshal.ReadInt32(b) != 0 ? 1 : 0;
+          if (GetTokenInformation(t, 25, b, 256, out n)) { IntPtr sid = Marshal.ReadIntPtr(b); int c = Marshal.ReadByte(GetSidSubAuthorityCount(sid)); if (c > 0) r[1] = Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(c - 1))); }
+        } finally { Marshal.FreeHGlobal(b); }
+      } finally { CloseHandle(t); }
+    } finally { CloseHandle(p); }
+    return r;
+  }
+}
+'@
+$me = [int]$env:NN_PID
+$self = [NNTok]::Info($me)
+$selfSession = $null; try { $selfSession = [int](Get-Process -Id $me).SessionId } catch {}
+$servers = @(Get-Process -Name WindowsSandboxServer | Select-Object -First 8 | ForEach-Object { $p = $_; $i = [NNTok]::Info($p.Id); @{ sessionId = [int]$p.SessionId; elevated = $i[0]; integrity = $i[1] } })
+$all = @{}; foreach ($q in @(Get-CimInstance -ClassName Win32_Process)) { $all[[int]$q.ProcessId] = $q }
+$chain = @(); $cur = $all[$me]
+while ($cur -and $chain.Count -lt 8) {
+  $chain += "$($cur.Name)"
+  $up = $all[[int]$cur.ParentProcessId]
+  if (-not $up -or [int]$up.ProcessId -eq [int]$cur.ProcessId -or $up.CreationDate -gt $cur.CreationDate) { break }
+  $cur = $up
+}
+ConvertTo-Json -Compress -Depth 4 -InputObject @{ elevated = $self[0]; integrity = $self[1]; processSessionId = $selfSession; consoleSessionId = [int64][NNTok]::WTSGetActiveConsoleSessionId(); servers = $servers; chain = $chain }
 `;
 const SESSION_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -171,20 +219,41 @@ export function ownerFromProbe(raw: { owner?: unknown } | null, path: string): s
 export const PROBE_TIMEOUT_MS = 60_000;
 /** The Sandbox server process probe (diagnostics around `wsb list`): one try, no retry. */
 export const SERVER_PROBE_TIMEOUT_MS = 30_000;
+/** The list-context probe (diagnostics after a failed `wsb list`): one try, no retry; it compiles a small type, so it gets a little more than the server probe. */
+export const CONTEXT_PROBE_TIMEOUT_MS = 45_000;
+/** The only variables the diagnostic `wsb list` through cmd.exe gets. */
+export const MINIMAL_ENV_NAMES: readonly string[] = ["SystemRoot", "windir", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "PATH"];
+
+/** The minimal environment: those names with this process's values where set (process.env on Windows finds a name in any case), nothing else. */
+export function minimalEnv(source: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const n of MINIMAL_ENV_NAMES) { const v = source[n]; if (v !== undefined && v !== "") out[n] = v; }
+  return out;
+}
+
+/**
+ * The command line for `cmd.exe /d /v:off /s /c "<"program" args>"`, passed verbatim. Only a program path and arguments without quotes, percent signs, line breaks or NUL are taken: with
+ * /s cmd strips the outer quotes and runs the rest, where a quoted path keeps & | < > ^ literal, but % would still expand (! does not: delayed expansion is off). Anything else throws.
+ */
+export function cmdLine(file: string, args: readonly string[]): string {
+  for (const part of [file, ...args]) if (/["%\r\n\0]/.test(part)) throw new Error("a program path or argument that cmd.exe could change");
+  for (const a of args) if (!/^[A-Za-z0-9-]+$/.test(a)) throw new Error("an argument that is not a plain word");
+  return `/d /v:off /s /c ""${file}" ${args.join(" ")}"`;
+}
 
 /**
  * Runs a program with a hard time limit. At the limit the whole process tree is stopped first (`stopTree`: on Windows `taskkill /T /F`, which needs the parent still alive to find its
  * descendants), then the program itself, and its pipes are closed, so a descendant that inherited them can neither keep running nor hold the result back. If even that brings no end
  * within a few seconds, the result is given anyway. A timed-out result has code null, timedOut true and says so in stderr.
  */
-export function runBounded(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number; readonly env?: NodeJS.ProcessEnv }, stopTree: (pid: number) => Promise<void>): Promise<ProcessResult> {
+export function runBounded(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number; readonly env?: NodeJS.ProcessEnv; readonly verbatim?: boolean }, stopTree: (pid: number) => Promise<void>): Promise<ProcessResult> {
   return new Promise((resolve) => {
     let timedOut = false;
     let done = false;
     let last: NodeJS.Timeout | undefined;
     const said = (): string => `timed out after ${String(Math.round(options.timeoutMs / 1000))} s and was stopped`;
     const finish = (r: ProcessResult): void => { if (done) return; done = true; clearTimeout(timer); if (last !== undefined) clearTimeout(last); resolve(r); };
-    const child = execFile(file, [...args], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), windowsHide: true, maxBuffer: 16 * 1024 * 1024, ...(options.env === undefined ? {} : { env: options.env }) }, (error, stdout, stderr) => {
+    const child = execFile(file, [...args], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), windowsHide: true, maxBuffer: 16 * 1024 * 1024, ...(options.env === undefined ? {} : { env: options.env }), ...(options.verbatim === true ? { windowsVerbatimArguments: true } : {}) }, (error, stdout, stderr) => {
       if (timedOut) { finish({ code: null, stdout: String(stdout), stderr: `${String(stderr)}${said()}`, timedOut: true }); return; }
       const e = error as NodeJS.ErrnoException | null;
       finish({ code: e === null ? 0 : typeof e.code === "number" ? e.code : null, stdout: String(stdout), stderr: e !== null && typeof e.code !== "number" && String(stderr) === "" ? e.message : String(stderr), timedOut: false });
@@ -239,6 +308,12 @@ export function windowsRealHost(): WindowsHost {
       const list = Array.isArray(raw) ? raw : raw === null ? [] : [raw];
       return list.filter((p) => typeof p.pid === "number").map((p) => ({ pid: p.pid as number, ...(typeof p.started === "string" ? { started: p.started } : {}) }));
     },
+    async listContext(): Promise<WindowsListContext> {
+      // Recorded only, after every `wsb list` call failed: one try.
+      return powershell<WindowsListContext>(LIST_CONTEXT_SCRIPT, { NN_PID: String(process.pid) }, { timeoutMs: CONTEXT_PROBE_TIMEOUT_MS });
+    },
+    // A full path to cmd.exe under the system root, AutoRun ignored (/d), the environment replaced (not merged) by the minimal one.
+    runMinimalEnv: (file, args, options) => runBounded(`${sysRoot()}\\System32\\cmd.exe`, [cmdLine(file, args)], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs, env: minimalEnv(process.env), verbatim: true }, stopTree),
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } },
     exists: (p) => existsSync(p),
     isLinkOrJunction: (p) => {
