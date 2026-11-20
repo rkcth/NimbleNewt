@@ -1,31 +1,38 @@
 import { listSandboxes, type ListOptions } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { releaseJob } from "./windows-job.js";
+import { scanEvidenceFolders } from "./windows-records.js";
 import { verifyClient, type WindowsSettings } from "./windows-plan.js";
 
 /*
  * After an evidence run on the owner's Windows machine (own-hardware.yml): what a run that was stopped hard (a step or job timeout, a cancelled run) left behind. A normal run releases
- * its own jobs; a killed one cannot, and the folders it used are per-run, so the next run's health check would never see them. This looks only in the folders those runs use
- * (`%ProgramData%\nn-wsb-real-*` and `nn-wsb-host-*` of the real tests, and the G05 suite's base under the runner's temporary folder), and releases each job left there through the
+ * its own jobs; a killed one cannot, and the folders it used are per-run, so the next run's health check would never see them. This looks only in the folders those runs recorded
+ * (a record per folder, with a token that must match a marker file in it: windows-records.ts; `%ProgramData%\nn-wsb-real-*` and `nn-wsb-host-*` of the real tests, and the G05 suite's base under the runner's temporary folder), and releases each job left there through the
  * backend's own `releaseJob`: the sandbox the job recorded is stopped, the saved access lists are restored, the lock and the job folder go. A control folder whose lock a live process
  * holds is not touched at all, nor one that is or passes through a link or junction. A test's base folder is removed only when nothing is left in its jobs folder. Nothing else on the
  * machine is looked at.
  */
 
-/** The control folders the evidence runs use, as found on this machine. */
-export function evidenceControlDirs(host: WindowsHost): string[] {
+/** What the control-folder search found: the folders to act on, and what was left alone (names only, for the report). */
+export interface EvidenceSearch {
+  readonly dirs: string[];
+  readonly unrecorded: readonly string[];
+  readonly distrusted: readonly string[];
+}
+
+/** The control folders the evidence runs use: those inside folders a run recorded (marker matching its token), and the G05 base under the runner's temporary folder. */
+export function searchEvidenceDirs(host: WindowsHost): EvidenceSearch {
   const out: string[] = [];
-  const data = host.env("ProgramData");
-  if (data !== undefined && data !== "") {
-    for (const name of host.listDir(data)) {
-      if (!/^nn-wsb-(?:real|host)-[A-Za-z0-9]{6}$/.test(name)) continue;
-      for (const c of host.listDir(`${data}\\${name}`)) if (/^control(?:-acl)?$/i.test(c)) out.push(`${data}\\${name}\\${c}`);
-    }
+  const found = scanEvidenceFolders(host);
+  for (const base of found.folders) {
+    for (const c of host.listDir(base)) if (/^control(?:-acl)?$/i.test(c)) out.push(`${base}\\${c}`);
   }
   const g05 = host.env("NIMBLENEWT_G05_WSB_BASE") ?? (host.env("RUNNER_TEMP") === undefined ? undefined : `${host.env("RUNNER_TEMP")!}\\nn-g05-wsb`);
   if (g05 !== undefined && host.exists(`${g05}\\control`)) out.push(`${g05}\\control`);
-  return out;
+  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted };
 }
+
+export const evidenceControlDirs = (host: WindowsHost): string[] => searchEvidenceDirs(host).dirs;
 
 export interface LeftoverResult {
   /** Jobs whose sandbox, access lists, lock and folder were released. */

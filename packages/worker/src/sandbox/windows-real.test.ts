@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
+import { createRecordedFolder } from "./windows-records.js";
 import { windowsRealHost } from "./windows-real.js";
 import type { WindowsHost } from "./windows-host.js";
 import { redactAccountName, redactSid, scrub, scrubDeep, sidClass, type RedactionNames } from "./windows-redact.js";
@@ -141,7 +142,7 @@ describe("Windows Sandbox on a real Windows machine", { skip }, () => {
     // The console user's full name (the account's FullName) is used only to hide it; it is never written anywhere.
     const full = await new Promise<string>((resolve) => execFile(`${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_UserAccount -Filter \"Name='$($env:NN_U -replace \"'\",\"''\")'\").FullName"], { env: { ...process.env, NN_U: (found ?? owner).split("\\").pop()! }, timeout: 30_000, windowsHide: true }, (_e, out) => resolve(String(out ?? "").trim())));
     if (full !== "") redactNames.users.push(full);
-    base = realpathSync(mkdtempSync(join(process.env["ProgramData"] ?? tmpdir(), "nn-wsb-real-")));
+    base = createRecordedFolder("nn-wsb-real-");
     note("machine", { platform: process.platform, release: process.version, owner, shareIdentity, user, base });
       } catch (error) { results["before hook"] = "fail"; recordFailure("before hook", error, 0); throw error; }
   });

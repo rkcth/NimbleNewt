@@ -9,7 +9,8 @@ import type { NormalizedRecipe } from "./recipe.js";
 import { AUTOLOGON_ACKNOWLEDGEMENT, VM_FALLBACK_DECISION, windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import type { ProcessResult, WindowsAutologon, WindowsHost, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 import { EXIT_BUSY, EXIT_REFUSED, jobDirFor, runWindowsJob, type WindowsJob } from "./windows-job.js";
-import { evidenceControlDirs, releaseLeftovers, sandboxRunning } from "./windows-cleanup.js";
+import { evidenceControlDirs, releaseLeftovers, sandboxRunning, searchEvidenceDirs } from "./windows-cleanup.js";
+import { MARKER_NAME, dropFinishedRecords } from "./windows-records.js";
 import { accessFromProbe, ownerFromProbe, packageFromProbe, sessionFromProbe, signatureFromProbe } from "./windows-real.js";
 import { ACCEPTED_SIGNATURE_KINDS, INTERACTIVE_RUNNER_HINT, MICROSOFT_STORE_PUBLISHER_ID, describeWsbAccessDenied, SANDBOX_PACKAGES, entryTokens, entryWrites, icaclsWriterEntries, rightsTokens, WINDOWS_PUBLISHER_ID, aclSteps, checkIdentity, describeSignature, packageFamilyName, shortStatusMessage, verifyClient, checkWindowsHostPath, compareVersions, guestPathFor, isWsbAccessDenied, launchScript, parseIcaclsWritable, quoteArg, sharesFor, wsbConfigXml, type WindowsSettings } from "./windows-plan.js";
 
@@ -1200,6 +1201,66 @@ describe("Windows launcher: running a job", () => {
     assert.ok(host.exists("C:\\Jobs\\a\\keep.txt"), "a directory outside the jobs directory is never touched");
   });
 
+  test("own-hardware cleanup trusts only recorded folders: a matching name with no record, or a record with the wrong token, is left alone and reported; a record whose folder is gone is dropped", async () => {
+    const host = new SimHost();
+    const ident = { owner: "PC\\robert", shareIdentity: "PC\\robert" };
+    const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
+    host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
+    const RECORDS = "D:\\a\\_temp\\nn-wsb-records";
+    const TOKEN = "0123456789abcdef0123456789abcdef";
+    const leave = (base: string, job: string, sandbox: string): string => {
+      const jobDir = `${base}\\control\\jobs\\${job}`;
+      const folder = `${base}\\w\\work`;
+      host.writeText(`${jobDir}\\job.json`, "{}");
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ id: sandbox }));
+      host.sandboxes.add(sandbox);
+      host.writeText(`${jobDir}\\acl-0.txt`, "saved");
+      host.saved.set(key(`${jobDir}\\acl-0.txt`), orig); host.savedFor.set(key(`${jobDir}\\acl-0.txt`), folder);
+      host.writeText(`${jobDir}\\acl.json`, JSON.stringify([{ path: folder, parent: base, file: `${jobDir}\\acl-0.txt` }]));
+      host.acl.set(key(folder), [...orig, "PC\\robert:(OI)(CI)M"]);
+      return jobDir;
+    };
+    const rec = (base: string, token: string, marker: string): void => {
+      host.writeText(`${RECORDS}\\${base.split("\\").pop()}.json`, JSON.stringify({ path: base, token, jobId: "7" }));
+      if (marker !== "") host.writeText(`${base}\\${MARKER_NAME}`, marker);
+    };
+    const good = "C:\\ProgramData\\nn-wsb-real-good01";
+    const foreign = "C:\\ProgramData\\nn-wsb-real-fore01";
+    const wrong = "C:\\ProgramData\\nn-wsb-host-wron01";
+    const gone = "C:\\ProgramData\\nn-wsb-real-gone01";
+    const badRec = "C:\\ProgramData\\nn-wsb-real-badr01";
+    leave(good, "job-1", "00000000-0000-4000-8000-0000000000c1"); rec(good, TOKEN, TOKEN);
+    leave(foreign, "job-2", "00000000-0000-4000-8000-0000000000c2"); // no record at all
+    leave(wrong, "job-3", "00000000-0000-4000-8000-0000000000c3"); rec(wrong, TOKEN, "ffffffffffffffffffffffffffffffff");
+    leave(badRec, "job-4", "00000000-0000-4000-8000-0000000000c4"); host.writeText(`${RECORDS}\\x.json`, "not json"); host.writeText(`${badRec}\\${MARKER_NAME}`, TOKEN);
+    rec(gone, TOKEN, ""); // the folder was never there or is already removed
+    host.writeText(`${RECORDS}\\elsewhere.json`, JSON.stringify({ path: "C:\\Users\\someone\\nn-wsb-real-away01", token: TOKEN, jobId: "7" }));
+    const found = searchEvidenceDirs(host);
+    assert.deepEqual(found.dirs, [`${good}\\control`]);
+    assert.deepEqual([...found.unrecorded].sort(), [badRec.split("\\").pop(), foreign.split("\\").pop()].sort());
+    assert.ok(found.distrusted.some((d) => d.includes("wron01")), "the wrong token is reported by name");
+    assert.equal(found.distrusted.length, 3, "wrong token, unreadable record and a path outside ProgramData");
+    assert.equal(host.exists(`${RECORDS}\\nn-wsb-real-gone01.json`), false, "a record whose folder is gone is dropped quietly");
+    assert.ok(!found.distrusted.join().includes("gone01") && !found.unrecorded.join().includes("gone01"));
+    const r = await releaseLeftovers(host, found.dirs, ident);
+    assert.equal(r.released, 1);
+    assert.equal(r.kept.length, 0);
+    assert.equal(host.exists(good), false, "the recorded folder is cleaned");
+    for (const [base, job, sb] of [[foreign, "job-2", "c2"], [wrong, "job-3", "c3"], [badRec, "job-4", "c4"]] as const) {
+      assert.ok(host.exists(`${base}\\control\\jobs\\${job}\\acl.json`), `${job} untouched`);
+      assert.ok(host.sandboxes.has(`00000000-0000-4000-8000-0000000000${sb}`), `${job}'s sandbox still running`);
+      assert.deepEqual(host.acl.get(key(`${base}\\w\\work`)), [...orig, "PC\\robert:(OI)(CI)M"], `${job}'s access list untouched`);
+    }
+    assert.equal(dropFinishedRecords(host), 1, "the cleaned folder's record goes");
+    assert.equal(host.exists(`${RECORDS}\\nn-wsb-real-good01.json`), false);
+    assert.ok(host.exists(`${RECORDS}\\nn-wsb-host-wron01.json`), "a record that was not trusted is kept");
+    // Without a work area nothing is recorded: every pattern folder is only reported.
+    delete host.envMap["RUNNER_TEMP"];
+    const none = searchEvidenceDirs(host);
+    assert.deepEqual(none.dirs, []);
+    assert.equal(none.unrecorded.length, 3);
+  });
+
   test("own-hardware cleanup: jobs a killed evidence run left in its test folders are released (sandbox stopped, ACLs back) and the folder goes; a live or failing one is kept", async () => {
     const host = new SimHost();
     const orig = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"];
@@ -1217,6 +1278,14 @@ describe("Windows launcher: running a job", () => {
     const real = "C:\\ProgramData\\nn-wsb-real-ab12cd";
     const hostTest = "C:\\ProgramData\\nn-wsb-host-zz9yx8";
     host.envMap["RUNNER_TEMP"] = "D:\\a\\_temp";
+    const RECORDS = "D:\\a\\_temp\\nn-wsb-records";
+    const TOKEN = "0123456789abcdef0123456789abcdef";
+    /** What a run does when it creates its folder: a record in the runner's work area and the same token in a marker inside the folder. */
+    const record = (folder: string, token = TOKEN, markerToken = token): void => {
+      host.writeText(`${RECORDS}\\${folder.split("\\").pop()}.json`, JSON.stringify({ path: folder, token, jobId: "1" }));
+      host.writeText(`${folder}\\${MARKER_NAME}`, markerToken);
+    };
+    record(real); record(hostTest);
     leave(`${real}\\control`, "job-1", "00000000-0000-4000-8000-0000000000b1", `${real}\\job1\\work`);
     leave("D:\\a\\_temp\\nn-g05-wsb\\control", "job-2", "00000000-0000-4000-8000-0000000000b2", "C:\\T\\nn-g05-x\\work");
     // The host test's base has two control folders; one job there cannot be undone, so that base stays whole.
