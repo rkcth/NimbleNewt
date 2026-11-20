@@ -288,6 +288,23 @@ export class LandingQueueService {
     return [{ type: "update", ref: { kind: KIND, id: queueId }, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((e) => e.submissionId !== submissionId), landed, ...(reservations === undefined ? {} : { reservations }) }, this.#runner.now())) }];
   }
 
+  /**
+   * Another task of the queue whose landing is on its way to the host or at it (its open request is a `started` or `uncertain` landing), if any (card P10). A reservation can put a task ahead of an entry that was
+   * first (a reserved place restored from `away`, or the re-approval that takes it again), which the take-out guard does not see; the landing check asks this, so the first place's landing waits until another entry's
+   * landing has ended and the queue never has two landings at the host. A landing records its request before its last check, so of two landings that both pass the first-place check one always sees the other.
+   */
+  async landingUnderway(projectId: string, branch: string, exceptTaskId: string): Promise<string | undefined> {
+    const q = await this.get(projectId, branch);
+    for (const e of q.entries) {
+      if (e.taskId === exceptTaskId) continue;
+      const openId = ((await this.#runner.get(OPEN, e.taskId))?.body as unknown as { requestId?: string } | undefined)?.requestId;
+      if (typeof openId !== "string" || openId === "") continue;
+      const rb = (await this.#runner.get(REQUEST, openId))?.body as unknown as { operation?: string; state?: string } | undefined;
+      if (rb?.operation === "landing" && (rb.state === "started" || rb.state === "uncertain")) return e.taskId;
+    }
+    return undefined;
+  }
+
   /** The controller's time (the clock the services were built with). */
   now(): string { return this.#runner.now(); }
 
@@ -334,13 +351,15 @@ export class LandingQueueService {
 
   /**
    * Marks that the director was told about the queue (card P10), so it is told once: `front` (the first task, first since `since`, held the branch too long) or `round` (a reserved task needed refresh round `round`
-   * beyond its cap). Answers whether this call made the mark (false: already marked, or the queue moved on: another task is first, or the task holds no reservation).
+   * beyond its cap, in the reservation made at `since`). Answers whether this call made the mark (false: already marked, a repeat of the same mark, or the queue moved on: another task is first, or the task holds no
+   * such reservation).
    */
-  async markEscalated(command: { projectId: string; branch: string; taskId: string } & ({ kind: "front"; since: string } | { kind: "round"; round: number })): Promise<boolean> {
+  async markEscalated(command: { projectId: string; branch: string; taskId: string } & ({ kind: "front"; since: string } | { kind: "round"; round: number; since: string })): Promise<boolean> {
     const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
-    const key = command.kind === "front" ? `front:${command.since}` : `round:${command.round}`;
+    // The round mark is named by the reservation (its `since`) too: a later reservation of the same task is marked again.
+    const key = command.kind === "front" ? `front:${command.since}` : `round:${command.since}:${command.round}`;
     let marked = false;
-    try { await retried(() => this.#runner.command("landing.queue.escalate", { commandId: `lq-escalate:${queueId}:${command.taskId}:${key}`.slice(0, 120), actor: "service:landing-queue" }, async () => ({
+    try { marked = !(await retried(() => this.#runner.command("landing.queue.escalate", { commandId: `lq-escalate:${queueId}:${command.taskId}:${key}`.slice(0, 120), actor: "service:landing-queue" }, async () => ({
       payload: { projectId: command.projectId, branch: command.branch, taskId: command.taskId, key },
       build: async () => {
         const current = await this.#runner.get(KIND, queueId);
@@ -348,12 +367,12 @@ export class LandingQueueService {
         let next: LandingQueueBody | undefined;
         if (q !== undefined && command.kind === "front" && q.front !== undefined && q.front.taskId === command.taskId && q.front.since === command.since && q.front.escalated !== true) next = { ...q, front: { ...q.front, escalated: true } };
         const r = q?.reservations?.find((x) => x.taskId === command.taskId);
-        if (q !== undefined && command.kind === "round" && r !== undefined && r.escalatedRound === undefined) next = { ...q, reservations: q.reservations!.map((x) => (x.taskId === command.taskId ? { ...x, escalatedRound: command.round } : x)) };
+        if (q !== undefined && command.kind === "round" && r !== undefined && r.since === command.since && r.escalatedRound === undefined) next = { ...q, reservations: q.reservations!.map((x) => (x.taskId === command.taskId ? { ...x, escalatedRound: command.round } : x)) };
         if (next === undefined || current === undefined) throw new DomainError("invalid_transition", NOTHING);
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(next) }], detail: { taskId: command.taskId, key }, contention: async () => new DomainError("stale_revision", RACE) };
       },
-    }))); marked = true; } catch (error) { if (!nothing(error)) throw error; }
+    })))).replayed; } catch (error) { if (!nothing(error)) throw error; }
     return marked;
   }
 }

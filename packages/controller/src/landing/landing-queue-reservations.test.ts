@@ -20,7 +20,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 type Told = { commandId: string; taskId: string; branch: string; why: "front" | "round"; text: string };
 
 for (const backend of backends) {
-  const rig = async (o: { cap?: number | (() => Promise<number>); holdMs?: number } = {}) => {
+  const rig = async (o: { cap?: number | (() => Promise<number>); holdMs?: number; gate?: (call: WorkspaceCall) => Promise<void> } = {}) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     const options = { clock: w.clock.now, pause: async () => undefined };
@@ -28,13 +28,15 @@ for (const backend of backends) {
     const told: Told[] = [];
     const directors = new Set<string>();
     const cap = o.cap;
+    /** While positive, an escalation fails (the owner could not be told) after it was asked; each failure counts down. */
+    const failing = { escalations: 0 };
     const ops = new LandingQueueOps(LandingQueueService.withEpoch(w.storage, w.epoch, options), {
       approvalOf: async (id) => approvals.get(id),
       landingBranch: async () => "main",
       projectOfTask: async (t) => ((await w.storage.getAggregate({ kind: "task", id: t }))?.body as { projectId?: string } | undefined)?.projectId,
       refreshCap: typeof cap === "function" ? cap : async () => cap ?? 3,
       isDirector: async (by) => directors.has(by.id),
-      escalate: async (n) => { told.push({ commandId: n.commandId, taskId: n.taskId, branch: n.branch, why: n.why, text: n.text }); },
+      escalate: async (n) => { if (failing.escalations > 0) { failing.escalations--; throw new Error("the owner could not be told"); } told.push({ commandId: n.commandId, taskId: n.taskId, branch: n.branch, why: n.why, text: n.text }); },
       ...(o.holdMs === undefined ? {} : { holdMs: o.holdMs }),
     });
     const leaseOps = new IntegratorLeaseOps(IntegratorLeaseService.withEpoch(w.storage, w.epoch, options), { landingBranch: async () => "main" });
@@ -52,6 +54,7 @@ for (const backend of backends) {
     const calls: WorkspaceCall[] = [];
     const host = async (call: WorkspaceCall): Promise<WorkspaceOutcome> => {
       calls.push(call);
+      await o.gate?.(call);
       const s = call.submission!;
       if (s.base !== head) return { ok: false, reason: `submission ${s.id} was approved on ${s.base.slice(0, 12)} but the landing branch is at ${head.slice(0, 12)}` };
       head = oid(++commits);
@@ -70,7 +73,7 @@ for (const backend of backends) {
     };
     const list = () => ops.list(w.owner, { projectId: w.project });
     return {
-      store, w, ops, person, task, submit, takeBack, told, directors, lander, list, calls,
+      store, w, ops, person, task, submit, takeBack, told, failing, directors, lander, list, calls,
       head: () => head,
       queued: async () => (await list()).items.map((e) => [e.position, e.taskId]),
       close: () => store.close(),
@@ -179,7 +182,7 @@ for (const backend of backends) {
       await refuses("invalid_transition", () => land(t2), /the oldest .* lands first/);
       await refuses("invalid_transition", () => land(t2), /the oldest .* lands first/);
       assert.deepEqual(r.told.map((t) => [t.taskId, t.why]), [[t1, "front"]]);
-      assert.match(r.told[0]!.text, new RegExp(`Task ${t1} has been first in the landing queue of branch main since ${since} \\(1 h\\) and has not landed; other work waits behind it`));
+      assert.match(r.told[0]!.text, new RegExp(`Task ${t1} has been first in the landing queue of branch main since ${since} \\(at least 1 h\\) and has not landed; other work waits behind it`));
       const front = (await r.list()).front!;
       assert.deepEqual([front.taskId, front.since, front.escalated], [t1, since, true]);
       // The head's own landing is not a wait behind it; once it is taken out, the next first place starts its own time.
@@ -193,6 +196,70 @@ for (const backend of backends) {
       assert.equal((await land(t2)).state, "done");
       r.w.clock.advance(61 * MIN);
       assert.equal(r.told.length, 1, "nothing waits behind the new first place yet");
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a reserved place that comes ahead of an entry whose landing is at the host waits until that landing ends (card P10, reservations)`, async () => {
+    let atHost: () => void = () => undefined, release: () => void = () => undefined;
+    const reached = new Promise<void>((res) => { atHost = res; });
+    const blocked = new Promise<void>((res) => { release = res; });
+    let first = true;
+    const r = await rig({ cap: 2, gate: async () => { if (first) { first = false; atHost(); await blocked; } } });
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2] = [await r.task("one"), await r.task("two")];
+      const s1 = r.submit(t1, r.head());
+      await r.ops.queueApproved(s1, "rv1");
+      await r.ops.queueApproved(r.submit(t2, r.head()), "rv2");
+      // Task one's approval is taken back: it leaves (its place remembered); task two is first, and its landing passes its checks and waits at the host.
+      r.takeBack(s1);
+      assert.equal(await r.ops.withdrawUnapproved(s1, "rv3"), true);
+      const land = await r.lander(ivy, t2);
+      const two = land(t2);
+      await reached;
+      // Meanwhile task one's author reaches the cap: its old place (1, ahead of task two) is reserved, and its re-approval takes that place.
+      assert.equal(await r.ops.afterRound({ taskId: t1, projectId: r.w.project, round: 2 }), "reserved");
+      await r.ops.queueApproved(r.submit(t1, r.head()), "rv4");
+      assert.deepEqual(await r.queued(), [[1, t1], [2, t2]]);
+      // Task one is first, but task two's landing has not ended: task one's landing is refused before any host is asked (two landings never reach the host together).
+      await refuses("invalid_transition", () => land(t1), new RegExp(`task ${t2}'s landing on branch main is in progress`));
+      assert.equal(r.calls.length, 1);
+      release();
+      assert.equal((await two).state, "done");
+      // Once it has ended, task one's landing is asked of the host (which refuses it: the branch moved since its approval).
+      assert.equal((await land(t1)).state, "refused");
+      assert.equal(r.calls.length, 2);
+    } finally { release(); await r.close(); }
+  });
+
+  test(`${backend.name}: an escalation that could not be told is told at the next refused landing or round, and then once (card P10, reservations)`, async () => {
+    const r = await rig({ cap: 2, holdMs: 60 * MIN });
+    try {
+      const ivy = await r.person("ivy");
+      const [t1, t2, t3] = [await r.task("one"), await r.task("two"), await r.task("three")];
+      await r.ops.queueApproved(r.submit(t1, oid(999)), "rv1"); // approved on a base the branch is not at
+      await r.ops.queueApproved(r.submit(t2, r.head()), "rv2");
+      const land = await r.lander(ivy, t1);
+      r.w.clock.advance(60 * MIN);
+      // The owner could not be told: nothing is marked, and the next refused landing tells; after that, once.
+      r.failing.escalations = 1;
+      await refuses("invalid_transition", () => land(t2), /the oldest .* lands first/);
+      assert.deepEqual([r.told.length, (await r.list()).front?.escalated], [0, undefined]);
+      await refuses("invalid_transition", () => land(t2), /the oldest .* lands first/);
+      await refuses("invalid_transition", () => land(t2), /the oldest .* lands first/);
+      assert.deepEqual(r.told.map((t) => [t.taskId, t.why]), [[t1, "front"]]);
+      assert.equal((await r.list()).front?.escalated, true);
+      // A round beyond the cap whose notice failed is told at the next round, naming that round; then not again.
+      assert.equal(await r.ops.afterRound({ taskId: t3, projectId: r.w.project, round: 2 }), "reserved");
+      r.failing.escalations = 1;
+      assert.equal(await r.ops.afterRound({ taskId: t3, projectId: r.w.project, round: 3 }), undefined);
+      assert.equal((await r.list()).reservations.find((x) => x.taskId === t3)?.escalatedRound, undefined);
+      assert.equal(await r.ops.afterRound({ taskId: t3, projectId: r.w.project, round: 4 }), "escalated");
+      assert.equal(await r.ops.afterRound({ taskId: t3, projectId: r.w.project, round: 5 }), undefined);
+      const rounds = r.told.filter((t) => t.why === "round");
+      assert.deepEqual(rounds.map((t) => t.taskId), [t3]);
+      assert.match(rounds[0]!.text, /needed refresh round 4 /);
+      assert.equal((await r.list()).reservations.find((x) => x.taskId === t3)?.escalatedRound, 4);
     } finally { await r.close(); }
   });
 

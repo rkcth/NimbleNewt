@@ -46,7 +46,10 @@ export interface LandingQueueOpsOptions {
   readonly projectOfTask: (taskId: string) => Promise<string | undefined>;
   /** The project's refresh-round cap (`integration.refreshRounds`). Absent or throwing: `REFRESH_CAP_DEFAULT`. */
   readonly refreshCap?: (projectId: string) => Promise<number>;
-  /** Tells the project's director (and the owner) about a landing queue that needs a decision. Best effort: a throw is ignored (the mark stays, so it is not told twice). */
+  /**
+   * Tells the project's director (and the owner) about a landing queue that needs a decision. It is asked before the queue marks the escalation, so a throw (the owner could not be told) leaves it unmarked and it is
+   * asked again at the next refused landing or round; a repeat of the same `commandId` must tell nobody twice.
+   */
   readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round"; readonly text: string }) => Promise<void>;
   /** Whether the caller is a director of the project (it may take entries out and end reservations). Absent: nobody is. */
   readonly isDirector?: (by: Principal, projectId: string) => Promise<boolean>;
@@ -191,13 +194,16 @@ export class LandingQueueOps {
     // The first place: the entry or reserved place with the lowest number (card P10). A reserved place waiting for its task's approval holds the branch: nothing else lands before it.
     const head = frontOf(q);
     const behind = (message: string): Promise<never> => this.#heldTooLong(call.projectId, branch, q.front, head?.entry === undefined).then(() => { throw new DomainError("invalid_transition", message); });
-    const firstIs = head === undefined ? "" : head.entry === undefined ? `task ${head.taskId} holds the first place (reserved after its author reached the refresh-round cap) and waits for its approved submission` : `the oldest (${head.entry.submissionId}, task ${head.taskId}${head.reservation === undefined ? "" : ", a reserved place"})`;
+    const firstIs = head === undefined ? "" : head.entry === undefined ? `task ${head.taskId} holds the first place (reserved after its author reached the refresh-round cap) and waits for its approved submission (the owner, an integrator or a director may take it out with landing.queue.remove, which lets the others land)` : `the oldest (${head.entry.submissionId}, task ${head.taskId}${head.reservation === undefined ? "" : ", a reserved place"})`;
     if (mine === undefined) {
       if (by.kind === "owner" && head === undefined) return undefined;
       if (head !== undefined && head.taskId !== call.taskId && by.kind === "owner") return behind(`the landing queue of branch ${branch} is not empty and task ${call.taskId} has nothing in it: ${firstIs}${head.entry === undefined ? "" : " lands first"}`);
       throw new DomainError("invalid_transition", `task ${call.taskId} has no approved submission in the landing queue of branch ${branch}; an integrator lands only queued submissions (landing.queue.add)`);
     }
     if (head!.taskId !== call.taskId) return behind(`task ${call.taskId}'s submission ${mine.submissionId} is number ${q.entries.indexOf(mine) + 1} in the landing queue of branch ${branch}; ${firstIs}${head!.entry === undefined ? "" : " lands first"}`);
+    // A reserved place can come ahead of an entry whose landing already passed its own checks (card P10): this one waits until that landing ends, so two landings never reach the host together.
+    const underway = await this.#queue.landingUnderway(call.projectId, branch, call.taskId);
+    if (underway !== undefined) throw new DomainError("invalid_transition", `task ${underway}'s landing on branch ${branch} is in progress; task ${call.taskId} lands after that landing ends (ask again then)`);
     const a = await this.#options.approvalOf(mine.submissionId);
     if (a === undefined || !a.approved || a.base !== mine.base || a.tree !== mine.tree) throw new DomainError("review_invalid", `submission ${mine.submissionId} is no longer approved as queued (${redactText(a?.reason ?? "its base or tree changed").slice(0, 200)}); take it out of the queue (landing.queue.remove) or have it approved again`, { field: "submissionId" });
     return { submissionId: mine.submissionId, base: mine.base, tree: mine.tree, branch };
@@ -205,18 +211,20 @@ export class LandingQueueOps {
 
   /**
    * A landing waits behind the first place (card P10). When that place has been first for `holdMs` or longer, the director is told, once per first place: it holds the branch, and someone decides whether it goes on
-   * (its author is approved and it lands) or is taken out. Best effort: a failure to mark or tell never changes the landing's own answer.
+   * (its author is approved and it lands) or is taken out. The notice goes first and the mark after it: a notice that could not be given is given at the next refused landing (the notices are named by command ID,
+   * and their text depends only on the first place, so two refusals at the same moment tell once). Best effort: a failure to mark or tell never changes the landing's own answer.
    */
   async #heldTooLong(projectId: string, branch: string, front: LandingQueueFront | undefined, waitingForApproval: boolean): Promise<void> {
     if (front === undefined || front.escalated === true || this.#options.escalate === undefined) return;
+    const holdMs = this.#options.holdMs ?? LANDING_HOLD_MS;
     const since = Date.parse(front.since), now = Date.parse(this.#queue.now());
-    if (!Number.isFinite(since) || !Number.isFinite(now) || now - since < (this.#options.holdMs ?? LANDING_HOLD_MS)) return;
+    if (!Number.isFinite(since) || !Number.isFinite(now) || now - since < holdMs) return;
     try {
-      if (!(await this.#queue.markEscalated({ kind: "front", projectId, branch, taskId: front.taskId, since: front.since }))) return;
-      const hours = Math.floor((now - since) / 3_600_000);
-      const text = `Task ${front.taskId} has been first in the landing queue of branch ${branch} since ${front.since} (${hours} h) and has not landed${waitingForApproval ? ": its place is reserved and it waits for an approved submission" : ""}; other work waits behind it. Decide whether it goes on, or take it out with landing.queue.remove.`;
-      await this.#options.escalate({ commandId: `lq-held:${LandingQueueService.queueIdOf(projectId, branch)}:${front.taskId}:${front.since}`.slice(0, 120), projectId, taskId: front.taskId, branch, why: "front", text });
-    } catch { /* best effort */ }
+      const hold = holdMs % 3_600_000 === 0 ? `${holdMs / 3_600_000} h` : `${Math.round(holdMs / 60_000)} min`;
+      const text = `Task ${front.taskId} has been first in the landing queue of branch ${branch} since ${front.since} (at least ${hold}) and has not landed${waitingForApproval ? ": its place is reserved and it waits for an approved submission" : ""}; other work waits behind it. Decide whether it goes on, or take it out with landing.queue.remove.`;
+      await this.#options.escalate({ commandId: `lq-held:${LandingQueueService.queueIdOf(projectId, branch)}:${front.taskId}:${front.since}${waitingForApproval ? ":waiting" : ""}`.slice(0, 120), projectId, taskId: front.taskId, branch, why: "front", text });
+      await this.#queue.markEscalated({ kind: "front", projectId, branch, taskId: front.taskId, since: front.since });
+    } catch { /* best effort: unmarked, so the next refused landing tells again */ }
   }
 
   /**
@@ -239,9 +247,10 @@ export class LandingQueueOps {
         return "reserved";
       }
       if (call.round <= held.round || held.escalatedRound !== undefined) return undefined;
-      if (!(await this.#queue.markEscalated({ kind: "round", projectId: call.projectId, branch, taskId: call.taskId, round: call.round }))) return undefined;
+      // Told first, marked after: a notice that could not be given is given at the task's next round (named by that round, so a repeat is told once).
       const text = `Task ${call.taskId} needed refresh round ${call.round} although its place in the landing queue of branch ${branch} was reserved at round ${held.round} (the cap is ${cap}): its work keeps going stale. Decide whether it goes on, or take it out with landing.queue.remove.`;
-      try { await this.#options.escalate?.({ commandId: `lq-rounds:${call.taskId}:${held.since}`.slice(0, 120), projectId: call.projectId, taskId: call.taskId, branch, why: "round", text }); } catch { /* best effort */ }
+      try { await this.#options.escalate?.({ commandId: `lq-rounds:${call.taskId}:${held.since}:${call.round}`.slice(0, 120), projectId: call.projectId, taskId: call.taskId, branch, why: "round", text }); } catch { return undefined; }
+      if (!(await this.#queue.markEscalated({ kind: "round", projectId: call.projectId, branch, taskId: call.taskId, round: call.round, since: held.since }))) return undefined;
       return "escalated";
     } catch { return undefined; }
   }
