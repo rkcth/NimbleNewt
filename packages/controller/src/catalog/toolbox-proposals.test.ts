@@ -372,6 +372,25 @@ for (const backend of backends) {
     assert.ok(!(await allKept()).includes("deleted meanwhile"), await allKept());
   });
 
+  suite("slice 4, second review: a proposal written after the owner's deletion gathered what stands on the record, but before the record is blanked, leaves no copy behind (the deletion looks again once the record is blanked)", async (c) => {
+    const { cody, maya } = await cast(c);
+    const kept = async (id: string) => c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id });
+    // Before the first removal (after the gather) the author proposes from the record, which is still as it was: the proposal and its kept copy are written.
+    const rec = await c.note(cody.p, "console.log('lint, proposed while being deleted')");
+    let made: string | undefined;
+    const retention = RetentionService.withEpoch(c.storage, c.epoch, { settings: { effective: async () => ({ ...RETENTION_DEFAULTS, reserveBytes: 0, thinkingAuto: false }) }, beforeBatch: async (batch: number) => {
+      if (batch === 0 && made === undefined) made = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: rec, rationale: "r", tests: "t" })).proposalId;
+    } } as never, options);
+    const deleted = await retention.delete(c.owner, { commandId: cid("del"), recordId: rec, reason: "the owner asked" });
+    assert.equal(deleted.status, "deleted", JSON.stringify(deleted));
+    assert.ok(made !== undefined);
+    assert.equal(await kept(made!), undefined, "the copy written meanwhile is removed with the record");
+    assert.ok(deleted.derived.others.includes(`${PROPOSAL_TEXT_KIND}/${made}`), JSON.stringify(deleted.derived));
+    assert.deepEqual((await c.props.get(maya.p, made!)).unavailable, ["executable"]);
+    // Once the record is blanked nothing more is made from it.
+    await refuses("invalid_command", () => c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: rec, rationale: "r", tests: "t" }));
+  });
+
   suite("slice 4, the README validation walk (README 324-326): a coder's personal tool becomes a role-scoped shared version that survives its author's rename and retirement; only maintainers change it; a published version is immutable; update, rollback and revocation; nothing is granted by publishing", async (c) => {
     const cody = await c.agent("Cody", worker(c.a), { roles: ["coder"] });
     const kim = await c.agent("Kim", [...worker(c.a), { action: "tool.toolbox.fmt", project: c.a }], { roles: ["coder"] });

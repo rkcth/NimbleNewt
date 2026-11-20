@@ -170,6 +170,10 @@ function runKinds(b: { removedByKind?: unknown; removed?: unknown; removedCount?
 }
 
 
+/** The records that keep a copy of a desk record's text and name it in `sources` (card T08): a shared release's snapshot and a waiting proposal's kept text. The owner's deletion of the record removes them. */
+const TEXT_COPY_KINDS = ["catalog-snapshot", "toolbox-proposal-text"] as const;
+const madeFrom = (a: Aggregate, ids: ReadonlySet<string>): boolean => { const b = a.body as { sources?: unknown }; return Array.isArray(b.sources) && b.sources.some((id) => typeof id === "string" && ids.has(id)); };
+
 async function scan(runner: CommandRunner, kind: string, each: (a: Aggregate) => void, limit = SCAN_LIMIT): Promise<boolean> {
   let after: string | undefined; let seen = 0;
   // A read with no cap must still end: a store that does not move past the cursor (a page whose last ID was a cursor already) counts as a read that did not finish.
@@ -1177,6 +1181,16 @@ export class RetentionService {
       for (const w of batch) await step(w.name, w.kind, w.id, w.build);
     }
     if (todo > handled) return { status: "partial", recordId: command.recordId, derived, backups, deletionId, remaining: todo - handled };
+    // A snapshot or a proposal's kept text written from one of the records after the gather above (the record was not blanked yet, so that write's own revision check passed) is looked for again now that every record
+    // is blanked: neither is made from a blanked record, so this finds the last of them (card T08, second review). A partial request needs no such pass: the next one gathers again.
+    const blanked = new Set(members.map((a) => a.id));
+    const late: { kind: string; id: string }[] = [];
+    for (const kind of TEXT_COPY_KINDS) await scan(this.#runner, kind, (a) => { if (madeFrom(a, blanked) && !found.others.some((o) => o.kind === kind && o.id === a.id)) late.push({ kind, id: a.id }); });
+    if (late.length > 0) {
+      derived.others.push(...late.map((o) => `${o.kind}/${o.id}`));
+      await this.#deps.ledger?.append({ deletionId, at: this.#runner.now(), by: owner.id, reason: command.reason, desk: plan.desk, compactions: plan.compactions, removed: [...plan.summaries.map((id) => ({ kind: "summary-record", id })), ...plan.archives.map((id) => ({ kind: "retention-archive", id })), ...plan.others, ...late] });
+      for (const o of late) await step("derived", o.kind, o.id, (f) => [{ type: "delete", ref: { kind: o.kind, id: o.id }, expectedRevision: f.revision }]);
+    }
     await this.#upsertDeletion(owner.id, `${base}.done.${attempt}`, deletionId, recordBody("deleted", { attempt, plan: null as unknown as JsonObject }));
     return { status: "deleted", recordId: command.recordId, derived, backups, deletionId, ...(replayCited.length > 0 ? { replayReleased: [...replayCited] } : {}) };
   }
@@ -1243,8 +1257,8 @@ export class RetentionService {
       complete = (await scan(this.#runner, kind, (a) => { if (quotes(a.body)) others.set(`${kind}/${a.id}`, { kind, id: a.id }); })) && complete;
     }
     // A shared tool's release keeps a snapshot of its text, and a waiting proposal the text of the parts its author wrote (card T08); one made from the record goes with it.
-    for (const kind of ["catalog-snapshot", "toolbox-proposal-text"]) {
-      complete = (await scan(this.#runner, kind, (a) => { const b = a.body as { sources?: unknown }; if (Array.isArray(b.sources) && b.sources.some((id) => typeof id === "string" && copyOf.has(id))) others.set(`${kind}/${a.id}`, { kind, id: a.id }); })) && complete;
+    for (const kind of TEXT_COPY_KINDS) {
+      complete = (await scan(this.#runner, kind, (a) => { if (madeFrom(a, copyOf)) others.set(`${kind}/${a.id}`, { kind, id: a.id }); })) && complete;
     }
     for (const o of plan?.others ?? []) if ((await this.#runner.get(o.kind, o.id)) !== undefined) others.set(`${o.kind}/${o.id}`, o);
     const archives: Aggregate[] = [];
