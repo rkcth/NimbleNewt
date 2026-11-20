@@ -221,13 +221,22 @@ for (const backend of backends) {
       const together = new Promise<void>((ok) => { go = ok; });
       r.setAnswer(async (call) => { await together; return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: call.submission!.id, base: call.submission!.base, tree: call.submission!.tree } }; });
       const ask = (by: Principal, svc: WorkspaceOpService, id: string, taskId: string) => svc.request(by, { commandId: id, operation: "landing", taskId, reason: "race", leaseId: won[0]!.leaseId, fence: won[0]!.fence }).then((a) => a.state, (e: DomainError) => e.code);
-      const one = r.workspace(), two = r.workspace(r.queueOps());
+      // The second service's queue check is observed, so the test knows (without waiting for a time) when the later landing has been judged against the queue while the oldest is still on the host.
+      const twoQueue = r.queueOps(), judged: string[] = [], judgeCheck = twoQueue.checkLanding.bind(twoQueue);
+      twoQueue.checkLanding = async (by, call) => { try { return await judgeCheck(by, call); } finally { judged.push(call.taskId); } };
+      const one = r.workspace(), two = r.workspace(twoQueue);
       const racing = [ask(holder, one, "h1", t1), ask(loser, two, "x1", t1), ask(holder, two, "h2", t2)];
-      while (r.calls.length < 1) await new Promise((ok) => setTimeout(ok, 5));
-      // Give the others every chance to reach the host before it answers.
-      await new Promise((ok) => setTimeout(ok, 50));
-      assert.equal(r.calls.length, 1, "only one landing reached the host");
-      go();
+      // A landing that ends before the point waited for (a fault before the host or before its queue check) ends the wait too, so the assertions report it instead of the file waiting for its timeout; the held host answer is
+      // released whatever happens, so a failed assertion does not leave the first landing waiting.
+      const ended = racing.map(() => false);
+      racing.forEach((p, i) => { void p.finally(() => { ended[i] = true; }); });
+      try {
+        while (r.calls.length < 1 && !ended[0]) await new Promise((ok) => setTimeout(ok, 5));
+        // The later landing's queue check has finished (it is not the oldest) before the host answers; on a slow machine it would otherwise start after the oldest landed and find itself the oldest.
+        while (!judged.includes(t2) && !ended[2]) await new Promise((ok) => setTimeout(ok, 5));
+        assert.ok(judged.includes(t2), "the later landing was judged against the queue while the oldest was on the host");
+        assert.equal(r.calls.length, 1, "only one landing reached the host");
+      } finally { go(); }
       const states = await Promise.all(racing);
       assert.deepEqual(states, ["done", "fenced", "invalid_transition"], JSON.stringify(states));
       assert.deepEqual(r.calls.map((c) => c.taskId), [t1]);

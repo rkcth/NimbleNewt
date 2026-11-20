@@ -5,6 +5,7 @@ import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import { randomUUID } from "node:crypto";
 import { EXIT_BUSY, jobDirFor, jobFile, lockFile, releaseJob, runWindowsJob, type WindowsJob } from "./windows-job.js";
+import { listSandboxes, type ListOptions } from "./windows-list.js";
 import type { WindowsHost } from "./windows-host.js";
 import { cutWhole } from "./windows-redact.js";
 import {
@@ -27,6 +28,8 @@ export interface AutologonOptIn {
 }
 
 export interface WindowsSandboxOptions {
+  /** Limits and pause of the `wsb list` calls (tests shorten them). Default: a long first call and at most two retries. */
+  readonly listOptions?: ListOptions;
   /** Default: the real Windows implementation (windows-real.ts). */
   readonly host: WindowsHost;
   /** Supervisor-owned: job files and the sandbox lock. */
@@ -122,6 +125,7 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
     return { file: node, args: [runnerScript, jobFile(jobDir)], env: { ...passed, TEMP: runnerTemp, TMP: runnerTemp, NIMBLENEWT_WSB_JOB: jobDir }, cwd: controlDir };
   };
 
+  let lastListDetail: string | undefined;
   const checkHealth = async (): Promise<BackendHealth> => {
     const notes = capabilityNotes(settings);
     const no = (reason: string): BackendHealth => ({ healthy: false, backend: "windows-sandbox", ...(clientVersion === "unverified" ? {} : { version: clientVersion }), reason, notes });
@@ -146,11 +150,12 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
     try { const holder = lockText === undefined ? {} : JSON.parse(lockText) as { pid?: number }; running = holder.pid !== undefined && holder.pid !== host.pid && host.pidAlive(holder.pid); } catch { running = false; }
     if (!running) {
       for (const leftover of host.listDir(`${controlDir}\\jobs`)) {
-        const result = await releaseJob(host, settings, `${controlDir}\\jobs\\${leftover}`);
+        const result = await releaseJob(host, settings, `${controlDir}\\jobs\\${leftover}`, options.listOptions);
         if (!result.ok) return no(`a job left changes behind and they could not be undone: ${result.reason}`);
       }
-      const listed = await host.run(client.value.wsb, ["list", "--raw"], { cwd: client.value.cwd, timeoutMs: 60_000 }).catch(() => undefined);
-      if (listed === undefined || listed.code !== 0) return no("the running sandboxes could not be listed");
+      const listed = await listSandboxes(host, client.value, options.listOptions);
+      lastListDetail = listed.detail;
+      if (!listed.ok) return no(`the running sandboxes could not be listed after ${String(listed.attempts)} attempt(s) (${listed.detail})`);
       if (/[0-9a-f]{8}-[0-9a-f]{4}-/i.test(listed.stdout)) return no("a Windows Sandbox is already running that this program did not start; capacity is one sandbox at a time");
     }
     // The real test: a sandbox is started and the guest is asked to do what it must not be able to.
@@ -198,12 +203,13 @@ export function windowsSandboxBackend(options: WindowsSandboxOptions): SandboxBa
       windowsMode: mode,
       sessionDependent: "true",
       ...(mode === "autologon-lock" ? { autologonAuthority: options.autologonLock!.authority, lockChecked: "at admission and again before the command starts" } : { autologon: "off (never a default)" }),
+      ...(lastListDetail === undefined ? {} : { wsbListDiagnostics: lastListDetail }),
       clientVersion, clientProof, minClientVersion: minVersion, shareIdentity: settings.shareIdentity, supervisorAcl: aclPolicy, vmFallback: VM_FALLBACK_DECISION.split(":")[0]!,
     }),
     async release(spawnPlan: SpawnPlan): Promise<void> {
       const jobDir = spawnPlan.env["NIMBLENEWT_WSB_JOB"];
       if (jobDir === undefined || !overlapsWin(jobDir, `${controlDir}\\jobs`) || jobDir === `${controlDir}\\jobs`) return;
-      const result = await releaseJob(host, settings, jobDir);
+      const result = await releaseJob(host, settings, jobDir, options.listOptions);
       if (!result.ok) throw new Error(`Windows Sandbox cleanup incomplete: ${result.reason}`);
     },
   };

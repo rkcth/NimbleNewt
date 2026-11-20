@@ -97,6 +97,10 @@ export interface WindowsHost {
   /** This process's id (for the lock file). */
   readonly pid: number;
   pidAlive(pid: number): boolean;
+  /** The names (not the values) of this process's environment variables. Optional; used only to record which variables a child could see. */
+  envNames?(): readonly string[];
+  /** The Windows Sandbox server processes running now (id and start time, ISO). Optional; recorded only, for diagnosing a `wsb` call that does not answer. */
+  serverProcesses?(): Promise<readonly { readonly pid: number; readonly started?: string }[]>;
 
   exists(path: string): boolean;
   /** True when the path is, or passes through, a symbolic link, a junction or any other reparse point (its real path differs from the path). */
