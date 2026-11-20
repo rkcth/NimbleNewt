@@ -437,6 +437,20 @@ describe("Windows launcher: health (fail closed, mode and limits visible)", () =
       assert.match(d, /server before: pid 777 started 2026-11-19T10:00:00.000Z; server after: pid 777 started/);
     });
 
+    test("the server line copies only a whole process id and an ISO time; anything else the host returned is 'unknown', and a failing probe is 'not readable'", async () => {
+      const host = new SimHost();
+      host.servers = [{ pid: 12, started: "C:\\Users\\robert started this" }, { pid: 1.5, started: "2026-11-19T10:00:00.1234567Z" }];
+      host.listScript = [hung, hung, hung];
+      const reason = (await windowsSandboxBackend(options(host, { listOptions: fast })).health()).reason!;
+      assert.match(reason, /server before: pid 12 started unknown, pid unknown started 2026-11-19T10:00:00.1234567Z;/);
+      assert.ok(!reason.includes("robert") && !reason.includes("Users"), reason);
+      const failing = new SimHost(); failing.listScript = [hung, hung, hung];
+      failing.serverProcesses = async () => { throw new Error("PowerShell failed: C:\\Users\\robert"); };
+      const r2 = (await windowsSandboxBackend(options(failing, { listOptions: fast })).health()).reason!;
+      assert.match(r2, /server before: not readable; server after: not readable/);
+      assert.ok(!r2.includes("robert"), r2);
+    });
+
     test("the first call has a longer limit than the retries, and there are at most two retries", async () => {
       const host = new SimHost();
       host.listScript = [hung, hung, hung, hung];

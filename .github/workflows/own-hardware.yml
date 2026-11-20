@@ -229,8 +229,8 @@ jobs:
           node scripts/y02-checkpoint.mjs run --out "$RUNNER_TEMP/y02-windows" 2>&1 | tee "$RUNNER_TEMP/y02-wsb-local/y02.log" | node scripts/redact-log.mjs
       # What a step stopped by its timeout (or a cancelled run) left behind: each leftover job's sandbox is stopped and its access lists restored through the backend's own release
       # (scripts/wsb-cleanup.mjs); a Windows Sandbox still running afterwards is reported, not stopped. Counts only in the log; the reasons stay in the local folder.
-      # 30 minutes: when `wsb list` does not answer, each list takes up to about 5 minutes (three calls and the server probes, windows-list.ts), once per leftover whose stop
-      # failed and once for the final check.
+      # 30 minutes: when `wsb list` does not answer, each list takes up to about 7 minutes (three calls, two 30 s server probes, and up to 20 s to stop each timed-out
+      # program; windows-list.ts), once per leftover whose stop failed and once for the final check.
       - name: Release leftovers of the Sandbox runs
         id: cleanup
         if: always()

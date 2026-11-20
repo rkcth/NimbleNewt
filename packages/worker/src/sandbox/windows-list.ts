@@ -36,11 +36,15 @@ export function envPresence(host: WindowsHost): string {
   return parts.join(" ");
 }
 
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$/;
+
 async function servers(host: WindowsHost): Promise<string> {
   if (host.serverProcesses === undefined) return "not available";
   try {
     const list = await host.serverProcesses();
-    return list.length === 0 ? "none" : list.map((p) => `pid ${String(p.pid)} started ${p.started ?? "unknown"}`).join(", ");
+    // Only a whole process id and an ISO time are copied, whatever the host returned: the line goes to logs of a public repository.
+    const shown = list.slice(0, 8).map((p) => `pid ${Number.isSafeInteger(p.pid) ? String(p.pid) : "unknown"} started ${p.started !== undefined && ISO_TIME.test(p.started) ? p.started : "unknown"}`);
+    return list.length === 0 ? "none" : `${shown.join(", ")}${list.length > 8 ? ` and ${String(list.length - 8)} more` : ""}`;
   } catch { return "not readable"; }
 }
 
