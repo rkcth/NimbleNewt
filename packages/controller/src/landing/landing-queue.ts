@@ -15,6 +15,9 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
  */
 export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200, landed: 200 } as const;
 const KIND = "landing-queue";
+/** The workspace service's records (see `WorkspaceOpService`): one open-request pointer per task, and the requests themselves. Read here only to tell that a task's landing is in progress. */
+const OPEN = "workspace-open";
+const REQUEST = "workspace-request";
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const SUBMISSION = /^sbm-[a-z2-7]{20}$/;
 
@@ -154,10 +157,17 @@ export class LandingQueueService {
         const at = q?.entries.findIndex((e) => e.taskId === taskId) ?? -1;
         if (current === undefined || q === undefined || at < 0 || (command.allowed !== undefined && !command.allowed(q.entries[at]!))) throw new DomainError("not_found", `task ${taskId} has no submission in the landing queue of branch ${command.branch}`);
         removed = q.entries[at];
+        // An entry whose landing is on its way to the host (or at it) stays until that landing ends: taking it out would make the next entry the oldest, and its landing could then reach the host too.
+        // The task's open-request record is read, and written back unchanged, in this same write: a landing that starts at the same moment changes that record and so loses the race (this write is built again, or that landing fails before the host).
+        const open = await this.#runner.get(OPEN, taskId);
+        const openId = (open?.body as unknown as { requestId?: string } | undefined)?.requestId;
+        const request = typeof openId === "string" && openId !== "" ? await this.#runner.get(REQUEST, openId) : undefined;
+        const rb = request?.body as unknown as { operation?: string; state?: string } | undefined;
+        if (open !== undefined && rb?.operation === "landing" && rb.state === "started") throw new DomainError("invalid_transition", `task ${taskId}'s submission ${removed!.submissionId} is being landed on branch ${command.branch} right now, so it cannot be taken out of the queue until that landing ends: wait for that landing to end (it ends with a result of its own), then take the submission out if it is still queued`);
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return {
           ref, creates: false,
-          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json({ ...q, entries: q.entries.filter((_, i) => i !== at) }) }],
+          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json({ ...q, entries: q.entries.filter((_, i) => i !== at) }) }, ...(open === undefined ? [] : [{ type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }])],
           detail: { branch: command.branch, taskId, submissionId: q.entries[at]!.submissionId, reason },
           contention: async () => new DomainError("stale_revision", RACE),
         };
