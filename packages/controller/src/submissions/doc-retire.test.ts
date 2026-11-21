@@ -108,6 +108,9 @@ for (const backend of backends) {
       const gr = await read(guide);
       await docs.record(owner, { commandId: cid("r"), projectId: project, obligationId: guide, expectedRevision: gr.revision, title: `a${"\u{1F4D8}".repeat(40)}`, location: "docs/guide.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login, search] });
       assert.equal((await read(guide)).state, "verified", "a new title keeps the document verified");
+      // A long second title (second review): the two names together make the notice longer than 200 characters, so it is cut to 200 with "..." at the end.
+      await docs.record(owner, { commandId: cid("r"), projectId: project, obligationId: faq, expectedRevision: (await read(faq)).revision, title: `Frequently asked questions ${"x".repeat(80)}`, location: "docs/faq.md", audience: "support", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login] });
+      assert.equal((await read(faq)).state, "verified");
       // The controller's automatic check after independent QA evidence: the owner is told.
       const l4 = code(login, treeB);
       await docs.afterQaEvidence({ evidenceId: derivedId("qae", cid("qa")), taskId: login, submissionId: l4, source: "independent" });
@@ -115,7 +118,7 @@ for (const backend of backends) {
       assert.match(notices[1]!.text, /2 verified documents went stale/);
       assert.ok(notices[1]!.text.includes(`"a${"\u{1F4D8}".repeat(29)}"`), notices[1]!.text);
       assert.doesNotMatch(notices[1]!.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "no half character");
-      assert.ok(notices[1]!.text.length <= 200);
+      assert.ok(notices[1]!.text.length <= 200 && notices[1]!.text.length >= 190 && notices[1]!.text.endsWith("..."), notices[1]!.text);
       assert.notEqual(notices[1]!.commandId, notices[0]!.commandId);
       assert.equal((await read(guide)).updates.find((u) => u.state === "open")?.requestedBy, DOC_AUTO_PRINCIPAL.id);
       // A notice that cannot be sent is not the check's failure.
@@ -216,6 +219,15 @@ for (const backend of backends) {
       const second = await docs.retire(owner, { commandId: oldRetire, obligationId: old, expectedRevision: (await read(old)).revision - 1 });
       assert.deepEqual([second.replayed, second.cancelled, second.running], [true, [oldTask], []]);
       assert.equal(await taskState(oldTask), "cancelled");
+
+      // A verification made before the retirement and sent again with its command ID (its answer was lost) is answered with its result, not refused because the document was retired since (second review).
+      const tips = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "Tips", location: "docs/tips.md", audience: "user", owner: dora.id, applicableVersion: "3.0", implementationRefs: [login] })).id;
+      const tipsVerify = { commandId: cid("v"), obligationId: tips, expectedRevision: (await read(tips)).revision, documentSubmissionId: await documentChange(), evidence: [code(login, treeA)] };
+      const verified = await docs.verify(dora, tipsVerify);
+      await docs.retire(owner, { commandId: cid("x"), obligationId: tips, expectedRevision: verified.revision });
+      const verifiedAgain = await docs.verify(dora, tipsVerify);
+      assert.deepEqual([verifiedAgain.replayed, verifiedAgain.id, verifiedAgain.revision], [true, tips, verified.revision]);
+      await refuses("invalid_command", () => docs.verify(dora, { ...tipsVerify, commandId: cid("v"), expectedRevision: verified.revision + 1 }), /was retired/);
     } finally {
       await world.close();
     }

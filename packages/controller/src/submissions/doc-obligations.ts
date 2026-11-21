@@ -296,7 +296,7 @@ export class DocObligationService {
     if (!Array.isArray(ev) || ev.length < 1 || ev.length > DOC_LIMITS.refs || ev.some((e) => typeof e !== "string" || !SBM.test(e)) || new Set(ev).size !== ev.length) bad("evidence", `must list 1 to ${DOC_LIMITS.refs} different code submission IDs`);
     const version = command.applicableVersion === undefined ? undefined : text(command.applicableVersion, "applicableVersion", { min: 1, max: DOC_LIMITS.version });
     const { body: ob } = await this.#obligation(by, command.obligationId);
-    this.#kept(command.obligationId, ob);
+    // A retired document is refused inside the command (second review), not here: a verification made before the retirement and sent again with its command ID is answered with its result.
     if (by.kind !== "owner" && by.id !== ob.owner) throw new DomainError("forbidden", `only the owner or the document's owner ${ob.owner} verifies it`);
     let settled: string[] = [];
     const scoped = scopedCommandId(by.id, commandId);
