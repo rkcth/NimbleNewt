@@ -9,6 +9,7 @@ import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/contro
 import { SandboxLauncher, appFromRepository, localWorkerParts } from "@nimblenewt/worker";
 import { PI_AGENT_LAYOUT, sharedSystemText } from "@nimblenewt/pi-adapter";
 import { endpoint, loopbackFetch } from "./h12-worker-support.js";
+import { windowHolding } from "./window-support.js";
 
 // Card C07g through the composed controller and the real worker process (Pi in the real sandbox): a task that last ran on another route starts on a route nobody has measured. The dispatcher builds the owner's context
 // for that route on the assumed fixed part; the worker's process comes up, says what it really sends besides the prompt, the route is measured with that and the view is built again before the first call. The model gets the
@@ -20,8 +21,10 @@ const AGENT = "agt-abcdefghijklmnopqrst";
 // The route's window and the figure assumed for a route nobody has measured. The real process's fixed part (its system text and every bridge tool's schema, about 17,600 characters since card T08's toolbox
 // tools, about 20,250 since card P03b's service and deliverable tools, about 21,600 since card T08's fourth slice) is just under the default floor (22,200 characters since card T08's fourth slice, 21,750 since card P03b; 19,000 from card "Fixed-part sizing after T08"), so the owner sets a clearly larger one here: the dispatcher's view is built on more than the process really
 // sends, and the measured view fits more.
-// The window's startup share (a quarter) holds the measured fixed part beside what must stay whole, with room for some of the questions but not all.
-const WINDOW = 40_960;
+// The window's startup share (a quarter) holds the measured fixed part beside what must stay whole, with room for some of the questions but not all: 43,008 tokens at the current budget, the fixed part at its
+// budget beside 3,300 tokens of the owner's context. What must stay whole (the goal, the decision, the newest questions and a reference for each one left out) came to 3,034 tokens at card T08's fourth slice;
+// it was 40,960 written out, which that slice's tools left 2 tokens short (need 10,242, have 10,240; `window-support.ts`). Forty questions of about 100 tokens each never all fit in the room left.
+const WINDOW = windowHolding(3_300);
 const FLOOR_CHARS = 22_750;
 const HEADER = `[The owner's decisions, goals, permissions and open questions for this task, rebuilt for model route localp/small (a ${WINDOW}-token window).]`;
 type Reply = { ok: boolean; result?: any; error?: { code: string; message: string } };

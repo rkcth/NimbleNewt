@@ -12,6 +12,7 @@ import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRel
 import { EXEC_PROFILES, PI, ROUTING_TABLE, selfSigned, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
+import { windowHolding } from "./window-support.js";
 
 // Card H12k, end to end: startController composes the local worker host. The host is the real one (the bubblewrap launcher, the worker process running Pi, the controller's model relay, the message, pause and context
 // guards and the owner's limits from the services the controller hands `build`), its checkout is made by the production workspace port, and every tool request of the agent crosses the channel to the controller's
@@ -21,6 +22,9 @@ const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-abcdefghijklmnopqrst";
+// The model's window (35,840 tokens at the current budget): its startup share holds the real fixed part at its budget beside the rest of this test's first call, measured at 1,062 tokens at card T08's
+// fourth slice, with about 450 to spare. It was 32,768 written out, where that first call (8,270 tokens) went over the startup share of 8,192 once T08's fourth slice grew the tools (`window-support.ts`).
+const WINDOW = windowHolding(1_500);
 const PUBLIC = "93.184.216.34";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const until = async (ok: () => boolean | Promise<boolean>, ms: number, why: string | (() => string)): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(typeof why === "function" ? why() : why); await sleep(50); } };
@@ -125,7 +129,7 @@ test("the composed local host runs an attempt through the real relay, guards and
           transport: { ca: mcp.ca, dial: (to) => { dialed.push(`${to.address}:${to.port}`); return netConnect({ host: "127.0.0.1", port: mcp.port }); } },
         },
         local: {
-          window: () => 32768,
+          window: () => WINDOW,
           build: (services) => {
             built = services;
             const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }) } : undefined) });
@@ -139,7 +143,7 @@ test("the composed local host runs an attempt through the real relay, guards and
                 mkdirSync(home, { recursive: true }); mkdirSync(scratch, { recursive: true });
                 return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
               },
-              model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+              model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
               // The agent's own namespace and the controller's own tool bridge (ToolExecutionService), both as the composer hands them to the host builder (card T06b).
               namespaceId: (order) => services.namespaceId(order as never),
               bridge: async (order, call, token, request) => {

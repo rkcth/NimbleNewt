@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_REPLY_TOKENS, DEFAULT_CONTEXT_TOKENS, DEFAULT_ROUTE_FLOOR_CHARS, MIN_STARTABLE_WINDOW, MIN_WORKABLE_CONTEXT_TOKENS, PRACTICAL_STARTABLE_WINDOW, ROUTE_FLOOR_DEFAULTS, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_TOKENS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "@nimblenewt/controller";
+import { DEFAULT_REPLY_TOKENS, DEFAULT_CONTEXT_TOKENS, contextBudget, DEFAULT_ROUTE_FLOOR_CHARS, MIN_STARTABLE_WINDOW, MIN_WORKABLE_CONTEXT_TOKENS, PRACTICAL_STARTABLE_WINDOW, ROUTE_FLOOR_DEFAULTS, WORKER_FIXED_PART, WORKER_FIXED_PART_ABOUT_TOKENS, WORKER_FIXED_PART_BUDGET, WORKER_FIXED_PART_TOKENS, practicalWindow, smallWindowWarning, startableWindow, windowCanStartTask } from "@nimblenewt/controller";
 import { MIN_WORKABLE_WINDOW, PI_AGENT_LAYOUT, composeTools, createBridge, sharedSystemText, toolSchemaCharsOf } from "@nimblenewt/pi-adapter";
+import { windowHolding } from "./window-support.js";
 
 // Card "Fixed-part sizing after T08": the real worker's fixed part (its system text and the schemas of every bridge tool), measured as the worker measures it at start (process.ts reports
 // `systemPromptChars: sharedSystemText(PI_AGENT_LAYOUT).length` and `toolSchemaChars: toolSchemaCharsOf(composeTools(bridge, [], namespace))`; the agent's namespace does not change a bridge tool's name).
@@ -54,9 +55,12 @@ test("the smallest window that can start a task, and the warning for an accepted
   assert.equal(MIN_STARTABLE_WINDOW, 36_864, `the warning names it ("at least 36,864 tokens"), pinned here on purpose; ${RAISE}`);
   // The window the tests that run the real process use (36,864 since card P03b's first slice; 32,768 before it, 24,576 before the CI fix) and the one the launcher assumes for a provider of the configuration document
   // can start a task on the REAL fixed part; 24,576 cannot.
-  for (const [w, who] of [[36_864, "the real-process tests w12-anchor, w13-recall, g09-remote-updates, h12bf-composed and w03-rig-support (W03, W04, L04e, L04g)"], [DEFAULT_CONTEXT_TOKENS, "the launcher's DEFAULT_CONTEXT_TOKENS"]] as const) {
+  for (const [w, who] of [[36_864, "the real-process tests w12-anchor, w13-recall, g09-remote-updates, h12bf-composed"], [DEFAULT_CONTEXT_TOKENS, "the launcher's DEFAULT_CONTEXT_TOKENS"]] as const) {
     assert.equal(windowCanStartTask(w, r.systemPromptChars + r.toolSchemaChars), true, `${who} assume ${w} tokens start a task; ${derived(r)}`);
   }
+  // The real-process tests whose windows come from window-support.ts (the W03 rig, h12k-composed-host, w11-job-wake, c07g-route-view) hold the real fixed part beside their own measured first call: the
+  // window is worked out on the budget, which the real part is under (the first test here), so it holds the real part too.
+  for (const own of [1_500, 2_600, 3_300]) assert.ok(contextBudget(windowHolding(own)).startupTokens >= Math.ceil((r.systemPromptChars + r.toolSchemaChars) / 3) + own, `windowHolding(${own}); ${derived(r)}`);
   assert.equal(windowCanStartTask(24_576), false);
   // The accepted minimum is still the worker's; everything from there up to the startable window carries a warning naming both figures.
   assert.equal(MIN_WORKABLE_CONTEXT_TOKENS, MIN_WORKABLE_WINDOW);

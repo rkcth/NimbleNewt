@@ -9,12 +9,16 @@ import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRel
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, doneVerifier, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
+import { windowHolding } from "./window-support.js";
 
 // Shared by the composed tests of cards W03, W04, W05 and W10: the composed controller with the real local worker (bubblewrap, the worker process running Pi), the real checkout layout and a scripted OpenAI-compatible endpoint.
 export const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-abcdefghijklmnopqrst";
+// The model's window (40,960 tokens at the current budget): its startup share holds the real fixed part at its budget beside the rest of the largest first call of the tests on this rig, measured at 2,241 tokens
+// (G09's retained-context resume at T08's fourth slice), with about 350 to spare. It was 36,864 written out, which T08's third and fourth slices left 233 tokens short (`window-support.ts`).
+const WINDOW = windowHolding(2_600);
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 
@@ -78,7 +82,7 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
     dispatch: {
       manual: true,
       local: {
-        window: () => 36864,
+        window: () => WINDOW,
         build: (services) => {
           const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }), ...(options.kind === undefined ? {} : { kind: options.kind }) } : undefined) });
           const parts = localWorkerParts<Pick<ToolGateway, "call">["call"]>({
@@ -90,7 +94,7 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
               mkdirSync(home, { recursive: true }); mkdirSync(scratch, { recursive: true });
               return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
             },
-            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 36864, maxTokens: 1024, reasoning: false, input: ["text"] }),
+            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
             namespaceId: (order) => services.namespaceId(order as never),
             bridge: async (order, call, token, request) => services.bridge!(order as never, call, token, request) as never,
             relay: (order, request) => services.attemptRelay(order as never, relay, { model: "local" }).relay(request),

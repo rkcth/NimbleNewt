@@ -14,10 +14,12 @@ import { admitFirstCall, type FirstCall } from "./dispatch.js";
  * 2. Update the figures the tests pin on purpose to the new `WORKER_FIXED_PART_ABOUT_TOKENS` / `MIN_STARTABLE_WINDOW` / `PRACTICAL_STARTABLE_WINDOW` (the budget test prints them): `fixed-part-budget.test.ts`
  *    (integration) and `setup/small-window.test.ts` ("about N tokens", "N or more is needed in practice").
  *    The C07g real-process test (`integration/c07g-route-view.test.ts`, `FLOOR_CHARS`) sets a floor that must stay above the real fixed part: raise it with the budget.
+ *    The real-process tests whose windows come from `integration/src/window-support.ts` (`windowHolding`: the fixed part at this budget beside each test's own measured first call) follow the budget by
+ *    themselves: `w03-rig-support.ts` (W03, W04, W05, W10, G09's retained context, L04e, L04g and the other tests on that rig), h12k-composed-host, w11-job-wake and c07g-route-view (card "Prompt growth tests").
  * 3. If the real fixed part no longer starts a task on the window these assume (36,864 tokens since card P03b's first slice, 32,768 before), they must be raised to the new `PRACTICAL_STARTABLE_WINDOW` (or more):
  *    the launcher's `DEFAULT_CONTEXT_TOKENS` (a provider from the configuration document) and the launcher note `u14-launcher.test.ts` pins ("context window assumed 36864 tokens ... under about 36,864"),
  *    the placeholder the interpreter prompt names (`chat/model-interpreter.ts`, "36864 is only the launcher's placeholder"), and the integration tests that run the real worker process on that window: w12-anchor and w13-recall (`WINDOW`), g09-remote-updates
- *    (`WINDOW`), h12bf-composed (`window`) and `w03-rig-support.ts` (its `window` and `contextWindow`, used by W03, W04, L04e and L04g); then the budget test's list of those windows and the windows
+ *    (`WINDOW`) and h12bf-composed (`window`); then the budget test's list of those windows and the windows
  *    `setup/small-window.test.ts` expects to start a task. h12bf's compaction case (98,304 tokens, a stored conversation sized against the fixed part; its comment explains the sizing) must be sized again by hand. Check that
  *    `context/enforcement.test.ts`'s view suite (40,960) still cuts. The owner is then told the larger window.
  *    The scripts' hosts (`scripts/local-host.mjs`, `scripts/remote-host.mjs`) take their fallback window and reply room from `DEFAULT_CONTEXT_TOKENS` and `DEFAULT_REPLY_TOKENS`, so they follow.
