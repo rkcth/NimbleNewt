@@ -12,7 +12,7 @@ export type { Cite };
  */
 export interface OutcomeNotice {
   readonly key: string;
-  readonly kind: "agenda-outcome" | "improvement-outcome";
+  readonly kind: "agenda-outcome" | "improvement-outcome" | "lesson-outcome";
   readonly projectId: string;
   readonly to: { readonly kind: "chat-turn" | "inquiry" | "agent"; readonly id: string };
   readonly text: string;

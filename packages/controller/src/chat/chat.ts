@@ -603,7 +603,7 @@ export class ChatService {
       if (intent.kind === "status") {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
-        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs", "landing_queue", "observations"].includes(String(request["kind"]))) {
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs", "landing_queue", "observations", "lessons"].includes(String(request["kind"]))) {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
@@ -2235,6 +2235,11 @@ export class ChatService {
         const item = typeof args["concernId"] === "string" ? await this.#get(token, "stall.concern.get", { concernId: args["concernId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such concern") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "lesson": {
+        // A lesson's revision when the owner evaluates it (card B03); a second decision on the same lesson in one message expects the next revision.
+        const item = typeof args["lessonId"] === "string" ? await this.#get(token, "lesson.get", { lessonId: args["lessonId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such lesson") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`lesson:${args["lessonId"] as string}`) };
+      }
       case "observation": {
         // An observation's revision when the owner settles it (card B02).
         const item = typeof args["observationId"] === "string" ? await this.#get(token, "observation.get", { observationId: args["observationId"] }) : undefined;
@@ -2945,6 +2950,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
     case "observation.dispose": return `observation:${a["observationId"] as string}`;
+    case "lesson.decide": return `lesson:${a["lessonId"] as string}`;
     // A repair named in the same message comes before the owner's judgement of it, which then expects the defect's next revision.
     case "defect.repair": return `defect:${a["id"] as string}`;
     case "standup.update": return `standup:${a["scheduleId"] as string}`;

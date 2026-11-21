@@ -121,6 +121,15 @@ export function improvementOutcomeLoops(improvements: { deliverOutcomes(by: Prin
   } }];
 }
 
+/** B03: the evaluated outcomes of lessons go back to the agents that proposed them, project by project; one that cannot be filed yet stays pending. */
+export function lessonOutcomeLoops(lessons: { deliverOutcomes(by: Principal, projectId: string): Promise<unknown> }, projects: () => Promise<readonly string[]>): DispatcherLoop[] {
+  return [{ name: "lessons.outcomes", run: async (by) => {
+    const failed: string[] = [];
+    for (const projectId of await projects()) { try { await lessons.deliverOutcomes(by, projectId); } catch (error) { failed.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`); } }
+    if (failed.length > 0) throw new Error(`lesson outcomes could not be delivered for ${failed.length} project(s): ${failed.slice(0, 3).join("; ")}`);
+  } }];
+}
+
 /** M03e: a decision on an improvement that has gone untold for some days is shown to the owner (once per decision), project by project. */
 export function untoldImprovementLoops(improvements: { untold(by: Principal, projectId: string, olderThanMs: number): Promise<readonly { id: string; revision: number; title: string; disposition: string; decidedAt: string }[]> }, projects: () => Promise<readonly string[]>, tell: (notice: { readonly key: string; readonly projectId: string; readonly itemId: string; readonly text: string }) => Promise<unknown>, days = 7): DispatcherLoop[] {
   if (!Number.isFinite(days) || days <= 0) throw new Error("days must be above zero");

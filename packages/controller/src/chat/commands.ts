@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect" | "observation";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect" | "observation" | "lesson";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -249,6 +249,9 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "agenda.correct": { verb: "Correct agenda item", mode: "apply", revision: "agenda", needsProject: true },
   // Card B02: settling an observation (promoted to an improvement proposal, dismissed, resolved, or open again) changes no work; the revision is read for the owner.
   "observation.dispose": { verb: "Settle an observation (observationId from the observations status; to promoted with improvementId, dismissed or resolved with the owner's reason, or open; owner optional)", mode: "apply", revision: "observation" },
+  // Card B03: the owner proposes a lesson (it is only a candidate until evaluated) and evaluates one; neither changes work or grants anything, and a decision can be reviewed again, so both apply at once. The revision is read for the owner.
+  "lesson.propose": { verb: "Propose a lesson (title, statement and applicability in the owner's words; evidence from the observations status or other records; dependsOn, revises, supersedes, contradicts only when the owner names lessons)", mode: "apply", needsProject: true },
+  "lesson.decide": { verb: "Evaluate or review a lesson (lessonId from the lessons status; to evaluating, accepted, rejected, inconclusive or needs-review, with the owner's finding)", mode: "apply", revision: "lesson" },
   // Stand-ups (card M03g). Pausing or renaming one follows the profile like other explicit orders; ending (cannot be undone) and resuming are always shown first; a change of who attends or when it is held is shown first (see `proposalReason`). Setting one up wakes agents on a schedule, so it is always shown first. Delivering outcomes only puts decisions back where they came from.
   "standup.update": { verb: "Change stand-up", mode: "profile", revision: "standup", needsProject: true },
   "standup.configure": { verb: "Set up stand-up", mode: "propose", needsProject: true },
