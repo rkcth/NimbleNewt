@@ -94,8 +94,13 @@ const OBSERVATION_ID = /^obs-[a-z2-7]{20}$/;
 const SOURCE_ID = /^[a-z]{3,4}-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 interface IndexBody { readonly ids: readonly string[] }
-/** The later of two clock hours (ISO strings in UTC compare as text). */
-const later = (hour: string, recorded: string | undefined): string => (recorded !== undefined && recorded > hour ? recorded : hour);
+/** How far ahead of this controller's own hour a recorded hour is still trusted: a clock more than a day ahead (or a damaged record) must not hold everyone's counts in a far-off hour. */
+const TRUSTED_AHEAD_MS = 86_400_000;
+/**
+ * The later of two clock hours (ISO strings in UTC compare as text), so the hour never goes back; a recorded hour more than a day ahead of this controller's is not trusted and this controller's own hour
+ * is used (its counts start again), which bounds what one controller with a far-future clock can do to the others.
+ */
+const later = (hour: string, recorded: string | undefined): string => (recorded !== undefined && recorded > hour && Date.parse(recorded) - Date.parse(hour) <= TRUSTED_AHEAD_MS ? recorded : hour);
 const nextHour = (hour: string): string => new Date(Date.parse(hour) + 3_600_000).toISOString().slice(11, 16);
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -194,9 +199,13 @@ export class ObservationService {
       // A reporter that may not read the project's observations sees what it told and the shared event, never who else reported, owns or settled it, nor another reporter's detail or context records.
       const own = view<ObservationBody>(found);
       const first = own.reportedBy === viewer.id;
-      const { detail, owner, ...rest } = own;
+      const { detail, owner, taskId, ...rest } = own;
+      // Another agent's words, and the task its context records named, are that agent's; the controller's summary comes from the event records the reporter could read to join.
+      const theirs = !first && own.origin === "agent";
       return {
         ...rest, reportedBy: first ? viewer.id : "another reporter", reporters: [viewer.id],
+        ...(theirs ? { summary: "(told first by another reporter, in its own words)" } : {}),
+        ...(taskId === undefined || theirs ? {} : { taskId }),
         ...(first && detail !== undefined ? { detail } : {}),
         ...(owner === undefined ? {} : { owner: owner === viewer.id ? viewer.id : "someone else" }),
         sources: first ? own.sources : own.sources.filter((x) => EVENT_KINDS.includes(x.kind)),
@@ -260,15 +269,24 @@ export class ObservationService {
           const body = found.body as unknown as ObservationBody;
           if (body.projectId !== fields.projectId) throw new DomainError("forbidden", `${by.id} may not report that`);
           const reporters = body.reporters.includes(by.id) || body.reporters.length >= OBSERVATION_LIMITS.reporters ? body.reporters : [...body.reporters, by.id];
-          const changes: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...body, reporters, reports: body.reports + 1, lastSeenAt: nowIso }) }];
+          // The controller's account of an event is the record: an agent that told the event first (for example its own review request before it was denied) does not decide its kind, words, detail or
+          // owner, so the order of the reports does not matter. The agent stays a reporter and its report stays counted, as when it tells the event after the controller.
+          const { detail: _d, owner: _o, taskId: _t, ...base } = body;
+          void _d; void _o; void _t;
+          const told: ObservationBody = origin === "controller" && body.origin === "agent"
+            ? { ...base, kind: fields.kind, summary: fields.summary, ...(fields.detail === undefined ? {} : { detail: fields.detail }), sources: fields.sources.map((x) => ({ kind: x.kind, id: x.id })), ...(fields.taskId === undefined ? {} : { taskId: fields.taskId }), origin: "controller", reportedBy: by.id, ...(body.owner === undefined || body.owner === body.reportedBy ? {} : { owner: body.owner }) }
+            : body;
+          const changes: Change[] = [{ type: "update", ref, expectedRevision: found.revision, body: clean({ ...told, reporters, reports: body.reports + 1, lastSeenAt: nowIso }) }];
           if (origin === "agent") changes.push(rateChange({ ...rate, byReporter: counted() }));
           return { ref, creates: false, changes, detail: { projectId: fields.projectId, joined: true } };
         }
         if (joins !== undefined) throw new DomainError("not_found", "the observation cited does not exist");
         const index = await this.#index(fields.projectId);
-        const why = rate.created >= this.#limits.perProjectPerHour ? "rate" : index.ids.length >= this.#limits.open ? "open-list" : undefined;
+        // Agents' new observations leave a quarter of the hour's limit and a tenth of the open list to the controller, so agents' reports cannot crowd out what the controller sees.
+        const reserved = origin === "agent" ? { hour: Math.floor(this.#limits.perProjectPerHour / 4), open: Math.floor(this.#limits.open / 10) } : { hour: 0, open: 0 };
+        const why = rate.created >= this.#limits.perProjectPerHour - reserved.hour ? "rate" : index.ids.length >= this.#limits.open - reserved.open ? "open-list" : undefined;
         if (why !== undefined) {
-          if (origin === "agent") throw new DomainError("unavailable", why === "rate" ? `${rate.created} observations were made in this project this hour, the most allowed; try again after ${nextHour(hour)} UTC` : `${this.#limits.open} observations are already open in this project; a manager settles some first`);
+          if (origin === "agent") throw new DomainError("unavailable", why === "rate" ? `${rate.created} observations were made in this project this hour, the most agents may add (the rest are kept for what the controller sees); try again after ${nextHour(hour)} UTC` : `${index.ids.length} observations are already open in this project, the most agents may add (the rest are kept for what the controller sees); a manager settles some first`);
           // The controller's event goes on; only the observation is not made, and that is counted where the owner sees it.
           return { ref: rateRef, creates: false, changes: [rateChange({ ...rate, suppressed: rate.suppressed + 1, suppressedTotal: rate.suppressedTotal + 1, lastSuppressed: { at: nowIso, kind: fields.kind, why } })], detail: { projectId: fields.projectId, suppressed: why } };
         }
