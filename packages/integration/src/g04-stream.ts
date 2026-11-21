@@ -54,7 +54,9 @@ export interface StreamController extends ToolController { readonly replyEnded: 
 
 /**
  * The `push` tool as the production tool bridge runs it (L05d, `ToolExecutionService#generationCheck` and `#admitted`): the call is checked against its generation, admitted as an effect of the generation the stream recorded
- * with the bridge's own admission command ID (`bridgeAdmitId`), and run through the ledger. Left out: the bridge's name and arguments check (the scripted model writes one call), its busy wait and its mapping of a failed outcome.
+ * with the bridge's own admission command ID (`bridgeAdmitId`), and run through the ledger. Left out: the bridge's name and arguments check (the scripted model writes one call), its pause check (no pause here), its busy wait and its mapping of a failed outcome.
+ * The effect run by the ledger is the tool slice's target (`pushTarget`: honours its key and can be asked), not the bridge's own effect bridge, which has no `reconcile` and is idempotent only for `tool.invoke` and `job.start`: for any
+ * other write the bridge's effect, killed after it started, would end `uncertain` (the owner told), so the outcomes from `effect.claim` on hold for an operation that can be asked, as in the tool slice.
  * The bridge waits briefly (up to 3 s) for a generation that is still streaming, because the reply ends a moment after the worker has read it whole; here the tool waits for the tap's end of the reply this process is reading
  * (an event, no fixed pause), so the order of boundaries is the same in every run. A refusal is answered as the bridge answers it ("it was not run"); with no reply being read (a call presented again after a restart) a
  * generation that is still streaming is refused at once, where the bridge would refuse it after its 3 s.
