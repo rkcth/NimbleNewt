@@ -232,3 +232,20 @@ test("second review: an executable-bit change is re-applied exactly, a link in t
     assert.equal(await readFile(marker, "utf8").catch(() => ""), "", "no hook ran during the landing either");
   } finally { await done(r.dir); }
 });
+
+test("second re-check: an ignore file the work changes overlaps the branch's paths in its folder, and a root ignore file the branch adds (any case) overlaps every path of the work (card P10)", { skip }, async () => {
+  const r = await rig();
+  try {
+    const mine = await r.work("tsk-mine-ignore", { "docs/.gitignore": "*.tmp\n" });
+    const anywhere = await r.work("tsk-root-ignore", { "src/z.ts": "export const z = 1;\n" });
+    const ask = (taskId: string, tree: string) => r.ws.port.restack({ requestId: rid(), taskId, projectId: "prj-one", submission: { id: S, base: r.base, tree } });
+    // The branch changes a file in the folder whose ignore file the work changes: overlap (the work's side of the rule).
+    const head = r.commitShared({ "docs/c.md": "# c, newer\n" }, "docs changed");
+    assert.deepEqual(await ask("tsk-mine-ignore", mine.tree), { ok: true, state: "overlap", paths: ["docs/.gitignore"], head });
+    // Without an ignore file, the same branch change leaves src/ disjoint.
+    assert.equal(((await ask("tsk-root-ignore", anywhere.tree)) as { state?: string }).state, "reapplied");
+    // A root ignore file the branch adds, spelled in another case, covers every folder: the next re-apply of the work overlaps.
+    const head2 = r.commitShared({ ".GitIgnore": "*.ts\n" }, "root ignore file");
+    assert.deepEqual(await ask("tsk-root-ignore", anywhere.tree), { ok: true, state: "overlap", paths: ["src/z.ts"], head: head2 });
+  } finally { await done(r.dir); }
+});
