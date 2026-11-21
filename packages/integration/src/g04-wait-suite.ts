@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "@nimblenewt/controller";
-import { isCrash, Chaos, Clock, Crash, acknowledgedSurvive, describe, engines, openStore, pickIndexes, runChild, startProcess, stopServer, withEngine, type Clean, type SliceWorld } from "./g04-fixture.js";
+import { isCrash, Chaos, Clock, Crash, acknowledgedSurvive, describe, engines, killProblem, openStore, pickIndexes, runChild, startProcess, stopServer, withEngine, type Clean, type SliceWorld } from "./g04-fixture.js";
 import { DEADLINE, checkWaits, cleanWaitRun, openWaits, settleWaits, waitAuditCounts, waitScenario, waitServices, waitSignature } from "./g04-wait.js";
 
 /**
@@ -73,7 +73,7 @@ export function defineWaitTests(engineName: string): void {
     for (const crashAt of [lastOpen.before, lastOpen.after, lastOpen.after + 1]) {
       await withEngine(engine, async (spec, dir) => {
         const child = await runChild(spec, dir, crashAt, "wait");
-        assert.equal(child.killed && !child.out.includes("finished"), true, `the child was not killed at ${describe(clean, crashAt)}: ${child.err.slice(0, 300)}`);
+        assert.equal(killProblem(child, clean.labels, crashAt, describe(clean, crashAt)), undefined);
         const storage = await openStore(spec);
         try {
           assert.deepEqual(await acknowledgedSurvive(storage, clean, crashAt), []);
