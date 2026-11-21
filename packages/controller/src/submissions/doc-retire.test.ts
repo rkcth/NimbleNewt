@@ -227,6 +227,8 @@ for (const backend of backends) {
       await docs.retire(owner, { commandId: cid("x"), obligationId: tips, expectedRevision: verified.revision });
       const verifiedAgain = await docs.verify(dora, tipsVerify);
       assert.deepEqual([verifiedAgain.replayed, verifiedAgain.id, verifiedAgain.revision], [true, tips, verified.revision]);
+      // The same command ID with other arguments is still a conflict (the repeat check comes before the retired check), not answered and not refused as retired.
+      await refuses("command_conflict", () => docs.verify(dora, { ...tipsVerify, expectedRevision: verified.revision }));
       await refuses("invalid_command", () => docs.verify(dora, { ...tipsVerify, commandId: cid("v"), expectedRevision: verified.revision + 1 }), /was retired/);
     } finally {
       await world.close();
