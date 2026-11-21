@@ -7,6 +7,7 @@ import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.
 import { PI } from "../dispatch/testing/world.js";
 import { CHAT_OPS } from "../chat/commands.js";
 import { ScriptedInterpreter } from "../chat/index.js";
+import { NotificationService } from "../notifications/index.js";
 import { STATUS_KINDS } from "../status/index.js";
 import { startController } from "./index.js";
 
@@ -152,6 +153,35 @@ test("documentation obligations through the running controller and the owner's c
     const lostTask = lost.updates.find((u: any) => u.state === "open");
     assert.equal(lostTask.requestedBy, "service:doc-checks");
     assert.equal((await s.assignments.getAssignment(lostTask.taskId))?.owner?.id, dora.bare);
+
+    // The owner is told by a notice (not a needs-you item) each time verified documents went stale on a check the owner did not run: new tested code, then lost evidence (Q03 leftover).
+    const inbox = await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob);
+    const told = inbox.items.filter((i) => i.ref.kind === "doc-obligation" && i.ref.id === obligation);
+    assert.ok(told.length >= 1, JSON.stringify(inbox.items.map((i) => [i.ref, i.detail])));
+    assert.ok(told.every((i) => i.level === "notice" && i.projectId === project), JSON.stringify(told));
+    assert.ok(told.some((i) => /A verified document went stale: "Landing page"/.test(i.detail ?? "")), JSON.stringify(told.map((i) => i.detail)));
+
+    // The owner takes the landing page away by chat (shown first, pinned to the revision shown; the reason in the owner's own words): it leaves the docs, and Dora's open update task is cancelled.
+    assert.ok(CHAT_OPS["doc.obligation.retire"]);
+    const drop = "we deleted the landing page, stop tracking it";
+    assert.equal((await turn("m9", drop, [{ kind: "command", op: "doc.obligation.retire", args: { obligationId: obligation, reason: "replaced by the new site" }, evidence: drop, basis: "owner" }]))[0].status, "refused", "a reason the owner did not give is refused");
+    const retiring = await turn("m10", drop, [{ kind: "command", op: "doc.obligation.retire", args: { obligationId: obligation, reason: "we deleted the landing page" }, evidence: drop, basis: "owner" }]);
+    assert.equal(retiring[0].status, "proposed", JSON.stringify(retiring));
+    const retired = await turn("m11", "yes, do that", [{ kind: "apply_proposal", proposalId: retiring[0].proposalId, evidence: "do that", basis: "owner" }]);
+    assert.equal(retired[0].status, "applied", JSON.stringify(retired));
+    const gone = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
+    assert.deepEqual([gone.retired.by, gone.retired.reason, gone.updates.filter((u: any) => u.state === "open").length], [rob.id, "we deleted the landing page", 0]);
+    assert.equal((await call(boot.token, "task.get", { taskId: lostTask.taskId })).result.item.state, "cancelled");
+    assert.deepEqual((await call(boot.token, "doc.obligation.list", { projectId: project })).result.items.map((i: any) => i.title), ["user guide"]);
+    const docsNow = await turn("m12", q, [{ kind: "status", request: { kind: "docs" }, evidence: q, basis: "owner" }]);
+    assert.doesNotMatch((docsNow[0].lines as { text: string }[]).map((l) => l.text).join("\n"), /Landing page/);
+    // Through the state API: a retired document is neither verified nor retired again; an agent outside the docs and director roles may not retire.
+    assert.equal((await call(dora.token, "doc.obligation.verify", { obligationId: obligation, expectedRevision: gone.revision, documentSubmissionId: updated.result.id, evidence: [sub2] }, "v9")).error.code, "invalid_command");
+    const guideId = both[1].id as string;
+    assert.equal((await call(quinn.token, "doc.obligation.retire", { obligationId: guideId, expectedRevision: both[1].revision }, "x1")).error.code, "forbidden");
+    const byDora = await call(dora.token, "doc.obligation.retire", { obligationId: guideId, expectedRevision: both[1].revision }, "x2");
+    assert.equal(byDora.ok, true, JSON.stringify(byDora));
+    assert.deepEqual((await call(boot.token, "doc.obligation.list", { projectId: project })).result.items, []);
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
