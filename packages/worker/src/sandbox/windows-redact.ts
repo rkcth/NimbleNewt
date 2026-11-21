@@ -264,32 +264,38 @@ const NAME_START = String.raw`(?<![A-Za-z0-9](?<!\\[nrtbfv]|(?:\x1b|\\x1[bB]|\\u
  * any mix (`jürgen` finds `JU\u0308RGEN`); each Turkish i (`i`, `I`, `İ`, `ı`, with or without a combining dot above) stands for all of them, and the sharp s (`ß`, `ẞ`) for
  * either or `ss`, which a case-insensitive search does not equate (`İSMAİL` and `Ilgın` are the names of `ismail@…` and `ılgın@…`; `STRAẞE` and `STRASSE` of `straße@…`).
  * A letter with two or more marks also matches every partly composed spelling and every order of its marks that is canonically the same (`\u1EC7` as `\u00EA` + dot below or `\u1EB9` +
- * circumflex, as text converted from the Vietnamese Windows code page 1258 writes it; a Hangul syllable as its first two jamo composed plus the last).
+ * circumflex, as text converted from the Vietnamese Windows code page 1258 writes it; a Hangul syllable as its first two jamo composed plus the last). This holds for a
+ * letter and the marks after it together, so a letter with no composed form of its own is found too (Yoruba `\u1ECD\u0301` as `\u00F3` + dot below).
  * Whatever it matches folds loosely (`looseFold`) as the name does.
  */
 function namePattern(name: string): string {
   let p = "";
-  for (const ch of name.normalize("NFC")) {
-    if (/^[iI\u0130\u0131]$/.test(ch)) p += "[iI\u0130\u0131]\u0307?";
-    else if (ch === "\u0307" && p.endsWith("\u0307?")) continue;
-    else if (ch === "\u00DF" || ch === "\u1E9E") p += "(?:[\u00DF\u1E9E]|ss)";
-    else { const forms = spellings(ch); p += forms.length === 1 ? escapeRe(ch) : `(?:${forms.map(escapeRe).join("|")})`; }
+  for (const unit of name.normalize("NFC").match(/\P{M}\p{M}*|\p{M}+/gu) ?? []) {
+    if (!/^[iI\u0130\u0131\u00DF\u1E9E]/.test(unit)) { const forms = spellings(unit); p += forms.length === 1 ? escapeRe(unit) : `(?:${forms.map(escapeRe).join("|")})`; continue; }
+    for (const ch of unit) {
+      if (/^[iI\u0130\u0131]$/.test(ch)) p += "[iI\u0130\u0131]\u0307?";
+      else if (ch === "\u0307" && p.endsWith("\u0307?")) continue;
+      else if (ch === "\u00DF" || ch === "\u1E9E") p += "(?:[\u00DF\u1E9E]|ss)";
+      else p += escapeRe(ch);
+    }
   }
   return p;
 }
 /**
- * The spellings of one composed character that are canonically equivalent to it: composed, decomposed, and (for two or more parts after the first) each order of the
- * later parts with any of them composed onto the first, kept only where its decomposition is the character's own. At most five later parts are permuted (Unicode has
- * no composed character with more); longest first. Cached.
+ * The spellings of a letter and the marks after it (`unit`) that are canonically equivalent to it: as given, decomposed, its first code point decomposed, and (for two or
+ * three parts after the first) each order of the later parts with any of them composed onto the first, kept only where its decomposition is the unit's own. Three later
+ * parts is the most a composed character has; with more (a hostile run of marks) only the first three spellings are taken, so a unit has at most 3 + 3! x 4 alternatives.
+ * Longest first. Cached, up to 10,000 units.
  */
 const SPELLINGS = new Map<string, string[]>();
-function spellings(ch: string): string[] {
-  const known = SPELLINGS.get(ch);
+function spellings(unit: string): string[] {
+  const known = SPELLINGS.get(unit);
   if (known !== undefined) return known;
-  const d = ch.normalize("NFD");
-  const found = new Set([ch, d]);
+  const d = unit.normalize("NFD");
+  const head = String.fromCodePoint(unit.codePointAt(0)!);
+  const found = new Set([unit, d, head.normalize("NFD") + unit.slice(head.length)]);
   const [first, ...rest] = [...d];
-  if (rest.length >= 2 && rest.length <= 5) {
+  if (rest.length >= 2 && rest.length <= 3) {
     const orders = (xs: string[]): string[][] => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => orders([...xs.slice(0, i), ...xs.slice(i + 1)]).map((o) => [x, ...o])));
     for (const order of orders(rest)) for (let j = 0; j <= order.length; j++) {
       const spelt = `${(first! + order.slice(0, j).join("")).normalize("NFC")}${order.slice(j).join("")}`;
@@ -297,7 +303,8 @@ function spellings(ch: string): string[] {
     }
   }
   const all = [...found].sort((a, b) => b.length - a.length);
-  SPELLINGS.set(ch, all);
+  if (SPELLINGS.size >= 10_000) SPELLINGS.clear();
+  SPELLINGS.set(unit, all);
   return all;
 }
 /** A name as a whole word; a space in it matches any run of blanks, line breaks included (console output wraps). */
