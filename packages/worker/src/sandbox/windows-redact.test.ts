@@ -468,8 +468,9 @@ test("e-mail addresses in any script are found: a non-ASCII local part, an inter
     const pieces = [local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)];
     assert.equal(redact(text, names), redact(text, { ...names, users: [...names.users, ...pieces] }), text);
   }
-  // Linear: 3 MB of one non-ASCII letter, of CJK, of astral letters, of emoji, of letters and @ alternating, and many Unicode addresses on one line.
-  const big = 3_000_000;
+  // Linear: 1 MB of one non-ASCII letter, of CJK, of astral letters, of emoji, of letters and @ alternating, and many Unicode addresses on one line (a search retried at
+  // every start takes minutes on 1 MB; 3 MB of CJK took a fifth of the limit on an idle machine, too close for a loaded Windows or macOS runner).
+  const big = 1_000_000;
   for (const [kind, text] of [["ä", "ä".repeat(big)], ["CJK", "用".repeat(big)], ["astral letters", "𝐣".repeat(big / 2)], ["emoji", "🙂".repeat(big / 2)], ["letter and @", "ä@".repeat(big / 2)], ["dots", `ä@${"ä.".repeat(big / 2)}1`]] as const) {
     const started = process.hrtime.bigint();
     const out = scrub(text, names, 100);
@@ -498,6 +499,27 @@ test("an address's name is found elsewhere in its other case and normalization f
     ["GROẞ@ex.de later groß", "<email> later <user>"],
     ["ŉame@ex.com later ʼNAME", "<email> later <user>"],
   ] as const) { assert.equal(redact(text, names), out, text); assert.equal(scrub(text, names), out, text); }
+  // A letter with two marks partly composed or with its marks in another canonical order (Vietnamese text converted from Windows code page 1258 writes the tone mark
+  // apart: `ê` + combining dot below for `ệ`), and a Hangul syllable as a composed pair plus its final jamo: the same name, so it goes.
+  for (const spelt of ["VIÊ\u0323T", "viẹ\u0302t", "VIE\u0323\u0302T", "vie\u0302\u0323t", "Việt"]) assert.equal(redact(`việt@ex.vn later ${spelt}`, names), "<email> later <user>", spelt);
+  assert.equal(redact("nguyễn@ex.vn later NGUYÊ\u0303N", names), "<email> later <user>");
+  assert.equal(redact("vie\u0323\u0302t.nam@ex.vn later VIỆT and việt", names), "<email> later <user> and <user>");
+  assert.equal(redact("한국@ex.kr later 하\u11AB국 and \u1112\u1161\u11AB\u1100\u116E\u11A8", names), "<email> later <user> and <user>");
+  // Every letter that decomposes into three or more code points (every 61st Hangul syllable), written with its first two parts composed and the rest apart, and with
+  // its later parts in reverse order where that is still the same letter.
+  let checked = 0;
+  for (let cp = 0xc0; cp <= 0xffff; cp++) {
+    const ch = String.fromCharCode(cp);
+    const d = [...ch.normalize("NFD")];
+    if (ch.normalize("NFC") !== ch || d.length < 3 || !/\p{L}/u.test(ch) || (cp >= 0xac00 && cp <= 0xd7a3 && cp % 61 !== 0)) continue;
+    for (const spelt of [`${(d[0]! + d[1]!).normalize("NFC")}${d.slice(2).join("")}`, `${d[0]!}${d.slice(1).reverse().join("")}`]) {
+      if (spelt.normalize("NFD") !== d.join("") || spelt === ch) continue;
+      const text = `qa${ch}z@ex.com then qa${spelt}z`;
+      assert.equal(redact(text, names), "<email> then <user>", `U+${cp.toString(16)} ${JSON.stringify(spelt)}`);
+      checked++;
+    }
+  }
+  assert.ok(checked > 400, String(checked));
   // Joiners and middle dots inside a word, a full-width or small at sign, ideographic and full-width dots: the whole address goes, not only the part after them.
   for (const text of ["علی‌رضا@ex.ir", "marcel·la@ex.cat", "ジョン・スミス@例え.jp", "क्‍ष@ex.in", "用户@例子。中国", "jim＠example.com", "jim﹫example．com", "jim@例子｡中国"]) {
     assert.equal(redact(`a ${text} b`, names), "a <email> b", text);

@@ -263,6 +263,8 @@ const NAME_START = String.raw`(?<![A-Za-z0-9](?<!\\[nrtbfv]|(?:\x1b|\\x1[bB]|\\u
  * A name as a search pattern (for a regular expression with the `i` flag and without `u`). A letter with a canonical decomposition matches it composed or decomposed, in
  * any mix (`jürgen` finds `JU\u0308RGEN`); each Turkish i (`i`, `I`, `İ`, `ı`, with or without a combining dot above) stands for all of them, and the sharp s (`ß`, `ẞ`) for
  * either or `ss`, which a case-insensitive search does not equate (`İSMAİL` and `Ilgın` are the names of `ismail@…` and `ılgın@…`; `STRAẞE` and `STRASSE` of `straße@…`).
+ * A letter with two or more marks also matches every partly composed spelling and every order of its marks that is canonically the same (`\u1EC7` as `\u00EA` + dot below or `\u1EB9` +
+ * circumflex, as text converted from the Vietnamese Windows code page 1258 writes it; a Hangul syllable as its first two jamo composed plus the last).
  * Whatever it matches folds loosely (`looseFold`) as the name does.
  */
 function namePattern(name: string): string {
@@ -271,9 +273,32 @@ function namePattern(name: string): string {
     if (/^[iI\u0130\u0131]$/.test(ch)) p += "[iI\u0130\u0131]\u0307?";
     else if (ch === "\u0307" && p.endsWith("\u0307?")) continue;
     else if (ch === "\u00DF" || ch === "\u1E9E") p += "(?:[\u00DF\u1E9E]|ss)";
-    else { const d = ch.normalize("NFD"); p += d === ch ? escapeRe(ch) : `(?:${escapeRe(ch)}|${escapeRe(d)})`; }
+    else { const forms = spellings(ch); p += forms.length === 1 ? escapeRe(ch) : `(?:${forms.map(escapeRe).join("|")})`; }
   }
   return p;
+}
+/**
+ * The spellings of one composed character that are canonically equivalent to it: composed, decomposed, and (for two or more parts after the first) each order of the
+ * later parts with any of them composed onto the first, kept only where its decomposition is the character's own. At most five later parts are permuted (Unicode has
+ * no composed character with more); longest first. Cached.
+ */
+const SPELLINGS = new Map<string, string[]>();
+function spellings(ch: string): string[] {
+  const known = SPELLINGS.get(ch);
+  if (known !== undefined) return known;
+  const d = ch.normalize("NFD");
+  const found = new Set([ch, d]);
+  const [first, ...rest] = [...d];
+  if (rest.length >= 2 && rest.length <= 5) {
+    const orders = (xs: string[]): string[][] => (xs.length <= 1 ? [xs] : xs.flatMap((x, i) => orders([...xs.slice(0, i), ...xs.slice(i + 1)]).map((o) => [x, ...o])));
+    for (const order of orders(rest)) for (let j = 0; j <= order.length; j++) {
+      const spelt = `${(first! + order.slice(0, j).join("")).normalize("NFC")}${order.slice(j).join("")}`;
+      if (spelt.normalize("NFD") === d) found.add(spelt);
+    }
+  }
+  const all = [...found].sort((a, b) => b.length - a.length);
+  SPELLINGS.set(ch, all);
+  return all;
 }
 /** A name as a whole word; a space in it matches any run of blanks, line breaks included (console output wraps). */
 const wholeWord = (name: string): RegExp => new RegExp(String.raw`${NAME_START}${namePattern(name).replace(/ +/g, String.raw`\s+`)}(?![A-Za-z0-9])`, "gi");
