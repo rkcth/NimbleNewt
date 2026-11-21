@@ -175,3 +175,23 @@ test("wsb-cleanup: bad usage exits 2; off Windows it does nothing and exits 0", 
     assert.match(r.stdout, /not Windows/);
   }
 });
+
+test("own-hardware: the job-context diagnostic (card wsb-console) runs once before the first wsb call, never fails the job, and fits in the job's limit", () => {
+  const text = read("own-hardware.yml");
+  const j = job(text, "sandbox-windows");
+  const s = step(j, "wsbctx");
+  assert.match(s, /\n {8}continue-on-error: true\n/);
+  assert.match(s, /\n {8}timeout-minutes: 5\n/);
+  assert.match(s, /node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs > "\$RUNNER_TEMP\/wsb-job-context\.txt"/);
+  // Only the redacted copy is printed or added to the summary.
+  assert.doesNotMatch(s.replace(/node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, ""), /wsb-job-context\.mjs/);
+  // After the build, before every step that runs wsb (the Sandbox tests are the first).
+  assert.ok(j.indexOf("id: wsbctx") > j.indexOf("npm run build") && j.indexOf("id: wsbctx") < j.indexOf("id: wsb\n"));
+  // A record, not evidence: the outcome step does not read it.
+  assert.doesNotMatch(j.slice(j.indexOf("- name: Job summary and outcome")), /steps\.wsbctx\./);
+  const ids = ["wsbctx", "fs", "wsb", "wd", "g05", "g06", "y02", "cleanup"];
+  const stepSum = ids.reduce((sum, id) => sum + Number(/\n {8}timeout-minutes: (\d+)\n/.exec(step(j, id))[1]), 0);
+  assert.ok(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(j)[1]) >= stepSum + 30, `job limit below ${stepSum + 30}`);
+  // No other job runs it.
+  assert.equal(text.split("wsb-job-context.mjs").length - 1, 1);
+});
