@@ -158,7 +158,7 @@ export interface StateApiDeps {
   /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
   readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate">;
   /** Documentation obligations and their impact (card Q03). */
-  readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "impact" | "release" | "list" | "get">;
+  readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "retire" | "impact" | "release" | "list" | "get">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, landing, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
