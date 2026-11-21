@@ -328,6 +328,22 @@ for (const backend of backends) {
     await c.decide(x2rival, "accepted");
     await refuses("invalid_command", () => c.decide(x3, "accepted"), /earlier version, lesson .* is already superseded/);
     assert.deepEqual([await c.status(x2), await c.status(x3)], ["candidate", "candidate"]);
+    // Re-check: a version found rejected in the middle of the chain is walked through too, so version 1 does not stay accepted beside version 4.
+    const y1 = await c.lesson("Y one"); await c.decide(y1, "accepted");
+    const y2 = await c.lesson("Y two", { revises: y1 });
+    const y3 = await c.lesson("Y three", { revises: y2 });
+    await c.decide(y2, "rejected", "no");
+    const y4 = await c.lesson("Y four", { revises: y3 });
+    await c.decide(y4, "accepted");
+    assert.deepEqual([await c.status(y1), (await c.lessons.get(c.owner, y1))!.supersededBy, await c.status(y2), await c.status(y3), await c.status(y4)], ["superseded", y4, "rejected", "superseded", "accepted"]);
+    // A middle version accepted (replacing version 1) and later rejected on review: version 1 was replaced inside this chain, so the walk ends there and version 4 is accepted.
+    const z1 = await c.lesson("Z one"); await c.decide(z1, "accepted");
+    const z2 = await c.lesson("Z two", { revises: z1 });
+    const z3 = await c.lesson("Z three", { revises: z2 });
+    await c.decide(z2, "accepted"); await c.decide(z2, "needs-review", "look again"); await c.decide(z2, "rejected", "no");
+    const z4 = await c.lesson("Z four", { revises: z3 });
+    await c.decide(z4, "accepted");
+    assert.deepEqual([await c.status(z1), (await c.lessons.get(c.owner, z1))!.supersededBy, await c.status(z3), await c.status(z4)], ["superseded", z2, "superseded", "accepted"]);
 
     // A full premise makes room only by dropping finished dependents (superseded, inconclusive): every open one (accepted, evaluating, under review, candidate) stays, and is marked when the premise is replaced.
     const base = await c.lesson("Crowded base"); await c.decide(base, "accepted");
@@ -406,7 +422,8 @@ for (const backend of backends) {
     suite("finished lessons waiting to be told do not count against the open-lesson limit, so a project cannot be locked by them", async (c) => {
       // An agent's lessons with no task have nowhere to be told; rejected, they stay listed (waiting) but are no longer open.
       const ids: string[] = [];
-      for (let i = 0; i < 500; i++) ids.push((await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: `L${i}`, statement: "x", applicability: "y", evidence: [{ kind: "improvement-item", id: await c.improvement(c.a) }] })).id);
+      // (Re-check: the oldest one has a task, so its outcome can still be told later.)
+      for (let i = 0; i < 500; i++) ids.push((await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: `L${i}`, statement: "x", applicability: "y", evidence: [i === 0 ? { kind: "submission", id: await c.submission(c.a, c.taskA) } : { kind: "improvement-item", id: await c.improvement(c.a) }] })).id);
       await refuses("unavailable", () => c.lesson("Over"), /500 lessons are open/);
       for (const id of ids.slice(0, 3)) await c.decide(id, "rejected", "noise");
       assert.equal((await c.lessons.get(c.owner, ids[0]!))!.outcomePending, true);
@@ -422,10 +439,14 @@ for (const backend of backends) {
       assert.equal((await all()).length, 1000);
       const last = await c.lesson("Room at a full list");
       const listed = await all();
-      assert.deepEqual([listed.length, listed.includes(last), listed.includes(ids[0]!), listed.includes(ids[1]!), listed.includes(fresh)], [1000, true, false, true, true]);
-      assert.deepEqual([(await c.lessons.get(c.owner, ids[0]!))!.status, (await c.lessons.get(c.dev, ids[0]!))!.outcomePending], ["rejected", true]);
+      // Re-check: the oldest finished one WITH NO TASK leaves; the older one with a task stays listed, so the outcome loop can still tell it.
+      assert.deepEqual([listed.length, listed.includes(last), listed.includes(ids[0]!), listed.includes(ids[1]!), listed.includes(ids[2]!), listed.includes(fresh)], [1000, true, true, false, true, true]);
+      assert.deepEqual([(await c.lessons.get(c.owner, ids[1]!))!.status, (await c.lessons.get(c.dev, ids[1]!))!.outcomePending], ["rejected", true]);
       // Open lessons are never dropped: with 500 open the next is still refused.
       await refuses("unavailable", async () => { for (let i = 0; i < 2; i++) await c.lesson(`Fill ${i}`); }, /500 lessons are open/);
+      const told = await c.make({ outcomes: { deliver: async (x: OutcomeNotice) => x.taskId !== undefined } }).deliverOutcomes(c.host, c.a);
+      assert.deepEqual(told.delivered, [ids[0]!]);
+      assert.equal((await c.lessons.get(c.dev, ids[0]!))!.outcomePending, false);
     });
   }
 }

@@ -36,6 +36,8 @@ const LEGAL: Readonly<Record<LessonStatus, readonly LessonStatus[]>> = {
   rejected: [], inconclusive: [], superseded: [],
 };
 const EVALUATED: readonly LessonStatus[] = ["accepted", "rejected", "inconclusive"];
+/** Versions a later version's acceptance walks back through to the version still in force. */
+const NOT_IN_FORCE: readonly LessonStatus[] = ["candidate", "evaluating", "rejected", "inconclusive"];
 
 export const EVIDENCE_KINDS = ["observation", "submission", "review", "improvement-item", "lesson"] as const;
 export type LessonEvidenceKind = (typeof EVIDENCE_KINDS)[number];
@@ -164,11 +166,14 @@ export class LessonService {
         if (index.ids.length >= LESSON_LIMITS.current) {
           // Finished lessons whose proposer cannot be told yet (no task, a retired proposer) stay listed, but only open lessons count against the limit, so they never lock the project. The list holds at most
           // twice the limit: when it is full, the oldest finished ones leave it (each stays readable, with its outcome still marked pending), rather than the project refusing new lessons for good.
-          const finished: string[] = [];
-          for (const x of index.ids) { const l = await this.#lesson(x); if (l !== undefined && FINAL.includes(l.body.status)) finished.push(x); }
-          if (index.ids.length - finished.length >= LESSON_LIMITS.current) throw new DomainError("unavailable", `${LESSON_LIMITS.current} lessons are open in this project, the most kept; settle some first`);
+          // The ones with no task leave first: their outcome has nowhere to be filed, whereas one with a task can still be told by the outcome loop (which reads only this list). One with a task leaves only
+          // when every finished one has a task and none could be told yet (its proposer can still read it).
+          const untold: string[] = [];
+          const tasked: string[] = [];
+          for (const x of index.ids) { const l = await this.#lesson(x); if (l !== undefined && FINAL.includes(l.body.status)) (l.body.taskId === undefined ? untold : tasked).push(x); }
+          if (index.ids.length - untold.length - tasked.length >= LESSON_LIMITS.current) throw new DomainError("unavailable", `${LESSON_LIMITS.current} lessons are open in this project, the most kept; settle some first`);
           const over = index.ids.length + 1 - 2 * LESSON_LIMITS.current;
-          if (over > 0) { const drop = new Set(finished.slice(0, over)); listed = index.ids.filter((x) => !drop.has(x)); }
+          if (over > 0) { const drop = new Set([...untold, ...tasked].slice(0, over)); listed = index.ids.filter((x) => !drop.has(x)); }
         }
         const taskId = await this.#taskOf(evidence);
         const body: LessonBody = {
@@ -240,14 +245,21 @@ export class LessonService {
             if (premise?.status !== "accepted") throw new DomainError("invalid_command", `premise ${p} is ${premise?.status ?? "missing"}; it must be accepted first, or this lesson revised to rest on its successor`, { field: "to" });
           }
           // A version accepted while the version it revises was never in force (a candidate) also replaces the version before that one still current: accepting version 3 over a candidate version 2 must not
-          // leave version 1 accepted beside it. The walk follows `revises` through versions never accepted, at most ten steps; a version already replaced by another version on the way is refused, as below.
+          // leave version 1 accepted beside it. The walk follows `revises` through versions not in force (a candidate, one under evaluation, or one found rejected or inconclusive), at most ten steps. An
+          // earlier version replaced by a version of this chain ends the walk (nothing before it is in force); one replaced by a version outside the chain (a rival) is refused, as below.
           const supersedes = [...got.body.supersedes];
-          for (let step = 0, at = got.body.revises === undefined ? undefined : await edits.get(got.body.revises); at !== undefined && (at.status === "candidate" || at.status === "evaluating") && at.revises !== undefined; step++) {
+          const chain = new Set<string>([id]);
+          for (let step = 0, atId = got.body.revises, at = atId === undefined ? undefined : await edits.get(atId); atId !== undefined && at !== undefined && NOT_IN_FORCE.includes(at.status) && at.revises !== undefined; step++) {
             if (step >= 10) throw new DomainError("invalid_command", `lesson ${id} revises a chain of more than ten versions never accepted; settle the earlier versions first`, { field: "to" });
+            chain.add(atId);
             const before = await edits.get(at.revises);
             if (before === undefined) break;
-            if (before.status === "superseded") throw new DomainError("invalid_command", `an earlier version, lesson ${at.revises}, is already superseded${before.supersededBy === undefined ? "" : ` by ${before.supersededBy}`}; revise the current version instead`, { field: "to" });
+            if (before.status === "superseded") {
+              if (before.supersededBy !== undefined && chain.has(before.supersededBy)) break;
+              throw new DomainError("invalid_command", `an earlier version, lesson ${at.revises}, is already superseded${before.supersededBy === undefined ? "" : ` by ${before.supersededBy}`}; revise the current version instead`, { field: "to" });
+            }
             if (!FINAL.includes(before.status) && !supersedes.includes(at.revises)) supersedes.push(at.revises);
+            atId = at.revises;
             at = before;
           }
           for (const s of supersedes) {
