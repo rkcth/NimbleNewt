@@ -152,7 +152,7 @@ export class LandingQueueService {
 
   /**
    * Puts an approved submission in the queue. A submission already queued is left where it is (`already`); a task already queued has its entry's submission replaced in place (it keeps its turn); anything else goes to the
-   * back. At most `entries` entries; one more is refused `unavailable`.
+   * back. At most `entries` entries; one more is refused `unavailable`, except a task's re-approval into its reserved place (reservations are bounded on their own, so at most `entries` + `reservations`).
    */
   async enqueue(command: { commandId: string; actor: string; projectId: string; branch: string; submissionId: string; taskId: string; base: string; tree: string; author: string; submittedAt?: string }): Promise<{ entry: LandingQueueEntry; position: number; already: boolean; replaced?: string }> {
     const projectId = text(command.projectId, "projectId", { min: 1, max: 100 });
