@@ -262,6 +262,8 @@ test("the guide's hand-off conversations, run line by line through the launcher 
     assert.ok((await call(live, "task.transition", { taskId, to: "ready", expectedRevision: 1 }, "tr1")).ok);
     assert.ok((await call(live, "task.assign", { taskId, owner: { kind: "agent", id: ann } }, "as1")).ok);
     const holder = async (): Promise<unknown> => (await call(live, "assignment.get", { taskId })).result.item.owner;
+    // Whether the task's work is held (paused): a hand-off holds it while it is prepared and lets go when it ends, so the task is free for work again.
+    const held = async (): Promise<boolean> => (await call(live, "lifecycle.status", { scope: { kind: "task", id: taskId } })).result.item.intent === "pause";
     const going = async (): Promise<{ id: string } | undefined> => { const r = await call(live, "handoff.for-task", { taskId }); return r.ok ? r.result.item : (assert.equal(r.error.code, "not_found", JSON.stringify(r)), undefined); };
 
     const chat = live.controller.chat!;
@@ -295,12 +297,15 @@ test("the guide's hand-off conversations, run line by line through the launcher 
         assert.deepEqual(kinds(outcomes), [["applied", "handoff.prepare"]]);
         assert.deepEqual(await holder(), { kind: "agent", id: ann }, "preparing the hand-off moves nothing");
         prepared = (await going())?.id;
+        assert.ok(await held(), "Ann's work on the task is brought to a stop while the hand-off is prepared");
         assert.ok(prepared !== undefined, "a hand-off is going on for the task");
       }
       // The guide: the answer names agents by their IDs.
       if (step.you.startsWith("In Garden")) assert.ok(reply.includes(ann) && reply.includes(await agentId("Bob")), `the hand-off status names Ann and Bob by ID: ${reply}`);
       if (step.you.startsWith("Finish handing over")) {
         assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "handing over with gaps is shown first");
+        // The guide says this is shown first in every profile, not only on strict (the example's profile): the reason given is the accepted gaps, not the profile.
+        assert.ok(reply.includes("(it changes what someone may do or where work is done)") && !reply.includes("strict profile"), `handing over with gaps is shown first for its own reason, whatever the profile: ${reply}`);
         assert.deepEqual(await holder(), { kind: "agent", id: ann }, "nothing moved before the yes");
       }
     }
@@ -308,6 +313,7 @@ test("the guide's hand-off conversations, run line by line through the launcher 
     const bob = { id: await agentId("Bob") };
     assert.deepEqual(await holder(), { kind: "agent", id: bob.id });
     assert.equal((await call(live, "task.get", { taskId })).result.item.state, "ready");
+    assert.equal(await held(), false, "the hand-off's hold is lifted, so Bob can work on the task");
     assert.equal(await going(), undefined, "no hand-off is still going on for the task");
     const done = (await call(live, "handoff.get", { handoffId: prepared })).result.item;
     assert.equal(done.phase, "transferred");
@@ -322,7 +328,7 @@ test("the guide's hand-off conversations, run line by line through the launcher 
     for (const step of moreSteps) {
       const { outcomes, reply } = await say(step);
       if (step.you.startsWith("Hand Add a greeting")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.prepare"]]); assert.ok((await going()) !== undefined); }
-      if (step.you.startsWith("Cancel")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.cancel"]]); assert.equal(await going(), undefined, "the cancelled hand-off is over"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }, "cancelling moves nothing"); }
+      if (step.you.startsWith("Cancel")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.cancel"]]); assert.equal(await going(), undefined, "the cancelled hand-off is over"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }, "cancelling moves nothing"); assert.equal(await held(), false, "and lifts the cancelled hand-off's hold"); }
       if (step.you.startsWith("Let Ann cover")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a time to give the task back is shown first"); assert.ok(reply.includes(friday), `the proposal shows the time the task goes back (${friday}): ${reply}`); assert.equal(await going(), undefined, "nothing is prepared before the yes"); }
       if (step.you.startsWith("no,")) { assert.deepEqual(outcomes.map((o) => o.status), ["discarded"]); assert.equal(await going(), undefined); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }); }
       if (step.you.startsWith("Take Add a greeting")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a takeover by force is shown first"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }); }
