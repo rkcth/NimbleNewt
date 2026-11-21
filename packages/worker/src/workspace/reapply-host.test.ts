@@ -69,6 +69,20 @@ test("reapply keeps the agent's changed and new files over a branch that moved i
   } finally { await w.done(); }
 });
 
+test("a refresh names the whole landing branch it used, also a name longer than the summary shows (second review: the controller compares it with the branch it carried)", { skip }, async () => {
+  const long = `release/${"x".repeat(90)}`;
+  const w = await world({ landing: () => ({ branch: long, requirePermit: false }) });
+  try {
+    const head = await w.advance({ "README.md": "hello again\n" });
+    sh(w.shared, "branch", long, head);
+    const r = await w.host.run(call("reapply"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["base"], detailOf(r)["branch"]], [head, long]);
+    const again = await w.host.run(call("reapply"));
+    assert.deepEqual([detailOf(again)["changed"], detailOf(again)["branch"]], [false, long]);
+  } finally { await w.done(); }
+});
+
 test("reapply over a branch that moved in the same file merges edits that do not overlap, and lists overlapping edits with markers without resolving them", { skip }, async () => {
   const w = await world();
   try {
@@ -166,5 +180,109 @@ test("reapply refuses a landing branch change that is a link, as a value, and ch
     assert.equal(r.ok, false); assert.match(reasonOf(r), /link/);
     assert.equal(await w.git.baseOf(w.where.gitDir), base);
     assert.equal(await readFile(join(w.where.checkout, "mine.ts"), "utf8"), "export const m = 1;\n");
+  } finally { await w.done(); }
+});
+
+// Card H12p follow-up: the refresh goes to the owner's landing branch (the branch a landing and the integrator's re-apply land on), whatever the shared working tree has checked out.
+test("reapply goes to the owner's landing branch even when the shared working tree has another branch checked out, and says which branch", { skip }, async () => {
+  const w = await world();
+  try {
+    await writeFile(join(w.where.checkout, "mine.ts"), "export const m = 1;\n");
+    const onMain = await w.advance({ "other.ts": "export const o = 1;\n" });
+    // The owner (or a tool) has the shared tree on another branch for a moment, with a commit of its own.
+    sh(w.shared, "checkout", "-q", "-b", "side");
+    const onSide = await w.advance({ "side.ts": "export const s = 1;\n" });
+    assert.notEqual(onSide, onMain);
+    const before = w.sharedState();
+    const r = await w.host.run(call("reapply"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const d = detailOf(r);
+    assert.deepEqual([d["changed"], d["base"], d["branch"]], [true, onMain, "main"]);
+    assert.match(summaryOf(r), /landing branch "main"/);
+    assert.equal(await w.git.baseOf(w.where.gitDir), onMain, "onto the landing branch's head, not the shared tree's checked-out head");
+    assert.equal(await readFile(join(w.where.checkout, "other.ts"), "utf8"), "export const o = 1;\n");
+    await assert.rejects(readFile(join(w.where.checkout, "side.ts"), "utf8"), "nothing of the other branch is taken");
+    assert.equal(await readFile(join(w.where.checkout, "mine.ts"), "utf8"), "export const m = 1;\n");
+    assert.equal(w.sharedState(), before, "the shared repository is only read");
+    // The same head the host names for a submit's check.
+    assert.deepEqual(await w.host.landingHead({ taskId: "tsk-one", projectId: "prj-one", shared: w.shared }, "x"), { head: onMain, branch: "main" });
+    const again = await w.host.run(call("reapply"));
+    assert.deepEqual([again.ok, detailOf(again)["changed"], detailOf(again)["branch"]], [true, false, "main"]);
+  } finally { await w.done(); }
+});
+
+test("reapply is refused, and the checkout left as it was, when the landing branch is missing, the settings cannot be read, the host refuses to name a policy or the name is not a branch; with no branch set it follows the shared head as before", { skip }, async () => {
+  let policy: () => unknown = () => ({ branch: "trunk" });
+  const given: unknown[] = [];
+  const w = await world({ landing: (x) => { given.push(x); return policy() as never; } });
+  try {
+    await writeFile(join(w.where.checkout, "mine.ts"), "export const m = 1;\n");
+    await w.advance({ "other.ts": "export const o = 1;\n" });
+    const base = await w.git.baseOf(w.where.gitDir);
+    const unchanged = async (): Promise<void> => {
+      assert.equal(await w.git.baseOf(w.where.gitDir), base);
+      assert.equal(await readFile(join(w.where.checkout, "mine.ts"), "utf8"), "export const m = 1;\n");
+      await assert.rejects(readFile(join(w.where.checkout, "other.ts"), "utf8"));
+    };
+    const missing = await w.host.run(call("reapply"));
+    assert.equal(missing.ok, false); assert.match(reasonOf(missing), /no branch "trunk".*left as it was/);
+    await unchanged();
+    policy = () => { throw new Error("settings store down"); };
+    const unreadable = await w.host.run(call("reapply"));
+    assert.equal(unreadable.ok, false); assert.match(reasonOf(unreadable), /could not read the landing settings.*left as it was/);
+    await unchanged();
+    policy = () => ({ refuse: "the owner's branch is not the one this host lands on" });
+    const refused = await w.host.run(call("reapply"));
+    assert.equal(refused.ok, false); assert.equal(reasonOf(refused), "the owner's branch is not the one this host lands on");
+    await unchanged();
+    for (const bad of ["-main", "main..x", "refs//x", "main.lock", "ma in"]) {
+      policy = () => ({ branch: bad });
+      const r = await w.host.run(call("reapply"));
+      assert.equal(r.ok, false, bad); assert.match(reasonOf(r), /not a plain branch name/, bad);
+    }
+    await unchanged();
+    // The policy a remote request carried reaches the host's option, as for a landing.
+    given.length = 0;
+    policy = () => ({});
+    sh(w.shared, "checkout", "-q", "-b", "side");
+    const onSide = await w.advance({ "side.ts": "export const s = 1;\n" });
+    const r = await w.host.run(call("reapply", { landing: { branch: "main" } }));
+    assert.deepEqual(given, [{ taskId: "tsk-one", projectId: "prj-one", carried: { branch: "main" } }]);
+    // No branch named: the shared tree's checked-out head, as before this change.
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["base"], detailOf(r)["branch"]], [onSide, undefined]);
+    assert.match(summaryOf(r), /onto the landing branch's head/);
+  } finally { await w.done(); }
+});
+
+test("the landing branch is read by its exact name only: a refs/ prefix, a tag of the same name, a longer branch under it, a hand-written ref to a non-commit and malformed names give nothing, and the shared repository is only read (card H12p follow-up review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const main = sh(w.shared, "rev-parse", "HEAD");
+    assert.equal(await w.git.branchHead(w.shared, "main"), main);
+    // A tag named like a branch is not a branch; a branch named after a ref path is a different branch.
+    sh(w.shared, "tag", "trunk");
+    sh(w.shared, "branch", "feature/x");
+    sh(w.shared, "tag", "-a", "-m", "annotated", "v1");
+    const tagObject = sh(w.shared, "rev-parse", "v1");
+    // A branch ref written by hand that holds the annotated tag object, not a commit (git itself refuses to write one).
+    // (Loose ref files only: a repository whose refs are kept another way, such as reftable, leaves this part out.)
+    await writeFile(join(w.shared, ".git", "refs", "heads", "odd"), `${tagObject}\n`).catch(() => undefined);
+    const planted = sh(w.shared, "for-each-ref", "--format=%(objecttype)", "refs/heads/odd") === "tag";
+    const before = w.sharedState();
+    for (const name of ["trunk", "feature", "refs/heads/main", "heads/main", "odd", "mai", "HEAD"]) assert.equal(await w.git.branchHead(w.shared, name), undefined, name);
+    assert.equal(await w.git.branchHead(w.shared, "feature/x"), main);
+    for (const bad of ["-main", "--all", "main..x", "a//b", "main/", "main.lock", "ma in", "ma\nin", "ma\u0000in", "mäin", "*", "ma?n", "[m]ain", "@{-1}", "main~1", "main^", "ma:in", ".main", "a".repeat(201), ""]) {
+      await assert.rejects(w.git.branchHead(w.shared, bad), /not a plain branch name/, JSON.stringify(bad));
+    }
+    assert.equal(w.sharedState(), before, "the shared repository is only read");
+    // Through the host: a refresh onto a branch that is only a tag, or that holds no commit, is refused and the checkout is left as it was.
+    for (const branch of planted ? ["trunk", "odd"] : ["trunk"]) {
+      const host = new WorkspaceHost({ git: w.git, journal: join(w.dir, `journal-${branch}`), locate: () => w.where, landing: () => ({ branch, requirePermit: false }) });
+      await w.advance({ [`${branch}.txt`]: "x\n" });
+      const r = await host.run(call("reapply"));
+      assert.equal(r.ok, false, branch); assert.match(reasonOf(r), new RegExp(`no branch "${branch}".*left as it was`), branch);
+      assert.equal(await w.git.baseOf(w.where.gitDir), w.first, branch);
+    }
   } finally { await w.done(); }
 });

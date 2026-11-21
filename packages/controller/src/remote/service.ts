@@ -259,8 +259,8 @@ function checkAsk(call: WorkspaceCall): WorkspaceAsk {
   if (typeof call.reason !== "string" || call.reason.length < 1 || call.reason.length > 500) invalid("reason", "must be 1 to 500 characters");
   if (!Array.isArray(call.quietAttempts) || call.quietAttempts.length > 50 || call.quietAttempts.some((a) => typeof a !== "string" || !ATTEMPT.test(a))) invalid("quietAttempts", "must be a short list of attempt IDs");
   if (call.assignee !== undefined && (typeof call.assignee !== "string" || !name.test(call.assignee))) invalid("assignee", "is malformed");
-  // The owner's landing policy rides only a landing; any other operation carrying one is a mistake and is refused rather than quietly dropped.
-  if (call.landing !== undefined && call.operation !== "landing") invalid("landing", "is carried only by a landing");
+  // The owner's landing policy rides only a landing and the author's own refresh (card H12p follow-up: it goes to the landing branch); any other operation carrying one is a mistake and is refused rather than quietly dropped.
+  if (call.landing !== undefined && call.operation !== "landing" && call.operation !== "reapply") invalid("landing", "is carried only by a landing or the author's refresh");
   // Card H12o: an approved submission's commit is not carried to a remote host (it would be dropped here and the host would commit whatever its checkout holds); refused rather than quietly dropped.
   if (call.submission !== undefined) invalid("submission", "the commit of an approved submission is not carried to a remote host");
   return { requestId: id, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: [...call.quietAttempts], ...(call.assignee === undefined ? {} : { assignee: call.assignee }), ...(call.landing === undefined ? {} : { landing: checkCarriedLanding(call.landing) }) };
