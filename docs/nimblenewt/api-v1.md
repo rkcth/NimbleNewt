@@ -1861,7 +1861,7 @@ Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subjec
 
 #### `status.attention`
 
-What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), tool calls whose result is not known (`uncertain_tool_result`), and stale artifacts (`stale_artifact`: a newer artifact of the same name exists on the task, or the newest artifact of a still-open task is more than 7 days old, or a versioned deliverable's newest version was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since: `reason` `contract_changed`, `at` when they first changed, or when the current contract version was stored if the first change is more than 20 versions back, which `detail.at` says: `first_change` or `current_version`; the deliverable cited). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task; artifacts: the artifact right on the project; deliverables: the right `deliverable.record.list` asks for); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`.
+What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), tool calls whose result is not known (`uncertain_tool_result`), and stale artifacts (`stale_artifact`: a newer artifact of the same name exists on the task, or the newest artifact of a still-open task is more than 7 days old, or a versioned deliverable's newest version was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since: `reason` `contract_changed`, `at` when they first changed, or when the current contract version was stored if the first change is more than 20 versions back, which `detail.at` says: `first_change` or `current_version`; or its newest standing version names an artifact of the task that a newer artifact of the same name has replaced and not that newest one: `reason` `artifact_replaced`, `at` when the first replacement was recorded, artifact names and the newer artifact only for a caller with the artifact right; the deliverable cited). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task; artifacts: the artifact right on the project; deliverables: the right `deliverable.record.list` asks for); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`.
 
 Arguments:
 
@@ -1870,7 +1870,7 @@ Arguments:
 - `agentId` (optional): only this agent (the task's owner of record, the caller of the tool, the one who recorded the artifact, or the deliverable's responsible agent)
 - `state` (optional): only tasks in this state
 - `kind` (optional): `paused_assignee`, `unreachable_worker`, `uncertain_tool_result` or `stale_artifact`
-- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time, when the artifact was replaced or recorded, when the contract's work first changed)
+- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time, when the artifact was replaced or recorded, when the contract's work first changed, when a deliverable's artifact was first replaced)
 - `until` (optional): only items up to this UTC time
 - `limit` (optional): 1 to 100, default 50
 - `after` (optional): the `next` of the previous page
@@ -4013,14 +4013,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `work.refresh`
 
-An agent refreshes its own checkout onto the landing branch's current head before it submits (card H12p). Your work (changed, new and ignored files, committed or not) is re-applied three-way: a file only you changed stays, a file only the landing branch changed is taken, a file both changed is merged line by line. Overlapping edits are NEVER resolved for you: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is listed (a file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content are listed too and keep your side). You fix every conflict yourself and re-run your checks before you submit. There is no pause: it runs while you work and is one call at a time with the task's other workspace operations (a second one is `unavailable`: ask again). Files in your checkout may now differ from what you read earlier, so read them again. A refresh that moved you onto a newer head is one refresh round of the task; the rounds are carried on your submission. Asking when you are at the head already changes nothing. Only the attempt's own agent, while it runs; the same command again returns the recorded answer.
+An agent refreshes its own checkout onto the landing branch's current head before it submits (card H12p). The landing branch is the owner's (the project's own, else `workspace.landing.branch`), the same one a landing and the integrator's re-apply use and the one your submit is checked against; with none set it is the shared workspace's current head. A landing branch the shared repository does not have, or settings that cannot be read, refuse the refresh and leave your checkout as it was. Your work (changed, new and ignored files, committed or not) is re-applied three-way: a file only you changed stays, a file only the landing branch changed is taken, a file both changed is merged line by line. Overlapping edits are NEVER resolved for you: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is listed (a file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content are listed too and keep your side). You fix every conflict yourself and re-run your checks before you submit. There is no pause: it runs while you work and is one call at a time with the task's other workspace operations (a second one is `unavailable`: ask again). Files in your checkout may now differ from what you read earlier, so read them again. A refresh that moved you onto a newer head is one refresh round of the task; the rounds are carried on your submission. Asking when you are at the head already changes nothing. Only the attempt's own agent, while it runs; the same command again returns the recorded answer.
 
 Arguments:
 
 - `attemptId`: your attempt
 - `commandId`: required
 
-Result: `{ item }`: the recorded request (`state`, `summary`, `detail` with `changed`, `before`, `base`, `kept`, `taken`, `merged`, `conflictCount` and `conflicts` as `{ path, kind }`, and `round`).
+Result: `{ item }`: the recorded request (`state`, `summary`, `detail` with `changed`, `before`, `base`, `kept`, `taken`, `merged`, `conflictCount` and `conflicts` as `{ path, kind }`, `branch` when a landing branch is set, and `round`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -7866,6 +7866,21 @@ Arguments:
 - `applicableVersion` (optional): the version it now applies to
 
 Result: `{ id, revision, replayed, settled (update tasks settled) }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `doc.obligation.retire`
+
+Takes a document away (card Q03): it is no longer kept (removed, or merged into another). It leaves the project's documents (`doc.obligation.list`, the `docs` view, and every impact and release check) and no longer counts toward the project's 500; `doc.obligation.get` still reads it, marked `retired` (who, when, why). A retired document can be neither verified nor replaced: record it again if it is kept again. Its open update tasks are dropped: each one not yet started is cancelled; one already in progress is left to its agent and listed in `running`. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID retires once and finishes any cancellation a failure left.
+
+Arguments:
+
+- `commandId`: required
+- `obligationId`: the obligation
+- `expectedRevision`: its revision
+- `reason` (optional): why, in a few words (at most 300 characters)
+
+Result: `{ id, revision, replayed, cancelled (update tasks cancelled), running (update tasks left in progress) }`.
 
 Completion: finished when accepted (`completed: true`).
 

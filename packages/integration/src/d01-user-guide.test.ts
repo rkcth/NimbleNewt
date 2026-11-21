@@ -197,6 +197,163 @@ test("the guide's example conversation, run line by line through the launcher an
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+// What the stand-in model answers to each line of the guide's hand-off conversation (the section "Handing a task to another agent"). As above, a line added to or changed in the guide without a matching
+// entry here fails the test, and so does an entry here that the guide no longer has.
+function handoffUnderstanding(lastProposals: () => string[]): Record<string, () => unknown[]> {
+  const yes = (words: string) => () => lastProposals().map((proposalId) => ({ kind: "apply_proposal", proposalId, evidence: words, basis: "owner" }));
+  const hand = "Hand Add a greeting to the README over to Bob, Ann is away this week";
+  return {
+    "Add an agent called Bob as an author": () => [intent("command", { op: "agent.create", args: { friendlyName: "Bob", roles: ["author"] } }, "Add an agent called Bob")],
+    "yes, add him": yes("yes, add him"),
+    "Let Bob work on Garden": () => [intent("command", { op: "grant.create", args: { agentName: "Bob", projectName: "Garden", bundle: "roles" } }, "Let Bob work on Garden")],
+    "yes, give them": yes("yes, give them"),
+    [hand]: () => [intent("command", { op: "handoff.prepare", args: { taskTitle: TASK, toAgentName: "Bob", reason: "Ann is away this week" } }, hand)],
+    "In Garden, how is the hand-off of Add a greeting to the README going?": () => [{ kind: "switch_focus", projectName: "Garden", evidence: "In Garden", basis: "owner" }, intent("status", { request: { kind: "handoff", taskTitle: TASK } }, "how is the hand-off of Add a greeting to the README going?")],
+    "Finish handing over Add a greeting to the README, gaps and all": () => [intent("command", { op: "handoff.complete", args: { taskTitle: TASK, acceptGaps: true } }, "Finish handing over Add a greeting to the README, gaps and all")],
+    "yes, hand it over": yes("yes, hand it over"),
+  };
+}
+
+// The guide's three further hand-off lines (cancel, cover for a while, take over by force), said once the task is Bob's.
+function handoffMoreUnderstanding(lastProposals: () => string[], friday: string): Record<string, () => unknown[]> {
+  const back = "Hand Add a greeting to the README back to Ann, Bob is needed elsewhere";
+  const cover = "Let Ann cover Add a greeting to the README until Friday, Bob is needed elsewhere";
+  const force = "Take Add a greeting to the README over for Ann, Bob is not answering";
+  return {
+    [back]: () => [intent("command", { op: "handoff.prepare", args: { taskTitle: TASK, toAgentName: "Ann", reason: "Bob is needed elsewhere" } }, back)],
+    "Cancel the hand-off of Add a greeting to the README": () => [intent("command", { op: "handoff.cancel", args: { taskTitle: TASK } }, "Cancel the hand-off of Add a greeting to the README")],
+    [cover]: () => [intent("command", { op: "handoff.prepare", args: { taskTitle: TASK, toAgentName: "Ann", reason: "Bob is needed elsewhere", returnAt: friday } }, cover)],
+    "no, drop that": () => lastProposals().map((proposalId) => ({ kind: "discard_proposal", proposalId, evidence: "no, drop that", basis: "owner" })),
+    [force]: () => [intent("command", { op: "handoff.takeover", args: { taskTitle: TASK, toAgentName: "Ann", reason: "Bob is not answering" } }, force)],
+    "yes, take it over": () => lastProposals().map((proposalId) => ({ kind: "apply_proposal", proposalId, evidence: "yes, take it over", basis: "owner" })),
+  };
+}
+
+test("the guide's hand-off conversations, run line by line through the launcher and the terminal chat, move the example's task from Ann to Bob with its package, cancel, discard a cover and take it back by force, and every reply they quote is real (card D01)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-handoff-"));
+  const turns: Turn[] = [];
+  const lastProposals = (): string[] => (turns.at(-1)?.outcomes ?? []).flatMap((o) => (o.status === "proposed" && o.proposalId !== undefined ? [o.proposalId] : []));
+  // "until Friday": the stand-in reads it as a time three days ahead (a real model works the date out; the chat shows it before anything is done).
+  const friday = new Date(Date.now() + 3 * 86_400_000).toISOString();
+  const first = handoffUnderstanding(lastProposals);
+  const more = handoffMoreUnderstanding(lastProposals, friday);
+  const table = { ...first, ...more };
+  const asked: string[] = [];
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const text = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    asked.push(text);
+    const intents = table[text]?.() ?? [{ kind: "none", reason: "not in the guide" }];
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const steps = conversation(blocksAfter(guide(), "handoff")[0]!);
+  const moreSteps = conversation(blocksAfter(guide(), "handoff-more")[0]!);
+  assert.deepEqual(steps.map((s) => s.you), Object.keys(first), "the guide's hand-off conversation and the test's table of what the model understands differ: update both together");
+  assert.deepEqual(moreSteps.map((s) => s.you), Object.keys(more), "the guide's further hand-off lines and the test's table differ: update both together");
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    const live = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
+    l = live;
+    // Where the guide's first conversation ends (made here through the API): Garden, Ann the author with her role's rights there, and the task ready and given to her.
+    const project = (await call(live, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const ann = (await call(live, "agent.create", { friendlyName: "Ann", roles: ["author"] }, "a1")).result.id as string;
+    for (const action of STANDARD_ROLES.find((r) => r.name === "author")!.capabilities) assert.ok((await call(live, "grant.create", { grantee: `agent:${ann}`, action, project, basis: "Let Ann work on Garden" }, `g-${action}`)).ok);
+    const taskId = (await call(live, "task.create", { projectId: project, title: TASK }, "t1")).result.id as string;
+    assert.ok((await call(live, "task.transition", { taskId, to: "ready", expectedRevision: 1 }, "tr1")).ok);
+    assert.ok((await call(live, "task.assign", { taskId, owner: { kind: "agent", id: ann } }, "as1")).ok);
+    const holder = async (): Promise<unknown> => (await call(live, "assignment.get", { taskId })).result.item.owner;
+    // Whether the task's work is held (paused): a hand-off holds it while it is prepared and lets go when it ends, so the task is free for work again.
+    const held = async (): Promise<boolean> => (await call(live, "lifecycle.status", { scope: { kind: "task", id: taskId } })).result.item.intent === "pause";
+    const going = async (): Promise<{ id: string } | undefined> => { const r = await call(live, "handoff.for-task", { taskId }); return r.ok ? r.result.item : (assert.equal(r.error.code, "not_found", JSON.stringify(r)), undefined); };
+
+    const chat = live.controller.chat!;
+    const wrapped = { api: live.controller.api, chat: { submit: async (...a: Parameters<typeof chat.submit>) => { const t = await chat.submit(...a); turns.push(t as unknown as Turn); return t; } } };
+    const say = async (step: { you: string; replies: string[] }): Promise<{ outcomes: Turn["outcomes"]; reply: string }> => {
+      const out: string[] = [];
+      const before = turns.length;
+      await runTerminalChat({ controller: wrapped as never, ownerToken: live.ownerToken, input: lines([step.you]), write: (t) => out.push(t) });
+      const reply = out.join("");
+      assert.equal(turns.length, before + 1, `"${step.you}" made one turn: ${reply}`);
+      const outcomes = turns.at(-1)!.outcomes;
+      assert.ok(!outcomes.some((o) => o.status === "refused"), `"${step.you}" was refused: ${reply}`);
+      for (const quote of step.replies) assert.ok(quotedIn(quote, reply), `the guide quotes "${quote}" for "${step.you}", but the chat printed:\n${reply}`);
+      if (/^yes\b/.test(step.you)) assert.ok(outcomes.length > 0 && outcomes.every((o) => o.status === "applied"), `"${step.you}" applied what was shown: ${reply}`);
+      return { outcomes, reply };
+    };
+    const agentId = async (name: string): Promise<string> => ((await call(live, "agent.list")).result.items as { id: string; friendlyName: string }[]).find((a) => a.friendlyName === name)!.id;
+    const kinds = (o: Turn["outcomes"]) => o.map((x) => [x.status, x.op ?? null]);
+
+    let prepared: string | undefined;
+    for (const step of steps) {
+      const { outcomes, reply } = await say(step);
+      // The guide: Bob needs rights in Garden first, or the hand-off is refused.
+      if (step.you === "yes, add him") {
+        const early = await call(live, "handoff.prepare", { taskId, to: { kind: "agent", id: await agentId("Bob") }, reason: "before Bob has rights" }, "early");
+        assert.ok(!early.ok && /no right to work in the task's project/.test(early.error.message), `a hand-off to Bob before he has rights in Garden is refused: ${JSON.stringify(early)}`);
+        assert.equal(await going(), undefined);
+      }
+      // What the guide says about each step: asking for the hand-off moves nothing yet, the package lacks what the example task has not got, and finishing with gaps is shown first.
+      if (step.you.startsWith("Hand Add a greeting")) {
+        assert.deepEqual(kinds(outcomes), [["applied", "handoff.prepare"]]);
+        assert.deepEqual(await holder(), { kind: "agent", id: ann }, "preparing the hand-off moves nothing");
+        prepared = (await going())?.id;
+        assert.ok(await held(), "Ann's work on the task is brought to a stop while the hand-off is prepared");
+        assert.ok(prepared !== undefined, "a hand-off is going on for the task");
+      }
+      // The guide: the answer names agents by their IDs.
+      if (step.you.startsWith("In Garden")) assert.ok(reply.includes(ann) && reply.includes(await agentId("Bob")), `the hand-off status names Ann and Bob by ID: ${reply}`);
+      if (step.you.startsWith("Finish handing over")) {
+        assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "handing over with gaps is shown first");
+        // The guide says this is shown first in every profile, not only on strict (the example's profile): the reason given is the accepted gaps, not the profile.
+        assert.ok(reply.includes("(it changes what someone may do or where work is done)") && !reply.includes("strict profile"), `handing over with gaps is shown first for its own reason, whatever the profile: ${reply}`);
+        assert.deepEqual(await holder(), { kind: "agent", id: ann }, "nothing moved before the yes");
+      }
+    }
+    // Where the guide says the first conversation ends: the task is Bob's, still ready, the move is in the task's record, and the hand-off is recorded with the gaps the owner accepted.
+    const bob = { id: await agentId("Bob") };
+    assert.deepEqual(await holder(), { kind: "agent", id: bob.id });
+    assert.equal((await call(live, "task.get", { taskId })).result.item.state, "ready");
+    assert.equal(await held(), false, "the hand-off's hold is lifted, so Bob can work on the task");
+    assert.equal(await going(), undefined, "no hand-off is still going on for the task");
+    const done = (await call(live, "handoff.get", { handoffId: prepared })).result.item;
+    assert.equal(done.phase, "transferred");
+    assert.equal(done.reason, "Ann is away this week");
+    assert.deepEqual(done.acceptedGaps.missing, ["acceptanceCriteria", "unfinishedWork", "nextAction"], "the gaps the guide quotes are the ones accepted");
+    // The latest move in the task's record, which must name the new holder as the one the task went to.
+    const lastMove = async (): Promise<{ summary: string; manifest?: { refs?: { kind: string; id: string }[] } } | undefined> => ((await call(live, "activity.steps", { taskId })).result.steps as { kind: string; summary: string }[]).filter((x) => x.kind === "ownership").at(-1);
+    const moved = async (to: string): Promise<boolean> => (await lastMove())?.summary.includes(`to agent ${to}.`) === true;
+    assert.ok(await moved(bob.id), "the move is in the task's record");
+
+    // The further lines: a hand-off back to Ann is prepared and cancelled (the task stays Bob's), a cover until Friday is shown first with its time and dropped, and a takeover by force is shown first and moves the task.
+    for (const step of moreSteps) {
+      const { outcomes, reply } = await say(step);
+      if (step.you.startsWith("Hand Add a greeting")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.prepare"]]); assert.ok((await going()) !== undefined); }
+      if (step.you.startsWith("Cancel")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.cancel"]]); assert.equal(await going(), undefined, "the cancelled hand-off is over"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }, "cancelling moves nothing"); assert.equal(await held(), false, "and lifts the cancelled hand-off's hold"); }
+      if (step.you.startsWith("Let Ann cover")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a time to give the task back is shown first"); assert.ok(reply.includes(friday), `the proposal shows the time the task goes back (${friday}): ${reply}`); assert.equal(await going(), undefined, "nothing is prepared before the yes"); }
+      if (step.you.startsWith("no,")) { assert.deepEqual(outcomes.map((o) => o.status), ["discarded"]); assert.equal(await going(), undefined); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }); }
+      if (step.you.startsWith("Take Add a greeting")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a takeover by force is shown first"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }); }
+    }
+    assert.deepEqual(await holder(), { kind: "agent", id: ann }, "the takeover gave the task to Ann");
+    assert.ok(await moved(ann), "and is in the task's record");
+    // The guide: the takeover is recorded as a forced one.
+    const forcedId = (await lastMove())?.manifest?.refs?.find((r) => r.kind === "handoff")?.id;
+    assert.ok(forcedId !== undefined && forcedId !== prepared, "the takeover's move names its own hand-off");
+    const forced = (await call(live, "handoff.get", { handoffId: forcedId })).result.item;
+    assert.deepEqual([forced.mode, forced.phase, forced.reason], ["forced", "transferred", "Bob is not answering"], "the takeover is recorded as a forced one, with the owner's reason");
+    assert.ok(forced.exception !== undefined, "and as an exception");
+    assert.deepEqual(asked, [...steps, ...moreSteps].map((s) => s.you), "every line went to the model once, and nothing else did");
+    // The guide: `/nimblenewt.agent-list {}` shows which ID is whose.
+    const listed: string[] = [];
+    await runTerminalChat({ controller: wrapped as never, ownerToken: live.ownerToken, input: lines(["/nimblenewt.agent-list {}"]), write: (t) => listed.push(t) });
+    const list = listed.join("").replace(/\r\n/g, "\n");
+    const json = /Ran nimblenewt\.agent-list:\n([\s\S]*)$/.exec(list)?.[1];
+    assert.ok(json !== undefined, `the agent list ran:\n${list}`);
+    const items = (JSON.parse(json) as { items: { id: string; friendlyName: string }[] }).items;
+    for (const [name, id] of [["Ann", ann], ["Bob", bob.id]] as const) assert.ok(items.some((a) => a.id === id && a.friendlyName === name), `the agent list shows ${name} with the ID ${id}:\n${list}`);
+    assert.equal(asked.length, steps.length + moreSteps.length, "a typed command is not read by the model");
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 test("with every model server down, each typed recovery order in the guide runs as written, with no model call, and the guide's quoted answers are real (card D01)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-down-"));
   let modelCalls = 0;
