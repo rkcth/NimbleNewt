@@ -509,6 +509,10 @@ test("an address's name is found elsewhere in its other case and normalization f
   // letter (`ú` + diaeresis is not `ǘ`) is not the name; a letter with a long run of marks (only three are reordered) is found composed and decomposed.
   for (const spelt of ["\u00F3\u0323la", "O\u0301\u0323LA", "o\u0323\u0301la", "\u1ECC\u0301LA"]) assert.equal(redact(`\u1ECD\u0301la@ex.ng later ${spelt}`, names), "<email> later <user>", spelt);
   assert.equal(redact("qa\u01D8z@ex.com then qa\u00FA\u0308z", names), "<email> then qa\u00FA\u0308z");
+  // A letter of two or more parts followed by more marks than are reordered (`\u1eef` and a Hangul syllable with a final, each with two more marks) is still found with its
+  // first parts composed, as it was before a letter was taken together with its marks.
+  assert.equal(redact("x\u1eef\u0337\u0335y@ex.com then X\u01af\u0303\u0337\u0335Y", names), "<email> then <user>");
+  assert.equal(redact("q\ud4af\u031c\u031e@ex.kr then q\ud494\u11c2\u031c\u031e", names), "<email> then <user>");
   const marks = `a${"\u0301\u0323".repeat(15)}b`.normalize("NFC");
   assert.equal(redact(`${marks}@ex.com then ${marks} and ${marks.normalize("NFD")}`, names), "<email> then <user> and <user>");
   // Every letter that decomposes into three or more code points (every 61st Hangul syllable), written with its first two parts composed and the rest apart, and with

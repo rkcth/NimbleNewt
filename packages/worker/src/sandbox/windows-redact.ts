@@ -284,7 +284,8 @@ function namePattern(name: string): string {
 /**
  * The spellings of a letter and the marks after it (`unit`) that are canonically equivalent to it: as given, decomposed, its first code point decomposed, and (for two or
  * three parts after the first) each order of the later parts with any of them composed onto the first, kept only where its decomposition is the unit's own. Three later
- * parts is the most a composed character has; with more (a hostile run of marks) only the first three spellings are taken, so a unit has at most 3 + 3! x 4 alternatives.
+ * parts is the most a composed character has; with more (a hostile run of marks) the first three spellings are taken and the first code point's own spellings followed by
+ * the marks as written (`Ữ` written `U` + horn + tilde, then two more marks), so a unit has at most 3 + 3! x 4 alternatives.
  * Longest first. Cached, up to 10,000 units.
  */
 const SPELLINGS = new Map<string, string[]>();
@@ -301,7 +302,7 @@ function spellings(unit: string): string[] {
       const spelt = `${(first! + order.slice(0, j).join("")).normalize("NFC")}${order.slice(j).join("")}`;
       if (spelt.normalize("NFD") === d) found.add(spelt);
     }
-  }
+  } else if (rest.length > 3 && unit !== head) for (const s of spellings(head)) found.add(s + unit.slice(head.length));
   const all = [...found].sort((a, b) => b.length - a.length);
   if (SPELLINGS.size >= 10_000) SPELLINGS.clear();
   SPELLINGS.set(unit, all);
