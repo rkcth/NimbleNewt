@@ -1111,10 +1111,12 @@ export class GitBridge {
   async branchHead(shared: string, branch: string): Promise<string | undefined> {
     if (typeof branch !== "string" || !BRANCH_NAME.test(branch) || branch.includes("..") || branch.includes("//") || branch.endsWith("/") || branch.endsWith(".lock")) throw new WorkspaceError("invalid_path", "the landing branch is not a plain branch name");
     const want = `refs/heads/${branch}`;
-    const out = (await this.#run(["for-each-ref", "--format=%(refname)%00%(objectname)", want], { gitDir: await this.#sharedGitDir(shared) })).stdout;
+    // `for-each-ref` takes its argument as a pattern (a whole-component prefix: `refs/heads/a` also lists `refs/heads/a/b`), so only the exact name is taken; and only a commit (a branch ref written by hand could hold
+    // another kind of object, which a refresh must not be based on).
+    const out = (await this.#run(["for-each-ref", "--format=%(refname)%00%(objecttype)%00%(objectname)", want], { gitDir: await this.#sharedGitDir(shared) })).stdout;
     for (const line of out.split("\n")) {
-      const [name, id] = line.split("\0");
-      if (name === want && id !== undefined && COMMIT.test(id)) return id;
+      const [name, type, id] = line.split("\0");
+      if (name === want && type === "commit" && id !== undefined && COMMIT.test(id)) return id;
     }
     return undefined;
   }

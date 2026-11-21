@@ -240,3 +240,35 @@ test("reapply is refused, and the checkout left as it was, when the landing bran
     assert.match(summaryOf(r), /onto the landing branch's head/);
   } finally { await w.done(); }
 });
+
+test("the landing branch is read by its exact name only: a refs/ prefix, a tag of the same name, a longer branch under it, a hand-written ref to a non-commit and malformed names give nothing, and the shared repository is only read (card H12p follow-up review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const main = sh(w.shared, "rev-parse", "HEAD");
+    assert.equal(await w.git.branchHead(w.shared, "main"), main);
+    // A tag named like a branch is not a branch; a branch named after a ref path is a different branch.
+    sh(w.shared, "tag", "trunk");
+    sh(w.shared, "branch", "feature/x");
+    sh(w.shared, "tag", "-a", "-m", "annotated", "v1");
+    const tagObject = sh(w.shared, "rev-parse", "v1");
+    // A branch ref written by hand that holds the annotated tag object, not a commit (git itself refuses to write one).
+    // (Loose ref files only: a repository whose refs are kept another way, such as reftable, leaves this part out.)
+    await writeFile(join(w.shared, ".git", "refs", "heads", "odd"), `${tagObject}\n`).catch(() => undefined);
+    const planted = sh(w.shared, "for-each-ref", "--format=%(objecttype)", "refs/heads/odd") === "tag";
+    const before = w.sharedState();
+    for (const name of ["trunk", "feature", "refs/heads/main", "heads/main", "odd", "mai", "HEAD"]) assert.equal(await w.git.branchHead(w.shared, name), undefined, name);
+    assert.equal(await w.git.branchHead(w.shared, "feature/x"), main);
+    for (const bad of ["-main", "--all", "main..x", "a//b", "main/", "main.lock", "ma in", "ma\nin", "ma\u0000in", "mäin", "*", "ma?n", "[m]ain", "@{-1}", "main~1", "main^", "ma:in", ".main", "a".repeat(201), ""]) {
+      await assert.rejects(w.git.branchHead(w.shared, bad), /not a plain branch name/, JSON.stringify(bad));
+    }
+    assert.equal(w.sharedState(), before, "the shared repository is only read");
+    // Through the host: a refresh onto a branch that is only a tag, or that holds no commit, is refused and the checkout is left as it was.
+    for (const branch of planted ? ["trunk", "odd"] : ["trunk"]) {
+      const host = new WorkspaceHost({ git: w.git, journal: join(w.dir, `journal-${branch}`), locate: () => w.where, landing: () => ({ branch, requirePermit: false }) });
+      await w.advance({ [`${branch}.txt`]: "x\n" });
+      const r = await host.run(call("reapply"));
+      assert.equal(r.ok, false, branch); assert.match(reasonOf(r), new RegExp(`no branch "${branch}".*left as it was`), branch);
+      assert.equal(await w.git.baseOf(w.where.gitDir), w.first, branch);
+    }
+  } finally { await w.done(); }
+});
