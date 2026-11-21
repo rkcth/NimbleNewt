@@ -324,6 +324,13 @@ export class ContractService {
     return (stored?.body as unknown as ContractBody | undefined)?.recovery ?? DEFAULT_CONTRACT.recovery;
   }
 
+  /** The P or PC class admission should count the task's next request under (card B01). A request already made keeps the class it was made with, so relabeling moves no admitted work or spend. */
+  async workClassOf(taskId: string): Promise<WorkClass> {
+    const stored = await this.#runner.get("task-contract", taskId);
+    const c = (stored?.body as unknown as ContractBody | undefined)?.workClass;
+    return c === "PC" ? "PC" : "P";
+  }
+
   /** The priority admission should use for the task now. A change takes effect at the next decision that asks; versions already stored keep the priority they had. */
   async priorityOf(taskId: string): Promise<number> {
     const stored = await this.#runner.get("task-contract", taskId);

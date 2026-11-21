@@ -930,7 +930,8 @@ export class StandupService {
         held = hi - lo;
       }
       if (!(held > 0)) return;
-      let workClass = classes.get(d.taskId);
+      // The class the attempt was admitted under (card B01) when it is on record, so relabeling the task afterwards cannot move this time to the other kind; older attempts fall back to the task's class now.
+      let workClass: "P" | "PC" | undefined = d.ask?.workClass === "P" || d.ask?.workClass === "PC" ? d.ask.workClass : classes.get(d.taskId);
       if (workClass === undefined) { workClass = await this.#classOf(d.taskId); classes.set(d.taskId, workClass); }
       sums[workClass] += held;
       attempts++;

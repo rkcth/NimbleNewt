@@ -67,6 +67,13 @@ export interface ConfigurationOptions extends RunnerOptions {
   readonly combiners?: readonly Combiner[];
   /** The routing service the configuration binds to (card R01). */
   readonly routing?: RoutingService;
+  /**
+   * Told after an apply or a change has put settings into force, with the layer and the keys whose value changed: the controller uses it to let waiting work in at once when the owner's P/PC
+   * allocation changes (card B01). A repeat of the apply or change tells it again with the keys and revision that write recorded (when its history entry is still kept), so a step a stop between the
+   * write and this call left undone is finished by the repeat; a listener keys its own step by the revision so that telling twice does it once (as the caps' `onChanged` is told on a repeat too).
+   * A failure here is not the change's: the change is already in force, and the next decision reads it anyway.
+   */
+  readonly onChanged?: (change: { readonly layer: LayerKind; readonly scopeId: string; readonly keys: readonly string[]; readonly revision: number }) => Promise<void>;
 }
 
 export const CONFIG_LIMITS = { keysPerLayer: 200, history: 40, problems: 20, scan: 1000 } as const;
@@ -94,12 +101,19 @@ export class ConfigurationService {
   readonly #definitions: readonly SettingDefinition[];
   readonly #combiners: readonly Combiner[];
   readonly #routing: RoutingService | undefined;
+  readonly #onChanged: ConfigurationOptions["onChanged"];
 
   private constructor(runner: CommandRunner, options: ConfigurationOptions) {
     this.#runner = runner;
     this.#definitions = [...DEFAULT_SETTINGS, ...(options.settings ?? [])];
     this.#combiners = [...DEFAULT_COMBINERS, ...(options.combiners ?? [])];
     this.#routing = options.routing;
+    this.#onChanged = options.onChanged;
+  }
+
+  async #changed(layer: LayerKind, scopeId: string, keys: readonly string[], revision: number): Promise<void> {
+    if (this.#onChanged === undefined || keys.length === 0) return;
+    try { await this.#onChanged({ layer, scopeId, keys, revision }); } catch { /* the change is in force; whoever reads it next decides on it */ }
   }
 
   static withEpoch(storage: ControllerStorage, epoch: number, options: ConfigurationOptions = {}): ConfigurationService {
@@ -246,11 +260,12 @@ export class ConfigurationService {
     if (r.replayed) {
       const stored = (await this.#runner.get("config-layer", layerIdOf(layer, scopeId)))?.body as unknown as LayerBody | undefined;
       const entry = stored?.history.find((h) => h.revision === r.revision);
-      if (entry !== undefined) return { applied: true, revision: r.revision, problems: [], takesEffect: { ...entry.effects } };
+      if (entry !== undefined) { await this.#changed(layer, scopeId, Object.keys(entry.effects), r.revision); return { applied: true, revision: r.revision, problems: [], takesEffect: { ...entry.effects } }; }
       const refused = stored?.failures?.find((f) => f.revision === r.revision);
       if (refused !== undefined) return { applied: false, revision: r.revision, problems: [...refused.problems], takesEffect: {} };
       return { applied: false, revision: r.revision, problems: ["this apply was recorded, but its details are no longer kept"], takesEffect: {} };
     }
+    if (outcome.applied) await this.#changed(layer, scopeId, Object.keys(outcome.takesEffect), r.revision);
     return { ...outcome, revision: r.revision };
   }
 
@@ -323,8 +338,10 @@ export class ConfigurationService {
     if (r.replayed) {
       const stored = (await this.#runner.get("config-layer", layerIdOf(layer, scopeId)))?.body as unknown as LayerBody | undefined;
       const entry = stored?.history.find((h) => h.revision === r.revision);
+      if (entry !== undefined) await this.#changed(layer, scopeId, Object.keys(entry.effects), r.revision);
       return { revision: r.revision, replayed: true, takesEffect: entry === undefined ? {} : { ...entry.effects } };
     }
+    await this.#changed(layer, scopeId, Object.keys(effects), r.revision);
     return { revision: r.revision, replayed: false, takesEffect: effects };
   }
 
