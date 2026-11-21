@@ -7869,6 +7869,21 @@ Result: `{ id, revision, replayed, settled (update tasks settled) }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `doc.obligation.retire`
+
+Takes a document away (card Q03): it is no longer kept (removed, or merged into another). It leaves the project's documents (`doc.obligation.list`, the `docs` view, and every impact and release check) and no longer counts toward the project's 500; `doc.obligation.get` still reads it, marked `retired` (who, when, why). A retired document can be neither verified nor replaced: record it again if it is kept again. Its open update tasks are dropped: each one not yet started is cancelled; one already in progress is left to its agent and listed in `running`. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID retires once and finishes any cancellation a failure left.
+
+Arguments:
+
+- `commandId`: required
+- `obligationId`: the obligation
+- `expectedRevision`: its revision
+- `reason` (optional): why, in a few words (at most 300 characters)
+
+Result: `{ id, revision, replayed, cancelled (update tasks cancelled), running (update tasks left in progress) }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `doc.impact.check`
 
 Which documents a task's new tested code affects (card Q03). `submissionId` names the code (a code submission of the task); without it, the newest independently QA-checked one is used. When that code's QA gate passes, every document of the project describing the task that was verified against another tree of it becomes `stale`, and every unverified one is flagged; a document whose own evidence for the task no longer passes QA becomes `stale` whatever the code (`verdict` says whether the named code passes). A flagged document gets an update task, created ready and assigned to the document's owner, whose text links the tested code: one open update task per task described (a further change of the same task is noted on the record, and the document must then be verified against the newest flagged tree). Asked again for the same code, nothing is repeated (unopened update tasks are opened); code the document was flagged for in an earlier, settled round flags it again. The controller runs this check by itself when independent QA evidence is recorded (`qa.evidence.record`), and checks for lost evidence when QA evidence is invalidated (`qa.evidence.check`), so asking is needed only to check again. The owner, or a docs or director agent of the project.

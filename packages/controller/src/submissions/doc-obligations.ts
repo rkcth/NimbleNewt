@@ -40,8 +40,8 @@ export interface DocUpdate {
   readonly reason: DocReason;
   readonly requestedBy: string;
   readonly requestedAt: string;
-  /** `settled` once a verification of the document came after it. */
-  readonly state: "open" | "settled";
+  /** `settled` once a verification of the document came after it; `dropped` when the document was retired while it was open (its task is cancelled unless it had started). */
+  readonly state: "open" | "settled" | "dropped";
   readonly settledAt?: string;
 }
 
@@ -78,6 +78,8 @@ export interface DocObligationBody {
   /** When it was last flagged (a reason noted): a verification needs a document change submitted no earlier, not one made before the flag. */
   readonly flaggedAt?: string;
   readonly updates: readonly DocUpdate[];
+  /** Taken away (card Q03, retiring a document): the document is no longer kept. It left the project's list, so no check flags it and it does not count toward the project's limit; it cannot be verified or replaced. */
+  readonly retired?: { readonly by: string; readonly at: string; readonly reason?: string };
   /** How many update tasks the document was ever given (the settled ones beyond the limit are dropped from `updates`). */
   readonly updateCount?: number;
 }
@@ -96,6 +98,11 @@ export interface DocObligationPorts {
   readonly newestChecked?: (by: Principal, taskId: string) => Promise<string | undefined>;
   readonly projects: Pick<ProjectService, "createTask" | "transitionTask">;
   readonly assignments: Pick<AssignmentService, "assignTask">;
+  /**
+   * Tells the owner that documents went stale (card Q03): called once per check that moved verified documents to `stale`, when the check was not the owner's own (the automatic checks after QA evidence,
+   * or a docs or director agent's check); the owner who asked reads the answer. `commandId` is derived from the check's command, so a notice sent twice is one notice. A failure is not the check's failure.
+   */
+  readonly notify?: (n: { readonly commandId: string; readonly projectId: string; readonly obligationId: string; readonly text: string }) => Promise<void>;
 }
 
 const DOB = /^dob-[a-z2-7]{20}$/;
@@ -110,7 +117,7 @@ const KEEPERS = ["docs", "director"] as const;
 export const DOC_AUTO_PRINCIPAL: Principal = { id: "service:doc-checks", kind: "owner", name: "doc-checks", grants: [] } as unknown as Principal;
 /** The command ID of the documentation release check a release candidate's submission runs: one per candidate, project and version, so a repeat (or the same candidate submitted again) finds it. */
 export const releaseDocsCommandId = (candidateId: string, projectId: string, version: string): string => `release-docs:${candidateId}:${createHash("sha256").update(`${projectId}\u0000${version}`).digest("hex").slice(0, 24)}`;
-export const DOC_LIMITS = { perProject: 500, title: 200, location: 500, version: 40, refs: 20, claims: 20, claim: 300, updates: 20 } as const;
+export const DOC_LIMITS = { perProject: 500, title: 200, location: 500, version: 40, refs: 20, claims: 20, claim: 300, updates: 20, reason: 300 } as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hidden = (what: string): never => { throw new DomainError("not_found", `no such ${what}`); };
@@ -179,6 +186,11 @@ export class DocObligationService {
     return { id: id as string, revision: found!.revision, body: body! };
   }
 
+  /** Refuses a change to a retired document: it is no longer kept, so it is neither verified nor replaced (record a new one instead). */
+  #kept(id: string, b: DocObligationBody): void {
+    if (b.retired !== undefined) throw new DomainError("invalid_command", `documentation obligation ${id} was retired at ${b.retired.at}: record the document again if it is kept again`, { field: "obligationId" });
+  }
+
   async #index(projectId: string): Promise<{ revision?: number; body: IndexBody }> {
     const found = await this.#runner.get("doc-obligation-index", projectId);
     return { ...(found === undefined ? {} : { revision: found.revision }), body: (found?.body as unknown as IndexBody | undefined) ?? { ids: [] } };
@@ -241,6 +253,7 @@ export class DocObligationService {
         if (replacing) {
           const current = await this.#obligation(by, id);
           if (current.body.projectId !== projectId) hidden("documentation obligation");
+          this.#kept(id, current.body);
           if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the obligation is at revision ${current.revision}`, { currentRevision: current.revision });
           const b = current.body;
           // Compared field by field: a stored record may come back with its keys in another order.
@@ -283,6 +296,7 @@ export class DocObligationService {
     if (!Array.isArray(ev) || ev.length < 1 || ev.length > DOC_LIMITS.refs || ev.some((e) => typeof e !== "string" || !SBM.test(e)) || new Set(ev).size !== ev.length) bad("evidence", `must list 1 to ${DOC_LIMITS.refs} different code submission IDs`);
     const version = command.applicableVersion === undefined ? undefined : text(command.applicableVersion, "applicableVersion", { min: 1, max: DOC_LIMITS.version });
     const { body: ob } = await this.#obligation(by, command.obligationId);
+    // A retired document is refused inside the command (second review), not here: a verification made before the retirement and sent again with its command ID is answered with its result.
     if (by.kind !== "owner" && by.id !== ob.owner) throw new DomainError("forbidden", `only the owner or the document's owner ${ob.owner} verifies it`);
     let settled: string[] = [];
     const scoped = scopedCommandId(by.id, commandId);
@@ -292,6 +306,7 @@ export class DocObligationService {
         const current = await this.#obligation(by, command.obligationId);
         if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the obligation is at revision ${current.revision}`, { currentRevision: current.revision });
         const b = current.body;
+        this.#kept(current.id, b);
         const docFound = await this.#runner.get("submission", command.documentSubmissionId);
         const doc = docFound?.body as unknown as SubmissionBody | undefined;
         if (doc === undefined || doc.projectId !== b.projectId) bad("documentSubmissionId", "is not a submission of this project");
@@ -348,6 +363,62 @@ export class DocObligationService {
     return { id: result.id, revision: result.revision, replayed: result.replayed, settled };
   }
 
+  // ---- retiring -------------------------------------------------------------------------------------------------------------
+
+  /**
+   * Takes a document away (card Q03): it is no longer kept (the page was removed, or merged into another). It leaves the project's list in the same write, so no impact or release check flags it again and
+   * it no longer counts toward the project's limit; the record stays readable by its ID (`get`), marked retired, and can be neither verified nor replaced. Its open update tasks are dropped: each one
+   * that has not started (proposed, ready or blocked) is cancelled; one already in progress is left to its agent, whose verification is then refused, and is reported as `running`. The owner, or a docs or
+   * director agent of the project (the same people who record documents). Repeating the command finishes the cancellations a failure left.
+   */
+  async retire(by: Principal, command: NoActor & { obligationId: string; expectedRevision: number; reason?: string }): Promise<{ id: string; revision: number; replayed: boolean; cancelled: readonly string[]; running: readonly string[] }> {
+    only(command, ["commandId", "obligationId", "expectedRevision", "reason"]);
+    const commandId = checkCommandId(command.commandId);
+    if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) bad("expectedRevision", "must be the obligation's revision");
+    const reason = command.reason === undefined ? undefined : redactText(text(command.reason, "reason", { min: 1, max: DOC_LIMITS.reason }));
+    if (by.kind !== "owner" && by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not retire documentation obligations`);
+    const first = await this.#obligation(by, command.obligationId);
+    await this.#keeps(by, first.body.projectId);
+    const scoped = scopedCommandId(by.id, commandId);
+    const result = await this.#runner.command("doc.obligation.retire", { commandId: scoped, actor: by.id }, async () => ({
+      payload: { obligationId: first.id, expectedRevision: command.expectedRevision, ...(reason === undefined ? {} : { reason }) },
+      build: async () => {
+        const current = await this.#obligation(by, first.id);
+        if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the obligation is at revision ${current.revision}`, { currentRevision: current.revision });
+        this.#kept(current.id, current.body);
+        const b = current.body;
+        const now = this.#runner.now();
+        const index = await this.#index(b.projectId);
+        const next: DocObligationBody = { ...b, updates: b.updates.map((u) => (u.state === "open" ? { ...u, state: "dropped" as const, settledAt: now } : u)), retired: { by: by.id, at: now, ...(reason === undefined ? {} : { reason }) } };
+        const changes: Change[] = [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }];
+        // Out of the project's list in the same write: a check that read the list before this write and the record after it skips the retired record (every plan does).
+        if (index.revision !== undefined) changes.push({ type: "update", ref: { kind: "doc-obligation-index", id: b.projectId }, expectedRevision: index.revision, body: json({ ids: index.body.ids.filter((x) => x !== current.id) }) });
+        return { ref: { kind: "doc-obligation", id: current.id }, creates: false, changes, detail: { projectId: b.projectId } };
+      },
+    }));
+    // The dropped update tasks (on a repeat too: whatever a failure left not cancelled): cancelled unless already started or finished.
+    const stored = (await this.#runner.get("doc-obligation", result.id))?.body as unknown as DocObligationBody | undefined;
+    const cancelled: string[] = [];
+    const running: string[] = [];
+    for (const u of stored?.retired === undefined ? [] : stored.updates.filter((x) => x.state === "dropped")) {
+      const found = await this.#runner.get("task", u.taskId);
+      const t = found?.body as unknown as TaskBody | undefined;
+      if (found === undefined || t === undefined || t.state === "done") continue;
+      if (t.state === "cancelled") { cancelled.push(u.taskId); continue; }
+      if (t.state === "in_progress") { running.push(u.taskId); continue; }
+      try {
+        await this.#ports.projects.transitionTask({ commandId: `doc-retire:${u.taskId}:cancel:${found.revision}`, actor: by.id, taskId: u.taskId, expectedRevision: found.revision, to: "cancelled" });
+        cancelled.push(u.taskId);
+      } catch (error) {
+        if (!(error instanceof DomainError)) throw error;
+        // Moved meanwhile: reported as running when it started, else left for a repeat of the command to cancel.
+        const state = (await this.#task(u.taskId))?.state;
+        if (state === "cancelled") cancelled.push(u.taskId); else if (state === "in_progress") running.push(u.taskId);
+      }
+    }
+    return { id: result.id, revision: result.revision, replayed: result.replayed, cancelled, running };
+  }
+
   // ---- impact and release ---------------------------------------------------------------------------------------------------
 
   /**
@@ -395,7 +466,7 @@ export class DocObligationService {
       for (const id of (await this.#index(task!.projectId)).body.ids) {
         const found = await this.#runner.get("doc-obligation", id);
         const b = found?.body as unknown as DocObligationBody | undefined;
-        if (found === undefined || b === undefined || !b.implementationRefs.includes(taskId)) continue;
+        if (found === undefined || b === undefined || b.retired !== undefined || !b.implementationRefs.includes(taskId)) continue;
         const reasons: DocReason[] = [];
         const was = b.state === "unverified" ? undefined : b.verification?.evidence.find((e) => e.taskId === taskId);
         const newer = tested && (await behind(b, was));
@@ -438,7 +509,7 @@ export class DocObligationService {
         for (const id of (await this.#index(task!.projectId)).body.ids) {
           const found = await this.#runner.get("doc-obligation", id);
           const b = found?.body as unknown as DocObligationBody | undefined;
-          if (found === undefined || b === undefined || b.state === "unverified" || !b.implementationRefs.includes(taskId)) continue;
+          if (found === undefined || b === undefined || b.retired !== undefined || b.state === "unverified" || !b.implementationRefs.includes(taskId)) continue;
           const was = b.verification?.evidence.find((v) => v.taskId === taskId);
           if (was === undefined || (await this.#ports.gate(by, was.submissionId)).verdict === "passed") continue;
           const p = this.#planned(id, found.revision, b, [{ kind: "evidence_lost", taskId, submissionId: was.submissionId }]);
@@ -465,7 +536,7 @@ export class DocObligationService {
       for (const id of (await this.#index(projectId)).body.ids) {
         const found = await this.#runner.get("doc-obligation", id);
         const b = found?.body as unknown as DocObligationBody | undefined;
-        if (found === undefined || b === undefined || b.applicableVersion === version) continue;
+        if (found === undefined || b === undefined || b.retired !== undefined || b.applicableVersion === version) continue;
         const p = this.#planned(id, found.revision, b, [{ kind: "release_changed", from: b.applicableVersion, to: version }]);
         if (p !== undefined) out.push(p);
       }
@@ -501,6 +572,7 @@ export class DocObligationService {
     const scoped = scopedCommandId(by.id, commandId);
     let made: { obligationId: string; taskId: string; create: string; projectId: string; title: string; description: string; owner: string }[] = [];
     let flagged: string[] = [];
+    let staled: { id: string; projectId: string; title: string }[] = [];
     let replayed = false;
     let wrote = false;
     // The command always goes through the runner, so a command ID used before is answered with its result, or refused as `command_conflict` when it was used with other arguments, even when there is
@@ -515,6 +587,7 @@ export class DocObligationService {
           const now = this.#runner.now();
           const changes: Change[] = [];
           made = [];
+          staled = [];
           for (const f of found) {
             let count = f.body.updateCount ?? f.body.updates.length;
             const added: DocUpdate[] = [];
@@ -530,6 +603,7 @@ export class DocObligationService {
             for (let i = 0; kept.length + added.length > DOC_LIMITS.updates && i < kept.length;) { if (kept[i]!.state === "settled") kept.splice(i, 1); else i++; }
             const releaseTo = [...f.reasons].reverse().find((r): r is Extract<DocReason, { kind: "release_changed" }> => r.kind === "release_changed")?.to;
             const state: DocState = f.body.state === "unverified" ? "unverified" : "stale";
+            if (f.body.state === "verified") staled.push({ id: f.id, projectId: f.body.projectId, title: f.body.title });
             const next: DocObligationBody = { ...f.body, state, reasons: [...(f.body.reasons ?? []), ...f.reasons].slice(-DOC_LIMITS.updates), ...(releaseTo === undefined ? {} : { releaseVersion: releaseTo }), flaggedAt: now, updates: [...kept, ...added], updateCount: count };
             changes.push({ type: "update", ref: { kind: "doc-obligation", id: f.id }, expectedRevision: f.revision, body: json(next) });
           }
@@ -555,6 +629,15 @@ export class DocObligationService {
     }
     const tasks: { obligationId: string; taskId: string; assigned: boolean }[] = [];
     for (const m of made) tasks.push({ obligationId: m.obligationId, taskId: m.taskId, assigned: await this.#open(by, m) });
+    // Documents that were verified went stale: the owner is told, unless the owner ran this check (they read the answer). After the update tasks, so the notice can say who has them.
+    if (wrote && staled.length > 0 && this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id)) {
+      // Cut on whole characters (first review): a cut through a character written as two UTF-16 units would leave half of it, which the notice's text check refuses, and the notice would be lost.
+      const cut = (s: string, n: number): string => (s.length <= n ? s : s.slice(0, n).replace(/[\uD800-\uDBFF]$/, ""));
+      const names = staled.map((d) => `"${cut(d.title, 60)}"`).join(", ");
+      const text = `${staled.length === 1 ? "A verified document went" : `${staled.length} verified documents went`} stale: ${names}. Update tasks went to their keepers; the docs view shows why.`;
+      const noticeId = `doc-stale:${createHash("sha256").update(scoped).digest("hex").slice(0, 40)}`;
+      await this.#ports.notify({ commandId: noticeId, projectId: staled[0]!.projectId, obligationId: staled[0]!.id, text: text.length <= 200 ? text : `${cut(text, 196)}...` }).catch(() => undefined);
+    }
     return { flagged, tasks, replayed };
   }
 
@@ -579,13 +662,25 @@ export class DocObligationService {
     };
   }
 
-  async #open(by: Principal, m: { taskId: string; create: string; projectId: string; title: string; description: string; owner: string }): Promise<boolean> {
+  async #open(by: Principal, m: { obligationId: string; taskId: string; create: string; projectId: string; title: string; description: string; owner: string }): Promise<boolean> {
     const step = async (finished: () => Promise<boolean>, run: () => Promise<unknown>): Promise<void> => {
       if (await finished()) return;
       try { await run(); } catch (error) { if (!(error instanceof DomainError) || !(await finished())) throw error; }
     };
     const commandBase = `doc-update:${m.taskId}`;
+    // A document retired after the flag was written: its update task is not opened (one not yet created is never created).
+    if ((await this.#task(m.taskId)) === undefined && ((await this.#runner.get("doc-obligation", m.obligationId))?.body as unknown as DocObligationBody | undefined)?.retired !== undefined) return false;
     await step(async () => (await this.#task(m.taskId)) !== undefined, () => this.#ports.projects.createTask({ commandId: m.create, actor: by.id, projectId: m.projectId, title: m.title, description: m.description }));
+    // Read again after the task exists (first review): a retirement that committed after the read above found no task to cancel, so the task just created is cancelled here instead. The retirement
+    // writes the record before it reads the tasks and this reads the record after writing the task, so one of the two always sees the other.
+    if (((await this.#runner.get("doc-obligation", m.obligationId))?.body as unknown as DocObligationBody | undefined)?.retired !== undefined) {
+      const found = await this.#runner.get("task", m.taskId);
+      const state = (found?.body as unknown as TaskBody | undefined)?.state;
+      if (found !== undefined && (state === "proposed" || state === "ready" || state === "blocked")) {
+        try { await this.#ports.projects.transitionTask({ commandId: `doc-retire:${m.taskId}:cancel:${found.revision}`, actor: by.id, taskId: m.taskId, expectedRevision: found.revision, to: "cancelled" }); } catch (error) { if (!(error instanceof DomainError)) throw error; }
+      }
+      return false;
+    }
     await step(async () => (await this.#task(m.taskId))?.state !== "proposed", async () => this.#ports.projects.transitionTask({ commandId: `${commandBase}:ready`, actor: by.id, taskId: m.taskId, expectedRevision: (await this.#runner.get("task", m.taskId))!.revision, to: "ready" }));
     try {
       await step(async () => (await this.#runner.get("assignment", assignmentIdOf(m.taskId))) !== undefined, () => this.#ports.assignments.assignTask({ commandId: `${commandBase}:assign`, actor: by.id, taskId: m.taskId, owner: { kind: "agent", id: bare(m.owner) }, reason: "document update" }));
