@@ -1146,6 +1146,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       gate: async (by, submissionId) => { const { gate, reads } = await qaEvidence.gateBound(by, submissionId); return { ...gate, reads }; },
       newestChecked: async (by, taskId) => (await qaEvidence.list(by, taskId)).items.find((e) => e.source === "independent")?.submissionId,
       projects, assignments,
+      // Verified documents that went stale on a check the owner did not run (the automatic checks, a docs or director agent's check): a notice, not a needs-you item (the keepers have the update tasks).
+      notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "notice", ref: { kind: "doc-obligation", id: n.obligationId }, detail: n.text, projectId: n.projectId }); },
     });
     const cleanupSettings = CleanupSettingsService.withEpoch(storage, epoch, options.cleanupDefault, { warn: async (d) => { await notifications.emitFromController({ commandId: `cleanup-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "cleanup-settings", id: "main" }, detail: d.detail }); } });
     // The leftovers of a finished attempt (installed or still running, never removed by the controller) go to the agent's boss as a needs-you message; with no boss, or one who cannot be told about the task, to the owner.
