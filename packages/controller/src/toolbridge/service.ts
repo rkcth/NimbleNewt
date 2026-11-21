@@ -11,6 +11,7 @@ import type { ToolGateway, ToolResult } from "../dispatch/ports.js";
 import type { AdmissionService } from "../admission/index.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
+import { KIND_ROLES, type SubmissionKind } from "../submissions/submissions.js";
 import { EffectRejected, type EffectBridge } from "../domain/effects.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown } from "../domain/model.js";
@@ -40,7 +41,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose", "toolbox.pins", "toolbox.optin", "toolbox.proposal", "toolbox.revoke"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose", "toolbox.pins", "toolbox.optin", "toolbox.proposal", "toolbox.revoke"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -132,6 +133,11 @@ export interface ToolExecutionDeps {
   readonly busyWait?: { readonly stepMs: number; readonly totalMs: number };
   /** The owner who revoked, by principal ID, for the `pause` choice applied after a revocation that another process took. Absent or `undefined` answer: the calls are stopped and the owner is told the tasks could not be paused. */
   readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
+  /**
+   * Card Q01b (bridge): an artifact as the controller recorded it and whether its files still match (`ArtifactService.get` and `verify`), so a document change submitted through the bridge names the digest the controller
+   * recorded for an artifact of the attempt's own task, never one the agent writes. Absent: a document change through the bridge is refused as unavailable.
+   */
+  readonly artifactOf?: (artifactId: string) => Promise<{ readonly taskId?: string; readonly manifestDigest: string; readonly intact: boolean } | undefined>;
   readonly hosts: Pick<HostService, "status">;
   readonly admission: Pick<AdmissionService, "snapshot">;
   readonly runner: ScriptRunner;
@@ -201,8 +207,10 @@ export interface BuiltinTool {
 /** The bound gateway of the attempt the request came through. */
 export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
+/** The kinds an agent records through the bridge (card Q01b); code is left out: it is submitted with `work.end`. Each is recorded in its one role of `KIND_ROLES`. */
+const BRIDGE_SUBMISSION_KINDS: ReadonlySet<unknown> = new Set(["review", "qa", "signoff", "document"]);
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
-const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "service.operate", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "toolbox.copy", "toolbox.propose", "toolbox.optin", "toolbox.revoke"]);
+const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "service.operate", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "toolbox.copy", "toolbox.propose", "toolbox.optin", "toolbox.revoke"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
 const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) => op !== "turn.continue"));
 /** The actions of `toolbox.proposal` (card T08) that only read; every other action (and one that is not known, which the operation refuses) is a write: a pause refuses it and a recorded call is admitted as an effect. */
@@ -528,6 +536,7 @@ export class ToolExecutionService {
               case "message.send": return await this.#message(context, args);
               case "artifact.publish": return await this.#artifact(token, context, args);
               case "deliverable.draft": case "deliverable.submit": return await this.#deliverable(token, context, request.op as "deliverable.draft" | "deliverable.submit", args);
+              case "submission.record": return await this.#submission(token, context, args);
               case "service.observe": case "service.operate": return await this.#service(token, context, request.op as "service.observe" | "service.operate", args);
               case "tool.register": return await this.#register(context, args);
               case "tool.discover": return await this.#discover(context, args);
@@ -842,6 +851,35 @@ export class ToolExecutionService {
       return refusal("stale_revision", `the task contract changed after this attempt began (it was version ${String(body["contractVersion"])}); this attempt cannot submit. Say so when you end your work: the next attempt works against the new contract`);
     }
     return refusal(response.error.code, response.error.message);
+  }
+
+  /**
+   * Card Q01b (bridge): a reviewer, qa, docs or director agent records its submission for its own task through the same door every client uses (`submission.record` with the worker's task credential, so the role it holds, the
+   * task scope, the subject's task, the self-review and sign-off rules and the formats are all checked there). The task comes from the attempt and the role from the kind (each kind has exactly one role), never from the
+   * request. Code is not submitted here: `work.end { submit: true }` has the host read the base, tree and patch ID from the checkout, so an agent never states them. A document change names an artifact of this task;
+   * the digest recorded is the one the controller recorded for it, and only while its files still match. Asking again with the call ID records once.
+   */
+  async #submission(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
+    if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
+    onlyKnown(args, ["kind", "subject", "verdict", "decision", "report", "artifactId"]);
+    const kind = args["kind"];
+    if (kind === "code") return refusal("invalid_command", "kind: code is not recorded here; end with work-end submit true and the controller reads the base, tree and patch ID from your checkout");
+    const role = BRIDGE_SUBMISSION_KINDS.has(kind) ? KIND_ROLES[kind as SubmissionKind][0] : undefined;
+    if (role === undefined) return refusal("invalid_command", "kind: must be review, qa, signoff or document");
+    let body: JsonObject = { ...args, taskId: c.taskId, role };
+    if (kind === "document") {
+      const artifactId = args["artifactId"];
+      if (typeof artifactId !== "string") return refusal("invalid_command", "artifactId: a document change names the artifact you published for this task (artifact-publish answers its id)");
+      if (this.#deps.artifactOf === undefined) return refusal("unavailable", "artifacts are not kept by this controller; a document change cannot be submitted here");
+      let found: Awaited<ReturnType<NonNullable<ToolExecutionDeps["artifactOf"]>>>;
+      try { found = await this.#deps.artifactOf(artifactId); } catch (error) { if (isDomainError(error, "invalid_command")) return refusal("invalid_command", `artifactId: ${error.message}`); throw error; }
+      // Another task's artifact is answered as one that does not exist: the attempt reaches its own task only.
+      if (found === undefined || found.taskId !== c.taskId) return refusal("not_found", `no artifact ${artifactId.slice(0, 80)} of this task`);
+      if (!found.intact) return refusal("invalid_command", `artifact ${artifactId.slice(0, 80)} no longer matches its files; publish the document again and submit the new artifact`);
+      body = { ...body, artifactDigest: `sha256:${found.manifestDigest}` };
+    }
+    const response = await this.#deps.state.handle(token, { v: 1, op: "submission.record", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: body });
+    return response.ok ? ok(response.result) : refusal(response.error.code, response.error.message);
   }
 
   /**
