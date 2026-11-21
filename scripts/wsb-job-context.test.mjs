@@ -71,13 +71,13 @@ test("the helper's answer as fixed words: session, console, job, parents with se
     "session: this process 1, console session 1",
     "console: this process has a console no; the helper (started by this process with windowsHide) got a console window no",
     "job object: this process in a job yes, limit flags 0x00002800, UI restrictions 0x00000000 (read by the helper in the same job)",
-    "parents (this process first): nodeExe < bashExe < RunnerWorkerExe < RunnerListenerExe < RunnerServiceExe(service) < servicesExe; under a Windows service yes",
+    "parents (this process first): nodeExe < bashExe < RunnerWorkerExe < RunnerListenerExe < RunnerServiceExe(service) < servicesExe; the runner's Windows service (RunnerServiceExe) among them yes",
     "window station WinSta0, desktop Default (the helper's, inherited from this process)",
   ]);
   const attached = probeLines({ ...raw, attachError: 0, inJob: false, chain: [{ name: "node.exe" }, { name: "pwsh.exe" }, { name: "explorer.exe" }], windowStation: "Service-0x0-3e7$" });
   assert.match(attached[1], /has a console yes;/);
   assert.equal(attached[2], "job object: this process in a job no");
-  assert.match(attached[3], /nodeExe < pwshExe < explorerExe; under a Windows service no$/);
+  assert.match(attached[3], /nodeExe < pwshExe < explorerExe; the runner's Windows service \(RunnerServiceExe\) among them no$/);
   assert.match(attached[4], /^window station Service-0x0-3e7\$,/);
 });
 
@@ -87,7 +87,7 @@ test("the helper's answer: missing or odd values are unknown or other, never cop
     assert.equal(lines[0], "session: this process unknown, console session unknown");
     assert.match(lines[1], /has a console unknown;.*window unknown$/);
     assert.equal(lines[2], "job object: this process in a job unknown");
-    assert.equal(lines[3], "parents (this process first): unknown; under a Windows service unknown");
+    assert.equal(lines[3], "parents (this process first): unknown; the runner's Windows service (RunnerServiceExe) among them unknown");
   }
   const odd = probeLines({ attachError: 5, processSession: -1, consoleSession: "1", inJob: true, jobLimitFlags: "C:\\Users\\Jane", windowStation: "C:\\Users\\Jane", desktop: "a b", chain: [{ name: "C:\\Users\\Jane\\evil.exe", service: "yes" }, { name: 5 }] });
   const text = odd.join("\n");
@@ -95,8 +95,10 @@ test("the helper's answer: missing or odd values are unknown or other, never cop
   assert.match(text, /has a console unknown \(error 5\)/);
   assert.match(text, /this process unknown, console session unknown/);
   assert.match(text, /limit flags unknown/);
-  assert.match(text, /parents \(this process first\): other < other; under a Windows service no/);
+  assert.match(text, /parents \(this process first\): other < other; the runner's Windows service \(RunnerServiceExe\) among them no/);
   assert.match(text, /window station other, desktop other/);
+  // At most 16 parents are shown, as the helper collects at most 16.
+  assert.equal(probeLines({ chain: Array.from({ length: 20 }, () => ({ name: "node.exe" })) })[3].split(" < ").length, 16);
   assert.equal(chainLabel("NODE.EXE"), "nodeExe");
   assert.equal(chainLabel(undefined), "other");
 });
@@ -158,9 +160,11 @@ test("the helper's answer: no console session attached, an empty chain, and the 
   const base = { processSession: 2, consoleSession: 0xffffffff, chain: [] };
   const lines = probeLines(base);
   assert.equal(lines[0], "session: this process 2, console session none attached");
-  assert.equal(lines[3], "parents (this process first): unknown; under a Windows service unknown");
+  assert.equal(lines[3], "parents (this process first): unknown; the runner's Windows service (RunnerServiceExe) among them unknown");
   const wrapped = probeLines({ ...base, chain: { value: [{ name: "node.exe" }, { name: "services.exe", service: true }], Count: 2 } });
-  assert.equal(wrapped[3], "parents (this process first): nodeExe < servicesExe(service); under a Windows service yes");
+  // A runner started by a Task Scheduler task at logon has the Schedule service's svchost as a parent: marked, but not the runner's service.
+  assert.equal(probeLines({ chain: [{ name: "node.exe" }, { name: "Runner.Listener.exe" }, { name: "svchost.exe", service: true }] })[3], "parents (this process first): nodeExe < RunnerListenerExe < svchostExe(service); the runner's Windows service (RunnerServiceExe) among them no");
+  assert.equal(wrapped[3], "parents (this process first): nodeExe < servicesExe(service); the runner's Windows service (RunnerServiceExe) among them no");
 });
 
 test("a bounded run's result: stopped, not found, exit codes; the runner's own stop text is not read as wsb's", () => {

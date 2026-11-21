@@ -5,7 +5,7 @@
 //   - this process's session id and the console's session id, and whether the console session is locked;
 //   - whether this process has a console (a helper leaves its own console and tries to attach to this process's), and whether std streams are terminals;
 //   - whether this process is in a job object, and the job's limit and UI-restriction flags (read by the helper, which is in the same job unless it broke away);
-//   - the parent chain as fixed labels, and whether any ancestor is a Windows service;
+//   - the parent chain as fixed labels (a Windows service's process marked), and whether the runner's own service is among them;
 //   - the window station and desktop names (the helper's, inherited from this process);
 //   - the NAMES of the environment variables (never their values);
 //   - one `wsb list` with a short limit: outcome, duration, and fixed markers of its error output.
@@ -117,7 +117,9 @@ export function probeLines(raw) {
   // Windows PowerShell 5.1's ConvertTo-Json can write an array as {"value": [...], "Count": n}; both forms are read.
   const list = Array.isArray(o.chain) ? o.chain : o.chain !== null && typeof o.chain === "object" && Array.isArray(o.chain.value) ? o.chain.value : [];
   const chain = list.slice(0, 16).map((p) => `${chainLabel(p?.name)}${p?.service === true ? "(service)" : ""}`);
-  const underService = list.length > 0 ? list.some((p) => p?.service === true) : undefined;
+  // RunnerService.exe is the runner installed as a Windows service. A "(service)" mark alone does not say that: a task started by Task Scheduler (a way to run the runner
+  // interactively at logon) has the Schedule service's svchost as its parent.
+  const underRunnerService = list.length > 0 ? list.some((p) => chainLabel(p?.name) === "RunnerServiceExe") : undefined;
   const station = typeof o.windowStation === "string" && WINDOW_OBJECT_NAME.test(o.windowStation) ? o.windowStation : o.windowStation === undefined || o.windowStation === null ? "unknown" : "other";
   const desktop = typeof o.desktop === "string" && WINDOW_OBJECT_NAME.test(o.desktop) ? o.desktop : o.desktop === undefined || o.desktop === null ? "unknown" : "other";
   const job = o.inJob === true
@@ -127,7 +129,7 @@ export function probeLines(raw) {
     `session: this process ${num(o.processSession)}, console session ${consoleSessionWord(o.consoleSession)}`,
     `console: this process has a console ${attach}; the helper (started by this process with windowsHide) got a console window ${word(o.helperConsoleWindow)}`,
     `job object: this process in a job ${job}`,
-    `parents (this process first): ${chain.length > 0 ? chain.join(" < ") : "unknown"}; under a Windows service ${word(underService)}`,
+    `parents (this process first): ${chain.length > 0 ? chain.join(" < ") : "unknown"}; the runner's Windows service (RunnerServiceExe) among them ${word(underRunnerService)}`,
     `window station ${station}, desktop ${desktop} (the helper's, inherited from this process)`,
   ];
 }
