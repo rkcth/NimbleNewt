@@ -469,7 +469,7 @@ export class WorkspaceHost {
     const target = tip.head;
     const onto = tip.branch === undefined ? "the landing branch's head" : `the head of the landing branch ${JSON.stringify(tip.branch.slice(0, 80))}`;
     const before = await git.baseOf(where.gitDir);
-    if (before === target) return { ok: true, summary: cut(`your checkout is already based on ${onto} ${target.slice(0, 12)}; nothing to refresh`), detail: { changed: false, base: target, ...(tip.branch === undefined ? {} : { branch: tip.branch.slice(0, 80) }) } };
+    if (before === target) return { ok: true, summary: cut(`your checkout is already based on ${onto} ${target.slice(0, 12)}; nothing to refresh`), detail: { changed: false, base: target, ...(tip.branch === undefined ? {} : { branch: tip.branch }) } };
     let made;
     try { made = await git.reapply({ shared: where.shared, commit: target, gitDir: where.gitDir, checkout: where.checkout }); } catch (error) {
       this.#flag(call, error);
@@ -477,7 +477,7 @@ export class WorkspaceHost {
       throw error;
     }
     const listed = made.conflicts.slice(0, HOST_LIMITS.conflictsListed).map((c) => ({ path: c.path.slice(0, HOST_LIMITS.conflictPath), kind: c.kind }));
-    const detail = (): { [key: string]: HostJson } => ({ changed: !made.unchanged, before: made.previous, base: made.base, kept: made.kept.length, taken: made.taken.length, merged: made.merged.length, conflictCount: made.conflicts.length, conflicts: listed, ...(made.conflicts.length > listed.length ? { conflictsNotListed: made.conflicts.length - listed.length } : {}), ...(tip.branch === undefined ? {} : { branch: tip.branch.slice(0, 80) }) });
+    const detail = (): { [key: string]: HostJson } => ({ changed: !made.unchanged, before: made.previous, base: made.base, kept: made.kept.length, taken: made.taken.length, merged: made.merged.length, conflictCount: made.conflicts.length, conflicts: listed, ...(made.conflicts.length > listed.length ? { conflictsNotListed: made.conflicts.length - listed.length } : {}), ...(tip.branch === undefined ? {} : { branch: tip.branch }) });
     while (listed.length > 0 && Buffer.byteLength(JSON.stringify(detail()), "utf8") > HOST_LIMITS.detailBytes) listed.pop();
     const n = made.conflicts.length;
     const counts = `${made.kept.length} of your file(s) kept, ${made.taken.length} taken from the landing branch, ${made.merged.length} merged cleanly`;

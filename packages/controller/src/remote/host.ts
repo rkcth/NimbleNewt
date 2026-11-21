@@ -87,6 +87,14 @@ export class RemoteWorkerHost implements WorkerHost {
         throw error;
       }
       if (answer.ok === false && answer.failed === true) throw new DomainError("unavailable", answer.reason);
+      // Second review (mixed versions): a refresh that carried a landing branch must come back naming that branch (`detail.branch`). A host built before the H12p follow-up ignores the carried policy and refreshes onto its
+      // shared tree's checked-out head, and a host whose own `landing` option does not take the carried policy reads another one; neither says the branch. The refresh may have moved the checkout, so this is not a clean
+      // refusal: it is thrown (recorded as failed), never recorded as a refresh onto the landing branch.
+      const wanted = call.operation === "reapply" ? call.landing?.branch : undefined;
+      if (answer.ok && typeof wanted === "string" && wanted.length > 0) {
+        const said = (answer.detail as { branch?: unknown } | undefined)?.branch;
+        if (said !== wanted) throw new DomainError("unavailable", `${this.hostId} answered the refresh without saying it used the landing branch ${JSON.stringify(wanted.slice(0, 80))} (${typeof said === "string" ? `it named ${JSON.stringify(said.slice(0, 80))}` : "a host built before the refresh followed the landing branch refreshes onto its shared workspace's checked-out head"}), so your checkout may now be based on another commit; do not take it as fresh: refresh again once that host is updated, and re-run your checks`);
+      }
       return answer.ok ? answer : { ok: false, reason: answer.reason };
     } };
   }

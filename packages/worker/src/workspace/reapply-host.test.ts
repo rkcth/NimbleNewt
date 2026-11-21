@@ -69,6 +69,20 @@ test("reapply keeps the agent's changed and new files over a branch that moved i
   } finally { await w.done(); }
 });
 
+test("a refresh names the whole landing branch it used, also a name longer than the summary shows (second review: the controller compares it with the branch it carried)", { skip }, async () => {
+  const long = `release/${"x".repeat(90)}`;
+  const w = await world({ landing: () => ({ branch: long, requirePermit: false }) });
+  try {
+    const head = await w.advance({ "README.md": "hello again\n" });
+    sh(w.shared, "branch", long, head);
+    const r = await w.host.run(call("reapply"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.deepEqual([detailOf(r)["base"], detailOf(r)["branch"]], [head, long]);
+    const again = await w.host.run(call("reapply"));
+    assert.deepEqual([detailOf(again)["changed"], detailOf(again)["branch"]], [false, long]);
+  } finally { await w.done(); }
+});
+
 test("reapply over a branch that moved in the same file merges edits that do not overlap, and lists overlapping edits with markers without resolving them", { skip }, async () => {
   const w = await world();
   try {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DoneCheckReport, DoneCheckRequest } from "../dispatch/ports.js";
+import { DomainError } from "../domain/errors.js";
 import type { WorkspaceCall } from "../workspace-ops/index.js";
 import { RemoteWorkerHost } from "./host.js";
 import { WorkspaceResponder } from "./responder.js";
@@ -67,14 +68,24 @@ for (const backend of backends) {
     let policy: unknown = { branch: "main", requirePermit: true };
     const handle = hostWith(c as never, { landingPolicy: async () => { if (policy instanceof Error) throw policy; return policy; } });
     const seen: WorkspaceCall[] = [];
-    const responder = new WorkspaceResponder({ client: r1.client, busy: () => ["att-busy"], port: { run: async (x) => { seen.push(x); return { ok: true, summary: "refreshed" }; } } });
+    // The host's answer: a current host names the landing branch it used (`detail.branch`); `echo` stands in for other hosts (second review: an older host says no branch, a host with its own policy names another).
+    let echo: (x: WorkspaceCall) => string | undefined = (x) => x.landing?.branch;
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => ["att-busy"], port: { run: async (x) => { seen.push(x); const b = echo(x); return { ok: true, summary: "refreshed", ...(b === undefined ? {} : { detail: { changed: true, branch: b } }) }; } } });
     const go = async (call: WorkspaceCall) => { const pending = handle.workspace.run(call); await wait(() => r1.client.workspaceRequests()); responder.handle(await r1.client.workspaceRequests()); return pending; };
     const reapply = (more: Partial<WorkspaceCall> = {}): WorkspaceCall => landing({ operation: "reapply", reason: "the author refreshes", ...more });
-    assert.deepEqual(await go(reapply({ landing: { branch: "evil" } })), { ok: true, summary: "refreshed" });
+    assert.deepEqual(await go(reapply({ landing: { branch: "evil" } })), { ok: true, summary: "refreshed", detail: { changed: true, branch: "main" } });
     assert.deepEqual([seen[0]!.operation, seen[0]!.landing], ["reapply", { branch: "main", requirePermit: true }], "the owner's figures, not the caller's");
-    // A policy that names no branch is carried as it is (the host then follows its shared head).
+    // Second review (mixed versions): a host that does not say it used the carried branch (built before the follow-up, so it refreshed onto its shared tree's checked-out head) or names another branch may have moved the
+    // checkout somewhere else: thrown (the workspace service records failed), never taken as a refresh onto the landing branch.
+    echo = () => undefined;
+    await assert.rejects(go(reapply()), (e: unknown) => e instanceof DomainError && e.code === "unavailable" && /without saying it used the landing branch "main".*built before.*do not take it as fresh/.test(e.message));
+    echo = () => "side";
+    await assert.rejects(go(reapply()), (e: unknown) => e instanceof DomainError && e.code === "unavailable" && /it named "side"/.test(e.message));
+    echo = (x) => x.landing?.branch;
+    seen.splice(1, 2);
+    // A policy that names no branch is carried as it is (the host then follows its shared head), and an answer naming no branch is then what is expected.
     policy = {};
-    await go(reapply());
+    assert.equal((await go(reapply())).ok, true);
     assert.deepEqual(seen[1]!.landing, {});
     // Unreadable: nothing is sent, and the answer says the checkout was left as it was.
     policy = new Error("settings down");
