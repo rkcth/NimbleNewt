@@ -420,11 +420,16 @@ const HOUR_WORDS: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3,
 const CLOCK = (() => {
   const hour = `(?:\\d{1,2}|${Object.keys(HOUR_WORDS).sort((x, y) => y.length - x.length).join("|")})`;
   const units = [...Object.keys(DURATION_UNITS), "kb", "mb", "gb", "tb", "kib", "mib", "gib", "tib", "gig", "gigs", "meg", "megs", "bytes?", "percent", "of"].sort((x, y) => y.length - x.length).join("|");
-  return `(?<![0-9a-z.:,])(?:midnight|noon|midday|(?:half|quarter)\\s+(?:past|to)\\s+${hour}|${hour}(?:[:.]\\d{2})?)(?:\\s*[ap]\\.?m\\b\\.?)?(?![0-9a-z:%]|\\.\\d|\\s*(?:${units})\\b|\\s*%)`;
+  return `(?<![0-9a-z.:,])(?:midnight|noon|midday|(?:half|quarter)\\s+(?:past|to)\\s+${hour}|${hour}(?:[:.]\\d{2}|\\s+o'?clock)?)(?:\\s*[ap]\\.?m\\b\\.?)?(?![0-9a-z:%]|\\.\\d|\\s*(?:${units})\\b|\\s*%)`;
 })();
+const WEEKDAYS = "mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?|thu(?:rs|rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?";
+/** Words before a bare hour that say it is a time of day ("at 2", "from 2", "tonight 2 to 4", "Saturday 2-4"); after a comma or at the start of the message one needs none. */
+const TIME_BEFORE = `from|between|at|after|around|about|tonight|today|tomorrow|morning|night|evening|afternoon|overnight|${WEEKDAYS}|it|window|downtime|outage|maintenance|starting|start|starts|begin|begins|do|run|say`;
+/** Words after a bare hour that say it is a time of day ("2 to 4 London time", "until 4 in the morning", "between 2 and 3 tonight"); a following thing counted ("2 to 3 hosts") says it is not. */
+const TIME_AFTER = `to|through|thru|until|till|til|and|or|then|end|ends|ending|finish|finishes|finishing|stop|stops|stopping|done|wrap|with|in|on|tonight|today|tomorrow|this|next|for|so|but|if|when|o'?clock|oclock|sharp|ish|local|utc|gmt|bst|cet|cest|[ecmp][sd]?t|eastern|central|mountain|pacific|(?:[a-z]+\\s+){0,2}time|${WEEKDAYS}|morning|night|evening|afternoon|overnight|at\\s+night|please|is|works|would|should|will|ok|okay|fine|thanks`;
 /** The minutes after midnight a time of day written as `CLOCK` may mean: one marked am or pm, or past 12, is read that way only; one without is read both ways round the clock. */
 function clockTimes(written: string): number[] {
-  const x = written.trim();
+  const x = written.trim().replace(/\s+o'?clock$/, "");
   if (x === "midnight") return [0];
   if (x === "noon" || x === "midday") return [720];
   const m = /^(?:(half|quarter)\s+(past|to)\s+)?(\d{1,2}|[a-z]+)(?:[:.](\d{2}))?(?:\s*([ap])\.?m\b\.?)?$/.exec(x);
@@ -460,7 +465,8 @@ export function windowLengthInWords(minutes: number, start: unknown, text: strin
   // Lengths that say when the window starts or when to prepare, not how long it lasts.
   const t = numbersOf(text)
     .replace(new RegExp(`(?<!\\b(?:done|finished|over|complete|completed)\\s)\\b(?:in|within)\\s+(?:the\\s+next\\s+)?${amount}`, "g"), " ")
-    .replace(new RegExp(`${amount}\\s+(?:before|ahead|early|earlier|beforehand|prior|in\\s+advance)\\b`, "g"), " ")
+    .replace(new RegExp(`${amount}\\s+(?:before|ahead|early|earlier|beforehand|prior|in\\s+advance|ago)\\b`, "g"), " ")
+    .replace(new RegExp(`\\b(?:every|each)\\s+${amount}`, "g"), " ")
     .replace(/\b(?:the\s+)?(?:next|following)\s+day\b|\ba\s+day\s+(?:after|later)\b/g, " ");
   if (durationInWords(minutes * 60, t)) return true;
   // Hours and minutes said together, and halves and quarters of an hour.
@@ -474,21 +480,29 @@ export function windowLengthInWords(minutes: number, start: unknown, text: strin
   const from = Number(at[1]) * 60 + Number(at[2]);
   const fits = (end: number): boolean => (end - from + 1440) % 1440 === minutes;
   const isStart = (written: string): boolean => clockTimes(written).includes(from);
+  // A bare hour ("2", "four") is a time of day only where a time is spoken of: not "2 to 3 hosts", "scale from 2 to 4 workers", "release 2-3 tonight" or "version 2 through 4 are broken". One marked
+  // am or pm, written with minutes, or midnight or noon needs no such check.
+  const bare = (x: string): boolean => /^\s*(?:\d{1,2}|[a-z]+)\s*$/.test(x) && !/midnight|noon|midday/.test(x);
+  const before = (at: number): boolean => new RegExp(`(?:^|[^\\sa-z0-9'])\\s*$|\\b(?:${TIME_BEFORE})\\s+$`).test(t.slice(Math.max(0, at - 40), at));
+  const after = (at: number): boolean => new RegExp(`^(?:\\s*$|\\s*[^\\sa-z0-9']|\\s+(?:${TIME_AFTER})\\b)`).test(t.slice(at, at + 60));
   // A range with both ends written: "from 2 to 4am", "2-4am", "between 2 and 3", "10pm till midnight".
-  for (const m of t.matchAll(new RegExp(`(${CLOCK})\\s*(?:to|through|thru|until|till|til|-|–|—)\\s*(${CLOCK})|\\bbetween\\s+(${CLOCK})\\s+and\\s+(${CLOCK})`, "g"))) {
-    const [s, e] = m[1] !== undefined ? [m[1], m[2]!] : [m[3]!, m[4]!];
+  for (const m of t.matchAll(new RegExp(`(${CLOCK})\\s*(?:to|through|thru|until|till|til|-|–|—)\\s*(${CLOCK})|\\bbetween\\s+(${CLOCK})\\s+and\\s+(${CLOCK})`, "dg"))) {
+    const [si, ei] = m[1] !== undefined ? [1, 2] : [3, 4];
+    const [s, e] = [m[si]!, m[ei]!];
     // `11-03` is a day, not a range: a dash range's end is not written with a leading zero.
     if (/^\s*[-–—]/.test(m[0].slice(s.length)) && /^0\d$/.test(e.trim())) continue;
+    if (bare(s) && bare(e) && !(before(m.indices![si]![0]) && after(m.indices![ei]![1]))) continue;
     if (isStart(s) && clockTimes(e).some(fits)) return true;
   }
   // An end time said alone ("at 2 ... until 4", "at 11pm, done by 1am"), with the start written elsewhere in the words as a time of day. A bare "to 4" or "by 4" says an end only when marked
-  // am or pm, written with minutes, or midnight or noon ("rollback to 2", "up to 2 hours" are not end times); "until 4" and "done by 4" always do.
-  const written = [...t.matchAll(new RegExp(CLOCK, "g"))].map((m) => ({ at: m.index, text: m[0] }));
+  // am or pm, written with minutes, or midnight or noon ("rollback to 2", "up to 2 hours" are not end times); "until 4", "done by 4" and "ending at 4" always do.
+  const written = [...t.matchAll(new RegExp(CLOCK, "g"))].map((m) => ({ at: m.index, text: m[0] })).filter((w) => !bare(w.text) || (before(w.at) && after(w.at + w.text.length)));
   const marked = (e: string): boolean => /[ap]\.?m|:|midnight|noon|midday/.test(e);
-  for (const m of t.matchAll(new RegExp(`(\\b(?:until|till|til|(?:done|finished|over|complete|completed|back)\\s+by)\\s+(?:about\\s+|around\\s+)?|\\b(?:to|through|thru|by)\\s+)(${CLOCK})`, "g"))) {
+  for (const m of t.matchAll(new RegExp(`(\\b(?:until|till|til|(?:done|finished|over|complete|completed|back|wrapped\\s+up|wrap\\s+up)\\s+by|(?:end|ends|ending|finish|finishes|finishing|stop|stops|stopping)(?:\\s+at)?)\\s+(?:about\\s+|around\\s+)?|\\b(?:to|through|thru|by)\\s+)(${CLOCK})`, "g"))) {
     const e = m[2]!;
     if (/^(?:to|through|thru|by)\s/.test(m[1]!) && !marked(e)) continue;
     const endAt = m.index + m[1]!.length;
+    if (bare(e) && !after(endAt + e.length)) continue;
     if (written.some((w) => w.at !== endAt && isStart(w.text)) && clockTimes(e).some(fits)) return true;
   }
   return false;
@@ -498,15 +512,16 @@ export function windowLengthInWords(minutes: number, start: unknown, text: strin
 export function leadInWords(minutes: number, text: string): boolean {
   if (!Number.isSafeInteger(minutes) || minutes < 0) return false;
   if (minutes === 0) return /(?:^|[^0-9.])(?:0|zero)\s*(?:minutes?|mins?|m)\b|\bno\s+(?:preparation\s+)?lead\b/.test(numbersOf(text));
-  return durationInWords(minutes * 60, text);
+  // A length said as how long ago something happened ("5 minutes ago") is not a lead.
+  return durationInWords(minutes * 60, numbersOf(text).replace(/\b(?:\d+(?:\.\d+)?|[a-z-]+)\s*(?:minutes?|mins?|m|hours?|hrs?|h)\s+ago\b/g, " "));
 }
 
 const SIZE_UNITS: Readonly<Record<string, readonly number[]>> = {
   b: [1], byte: [1], bytes: [1],
-  kb: [1e3, 1024], kilobyte: [1e3, 1024], kilobytes: [1e3, 1024], kib: [1024], k: [1e3, 1024],
+  kb: [1e3, 1024], kilobyte: [1e3, 1024], kilobytes: [1e3, 1024], kib: [1024],
   mb: [1e6, 1024 ** 2], megabyte: [1e6, 1024 ** 2], megabytes: [1e6, 1024 ** 2], mib: [1024 ** 2], meg: [1e6, 1024 ** 2], megs: [1e6, 1024 ** 2],
   gb: [1e9, 1024 ** 3], gigabyte: [1e9, 1024 ** 3], gigabytes: [1e9, 1024 ** 3], gib: [1024 ** 3], gig: [1e9, 1024 ** 3], gigs: [1e9, 1024 ** 3], g: [1e9, 1024 ** 3],
-  tb: [1e12, 1024 ** 4], terabyte: [1e12, 1024 ** 4], terabytes: [1e12, 1024 ** 4], tib: [1024 ** 4], t: [1e12, 1024 ** 4],
+  tb: [1e12, 1024 ** 4], terabyte: [1e12, 1024 ** 4], terabytes: [1e12, 1024 ** 4], tib: [1024 ** 4],
 };
 /**
  * Whether the owner's own words give this amount of free space in bytes (card K07, a window's `minFreeBytes`): "5 GB", "2 gigabytes", "500 MiB", "1.5 TB", "a gigabyte", "0 bytes". A size in

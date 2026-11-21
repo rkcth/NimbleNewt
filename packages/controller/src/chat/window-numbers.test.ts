@@ -75,6 +75,40 @@ test("first review: numbers that are not the window's length are not read as one
   ] as const) assert.equal(windowLengthInWords(minutes, start, words), false, `${why}: ${words}`);
 });
 
+test("second review: a bare hour range of things counted is not a time range, and an end said as 'ending at' or 'o'clock' is read", () => {
+  for (const [minutes, start, words, why] of [
+    [60, "02:00", "install at 2 to 3 hosts", "hosts are counted, not hours"],
+    [60, "02:00", "install release 2-3 at 2", "a release number range is not a window"],
+    [60, "02:00", "at 2, scale 2 to 3 workers", "nor a count of workers"],
+    [120, "02:00", "at 2, scale from 2 to 4 workers", "nor after 'from'"],
+    [60, "02:00", "at 2, the 2-3 nodes are fine", "nor nodes after 'the'"],
+    [120, "02:00", "at 2, version 2 through 4 are broken", "nor versions"],
+    [60, "02:00", "at 2, keep 2 to 3 copies", "nor copies"],
+    [120, "02:00", "install on 2 hosts until 4", "the start is not written as a time"],
+    [60, "02:00", "at 2, wait until 3 hosts are drained", "an end of a count is not an end time"],
+    [60, "02:00", "install at 2, I said so 60 minutes ago", "a time ago is not a length"],
+    [60, "02:00", "install at 2, check every 60 minutes", "a period is not a length"],
+  ] as const) assert.equal(windowLengthInWords(minutes, start, words), false, `${why}: ${words}`);
+  for (const [minutes, start, words] of [
+    [120, "02:00", "install the update from 2 to 4 London time"],
+    [120, "02:00", "from 2 to 4 in the morning"],
+    [120, "02:00", "Saturday 2 to 4"],
+    [120, "02:00", "2 to 4 works for me"],
+    [60, "02:00", "between 2 and 3 would be great"],
+    [120, "02:00", "tonight 2-4"],
+    [60, "02:00", "window at 2 ending at 3"],
+    [60, "02:00", "run it at 2, stop at 3"],
+    [60, "02:00", "start at 2am, end at 3am"],
+    [60, "02:00", "2am, wrap up by 3"],
+    [60, "02:00", "let's say 2 until 3, ok?"],
+    [120, "02:00", "2 o'clock to 4 o'clock"],
+    [60, "02:00", "at 2 until 3 New York time"],
+  ] as const) assert.equal(windowLengthInWords(minutes, start, words), true, `${minutes} from ${start}: ${words}`);
+  assert.equal(leadInWords(5, "install at 2 for an hour, I asked 5 minutes ago"), false, "a time ago is not a lead");
+  assert.equal(sizeInWords(1000, "install at 2 for an hour, 1k tasks are waiting"), false, "a thousand tasks is not a size");
+  assert.equal(sizeInWords(2e12, "at 2 for an hour, step 2 t"), false, "nor a bare t");
+});
+
 test("a preparation lead counts only when the owner said it, none included", () => {
   assert.equal(leadInWords(30, "install it tonight at 2 for an hour and start preparing 30 minutes before"), true);
   assert.equal(leadInWords(120, "start preparing two hours ahead"), true);
