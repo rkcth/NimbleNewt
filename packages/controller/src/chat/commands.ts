@@ -471,7 +471,8 @@ export function windowLengthInWords(minutes: number, start: unknown, text: strin
     .replace(/\b(?:the\s+)?(?:next|following)\s+day\b|\ba\s+day\s+(?:after|later)\b/g, " ");
   if (durationInWords(minutes * 60, t)) return true;
   // Hours and minutes said together, and halves and quarters of an hour.
-  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|${n})[ -]?(?:hours?|hrs?|h)(?:,?\\s*and)?\\s*(\\d+|${n})[ -]?(?:minutes?|mins?|m)\\b`, "g"))) if (numberOf(m[1]!) * 60 + numberOf(m[2]!) === minutes) return true;
+  // As in `durationInWords`, a number in words is apart from its unit ("ah am I late" is not an hour and a minute).
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|(?:${n})(?=[ -]))[ -]?(?:hours?|hrs?|h)(?:,?\\s*and)?\\s*(\\d+|(?:${n})(?=[ -]))[ -]?(?:minutes?|mins?|m)\\b`, "g"))) if (numberOf(m[1]!) * 60 + numberOf(m[2]!) === minutes) return true;
   for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|${n})\\s+(?:hours?\\s+and\\s+a\\s+(half|quarter)|and\\s+a\\s+(half|quarter)\\s+hours?)\\b`, "g"))) if (numberOf(m[1]!) * 60 + ((m[2] ?? m[3]) === "half" ? 30 : 15) === minutes) return true;
   if (minutes === 15 && /\b(?:a\s+)?quarter\s+of\s+an\s+hour\b/.test(t)) return true;
   if (minutes === 45 && /\bthree\s+quarters\s+of\s+an\s+hour\b/.test(t)) return true;

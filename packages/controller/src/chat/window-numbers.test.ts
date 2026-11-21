@@ -116,6 +116,12 @@ test("re-check: a number word run into a unit is another word ('and' is not 'an 
   assert.equal(leadInWords(1440, "install at 2 for an hour and back up first"), false, "'and' is not a one-day lead");
   assert.equal(leadInWords(60, "ah ok, install at 2 for two hours"), false, "'ah' is not an hour's lead");
   assert.equal(sizeInWords(1, "at 2 for an hour, ab testing is off"), false, "'ab' is not a byte");
+  assert.equal(windowLengthInWords(61, "02:00", "ah am i late? install at 2"), false, "'ah am' is not an hour and a minute");
+  assert.equal(windowLengthInWords(90, "02:00", "ah 30 minutes then, at 2"), false, "'ah 30 minutes' is not an hour and a half");
+  assert.equal(windowLengthInWords(121, "02:00", "at 2 for 2 hours and am around after"), false, "'2 hours and am' is not 121 minutes");
+  assert.equal(windowLengthInWords(150, "02:00", "at 2 for two hours and thirty minutes"), true);
+  assert.equal(windowLengthInWords(90, "02:00", "at 2 for an hour and 30 minutes"), true);
+  assert.equal(windowLengthInWords(90, "02:00", "at 2 for 1h30m"), true);
   // Still read: a number word apart from its unit, or joined by a hyphen; digits run into a unit.
   assert.equal(windowLengthInWords(1440, "02:00", "install at 2 for a day and check it"), true);
   assert.equal(windowLengthInWords(60, "02:00", "at 2 for a one-hour window and then stop"), true);
