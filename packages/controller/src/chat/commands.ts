@@ -381,7 +381,7 @@ export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId
 
 /** The argument names the operation takes (from the API's own table, so they cannot drift), plus the chat-only names and the revision the chat fills in. */
 
-const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
+const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, "twenty-four": 24, thirty: 30, forty: 40, "forty-five": 45, "forty five": 45, fifty: 50, sixty: 60, ninety: 90 };
 const DURATION_UNITS: Readonly<Record<string, number>> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60, h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600, d: 86_400, day: 86_400, days: 86_400 };
 /**
  * Whether the owner's own words state this length of time in seconds (card R04c: a drain's `drainSeconds`): "3600 seconds", "30 minutes", "an hour", "the next hour", "2 hrs", "half an hour", "1.5 hours". A number the model chose is not
@@ -393,7 +393,7 @@ export function durationInWords(seconds: number, text: string): boolean {
   const t = text.replace(/[‘’]/g, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ");
   if (seconds === 1800 && /\bhalf\s+an?\s+hour\b/.test(t)) return true;
   const units = Object.keys(DURATION_UNITS).sort((x, y) => y.length - x.length).join("|");
-  const re = new RegExp(`(?:^|[^0-9a-z.])(\\d+(?:\\.\\d+)?|${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})[ -]?(${units})\\b`, "g");
+  const re = new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})[ -]?(${units})\\b`, "g");
   for (const m of t.matchAll(re)) {
     const n = /^\d/.test(m[1]!) ? Number(m[1]) : DURATION_NUMBERS[m[1]!]!;
     if (Math.round(n * DURATION_UNITS[m[2]!]!) === seconds) return true;
@@ -401,44 +401,97 @@ export function durationInWords(seconds: number, text: string): boolean {
   return false;
 }
 
-/** The owner's message made ready for reading numbers: curly quotes straightened, lowercased, and record IDs (anything shaped like `rcn-...`) and ISO days (`2026-11-21`) blanked, so their digits are not read as a length, a size or a time. */
-const numbersOf = (text: string): string => text.replace(/[‘’]/g, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ").replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ");
+/** Month names, so the day after one (`Nov 3`, `3rd of November`) is not read as a time of day or a length. */
+const MONTH_NAMES = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+/**
+ * The owner's message made ready for reading numbers: curly quotes straightened, lowercased, and the numbers that are not lengths, sizes or times of day blanked so their digits are never read as
+ * one: record IDs (anything shaped like `rcn-...`), days (`2026-11-21`, `21/11/2026`, `11/21`, `21.11.2026`, `Nov 3`, `3rd of November`) and versions (`2.1.3`, `v2.1`).
+ */
+const numbersOf = (text: string): string => text.replace(/[‘’]/g, "'").toLowerCase()
+  .replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ")
+  .replace(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{1,2}\/\d{1,2}\b/g, " ")
+  .replace(/\bv\d+(?:\.\d+)*\b|\b\d+\.\d+\.\d+\b/g, " ")
+  .replace(new RegExp(`\\b(?:${MONTH_NAMES})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTH_NAMES})\\b`, "g"), " ");
 const NUMBER_WORDS = (): string => Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|");
 const numberOf = (word: string): number => (/^\d/.test(word) ? Number(word) : DURATION_NUMBERS[word]!);
+/** The hours of the clock in words ("from two to four am"). */
+const HOUR_WORDS: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+/** A time of day as people write it: `4`, `4:30`, `4.30`, `4am`, `4 p.m.`, `four`, `half past 4`, `quarter to five`, `midnight`, `noon`. Not one when a unit follows (`4 hours`, `5 GB`, `one of`). */
+const CLOCK = (() => {
+  const hour = `(?:\\d{1,2}|${Object.keys(HOUR_WORDS).sort((x, y) => y.length - x.length).join("|")})`;
+  const units = [...Object.keys(DURATION_UNITS), "kb", "mb", "gb", "tb", "kib", "mib", "gib", "tib", "gig", "gigs", "meg", "megs", "bytes?", "percent", "of"].sort((x, y) => y.length - x.length).join("|");
+  return `(?<![0-9a-z.:,])(?:midnight|noon|midday|(?:half|quarter)\\s+(?:past|to)\\s+${hour}|${hour}(?:[:.]\\d{2})?)(?:\\s*[ap]\\.?m\\b\\.?)?(?![0-9a-z:%]|\\.\\d|\\s*(?:${units})\\b|\\s*%)`;
+})();
+/** The minutes after midnight a time of day written as `CLOCK` may mean: one marked am or pm, or past 12, is read that way only; one without is read both ways round the clock. */
+function clockTimes(written: string): number[] {
+  const x = written.trim();
+  if (x === "midnight") return [0];
+  if (x === "noon" || x === "midday") return [720];
+  const m = /^(?:(half|quarter)\s+(past|to)\s+)?(\d{1,2}|[a-z]+)(?:[:.](\d{2}))?(?:\s*([ap])\.?m\b\.?)?$/.exec(x);
+  if (m === null) return [];
+  const h = /^\d/.test(m[3]!) ? Number(m[3]) : HOUR_WORDS[m[3]!];
+  if (h === undefined || (m[1] !== undefined && m[4] !== undefined) || (m[1] === "half" && m[2] === "to")) return [];
+  const mm = m[4] === undefined ? 0 : Number(m[4]);
+  if (mm > 59) return [];
+  let hours: number[];
+  if (m[5] !== undefined) {
+    if (h < 1 || h > 12) return [];
+    hours = [(h % 12) + (m[5] === "p" ? 12 : 0)];
+  } else if (h === 24) {
+    if (mm !== 0 || m[1] !== undefined) return [];
+    hours = [0];
+  } else if (h > 24) return [];
+  else hours = h === 0 || h > 12 ? [h] : [h, (h + 12) % 24];
+  const shift = m[1] === "half" ? 30 : m[1] === "quarter" ? (m[2] === "past" ? 15 : -15) : 0;
+  return hours.map((hh) => (hh * 60 + mm + shift + 1440) % 1440);
+}
 
 /**
  * Whether the owner's own words give this length of a maintenance window in minutes (card K07): a length said outright ("for 90 minutes", "an hour", "2 hrs", "half an hour"), hours and minutes
- * together ("an hour and a half", "2 hours and 30 minutes", "1h30m"), or an end time after the start the proposal shows ("from 2 to 4am", "3am until 4:30", "between 2 and 3", "2-4am"). An end time
- * written without am or pm is read both ways round the clock; the length the window would be set with is still shown on the proposal for the owner to confirm. A number the model chose is not the
- * owner's, so a length found nowhere in the words is asked for instead of proposed.
+ * together ("an hour and a half", "two and a half hours", "2 hours and 30 minutes", "1h30m", "an hour and a quarter"), or an end time after the start the proposal shows, with that start written too
+ * ("from 2 to 4am", "3am until 4:30", "between 2 and 3", "2-4am", "at 11pm, done by 1am", "from 10pm till midnight"). An end time written without am or pm is read both ways round the clock; the length
+ * the window would be set with is still shown on the proposal for the owner to confirm. A length said as when the window starts or how early to prepare ("in 2 hours", "30 minutes before", "the next
+ * day") is not its length. A number the model chose is not the owner's, so a length found nowhere in the words is asked for instead of proposed.
  */
 export function windowLengthInWords(minutes: number, start: unknown, text: string): boolean {
   if (!Number.isSafeInteger(minutes) || minutes <= 0) return false;
-  if (durationInWords(minutes * 60, text)) return true;
-  const t = numbersOf(text);
   const n = NUMBER_WORDS();
-  // Hours and minutes said together, or an hour and a half.
-  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(\\d+|${n})[ -]?(?:hours?|hrs?|h)(?:,?\\s*and)?\\s*(\\d+|${n})[ -]?(?:minutes?|mins?|m)\\b`, "g"))) if (numberOf(m[1]!) * 60 + numberOf(m[2]!) === minutes) return true;
-  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(\\d+|${n})\\s+hours?\\s+and\\s+a\\s+half\\b`, "g"))) if (numberOf(m[1]!) * 60 + 30 === minutes) return true;
-  // An end time after the start: "to 4", "until 4:30am", "till noon", "and 3" (between 2 and 3), "2-4am".
+  const amount = `(?:\\d+(?:\\.\\d+)?|half\\s+an?|${n})[ -]?(?:${Object.keys(DURATION_UNITS).sort((x, y) => y.length - x.length).join("|")})\\b`;
+  // Lengths that say when the window starts or when to prepare, not how long it lasts.
+  const t = numbersOf(text)
+    .replace(new RegExp(`(?<!\\b(?:done|finished|over|complete|completed)\\s)\\b(?:in|within)\\s+(?:the\\s+next\\s+)?${amount}`, "g"), " ")
+    .replace(new RegExp(`${amount}\\s+(?:before|ahead|early|earlier|beforehand|prior|in\\s+advance)\\b`, "g"), " ")
+    .replace(/\b(?:the\s+)?(?:next|following)\s+day\b|\ba\s+day\s+(?:after|later)\b/g, " ");
+  if (durationInWords(minutes * 60, t)) return true;
+  // Hours and minutes said together, and halves and quarters of an hour.
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|${n})[ -]?(?:hours?|hrs?|h)(?:,?\\s*and)?\\s*(\\d+|${n})[ -]?(?:minutes?|mins?|m)\\b`, "g"))) if (numberOf(m[1]!) * 60 + numberOf(m[2]!) === minutes) return true;
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|${n})\\s+(?:hours?\\s+and\\s+a\\s+(half|quarter)|and\\s+a\\s+(half|quarter)\\s+hours?)\\b`, "g"))) if (numberOf(m[1]!) * 60 + ((m[2] ?? m[3]) === "half" ? 30 : 15) === minutes) return true;
+  if (minutes === 15 && /\b(?:a\s+)?quarter\s+of\s+an\s+hour\b/.test(t)) return true;
+  if (minutes === 45 && /\bthree\s+quarters\s+of\s+an\s+hour\b/.test(t)) return true;
+  // An end time after the start the proposal shows: the start must be written too, so a start the model chose cannot make a length out of an end time.
   const at = typeof start === "string" ? /^(\d{2}):(\d{2})$/.exec(start) : null;
   if (at === null) return false;
   const from = Number(at[1]) * 60 + Number(at[2]);
-  const ends: number[] = [];
-  if (/\b(?:to|until|till|til|through|thru)\s+midnight\b/.test(t)) ends.push(0);
-  if (/\b(?:to|until|till|til|through|thru)\s+noon\b/.test(t)) ends.push(12 * 60);
-  const clock = "(\\d{1,2})(?::(\\d{2}))?\\s*(a\\.?m\\.?|p\\.?m\\.?)?(?![0-9:])";
-  const startClock = "\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?";
-  const endAfter = new RegExp(`(?:\\b(?:to|until|till|til|through|thru)\\s+|\\bbetween\\s+${startClock}\\s+and\\s+|(?<![0-9.:])${startClock}\\s*[-–]\\s*)${clock}`, "g");
-  for (const m of t.matchAll(endAfter)) {
-    const h = Number(m[1]);
-    const mm = m[2] === undefined ? 0 : Number(m[2]);
-    if (h > 24 || mm > 59) continue;
-    const half = m[3]?.[0];
-    const hours = half === "a" ? [h % 12] : half === "p" ? [(h % 12) + 12] : h > 12 ? [h % 24] : [h % 24, (h + 12) % 24];
-    for (const hh of hours) ends.push(hh * 60 + mm);
+  const fits = (end: number): boolean => (end - from + 1440) % 1440 === minutes;
+  const isStart = (written: string): boolean => clockTimes(written).includes(from);
+  // A range with both ends written: "from 2 to 4am", "2-4am", "between 2 and 3", "10pm till midnight".
+  for (const m of t.matchAll(new RegExp(`(${CLOCK})\\s*(?:to|through|thru|until|till|til|-|–|—)\\s*(${CLOCK})|\\bbetween\\s+(${CLOCK})\\s+and\\s+(${CLOCK})`, "g"))) {
+    const [s, e] = m[1] !== undefined ? [m[1], m[2]!] : [m[3]!, m[4]!];
+    // `11-03` is a day, not a range: a dash range's end is not written with a leading zero.
+    if (/^\s*[-–—]/.test(m[0].slice(s.length)) && /^0\d$/.test(e.trim())) continue;
+    if (isStart(s) && clockTimes(e).some(fits)) return true;
   }
-  return ends.some((end) => (end - from + 1440) % 1440 === minutes);
+  // An end time said alone ("at 2 ... until 4", "at 11pm, done by 1am"), with the start written elsewhere in the words as a time of day. A bare "to 4" or "by 4" says an end only when marked
+  // am or pm, written with minutes, or midnight or noon ("rollback to 2", "up to 2 hours" are not end times); "until 4" and "done by 4" always do.
+  const written = [...t.matchAll(new RegExp(CLOCK, "g"))].map((m) => ({ at: m.index, text: m[0] }));
+  const marked = (e: string): boolean => /[ap]\.?m|:|midnight|noon|midday/.test(e);
+  for (const m of t.matchAll(new RegExp(`(\\b(?:until|till|til|(?:done|finished|over|complete|completed|back)\\s+by)\\s+(?:about\\s+|around\\s+)?|\\b(?:to|through|thru|by)\\s+)(${CLOCK})`, "g"))) {
+    const e = m[2]!;
+    if (/^(?:to|through|thru|by)\s/.test(m[1]!) && !marked(e)) continue;
+    const endAt = m.index + m[1]!.length;
+    if (written.some((w) => w.at !== endAt && isStart(w.text)) && clockTimes(e).some(fits)) return true;
+  }
+  return false;
 }
 
 /** Whether the owner's own words give this preparation lead in minutes (card K07): a length said outright, or none at all ("0 minutes", "no lead time", "no preparation lead"). */
@@ -463,7 +516,7 @@ export function sizeInWords(bytes: number, text: string): boolean {
   if (!Number.isSafeInteger(bytes) || bytes < 0) return false;
   const t = numbersOf(text).replace(/(\d),(?=\d{3}\b)/g, "$1");
   const units = Object.keys(SIZE_UNITS).sort((x, y) => y.length - x.length).join("|");
-  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(\\d+(?:\\.\\d+)?|${NUMBER_WORDS()}|zero)[ -]?(${units})\\b`, "g"))) {
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|${NUMBER_WORDS()}|zero)[ -]?(${units})\\b`, "g"))) {
     const n = m[1] === "zero" ? 0 : numberOf(m[1]!);
     if (SIZE_UNITS[m[2]!]!.some((u) => Math.round(n * u) === bytes)) return true;
   }

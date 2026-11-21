@@ -33,6 +33,48 @@ test("a window's length the owner did not say is not found", () => {
   assert.equal(windowLengthInWords(0, "02:00", "install it tonight for 0 minutes"), false, "no length is zero");
 });
 
+test("first review: more of the usual ways of saying a length are read", () => {
+  for (const [minutes, start, words] of [
+    [150, "02:00", "let's do 2am, two and a half hours"],
+    [75, "02:00", "at 2am for an hour and a quarter"],
+    [45, "02:00", "at 2am for three quarters of an hour"],
+    [720, "00:00", "starting at midnight for twelve hours"],
+    [90, "03:00", "3am until 4.30"],
+    [180, "01:00", "from one to four am"],
+    [120, "23:00", "tonight at 11pm, should be done by 1am"],
+    [30, "02:30", "at half past 2 until 3"],
+    [90, "23:30", "tonight 11:30pm\u20131am"],
+    [240, "22:00", "10 PM to 2 AM"],
+    [60, "00:00", "from midnight to 1am"],
+    [90, "03:00", "on 21/11/2026 at 3 for 90 minutes"],
+    [60, "02:00", "install v2.1.3 on Nov 22 at 2 for an hour"],
+  ] as const) assert.equal(windowLengthInWords(minutes, start, words), true, `${minutes} from ${start}: ${words}`);
+});
+
+test("first review: numbers that are not the window's length are not read as one", () => {
+  for (const [minutes, start, words, why] of [
+    [720, "02:00", "install it tonight at 2 for 2 hours, rollback to 2 if it fails", "'to 2' without am, pm or minutes is not an end time"],
+    [660, "03:00", "upgrade to 2.1 tonight at 3 for an hour", "a version is not an end time"],
+    [720, "02:00", "at 2am, it may take up to 2 hours", "'to 2 hours' is a length, not an end time"],
+    [60, "02:00", "install it on 11-03 at 2", "a day written 11-03 is not the range 11 to 3"],
+    [1140, "02:00", "install it on 11-21 at 2", "nor 11-21"],
+    [240, "11:00", "install it on 11-03 at 11", "nor 11-03 when the start is 11 (a dash range's end has no leading zero)"],
+    [780, "15:00", "Nov 3 at 2 until 4", "the day after a month is not the start"],
+    [1440, "03:00", "install it the next day at 3am", "the next day is when, not how long"],
+    [1440, "03:00", "install it in a day at 3am", "nor in a day"],
+    [120, "02:00", "install it in 2 hours", "nor in 2 hours"],
+    [30, "02:00", "at 2, start preparing 30 minutes before", "a preparation lead is not the length"],
+    [300, "02:00", "at 2, give it 1,5 hours", "a decimal comma is not two numbers"],
+    [120, "02:00", "install it tonight until 4", "an end time with no start written: the start would be the model's"],
+    [720, "16:00", "install it tonight until 4", "the end time is not its own start"],
+    [30, "00:00", "at 0 until 24:30", "24:30 is not a time of day"],
+    [120, "02:00", "at 2 until 16am", "16am is not a time of day (not 4am)"],
+    [60, "02:00", "install it at 2 until \u0663", "only ASCII digits are read"],
+    [60, "02:00", "at 2 for \uff16\uff10 minutes", "nor full-width ones"],
+    [60, "02:00", "at 2 for 60000000000000000000 minutes", "a huge number is not a small one"],
+  ] as const) assert.equal(windowLengthInWords(minutes, start, words), false, `${why}: ${words}`);
+});
+
 test("a preparation lead counts only when the owner said it, none included", () => {
   assert.equal(leadInWords(30, "install it tonight at 2 for an hour and start preparing 30 minutes before"), true);
   assert.equal(leadInWords(120, "start preparing two hours ahead"), true);
@@ -51,6 +93,8 @@ test("a free-space figure counts only when the owner said it, in powers of ten o
   assert.equal(sizeInWords(0, "keep 0 bytes free"), true);
   assert.equal(sizeInWords(1_073_741_824, "keep 1,073,741,824 bytes free"), true);
   assert.equal(sizeInWords(500e6, "needs 500 MiB free"), false, "MiB is only 1024s");
+  assert.equal(sizeInWords(5e9, "keep 2,5 GB free"), false, "a decimal comma is not two numbers");
+  assert.equal(sizeInWords(5e9, "make sure 5,000 MB is free"), true, "a thousands comma is");
   assert.equal(sizeInWords(10 * 1024 ** 3, "make sure 5 GB is free"), false, "a different size");
   assert.equal(sizeInWords(1024 ** 3, "install it tonight at 2 for an hour"), false, "no size at all");
 });
