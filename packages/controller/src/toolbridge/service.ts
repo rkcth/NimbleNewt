@@ -875,7 +875,10 @@ export class ToolExecutionService {
       try { found = await this.#deps.artifactOf(artifactId); } catch (error) { if (isDomainError(error, "invalid_command")) return refusal("invalid_command", `artifactId: ${error.message}`); throw error; }
       // Another task's artifact is answered as one that does not exist, and its files are not read: the attempt reaches its own task only.
       if (found === undefined || found.taskId !== c.taskId) return refusal("not_found", `no artifact ${artifactId.slice(0, 80)} of this task`);
-      if (!(await found.intact())) return refusal("invalid_command", `artifact ${artifactId.slice(0, 80)} no longer matches its files; publish the document again and submit the new artifact`);
+      // A failure to read the files is answered plainly: the blob store's message can name its own paths, which are not the agent's to see.
+      let intact: boolean;
+      try { intact = await found.intact(); } catch { return refusal("unavailable", `the files of artifact ${artifactId.slice(0, 80)} could not be checked now; try again later`); }
+      if (!intact) return refusal("invalid_command", `artifact ${artifactId.slice(0, 80)} no longer matches its files; publish the document again and submit the new artifact`);
       body = { ...body, artifactDigest: `sha256:${found.manifestDigest}` };
     }
     const response = await this.#deps.state.handle(token, { v: 1, op: "submission.record", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: body });

@@ -1448,9 +1448,11 @@ for (const backend of backends) {
     const D = "f".repeat(64);
     // `read` records each artifact whose files were checked: only ones of the attempt's own task are.
     const read: string[] = [];
-    const art = (id: string, taskOf: string | undefined, digest: string, intact: boolean) => [id, { ...(taskOf === undefined ? {} : { taskId: taskOf }), manifestDigest: digest, intact: async () => { read.push(id); return intact; } }] as const;
+    const art = (id: string, taskOf: string | undefined, digest: string, intact: boolean | Error) => [id, { ...(taskOf === undefined ? {} : { taskId: taskOf }), manifestDigest: digest, intact: async () => { read.push(id); if (intact instanceof Error) throw intact; return intact; } }] as const;
     const artifacts = new Map<string, { taskId?: string; manifestDigest: string; intact: () => Promise<boolean> }>([
       art("art-mine", taskId, D, true), art("art-other", "task-aaaaaaaaaaaaaaaaaaaa", "0".repeat(64), true), art("art-loose", undefined, "1".repeat(64), true), art("art-damaged", taskId, "2".repeat(64), false),
+      // The store failing to read the files (its message names its own path) is a plain refusal.
+      art("art-unreadable", taskId, "3".repeat(64), new DomainError("unavailable", "the blob store could not complete the request (a.md): EACCES: permission denied, stat '/srv/store/blobs/ab/cd'")),
     ]);
     const asked: string[] = [];
     const deps = {
@@ -1485,6 +1487,7 @@ for (const backend of backends) {
       out["unknown-artifact"] = await send({ kind: "document", artifactId: "art-none" }, "x12");
       out["damaged-artifact"] = await send({ kind: "document", artifactId: "art-damaged" }, "x13");
       out["bad-artifact-id"] = await send({ kind: "document", artifactId: "bad id" }, "x14");
+      out["unreadable-artifact"] = await send({ kind: "document", artifactId: "art-unreadable" }, "x16");
       out["no-artifacts-kept"] = await send({ kind: "document", artifactId: "art-mine" }, "x15", bare);
       out["review-bare"] = await send({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, "s6", bare);
     });
@@ -1498,6 +1501,7 @@ for (const backend of backends) {
     assert.match(bad(out["damaged-artifact"]!).message, /no longer matches its files/);
     for (const k of ["other-task-artifact", "loose-artifact", "unknown-artifact"]) assert.equal(bad(out[k]!).code, "not_found", k);
     assert.equal(bad(out["no-artifacts-kept"]!).code, "unavailable");
+    assert.deepEqual(bad(out["unreadable-artifact"]!), { ok: false, code: "unavailable", message: "the files of artifact art-unreadable could not be checked now; try again later" }, "no store path or message reaches the agent");
     // Only the five accepted requests reached the API (the sixth is the refused review, which the API answered), each with the worker's credential, the attempt's task, the kind's role and a command ID from the call.
     assert.deepEqual(seen.map((x) => [x.raw.op, x.raw.args["kind"], x.raw.args["role"], x.raw.args["taskId"], x.token === token, /^bridge:/.test(String(x.raw.commandId))]), [
       ["submission.record", "review", "reviewer", taskId, true, true], ["submission.record", "qa", "qa", taskId, true, true], ["submission.record", "signoff", "director", taskId, true, true],
@@ -1506,8 +1510,8 @@ for (const backend of backends) {
     assert.deepEqual(seen[3]!.raw.args, { kind: "document", artifactId: "art-mine", report: "manual updated", taskId, role: "docs", artifactDigest: `sha256:${D}` }, "the digest the controller recorded");
     assert.deepEqual(seen[0]!.raw.args, { kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve", taskId, role: "reviewer" });
     assert.notEqual(seen[0]!.raw.commandId, seen[1]!.raw.commandId);
-    assert.deepEqual(asked, ["art-mine", "art-other", "art-loose", "art-none", "art-damaged", "bad id"], "the artifact is looked up only for a document change that names one and passes the field check");
-    assert.deepEqual(read, ["art-mine", "art-damaged"], "the files of an artifact of another task (or of none) are never read for the agent");
+    assert.deepEqual(asked, ["art-mine", "art-other", "art-loose", "art-none", "art-damaged", "bad id", "art-unreadable"], "the artifact is looked up only for a document change that names one and passes the field check");
+    assert.deepEqual(read, ["art-mine", "art-damaged", "art-unreadable"], "the files of an artifact of another task (or of none) are never read for the agent");
   });
 
   suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {
