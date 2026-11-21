@@ -19,7 +19,7 @@ import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../sto
  *
  * The service takes no caller: who may add, remove or read is decided by its door (`LandingQueueOps`).
  */
-export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200, landed: 200, reservations: 200, away: 200 } as const;
+export const LANDING_QUEUE_LIMITS = { entries: 200, reason: 300, branch: 200, landed: 200, reservations: 200, away: 200, returned: 200, returns: 200, paths: 20 } as const;
 const KIND = "landing-queue";
 /** How many pages of 200 queue records `queuesOf` reads at most: 10,000 queue records over all projects of the controller (every branch that ever held a queue, empty ones included). */
 const QUEUE_SCAN_PAGES = 50;
@@ -60,6 +60,11 @@ export interface LandingReservation {
 }
 /** The first task of the queue (an entry or a reserved place without one) and since when it has been first. `escalated`: the director was told it held the branch too long. */
 export interface LandingQueueFront { readonly taskId: string; readonly since: string; readonly escalated?: true }
+/**
+ * How often a task's queued work went back to its author because it overlapped files that landed since its base (card P10, "overlap returns the work to the author"): each return is one repair cycle of the task (card Q04),
+ * counted here and never reset until the task lands. `last` is the last return: when, which submission, and the overlapping paths (at most `LANDING_QUEUE_LIMITS.paths`).
+ */
+export interface LandingReturns { readonly taskId: string; readonly count: number; readonly last: { readonly at: string; readonly submissionId: string; readonly paths: readonly string[] } }
 export interface LandingQueueBody {
   readonly projectId: string;
   readonly branch: string;
@@ -73,6 +78,10 @@ export interface LandingQueueBody {
   /** The places of entries the controller withdrew because their approval was taken back (newest last, at most `LANDING_QUEUE_LIMITS.away`): a reservation made while the task is away gives it back that place. */
   readonly away?: readonly { readonly taskId: string; readonly seq: number }[];
   readonly front?: LandingQueueFront;
+  /** The submissions returned to their authors because they overlapped landed work (newest last, at most `LANDING_QUEUE_LIMITS.returned`): one of these is not queued again (it would overlap again); a refreshed submission is. */
+  readonly returned?: readonly string[];
+  /** Conflict returns per task (card P10 with Q04), at most `LANDING_QUEUE_LIMITS.returns` tasks (the oldest dropped first). */
+  readonly returns?: readonly LandingReturns[];
 }
 export interface LandingQueue extends LandingQueueBody { readonly queueId: string; readonly revision: number }
 
@@ -91,12 +100,12 @@ export function frontOf(q: Pick<LandingQueueBody, "entries" | "reservations">): 
 }
 /** The body with its `front` brought up to date: the same first task keeps its `since` (and its escalation mark); a new first task starts now; an empty queue has none. Optional fields left empty are dropped. */
 function settled(next: LandingQueueBody, now: string): LandingQueueBody {
-  const { front: before, reservations, landed, away: wasAway, ...rest } = next;
+  const { front: before, reservations, landed, away: wasAway, returned, returns, ...rest } = next;
   const away = (wasAway ?? []).filter((a) => !rest.entries.some((e) => e.taskId === a.taskId) && !(reservations ?? []).some((r) => r.taskId === a.taskId));
   const first = frontOf(next);
   const front = first === undefined ? undefined : before !== undefined && before.taskId === first.taskId ? before : { taskId: first.taskId, since: now };
   const sorted = [...rest.entries].sort((a, b) => a.seq - b.seq);
-  return { ...rest, entries: sorted, ...(landed === undefined || landed.length === 0 ? {} : { landed }), ...(reservations === undefined || reservations.length === 0 ? {} : { reservations }), ...(away.length === 0 ? {} : { away }), ...(front === undefined ? {} : { front }) };
+  return { ...rest, entries: sorted, ...(landed === undefined || landed.length === 0 ? {} : { landed }), ...(reservations === undefined || reservations.length === 0 ? {} : { reservations }), ...(away.length === 0 ? {} : { away }), ...(returned === undefined || returned.length === 0 ? {} : { returned }), ...(returns === undefined || returns.length === 0 ? {} : { returns }), ...(front === undefined ? {} : { front }) };
 }
 /** A lost race on the queue record, built again from what is stored now (never shown to a caller). */
 const RACE = "landing queue: lost a race, build again";
@@ -177,9 +186,11 @@ export class LandingQueueService {
         const ofTask = entries.findIndex((e) => e.taskId === taskId);
         const reservations = q?.reservations ?? [];
         const reserved = reservations.find((r) => r.taskId === taskId);
-        const kept = { projectId, branch, ...(landed.length === 0 ? {} : { landed }), ...(reservations.length === 0 ? {} : { reservations }), ...(q?.away === undefined ? {} : { away: q.away }), ...(q?.front === undefined ? {} : { front: q.front }) };
+        const kept = { projectId, branch, ...(landed.length === 0 ? {} : { landed }), ...(reservations.length === 0 ? {} : { reservations }), ...(q?.away === undefined ? {} : { away: q.away }), ...(q?.front === undefined ? {} : { front: q.front }), ...(q?.returned === undefined ? {} : { returned: q.returned }), ...(q?.returns === undefined ? {} : { returns: q.returns }) };
         let next: LandingQueueBody;
         if (landed.includes(command.submissionId)) throw new DomainError("invalid_transition", `submission ${command.submissionId} already landed from the landing queue of branch ${branch}; it is not queued again`);
+        // Work returned to its author because it overlapped landed files (card P10) would overlap again: only a refreshed, newly approved submission of the task is queued.
+        if ((q?.returned ?? []).includes(command.submissionId)) throw new DomainError("invalid_transition", `submission ${command.submissionId} was returned to its author because it changes files that landed on branch ${branch} after it was approved; it is not queued again (the author refreshes and submits again)`);
         if (same >= 0) {
           outcome = { already: true };
           next = { ...kept, nextSeq, entries };
@@ -287,7 +298,48 @@ export class LandingQueueService {
     // The task that landed no longer holds a reserved place (card P10).
     const task = q.entries.find((e) => e.submissionId === submissionId)?.taskId;
     const reservations = task === undefined ? q.reservations : (q.reservations ?? []).filter((r) => r.taskId !== task);
-    return [{ type: "update", ref: { kind: KIND, id: queueId }, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((e) => e.submissionId !== submissionId), landed, ...(reservations === undefined ? {} : { reservations }) }, this.#runner.now())) }];
+    // The task landed: its conflict returns are done with (card P10).
+    const returns = task === undefined ? q.returns : (q.returns ?? []).filter((r) => r.taskId !== task);
+    return [{ type: "update", ref: { kind: KIND, id: queueId }, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((e) => e.submissionId !== submissionId), landed, ...(reservations === undefined ? {} : { reservations }), ...(returns === undefined ? {} : { returns }) }, this.#runner.now())) }];
+  }
+
+  /**
+   * Returns a queued submission to its author (card P10: it changes files that landed on the branch after it was approved, so it cannot be re-applied mechanically). In one write: its entry leaves the queue (only that very
+   * submission: a newer one of the task that took its place stays), its place is remembered as the controller's withdrawals are (a reserved place is kept, so a re-approval takes it again), the submission is noted as
+   * returned (it is not queued again), and the task's conflict-return count grows by one. Answers the count; a repeat of the command answers the count as it stands, and `returned: false` when the submission was not
+   * the task's entry any more (it landed, was taken out or replaced: nothing to return, nothing counted).
+   */
+  async returnWork(command: { commandId: string; actor: string; projectId: string; branch: string; taskId: string; submissionId: string; paths: readonly string[] }): Promise<{ readonly returned: boolean; readonly count: number; readonly replayed: boolean }> {
+    const taskId = checkTaskId(command.taskId);
+    if (typeof command.submissionId !== "string" || !SUBMISSION.test(command.submissionId)) throw new DomainError("invalid_command", "submissionId: is not a submission ID", { field: "submissionId" });
+    const paths = (Array.isArray(command.paths) ? command.paths : []).filter((p): p is string => typeof p === "string").slice(0, LANDING_QUEUE_LIMITS.paths).map((p) => p.slice(0, 200));
+    const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
+    let returned = false;
+    let done: { replayed: boolean };
+    try {
+      done = await retried(() => this.#runner.command("landing.queue.return", { commandId: command.commandId, actor: command.actor }, async () => ({
+        payload: { projectId: command.projectId, branch: command.branch, taskId, submissionId: command.submissionId, paths },
+        build: async () => {
+          const current = await this.#runner.get(KIND, queueId);
+          const q = current?.body as unknown as LandingQueueBody | undefined;
+          const at = q?.entries.findIndex((e) => e.taskId === taskId && e.submissionId === command.submissionId) ?? -1;
+          if (current === undefined || q === undefined || at < 0) throw new DomainError("invalid_transition", NOTHING);
+          returned = true;
+          const now = this.#runner.now();
+          const away = [...(q.away ?? []).filter((a) => a.taskId !== taskId), { taskId, seq: q.entries[at]!.seq }].slice(-LANDING_QUEUE_LIMITS.away);
+          const before = (q.returns ?? []).find((r) => r.taskId === taskId);
+          const returns = [...(q.returns ?? []).filter((r) => r.taskId !== taskId), { taskId, count: (before?.count ?? 0) + 1, last: { at: now, submissionId: command.submissionId, paths } }].slice(-LANDING_QUEUE_LIMITS.returns);
+          const list = [...(q.returned ?? []).filter((x) => x !== command.submissionId), command.submissionId].slice(-LANDING_QUEUE_LIMITS.returned);
+          const ref: AggregateRef = { kind: KIND, id: queueId };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((_, i) => i !== at), away, returns, returned: list }, now)) }], detail: { branch: command.branch, taskId, submissionId: command.submissionId, count: (before?.count ?? 0) + 1 }, contention: async () => new DomainError("stale_revision", RACE) };
+        },
+      })));
+    } catch (error) {
+      if (!nothing(error)) throw error;
+      done = { replayed: false };
+    }
+    const count = (await this.get(command.projectId, command.branch)).returns?.find((r) => r.taskId === taskId)?.count ?? 0;
+    return { returned: returned || done.replayed, count, replayed: done.replayed };
   }
 
   /**

@@ -6,7 +6,7 @@ import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceError } from "./errors.js";
 import type { GitBridge } from "./git.js";
 import { WipBackupHost, type HostRestoreTarget } from "./wip-host.js";
-import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy } from "./host.js";
+import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type HostRestackCall, type HostRestackOutcome, type LandingPolicy } from "./host.js";
 import { landingChecks, type LandingCheckCall, type LandingCheckReport, type LandingChecksOptions } from "./landing-checks.js";
 import { fold, plainName } from "./names.js";
 import { NOFOLLOW } from "./paths.js";
@@ -57,7 +57,7 @@ export class LocalWorkspaces {
   readonly #options: LocalWorkspacesOptions;
   readonly host: WorkspaceHost;
   /** What a `LocalWorker` takes as its `workspace` option (and what a remote worker's responder runs). */
-  readonly port: { run(call: HostWorkspaceCall): Promise<HostWorkspaceOutcome>; /** Card P09: present when `checks` was given. */ landingChecks?(call: LandingCheckCall): Promise<LandingCheckReport> };
+  readonly port: { run(call: HostWorkspaceCall): Promise<HostWorkspaceOutcome>; /** Card P09: present when `checks` was given. */ landingChecks?(call: LandingCheckCall): Promise<LandingCheckReport>; /** Card P10: the integrator's mechanical re-apply of a queued submission onto the landing branch's head. */ restack(call: HostRestackCall): Promise<HostRestackOutcome> };
 
   constructor(options: LocalWorkspacesOptions) {
     if (typeof options.root !== "string" || !isAbsolute(options.root) || normalize(options.root) !== options.root) throw new WorkspaceError("invalid_path", "the workspace root must be an absolute, normalised path");
@@ -75,7 +75,7 @@ export class LocalWorkspaces {
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     });
     const checks = options.checks === undefined ? undefined : landingChecks({ ...options.checks, git: options.git, locate: (call) => this.locate(call) });
-    this.port = { run: (call) => this.host.run(call), ...(checks === undefined ? {} : { landingChecks: checks }) };
+    this.port = { run: (call) => this.host.run(call), restack: (call) => this.host.restack(call), ...(checks === undefined ? {} : { landingChecks: checks }) };
   }
 
   /** The folder of a task, when it exists exactly as named, is finished (its `complete` mark is there) and no other spelling of the name stands beside it. */

@@ -54,7 +54,25 @@ export interface HostWorkspaceCall {
    * checks would not be about what lands).
    */
   readonly checkedTree?: string;
+  /**
+   * A `landing` of a submission the integrator re-applied mechanically (card P10, `restack`): the base and tree that were approved. `submission` then names the re-applied base and tree, and the landing is made only when
+   * the checkout's committed change is proven here, again, to be exactly the approved change (`GitBridge.sameChange`) on a later commit of the approved base's history.
+   */
+  readonly reappliedFrom?: { readonly base: string; readonly tree: string };
 }
+/** A request to re-apply the oldest queued submission onto the landing branch's head (card P10), asked by the controller inside the quiesce before the landing's checks. */
+export interface HostRestackCall {
+  readonly requestId: string;
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly quietAttempts?: readonly string[];
+  readonly submission: ApprovedSubmission;
+}
+export type HostRestackOutcome =
+  | { readonly ok: true; readonly state: "current" }
+  | { readonly ok: true; readonly state: "reapplied"; readonly base: string; readonly tree: string; readonly previous: string; readonly recovered: boolean; readonly taken: number }
+  | { readonly ok: true; readonly state: "overlap"; readonly paths: readonly string[]; readonly head: string }
+  | { readonly ok: false; readonly reason: string };
 export interface HostSecurityEvent {
   readonly kind: "protected-path-touched" | "sandbox-escape-attempt";
   /** Up to 200 characters, the same for the same event. Built from the operation, the task and a digest of the refusal; no path text and no secret. */
@@ -150,6 +168,7 @@ export class WorkspaceHost {
     if (typeof operation !== "string" || !OPERATIONS.includes(operation)) return no(`the operation ${JSON.stringify(String(operation).slice(0, 30))} is not one this host knows`);
     if (!plainName(taskId) || !plainName(projectId)) return no("the task or project name is malformed");
     if (call.submission !== undefined && ((operation !== "release" && operation !== "landing") || !isApprovedSubmission(call.submission))) return no(operation !== "release" && operation !== "landing" ? "only a release commits a submission, and a landing lands one" : "the submission named is not of the controller's form (an ID, a full base commit and a tree)");
+    if (call.reappliedFrom !== undefined && (operation !== "landing" || call.submission === undefined || call.reappliedFrom === null || typeof call.reappliedFrom !== "object" || !isApprovedSubmission({ id: call.submission.id, base: (call.reappliedFrom as { base?: unknown }).base, tree: (call.reappliedFrom as { tree?: unknown }).tree }) || Object.keys(call.reappliedFrom).some((k) => k !== "base" && k !== "tree"))) return no("only a landing of a submission names the base and tree it was approved on, as full object IDs");
     if (call.checkedTree !== undefined && (operation !== "landing" || typeof call.checkedTree !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(call.checkedTree))) return no(operation !== "landing" ? "only a landing names the tree its checks ran on" : "the checked tree is not a full object ID");
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 500) return no("the reason is missing or too long");
     if (call.assignee !== undefined && (typeof call.assignee !== "string" || !IDENT.test(call.assignee))) return no("the assignee name is malformed");
@@ -167,6 +186,47 @@ export class WorkspaceHost {
     // The key is the shared tree itself, not one spelling of its path: a link, a different case or a trailing slash must not give a second lock.
     const sharedKey = await realpath(where.shared).catch(() => where.shared);
     return this.#serial(where.checkout, operation === "integration" || operation === "landing" ? () => this.#serial(`shared:${sharedKey}`, work) : work);
+  }
+
+  /**
+   * The integrator's mechanical re-apply of the landing queue's oldest submission onto the landing branch's head (card P10, `GitBridge.restack`). Asked by the controller inside the quiesce, before the landing's checks, so
+   * the checks run on the tree that would land. The landing policy must name the branch and the shared tree must be on it and clean (as for a landing). Runs in the same order as a landing (the checkout, then the shared
+   * tree). Answers `current` (already on the head), `reapplied` (the checkout now holds exactly the approved change on the head), or `overlap` (files the landing branch changed since the base are among the submission's:
+   * nothing was written, the work goes back to its author). Repeatable: a re-apply already made onto the same head is answered again. No journal: what it does is decided by the checkout's own state each time.
+   */
+  async restack(call: HostRestackCall): Promise<HostRestackOutcome> {
+    if (call === null || typeof call !== "object") return no("the request is not an object") as HostRestackOutcome;
+    if (typeof call.requestId !== "string" || !REQUEST.test(call.requestId)) return no("the request ID is not one this host accepts") as HostRestackOutcome;
+    if (!plainName(call.taskId) || !plainName(call.projectId)) return no("the task or project name is malformed") as HostRestackOutcome;
+    if (!isApprovedSubmission(call.submission)) return no("the submission named is not of the controller's form (an ID, a full base commit and a tree)") as HostRestackOutcome;
+    const where = await this.#options.locate({ taskId: call.taskId, projectId: call.projectId });
+    if (where === undefined) return no("the checkout of that task is not on this host") as HostRestackOutcome;
+    for (const p of [where.shared, where.checkout, where.gitDir]) if (typeof p !== "string" || !isAbsolute(p)) return no("this host's location for the checkout is not an absolute path (a host fault)") as HostRestackOutcome;
+    const work = async (): Promise<HostRestackOutcome> => {
+      const asLanding: HostWorkspaceCall = { requestId: call.requestId, operation: "landing", taskId: call.taskId, projectId: call.projectId, reason: "re-apply", ...(call.quietAttempts === undefined ? {} : { quietAttempts: call.quietAttempts }) };
+      const stale = await this.#notNow(asLanding);
+      if (stale !== undefined) return no(stale) as HostRestackOutcome;
+      let policy: LandingPolicy | undefined;
+      try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId }); } catch { return no("this host could not read the landing settings (workspace.landing.*), so nothing was re-applied") as HostRestackOutcome; }
+      if (policy !== undefined && typeof policy.refuse === "string") return no(cut(policy.refuse)) as HostRestackOutcome;
+      if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return no("this host has no landing branch set for the project (workspace.landing.branch), so nothing was re-applied") as HostRestackOutcome;
+      let tree;
+      try { tree = await this.#options.git.sharedTree(where.shared); } catch (error) { return no(cut(`the shared workspace could not be read: ${(error as Error).message}`)) as HostRestackOutcome; }
+      if (tree.branch !== policy.branch) return no(`the shared workspace is not on the landing branch ${JSON.stringify(policy.branch)}; nothing was re-applied`) as HostRestackOutcome;
+      if (tree.entries.length > 0) return no(`the shared workspace holds ${tree.entries.length} uncommitted file(s) (landed changes waiting to be committed, or other work); nothing was re-applied`) as HostRestackOutcome;
+      try {
+        const r = await this.#options.git.restack({ shared: where.shared, onto: tree.head, gitDir: where.gitDir, checkout: where.checkout, submission: call.submission });
+        if (r.state === "current") return { ok: true, state: "current" };
+        if (r.state === "overlap") return { ok: true, state: "overlap", paths: r.paths.slice(0, HOST_LIMITS.conflictsListed).map((p) => p.slice(0, HOST_LIMITS.conflictPath)), head: r.head };
+        return { ok: true, state: "reapplied", base: r.base, tree: r.tree, previous: r.previous, recovered: r.recovered, taken: r.taken };
+      } catch (error) {
+        this.#flag(asLanding, error);
+        if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message)) as HostRestackOutcome;
+        throw error;
+      }
+    };
+    const sharedKey = await realpath(where.shared).catch(() => where.shared);
+    return this.#serial(where.checkout, () => this.#serial(`shared:${sharedKey}`, work));
   }
 
   /** Tells the hook of a refusal that is a security sign (see `security`). Everything else is an ordinary refusal and is not reported. */
@@ -262,6 +322,12 @@ export class WorkspaceHost {
     if (base !== first.head) return no(`the checkout is based on ${base.slice(0, 12)} but the landing branch is at ${first.head.slice(0, 12)}; nothing was landed (the author refreshes onto the head first)`);
     // A queued submission (card P10): it was approved on a base, and it lands only on that base (base == head), so the landing branch has not moved since the review.
     const sub = call.operation === "landing" ? call.submission : undefined;
+    // A re-applied submission (card P10): the change the checkout now carries on the head is proven again here to be exactly the approved one, on a later commit of the approved base's history; otherwise nothing lands.
+    if (sub !== undefined && call.reappliedFrom !== undefined) {
+      let proven = false;
+      try { proven = (await git.isAncestor({ gitDir: where.gitDir, older: call.reappliedFrom.base, newer: sub.base })) && (await git.sameChange({ gitDir: where.gitDir, a: call.reappliedFrom, b: { base: sub.base, tree: sub.tree } })); } catch { proven = false; }
+      if (!proven) return no(`submission ${sub.id} as re-applied (tree ${sub.tree.slice(0, 12)} on ${sub.base.slice(0, 12)}) is not exactly the change approved on ${call.reappliedFrom.base.slice(0, 12)}; nothing was landed`);
+    }
     if (sub !== undefined && sub.base !== first.head) return no(`submission ${sub.id} was approved on ${sub.base.slice(0, 12)} but the landing branch is at ${first.head.slice(0, 12)}; nothing was landed (the author refreshes and the work is approved again)`);
     // The checkout must be at rest: only committed work lands (a file written after the review is not part of what was reviewed).
     const state = await git.status({ gitDir: where.gitDir, checkout: where.checkout });
@@ -331,7 +397,7 @@ export class WorkspaceHost {
     }
     let marked = false;
     try { marked = await git.markLanded({ gitDir: where.gitDir, commit: plan.head }); } catch { marked = false; }
-    return { ok: true, summary: `${result.count} file(s) landed in the shared workspace, uncommitted: landed changes are waiting to be committed by the integrator or owner${marked ? "" : "; the checkout could not be marked as landed"}`, detail: { written: result.count, kept: 0, skipped: plan.files.length - files.length, markedIntegrated: marked, changed: true, landed: marked, waitingToCommit: true, ...(sub === undefined ? {} : { submission: sub.id, base: sub.base, tree: sub.tree }) } };
+    return { ok: true, summary: `${result.count} file(s) landed in the shared workspace, uncommitted: landed changes are waiting to be committed by the integrator or owner${marked ? "" : "; the checkout could not be marked as landed"}`, detail: { written: result.count, kept: 0, skipped: plan.files.length - files.length, markedIntegrated: marked, changed: true, landed: marked, waitingToCommit: true, ...(sub === undefined ? {} : { submission: sub.id, base: sub.base, tree: sub.tree }), ...(call.reappliedFrom === undefined ? {} : { reappliedFrom: { base: call.reappliedFrom.base, tree: call.reappliedFrom.tree } }) } };
   }
 
   /**

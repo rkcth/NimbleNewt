@@ -4,7 +4,7 @@ import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
-import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEntry, type LandingQueueFront, type LandingReservation } from "./landing-queue.js";
+import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEntry, type LandingQueueFront, type LandingReservation, type LandingReturns } from "./landing-queue.js";
 
 /**
  * Who may put a submission in a branch's landing queue, take one out and read it, and what a landing must show about the queue before it writes (card P10). The queue service itself takes no caller; this is its door.
@@ -21,6 +21,8 @@ import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEn
 export const LANDING_HOLD_MS = 4 * 60 * 60 * 1000;
 /** The refresh-round cap when the project's settings cannot be read (the profiles' default). */
 export const REFRESH_CAP_DEFAULT = 3;
+/** The repair-cycle limit (card Q04, `review.repairCycles`) when the project's settings cannot be read (the setting's default). */
+export const REPAIR_CYCLES_DEFAULT = 3;
 const SUBMISSION = /^sbm-[a-z2-7]{20}$/;
 const refused = (what: string): DomainError => new DomainError("not_found", `${what} does not exist or is not yours to manage`);
 /** A branch named by a caller: one line of at most 200 characters (the queue's own bound). */
@@ -50,7 +52,13 @@ export interface LandingQueueOpsOptions {
    * Tells the project's director (and the owner) about a landing queue that needs a decision. It is asked before the queue marks the escalation, so a throw (the owner could not be told) leaves it unmarked and it is
    * asked again at the next refused landing or round; a repeat of the same `commandId` must tell nobody twice.
    */
-  readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round"; readonly text: string }) => Promise<void>;
+  readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round" | "returns" | "unassigned"; readonly text: string }) => Promise<void>;
+  /** The repair-cycle limit of the project (card Q04, `review.repairCycles`): conflict returns count against it. Absent or throwing: `REPAIR_CYCLES_DEFAULT`. */
+  readonly repairCycles?: (projectId: string) => Promise<number>;
+  /** Tells an agent (a notice in its inbox) that its task's work came back to it. A repeat of the same `commandId` must tell nobody twice. */
+  readonly tell?: (notice: { readonly commandId: string; readonly taskId: string; readonly to: string; readonly text: string }) => Promise<void>;
+  /** Whether an agent is active (not retired): work returned to a task is told to its holder only while that agent is active. Absent: every holder counts as active. */
+  readonly activeAgent?: (agentId: string) => Promise<boolean>;
   /** Whether the caller is a director of the project (it may take entries out and end reservations). Absent: nobody is. */
   readonly isDirector?: (by: Principal, projectId: string) => Promise<boolean>;
   /** See `LANDING_HOLD_MS`. */
@@ -162,7 +170,7 @@ export class LandingQueueOps {
    * `others` lists the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another, or a task's own landing branch): nothing there lands
    * on the landing branch, and `branch` reads one of them in full. `partial` says the walk over the queues stopped before the end.
    */
-  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean }; others: { branch: string; entries: number }[]; partial?: true }> {
+  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
     onlyKnown(query, ["projectId", "branch"]);
     if (typeof query.projectId !== "string" || !this.#integrator(by, query.projectId)) throw refused("that project");
     const named = query.branch === undefined ? undefined : branchName(query.branch);
@@ -175,7 +183,7 @@ export class LandingQueueOps {
     const first = q === undefined ? undefined : frontOf(q);
     const front = q?.front !== undefined && first !== undefined && q.front.taskId === first.taskId ? { ...q.front, waitingForApproval: first.entry === undefined } : undefined;
     const all = await this.#queue.queuesOf(query.projectId);
-    return { branch: branch ?? "", landingBranch: landing ?? "", items, reservations, ...(front === undefined ? {} : { front }), others: all.queues.filter((x) => x.branch !== branch), ...(all.partial ? { partial: true as const } : {}) };
+    return { branch: branch ?? "", landingBranch: landing ?? "", items, reservations, ...(front === undefined ? {} : { front }), returns: [...(q?.returns ?? [])], others: all.queues.filter((x) => x.branch !== branch), ...(all.partial ? { partial: true as const } : {}) };
   }
 
   /**
@@ -255,6 +263,43 @@ export class LandingQueueOps {
       if (!(await this.#queue.markEscalated({ kind: "round", projectId: call.projectId, branch, taskId: call.taskId, round: call.round, since: held.since }))) return undefined;
       return "escalated";
     } catch { return undefined; }
+  }
+
+  /**
+   * Overlapping work goes back to its author (card P10; the workspace service calls this when the host found that a queued submission changes files that landed on the branch after it was approved). The submission
+   * leaves the queue (its place remembered, a reserved place kept) and is not queued again; the return is one repair cycle of the task (card Q04: "a conflict returned to its author counts as a repair cycle"), counted
+   * against the project's `review.repairCycles`. Who is told: the agent that holds the task now (`assignee`: after a hand-off, or when the author retired, the task's new holder refreshes, not the submitter), while it is
+   * active. When nobody active holds the task, or when the count reaches the limit, the director and the owner are told (they decide: assign the task, let it go on, or take it out). Best effort: answers what it did.
+   */
+  async returned(call: { readonly requestId: string; readonly taskId: string; readonly projectId: string; readonly branch: string; readonly submissionId: string; readonly paths: readonly string[]; readonly assignee?: string }): Promise<{ readonly to?: string; readonly cycles: number; readonly limit: number; readonly escalated: boolean } | undefined> {
+    let r: Awaited<ReturnType<LandingQueueService["returnWork"]>>;
+    try { r = await this.#queue.returnWork({ commandId: `lq-return:${call.requestId}`, actor: "service:landing-queue", projectId: call.projectId, branch: call.branch, taskId: call.taskId, submissionId: call.submissionId, paths: call.paths }); } catch { return undefined; }
+    if (!r.returned) return undefined;
+    let limit = REPAIR_CYCLES_DEFAULT;
+    try { if (this.#options.repairCycles !== undefined) limit = await this.#options.repairCycles(call.projectId); } catch { limit = REPAIR_CYCLES_DEFAULT; }
+    if (!Number.isSafeInteger(limit) || limit < 1) limit = REPAIR_CYCLES_DEFAULT;
+    const files = call.paths.slice(0, 10).map((p) => JSON.stringify(p.slice(0, 100))).join(", ");
+    // The holder told: the task's current assignee, while it is an active agent (a retired author's task goes to whoever holds it now; a task nobody holds goes to the director and the owner).
+    let to: string | undefined;
+    if (call.assignee !== undefined && call.assignee !== "") {
+      let active = true;
+      try { if (this.#options.activeAgent !== undefined) active = await this.#options.activeAgent(call.assignee.replace(/^agent:/, "")); } catch { active = false; }
+      if (active) to = call.assignee;
+    }
+    if (to !== undefined && this.#options.tell !== undefined) {
+      const text = `Task ${call.taskId}: your approved submission ${call.submissionId} could not be landed on branch ${call.branch}: it changes file(s) that also changed there after it was approved (${files}). Nothing was landed, and it was taken out of the landing queue and returned to you. Refresh your checkout onto the landing branch (work.refresh), settle those files, and submit again for review; the new approval is queued by itself. This is conflict return ${r.count} of ${limit} before the director and the owner are asked to decide.`;
+      try { await this.#options.tell({ commandId: `lq-told:${call.requestId}`, taskId: call.taskId, to, text }); } catch { to = undefined; }
+    } else to = undefined;
+    // The director and the owner are told when the cycles reach the limit (each return from then on, named by its count), or when nobody could be told.
+    let escalated = false;
+    if (this.#options.escalate !== undefined && (r.count >= limit || to === undefined)) {
+      const why = r.count >= limit ? ("returns" as const) : ("unassigned" as const);
+      const text = why === "returns"
+        ? `Task ${call.taskId}'s work was returned to its author ${r.count} time(s) (the limit is ${limit}, review.repairCycles) because it changes files that landed on branch ${call.branch} after it was approved (last: ${files}). Decide whether it goes on, or take it out with landing.queue.remove.`
+        : `Task ${call.taskId}'s approved submission ${call.submissionId} changes files that landed on branch ${call.branch} after it was approved (${files}), so it was returned, but no active agent holds the task to refresh it. Assign the task, or take it out with landing.queue.remove.`;
+      try { await this.#options.escalate({ commandId: `lq-${why}:${call.taskId}:${r.count}`.slice(0, 120), projectId: call.projectId, taskId: call.taskId, branch: call.branch, why, text }); escalated = true; } catch { escalated = false; }
+    }
+    return { ...(to === undefined ? {} : { to }), cycles: r.count, limit, escalated };
   }
 
   /** The changes that take a landed submission out of the queue, for the landing's own write. */

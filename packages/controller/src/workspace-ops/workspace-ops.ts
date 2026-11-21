@@ -61,7 +61,21 @@ export interface WorkspaceCall {
   readonly submission?: { readonly id: string; readonly base: string; readonly tree: string };
   /** A `landing` only (card P09): the integrated tree the landing's required checks ran on. The host lands only when the checkout's head still has exactly this tree. Absent when the project requires no check. */
   readonly checkedTree?: string;
+  /**
+   * A `landing` of a submission the integrator re-applied mechanically (card P10, `WorkspacePort.restack`): the base and tree that were approved. `submission` then names the re-applied base and tree; the host proves again
+   * that the checkout's committed change is exactly the approved change before it lands anything.
+   */
+  readonly reappliedFrom?: { readonly base: string; readonly tree: string };
 }
+/**
+ * What a host answers to the integrator's mechanical re-apply of a queued submission (card P10): `current` (the checkout is on the landing branch's head already), `reapplied` (the checkout now holds exactly the approved
+ * change on the head: its new base and tree), `overlap` (files the landing branch changed since the base are among the submission's: nothing was written), or a refusal.
+ */
+export type RestackOutcome =
+  | { readonly ok: true; readonly state: "current" }
+  | { readonly ok: true; readonly state: "reapplied"; readonly base: string; readonly tree: string; readonly previous?: string; readonly recovered?: boolean; readonly taken?: number }
+  | { readonly ok: true; readonly state: "overlap"; readonly paths: readonly string[]; readonly head?: string }
+  | { readonly ok: false; readonly reason: string };
 /** The owner's landing figures that travel to a remote host: the owner-set values only (branch, whether the commit permit is required, extra protected paths, whether the built-in protected list applies). */
 export interface CarriedLanding {
   readonly branch?: string;
@@ -74,7 +88,11 @@ export type WorkspaceOutcome = { readonly ok: true; readonly summary: string; re
  * The host side of the operations. A host that cannot do one answers `ok: false` with why (a typed refusal, not a fault). `landingChecks` (card P09, optional): the change a landing would carry and the project's test commands run
  * on exactly its tree in the sandbox; a host without it cannot make a landing that requires checks pass.
  */
-export interface WorkspacePort extends LandingCheckHost { run(call: WorkspaceCall): Promise<WorkspaceOutcome> }
+export interface WorkspacePort extends LandingCheckHost {
+  run(call: WorkspaceCall): Promise<WorkspaceOutcome>;
+  /** Card P10 (optional): re-applies the queue's oldest submission onto the landing branch's head when its files are disjoint from what landed since its base. A host without it lands only on the approved base. */
+  restack?(call: { readonly requestId: string; readonly taskId: string; readonly projectId: string; readonly quietAttempts: readonly string[]; readonly submission: { readonly id: string; readonly base: string; readonly tree: string } }): Promise<RestackOutcome>;
+}
 
 export interface WorkspaceRecordBody {
   readonly operation: WorkspaceOperation;
@@ -114,6 +132,10 @@ export interface WorkspaceRecordBody {
   readonly toldAuthor?: string;
   /** Card P09 follow-up: the owner was sent a needs-you notice because the required tests had no test commands a landing can use (`checks.testsNeedOwner`), which the author cannot fix itself. */
   readonly toldOwner?: boolean;
+  /** Card P10: the queued submission was re-applied mechanically onto the landing branch's head (its files are disjoint from what landed since its base): the base and tree the landing carried instead of the approved ones. */
+  readonly reapplied?: { readonly base: string; readonly tree: string };
+  /** Card P10: the queued submission overlapped files that landed since its base, so it was returned to its author (taken out of the queue): the overlapping paths, and what the queue answered. */
+  readonly returned?: { readonly paths: readonly string[]; readonly to?: string; readonly cycles?: number; readonly limit?: number; readonly escalated?: boolean };
 }
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
 export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean }
@@ -154,6 +176,11 @@ export interface WorkspaceDeps {
   readonly landingQueue?: {
     check(by: Principal, call: { taskId: string; projectId: string; submissionId: unknown }): Promise<{ readonly submissionId: string; readonly base: string; readonly tree: string; readonly branch: string } | undefined>;
     landedChanges(projectId: string, branch: string, submissionId: string): Promise<Change[]>;
+    /**
+     * Card P10 (optional): the queued submission overlaps files that landed since its base, so it goes back to its author: out of the queue (its place remembered), counted as a repair cycle of the task under the Q04
+     * cycle limit, the task's current assignee told, and the director and owner told at the limit or when nobody holds the task. Best effort; answers what it did.
+     */
+    returned?(call: { readonly requestId: string; readonly taskId: string; readonly projectId: string; readonly branch: string; readonly submissionId: string; readonly paths: readonly string[]; readonly assignee?: string }): Promise<{ readonly to?: string; readonly cycles: number; readonly limit: number; readonly escalated: boolean } | undefined>;
   };
   /**
    * The landing gate (card P09, `LandingGate.evaluate`): asked for every `landing`, inside the quiesce after the lease and the queue were shown again and right before the host is asked to land. A landing is made only when it
@@ -528,12 +555,29 @@ export class WorkspaceOpService {
     // The landing gate's answer (card P09), kept on the record whatever the outcome.
     let gated: LandingChecksRecord | undefined;
     let gateRefused = false;
+    // Card P10: what the mechanical re-apply came to (the base and tree the landing carries instead of the approved ones), or the paths that overlapped.
+    let reapplied: { base: string; tree: string } | undefined;
+    let overlap: string[] | undefined;
     try {
       const outcome = await this.#deps.quiesce.around({ taskId: body.taskId }, body.operation, async (quiet) => {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
         // The quiesce may have taken a while: the lease is shown once more right before the host writes anything, and a lease that is no longer the caller's live hold means nothing is asked of the host.
         if (stillLeased !== undefined) {
           try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : error instanceof QueueMoved ? `the submission is no longer the oldest approved one in the landing queue, so nothing was landed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
+        }
+        // The integrator's mechanical re-apply (card P10): a queued submission approved on an older commit of the landing branch is moved onto its head when none of its files changed there since (exactly the approved
+        // change, proven by the host), so the checks below run on the tree that would land. Overlapping files: nothing is written, nothing lands, and the work goes back to its author (below, after the quiesce).
+        if (body.operation === "landing" && body.queued !== undefined && port!.restack !== undefined) {
+          const r = await port!.restack({ requestId: id, taskId: body.taskId, projectId: body.projectId, quietAttempts, submission: { id: body.queued.submissionId, base: body.queued.base, tree: body.queued.tree } });
+          if (r === null || typeof r !== "object" || r.ok !== true) return { ok: false as const, reason: `the submission could not be re-applied onto the landing branch's head, so nothing was landed: ${safe((r as { reason?: unknown } | undefined)?.reason ?? "no reason given", 300)}` };
+          if (r.state === "overlap") {
+            overlap = (Array.isArray(r.paths) ? r.paths : []).filter((p): p is string => typeof p === "string").slice(0, 20).map((p) => p.slice(0, 200));
+            return { ok: false as const, reason: `submission ${body.queued.submissionId} changes file(s) that also changed on the landing branch since it was approved (${overlap.slice(0, 5).map((p) => JSON.stringify(p.slice(0, 80))).join(", ")}${overlap.length > 5 ? ", ..." : ""}), so nothing was landed and the work goes back to its author to refresh and submit again` };
+          }
+          if (r.state === "reapplied") {
+            if (!OID.test(String(r.base)) || !OID.test(String(r.tree))) return { ok: false as const, reason: "the host's answer to the re-apply is not of the controller's form, so nothing was landed" };
+            reapplied = { base: r.base, tree: r.tree };
+          }
         }
         // The required checks (card P09), judged on the exact tree the landing would make, after the lease and the queue were shown again and before anything is written. Not all passed (not run counts as failed): nothing is
         // landed, and a queued submission stays in the queue. The submission judged is the queue's head when there is a queue (the same one the host is told), else the one the landing named.
@@ -551,7 +595,7 @@ export class WorkspaceOpService {
           }
         }
         // The host is told both what the queue says lands (card P10: base == head, exactly that tree) and the tree the checks ran on (card P09); it lands only when both hold.
-        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }), ...(body.queued === undefined ? {} : { submission: { id: body.queued.submissionId, base: body.queued.base, tree: body.queued.tree } }), ...(gated?.tree === undefined || gated.required.length === 0 ? {} : { checkedTree: gated.tree }) });
+        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }), ...(body.queued === undefined ? {} : reapplied === undefined ? { submission: { id: body.queued.submissionId, base: body.queued.base, tree: body.queued.tree } } : { submission: { id: body.queued.submissionId, base: reapplied.base, tree: reapplied.tree }, reappliedFrom: { base: body.queued.base, tree: body.queued.tree } }), ...(gated?.tree === undefined || gated.required.length === 0 ? {} : { checkedTree: gated.tree }) });
         if (answer !== null && typeof answer === "object" && answer.ok === true) {
           const found = (answer.detail ?? {}) as { changed?: unknown; landed?: unknown; written?: unknown; kept?: unknown; keptFiles?: unknown; partial?: unknown };
           changed = found.changed !== false;
@@ -603,17 +647,24 @@ export class WorkspaceOpService {
         const text = gated.testsNeedOwner === "authors-only" ? `Task ${body.taskId} cannot land: its test commands were set only by its own agents, which a landing does not run. Set or accept them (contract.set checks).` : `Task ${body.taskId} cannot land: its project requires tests but the task has no test commands. Set them (contract.set checks) or change the required checks.`;
         try { await this.#deps.notify({ commandId: `lgo-${body.taskId}-v${gated.contractVersion ?? 0}-${gated.testsNeedOwner}`, taskId: body.taskId, text: text.slice(0, 200) }); toldOwner = true; } catch { /* recorded as not told */ }
       }
-      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}) };
+      // Overlapping work goes back to its author (card P10): out of the queue, counted as a repair cycle, the task's holder told (best effort; the record says what was done).
+      let returned: WorkspaceRecordBody["returned"];
+      if (overlap !== undefined && body.queued !== undefined) {
+        let r: Awaited<ReturnType<NonNullable<NonNullable<WorkspaceDeps["landingQueue"]>["returned"]>>>;
+        try { r = await this.#deps.landingQueue?.returned?.({ requestId: id, taskId: body.taskId, projectId: body.projectId, branch: body.queued.branch, submissionId: body.queued.submissionId, paths: overlap, ...(body.assignee === undefined ? {} : { assignee: body.assignee }) }); } catch { r = undefined; }
+        returned = { paths: overlap, ...(r === undefined ? {} : { ...(r.to === undefined ? {} : { to: r.to }), cycles: r.cycles, limit: r.limit, escalated: r.escalated }) };
+      }
+      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(reapplied === undefined ? {} : { reapplied }), ...(returned === undefined ? {} : { returned }), ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
         // A queued submission leaves the queue only when the host confirms it landed exactly that submission (card P10); a landing it does not confirm is said so, and the entry stays.
         // Also a landing that wrote files but could not mark the checkout, or found nothing to land: the entry stays at the head until it is taken out (a repeat is refused by the host while the landed files wait uncommitted,
         // and after they are committed the branch is no longer at the submission's base).
-        const unconfirmed = body.operation === "landing" && body.queued !== undefined && !this.#landedExactly(body.queued, detail);
+        const unconfirmed = body.operation === "landing" && body.queued !== undefined && !this.#landedExactly(body.queued, detail, reapplied);
         const summary = `${safe(outcome.summary, unconfirmed ? WORKSPACE_LIMITS.summary - 220 : WORKSPACE_LIMITS.summary)}${unconfirmed ? `; the host did not confirm that exactly submission ${body.queued!.submissionId} landed, so it stays in the landing queue (landing.queue.remove takes it out)` : ""}`;
         return done("done", { summary, ...(detail === undefined ? {} : { detail }), ...more });
       }
-      return done("refused", { summary: `${gateRefused ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}), ...(told.length === 0 ? {} : { told }) });
+      return done("refused", { summary: `${gateRefused || returned !== undefined ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(reapplied === undefined ? {} : { reapplied }), ...(returned === undefined ? {} : { returned }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}), ...(told.length === 0 ? {} : { told }) });
     } catch (error) {
       if (error instanceof QuiesceRefused) return done("refused", { summary: safe(error.message, WORKSPACE_LIMITS.summary), ...(error.blockerId === undefined ? {} : { blocker: error.blockerId }) });
       // The host was asked and failed, or the answer was lost: it may have changed the checkout, so this is not a clean failure.
@@ -658,14 +709,20 @@ export class WorkspaceOpService {
   }
 
   /** Whether the host's detail confirms that exactly the queued submission landed: the same submission, base and tree. */
-  #landedExactly(q: NonNullable<WorkspaceRecordBody["queued"]>, detail: JsonObject | undefined): boolean {
-    return detail !== undefined && detail["landed"] === true && detail["submission"] === q.submissionId && detail["base"] === q.base && detail["tree"] === q.tree;
+  #landedExactly(q: NonNullable<WorkspaceRecordBody["queued"]>, detail: JsonObject | undefined, reapplied?: { readonly base: string; readonly tree: string }): boolean {
+    if (detail === undefined || detail["landed"] !== true || detail["submission"] !== q.submissionId) return false;
+    // A re-applied submission (card P10): the host landed the re-applied base and tree, and says it held them against the approved ones.
+    if (reapplied !== undefined) {
+      const from = detail["reappliedFrom"] as { base?: unknown; tree?: unknown } | undefined;
+      return detail["base"] === reapplied.base && detail["tree"] === reapplied.tree && from !== null && typeof from === "object" && from.base === q.base && from.tree === q.tree;
+    }
+    return detail["base"] === q.base && detail["tree"] === q.tree;
   }
 
   /** The change that takes a landed submission out of the landing queue (card P10), in the same write as the landing's outcome; only when the host confirmed exactly that submission landed. */
   async #dequeueChange(final: WorkspaceRecordBody): Promise<Change[]> {
     const q = final.queued;
-    if (final.operation !== "landing" || q === undefined || final.state !== "done" || this.#deps.landingQueue === undefined || !this.#landedExactly(q, final.detail)) return [];
+    if (final.operation !== "landing" || q === undefined || final.state !== "done" || this.#deps.landingQueue === undefined || !this.#landedExactly(q, final.detail, final.reapplied)) return [];
     return this.#deps.landingQueue.landedChanges(final.projectId, q.branch, q.submissionId);
   }
 

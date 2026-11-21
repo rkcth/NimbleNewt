@@ -901,17 +901,21 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       projectOfTask: (taskId) => integratorLeases.projectOfTask(taskId),
       // Reservations and escalation (card P10): the project's refresh-round cap; the director (each director of the project, in its inbox) and the owner are told, the owner as needs-you when the project has no director.
       refreshCap: async (projectId) => (await integration.effective(projectId)).refreshRounds,
+      // Card P10 with Q04: work returned to its author because it overlapped landed files counts as a repair cycle, against the project's `review.repairCycles`; the task's holder is told in its inbox while it is active.
+      repairCycles: async (projectId) => { const v = (await configuration.projectValues([DEFECT_CYCLE_SETTING], projectId))[DEFECT_CYCLE_SETTING]; return typeof v === "number" ? v : DEFECT_CYCLE_DEFAULT; },
+      tell: async (n) => { await messages.noticeFromController({ commandId: n.commandId, taskId: n.taskId, to: n.to.startsWith("agent:") ? n.to : `agent:${n.to}`, purpose: "your approved work was returned: it overlaps work that landed", text: n.text }); },
+      activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; },
       isDirector: async (by, projectId) => { const now = new Date().toISOString(); return by.kind === "agent" && (await agents.directorsOf(projectId, now)).includes(by.id); },
       escalate: async (n) => {
         const directors = await agents.directorsOf(n.projectId, new Date().toISOString());
         // Only a director that was actually told counts: when none could be (none in the project, or none can receive notices about this task), the owner is asked to decide.
         let toldDirectors = 0;
         for (const d of directors) { try { await messages.noticeFromController({ commandId: `${n.commandId}:${d}`.slice(0, 120), taskId: n.taskId, to: d, purpose: "the landing queue needs the director's decision", text: n.text }); toldDirectors++; } catch { /* the owner is still told */ } }
-        await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: toldDirectors === 0 ? "needs-you" : "notice", ref: { kind: "task", id: n.taskId }, projectId: n.projectId, detail: `Landing queue of ${n.branch.slice(0, 40)} waits on task ${n.taskId} (${n.why === "front" ? "first for too long" : "stale again after its reserved place"}). ${toldDirectors === 0 ? "No director could be told: you decide, or take it out." : "The director was told."}`.slice(0, 200) });
+        await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: toldDirectors === 0 ? "needs-you" : "notice", ref: { kind: "task", id: n.taskId }, projectId: n.projectId, detail: `Landing queue of ${n.branch.slice(0, 40)} waits on task ${n.taskId} (${n.why === "front" ? "first for too long" : n.why === "round" ? "stale again after its reserved place" : n.why === "returns" ? "its work overlapped landed files again, at the repair-cycle limit" : "returned work, nobody holds the task"}). ${toldDirectors === 0 ? "No director could be told: you decide, or take it out." : "The director was told."}`.slice(0, 200) });
       },
     });
     const workspaceOps = WorkspaceOpService.withEpoch(storage, epoch, {
-      landingQueue: { check: (by, call) => landingQueueOps.checkLanding(by, call), landedChanges: (projectId, branch, submissionId) => landingQueueOps.landedChanges(projectId, branch, submissionId) },
+      landingQueue: { check: (by, call) => landingQueueOps.checkLanding(by, call), landedChanges: (projectId, branch, submissionId) => landingQueueOps.landedChanges(projectId, branch, submissionId), returned: (call) => landingQueueOps.returned(call) },
       onRound: async (r) => { await landingQueueOps.afterRound(r); },
       landingLease: async (by, call) => {
         let branch: string | undefined;

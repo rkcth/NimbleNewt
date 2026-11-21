@@ -863,6 +863,109 @@ export class GitBridge {
   }
 
   /**
+   * The change between two commits or trees of the checkout's own repository, entry by entry (card P10): each changed path with its old and new mode and its old and new object ID, sorted by path (`diff --raw --no-abbrev
+   * --no-renames`, no rename or copy pairing). Two changes with the same entries carry exactly the same bytes onto the same old bytes.
+   */
+  async #rawChange(gitDir: string, from: string, to: string): Promise<{ path: string; line: string }[]> {
+    const listing = (await this.#run(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", from, to], { gitDir })).stdout.split("\0").filter(Boolean);
+    if (listing.length / 2 > GIT_LIMITS.files) throw new WorkspaceError("invalid_path", `more than ${GIT_LIMITS.files} files changed`);
+    const out: { path: string; line: string }[] = [];
+    for (let i = 0; i + 1 < listing.length; i += 2) out.push({ path: listing[i + 1]!, line: listing[i]! });
+    return out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  }
+
+  /**
+   * Whether two changes of the checkout's repository are the same change (card P10, a mechanically re-applied submission): the same paths, each with the same old and new mode and the same old and new object. A change
+   * with no entry is never the same as anything (nothing to land).
+   */
+  async sameChange(options: { gitDir: string; a: { base: string; tree: string }; b: { base: string; tree: string } }): Promise<boolean> {
+    for (const v of [options.a.base, options.a.tree, options.b.base, options.b.tree]) if (!OBJECT.test(v)) throw new WorkspaceError("invalid_path", "a change is named by full object IDs");
+    const x = await this.#rawChange(options.gitDir, options.a.base, options.a.tree);
+    const y = await this.#rawChange(options.gitDir, options.b.base, options.b.tree);
+    return x.length > 0 && x.length === y.length && x.every((e, i) => e.path === y[i]!.path && e.line === y[i]!.line);
+  }
+
+  /** Whether commit `older` is `newer` or one of its ancestors, in the checkout's repository. */
+  async isAncestor(options: { gitDir: string; older: string; newer: string }): Promise<boolean> {
+    if (!OBJECT.test(options.older) || !OBJECT.test(options.newer)) throw new WorkspaceError("invalid_path", "commits are named by full IDs");
+    return this.#run(["merge-base", "--is-ancestor", options.older, options.newer], { gitDir: options.gitDir }).then(() => true, () => false);
+  }
+
+  /**
+   * The integrator's mechanical re-apply of an approved submission onto the landing branch's head (card P10). The checkout must be at rest (no uncommitted file) and its committed change (base..HEAD) must be exactly the
+   * approved change (`submission`: base..tree), either on the approved base or already re-applied onto a later commit of the landing branch. Then:
+   * - the checkout's base is `onto` already: `current` (on the approved base) or `reapplied` (an earlier re-apply, answered again), nothing written;
+   * - `onto` is not a descendant of the checkout's base (the landing branch was rewritten): refused;
+   * - a path the submission changes was changed on the landing branch since the checkout's base (the same path, or a folder of one and a file inside it): `overlap`, with those paths, nothing written;
+   * - otherwise the files are disjoint: a new commit is made whose parent is `onto` and whose tree is `onto`'s tree with exactly the submission's entries put in (same modes, same objects), and it is proven to be the same
+   *   change as the approved one (`sameChange`) before anything moves. The checkout's files that the landing branch changed are brought up to date (a two-way read-tree of a clean checkout touches only those), and the
+   *   base and head move together in one ref transaction. The commit is the platform's (the release identity), not a review-gate permit commit.
+   * Nothing is merged line by line: content of a file both sides changed is never combined here.
+   */
+  async restack(options: { shared: string; onto: string; gitDir: string; checkout: string; submission: ApprovedSubmission }): Promise<
+    | { state: "current" }
+    | { state: "reapplied"; base: string; tree: string; commit: string; previous: string; recovered: boolean; taken: number }
+    | { state: "overlap"; paths: string[]; head: string }
+  > {
+    const sub = options.submission;
+    if (!isApprovedSubmission(sub)) throw new WorkspaceError("invalid_path", "a re-apply names a submission ID and a full base commit and tree");
+    if (!COMMIT.test(options.onto)) throw new WorkspaceError("invalid_path", "a re-apply goes onto a full commit ID");
+    const state = await this.status({ gitDir: options.gitDir, checkout: options.checkout });
+    if (state.dirty) throw new WorkspaceError("stale", `the checkout holds ${state.entries.length} changed, new or ignored file(s) that are not committed; nothing was re-applied (only committed work lands)`);
+    const base = await this.#base(options.gitDir);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
+    const tree = (await this.#run(["rev-parse", "--verify", `${head}^{tree}`], { gitDir: options.gitDir })).stdout.trim();
+    if (base === sub.base) {
+      if (tree !== sub.tree) throw new WorkspaceError("stale", `the checkout's committed work is not submission ${sub.id}'s approved tree; nothing was re-applied`);
+      if (base === options.onto) return { state: "current" };
+    } else {
+      // Re-applied before (by an earlier landing that did not finish): it counts only as exactly the approved change on a later commit of the approved base's history.
+      const proven = (await this.isAncestor({ gitDir: options.gitDir, older: sub.base, newer: base })) && (await this.sameChange({ gitDir: options.gitDir, a: { base: sub.base, tree: sub.tree }, b: { base, tree } }));
+      if (!proven) throw new WorkspaceError("stale", `the checkout is based on ${base.slice(0, 12)}, not on submission ${sub.id}'s approved base ${sub.base.slice(0, 12)}, and its committed change is not exactly the approved one; nothing was re-applied`);
+      if (base === options.onto) return { state: "reapplied", base, tree, commit: head, previous: sub.base, recovered: true, taken: 0 };
+    }
+    const sharedGit = await this.#sharedGitDir(options.shared);
+    await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.onto], { gitDir: options.gitDir, allowFile: true });
+    if (!(await this.isAncestor({ gitDir: options.gitDir, older: base, newer: options.onto }))) throw new WorkspaceError("stale", `the landing branch's head ${options.onto.slice(0, 12)} does not descend from the checkout's base ${base.slice(0, 12)} (the branch was rewritten); nothing was re-applied`);
+    const mine = await this.#rawChange(options.gitDir, base, head);
+    if (mine.length === 0) throw new WorkspaceError("stale", `submission ${sub.id} holds no change; nothing was re-applied`);
+    const theirs = (await this.#rawChange(options.gitDir, base, options.onto)).map((e) => e.path);
+    // Disjoint means no shared path, and no path of one side inside a folder the other side changed as a file (a file that became a folder, or the other way round).
+    const inside = (a: string, b: string): boolean => a.startsWith(`${b}/`);
+    const overlap = mine.filter((m) => theirs.some((t) => t === m.path || inside(m.path, t) || inside(t, m.path))).map((m) => m.path);
+    if (overlap.length > 0) return { state: "overlap", paths: overlap, head: options.onto };
+    for (const m of mine) {
+      const [oldMode = "", newMode = ""] = m.line.slice(1).split(" ");
+      if (["120000", "160000"].includes(oldMode) || ["120000", "160000"].includes(newMode)) throw new WorkspaceError("link_refused", `${JSON.stringify(m.path.slice(0, 80))} is a link or a submodule entry, which is not re-applied`);
+    }
+    // The new tree: the head's tree with exactly the submission's entries put in, built in a throwaway index.
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let built: string;
+    try {
+      await this.#run(["read-tree", options.onto], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      const lines = mine.map((m) => {
+        const [, newMode = "", , newSha = "", status = ""] = m.line.slice(1).split(" ");
+        return status === "D" ? `0 ${"0".repeat(newSha.length)}\t${m.path}` : `${newMode} ${newSha}\t${m.path}`;
+      });
+      await this.#run(["update-index", "-z", "--index-info"], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index }, input: lines.map((l) => `${l}\0`).join("") });
+      built = (await this.#run(["write-tree"], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.trim();
+    } finally { await rm(index, { force: true }); }
+    if (!OBJECT.test(built)) throw new WorkspaceError("unavailable", "git did not return a tree ID");
+    // The proof, before anything moves: the change from the head to the new tree is exactly the approved change.
+    if (!(await this.sameChange({ gitDir: options.gitDir, a: { base: sub.base, tree: sub.tree }, b: { base: options.onto, tree: built } }))) throw new WorkspaceError("stale", `submission ${sub.id} could not be re-applied as exactly the approved change; nothing was re-applied`);
+    const message = `Re-applied submission ${sub.id}\n\nRe-applied by NimbleNewt onto ${options.onto} (the landing branch's head), unchanged: exactly the approved change, whose files the landing branch did not change since ${base}. Not a review-gate permit commit.\n\nNimbleNewt-Submission: ${sub.id}\nNimbleNewt-Reapplied-From: ${base}\n`;
+    const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
+    const commit = (await this.#run(["commit-tree", built, "-p", options.onto, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
+    if (!COMMIT.test(commit)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+    // The checkout is clean, so a two-way read-tree from the head to the new commit writes only the files the landing branch changed (none of them is one of the submission's).
+    await this.#run(["update-index", "-q", "--really-refresh"], { gitDir: options.gitDir, workTree: options.checkout });
+    await this.#run(["read-tree", "-m", "-u", head, commit], { gitDir: options.gitDir, workTree: options.checkout });
+    // The base and the head move together, each only from what was read (a compare-and-swap in one transaction).
+    await this.#run(["update-ref", "--stdin"], { gitDir: options.gitDir, input: `start\nupdate refs/nn/base ${options.onto} ${base}\nupdate HEAD ${commit} ${head}\ncommit\n` });
+    return { state: "reapplied", base: options.onto, tree: built, commit, previous: base, recovered: false, taken: theirs.length };
+  }
+
+  /**
    * Backs up the checkout's work in progress to a work-in-progress branch on a remote the owner named (card P02b). Everything is made in the checkout's own git directory (the host's, outside every sandbox): the files go
    * into a TEMPORARY index of its own (`nn-wip-index-*`, started from the head so a tracked file an ignore rule matches is kept), so the agent's index, HEAD, base and branches are never touched; the commit is made with
    * `commit-tree` by the platform as author and committer (the agent's name is only a trailer), with `Developer`, `Executor`, `NimbleNewt-Task` and `NimbleNewt-WIP: unreviewed` and never a `Reviewed-by` or `Reviewed-via`.

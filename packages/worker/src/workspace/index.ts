@@ -3,7 +3,7 @@ export { LIMITS as NAME_LIMITS, collisionKey, collisions, fold, isGitName, nameP
 export { NOFOLLOW, resolveSafe, sameFile, type SafePath } from "./paths.js";
 export { GIT_LIMITS, GitBridge, RELEASE_IDENTITY, WIP_IDENTITY, WIP_REF_PREFIX, wipRef, wipRemote, filesDigest, isApprovedSubmission, permitLedgerPath, releaseLedgerPath, type ApprovedSubmission } from "./git.js";
 export { ABSENT, BRIDGE_LIMITS, WorkspaceBridge, versionOf, type PendingChange, type WriteResult } from "./bridge.js";
-export { WorkspaceHost, HOST_LIMITS, type CheckoutLocation, type HostJson, type HostOperation, type HostSecurityEvent, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy, type WorkspaceHostOptions } from "./host.js";
+export { WorkspaceHost, HOST_LIMITS, type CheckoutLocation, type HostJson, type HostOperation, type HostRestackCall, type HostRestackOutcome, type HostSecurityEvent, type HostWorkspaceCall, type HostWorkspaceOutcome, type LandingPolicy, type WorkspaceHostOptions } from "./host.js";
 export { LANDING_CHECK_OUTPUT_CHARS, landingChecks, type LandingCheckCall, type LandingCheckReport, type LandingCheckRun, type LandingChecksOptions } from "./landing-checks.js";
 export { LocalWorkspaces, PROGRESS_LIMITS, readPlan, type LocalWorkspacesOptions } from "./local-host.js";
 export { DEFAULT_PROTECTED_PATHS, isProtectedPath } from "./protected-paths.js";
