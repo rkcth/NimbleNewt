@@ -57,6 +57,7 @@ import type { EnvironmentService } from "../environments/index.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js";
 import { keptSecretUseText, type KeptSecretUse } from "../setup/kept-secret-uses.js";
+import type { ObservationService } from "../observations/observations.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
@@ -305,6 +306,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
+  observations: { keys: ["projectId", "observationKind"], about: "what went wrong or was put right in a project's work (card B02): the open observations of corrections, failures, recoveries, friction, approval stalls, redundant prompts and failed reviews, oldest first, each with how many reports joined it (a retelling of the same event counts once), its disposition, ID and revision, and this hour's storm count (observations the controller could not record because a limit was reached); observationKind keeps one kind. An observation is settled with observation.dispose" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
@@ -426,6 +428,7 @@ export type StatusRequest =
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
   | { readonly kind: "wip_backup"; readonly projectId: string }
+  | { readonly kind: "observations"; readonly projectId: string; readonly observationKind?: string }
   | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
@@ -574,6 +577,8 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
 export interface StatusDeps {
+  /** Observations of the project's work (card B02). Absent: the view is not offered. */
+  readonly observations?: Pick<ObservationService, "open">;
   /** What retention holds back and why, and its values (card T02c). Absent: the views are not offered. */
   readonly retention?: {
     check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
@@ -993,6 +998,7 @@ export class StatusService {
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
       case "wip_backup": { onlyKnown(request, ["kind", "projectId"]); return this.wipBackupLines(by, request.projectId); }
+      case "observations": { onlyKnown(request, ["kind", "projectId", "observationKind"]); return this.observationLines(by, request.projectId, request.observationKind); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
@@ -1171,6 +1177,19 @@ export class StatusService {
       line(`${recent.length} job(s) ended most recently:`, cite("jobs", "ended")),
       ...recent.map(({ job, wake }) => line(`${job.id} ${JSON.stringify(shown(job.label, 80))} (${job.kind}) of task ${job.taskId}: ${wake.state.replaceAll("_", " ")} at ${shown(wake.at, 30)}${job.exit?.reason === undefined ? "" : ` (${shown(job.exit.reason, 120)})`}; ${woke(wake)}${wake.notice === undefined ? "" : wake.notice.sent ? "; you were told" : `; you were not told (${shown(wake.notice.why ?? "", 120)})`}.`, cite("job", job.id), cite("task", job.taskId))),
     ];
+  }
+
+  /** The open observations of a project (card B02), 25 at most, and the hour's storm count; for whoever may read them (the service decides). */
+  async observationLines(by: Principal, projectId: string, observationKind: string | undefined): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.observations === undefined) return undefined;
+    const got = await this.#deps.observations.open(by, checkProjectId(projectId), { limit: 25, ...(observationKind === undefined ? {} : { kind: observationKind }) });
+    if (got === undefined) return undefined;
+    const c = cite("observation-index", projectId);
+    const out: Line[] = [line(got.items.length === 0 ? `No ${observationKind === undefined ? "" : `${shown(observationKind, 20)} `}observation is open in this project.` : `${got.items.length}${got.next === undefined ? "" : " (and more)"} open observation(s)${observationKind === undefined ? "" : ` of kind ${shown(observationKind, 20)}`}, oldest first; a retelling of the same event joins its observation and counts once.`, c)];
+    for (const o of got.items) out.push(line(`${shown(o.kind, 20)} (${o.origin === "agent" ? `reported by ${shown(o.reportedBy, 60)}` : "seen by the controller"}${o.reports > 1 ? `, ${o.reports} reports from ${o.reporters.length} reporter(s)` : ""}, last ${shown(o.lastSeenAt, 30)}): ${shown(o.summary, 200)}${o.owner === undefined ? "" : ` Owner: ${shown(o.owner, 60)}.`} [${o.id}, revision ${o.revision}]`, cite("observation", o.id, o.revision)));
+    const r = cite("observation-rate", projectId);
+    out.push(line(`This hour (from ${shown(got.rate.hour.slice(11, 16), 5)} UTC): ${got.rate.created} new observation(s); ${got.rate.suppressed === 0 ? "none was held back" : `${got.rate.suppressed} the controller saw were not recorded because a storm limit was reached`}${got.rate.suppressedTotal > got.rate.suppressed ? ` (${got.rate.suppressedTotal} held back in all)` : ""}.`, r));
+    return { observedAt: this.#runner.now(), lines: out };
   }
 
   /** The work-in-progress backup of one project (card P02b): off unless the owner turned it on; what it rests on and what it has done. Owner only. */
