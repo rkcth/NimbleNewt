@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import {
-  ANSWER, Chaos, Clock, acknowledgedSurvive, adapterProbe, around, cleanRun, describe, openAdapter, openStore, piConversation, runChild, runPath, startProcess, verifyFinished,
+  ANSWER, Chaos, Clock, acknowledgedSurvive, adapterProbe, around, cleanRun, describe, killProblem, openAdapter, openStore, piConversation, runChild, runPath, startProcess, verifyFinished,
   type Clean, type StoreSpec,
 } from "./g04-fixture.js";
 
@@ -13,7 +13,8 @@ export interface Killed { readonly index: number; readonly problems: string[]; r
 export async function killAndRestart(spec: StoreSpec, directory: string, clean: Clean, crashAt: number): Promise<Killed> {
   const child = await runChild(spec, directory, crashAt);
   const label = describe(clean, crashAt);
-  if (!child.killed || child.out.includes("finished")) return { index: crashAt, problems: [`${label}: the child was not killed (${child.err.slice(0, 300)})`], resumed: 0 };
+  const notKilled = killProblem(child, clean.labels, crashAt, label);
+  if (notKilled !== undefined) return { index: crashAt, problems: [notKilled], resumed: 0 };
   const storage = await openStore(spec);
   const { adapter } = await openAdapter(join(directory, "pi"), ANSWER);
   try {

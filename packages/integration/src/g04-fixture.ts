@@ -217,18 +217,51 @@ export async function acknowledgedSurvive(storage: ControllerStorage, clean: Cle
 /** What a child writes to stderr, followed by the JSON of its boundary label, just before it kills itself. */
 export const KILLED_AT = "g04 killed at ";
 
+/**
+ * How long a child may take to reach its boundary before the parent kills it and reports it as hung. A child normally dies within seconds (about 10 s on
+ * the slowest hosted runner); this is well under the integration package's 300 s file limit, so a hung child fails its own boundary with a reason instead
+ * of the whole file running out of time with the child still alive.
+ */
+export const CHILD_DEADLINE_MS = 120_000;
+
+/** What a child run ended as. `killed`: it died by its own SIGKILL (never by the parent's). `hung`: the parent killed it at the deadline. */
+export interface ChildRun { readonly killed: boolean; readonly hung: boolean; readonly out: string; readonly err: string }
+
+/** The scenarios a child runs. `probe-hang` and `probe-kill` touch no database: they check the harness itself (never reach a boundary; die at one). */
+export type ChildScenario = "path" | "wait" | "tool" | "tool-replay" | "probe-hang" | "probe-kill";
+
 /** A child process that runs the whole path (controller and adapter in one process) and kills itself with SIGKILL at a boundary. */
-export function runChild(spec: StoreSpec, directory: string, crashAt: number, scenario: "path" | "wait" | "tool" | "tool-replay" = "path"): Promise<{ killed: boolean; out: string; err: string }> {
+export function runChild(spec: StoreSpec, directory: string, crashAt: number, scenario: ChildScenario = "path", deadlineMs: number = CHILD_DEADLINE_MS): Promise<ChildRun> {
   const script = fileURLToPath(new URL("./g04-child.js", import.meta.url));
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, ["--import", guard, script, JSON.stringify(spec), directory, String(crashAt), scenario], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
+    let out = "", err = "", hung = false;
+    // The parent's own kill at the deadline is recorded before it is sent, so its SIGKILL is never read as the child's.
+    const deadline = setTimeout(() => { hung = true; proc.kill("SIGKILL"); }, deadlineMs);
     proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
     proc.stderr.on("data", (d: Buffer) => { err += d.toString(); });
-    proc.on("error", reject);
+    proc.on("error", (e) => { clearTimeout(deadline); reject(e); });
     // POSIX reports the signal; Windows reports a terminated process by a non-zero exit code.
-    proc.on("exit", (code, signal) => resolve({ killed: process.platform === "win32" ? signal !== null || (code !== null && code !== 0) : signal === "SIGKILL", out, err: `${err}${code === null || code === 0 ? "" : ` exit ${code}`}` }));
+    proc.on("exit", (code, signal) => {
+      clearTimeout(deadline);
+      const died = process.platform === "win32" ? signal !== null || (code !== null && code !== 0) : signal === "SIGKILL";
+      resolve({ killed: died && !hung, hung, out, err: `${err}${code === null || code === 0 ? "" : ` exit ${code}`}` });
+    });
   });
+}
+
+/**
+ * Why a child run does not count as a kill at boundary `crashAt` of the uncrashed run, or undefined when it does: the child must have died by its own
+ * SIGKILL, not finished, not hung, and must have reported the uncrashed run's label for that boundary (a child whose path took other steps would
+ * otherwise die somewhere else unnoticed).
+ */
+export function killProblem(child: ChildRun, labels: readonly string[], crashAt: number, label: string): string | undefined {
+  const tail = child.err.slice(0, 300);
+  if (child.hung) return `${label}: the child hung, it did not reach its boundary and was killed by the parent (${tail})`;
+  if (!child.killed || child.out.includes("finished")) return `${label}: the child was not killed (${tail})`;
+  const expected = labels[crashAt];
+  if (expected === undefined || !child.err.includes(`${KILLED_AT}${JSON.stringify(expected)}\n`)) return `${label}: the child died elsewhere (${tail})`;
+  return undefined;
 }
 
 /** The worker: the Pi adapter in a process of its own. `call` rejects when the process is gone. */

@@ -12,6 +12,13 @@ import { waitScenario } from "./g04-wait.js";
 const [specJson, directory, crashAt, scenario] = process.argv.slice(2) as [string, string, string, string];
 // The label the process dies at goes to stderr first (synchronously), so the parent can check the kill landed on the boundary it meant.
 const chaos: InstanceType<typeof Chaos> = new Chaos(Number(crashAt), () => (writeSync(2, `${KILLED_AT}${JSON.stringify(chaos.labels.at(-1))}\n`), process.kill(process.pid, "SIGKILL"), Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)));
+// Harness probes (g04-child.test.ts), no database: `probe-hang` never reaches a boundary and stays alive until the parent kills it; `probe-kill` passes
+// boundaries "probe 0", "probe 1", ... and dies at <crashAt> exactly as the real scenarios do.
+if (scenario === "probe-hang") {
+  setInterval(() => undefined, 1 << 30);
+  await new Promise<never>(() => undefined);
+}
+if (scenario === "probe-kill") for (let i = 0; i <= Number(crashAt); i++) chaos.hit(`probe ${i}`);
 const storage = await openStore(JSON.parse(specJson) as StoreSpec);
 if (scenario === "tool" || scenario === "tool-replay") {
   // The protected effect inside a tool the model calls (g04-tool.ts): its own adapter, with the tool and the reading model.
