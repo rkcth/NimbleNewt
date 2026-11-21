@@ -13,7 +13,8 @@ test("each suite divided by backend has exactly one test file per backend", () =
   const suites = new Map<string, string[]>();
   for (const file of files(src)) {
     const text = readFileSync(file, "utf8");
-    const suite = /from "\.\/([a-z0-9-]+-suite)\.js"/.exec(text)?.[1];
+    // (written with a class for the quote, so that the package-boundary scan does not read this pattern as an import)
+    const suite = /from\s["']\.\/([a-z0-9-]+-suite)\.js["']/.exec(text)?.[1];
     if (suite === undefined) continue;
     const calls = [...text.matchAll(/\bdefine[A-Za-z]+Tests\(\s*"([^"]+)"\s*\)/g)];
     if (calls.length === 0) continue; // a suite called with more arguments (slice: backend and a share of the points) is divided another way
