@@ -5,7 +5,8 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { PREFIX, PROBE_SCRIPT, WSB_LIST_TIMEOUT_MS, chainLabel, csvFields, envNameLines, parseGroups, parseUser, probeLines, render, wsbListLine } from "./wsb-job-context.mjs";
+import { writeFileSync } from "node:fs";
+import { OVERALL_LIMIT_MS, PREFIX, PROBE_SCRIPT, PROBE_TIMEOUT_MS, SESSION_WAIT_MS, WHOAMI_TIMEOUT_MS, WSB_LIST_TIMEOUT_MS, chainLabel, csvFields, envNameLines, fromBounded, parseGroups, parseUser, probeLines, render, windowsLines, wsbListLine } from "./wsb-job-context.mjs";
 import { usesSharedScanner } from "./safe-error.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -151,4 +152,76 @@ test("run off Windows: says so, prints names never values, through redact-log no
   const red = spawnSync(process.execPath, [join(root, "scripts", "redact-log.mjs")], { input: r.stdout, encoding: "utf8", env: { ...process.env, COMPUTERNAME: "MYPC" } });
   assert.equal(red.status, 0, red.stderr);
   assert.equal(red.stdout, r.stdout, "fixed words pass the log redaction unchanged");
+});
+
+test("the helper's answer: no console session attached, an empty chain, and the array form of Windows PowerShell 5.1", () => {
+  const base = { processSession: 2, consoleSession: 0xffffffff, chain: [] };
+  const lines = probeLines(base);
+  assert.equal(lines[0], "session: this process 2, console session none attached");
+  assert.equal(lines[3], "parents (this process first): unknown; under a Windows service unknown");
+  const wrapped = probeLines({ ...base, chain: { value: [{ name: "node.exe" }, { name: "services.exe", service: true }], Count: 2 } });
+  assert.equal(wrapped[3], "parents (this process first): nodeExe < servicesExe(service); under a Windows service yes");
+});
+
+test("a bounded run's result: stopped, not found, exit codes; the runner's own stop text is not read as wsb's", () => {
+  const stopped = wsbListLine(fromBounded({ code: null, stdout: "", stderr: "Cancelled\r\ntimed out after 45 s and was stopped", timedOut: true }, 45_100));
+  assert.match(stopped, /: no answer within 45000 ms \(stopped\) after 45100 ms; output lines 0; markers: cancelled; first error line: Cancelled$/);
+  assert.match(wsbListLine(fromBounded({ code: null, stdout: "", stderr: "timed out after 45 s and was stopped", timedOut: true }, 50_000)), /markers: none; first error line: none$/);
+  assert.match(wsbListLine(fromBounded({ code: null, stdout: "", stderr: "spawn wsb ENOENT", timedOut: false }, 4)), /: not found on PATH after 4 ms;/);
+  assert.match(wsbListLine(fromBounded({ code: 2147942405, stdout: "", stderr: "Access is denied.", timedOut: false }, 9)), /: failed \(exit 0x80070005\) after 9 ms; .*markers: access denied;/);
+  assert.match(wsbListLine(fromBounded({ code: 0, stdout: "a\r\n", stderr: "", timedOut: false }, 9)), /: answered \(exit 0\) after 9 ms; output lines 1;/);
+  assert.match(wsbListLine(fromBounded({ code: null, stdout: "", stderr: "stdout maxBuffer length exceeded", timedOut: false }, 9)), /: could not run after 9 ms;/);
+});
+
+test("the Windows facts through the backend's bounded runner: whoami, the helper with NN_PID and NN_OUT, the console user, then one wsb list", async () => {
+  const calls = [];
+  const host = {
+    session: async () => ({ processIsConsoleUser: true, processInConsoleSession: true, consoleUser: "DESKTOP-1\\jane", locked: false }),
+    run: async (file, args, options) => {
+      calls.push({ file, args, options });
+      if (/whoami\.exe$/.test(file)) return { code: 0, stdout: args[0] === "/user" ? '"desktop-1\\jane","S-1-5-21-1-2-3-1001"' : GROUPS_HIGH, stderr: "", timedOut: false };
+      if (/powershell\.exe$/.test(file)) {
+        writeFileSync(options.env.NN_OUT, JSON.stringify({ helperConsoleWindow: false, attachError: 6, processSession: 1, consoleSession: 1, inJob: false, windowStation: "WinSta0", desktop: "Default", chain: [{ name: "node.exe" }] }));
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      }
+      return { code: null, stdout: "", stderr: "Grpc failed to connect to localhost:80\ntimed out after 45 s and was stopped", timedOut: true };
+    },
+  };
+  const lines = [];
+  const state = {};
+  await windowsLines(lines, state, async () => host);
+  assert.deepEqual(lines.slice(0, 2), ["account: a local or domain account", "integrity level high (whoami /groups label); Administrators enabled"]);
+  assert.equal(lines[2], "session: this process 1, console session 1");
+  assert.equal(lines[7], "console user: is the console user yes; in the console session yes; someone signed in at the console yes; console locked no");
+  assert.match(lines[8], /^wsb list \(once, limit 45000 ms\): no answer within 45000 ms \(stopped\) after \d+ ms; output lines 0; markers: grpc, localhost:80; first error line: Grpc/);
+  assert.equal(lines.length, 9);
+  assert.ok(!lines.join("\n").includes("jane"), lines.join("\n"));
+  assert.equal(state.console, undefined);
+  // The helper gets this process's id and a file to write; wsb runs last, from PATH, with its own limit.
+  const helper = calls.find((c) => /powershell\.exe$/.test(c.file));
+  assert.equal(helper.options.env.NN_PID, String(process.pid));
+  assert.equal(helper.options.timeoutMs, PROBE_TIMEOUT_MS);
+  assert.deepEqual(helper.args.slice(0, 5), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]);
+  assert.deepEqual(calls.at(-1), { file: "wsb", args: ["list"], options: { timeoutMs: WSB_LIST_TIMEOUT_MS } });
+  assert.equal(calls.filter((c) => /whoami\.exe$/.test(c.file) && c.options.timeoutMs === WHOAMI_TIMEOUT_MS).length, 2);
+
+  // No helper answer and an unreadable session: every fact unknown, the helper's end recorded, wsb still run.
+  const quiet = { session: async () => { throw new Error("C:\\Users\\jane failed"); }, run: async (file) => ({ code: /powershell/.test(file) ? 1 : 0, stdout: "", stderr: "", timedOut: false }) };
+  const l2 = [];
+  await windowsLines(l2, {}, async () => quiet);
+  assert.match(l2.join("\n"), /helper: no answer \(exit 0x00000001, \d+ ms\)/);
+  assert.ok(l2.includes("console user: not readable"));
+  assert.match(l2.at(-1), /: answered \(exit 0\)/);
+  assert.ok(!l2.join("\n").includes("jane"));
+
+  // No build: one line, nothing run.
+  const l3 = [];
+  await windowsLines(l3, {}, async () => { throw new Error("missing"); });
+  assert.deepEqual(l3, ["not recorded: the worker build could not be loaded (run npm run build first)"]);
+});
+
+test("time: the slowest path (each limit reached, up to 20 s each to stop a tree) ends before the overall limit, which ends well before the step's 5 minutes", () => {
+  const stop = 20_000;
+  assert.ok(WHOAMI_TIMEOUT_MS + stop + PROBE_TIMEOUT_MS + stop + SESSION_WAIT_MS + WSB_LIST_TIMEOUT_MS + stop < OVERALL_LIMIT_MS);
+  assert.ok(OVERALL_LIMIT_MS + 45_000 <= 5 * 60_000);
 });

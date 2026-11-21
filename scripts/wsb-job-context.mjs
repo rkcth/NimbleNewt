@@ -12,7 +12,6 @@
 //   node scripts/wsb-job-context.mjs
 // Output: lines starting "wsb job context: ", fixed words, numbers and names checked against a strict pattern, each line passed through the shared credential scanner
 // (scripts/safe-error.mjs); the workflow also pipes it through scripts/redact-log.mjs. It always exits 0: a record, never a gate. Off Windows it says so. Needs `npm run build`.
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -115,15 +114,17 @@ const hex = (v) => (Number.isInteger(v) && v >= 0 && v <= 0xffffffff ? `0x${v.to
 export function probeLines(raw) {
   const o = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const attach = o.attachError === 0 ? "yes" : o.attachError === 6 ? "no" : Number.isInteger(o.attachError) ? `unknown (error ${num(o.attachError)})` : "unknown";
-  const chain = Array.isArray(o.chain) ? o.chain.slice(0, 16).map((p) => `${chainLabel(p?.name)}${p?.service === true ? "(service)" : ""}`) : [];
-  const underService = Array.isArray(o.chain) ? o.chain.some((p) => p?.service === true) : undefined;
+  // Windows PowerShell 5.1's ConvertTo-Json can write an array as {"value": [...], "Count": n}; both forms are read.
+  const list = Array.isArray(o.chain) ? o.chain : o.chain !== null && typeof o.chain === "object" && Array.isArray(o.chain.value) ? o.chain.value : [];
+  const chain = list.slice(0, 16).map((p) => `${chainLabel(p?.name)}${p?.service === true ? "(service)" : ""}`);
+  const underService = list.length > 0 ? list.some((p) => p?.service === true) : undefined;
   const station = typeof o.windowStation === "string" && WINDOW_OBJECT_NAME.test(o.windowStation) ? o.windowStation : o.windowStation === undefined || o.windowStation === null ? "unknown" : "other";
   const desktop = typeof o.desktop === "string" && WINDOW_OBJECT_NAME.test(o.desktop) ? o.desktop : o.desktop === undefined || o.desktop === null ? "unknown" : "other";
   const job = o.inJob === true
     ? `yes, limit flags ${hex(o.jobLimitFlags)}, UI restrictions ${hex(o.jobUiRestrictions)} (read by the helper in the same job)`
     : o.inJob === false ? "no" : "unknown";
   return [
-    `session: this process ${num(o.processSession)}, console session ${num(o.consoleSession)}`,
+    `session: this process ${num(o.processSession)}, console session ${consoleSessionWord(o.consoleSession)}`,
     `console: this process has a console ${attach}; the helper (started by this process with windowsHide) got a console window ${word(o.helperConsoleWindow)}`,
     `job object: this process in a job ${job}`,
     `parents (this process first): ${chain.length > 0 ? chain.join(" < ") : "unknown"}; under a Windows service ${word(underService)}`,
@@ -164,6 +165,7 @@ export function render(lines) {
 // answer goes to the file in NN_OUT, not to the standard output. NN_PID is this node process.
 export const PROBE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Add-Type -TypeDefinition @'
 using System; using System.Text; using System.Runtime.InteropServices;
 public static class NNJobCtx {
@@ -234,23 +236,55 @@ $o = [ordered]@{
 [System.IO.File]::WriteAllText($env:NN_OUT, (ConvertTo-Json -Compress -Depth 4 -InputObject $o))
 `;
 
-async function windowsLines() {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  const sys = process.env["SystemRoot"] ?? "C:\\Windows";
-  const lines = [];
-  const run = (file, args, timeout, env) => spawnSync(file, args, { encoding: "utf8", timeout, windowsHide: true, ...(env === undefined ? {} : { env }) });
+/** The whole run's limit, below the step's 5 minutes: what was recorded by then is printed, with a line saying the rest was not. */
+export const OVERALL_LIMIT_MS = 240_000;
+/** How long the console-user probe (started first, in parallel) may still take once the helper is done, before `wsb list` runs without it. */
+export const SESSION_WAIT_MS = 30_000;
 
-  // Who: kind of account, console user (by SID through the backend's own session probe), integrity and Administrators.
-  let consoleFacts = "console user unknown";
+/** The suffix the backend's bounded runner appends to the error output of a program it stopped (windows-real.ts `runBounded`); not `wsb`'s own words, so not a marker. */
+const STOPPED_SUFFIX = /timed out after \d+ s and was stopped$/;
+/** A result of the backend's bounded runner (code, stdout, stderr, timedOut) in the form `wsbListLine` reads. */
+export function fromBounded(r, durationMs) {
+  const stderr = String(r?.stderr ?? "");
+  const timedOut = r?.timedOut === true;
+  const error = timedOut ? { code: "ETIMEDOUT" } : r?.code === null && /\bENOENT\b/.test(stderr) ? { code: "ENOENT" } : r?.code === null ? { code: "other" } : undefined;
+  return { status: r?.code ?? null, signal: null, error, stdout: r?.stdout, stderr: timedOut ? stderr.replace(STOPPED_SUFFIX, "") : stderr, durationMs };
+}
+
+/** The console session id as words: 0xFFFFFFFF is what Windows gives while no session is attached to the console. */
+const consoleSessionWord = (v) => (v === 0xffffffff ? "none attached" : num(v));
+
+/** The backend's real Windows host (the built worker package). */
+async function realHost() {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  return (await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href)).windowsRealHost();
+}
+
+/** The Windows facts, pushed to `lines` as each is read (the overall limit prints what is there). `state.console` holds the console-user line until it is pushed. */
+export async function windowsLines(lines, state, loadHost = realHost) {
+  const sys = process.env["SystemRoot"] ?? "C:\\Windows";
+  // The backend's own bounded runner: at its limit the program's whole tree is stopped (taskkill /T /F) and its pipes closed, so a descendant holding them cannot keep this waiting.
+  let host;
   try {
-    const worker = await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href);
-    const s = await worker.windowsRealHost().session();
-    consoleFacts = `is the console user ${word(s.processIsConsoleUser)}; in the console session ${word(s.processInConsoleSession)}; someone signed in at the console ${word(typeof s.consoleUser === "string")}; console locked ${word(s.locked)}`;
-  } catch { consoleFacts = "console user not readable (build missing?)"; }
-  const user = run(`${sys}\\System32\\whoami.exe`, ["/user", "/fo", "csv", "/nh"], WHOAMI_TIMEOUT_MS);
-  const groups = run(`${sys}\\System32\\whoami.exe`, ["/groups", "/fo", "csv", "/nh"], WHOAMI_TIMEOUT_MS);
+    host = await loadHost();
+  } catch {
+    lines.push("not recorded: the worker build could not be loaded (run npm run build first)");
+    return;
+  }
+  const run = (file, args, timeoutMs, env) => host.run(file, args, { timeoutMs, ...(env === undefined ? {} : { env }) });
+
+  // Who: the console-user facts come from the backend's own session probe, started now beside the rest and awaited (for a short while) before `wsb list`.
+  state.console = "console user: not read within the limit";
+  const session = host.session().then(
+    (s) => { state.console = `console user: is the console user ${word(s.processIsConsoleUser)}; in the console session ${word(s.processInConsoleSession)}; someone signed in at the console ${word(typeof s.consoleUser === "string")}; console locked ${word(s.locked)}`; },
+    () => { state.console = "console user: not readable"; },
+  );
+  const [user, groups] = await Promise.all([
+    run(`${sys}\\System32\\whoami.exe`, ["/user", "/fo", "csv", "/nh"], WHOAMI_TIMEOUT_MS),
+    run(`${sys}\\System32\\whoami.exe`, ["/groups", "/fo", "csv", "/nh"], WHOAMI_TIMEOUT_MS),
+  ]);
   const g = parseGroups(groups.stdout);
-  lines.push(`account: ${parseUser(user.stdout)}; ${consoleFacts}`);
+  lines.push(`account: ${parseUser(user.stdout)}`);
   lines.push(`integrity level ${g.integrity} (whoami /groups label); Administrators ${g.admin}`);
 
   // The helper: session, console, job, parents, window station and desktop.
@@ -258,35 +292,50 @@ async function windowsLines() {
   try {
     const out = join(dir, "probe.json");
     const started = Date.now();
-    const r = run(`${sys}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PROBE_SCRIPT], PROBE_TIMEOUT_MS, { ...process.env, NN_PID: String(process.pid), NN_OUT: out });
+    const r = await run(`${sys}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PROBE_SCRIPT], PROBE_TIMEOUT_MS, { NN_PID: String(process.pid), NN_OUT: out });
     let raw = null;
     try { raw = JSON.parse(readFileSync(out, "utf8").replace(/^\uFEFF/, "")); } catch { /* no answer: every fact unknown */ }
     lines.push(...probeLines(raw));
-    if (raw === null) lines.push(`helper: no answer (exit ${r.status === null ? "none" : hex(r.status)}${r.error?.code === "ETIMEDOUT" ? ", stopped after the limit" : ""}, ${Date.now() - started} ms)`);
+    if (raw === null) lines.push(`helper: no answer (exit ${r.code === null ? "none" : hex(r.code)}${r.timedOut ? ", stopped after the limit" : ""}, ${Date.now() - started} ms)`);
   } finally { try { rmSync(dir, { recursive: true, force: true }); } catch { /* left */ } }
 
-  // One `wsb list`, as the owner ran it by hand (node spawnSync, `wsb` from PATH), with this job's environment and the stdio settings the backend uses (windowsHide, piped).
+  let wait;
+  await Promise.race([session, new Promise((r) => { wait = setTimeout(r, SESSION_WAIT_MS); })]);
+  clearTimeout(wait);
+  lines.push(state.console);
+  state.console = undefined;
+
+  // One `wsb list`, as the owner ran it by hand (node, `wsb` from PATH, windowsHide, piped output), with this job's environment.
   const started = performance.now();
-  const w = run("wsb", ["list"], WSB_LIST_TIMEOUT_MS);
-  lines.push(wsbListLine({ status: w.status, signal: w.signal, error: w.error, stdout: w.stdout, stderr: w.stderr, durationMs: performance.now() - started }));
-  return lines;
+  const w = await run("wsb", ["list"], WSB_LIST_TIMEOUT_MS);
+  lines.push(wsbListLine(fromBounded(w, performance.now() - started)));
 }
 
 async function main() {
   const terminal = `terminals: stdin ${word(process.stdin.isTTY === true)}, stdout ${word(process.stdout.isTTY === true)}, stderr ${word(process.stderr.isTTY === true)}`;
   const lines = [];
+  const state = {};
+  let printed = false;
+  // Printed once: at the end, or at the overall limit with what was recorded by then. Exits 0 after the output is written.
+  const finish = (extra) => {
+    if (printed) return;
+    printed = true;
+    const all = [...lines, ...extra, ...envNameLines(Object.keys(process.env))];
+    process.stdout.write(render(all).map((l) => `${l}\n`).join(""), () => process.exit(0));
+  };
   if (process.platform !== "win32") {
     lines.push(`not Windows; ${terminal}`);
   } else {
     lines.push(terminal);
-    try { lines.push(...await windowsLines()); } catch { lines.push("stopped early: an unexpected error (not shown)"); }
+    setTimeout(() => {
+      finish([...(state.console === undefined ? [] : [state.console]), `stopped at the overall limit of ${OVERALL_LIMIT_MS} ms: the facts after this line were not recorded`]);
+    }, OVERALL_LIMIT_MS);
+    try { await windowsLines(lines, state); } catch { lines.push("stopped early: an unexpected error (not shown)"); }
   }
-  lines.push(...envNameLines(Object.keys(process.env)));
-  for (const l of render(lines)) process.stdout.write(`${l}\n`);
+  finish([]);
 }
 
 const same = (a, b) => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
 if (process.argv[1] !== undefined && same(resolve(process.argv[1]), fileURLToPath(import.meta.url))) {
-  try { await main(); } catch { process.stdout.write(`${PREFIX}stopped early: an unexpected error (not shown)\n`); }
-  process.exit(0);
+  try { await main(); } catch { process.stdout.write(`${PREFIX}stopped early: an unexpected error (not shown)\n`, () => process.exit(0)); }
 }

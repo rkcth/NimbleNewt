@@ -84,7 +84,7 @@ jobs:
     if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, nimblenewt-windows]
     # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
-    # The job's limit is above the sum of every step's own limit (380 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
+    # The job's limit is above the sum of every step's own limit (385 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
     # (a self-hosted runner's job may run longer than a hosted one's 360 minutes).
     timeout-minutes: 420
     steps:
