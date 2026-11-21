@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { WITHHELD, cutWhole, redact, redactAccountName, redactAndCut, redactSid, scrub, scrubDeep, sidClass } from "./windows-redact.js";
+import { WITHHELD, canonFold, cutWhole, looseFold, redact, redactAccountName, redactAndCut, redactSid, scrub, scrubDeep, sidClass } from "./windows-redact.js";
 
 const names = { users: ["JimBob", "NimbleNewtRunner"], hosts: ["DESKTOP-4F2K9"] };
 
@@ -482,4 +482,58 @@ test("e-mail addresses in any script are found: a non-ASCII local part, an inter
   const out = redact(`${many}ölçek@ex.com then ÖLÇEK`, names);
   assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 1500);
   assert.ok(out.endsWith("<email> then <user>") && !/ü[0-9a-z]+@/.test(out), out.slice(-60));
+});
+
+test("an address's name is found elsewhere in its other case and normalization forms, and the in-word joiners, wide at signs and ideographic dots of internationalised addresses are part of the address", { timeout: 30_000 }, () => {
+  // Case forms the one-to-one case-insensitive search does not equate: Turkish dotted and dotless i, the sharp s, full case forms, and the composed and decomposed forms of an accented letter (in any mix within a name).
+  for (const [text, out] of [
+    ["ismail.kaya@ex.com.tr later İSMAİL KAYA", "<email> later <user> <user>"],
+    ["ılgın@ex.com.tr later ILGIN and Ilgın", "<email> later <user> and <user>"],
+    ["İsmail@ex.com.tr later ismail", "<email> later <user>"],
+    ["strauß@ex.de later STRAUSS", "<email> later <user>"],
+    ["ju\u0308rgen@ex.de later JÜRGEN", "<email> later <user>"],
+    ["jürgen@ex.de later JU\u0308RGEN", "<email> later <user>"],
+    ["jürgen.müller@ex.de later JU\u0308RGEN.MÜLLER and Jürgen Mu\u0308ller", "<email> later <user> and <user> <user>"],
+    ["straße@ex.de later STRAẞE and Strasse", "<email> later <user> and <user>"],
+    ["GROẞ@ex.de later groß", "<email> later <user>"],
+    ["ŉame@ex.com later ʼNAME", "<email> later <user>"],
+  ] as const) { assert.equal(redact(text, names), out, text); assert.equal(scrub(text, names), out, text); }
+  // Joiners and middle dots inside a word, a full-width or small at sign, ideographic and full-width dots: the whole address goes, not only the part after them.
+  for (const text of ["علی‌رضا@ex.ir", "marcel·la@ex.cat", "ジョン・スミス@例え.jp", "क्‍ष@ex.in", "用户@例子。中国", "jim＠example.com", "jim﹫example．com", "jim@例子｡中国"]) {
+    assert.equal(redact(`a ${text} b`, names), "a <email> b", text);
+    assert.equal(scrub(`a ${text} b`, names), "a <email> b", text);
+  }
+  assert.equal(redact("ジョン・スミス＠例え。jp then ジョン・スミス", names), "<email> then <user>");
+  // Still linear with these characters: 1 MB of joined letters, of wide at signs between letters, of ideographic dots after an at sign (a search retried at every start
+  // would take hours; 1 MB rather than 3 keeps a loaded test machine well inside the limit).
+  for (const [kind, text] of [["joined", "ä‍".repeat(500_000)], ["wide at", "ä＠".repeat(500_000)], ["ideographic dots", `ä@${"ä。".repeat(500_000)}1`]] as const) {
+    const started = process.hrtime.bigint();
+    const out = scrub(text, names, 100);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 1500, `${kind}: ${ms} ms`);
+    assert.ok(out.length < 200, kind);
+  }
+});
+
+test("the loose fold that picks which address names get their other forms: every form of a code point folds as the code point does, and so does what the case-insensitive search equates with it", () => {
+  // If a form folded differently, a name written only in that form elsewhere would be dropped before its forms are made, and stay in the record. Every code point is checked.
+  const fold = (s: string): string => { let k = ""; for (const ch of s) k += looseFold(ch.codePointAt(0)!); return k; };
+  const bad: string[] = [];
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCodePoint(cp);
+    if (cp > 0xffff && !/[\p{L}\p{M}\p{N}]/u.test(ch)) continue;
+    const want = looseFold(cp);
+    for (const form of [canonFold(cp), ch.toUpperCase(), ch.toLowerCase(), ch.toLocaleUpperCase("tr"), ch.toLocaleLowerCase("tr"), ch.normalize("NFC"), ch.normalize("NFD")]) if (fold(form) !== want) bad.push(`U+${cp.toString(16)}`);
+  }
+  assert.deepEqual(bad, []);
+  // The pattern of a name also takes any Turkish i and drops a combining dot above: the loose fold equates those too.
+  for (const cp of [0x69, 0x49, 0x130, 0x131]) assert.equal(looseFold(cp), "I");
+  assert.equal(looseFold(0x307), "");
+  // And the sharp s, which a name's pattern takes as `ß`, `ẞ` or `ss`.
+  assert.equal(looseFold(0xdf), "SS");
+  assert.equal(looseFold(0x1e9e), "SS");
+  // A lone surrogate is itself in both folds; an astral code point is its own two units for the case-insensitive search.
+  assert.equal(looseFold(0xd800), "\ud800");
+  assert.equal(canonFold(0x1e922), "\u{1E922}");
 });

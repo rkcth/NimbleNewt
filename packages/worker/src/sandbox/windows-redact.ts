@@ -103,12 +103,23 @@ const SEP = String.raw`[\\/]+`;
 /**
  * An e-mail address, tried only where `replaceEmails` starts it (sticky). The local part and the domain may be written in any script (`jürgen@beispiel.de`,
  * `пример@почта.рф`, `用户@例子.中国`): letters, digits and combining marks of every script, so an address with a non-ASCII local part or an internationalised domain written
- * in Unicode is found as the ASCII ones are. The last label is letters (with their marks) or an ASCII-encoded one (`xn--p1ai`).
+ * in Unicode is found as the ASCII ones are. The joiners and middle dots that internationalised names use inside a word (zero-width non-joiner and joiner, as in Persian
+ * `علی‌رضا`; the middle dot of Catalan `l·l`; the katakana middle dot of `ジョン・スミス`; Hebrew geresh and gershayim; the Tibetan tsheg) are part of a local part or a label
+ * too: without them the address was cut there and the word before it stayed. The at sign may be the full-width or small form (`＠`, `﹫`), and a label may end with the
+ * ideographic or full-width full stop (`。`, `．`, `｡`), which internationalised domain names read as a dot. The last label is letters (with their marks) or an
+ * ASCII-encoded one (`xn--p1ai`).
  */
-const EMAIL = /[\p{L}\p{N}\p{M}._%+-]+@[\p{L}\p{N}\p{M}-]+(?:\.[\p{L}\p{N}\p{M}-]+)*\.(?:xn--[A-Za-z0-9-]+|\p{L}[\p{L}\p{M}]+)/uy;
+const INWORD = String.raw`\u00B7\u05F3\u05F4\u0F0B\u200C\u200D\u30FB`;
+const LOCAL_SET = String.raw`[\p{L}\p{N}\p{M}${INWORD}._%+-]`;
+const AT = String.raw`[@\uFF20\uFE6B]`;
+const LABEL = String.raw`[\p{L}\p{N}\p{M}${INWORD}-]+`;
+const DOT = String.raw`[.\u3002\uFF0E\uFF61]`;
+const EMAIL = new RegExp(`${LOCAL_SET}+${AT}${LABEL}(?:${DOT}${LABEL})*${DOT}(?:xn--[A-Za-z0-9-]+|\\p{L}[\\p{L}\\p{M}]+)`, "uy");
 /** One character of an address's local part (the same set as `EMAIL`'s local part), and a run of them (sticky). */
-const EMAIL_LOCAL_CHAR = /[\p{L}\p{N}\p{M}._%+-]/uy;
-const EMAIL_LOCAL_RUN = /[\p{L}\p{N}\p{M}._%+-]+/uy;
+const EMAIL_LOCAL_CHAR = new RegExp(LOCAL_SET, "uy");
+const EMAIL_LOCAL_RUN = new RegExp(`${LOCAL_SET}+`, "uy");
+/** The local part of an address `EMAIL` found (everything before its at sign). */
+const localPart = (email: string): string => email.split(/[@\uFF20\uFE6B]/)[0]!;
 const isAsciiEmailLocal = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
 /** Whether the character (a whole code point) at `i` can be part of a local part. */
 const isEmailLocalAt = (text: string, i: number): boolean => {
@@ -154,19 +165,55 @@ function canon(c: number): number {
   CANON[c] = u;
   return u;
 }
+/** A word as the case-insensitive searches below compare it (`canon` on each code unit). */
+const canonical = (w: string): string => { let k = ""; for (let i = 0; i < w.length; i++) k += String.fromCharCode(canon(w.charCodeAt(i))); return k; };
+/** A code point as the case-insensitive searches below compare it, written out: `canon` for one code unit; a pair of surrogates is compared unit by unit, each as it is. */
+export const canonFold = (cp: number): string => (cp > 0xffff ? String.fromCodePoint(cp) : String.fromCharCode(canon(cp)));
 /**
- * Which of `words` occur anywhere in `text`, ignoring case exactly as the case-insensitive searches below do (`canon`; a name from an address in another script, such as
- * `jürgen` against `JÜRGEN`, compares as those searches compare it), in one pass over the text (Aho-Corasick): searching once per word took time growing with the number
- * of words times the length of the text.
+ * A code point folded loosely: case-mapped down and up, decomposed, its combining marks dropped and upper-cased again (`ü`, `u` with a combining diaeresis and `Ü` are all
+ * `U`; `ß` and `ẞ` are `SS`; `i`, `ı`, `İ` and `I` are all `I`; astral letters with case, such as Adlam's, fold too). Each case and normalization form of a code point folds as
+ * it does, and so does every code unit the case-insensitive searches equate with it (checked for every code point by a test): so whatever a name's patterns (`nameForms`,
+ * `namePattern`) match folds as the name does, and a name that does not occur loosely is found by none of them. A lone surrogate stays as it is. Cached.
  */
-function occurring(text: string, words: readonly string[]): Set<string> {
+const LOOSE = new Map<number, string>();
+export function looseFold(cp: number): string {
+  if (cp < 128) return String.fromCharCode(cp >= 97 && cp <= 122 ? cp - 32 : cp);
+  const known = LOOSE.get(cp);
+  if (known !== undefined) return known;
+  const ch = String.fromCodePoint(cp);
+  const folded = cp >= 0xd800 && cp <= 0xdfff ? ch : ch.toLowerCase().toUpperCase().normalize("NFD").replace(/\p{M}/gu, "").toUpperCase();
+  LOOSE.set(cp, folded);
+  return folded;
+}
+/**
+ * A name taken from an address and the other ways the same name may be written elsewhere that its pattern (`namePattern`) does not take: its full upper- and lower-case
+ * forms (`ŉ` is `ʼN`, `ΐ` is three code points in upper case), which a case-insensitive search (UTF-16 code units, one to one) does not equate with it. Forms with the
+ * same pattern up to case are given once, so a name usually has one (`jürgen` and `JÜRGEN` are one; `strauß` and `STRAUSS` two, both found by either).
+ */
+function nameForms(name: string): string[] {
+  if (/^[\x00-\x7f]*$/.test(name)) return [name];
+  const forms = new Map<string, string>();
+  for (const form of [name, name.toUpperCase(), name.toLowerCase()]) { const key = canonical(namePattern(form)); if (!forms.has(key)) forms.set(key, form); }
+  return [...forms.values()];
+}
+/**
+ * Which of `words` occur anywhere in `text`, each code point of both compared as `fold` writes it: by default exactly as the case-insensitive searches below compare it
+ * (`canonFold`; a name from an address in another script, such as `jürgen` against `JÜRGEN`, compares as those searches compare it), or loosely (`looseFold`). One pass over the
+ * text (Aho-Corasick): searching once per word took time growing with the number of words times the length of the text. A word that folds to nothing occurs.
+ */
+function occurring(text: string, words: readonly string[], fold: (cp: number) => string = canonFold): Set<string> {
   interface Node { readonly next: Map<number, Node>; fail: Node | null; readonly ends: string[]; seen: boolean }
-  const lower = canon;
   const root: Node = { next: new Map(), fail: null, ends: [], seen: false };
+  const found = new Set<string>();
   for (const w of words) {
     let n = root;
-    for (let i = 0; i < w.length; i++) { const c = lower(w.charCodeAt(i)); let k = n.next.get(c); if (k === undefined) { k = { next: new Map(), fail: null, ends: [], seen: false }; n.next.set(c, k); } n = k; }
-    n.ends.push(w);
+    for (let i = 0; i < w.length; i++) {
+      const cp = w.codePointAt(i)!;
+      if (cp > 0xffff) i++;
+      const f = fold(cp);
+      for (let j = 0; j < f.length; j++) { const c = f.charCodeAt(j); let k = n.next.get(c); if (k === undefined) { k = { next: new Map(), fail: null, ends: [], seen: false }; n.next.set(c, k); } n = k; }
+    }
+    if (n === root) found.add(w); else n.ends.push(w);
   }
   const queue: Node[] = [];
   for (const k of root.next.values()) { k.fail = root; queue.push(k); }
@@ -181,13 +228,17 @@ function occurring(text: string, words: readonly string[]): Set<string> {
   }
   let n = root;
   for (let i = 0; i < text.length; i++) {
-    const c = lower(text.charCodeAt(i));
-    while (n !== root && !n.next.has(c)) n = n.fail!;
-    n = n.next.get(c) ?? root;
-    // Each node and the nodes its failure links lead to are marked once; a marked node's chain is already marked.
-    for (let m: Node | null = n; m !== null && m !== root && !m.seen; m = m.fail) m.seen = true;
+    const cp = text.codePointAt(i)!;
+    if (cp > 0xffff) i++;
+    const f = fold(cp);
+    for (let j = 0; j < f.length; j++) {
+      const c = f.charCodeAt(j);
+      while (n !== root && !n.next.has(c)) n = n.fail!;
+      n = n.next.get(c) ?? root;
+      // Each node and the nodes its failure links lead to are marked once; a marked node's chain is already marked.
+      for (let m: Node | null = n; m !== null && m !== root && !m.seen; m = m.fail) m.seen = true;
+    }
   }
-  const found = new Set<string>();
   for (const k of queue) if (k.seen) for (const w of k.ends) found.add(w);
   return found;
 }
@@ -208,8 +259,24 @@ function localNames(): { users: string[]; hosts: string[] } {
  * in JSON or inspected text, where a name often starts the next line) or the `m` of a terminal colour code (written raw or escaped).
  */
 const NAME_START = String.raw`(?<![A-Za-z0-9](?<!\\[nrtbfv]|(?:\x1b|\\x1[bB]|\\u001[bB])\[[0-9;]*m))`;
+/**
+ * A name as a search pattern (for a regular expression with the `i` flag and without `u`). A letter with a canonical decomposition matches it composed or decomposed, in
+ * any mix (`jürgen` finds `JU\u0308RGEN`); each Turkish i (`i`, `I`, `İ`, `ı`, with or without a combining dot above) stands for all of them, and the sharp s (`ß`, `ẞ`) for
+ * either or `ss`, which a case-insensitive search does not equate (`İSMAİL` and `Ilgın` are the names of `ismail@…` and `ılgın@…`; `STRAẞE` and `STRASSE` of `straße@…`).
+ * Whatever it matches folds loosely (`looseFold`) as the name does.
+ */
+function namePattern(name: string): string {
+  let p = "";
+  for (const ch of name.normalize("NFC")) {
+    if (/^[iI\u0130\u0131]$/.test(ch)) p += "[iI\u0130\u0131]\u0307?";
+    else if (ch === "\u0307" && p.endsWith("\u0307?")) continue;
+    else if (ch === "\u00DF" || ch === "\u1E9E") p += "(?:[\u00DF\u1E9E]|ss)";
+    else { const d = ch.normalize("NFD"); p += d === ch ? escapeRe(ch) : `(?:${escapeRe(ch)}|${escapeRe(d)})`; }
+  }
+  return p;
+}
 /** A name as a whole word; a space in it matches any run of blanks, line breaks included (console output wraps). */
-const wholeWord = (name: string): RegExp => new RegExp(String.raw`${NAME_START}${escapeRe(name).replace(/ +/g, String.raw`\s+`)}(?![A-Za-z0-9])`, "gi");
+const wholeWord = (name: string): RegExp => new RegExp(String.raw`${NAME_START}${namePattern(name).replace(/ +/g, String.raw`\s+`)}(?![A-Za-z0-9])`, "gi");
 /** The name and its parts of four or more characters (a surname alone, "Robert.Hostetter", "robert_hostetter"). */
 const withPieces = (name: string): string[] => { const tail = name.split("\\").pop()!; return [name, tail, tail.replace(/[\s._-]+/g, ""), ...tail.split(/[\s._-]+/).filter((p) => p.length >= 4)]; };
 /** The 8.3 short-name prefix of a name: its first six letters and digits (ROBERT~1, ROBERT~1.DES). */
@@ -223,7 +290,7 @@ export function redact(text: string, names: RedactionNames = {}): string {
   out = out.replace(/(?:MicrosoftAccount|AzureAD)\\{1,2}[^\s:"'\\]+/gi, "<user>");
   // Only names of at most 64 characters (the longest local part an address may have) are searched for elsewhere: a longer run is not a person's name, and a pattern made
   // from it can be too large to build (100 KB of letters before an @ made redact throw).
-  out = replaceEmails(out, (m) => { const local = m.split("@")[0]!; fromEmail.push(...[local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)].filter((p) => p.length <= 64)); return "<email>"; });
+  out = replaceEmails(out, (m) => { const local = localPart(m); fromEmail.push(...[local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)].filter((p) => p.length <= 64)); return "<email>"; });
   out = out.replace(SID_IN_TEXT, (m: string, star: string, sid: string, at: number, all: string) => (isRedactedHead(sid, all.slice(at + m.length)) ? m : `${star}${redactSid(sid)}`));
   // Addresses (loopback and 0.x, which are version numbers, stay).
   out = out.replace(/\b(?!127\.|0\.)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g, "<ip>");
@@ -236,13 +303,17 @@ export function redact(text: string, names: RedactionNames = {}): string {
   // per address over the whole text took time growing with the square of a line that held many addresses. These names are made of e-mail characters only and the
   // searches below only put in placeholders, whose `<`, `>` and `\` are none of them, so a name that does not occur here can never be found below: the result is the
   // same as searching for every name.
-  const emailNames = fromEmail.flatMap(withPieces);
+  // A name also has other ways of being written that a case-insensitive search does not equate with it (decomposed accents, the Turkish i, the sharp s as `ss`, full
+  // case forms: `namePattern`, `nameForms`). Which names occur is judged loosely (`looseFold`: whatever a name's patterns match folds as the name does), so a name that
+  // could be found below is never dropped here, and the forms cost nothing for the many names that occur nowhere.
+  const searched = `${out}\n<host>\\<user>`;
+  const emailNames = fromEmail.length === 0 ? [] : [...new Set([...occurring(searched, [...new Set(fromEmail.flatMap(withPieces))], looseFold)].flatMap(nameForms))];
   const emailShort = fromEmail.map(shortPrefix);
-  const present = fromEmail.length === 0 ? new Set<string>() : occurring(`${out}\n<host>\\<user>`, [...emailNames, ...emailShort]);
-  const users = [...[...local.users, ...(names.users ?? [])].flatMap(withPieces), ...emailNames.filter((u) => present.has(u))].filter((u) => u.length >= 2);
+  const present = fromEmail.length === 0 ? new Set<string>() : occurring(searched, emailShort);
+  const users = [...[...local.users, ...(names.users ?? [])].flatMap(withPieces), ...emailNames].filter((u) => u.length >= 2);
   // Known names first (longest first), so that a home folder such as "Alice Smith" is already partly a placeholder when the home rule runs.
   const byLength = (a: string, b: string): number => b.length - a.length;
-  for (const h of [...new Set(hosts)].sort(byLength)) for (const u of [...new Set(users)].sort(byLength)) out = out.replace(new RegExp(`${escapeRe(h)}\\\\{1,4}${escapeRe(u)}(?![A-Za-z0-9_])`, "gi"), "<host>\\<user>");
+  for (const h of [...new Set(hosts)].sort(byLength)) for (const u of [...new Set(users)].sort(byLength)) out = out.replace(new RegExp(`${escapeRe(h)}\\\\{1,4}${namePattern(u)}(?![A-Za-z0-9_])`, "gi"), "<host>\\<user>");
   // 8.3 short names (ROBERT~1, ROBERT~1.DES) anywhere, before the plain names are replaced.
   for (const p of new Set([...[...local.users, ...(names.users ?? [])].map(shortPrefix), ...emailShort.filter((p) => present.has(p))])) if (p.length >= 3) out = out.replace(new RegExp(String.raw`(?<![A-Za-z0-9_])${escapeRe(p)}~\d+(?:\.\w{1,3})?`, "gi"), "<user>");
   for (const u of [...new Set(users)].sort(byLength)) out = out.replace(wholeWord(u), "<user>");
