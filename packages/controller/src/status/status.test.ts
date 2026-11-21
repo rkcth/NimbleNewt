@@ -827,6 +827,22 @@ for (const backend of backends) {
     const told = await status.ask(c.owner, { kind: "attention", projectId: c.project, attentionKind: "stale_artifact" });
     cited(told!.lines);
     assert.match(said(told!.lines), /Deliverable "Guide and notes" \(version 1, submitted\) on guide task names an artifact \("guide"\) that a newer artifact of the same name has replaced, so it may not deliver the latest work\./);
+    // The reads the port reports count against the attention scan budget: a port that reports more reads than the budget ends the owner-wide scan after the first task that had a
+    // replacement (two tasks here have one, so another task always follows it), with a cursor to go on from.
+    const asked: string[] = [];
+    const heavy = c.rebuild({}, { deliverables: { contractStale: async () => ({ items: [], reads: 0 }), artifactsReplaced: async (_by, taskId) => { asked.push(taskId); return { items: [], reads: 1_000_000 }; } } });
+    const cut = await heavy.attention(c.owner, { kind: "stale_artifact" });
+    assert.deepEqual([asked.length, cut.scanLimited, cut.next !== undefined], [1, true, true], "the port's reads end the scan");
+    // At most 100 deliverables of a task are read, however long its index: the index, then 100 records (the extra IDs name no record), then the standing versions among them.
+    const idxRef = { kind: "deliverable-index", id: t };
+    const idx = (await c.storage.getAggregate(idxRef))!;
+    const realIds = (idx.body as { ids: string[] }).ids;
+    assert.equal(realIds.length, 6);
+    const padded = [...realIds, ...Array.from({ length: 150 }, (_, i) => `dlv-${"a".repeat(17)}${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}a`)];
+    await c.storage.applyOperation({ operationId: cid("raw"), epoch: c.epoch, actor: "owner:test", correlationId: cid("co"), at: at(), changes: [{ type: "update", ref: idxRef, expectedRevision: idx.revision, body: { ...(idx.body as object), ids: padded } }], audit: [{ type: "test.long-index", subject: idxRef, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    const capped = await acceptance.artifactsReplaced(c.owner, t, new Map([[g1, { newest: g3, firstAt: a.at! }]]));
+    assert.equal(capped.reads, 1 + 100 + 5, "the index, 100 deliverable records (6 real, 94 missing) and the 5 standing versions among them");
+    assert.deepEqual(ids(await stale({ taskId: t })), [submitted, privateOne, middle].sort(), "the real ones are still found");
   });
 
   suite("attention: contract_changed edge cases: a contract changed back, a credential limited to one task, old records without a contract version, a missing contract version, a long history, title text that reads like an instruction, bounded reads, nothing written (card U13)", async (c) => {
