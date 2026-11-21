@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceBridge, ABSENT, versionOf, type WriteResult } from "./bridge.js";
 import { WorkspaceError } from "./errors.js";
-import { splitRelative, touchesGit } from "./names.js";
+import { collisionKey, fold, splitRelative, touchesGit } from "./names.js";
 import { NOFOLLOW, openedAt, resolveSafe, sameFile } from "./paths.js";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
@@ -930,9 +930,23 @@ export class GitBridge {
     const mine = await this.#rawChange(options.gitDir, base, head);
     if (mine.length === 0) throw new WorkspaceError("stale", `submission ${sub.id} holds no change; nothing was re-applied`);
     const theirs = (await this.#rawChange(options.gitDir, base, options.onto)).map((e) => e.path);
-    // Disjoint means no shared path, and no path of one side inside a folder the other side changed as a file (a file that became a folder, or the other way round).
+    // Disjoint means no shared path, and no path of one side inside a folder the other side changed as a file (a file that became a folder, or the other way round). Paths are compared as the same file would be on a
+    // case-insensitive or normalising filesystem (`collisionKey`: case, Unicode normalisation, ignorable characters), so `Foo` and `foo`, or the NFC and NFD spellings of a name, count as one path. A Git attribute file
+    // changed on one side overlaps every path of the other side in its folder or below (attributes decide how the files are converted when the landed files are committed: the approved bytes must not be committed under
+    // rules the review did not see).
+    const key = (p: string): string => collisionKey(p.split("/"));
     const inside = (a: string, b: string): boolean => a.startsWith(`${b}/`);
-    const overlap = mine.filter((m) => theirs.some((t) => t === m.path || inside(m.path, t) || inside(t, m.path))).map((m) => m.path);
+    const attributesOver = (attr: string, p: string): boolean => {
+      const parts = attr.split("/");
+      if (fold(parts[parts.length - 1]!) !== ".gitattributes") return false;
+      const folder = parts.slice(0, -1).join("/");
+      return folder === "" || inside(p, folder);
+    };
+    const theirKeys = theirs.map(key);
+    const overlap = mine.filter((m) => {
+      const k = key(m.path);
+      return theirKeys.some((t) => t === k || inside(k, t) || inside(t, k) || attributesOver(t, k) || attributesOver(k, t));
+    }).map((m) => m.path);
     if (overlap.length > 0) return { state: "overlap", paths: overlap, head: options.onto };
     for (const m of mine) {
       const [oldMode = "", newMode = ""] = m.line.slice(1).split(" ");
@@ -960,8 +974,14 @@ export class GitBridge {
     // The checkout is clean, so a two-way read-tree from the head to the new commit writes only the files the landing branch changed (none of them is one of the submission's).
     await this.#run(["update-index", "-q", "--really-refresh"], { gitDir: options.gitDir, workTree: options.checkout });
     await this.#run(["read-tree", "-m", "-u", head, commit], { gitDir: options.gitDir, workTree: options.checkout });
-    // The base and the head move together, each only from what was read (a compare-and-swap in one transaction).
-    await this.#run(["update-ref", "--stdin"], { gitDir: options.gitDir, input: `start\nupdate refs/nn/base ${options.onto} ${base}\nupdate HEAD ${commit} ${head}\ncommit\n` });
+    // The base and the head move together, each only from what was read (a compare-and-swap in one transaction). When the transaction fails, the checkout's files and index are put back to the head they were read at
+    // (the branch's files written above are taken out again), so a failed re-apply does not leave a checkout that looks changed and refuses every later landing or refresh.
+    try {
+      await this.#run(["update-ref", "--stdin"], { gitDir: options.gitDir, input: `start\nupdate refs/nn/base ${options.onto} ${base}\nupdate HEAD ${commit} ${head}\ncommit\n` });
+    } catch (error) {
+      await this.#run(["read-tree", "-m", "-u", commit, head], { gitDir: options.gitDir, workTree: options.checkout }).catch(() => undefined);
+      throw error;
+    }
     return { state: "reapplied", base: options.onto, tree: built, commit, previous: base, recovered: false, taken: theirs.length };
   }
 

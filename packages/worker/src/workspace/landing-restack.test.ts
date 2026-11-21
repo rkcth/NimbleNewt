@@ -145,3 +145,37 @@ test("overlapping files re-apply nothing: the same path, and a folder of one wit
     assert.equal((await r.ws.port.restack({ requestId: rid(), taskId: "tsk-three", projectId: "prj-one", submission: { id: S, base: r.base, tree: "x" } })).ok, false);
   } finally { await done(r.dir); }
 });
+
+test("the disjoint test folds names and follows renames and attribute files: a case-only or normalisation-only spelling, a rename's source and a Git attribute file over the work all overlap; a failed ref move puts the checkout back (card P10 review)", { skip }, async () => {
+  const r = await rig();
+  try {
+    const nfc = "lib/café.ts";
+    const nfd = "lib/café.ts";
+    const tCase = await r.work("tsk-case", { "docs/c.md": "# c, task\n" });
+    const tNorm = await r.work("tsk-norm", { [nfc]: "export const c = 1;\n" });
+    const tRename = await r.work("tsk-rename", { "src/b.ts": "export const b = 2;\n" });
+    const tAttr = await r.work("tsk-attr", { "pkg/deep/q.ts": "export const q = 1;\n" });
+    const tFree = await r.work("tsk-free", { "other/z.ts": "export const z = 1;\n" });
+    // The branch: a file whose name differs from task one's only by case, the other Unicode spelling of task two's new file, a rename whose source task three changes, and an attribute file over task four's folder.
+    sh(r.shared, "mv", "src/b.ts", "src/b-moved.ts");
+    const head = r.commitShared({ "docs/C.md": "# C\n", [nfd]: "export const c = 2;\n", "pkg/.gitattributes": "* text eol=crlf\n" }, "other work landed");
+    const ask = (taskId: string, tree: string) => r.ws.port.restack({ requestId: rid(), taskId, projectId: "prj-one", submission: { id: S, base: r.base, tree } });
+    assert.deepEqual(await ask("tsk-case", tCase.tree), { ok: true, state: "overlap", paths: ["docs/c.md"], head });
+    const norm = await ask("tsk-norm", tNorm.tree);
+    assert.equal((norm as { state?: string }).state, "overlap", JSON.stringify(norm));
+    assert.deepEqual(await ask("tsk-rename", tRename.tree), { ok: true, state: "overlap", paths: ["src/b.ts"], head });
+    assert.deepEqual(await ask("tsk-attr", tAttr.tree), { ok: true, state: "overlap", paths: ["pkg/deep/q.ts"], head });
+    // A ref transaction that fails (the base ref is locked): the checkout's files, index and refs are as they were, and the re-apply succeeds once the lock is gone.
+    const before = sh(tFree.checkout, ...tFree.g, "rev-parse", "HEAD");
+    const lock = join(tFree.gitDir, "refs", "nn", "base.lock");
+    await writeFile(lock, "");
+    await assert.rejects(ask("tsk-free", tFree.tree));
+    assert.equal(sh(tFree.checkout, ...tFree.g, "rev-parse", "HEAD"), before);
+    assert.equal(sh(tFree.checkout, ...tFree.g, "rev-parse", "refs/nn/base"), r.base);
+    assert.equal(sh(tFree.checkout, ...tFree.g, "status", "--porcelain=v1", "--untracked-files=all"), "", "the branch's files were taken out of the checkout again");
+    await rm(lock);
+    const ok = await ask("tsk-free", tFree.tree);
+    assert.equal((ok as { state?: string }).state, "reapplied", JSON.stringify(ok));
+    assert.equal(sh(tFree.checkout, ...tFree.g, "rev-parse", "refs/nn/base"), head);
+  } finally { await done(r.dir); }
+});
