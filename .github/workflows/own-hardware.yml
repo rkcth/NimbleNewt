@@ -153,6 +153,18 @@ jobs:
           [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## G06: this machine's filesystem`n``````json`n$json`n```````n", (New-Object System.Text.UTF8Encoding $false))
           # The step's exit status is not left to whichever native program (fsutil) ran last.
           exit 0
+      # Diagnostic only (card wsb-console): what this job's own process looks like before its first `wsb` call (account kind, integrity level, session, console, job object,
+      # parents and service, window station and desktop, environment variable NAMES) and one `wsb list` with a 45 s limit, to compare with the same call made by hand.
+      # Fixed words only, through the credential scanner and the log redaction; it always exits 0 and the outcome step does not read it.
+      - name: Record the job's process context before wsb
+        id: wsbctx
+        continue-on-error: true
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          node scripts/wsb-job-context.mjs 2>&1 | node scripts/redact-log.mjs > "$RUNNER_TEMP/wsb-job-context.txt"
+          cat "$RUNNER_TEMP/wsb-job-context.txt"
+          { echo "## The job's process context before wsb (diagnostic)"; echo '```'; cat "$RUNNER_TEMP/wsb-job-context.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Run the real Windows Sandbox tests
         id: wsb
         continue-on-error: true
