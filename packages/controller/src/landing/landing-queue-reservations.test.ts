@@ -5,7 +5,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { buildWorld } from "../dispatch/testing/world.js";
 import type { Principal } from "../security/principals.js";
 import { WorkspaceOpService, type WorkspaceCall, type WorkspaceOutcome } from "../workspace-ops/index.js";
-import { IntegratorLeaseOps, IntegratorLeaseService, LandingQueueOps, LandingQueueService, type QueueApproval } from "./index.js";
+import { IntegratorLeaseOps, IntegratorLeaseService, LANDING_QUEUE_LIMITS, LandingQueueOps, LandingQueueService, frontOf, type QueueApproval } from "./index.js";
 
 after(stopServer);
 
@@ -105,7 +105,9 @@ for (const backend of backends) {
       assert.deepEqual([waiting.front?.taskId, waiting.front?.waitingForApproval], [t1, true]);
       const land = await r.lander(ivy, t2);
       await refuses("invalid_transition", () => land(t2), new RegExp(`task ${t1} holds the first place \\(reserved after its author reached the refresh-round cap\\) and waits for its approved submission`));
-      await refuses("invalid_transition", () => land(t1), /no approved submission in the landing queue/);
+      await refuses("invalid_transition", () => land(t1), new RegExp(`task ${t1} holds a reserved place in the landing queue of branch main but has no approved submission there`));
+      // Second review: the owner cannot land the reserved task unqueued either (the queue is not empty), and is told why.
+      await refuses("invalid_transition", () => r.ops.checkLanding(r.w.owner, { taskId: t1, projectId: r.w.project, submissionId: undefined }), /holds a reserved place .* lands from that place once its submission is approved/);
       await refuses("invalid_transition", () => r.ops.checkLanding(r.w.owner, { taskId: t3, projectId: r.w.project, submissionId: undefined }), /not empty and task .* has nothing in it/);
       assert.equal(r.calls.length, 0);
       // A newer task queued meanwhile goes behind; the reserved task's re-approval takes its reserved place (first), not the back, and lands; the landing ends the reservation.
@@ -330,5 +332,28 @@ for (const backend of backends) {
       assert.deepEqual(r.told.filter((t) => t.why === "round"), []);
       assert.ok([...rounds.values()].some((n) => n >= CAP), "some task reached the cap, so reservations were used");
     } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a full queue whose first place is reserved still takes that task's re-approval, so the queue cannot stay held (card P10, reservations, second review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      const queue = LandingQueueService.withEpoch(w.storage, w.epoch, { clock: w.clock.now, pause: async () => undefined });
+      const tid = (n: number): string => `task-${sbm(n).slice(4)}`;
+      const add = (n: number, s: number) => queue.enqueue({ commandId: `add-${n}-${s}`, actor: "owner", projectId: w.project, branch: "main", submissionId: sbm(s), taskId: tid(n), base: oid(1), tree: oid(2), author: "agent:ann" });
+      // Task 0 is first and reaches the cap; its approval is taken back (the controller keeps its place), and the queue is then filled to its bound behind it.
+      await add(0, 1);
+      await queue.reserve({ commandId: "res-0", actor: "service:landing-queue", projectId: w.project, branch: "main", taskId: tid(0), round: 3, cap: 3 });
+      await queue.remove({ commandId: "wd-0", actor: "service:landing-queue", projectId: w.project, branch: "main", taskId: tid(0), reason: "approval taken back", allowed: () => true, keepReservation: true });
+      for (let n = 1; n <= LANDING_QUEUE_LIMITS.entries; n++) await add(n, 1000 + n);
+      const full = await queue.get(w.project, "main");
+      assert.equal(full.entries.length, LANDING_QUEUE_LIMITS.entries);
+      assert.deepEqual([frontOf(full)?.taskId, frontOf(full)?.entry], [tid(0), undefined], "the reserved place without an entry is first");
+      // Another task is refused at the bound; the reserved task's re-approval takes its place (first), so it can land and the queue moves again.
+      await refuses("unavailable", () => add(LANDING_QUEUE_LIMITS.entries + 1, 5000), /at most 200/);
+      const back = await add(0, 2);
+      assert.deepEqual([back.position, back.entry.seq], [1, 1]);
+      assert.equal(frontOf(await queue.get(w.project, "main"))?.entry?.submissionId, sbm(2));
+    } finally { await store.close(); }
   });
 }

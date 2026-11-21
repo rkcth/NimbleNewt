@@ -191,7 +191,9 @@ export class LandingQueueService {
           entries[ofTask] = { seq: old.seq, submissionId: command.submissionId, taskId, base: command.base, tree: command.tree, author, queuedAt: old.queuedAt, queuedBy: command.actor, replaced: old.submissionId, ...(submittedAt === undefined ? {} : { submittedAt }) };
           next = { ...kept, nextSeq, entries };
         } else {
-          if (entries.length >= LANDING_QUEUE_LIMITS.entries) throw new DomainError("unavailable", `the landing queue of branch ${branch} already holds ${entries.length} submissions, at most ${LANDING_QUEUE_LIMITS.entries}; land or remove some first`);
+          // A task with a reserved place is not refused at the bound (second review): while its place is first nothing else lands, so refusing it there would hold the queue until someone took something out.
+          // Reservations are bounded on their own, so the queue holds at most `entries` + `reservations` entries.
+          if (reserved === undefined && entries.length >= LANDING_QUEUE_LIMITS.entries) throw new DomainError("unavailable", `the landing queue of branch ${branch} already holds ${entries.length} submissions, at most ${LANDING_QUEUE_LIMITS.entries}; land or remove some first`);
           outcome = { already: false };
           // A task with a reserved place takes that place again (card P10): its turn is not lost while it was away from the queue.
           if (reserved !== undefined) {

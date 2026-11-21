@@ -198,6 +198,8 @@ export class LandingQueueOps {
     if (mine === undefined) {
       if (by.kind === "owner" && head === undefined) return undefined;
       if (head !== undefined && head.taskId !== call.taskId && by.kind === "owner") return behind(`the landing queue of branch ${branch} is not empty and task ${call.taskId} has nothing in it: ${firstIs}${head.entry === undefined ? "" : " lands first"}`);
+      // The task's own reserved place (card P10): it lands from that place once its submission is approved and queued, never as an unqueued landing (the owner's included).
+      if ((q.reservations ?? []).some((r) => r.taskId === call.taskId)) throw new DomainError("invalid_transition", `task ${call.taskId} holds a reserved place in the landing queue of branch ${branch} but has no approved submission there; it lands from that place once its submission is approved (the controller queues it then, or landing.queue.add)`);
       throw new DomainError("invalid_transition", `task ${call.taskId} has no approved submission in the landing queue of branch ${branch}; an integrator lands only queued submissions (landing.queue.add)`);
     }
     if (head!.taskId !== call.taskId) return behind(`task ${call.taskId}'s submission ${mine.submissionId} is number ${q.entries.indexOf(mine) + 1} in the landing queue of branch ${branch}; ${firstIs}${head!.entry === undefined ? "" : " lands first"}`);
