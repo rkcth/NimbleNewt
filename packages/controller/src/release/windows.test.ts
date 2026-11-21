@@ -240,7 +240,7 @@ for (const backend of backends) {
     const summer = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2027-07-01", "02:00") });
     assert.equal(summer.opensAt, "2027-07-01T01:00:00.000Z");
     const listed = await w.list(c.agent);
-    assert.deepEqual(listed.windows.map((x) => x.status), ["cancelled", "scheduled", "cancelled"], "newest opening first (November, July, March)");
+    assert.deepEqual(listed.windows.map((x) => [x.status, x.date]), [["scheduled", "2027-07-01"], ["cancelled", "2027-11-07"], ["cancelled", "2027-03-14"]], "the open window first, then newest opening first (November, March)");
     await refuses("invalid_command", () => w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at("2027-12-01") }), /within a year/);
   });
 
@@ -378,6 +378,24 @@ for (const backend of backends) {
     assert.equal((await w.get(c.owner, open)).status, "activated", "the open window was reached by the sweep");
     assert.equal((await w.list(c.owner)).windows.length, ids.length);
     assert.equal(c.pointer(), r.id);
+  });
+
+  suite("the open window leads the list even behind more than a page of ended windows that open later (cancelled ones set for next month), so chat and status always see it", async (c) => {
+    const r = await c.ready("v1");
+    const w = c.win();
+    // 51 windows set for later dates and cancelled: newest opening first, they alone would fill the 50 listed.
+    for (let i = 0; i < 51; i++) {
+      const s = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at(new Date(Date.parse("2026-12-01T00:00:00.000Z") + i * 86_400_000).toISOString().slice(0, 10)) });
+      await w.cancel(c.owner, { commandId: cid("x"), windowId: s.windowId });
+    }
+    const open = await w.set(c.owner, { commandId: cid("w"), candidateId: r.id, digest: r.digest, ...at() });
+    const listed = await w.list(c.owner);
+    assert.equal(listed.truncated, true);
+    assert.equal(listed.windows.length, 50);
+    assert.deepEqual([listed.windows[0]!.windowId, listed.windows[0]!.status], [open.windowId, "scheduled"], "the open window first");
+    assert.equal(listed.windows.filter((x) => x.status === "scheduled").length, 1);
+    assert.ok(listed.windows.slice(1).every((x, i, all) => i === 0 || all[i - 1]!.opensAt >= x.opensAt), "the rest newest opening first");
+    assert.equal(listed.windows[1]!.date, "2027-01-20", "the newest ended window comes next");
   });
 
   suite("a long wait whose count of running attempts goes up and down keeps saying what it waits for (no repeated step names after the history is full)", async (c) => {

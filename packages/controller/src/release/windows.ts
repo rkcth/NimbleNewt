@@ -208,10 +208,15 @@ export class ReleaseWindowService {
     return this.#view(by, found.revision, found.body as unknown as WindowBody);
   }
 
-  /** The newest windows first (by opening time), with the quarantined releases. */
+  /**
+   * The open windows first (scheduled, prepared or activated: at most one, as `set` allows), then the rest newest opening first, with the quarantined releases. The open window always leads the page,
+   * so a reader of the first 50 (the chat's "cancel the maintenance window", the status answer's first ten lines) cannot miss it behind ended windows that open later (a cancelled window set for
+   * next month, say).
+   */
   async list(by: Principal): Promise<{ windows: readonly WindowView[]; quarantined: readonly QuarantineBody[]; truncated: boolean }> {
     mayRead(by);
-    const all = (await this.#all()).sort((a, b) => (a.body.opensAt < b.body.opensAt ? 1 : a.body.opensAt > b.body.opensAt ? -1 : 0));
+    const open = (w: { body: WindowBody }): number => (OPEN_STATES.has(w.body.status) ? 0 : 1);
+    const all = (await this.#all()).sort((a, b) => open(a) - open(b) || (a.body.opensAt < b.body.opensAt ? 1 : a.body.opensAt > b.body.opensAt ? -1 : 0));
     const windows: WindowView[] = [];
     for (const w of all.slice(0, WINDOW_LIMITS.listed)) windows.push(await this.#view(by, w.revision, w.body));
     const quarantined = (await this.#runner.list(QUARANTINE, { limit: WINDOW_LIMITS.listed })).map((a) => a.body as unknown as QuarantineBody);

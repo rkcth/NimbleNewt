@@ -401,6 +401,75 @@ export function durationInWords(seconds: number, text: string): boolean {
   return false;
 }
 
+/** The owner's message made ready for reading numbers: curly quotes straightened, lowercased, and record IDs (anything shaped like `rcn-...`) and ISO days (`2026-11-21`) blanked, so their digits are not read as a length, a size or a time. */
+const numbersOf = (text: string): string => text.replace(/[‘’]/g, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ").replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ");
+const NUMBER_WORDS = (): string => Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|");
+const numberOf = (word: string): number => (/^\d/.test(word) ? Number(word) : DURATION_NUMBERS[word]!);
+
+/**
+ * Whether the owner's own words give this length of a maintenance window in minutes (card K07): a length said outright ("for 90 minutes", "an hour", "2 hrs", "half an hour"), hours and minutes
+ * together ("an hour and a half", "2 hours and 30 minutes", "1h30m"), or an end time after the start the proposal shows ("from 2 to 4am", "3am until 4:30", "between 2 and 3", "2-4am"). An end time
+ * written without am or pm is read both ways round the clock; the length the window would be set with is still shown on the proposal for the owner to confirm. A number the model chose is not the
+ * owner's, so a length found nowhere in the words is asked for instead of proposed.
+ */
+export function windowLengthInWords(minutes: number, start: unknown, text: string): boolean {
+  if (!Number.isSafeInteger(minutes) || minutes <= 0) return false;
+  if (durationInWords(minutes * 60, text)) return true;
+  const t = numbersOf(text);
+  const n = NUMBER_WORDS();
+  // Hours and minutes said together, or an hour and a half.
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(\\d+|${n})[ -]?(?:hours?|hrs?|h)(?:,?\\s*and)?\\s*(\\d+|${n})[ -]?(?:minutes?|mins?|m)\\b`, "g"))) if (numberOf(m[1]!) * 60 + numberOf(m[2]!) === minutes) return true;
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(\\d+|${n})\\s+hours?\\s+and\\s+a\\s+half\\b`, "g"))) if (numberOf(m[1]!) * 60 + 30 === minutes) return true;
+  // An end time after the start: "to 4", "until 4:30am", "till noon", "and 3" (between 2 and 3), "2-4am".
+  const at = typeof start === "string" ? /^(\d{2}):(\d{2})$/.exec(start) : null;
+  if (at === null) return false;
+  const from = Number(at[1]) * 60 + Number(at[2]);
+  const ends: number[] = [];
+  if (/\b(?:to|until|till|til|through|thru)\s+midnight\b/.test(t)) ends.push(0);
+  if (/\b(?:to|until|till|til|through|thru)\s+noon\b/.test(t)) ends.push(12 * 60);
+  const clock = "(\\d{1,2})(?::(\\d{2}))?\\s*(a\\.?m\\.?|p\\.?m\\.?)?(?![0-9:])";
+  const startClock = "\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?";
+  const endAfter = new RegExp(`(?:\\b(?:to|until|till|til|through|thru)\\s+|\\bbetween\\s+${startClock}\\s+and\\s+|(?<![0-9.:])${startClock}\\s*[-–]\\s*)${clock}`, "g");
+  for (const m of t.matchAll(endAfter)) {
+    const h = Number(m[1]);
+    const mm = m[2] === undefined ? 0 : Number(m[2]);
+    if (h > 24 || mm > 59) continue;
+    const half = m[3]?.[0];
+    const hours = half === "a" ? [h % 12] : half === "p" ? [(h % 12) + 12] : h > 12 ? [h % 24] : [h % 24, (h + 12) % 24];
+    for (const hh of hours) ends.push(hh * 60 + mm);
+  }
+  return ends.some((end) => (end - from + 1440) % 1440 === minutes);
+}
+
+/** Whether the owner's own words give this preparation lead in minutes (card K07): a length said outright, or none at all ("0 minutes", "no lead time", "no preparation lead"). */
+export function leadInWords(minutes: number, text: string): boolean {
+  if (!Number.isSafeInteger(minutes) || minutes < 0) return false;
+  if (minutes === 0) return /(?:^|[^0-9.])(?:0|zero)\s*(?:minutes?|mins?|m)\b|\bno\s+(?:preparation\s+)?lead\b/.test(numbersOf(text));
+  return durationInWords(minutes * 60, text);
+}
+
+const SIZE_UNITS: Readonly<Record<string, readonly number[]>> = {
+  b: [1], byte: [1], bytes: [1],
+  kb: [1e3, 1024], kilobyte: [1e3, 1024], kilobytes: [1e3, 1024], kib: [1024], k: [1e3, 1024],
+  mb: [1e6, 1024 ** 2], megabyte: [1e6, 1024 ** 2], megabytes: [1e6, 1024 ** 2], mib: [1024 ** 2], meg: [1e6, 1024 ** 2], megs: [1e6, 1024 ** 2],
+  gb: [1e9, 1024 ** 3], gigabyte: [1e9, 1024 ** 3], gigabytes: [1e9, 1024 ** 3], gib: [1024 ** 3], gig: [1e9, 1024 ** 3], gigs: [1e9, 1024 ** 3], g: [1e9, 1024 ** 3],
+  tb: [1e12, 1024 ** 4], terabyte: [1e12, 1024 ** 4], terabytes: [1e12, 1024 ** 4], tib: [1024 ** 4], t: [1e12, 1024 ** 4],
+};
+/**
+ * Whether the owner's own words give this amount of free space in bytes (card K07, a window's `minFreeBytes`): "5 GB", "2 gigabytes", "500 MiB", "1.5 TB", "a gigabyte", "0 bytes". A size in
+ * gigabytes and the like may be read in powers of ten or of 1024 (people mean either); the exact number of bytes is shown on the proposal for the owner to confirm.
+ */
+export function sizeInWords(bytes: number, text: string): boolean {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) return false;
+  const t = numbersOf(text).replace(/(\d),(?=\d{3}\b)/g, "$1");
+  const units = Object.keys(SIZE_UNITS).sort((x, y) => y.length - x.length).join("|");
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(\\d+(?:\\.\\d+)?|${NUMBER_WORDS()}|zero)[ -]?(${units})\\b`, "g"))) {
+    const n = m[1] === "zero" ? 0 : numberOf(m[1]!);
+    if (SIZE_UNITS[m[2]!]!.some((u) => Math.round(n * u) === bytes)) return true;
+  }
+  return false;
+}
+
 /** The month names an owner may write for a date, abbreviations included because people write `Nov 30`. */
 const MONTH_WORDS: Readonly<Record<string, number>> = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4, may: 5, jun: 6, june: 6,

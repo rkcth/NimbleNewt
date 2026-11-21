@@ -2931,7 +2931,7 @@ Result: The window.
 
 #### `release.window.list`
 
-Owner, or an agent granted exactly `release.manage` (card K07): the maintenance windows, newest opening first (up to 50), and the releases quarantined after a failed window.
+Owner, or an agent granted exactly `release.manage` (card K07): the maintenance windows, the open one (scheduled, prepared or activated) first and then the rest newest opening first (up to 50), and the releases quarantined after a failed window.
 
 Arguments:
 
