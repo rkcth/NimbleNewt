@@ -255,7 +255,7 @@ test("a SID is redacted whatever follows it and however long it is; only the red
   const fifteen = "S-1-5-21-1-2-3-4-5-6-7-8-9-10-11-12-13-14";
   assert.equal(redactSid(fifteen), "S-1-5-21-<domain>-<account>");
   assert.equal(redact(`x ${fifteen} y`, names), "x S-1-5-21-<domain>-<account> y");
-  assert.ok(!/1111|2222/.test(redact("S-1-5-21-1111-2222-3-4-5-6-7-8-9-10-11-12-13-14-15-16-17", names)));
+  assert.equal(redact("S-1-5-21-1111-2222-3-4-5-6-7-8-9-10-11-12-13-14-15-16-17", names), "<sid>", "a longer run is not a SID: it goes whole, the numbers past the fifteenth included");
   // Only the heads redactSid writes are exempt, and only before "-<": a raw head elsewhere, or another SID before "-<", is judged as a SID.
   assert.equal(scrub("S-1-5-21-<domain>-500 S-1-12-1-<account> S-1-5-5-<session>", names), "S-1-5-21-<domain>-500 S-1-12-1-<account> S-1-5-5-<session>");
   assert.equal(redact("S-1-5-21-77-<x>", names), "S-1-5-21-<domain>-<account>-<x>");
@@ -419,4 +419,67 @@ test("cutWhole: text not yet redacted is cut between words, so no half name, SID
   assert.equal(cutWhole("sid S-1-5-21-1111111111-2222", 20), "sid …");
   assert.equal(cutWhole("mail robert@example.com", 15), "mail …");
   assert.ok(!/robe|S-1-5-21-1/.test(redact(cutWhole("granted PC\\robert:(F) sid S-1-5-21-1111111111-2222", 15), { users: ["robert"], hosts: ["PC"] })));
+});
+
+test("a run of more than 15 sub-authorities (not a SID) goes whole, wherever it is written, and the last gate passes what is left (seeded random)", () => {
+  // Exactly 15 is still a SID of its class; 16 or more is `<sid>`, kept prefix or not, with the icacls asterisk kept, in an access-list line and before a placeholder.
+  const run = (n: number, head = "S-1-5-21"): string => `${head}-${Array.from({ length: n - (head.split("-").length - 3) }, (_, i) => String(70001 + i)).join("-")}`;
+  assert.equal(redact(`x ${run(15)} y`, names), "x S-1-5-21-<domain>-<account> y");
+  assert.equal(redact(`x ${run(16)} y`, names), "x <sid> y");
+  assert.equal(redact(`x *${run(16, "S-1-5-32")} y`, names), "x *<sid> y");
+  assert.equal(redact(`C:\\x ${run(20, "S-1-15-2")}:(I)(RX)`, names), "C:\\x <user>:(I)(RX)", "in an access-list line the account is a placeholder either way");
+  assert.equal(redact(`${run(18)}-<x>`, names), "<sid>-<x>");
+  assert.equal(redact(redact(`a ${run(30)} b`, names), names), "a <sid> b", "redacting twice changes nothing");
+  assert.equal(scrub(`a ${run(30)} b`, names), "a <sid> b");
+  assert.equal(sidClass(run(16)), "not a SID");
+  // Random lengths 16 to 60, random numbers, random wrappings and letter case: no number of the run survives redact or the last gate.
+  let seed = 20261121;
+  const rnd = (): number => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 2 ** 32;
+  const wraps = [(t: string) => t, (t: string) => `"${t}"`, (t: string) => `(${t})`, (t: string) => `owner ${t}:(OI)(CI)(F)`, (t: string) => `{"sid":"${t}"}`, (t: string) => `*${t}`, (t: string) => `${t}-<x>`, (t: string) => `S-1-5-18 ${t}`, (t: string) => t.toLowerCase()];
+  for (let k = 0; k < 2000; k++) {
+    const nums = Array.from({ length: 16 + Math.floor(rnd() * 45) }, () => String(100000 + Math.floor(rnd() * 4e9)));
+    const text = wraps[Math.floor(rnd() * wraps.length)]!(`S-1-${["5", "12", "15", "9"][Math.floor(rnd() * 4)]!}-${nums.join("-")}`);
+    for (const out of [redact(text, names), scrub(text, names)]) for (const n of nums) assert.ok(!out.includes(n), `${text} -> ${out}`);
+  }
+  // Linear on a very long run.
+  const started = process.hrtime.bigint();
+  assert.equal(scrub(`S-1-5${"-1234".repeat(600_000)}`, names, 100), "<sid>");
+  assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 1500);
+});
+
+test("e-mail addresses in any script are found: a non-ASCII local part, an internationalised domain in Unicode or ASCII form, and their names elsewhere in any letter case", { timeout: 30_000 }, () => {
+  // Unicode local parts and domains, as the ASCII ones: the address goes, and the local part and its pieces of four or more characters go elsewhere too.
+  assert.equal(redact("mail jürgen.müller@beispiel.de then JÜRGEN and Müller", names), "mail <email> then <user> and <user>");
+  assert.equal(redact("пример@почта.рф и ПРИМЕР", names), "<email> и <user>");
+  assert.equal(redact("用户@例子.中国 ok", names), "<email> ok");
+  assert.equal(redact("ζωή@παράδειγμα.ελ, ΖΩΉ", names), "<email>, <user>");
+  assert.equal(redact("राम@उदाहरण.भारत", names), "<email>");
+  assert.equal(redact("x@b.xn--p1ai and y@xn--e1afmkfd.xn--p1ai.", names), "<email> and <email>.");
+  assert.equal(redact("𝐣𝐨𝐞@ex.com", names), "<email>");
+  assert.equal(redact("şebnem.öz@örnek.com.tr; DESKTOP-4F2K9\\şebnem", names), "<email>; <host>\\<user>");
+  // Not addresses: versions, scoped packages, no domain end, no @, ordinary text in other scripts.
+  for (const keep of ["pkg@1.2.3 @scope/x@latest", "ä@b", "ä@b.1", "Привет, как дела?", "こんにちは世界", "ab@c"]) assert.equal(redact(keep, names), keep);
+  // The last gate withholds an address in any script that only appears once placeholders are taken out.
+  assert.equal(scrub("ü@ab<sid>.рф", names), WITHHELD);
+  // A name taken from an address is searched for elsewhere exactly as if it had been given as a known name: the one-pass search compares letters as the
+  // case-insensitive searches do (an upper-case Ü is the ü of the address; a long s or the Kelvin sign is not an ASCII letter).
+  for (const text of ["jürgen@ex.de JÜRGEN jÜrGeN", "ſam.kelly@ex.com SAM KELLY ſam", "\u212Aelvin.x@ex.com KELVIN \u212Aelvin", "ÆSIR.ÅSA@ex.no æsir åsa", "ǅemal@ex.com ǆemal Ǆemal"]) {
+    const local = text.split("@")[0]!;
+    const pieces = [local, ...local.split(/[._%+-]/).filter((p) => p.length >= 4)];
+    assert.equal(redact(text, names), redact(text, { ...names, users: [...names.users, ...pieces] }), text);
+  }
+  // Linear: 3 MB of one non-ASCII letter, of CJK, of astral letters, of emoji, of letters and @ alternating, and many Unicode addresses on one line.
+  const big = 3_000_000;
+  for (const [kind, text] of [["ä", "ä".repeat(big)], ["CJK", "用".repeat(big)], ["astral letters", "𝐣".repeat(big / 2)], ["emoji", "🙂".repeat(big / 2)], ["letter and @", "ä@".repeat(big / 2)], ["dots", `ä@${"ä.".repeat(big / 2)}1`]] as const) {
+    const started = process.hrtime.bigint();
+    const out = scrub(text, names, 100);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 1500, `${kind}: ${ms} ms`);
+    assert.ok(out.length < 200, kind);
+  }
+  const many = Array.from({ length: 40_000 }, (_, i) => `ü${i.toString(36)}@пример.рф `).join("");
+  const started = process.hrtime.bigint();
+  const out = redact(`${many}ölçek@ex.com then ÖLÇEK`, names);
+  assert.ok(Number(process.hrtime.bigint() - started) / 1e6 < 1500);
+  assert.ok(out.endsWith("<email> then <user>") && !/ü[0-9a-z]+@/.test(out), out.slice(-60));
 });

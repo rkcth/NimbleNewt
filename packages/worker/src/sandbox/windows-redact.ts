@@ -87,8 +87,11 @@ export function redactAccountName(account: string): string {
   if (parts.length === 2 && NAMED_AUTHORITIES.test(parts[0]!.trim()) && /^[A-Za-z0-9 ._$&'-]{1,80}$/.test(parts[1]!)) return a;
   return "<user>";
 }
-/** A SID in text, as long as it goes (up to 15 sub-authorities); a longer run of numbers is matched in parts, each judged on its own. */
-const SID_IN_TEXT = /(\*?)(S-1-\d+(?:-\d+){1,15})(?!\d)/gi;
+/**
+ * A SID in text, as long as its run of numbers goes. A run of more than 15 sub-authorities (more than Windows allows, so not a SID) is matched whole and becomes `<sid>`
+ * (`redactSid`): matched in parts, the numbers past the fifteenth stayed as plain text.
+ */
+const SID_IN_TEXT = /(\*?)(S-1-\d+(?:-\d+)+)(?!\d)/gi;
 /** The heads `redactSid` writes in front of a placeholder (`S-1-5-21-<domain>-...`, `S-1-12-1-<account>`, `S-1-5-5-<session>`, `S-1-5-83-<vm>`): only these, followed by `-<`, are left as they are. */
 const REDACTED_HEADS = new Set(["S-1-5-21", "S-1-12-1", "S-1-5-5", "S-1-5-83"]);
 const isRedactedHead = (sid: string, after: string): boolean => after.startsWith("-<") && REDACTED_HEADS.has(sid.toUpperCase());
@@ -97,9 +100,25 @@ const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 /** A run of path separators. One character class, not an alternation of `\\\\`, `\\` and `/`: those split a run of backslashes in exponentially many ways, and a home-folder
  * search that failed after two such runs (`C:` + 24 backslashes + `Users` + 24 backslashes) took minutes. */
 const SEP = String.raw`[\\/]+`;
-/** An e-mail address, tried only where `replaceEmails` starts it (sticky). */
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/y;
-const isEmailLocal = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
+/**
+ * An e-mail address, tried only where `replaceEmails` starts it (sticky). The local part and the domain may be written in any script (`jürgen@beispiel.de`,
+ * `пример@почта.рф`, `用户@例子.中国`): letters, digits and combining marks of every script, so an address with a non-ASCII local part or an internationalised domain written
+ * in Unicode is found as the ASCII ones are. The last label is letters (with their marks) or an ASCII-encoded one (`xn--p1ai`).
+ */
+const EMAIL = /[\p{L}\p{N}\p{M}._%+-]+@[\p{L}\p{N}\p{M}-]+(?:\.[\p{L}\p{N}\p{M}-]+)*\.(?:xn--[A-Za-z0-9-]+|\p{L}[\p{L}\p{M}]+)/uy;
+/** One character of an address's local part (the same set as `EMAIL`'s local part), and a run of them (sticky). */
+const EMAIL_LOCAL_CHAR = /[\p{L}\p{N}\p{M}._%+-]/uy;
+const EMAIL_LOCAL_RUN = /[\p{L}\p{N}\p{M}._%+-]+/uy;
+const isAsciiEmailLocal = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
+/** Whether the character (a whole code point) at `i` can be part of a local part. */
+const isEmailLocalAt = (text: string, i: number): boolean => {
+  const c = text.charCodeAt(i);
+  if (c < 128) return isAsciiEmailLocal(c);
+  EMAIL_LOCAL_CHAR.lastIndex = i;
+  return EMAIL_LOCAL_CHAR.test(text);
+};
+/** The length of the code point at `i` (2 for a surrogate pair), so a search never starts inside one. */
+const codePointLength = (text: string, i: number): number => { const c = text.charCodeAt(i); if (c < 0xd800 || c > 0xdbff) return 1; const d = text.charCodeAt(i + 1); return d >= 0xdc00 && d <= 0xdfff ? 2 : 1; };
 /**
  * Replaces every e-mail address in `text` with what `as` returns, finding the same addresses as a plain global search with `EMAIL` but in linear time. A plain search
  * retries at every character of a long run of name characters with no `@` (40 KB of letters took over a second, 3 MB never finished); here an address is tried only at
@@ -111,22 +130,38 @@ function replaceEmails(text: string, as: (email: string) => string): string {
   let copied = 0;
   let i = 0;
   while (i < text.length) {
-    if (!isEmailLocal(text.charCodeAt(i))) { i++; continue; }
+    if (!isEmailLocalAt(text, i)) { i += codePointLength(text, i); continue; }
     EMAIL.lastIndex = i;
     const m = EMAIL.exec(text);
     if (m !== null) { out += text.slice(copied, i) + as(m[0]); i = copied = i + m[0].length; continue; }
-    while (i < text.length && isEmailLocal(text.charCodeAt(i))) i++;
+    EMAIL_LOCAL_RUN.lastIndex = i;
+    i += EMAIL_LOCAL_RUN.exec(text)![0].length;
   }
   return copied === 0 ? text : out + text.slice(copied);
 }
 const hasEmail = (text: string): boolean => { let found = false; replaceEmails(text, (m) => { found = true; return m; }); return found; };
 /**
- * Which of `words` occur anywhere in `text`, ignoring the case of A to Z (as the case-insensitive searches below do for these ASCII words), in one pass over the text
- * (Aho-Corasick): searching once per word took time growing with the number of words times the length of the text.
+ * A UTF-16 code unit as the case-insensitive searches below compare it (a regular expression with the `i` flag and without `u`): its upper-case form when that is one code
+ * unit, except that a non-ASCII character never becomes an ASCII one (`ſ` is not `S`, the Kelvin sign is not `K`). Two characters match when these are equal. Cached.
+ */
+const CANON = new Uint16Array(65536);
+function canon(c: number): number {
+  if (c < 128) return c >= 97 && c <= 122 ? c - 32 : c;
+  const known = CANON[c]!;
+  if (known !== 0) return known;
+  const up = String.fromCharCode(c).toUpperCase();
+  const u = up.length === 1 && up.charCodeAt(0) >= 128 ? up.charCodeAt(0) : c;
+  CANON[c] = u;
+  return u;
+}
+/**
+ * Which of `words` occur anywhere in `text`, ignoring case exactly as the case-insensitive searches below do (`canon`; a name from an address in another script, such as
+ * `jürgen` against `JÜRGEN`, compares as those searches compare it), in one pass over the text (Aho-Corasick): searching once per word took time growing with the number
+ * of words times the length of the text.
  */
 function occurring(text: string, words: readonly string[]): Set<string> {
   interface Node { readonly next: Map<number, Node>; fail: Node | null; readonly ends: string[]; seen: boolean }
-  const lower = (c: number): number => (c >= 65 && c <= 90 ? c + 32 : c);
+  const lower = canon;
   const root: Node = { next: new Map(), fail: null, ends: [], seen: false };
   for (const w of words) {
     let n = root;
