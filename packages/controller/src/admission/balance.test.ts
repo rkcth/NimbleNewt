@@ -28,6 +28,12 @@ test("the allocation as places: the ceiling always leaves production one place, 
   assert.deepEqual(balancePlaces(4, { floor: 0, ceiling: 0 }), { reserved: 0, ceiling: 0, protectedP: 4 });
   assert.deepEqual(balancePlaces(1, { floor: 50, ceiling: 100 }), { reserved: 1, ceiling: 1, protectedP: 0 }, "a single place: the two take turns");
   assert.deepEqual(balancePlaces(10, { floor: 20, ceiling: 30 }), { reserved: 2, ceiling: 3, protectedP: 7 });
+  // A share the owner allows is never rounded down to none: a floor above 0 always gets its place, and a ceiling above 0% lets one attempt run (0% is how the owner says never).
+  assert.deepEqual(balancePlaces(4, { floor: 10, ceiling: 20 }), { reserved: 1, ceiling: 1, protectedP: 3 }, "20% of 4 places is less than one: one place, so the 10% floor is kept");
+  assert.deepEqual(balancePlaces(4, { floor: 0, ceiling: 20 }), { reserved: 0, ceiling: 1, protectedP: 3 });
+  assert.deepEqual(balancePlaces(1, { floor: 10, ceiling: 50 }), { reserved: 1, ceiling: 1, protectedP: 0 }, "a single place with a floor: the two take turns, improvement work is not shut out");
+  assert.deepEqual(balancePlaces(1, { floor: 0, ceiling: 0 }), { reserved: 0, ceiling: 0, protectedP: 1 });
+  assert.deepEqual(balancePlaces(2, { floor: 100, ceiling: 100 }), { reserved: 1, ceiling: 1, protectedP: 1 }, "a floor above what the places allow keeps production its one place");
 });
 
 test("only figures the owner set count; a damaged figure or a floor above the ceiling is damage, not a guess", async () => {
@@ -99,7 +105,8 @@ for (const backend of backends) {
     assert.ok(where.state === "running" && where.entry.lent === LENT_REASON, JSON.stringify(where));
     for (const x of p) { const w = await admission.where(x.id); assert.ok(w.state === "running" && w.entry.lent === undefined, "places outside the reserve are not lent"); }
     // Improvement work arrives: every place is taken, nothing running is stopped, and the view says why the reserve is short.
-    const pc = await ask("PC");
+    // On the other host, so that only the full lane (not a full host) holds it.
+    const pc = await ask("PC", { host: "host:h2" });
     assert.equal(pc.state, "waiting");
     let view = await admission.balance(owner);
     assert.deepEqual([view.places, view.running, view.waiting, view.lentTotal], [{ productive: 4, reserved: 1, ceiling: 2, protectedP: 2 }, { P: 4, PC: 0 }, { P: 0, PC: 1 }, 1]);
@@ -107,8 +114,10 @@ for (const backend of backends) {
     assert.equal(view.unmet?.short, 1);
     assert.match(view.unmet!.cause, /every productive place is taken \(4 production, 0 improvement\); 1 production attempt was lent a reserved place .* comes back as it ends; nothing running is stopped/);
     // A higher-priority production request does not take the next free place from the waiting improvement work.
-    const urgent = await ask("P", { priority: 9 });
+    const urgent = await ask("P", { priority: 9, host: "host:h2" });
     assert.equal(urgent.state, "waiting");
+    const full = await admission.where(urgent.id);
+    assert.ok(full.state === "waiting" && full.balanceReason === undefined, `no place is free, so the lane holds it, not the reserve: ${JSON.stringify(full)}`);
     await release(p[0]!.id);
     assert.equal((await admission.where(pc.id)).state, "running", "the freed place went to the improvement work");
     const held = await admission.where(urgent.id);
@@ -162,6 +171,45 @@ for (const backend of backends) {
     assert.deepEqual((await classes()).running, ["P", "PC", "PC"], "the freed place is not given to improvement work over the new ceiling");
     const view = await admission.balance(owner);
     assert.deepEqual([view.allocation, view.places.ceiling, view.running.PC], [{ floor: 0, ceiling: 25 }, 1, 2]);
+  });
+
+  suite("a ceiling or floor smaller than one place still lets improvement work run: never shut out by rounding", async ({ admission, allocate, ask, release }) => {
+    await allocate({ "workClass.pcFloor": 10, "workClass.pcCeiling": 20 });
+    for (let i = 0; i < 3; i++) assert.equal((await ask("P")).state, "running");
+    const pc = await ask("PC");
+    assert.equal(pc.state, "running", "20% of 4 places still lets one improvement attempt run");
+    const second = await ask("PC");
+    assert.equal(second.state, "waiting");
+    await release(pc.id);
+    assert.equal((await admission.where(second.id)).state, "running", "the place kept for improvement work (10% of 4 rounds up to one) goes to it");
+    const third = await ask("PC");
+    const why = await admission.where(third.id);
+    assert.ok(why.state === "waiting");
+    assert.match(why.balanceReason ?? "", /1 improvement \(PC\) attempt is already running, the most the owner's P\/PC allocation allows \(workClass.pcCeiling 20% of 4 places, rounded up to one place so a ceiling above 0% lets improvement work run\)/);
+  });
+
+  suite("a reserved place is lent rather than left empty when the only improvement work that could use it is held back behind older work that has waited too long", async ({ admission, allocate, ask, release }) => {
+    // One small host (h1, 4 CPUs) and a big one; four places, patience 1 so one skip makes a request first in line.
+    await admission.setCapacity({ commandId: cid("c"), actor: "owner:rob", host: "host:h1", capacity: { cpus: 4, memoryMb: 65_536 } });
+    await admission.setLimits({ commandId: cid("l"), actor: "owner:rob", limits: { ...DEFAULT_LIMITS, perHost: 4, patience: 1 } });
+    await allocate({ "workClass.pcFloor": 25, "workClass.pcCeiling": 50 });
+    const onH1 = await ask("P", { cpus: 2 });
+    await ask("P", { host: "host:h2" }); await ask("P", { host: "host:h2" });
+    const bigPC = await ask("PC", { cpus: 3 });
+    assert.equal(bigPC.state, "waiting", "h1 has no room for 3 more CPUs");
+    const smallPC = await ask("PC", { cpus: 1 });
+    assert.equal(smallPC.state, "running", "the small one fits h1 and passes the big one, which is now first in line for h1");
+    const smallPC2 = await ask("PC", { cpus: 1 });
+    const p = await ask("P", { host: "host:h2" });
+    assert.deepEqual([smallPC2.state, p.state], ["waiting", "waiting"]);
+    // A place frees and is owed to improvement work, but the only improvement work that fits must let the big one go first on h1: production is lent the place instead of it standing empty.
+    await release(smallPC.id);
+    const lent = await admission.where(p.id);
+    assert.ok(lent.state === "running" && lent.entry.lent === LENT_REASON, JSON.stringify(lent));
+    assert.equal((await admission.where(smallPC2.id)).state, "waiting");
+    // h1 frees: the big improvement request goes first, as its wait earned.
+    await release(onH1.id);
+    assert.equal((await admission.where(bigPC.id)).state, "running");
   });
 
   suite("with a single place the two kinds take turns, and production that takes it in turn is marked so", async ({ admission, allocate, ask, release }) => {

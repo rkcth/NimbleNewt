@@ -74,5 +74,25 @@ test("the owner sets the P/PC allocation in chat, admission keeps the reserved p
     await admission.release({ commandId: "rel", actor: "dispatcher", requestId: lent.id, reason: "done" });
     assert.equal((await admission.where(pc.id)).state, "running");
     assert.match(await ask(), /^Improvement work is not short of its reserved places now\.$/m);
+
+    // A changed allocation lets waiting work in at once (an admission sweep), not only at the next request or release: nothing else happens between the change and the check.
+    let k = 0;
+    const setting = async (key: string, value: number): Promise<void> => {
+      const said = `set ${key} to ${value}`;
+      const o = await turn(said, [{ kind: "policy_edit", change: { type: "setting", layer: "installation", key, value }, evidence: said, basis: "owner" }]);
+      if (o[0]!.status === "proposed") {
+        const yes = await turn(`yes, apply change ${k++}`, [{ kind: "apply_proposal", proposalId: o[0]!.proposalId, evidence: "yes, apply", basis: "owner" }]);
+        assert.equal(yes[0]!.status, "applied", JSON.stringify(yes));
+      } else assert.equal(o[0]!.status, "applied", JSON.stringify(o));
+    };
+    await setting("workClass.pcFloor", 0);
+    await setting("workClass.pcCeiling", 25);
+    const pc1 = await request("pc1", "PC");
+    const p0 = (await admission.snapshot()).running.find((e) => (e.workClass ?? "P") === "P")!;
+    await admission.release({ commandId: "rel-p", actor: "dispatcher", requestId: p0.id, reason: "done" });
+    const held = await admission.where(pc1.id);
+    assert.ok(held.state === "waiting" && /workClass.pcCeiling 25%/.test(held.balanceReason ?? ""), JSON.stringify(held));
+    await setting("workClass.pcCeiling", 50);
+    assert.equal((await admission.where(pc1.id)).state, "running", "the raised ceiling let the waiting improvement work in at once");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

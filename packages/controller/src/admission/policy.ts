@@ -57,13 +57,15 @@ export interface Balance { readonly floor: number; readonly ceiling: number }
 export interface BalancePlaces { readonly reserved: number; readonly ceiling: number; readonly protectedP: number }
 
 /**
- * Turns the percentages into places of `productive`. The ceiling is rounded down and, with two places or more, always leaves production at least one place, so a continuous improvement backlog cannot
- * starve production. A floor above 0 keeps at least one place (rounded up) so approved improvement work is never left without one, and never more than the ceiling. With a single place the two
- * kinds take turns by the usual patience rule (see `blockers`).
+ * Turns the percentages into places of `productive`. The ceiling is rounded down, but a ceiling above 0% is never less than one place (rounding a share the owner allows down to none would make it
+ * "never", which the owner says with 0%), and with two places or more it always leaves production at least one place, so a continuous improvement backlog cannot starve production. A floor above 0
+ * keeps at least one place (rounded up) so approved improvement work is never left without one, and never more than the ceiling. With a single place the two kinds take turns by the usual patience
+ * rule (see `blockers`).
  */
 export function balancePlaces(productive: number, b: Balance): BalancePlaces {
   const raw = Math.floor((productive * b.ceiling) / 100);
-  const ceiling = productive >= 2 ? Math.min(raw, productive - 1) : raw;
+  const least = b.ceiling > 0 ? Math.max(raw, 1) : 0;
+  const ceiling = productive >= 2 ? Math.min(least, productive - 1) : least;
   const reserved = b.floor <= 0 ? 0 : Math.min(Math.ceil((productive * b.floor) / 100), ceiling);
   return { reserved, ceiling, protectedP: productive - ceiling };
 }
@@ -127,13 +129,23 @@ const own = <T>(map: Readonly<Record<string, T>>, key: string): T | undefined =>
 
 export type Blocker = "lane" | "host" | "never" | "project" | "agent" | "fanin" | "improvement" | "reserved" | null;
 
-/** Whether some waiting improvement request could take a productive place if one were free (nothing but the lane holds it). Such a request is what a reserved place is kept for. */
+/**
+ * Whether some waiting improvement request could take a productive place if one were free (nothing but the lane holds it, and no request that has waited the patience number of times holds back what it
+ * needs, as `promote` does). Such a request is what a reserved place is kept for; one that `promote` would pass by cannot use the place, so production is lent it instead of the place standing empty.
+ */
 function improvementCouldUse(state: AdmissionState): boolean {
   // Asked for every waiting production request of one decision, so it is worked out once per picture (the pictures are never changed, only replaced).
   const known = couldUse.get(state);
   if (known !== undefined) return known;
   const { balance: _b, ...plain } = state; void _b;
-  const found = state.queue.some((e) => laneOf(e.class) === "productive" && workClassOf(e) === "PC" && blockers(plain, e).every((b) => b === "lane"));
+  const productive = state.queue.filter((e) => laneOf(e.class) === "productive");
+  const starved = productive.filter((e) => e.skipped >= state.limits.patience).map((e) => ({ e, held: blockers(plain, e) })).filter((s) => s.held.length > 0);
+  const found = productive.some((e) => {
+    if (workClassOf(e) !== "PC" || !blockers(plain, e).every((b) => b === "lane")) return false;
+    const keys = keysOf(e);
+    // Only the starved requests considered before this one bar it: all of them for a request that is not starved itself, the older ones for one that is.
+    return !starved.some((s) => s.e.id !== e.id && (e.skipped < state.limits.patience || s.e.seq < e.seq) && s.held.some((b) => { const k = keyOf(b, s.e); return k !== undefined && (k === "lane" || keys.includes(k)); }));
+  });
   couldUse.set(state, found);
   return found;
 }
@@ -175,8 +187,9 @@ export function blockers(state: AdmissionState, entry: Entry): Exclude<Blocker, 
       // Production may not take a place the reserve still owes to improvement work that is waiting and could run. When no improvement work could use it, the place is lent (see `promote`).
       // With a single place production has no protected share, so a production request passed over the patience number of times is served anyway: the two kinds take turns.
       const { unmet, free } = reserveOf(state, places);
+      // Only a free place can be kept: when none is free the lane is what holds production, and its reason says so.
       const yields = places.protectedP === 0 && entry.skipped >= state.limits.patience;
-      if (unmet > 0 && free <= unmet && !yields && improvementCouldUse(state)) out.push("reserved");
+      if (unmet > 0 && free > 0 && free <= unmet && !yields && improvementCouldUse(state)) out.push("reserved");
     }
   }
   return out;
@@ -220,7 +233,11 @@ export function balanceWaitReason(state: AdmissionState, entry: Entry): string |
   if (b === undefined) return null;
   const places = balancePlaces(state.limits.productive, b);
   const held = blockers(state, entry);
-  if (held.includes("improvement")) return `waiting for capacity: ${places.ceiling} improvement (PC) attempt${places.ceiling === 1 ? " is" : "s are"} already running, the most the owner's P/PC allocation allows (workClass.pcCeiling ${b.ceiling}% of ${state.limits.productive} places${places.ceiling < Math.floor((state.limits.productive * b.ceiling) / 100) ? ", less one place always kept for production" : ""})`;
+  if (held.includes("improvement")) {
+    const raw = Math.floor((state.limits.productive * b.ceiling) / 100);
+    const note = places.ceiling < raw ? ", less one place always kept for production" : places.ceiling > raw ? ", rounded up to one place so a ceiling above 0% lets improvement work run" : "";
+    return `waiting for capacity: ${places.ceiling} improvement (PC) attempt${places.ceiling === 1 ? " is" : "s are"} already running, the most the owner's P/PC allocation allows (workClass.pcCeiling ${b.ceiling}% of ${state.limits.productive} places${note})`;
+  }
   if (held.includes("reserved")) return `waiting for capacity: the free place is kept for improvement (PC) work that is waiting (workClass.pcFloor ${b.floor}% keeps ${places.reserved} of ${state.limits.productive} places for it)`;
   return null;
 }

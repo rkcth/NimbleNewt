@@ -1464,7 +1464,7 @@ export class StatusService {
         if (b.allocation === undefined) lines.push(line(`P/PC work balance: no allocation is set (workClass.pcFloor and workClass.pcCeiling), so no place is kept for improvement (PC) work and none is capped by kind; ${now}.`, c));
         else {
           lines.push(line(`P/PC work balance (your allocation: improvement floor ${b.allocation.floor}%, ceiling ${b.allocation.ceiling}% of ${b.places.productive} productive places): ${b.places.reserved} place(s) kept for improvement work, at most ${b.places.ceiling} improvement attempt(s) at once, ${b.places.protectedP} place(s) production always keeps; ${now}.`, c));
-          if (b.lentTotal > 0) lines.push(line(`${b.lentTotal} production attempt(s) run in places lent from the improvement reserve (no improvement work could use them); each place comes back when its attempt ends${b.lentTotal > b.lent.length ? `; the oldest ${b.lent.length} are counted here` : ""}.`, c));
+          if (b.lentTotal > 0) lines.push(line(`${b.lentTotal} production attempt(s) run in places lent from the improvement reserve (no improvement work could use them); each place comes back when its attempt ends.`, c));
           lines.push(line(b.unmet === undefined ? "Improvement work is not short of its reserved places now." : `Improvement work is short of ${b.unmet.short} reserved place(s): ${quoted(b.unmet.cause, 400)}.`, c));
         }
       }

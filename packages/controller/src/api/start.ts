@@ -66,7 +66,7 @@ import { PolicyEditService } from "../chat/index.js";
 import { WebChatDoor, type WebChatOptions } from "../web/index.js";
 
 import { CatalogPolicyService, CatalogService, ToolboxProposalService } from "../catalog/index.js";
-import { AdmissionService } from "../admission/index.js";
+import { AdmissionService, BALANCE_KEYS } from "../admission/index.js";
 import { HostService } from "../hosts/index.js";
 import { AdminViewService, secretWriter } from "../admin/index.js";
 import { AgentSiteAllowances, NetworkGrantService } from "../network/index.js";
@@ -822,7 +822,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const reconnectSettings = ReconnectSettingsService.withEpoch(storage, epoch);
     const reconnect = { get: (by: Principal) => reconnectSettings.get(by), set: (owner: Principal, command: Parameters<typeof reconnectSettings.set>[1]) => reconnectSettings.set(owner, command), decideReaccept: (owner: Principal, command: never) => { if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not decide on taking an attempt up again`); if (dispatch?.remote === undefined) throw new DomainError("unavailable", "remote workers are not running"); return dispatch.remote.decideReaccept(owner, command); }, pending: (owner: Principal, page: { after?: string; limit?: number }) => { if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not list the attempts waiting for a decision`); if (dispatch?.remote === undefined) throw new DomainError("unavailable", "remote workers are not running"); return dispatch.remote.pending(owner, page); } };
     const withPlacement = <T extends NonNullable<StartOptions["dispatch"]>>(dispatch: T): T => (dispatch?.remote === undefined || (dispatch.remote.placementPolicy !== undefined && dispatch.remote.reaccept !== undefined && dispatch.remote.patienceMs !== undefined && dispatch.remote.confirmWindowMs !== undefined) ? dispatch : Object.create(dispatch, { remote: { value: { ...dispatch.remote, ...(dispatch.remote.placementPolicy === undefined ? { placementPolicy: placement.policy(), ...(dispatch.remote.relocationPolicy === undefined ? { relocationPolicy: async () => ({ dataHosts: [...((await placement.policy()()).dataHosts ?? [])] }) } : {}) } : {}), ...(dispatch.remote.reaccept === undefined ? { reaccept: () => reconnectSettings.effective() } : {}), ...(dispatch.remote.patienceMs === undefined ? { patienceMs: () => reconnectSettings.patienceMs() } : {}), ...(dispatch.remote.confirmWindowMs === undefined ? { confirmWindowMs: () => reconnectSettings.confirmWindowMs() } : {}) }, enumerable: true } }) as T); // not a spread: the options are read when the dispatcher is built, not here
-    const configuration = ConfigurationService.withEpoch(storage, epoch, { routing, settings: MEETING_SETTINGS });
+    // A change of the owner's P/PC allocation lets waiting work in at once through an admission sweep (card B01), like a change of the caps; the sweep is bound once admission exists below.
+    let allocationChanged: ((revision: number) => Promise<void>) | undefined;
+    const configuration = ConfigurationService.withEpoch(storage, epoch, { routing, settings: MEETING_SETTINGS, onChanged: async (c) => { if (c.layer === "installation" && c.keys.some((k) => (BALANCE_KEYS as readonly string[]).includes(k))) await allocationChanged?.(c.revision); } });
     const conversations = ConversationService.withEpoch(storage, epoch, { availability: pauses.availability });
     const resources = ProjectResourceService.withEpoch(storage, epoch);
     const plans = ProjectPlanService.withEpoch(storage, epoch);
@@ -1599,6 +1601,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const dispatchLimits = DispatchLimitsSettingsService.withEpoch(storage, epoch, { ...(options.dispatch?.dispatcher?.attemptMs === undefined ? {} : { attemptMs: options.dispatch.dispatcher.attemptMs }), ...(options.dispatch?.dispatcher?.maxAttempts === undefined ? {} : { maxAttempts: options.dispatch.dispatcher.maxAttempts }) });
     // Optional caps on attempts per project, per agent and on fan-in: off unless the owner turns them on (card H10b). A change lets waiting work in at once through an admission sweep.
     const capacityAdmission = AdmissionService.withEpoch(storage, epoch);
+    allocationChanged = async (revision) => { await capacityAdmission.sweep({ commandId: `pc-sweep:${revision}`, actor: "dispatcher" }); };
     const capacityLimits = CapacityLimitsService.withEpoch(storage, epoch, { onChanged: async (revision) => { await capacityAdmission.sweep({ commandId: `cap-sweep:${revision}`, actor: "dispatcher" }); } });
     // The host and global quotas go through the same admission record (card H10); the owner's limits on spawning child tasks are read at every spawn.
     // Card U11d: the dispatcher (resume at launch) and the environment applier (activate) meet an `integrity` failure outside any API operation; both are told to the detectors like the API door does.
