@@ -64,6 +64,18 @@ test("an integration on a project with a landing branch is made under the integr
     assert.ok((await call(O, "landing.queue.remove", { taskId: other, reason: "let the integration go ahead" }, "rm1")).ok);
     assert.equal((await integrate(O, "w5")).error, undefined);
 
+    // The landing settings cannot be read (P10 sixth-slice second review): the composed gate fails closed rather than taking it for "no landing branch". Readable again: the integration goes ahead.
+    const configuration = c.services.configuration as unknown as { taskValues: (...a: unknown[]) => Promise<unknown> };
+    const readValues = configuration.taskValues;
+    configuration.taskValues = async () => { throw new Error("settings store offline"); };
+    try {
+      const unread = await integrate(O, "w5u");
+      assert.equal(unread.error?.code, "unavailable", JSON.stringify(unread));
+      assert.match(unread.error?.message ?? "", /landing settings could not be read.*nothing was written/);
+      assert.equal((unread.error?.message ?? "").includes("offline"), false, "the store's own error text is not passed on");
+    } finally { configuration.taskValues = readValues; }
+    assert.equal((await integrate(O, "w5r")).error, undefined);
+
     // The holder gives the lease back: the owner's integration is refused again.
     assert.ok((await call(ann, "integrator.lease.release", { leaseId: lease.leaseId, fence: lease.fence }, "r1")).ok);
     assert.equal((await integrate(O, "w6")).error?.code, "fenced");
