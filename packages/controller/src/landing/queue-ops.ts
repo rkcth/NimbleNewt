@@ -1,3 +1,4 @@
+import { isAgentOwner, type Owner } from "../domain/assignment-model.js";
 import { DomainError } from "../domain/errors.js";
 import { onlyKnown, taskId as checkTaskId, text } from "../domain/model.js";
 import { allowsExactly, inTaskScope } from "../security/access.js";
@@ -67,10 +68,11 @@ export interface LandingQueueOpsOptions {
   /** See `LANDING_HOLD_MS`. */
   readonly holdMs?: number;
   /**
-   * The principal that holds the task now (its current assignee, `agent:<id>`), or undefined when nobody holds it. Absent: the author rule alone (the submitter adds and takes out its task's work). Throwing: the
-   * caller is judged as neither the holder nor an author (fails closed; the owner, integrators and directors are not affected).
+   * The owner of the task's current assignment as the assignment records it (`{ kind, id }`), or undefined when nobody holds it. Only an agent owner is an agent that holds the task (`isAgentOwner`: the bare or
+   * the prefixed ID, and only for an agent principal); a person, role or team owner with the same name holds it for nobody here. Absent: the author rule alone (the submitter adds and takes out its task's work).
+   * Throwing: the caller is judged as neither the holder nor an author (fails closed; the owner, integrators and directors are not affected).
    */
-  readonly holderOf?: (taskId: string) => Promise<string | undefined>;
+  readonly holderOf?: (taskId: string) => Promise<Owner | undefined>;
 }
 export interface QueuedLanding { readonly submissionId: string; readonly base: string; readonly tree: string; readonly branch: string }
 
@@ -98,9 +100,9 @@ export class LandingQueueOps {
   async #ownAgent(by: Principal, taskId: string): Promise<(author: string) => boolean> {
     if (by.taskScope !== undefined && by.taskScope.taskId !== taskId) return () => false;
     if (this.#options.holderOf === undefined) return (author) => author === by.id;
-    let holder: string | undefined;
+    let holder: Owner | undefined;
     try { holder = await this.#options.holderOf(taskId); } catch { return () => false; }
-    if (holder !== undefined && holder !== "") return () => holder === by.id;
+    if (holder !== undefined) { const holds = isAgentOwner(holder, by); return () => holds; }
     return (author) => author === by.id;
   }
 

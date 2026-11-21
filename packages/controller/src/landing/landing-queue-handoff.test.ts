@@ -23,10 +23,11 @@ for (const backend of backends) {
     const w = await buildWorld(store.storage);
     const options = { clock: w.clock.now, pause: async () => undefined };
     const approvals = new Map<string, QueueApproval>();
-    const holderOf = async (taskId: string): Promise<string | undefined> => {
+    // As the composed controller reads it: the assignment's owner as recorded.
+    const holderOf = async (taskId: string) => {
       if (o.holderFails === true) throw new Error("the assignments could not be read");
       const a = await w.assignments.getAssignment(taskId);
-      return a?.state === "assigned" && a.owner !== undefined ? `${a.owner.kind}:${a.owner.id}` : undefined;
+      return a?.state === "assigned" ? a.owner : undefined;
     };
     const ops = new LandingQueueOps(LandingQueueService.withEpoch(w.storage, w.epoch, options), {
       approvalOf: async (id) => approvals.get(id),
@@ -118,6 +119,18 @@ for (const backend of backends) {
       await refuses("not_found", () => r.ops.add(ann, { commandId: "a4", submissionId: s1 }));
       assert.equal((await r.ops.add(r.w.owner, { commandId: "o2", submissionId: s1 })).position, 1);
       await refuses("not_found", () => r.ops.remove(ann, { commandId: "a5", taskId: t1, reason: "held by a person" }));
+      // A person owner whose ID is written like an agent's principal ID is still a person: the agent of that ID holds nothing.
+      await r.w.assignments.transferTask({ commandId: "tr-person-prefixed", actor: r.w.owner.id, taskId: t1, expectedRevision: (await r.w.assignments.getAssignment(t1))!.revision, to: { kind: "person", id: "agent:bob" }, reason: "a person" });
+      await refuses("not_found", () => r.ops.remove(bob, { commandId: "b4", taskId: t1, reason: "held by a person" }));
+      await refuses("not_found", () => r.ops.add(bob, { commandId: "b5", submissionId: s1 }));
+      // An agent owner written with the prefixed ID is the same agent.
+      await r.w.assignments.transferTask({ commandId: "tr-agent-prefixed", actor: r.w.owner.id, taskId: t1, expectedRevision: (await r.w.assignments.getAssignment(t1))!.revision, to: { kind: "agent", id: "agent:bob" }, reason: "bob" });
+      assert.equal((await r.ops.remove(bob, { commandId: "b6", taskId: t1, reason: "mine, prefixed" })).removed?.submissionId, s1);
+      // A non-agent principal named by an owner of its own kind holds nothing here (only agents hold a task's queued work).
+      await r.w.principals.enroll(r.w.owner, { commandId: "en-cli", kind: "client", name: "cli", grants: [] });
+      const cli = await r.w.principals.authenticate((await r.w.principals.issueCredential(r.w.owner, "client:cli")).token);
+      await r.w.assignments.transferTask({ commandId: "tr-client", actor: r.w.owner.id, taskId: t1, expectedRevision: (await r.w.assignments.getAssignment(t1))!.revision, to: { kind: "client", id: "cli" }, reason: "a client" });
+      await refuses("not_found", () => r.ops.add(cli, { commandId: "c1", submissionId: s1 }));
     } finally { await r.close(); }
   });
 

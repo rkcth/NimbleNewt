@@ -71,5 +71,9 @@ test("after a hand-off the task's new holder answers for its queued work through
     assert.equal((await call(bob.token, "landing.queue.remove", { taskId: task, reason: "not an agent's task" }, "b4")).error?.code, "not_found");
     assert.equal((await call(ann.token, "landing.queue.remove", { taskId: task, reason: "someone else holds it" }, "a4")).error?.code, "not_found");
     assert.deepEqual(await queue(), [[sid, ann.id]]);
+    // A person whose ID is written as Bob's agent principal ID: still a person, so Bob holds nothing.
+    await s.assignments.transferTask({ commandId: "tr-person-prefixed", actor: rob.id, taskId: task, expectedRevision: (await s.assignments.getAssignment(task))!.revision, to: { kind: "person", id: bob.id }, reason: "a person" } as never);
+    assert.equal((await call(bob.token, "landing.queue.remove", { taskId: task, reason: "a person holds it" }, "b5")).error?.code, "not_found");
+    assert.deepEqual(await queue(), [[sid, ann.id]]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });

@@ -907,7 +907,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       activeAgent: async (agentId) => { const p = await principals.get(`agent:${agentId}`); return p !== undefined && p.kind === "agent" && p.state === "active"; },
       isDirector: async (by, projectId) => { const now = new Date().toISOString(); return by.kind === "agent" && (await agents.directorsOf(projectId, now)).includes(by.id); },
       // Card P10 (hand-off): the task's holder now answers for its queued work; the submitter only while nobody else holds the task.
-      holderOf: async (taskId) => { const a = await assignments.getAssignment(taskId); return a?.state === "assigned" && a.owner !== undefined ? (a.owner.id.includes(":") ? a.owner.id : `${a.owner.kind}:${a.owner.id}`) : undefined; },
+      holderOf: async (taskId) => { const a = await assignments.getAssignment(taskId); return a?.state === "assigned" ? a.owner : undefined; },
       escalate: async (n) => {
         const directors = await agents.directorsOf(n.projectId, new Date().toISOString());
         // Only a director that was actually told counts: when none could be (none in the project, or none can receive notices about this task), the owner is asked to decide.
