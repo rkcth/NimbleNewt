@@ -12,6 +12,10 @@
     "g04-tool-sqlite.test.js",
     "g04-tool-sqlite-not-again.test.js",
     "g04-tool-postgres.test.js",
-    "g04-tool-postgres-not-again.test.js"
+    "g04-tool-postgres-not-again.test.js",
+    "g04-stream-sqlite.test.js",
+    "g04-stream-sqlite-read-first.test.js",
+    "g04-stream-postgres.test.js",
+    "g04-stream-postgres-read-first.test.js"
   ]
 }

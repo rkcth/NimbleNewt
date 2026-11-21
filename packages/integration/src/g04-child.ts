@@ -1,12 +1,13 @@
 /**
  * Child process for card G04. Usage: node g04-child.js <store spec JSON> <directory> <crashAt> <scenario>. Runs the whole path of the controller slice
- * (scenario `path`, or `wait`, see g04-wait.ts, or `tool`, see g04-tool.ts) over the given real database with the REAL Pi adapter (durable JSONL storage in <directory>/pi) in the same
+ * (scenario `path`, or `wait`, see g04-wait.ts, or `tool`, see g04-tool.ts, or `stream` and `stream-read-first`, see g04-stream.ts) over the given real database with the REAL Pi adapter (durable JSONL storage in <directory>/pi) in the same
  * process, and kills itself with SIGKILL at boundary <crashAt>.
  */
 import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { ANSWER, Chaos, Clock, KILLED_AT, openAdapter, openStore, piConversation, runPath, startProcess, type StoreSpec } from "./g04-fixture.js";
+import { childStreamRun } from "./g04-stream.js";
 import { childToolRun } from "./g04-tool.js";
 import { waitScenario } from "./g04-wait.js";
 
@@ -52,6 +53,14 @@ const storage = await openStore(JSON.parse(specJson) as StoreSpec);
 if (scenario === "tool" || scenario === "tool-replay") {
   // The protected effect inside a tool the model calls (g04-tool.ts): its own adapter, with the tool and the reading model.
   const run = await childToolRun(storage, directory, chaos, scenario === "tool-replay" ? "safe" : undefined);
+  process.stdout.write("finished\n");
+  await run.close();
+  await storage.close();
+  process.exit(0);
+}
+if (scenario === "stream" || scenario === "stream-read-first") {
+  // The model's reply through the production relay and stream tap, then the tool as the bridge runs it (g04-stream.ts).
+  const run = await childStreamRun(storage, directory, chaos, scenario === "stream" ? "recorded first" : "read first");
   process.stdout.write("finished\n");
   await run.close();
   await storage.close();

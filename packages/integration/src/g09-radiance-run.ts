@@ -121,7 +121,7 @@ export function viaRelay(relay: AttemptRelay): typeof globalThis.fetch {
 }
 
 /** Pi's models for one provider record whose calls go to the relay (the same shape the worker process builds, `relayModels`). */
-async function relayedModels(provider: string, model: string, alias: string): Promise<Models> {
+export async function relayedModels(provider: string, model: string, alias: string): Promise<Models> {
   const api = await import("@earendil-works/pi-ai/api/openai-completions");
   const baseUrl = `http://relay.invalid/${alias}`;
   const models = createModels();
