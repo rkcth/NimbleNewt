@@ -1231,6 +1231,30 @@ for (const backend of backends) {
 
   // ---- card M03h: the slot-usage review reads each task's own attempt record, not every dispatch record ---------------------------------------------
 
+  suite("an attempt's slot time counts under the class it was admitted with: relabeling the task afterwards moves none of it (card B01)", async (c) => {
+    const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
+    at("2026-10-20T12:00:00.000Z");
+    const wasP = await c.task("Ship the export", c.agentA, "in_progress");
+    const wasPC = await c.task("Faster lint", c.agentB, "in_progress");
+    const old = await c.task("Older run", c.agentA, "in_progress");
+    const relabel = async (id: string, to: "P" | "PC"): Promise<void> => { await c.contracts.setContract(c.owner, { commandId: cid("ct"), taskId: id, expectedVersion: (await c.contracts.get(c.owner, id))?.version ?? 0, workClass: to } as never); };
+    await relabel(wasPC, "PC");
+    const attempt = async (taskId: string, id: string, from: string, to: string, ask?: Record<string, unknown>): Promise<void> => {
+      await c.put("dispatch", derivedId("dpa", id), { attemptId: id, taskId, projectId: c.a, state: "finished", startedAt: from, claimedAt: from, slotSpans: [{ from, to }], outcome: { status: "succeeded", summary: "done", at: to }, ...(ask === undefined ? {} : { ask }) });
+      await c.put("dispatch-task-attempts", taskId, { taskId, attempts: [id] });
+    };
+    // Admitted as P (3 h) and as PC (1 h); an attempt from before the class was kept on the request (1 h) counts by its task's class now.
+    await attempt(wasP, "a-was-p", "2026-10-20T08:00:00.000Z", "2026-10-20T11:00:00.000Z", { n: 0, priority: 5, workClass: "P" });
+    await attempt(wasPC, "a-was-pc", "2026-10-20T11:00:00.000Z", "2026-10-20T12:00:00.000Z", { n: 0, priority: 5, workClass: "PC" });
+    await attempt(old, "a-old", "2026-10-20T12:00:00.000Z", "2026-10-20T13:00:00.000Z", { n: 0, priority: 5 });
+    // Then every task is relabeled the other way.
+    await relabel(wasP, "PC"); await relabel(wasPC, "P"); await relabel(old, "PC");
+    at("2026-10-21T05:00:00.000Z");
+    const text = (await spied(c).service.prepare(c.host, occ)).review.lines.map((l) => l.text).join("\n");
+    // P 3 h; PC 1 h (admitted as PC) + 1 h (the older run, by its task's class now) = 2 of 5 h = 40%. Counted by the tasks' classes now it would be 4 of 5 h.
+    assert.match(text, /actual PC share 40% \(worker-slot time of 3 attempts\)/);
+  });
+
   suite("the review's slot time is found from the tasks' own attempt records, with one scan only for older tasks that have none, and a full list that may have lost attempts says so", async (c) => {
     const occ = await c.occurrenceAt("2026-10-21T07:00:00.000Z");
     at("2026-10-20T12:00:00.000Z");
