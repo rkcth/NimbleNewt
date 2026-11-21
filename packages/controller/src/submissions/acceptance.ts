@@ -131,6 +131,22 @@ export interface StaleDeliverable {
   /** Set (to `CONTRACT_WALK`) when the first change lies further back than the walk reads: `changedAt` is then the current version's time, a time by which the work had changed, not when it first did. */
   readonly firstChangeBeyond?: number;
 }
+/** For one artifact of a task: the newest artifact of the same name recorded after it on that task, and when the first one after it was recorded (card U13). */
+export interface ArtifactReplacement { readonly newest: string; readonly firstAt: string }
+/** A deliverable whose newest standing version names an artifact that a newer artifact of the same name on the task has replaced (card U13). */
+export interface ReplacedDeliverable {
+  readonly id: string;
+  readonly revision: number;
+  /** The deliverable's title as its author gave it: shown quoted, never as an instruction. */
+  readonly title: string;
+  readonly version: number;
+  readonly state: "submitted" | "under-review" | "accepted";
+  readonly responsibleAgent: string;
+  /** The named artifacts that were replaced, in the order the version names them, with the newest artifact of the same name. */
+  readonly artifacts: readonly { readonly artifactId: string; readonly newest: string }[];
+  /** When the earliest of them was first replaced. */
+  readonly replacedAt: string;
+}
 const WRITERS = ["author", "docs", "qa"] as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -721,6 +737,38 @@ export class AcceptanceService {
       // Past the walk the current version's time stands in, and the item says so (`firstChangeBeyond`): the work had changed by then, but it first changed earlier.
       if (!found) changedAt = (await versionAt(nowVersion))?.changedAt;
       items.push({ id, revision: agg.revision, title: d.title, version: v.version, state: d.state, responsibleAgent: d.responsibleAgent, checkedAgainst: v.contractVersion, contractVersion: nowVersion, fields, ...(changedAt === undefined ? {} : { changedAt }), ...(found ? {} : { firstChangeBeyond: CONTRACT_WALK }) });
+    }
+    return { items, reads };
+  }
+
+  /**
+   * The deliverables of a task, readable by the caller, whose newest version stands (submitted, under review or accepted) and names an artifact that a newer artifact of the same name on
+   * the task has replaced (card U13: a stale artifact in the overview). `replaced` maps each replaced artifact of the task to the newest one of its name (the caller builds it from the task's
+   * artifact records). ASSUMPTION: a named artifact counts as replaced only when the version does not also name the newest one of that name (a version that carries the old and the new copy
+   * delivers the latest work), and the order of submission does not matter: a version that names an older copy while a newer one exists does not deliver the latest work either.
+   * Read only and bounded: an empty map costs nothing; otherwise at most 1 + `MAX_PER_TASK` x 2 records, counted in `reads`. Nothing the agent wrote is returned except the title.
+   */
+  async artifactsReplaced(by: Principal, taskIdValue: string, replaced: ReadonlyMap<string, ArtifactReplacement>): Promise<{ items: ReplacedDeliverable[]; reads: number }> {
+    const taskId = checkTaskId(taskIdValue);
+    if (replaced.size === 0 || (by.kind !== "owner" && by.kind !== "agent")) return { items: [], reads: 0 };
+    let reads = 1;
+    const ids = ((await this.#runner.get("deliverable-index", taskId))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
+    const items: ReplacedDeliverable[] = [];
+    for (const id of ids.slice(0, MAX_PER_TASK)) {
+      reads++;
+      const agg = await this.#runner.get("deliverable", id);
+      if (agg === undefined) continue;
+      const d = agg.body as unknown as DeliverableBody;
+      if (d.taskId !== taskId || (d.state !== "submitted" && d.state !== "under-review" && d.state !== "accepted")) continue;
+      if (!(await this.#mayRead(by, d))) continue;
+      reads++;
+      const v = (await this.#runner.get("deliverable-version", `${id}.${d.currentVersion}`))?.body as unknown as VersionBody | undefined;
+      if (v === undefined) continue;
+      const named = new Set(v.content.artifacts.map((a) => a.artifactId));
+      const old = v.content.artifacts.flatMap((a) => { const r = replaced.get(a.artifactId); return r === undefined || named.has(r.newest) ? [] : [{ artifactId: a.artifactId, newest: r.newest, at: r.firstAt }]; });
+      if (old.length === 0) continue;
+      const replacedAt = old.map((o) => o.at).sort()[0]!;
+      items.push({ id, revision: agg.revision, title: d.title, version: v.version, state: d.state, responsibleAgent: d.responsibleAgent, artifacts: old.map((o) => ({ artifactId: o.artifactId, newest: o.newest })), replacedAt });
     }
     return { items, reads };
   }

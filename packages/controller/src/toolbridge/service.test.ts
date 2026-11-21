@@ -1392,6 +1392,8 @@ for (const backend of backends) {
       out["deliverable.draft"] = await send("deliverable.draft", { type: "report", title: "r" }, "w15");
       out["deliverable.submit"] = await send("deliverable.submit", { id: "dlv-aaaaaaaaaaaaaaaaaaaa", expectedRevision: 1 }, "w16");
       out["service.operate"] = await send("service.operate", { service: "billing", resource: "cache", action: { type: "restart" } }, "w17");
+      // Card Q01b (bridge): nor is a submission recorded.
+      out["submission.record"] = await send("submission.record", { kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, "w18");
       // Reading a job and stopping one are not refused for a pause (here the job does not exist).
       out["job.status"] = await send("job.status", { jobId: "job-aaaaaaaaaaaaaaaaaaaa" }, "r4");
       out["desk.read"] = await send("desk.read", { recordId: doc["id"] as string }, "r1");
@@ -1403,7 +1405,7 @@ for (const backend of backends) {
       out["continue-after"] = await send("turn.continue", { n: 1, max: 3, endKind: "empty-visible-text" }, "nudge:1");
     });
     await c.tick();
-    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "deliverable.draft", "deliverable.submit", "service.operate"]) assert.equal(bad(out[op]!).code, "paused", op);
+    for (const op of ["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "tool.register", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "deliverable.draft", "deliverable.submit", "service.operate", "submission.record"]) assert.equal(bad(out[op]!).code, "paused", op);
     for (const op of ["desk.read", "task.get", "discover", "after", "continue-after", "service.observe"]) good(out[op]!);
     assert.equal(bad(out["job.status"]!).code, "not_found");
     assert.deepEqual(touched, ["job.get", "task.get", "service.observe"], "no write reached a service while paused");
@@ -1437,6 +1439,79 @@ for (const backend of backends) {
     assert.deepEqual(seen[0]!.raw.args, { taskId, dependencies: [{ kind: "file", key: "a.md" }] });
     assert.match(String(seen[0]!.raw.commandId), /^bridge:/);
     assert.ok(steps.some((x) => /recorded 1 input\(s\) its work relied on/.test(x)), steps.join("\n"));
+  });
+
+  suite("submission.record (card Q01b bridge): a review, qa report, sign-off or document change goes to the API with the worker's own credential for the attempt's own task, in the kind's one role; code, a named task, role or digest are refused; a document names the digest the controller recorded for an intact artifact of this task", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const seen: { token: unknown; raw: { op: string; commandId?: string; args: Record<string, unknown> } }[] = [];
+    const D = "f".repeat(64);
+    // `read` records each artifact whose files were checked: only ones of the attempt's own task are.
+    const read: string[] = [];
+    const art = (id: string, taskOf: string | undefined, digest: string, intact: boolean | Error) => [id, { ...(taskOf === undefined ? {} : { taskId: taskOf }), manifestDigest: digest, intact: async () => { read.push(id); if (intact instanceof Error) throw intact; return intact; } }] as const;
+    const artifacts = new Map<string, { taskId?: string; manifestDigest: string; intact: () => Promise<boolean> }>([
+      art("art-mine", taskId, D, true), art("art-other", "task-aaaaaaaaaaaaaaaaaaaa", "0".repeat(64), true), art("art-loose", undefined, "1".repeat(64), true), art("art-damaged", taskId, "2".repeat(64), false),
+      // The store failing to read the files (its message names its own path) is a plain refusal.
+      art("art-unreadable", taskId, "3".repeat(64), new DomainError("unavailable", "the blob store could not complete the request (a.md): EACCES: permission denied, stat '/srv/store/blobs/ab/cd'")),
+    ]);
+    const asked: string[] = [];
+    const deps = {
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks,
+      state: { handle: async (token: unknown, raw: unknown) => { seen.push({ token, raw: raw as never }); if ((raw as { args: { verdict?: string } }).args.verdict === "changes") return { v: 1, op: "x", ok: false, error: { code: "forbidden", message: "a review of your own submission is refused" } } as never; return { v: 1, op: "x", ok: true, result: { id: "sbm-bbbbbbbbbbbbbbbbbbbb", revision: 1, replayed: false } } as never; } },
+      isLocalHost: () => true,
+    };
+    const svc = new ToolExecutionService({ ...deps, artifactOf: async (id: string) => { asked.push(id); if (id === "bad id") throw new DomainError("invalid_command", "artifactId: not an artifact ID"); return artifacts.get(id); } });
+    const bare = new ToolExecutionService(deps);
+    const out: Record<string, BridgeResponse> = {};
+    let token = "";
+    c.worker.script = c.session(async (s) => {
+      token = s.token;
+      const send = (args: JsonObject, callId: string, over = svc) => over.handle(s.token, s.gateway, { op: "submission.record", callId, args });
+      out["review"] = await send({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, "s1");
+      out["qa"] = await send({ kind: "qa", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", report: "all green" }, "s2");
+      out["signoff"] = await send({ kind: "signoff", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", decision: "approve" }, "s3");
+      out["document"] = await send({ kind: "document", artifactId: "art-mine", report: "manual updated" }, "s4");
+      out["refused"] = await send({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "changes" }, "s5");
+      // What the attempt or the controller decides is never the request's.
+      out["code"] = await send({ kind: "code" }, "x1");
+      out["code-full"] = await send({ kind: "code", base: "c".repeat(40), tree: "a".repeat(40), patchId: "d".repeat(40) }, "x2");
+      out["named-task"] = await send({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve", taskId: "task-aaaaaaaaaaaaaaaaaaaa" }, "x3");
+      out["named-role"] = await send({ kind: "review", role: "director", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, "x4");
+      out["named-digest"] = await send({ kind: "document", artifactId: "art-mine", artifactDigest: `sha256:${"9".repeat(64)}` }, "x5");
+      out["evidence"] = await send({ kind: "qa", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", report: "r", evidence: [] }, "x6");
+      out["no-kind"] = await send({ subject: "sbm-aaaaaaaaaaaaaaaaaaaa" }, "x7");
+      out["odd-kind"] = await send({ kind: "toString" }, "x8");
+      out["no-artifact"] = await send({ kind: "document", report: "r" }, "x9");
+      out["other-task-artifact"] = await send({ kind: "document", artifactId: "art-other" }, "x10");
+      out["loose-artifact"] = await send({ kind: "document", artifactId: "art-loose" }, "x11");
+      out["unknown-artifact"] = await send({ kind: "document", artifactId: "art-none" }, "x12");
+      out["damaged-artifact"] = await send({ kind: "document", artifactId: "art-damaged" }, "x13");
+      out["bad-artifact-id"] = await send({ kind: "document", artifactId: "bad id" }, "x14");
+      out["unreadable-artifact"] = await send({ kind: "document", artifactId: "art-unreadable" }, "x16");
+      out["no-artifacts-kept"] = await send({ kind: "document", artifactId: "art-mine" }, "x15", bare);
+      out["review-bare"] = await send({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, "s6", bare);
+    });
+    await c.tick();
+    for (const k of ["review", "qa", "signoff", "document", "review-bare"]) assert.equal(good(out[k]!)["id"], "sbm-bbbbbbbbbbbbbbbbbbbb", k);
+    assert.deepEqual(bad(out["refused"]!), { ok: false, code: "forbidden", message: "a review of your own submission is refused" }, "the API's refusal is passed on");
+    for (const k of ["code", "code-full"]) assert.match(bad(out[k]!).message, k === "code" ? /code is not recorded here; end with work-end submit true/ : /base/, k);
+    assert.equal(bad(out["code"]!).code, "invalid_command");
+    for (const k of ["code-full", "named-task", "named-role", "named-digest", "evidence", "no-kind", "odd-kind", "no-artifact", "damaged-artifact", "bad-artifact-id"]) assert.equal(bad(out[k]!).code, "invalid_command", k);
+    assert.match(bad(out["no-kind"]!).message, /kind: must be review, qa, signoff or document/);
+    assert.match(bad(out["damaged-artifact"]!).message, /no longer matches its files/);
+    for (const k of ["other-task-artifact", "loose-artifact", "unknown-artifact"]) assert.equal(bad(out[k]!).code, "not_found", k);
+    assert.equal(bad(out["no-artifacts-kept"]!).code, "unavailable");
+    assert.deepEqual(bad(out["unreadable-artifact"]!), { ok: false, code: "unavailable", message: "the files of artifact art-unreadable could not be checked now; try again later" }, "no store path or message reaches the agent");
+    // Only the five accepted requests reached the API (the sixth is the refused review, which the API answered), each with the worker's credential, the attempt's task, the kind's role and a command ID from the call.
+    assert.deepEqual(seen.map((x) => [x.raw.op, x.raw.args["kind"], x.raw.args["role"], x.raw.args["taskId"], x.token === token, /^bridge:/.test(String(x.raw.commandId))]), [
+      ["submission.record", "review", "reviewer", taskId, true, true], ["submission.record", "qa", "qa", taskId, true, true], ["submission.record", "signoff", "director", taskId, true, true],
+      ["submission.record", "document", "docs", taskId, true, true], ["submission.record", "review", "reviewer", taskId, true, true], ["submission.record", "review", "reviewer", taskId, true, true],
+    ]);
+    assert.deepEqual(seen[3]!.raw.args, { kind: "document", artifactId: "art-mine", report: "manual updated", taskId, role: "docs", artifactDigest: `sha256:${D}` }, "the digest the controller recorded");
+    assert.deepEqual(seen[0]!.raw.args, { kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve", taskId, role: "reviewer" });
+    assert.notEqual(seen[0]!.raw.commandId, seen[1]!.raw.commandId);
+    assert.deepEqual(asked, ["art-mine", "art-other", "art-loose", "art-none", "art-damaged", "bad id", "art-unreadable"], "the artifact is looked up only for a document change that names one and passes the field check");
+    assert.deepEqual(read, ["art-mine", "art-damaged", "art-unreadable"], "the files of an artifact of another task (or of none) are never read for the agent");
   });
 
   suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {

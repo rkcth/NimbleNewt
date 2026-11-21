@@ -25,7 +25,7 @@ import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -603,7 +603,7 @@ export class ChatService {
       if (intent.kind === "status") {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
-        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs", "landing_queue"].includes(String(request["kind"]))) {
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs", "landing_queue", "observations"].includes(String(request["kind"]))) {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
@@ -1069,6 +1069,12 @@ export class ChatService {
       args["digest"] = String(found.result["digest"]);
       fillNotes.push(`Digest of the staged release, filled in from its record: ${String(found.result["digest"])}${found.result["ok"] === true ? "" : " (its files do not match this digest now; the window will fail its preparation)"}`);
       if (args["durationMinutes"] === undefined) return refuse("invalid_command", "How long should the maintenance window last (15 minutes to 24 hours)?");
+      // Every number the window is set with is the owner's own (the texts are checked by `foreignValue`, numbers are not): the length said outright or as an end time after the start, and the
+      // optional preparation lead, free space and health deadline only when the owner named them. A number found nowhere in the message is the model's, so it is asked for, never proposed.
+      if (!windowLengthInWords(args["durationMinutes"] as number, args["time"], words)) return refuse("unsupported_value", "How long the maintenance window should last is not in your message, so nothing was proposed; the chat does not choose the length for you. How long should it last (15 minutes to 24 hours)?");
+      if (args["prepareLeadMinutes"] !== undefined && !leadInWords(args["prepareLeadMinutes"] as number, words)) return refuse("unsupported_value", `How early preparation should start is not in your message, so nothing was proposed. How long before the opening should it start? Leave it unsaid and the default (${WINDOW_DEFAULTS.prepareLeadMinutes} minutes) applies.`);
+      if (args["minFreeBytes"] !== undefined && !sizeInWords(args["minFreeBytes"] as number, words)) return refuse("unsupported_value", "How much free space the update needs is not in your message, so nothing was proposed. How much should be free? Leave it unsaid and the default (1 GiB) applies.");
+      if (args["healthDeadlineSeconds"] !== undefined && !durationInWords(args["healthDeadlineSeconds"] as number, words)) return refuse("unsupported_value", "How long the new release has to show it started well is not in your message, so nothing was proposed. How long should it have? Leave it unsaid and the default (5 minutes) applies.");
       fillNotes.push(windowTimeNote(args));
     }
     // Cancelling a maintenance window without naming it ("cancel the maintenance window") means the one window that is open; there is at most one, and with none the owner is told so.
@@ -2229,6 +2235,11 @@ export class ChatService {
         const item = typeof args["concernId"] === "string" ? await this.#get(token, "stall.concern.get", { concernId: args["concernId"] }) : undefined;
         return item === undefined ? refuse("not_found", "no such concern") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
       }
+      case "observation": {
+        // An observation's revision when the owner settles it (card B02).
+        const item = typeof args["observationId"] === "string" ? await this.#get(token, "observation.get", { observationId: args["observationId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such observation") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`observation:${args["observationId"] as string}`) };
+      }
       case "defect": {
         // A defect's revision when the judgement or decision is shown (card Q04): a check, a repair or a decision in between makes the proposal stale, so the owner never judges a version they were not shown.
         const item = typeof args["id"] === "string" ? await this.#get(token, "defect.get", { id: args["id"] }) : undefined;
@@ -2933,6 +2944,7 @@ function recordOf(step: ChatStep): string | undefined {
     case "difficulty.set-profiles": return "difficulty-profiles";
     case "decision.record": return `decision:${a["projectId"] as string}:${normalTopic(String(a["topic"] ?? ""))}:${typeof a["taskId"] === "string" ? a["taskId"] : "*"}`;
     case "agenda.correct": return `agenda:${a["itemId"] as string}`;
+    case "observation.dispose": return `observation:${a["observationId"] as string}`;
     // A repair named in the same message comes before the owner's judgement of it, which then expects the defect's next revision.
     case "defect.repair": return `defect:${a["id"] as string}`;
     case "standup.update": return `standup:${a["scheduleId"] as string}`;

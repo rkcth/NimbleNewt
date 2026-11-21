@@ -37,7 +37,7 @@ import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js
 import { ACTIVITY_KINDS, clipText, type ActivityService, type ExplanationBody } from "../activity/activity.js";
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
-import type { StaleDeliverable } from "../submissions/acceptance.js";
+import type { ArtifactReplacement, ReplacedDeliverable, StaleDeliverable } from "../submissions/acceptance.js";
 import type { DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
@@ -57,6 +57,7 @@ import type { EnvironmentService } from "../environments/index.js";
 import type { MaintenanceService } from "../maintenance/index.js";
 import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js";
 import { keptSecretUseText, type KeptSecretUse } from "../setup/kept-secret-uses.js";
+import type { ObservationService } from "../observations/observations.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
@@ -151,7 +152,8 @@ export const ATTENTION_KINDS: readonly AttentionKind[] = ["paused_assignee", "un
  * When an artifact counts as stale (card U13, ASSUMPTION): (1) `superseded`, a newer artifact with the same name was recorded on the same task, so anyone still pointing at this one has an old version; or (2) `aged`, the newest
  * artifact of a task that is still open (not done or cancelled) was recorded more than this many days ago and nothing newer followed, so the deliverable may no longer match the work; or (3) `contract_changed`, a versioned
  * deliverable (card Q01) whose newest version is submitted, under review or accepted was checked against a task contract version whose work fields (expected result, acceptance criteria, required evidence, checks) have
- * changed since (`at` is when they first changed; the deliverable service decides which deliverables the caller may read). No file is read: the records are enough.
+ * changed since (`at` is when they first changed; the deliverable service decides which deliverables the caller may read); or (4) `artifact_replaced`, such a deliverable's
+ * standing version names an artifact of the task that a newer artifact of the same name has replaced and does not name that newest one (`at` is when the first replacement was recorded). No file is read: the records are enough.
  */
 export const STALE_ARTIFACT_DAYS = 7;
 /** The contract's work fields in the owner's words, for the `contract_changed` line. */
@@ -305,6 +307,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   maintenance: { keys: ["maintenanceId", "agent|agentName", "status", "limit"], about: "the agents' requests to change their environment (a package, an extension, a mount, a site, a skill draft, a protected change): what each asked for, who decided, whether it is waiting, being applied, applied, rolled back, failed or revoked, and why a change waits (owner only)" },
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
+  observations: { keys: ["projectId", "observationKind"], about: "what went wrong or was put right in a project's work (card B02): the open observations of corrections, failures, recoveries, friction, approval stalls, redundant prompts and failed reviews, oldest first, each with how many reports joined it (a retelling of the same event counts once), its disposition, ID and revision, and this hour's storm count (observations the controller could not record because a limit was reached); observationKind keeps one kind. An observation is settled with observation.dispose" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
@@ -331,7 +334,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   meeting_desk_reads: { keys: ["occurrenceId", "deskRecordId", "limit"], about: "what a meeting's chair read from absent members' desks and shared working notes (card M05b): each file with whose it is, its revision, how big it was, who read it and when, in the order the reads happened, and every refused attempt to change one (reading never changes, wakes or interrupts anyone); the meeting is named by its occurrence ID, which the meetings answer cites" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
-  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
+  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since, or names an artifact a newer one of the same name replaced), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest" },
   critical_path: { keys: [], about: "what the owner marked as the critical path (tasks, goals and projects), whether each is still open, and which decisions waiting for the owner hold it up (owner only; the owner marks and unmarks by chat)" },
   setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
@@ -426,6 +429,7 @@ export type StatusRequest =
   | { readonly kind: "retention" }
   | { readonly kind: "event_sources" }
   | { readonly kind: "wip_backup"; readonly projectId: string }
+  | { readonly kind: "observations"; readonly projectId: string; readonly observationKind?: string }
   | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
@@ -574,6 +578,8 @@ function retentionStatusLines(st: Readonly<Record<string, unknown>>, settings: C
 // ---- service -------------------------------------------------------------------------------------------------------------------
 
 export interface StatusDeps {
+  /** Observations of the project's work (card B02). Absent: the view is not offered. */
+  readonly observations?: Pick<ObservationService, "open">;
   /** What retention holds back and why, and its values (card T02c). Absent: the views are not offered. */
   readonly retention?: {
     check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
@@ -726,7 +732,11 @@ export interface StatusDeps {
    * The versioned deliverables of a task (card Q01) that the caller may read and that stand on a task contract changed since in what it asks for (card U13's `contract_changed` stale artifact). The service applies its own
    * read rule; `reads` is the number of records it read, counted against the attention scan. Absent: deliverables are never listed as stale.
    */
-  readonly deliverables?: { contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }> };
+  readonly deliverables?: {
+    contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }>;
+    /** The readable deliverables of a task whose standing version names an artifact a newer one of the same name replaced (`artifact_replaced`). Absent: never listed for that reason. */
+    artifactsReplaced?(by: Principal, taskId: string, replaced: ReadonlyMap<string, ArtifactReplacement>): Promise<{ readonly items: readonly ReplacedDeliverable[]; readonly reads: number }>;
+  };
   /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
   readonly defects?: Pick<DefectService, "forTask">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
@@ -996,6 +1006,7 @@ export class StatusService {
       case "retention": { onlyKnown(request, ["kind"]); return this.retentionLines(by); }
       case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
       case "wip_backup": { onlyKnown(request, ["kind", "projectId"]); return this.wipBackupLines(by, request.projectId); }
+      case "observations": { onlyKnown(request, ["kind", "projectId", "observationKind"]); return this.observationLines(by, request.projectId, request.observationKind); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
@@ -1174,6 +1185,19 @@ export class StatusService {
       line(`${recent.length} job(s) ended most recently:`, cite("jobs", "ended")),
       ...recent.map(({ job, wake }) => line(`${job.id} ${JSON.stringify(shown(job.label, 80))} (${job.kind}) of task ${job.taskId}: ${wake.state.replaceAll("_", " ")} at ${shown(wake.at, 30)}${job.exit?.reason === undefined ? "" : ` (${shown(job.exit.reason, 120)})`}; ${woke(wake)}${wake.notice === undefined ? "" : wake.notice.sent ? "; you were told" : `; you were not told (${shown(wake.notice.why ?? "", 120)})`}.`, cite("job", job.id), cite("task", job.taskId))),
     ];
+  }
+
+  /** The open observations of a project (card B02), 25 at most, and the hour's storm count; for whoever may read them (the service decides). */
+  async observationLines(by: Principal, projectId: string, observationKind: string | undefined): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.observations === undefined) return undefined;
+    const got = await this.#deps.observations.open(by, checkProjectId(projectId), { limit: 25, ...(observationKind === undefined ? {} : { kind: observationKind }) });
+    if (got === undefined) return undefined;
+    const c = cite("observation-index", projectId);
+    const out: Line[] = [line(got.items.length === 0 ? `No ${observationKind === undefined ? "" : `${shown(observationKind, 20)} `}observation is open in this project.` : `${got.items.length}${got.next === undefined ? "" : " (and more)"} open observation(s)${observationKind === undefined ? "" : ` of kind ${shown(observationKind, 20)}`}, oldest first; a retelling of the same event joins its observation and counts once.`, c)];
+    for (const o of got.items) out.push(line(`${shown(o.kind, 20)} (${o.origin === "agent" ? `reported by ${shown(o.reportedBy, 60)}` : "seen by the controller"}${o.reports > 1 ? `, ${o.reports} reports from ${o.reporters.length} reporter(s)` : ""}, last ${shown(o.lastSeenAt, 30)}): ${shown(o.summary, 200)}${o.owner === undefined ? "" : ` Owner: ${shown(o.owner, 60)}.`} [${o.id}, revision ${o.revision}]`, cite("observation", o.id, o.revision)));
+    const r = cite("observation-rate", projectId);
+    out.push(line(`This hour (from ${shown(got.rate.hour.slice(11, 16), 5)} UTC): ${got.rate.created} new observation(s); ${got.rate.suppressed === 0 ? "none was held back" : `${got.rate.suppressed} the controller saw were not recorded because a storm limit was reached`}${got.rate.suppressedTotal > got.rate.suppressed ? ` (${got.rate.suppressedTotal} held back in all)` : ""}.`, r));
+    return { observedAt: this.#runner.now(), lines: out };
   }
 
   /** The work-in-progress backup of one project (card P02b): off unless the owner turned it on; what it rests on and what it has done. Owner only. */
@@ -3252,6 +3276,35 @@ export class StatusService {
           if (agent !== undefined && maker !== agent) continue;
           const fields = d.fields.map((f) => CONTRACT_FIELD_WORDS[f] ?? "its work").join(", ");
           push(4, d.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), ...(d.changedAt === undefined ? {} : { at: d.changedAt }), summary: `Deliverable ${quoted(d.title, 120)} (version ${d.version}, ${d.state}) on ${base.title} was checked against contract version ${d.checkedAgainst}; the task's contract has since changed ${fields} (now version ${d.contractVersion}), so it may no longer be what the task asks for.${d.firstChangeBeyond === undefined ? "" : ` Its first change is more than ${d.firstChangeBeyond} contract versions back, so the time given is when the current version was stored; the work changed earlier.`}`, detail: { deliverableId: d.id, title: quoted(d.title, 120), reason: "contract_changed", version: d.version, state: d.state, checkedAgainst: d.checkedAgainst, contractVersion: d.contractVersion, fields: [...d.fields], at: d.firstChangeBeyond === undefined ? "first_change" : "current_version" }, cite: cite("deliverable", d.id, d.revision) });
+          if (found.length > limit) return;
+        }
+      }
+      // Versioned deliverables whose standing version names an artifact that a newer artifact of the same name on the task has replaced (`artifact_replaced`). The replacements come from the
+      // task's artifact records; the deliverable service decides which deliverables the caller may read. Artifact names and the newer artifact are shown only to a caller with the artifact right.
+      const replacedBy = this.#deps.deliverables?.artifactsReplaced;
+      if (want("stale_artifact") && replacedBy !== undefined && (floor === undefined || floor.rank <= 5)) {
+        const all = await artifactsOf(taskId);
+        const replaced = new Map<string, { newest: string; firstAt: string }>();
+        const names = new Map<string, string>();
+        // One pass per name, oldest first (by record time, then ID): every artifact but the newest of its name is replaced, first by the one recorded right after it.
+        const byName = new Map<string, { id: string; createdAt: string }[]>();
+        for (const art of all) { names.set(art.id, art.name); const list = byName.get(art.name) ?? []; list.push(art); byName.set(art.name, list); }
+        for (const list of byName.values()) {
+          list.sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : x.id < y.id ? -1 : 1));
+          const newest = list[list.length - 1]!.id;
+          for (let i = 0; i + 1 < list.length; i++) replaced.set(list[i]!.id, { newest, firstAt: list[i + 1]!.createdAt });
+        }
+        const r = await replacedBy.call(this.#deps.deliverables, by, taskId, replaced);
+        examined += r.reads;
+        const named = this.#mayReadArtifacts(by, body.projectId);
+        for (const d of [...r.items].sort((x, y) => (x.id < y.id ? -1 : 1))) {
+          if (floor !== undefined && floor.rank === 5 && d.id <= floor.id) continue;
+          if (!inRange(d.replacedAt)) continue;
+          const maker = d.responsibleAgent.replace(/^agent:/, "");
+          if (agent !== undefined && maker !== agent) continue;
+          const count = d.artifacts.length;
+          const which = named ? ` (${d.artifacts.map((a) => quoted(names.get(a.artifactId) ?? a.artifactId, 80)).join(", ")})` : "";
+          push(5, d.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), at: d.replacedAt, summary: `Deliverable ${quoted(d.title, 120)} (version ${d.version}, ${d.state}) on ${base.title} names ${count === 1 ? "an artifact" : `${count} artifacts`}${which} that ${count === 1 ? "a newer artifact of the same name has" : "newer artifacts of the same names have"} replaced, so it may not deliver the latest work.`, detail: { deliverableId: d.id, title: quoted(d.title, 120), reason: "artifact_replaced", version: d.version, state: d.state, artifacts: d.artifacts.map((a) => (named ? { artifactId: a.artifactId, name: shown(names.get(a.artifactId) ?? "", 120), replacedBy: a.newest } : { artifactId: a.artifactId })) }, cite: cite("deliverable", d.id, d.revision) });
           if (found.length > limit) return;
         }
       }

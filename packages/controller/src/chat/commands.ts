@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect" | "observation";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -247,6 +247,8 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Topics for a later stand-up (card M03). Capturing and correcting are reversible edits of a saved topic and apply at once, shown back to the owner; a topic that records an instruction or a decision for the team is first shown (see `proposalReason`).
   "agenda.capture": { verb: "Add agenda item", mode: "apply", needsProject: true },
   "agenda.correct": { verb: "Correct agenda item", mode: "apply", revision: "agenda", needsProject: true },
+  // Card B02: settling an observation (promoted to an improvement proposal, dismissed, resolved, or open again) changes no work; the revision is read for the owner.
+  "observation.dispose": { verb: "Settle an observation (observationId from the observations status; to promoted with improvementId, dismissed or resolved with the owner's reason, or open; owner optional)", mode: "apply", revision: "observation" },
   // Stand-ups (card M03g). Pausing or renaming one follows the profile like other explicit orders; ending (cannot be undone) and resuming are always shown first; a change of who attends or when it is held is shown first (see `proposalReason`). Setting one up wakes agents on a schedule, so it is always shown first. Delivering outcomes only puts decisions back where they came from.
   "standup.update": { verb: "Change stand-up", mode: "profile", revision: "standup", needsProject: true },
   "standup.configure": { verb: "Set up stand-up", mode: "propose", needsProject: true },
@@ -382,7 +384,7 @@ export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId
 
 /** The argument names the operation takes (from the API's own table, so they cannot drift), plus the chat-only names and the revision the chat fills in. */
 
-const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20, thirty: 30, forty: 40, "forty-five": 45, fifty: 50, sixty: 60, ninety: 90 };
+const DURATION_NUMBERS: Readonly<Record<string, number>> = { a: 1, an: 1, one: 1, next: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20, "twenty-four": 24, thirty: 30, forty: 40, "forty-five": 45, "forty five": 45, fifty: 50, sixty: 60, ninety: 90 };
 const DURATION_UNITS: Readonly<Record<string, number>> = { s: 1, sec: 1, secs: 1, second: 1, seconds: 1, m: 60, min: 60, mins: 60, minute: 60, minutes: 60, h: 3600, hr: 3600, hrs: 3600, hour: 3600, hours: 3600, d: 86_400, day: 86_400, days: 86_400 };
 /**
  * Whether the owner's own words state this length of time in seconds (card R04c: a drain's `drainSeconds`): "3600 seconds", "30 minutes", "an hour", "the next hour", "2 hrs", "half an hour", "1.5 hours". A number the model chose is not
@@ -394,10 +396,149 @@ export function durationInWords(seconds: number, text: string): boolean {
   const t = text.replace(/[‘’]/g, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ");
   if (seconds === 1800 && /\bhalf\s+an?\s+hour\b/.test(t)) return true;
   const units = Object.keys(DURATION_UNITS).sort((x, y) => y.length - x.length).join("|");
-  const re = new RegExp(`(?:^|[^0-9a-z.])(\\d+(?:\\.\\d+)?|${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})[ -]?(${units})\\b`, "g");
+  // A number in words is apart from its unit ("an hour", "two-day"): run together it is another word ("and" is not "an d", "am" not "a m", "ah" not "a h").
+  const re = new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|(?:${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})(?=[ -]))[ -]?(${units})\\b`, "g");
   for (const m of t.matchAll(re)) {
     const n = /^\d/.test(m[1]!) ? Number(m[1]) : DURATION_NUMBERS[m[1]!]!;
     if (Math.round(n * DURATION_UNITS[m[2]!]!) === seconds) return true;
+  }
+  return false;
+}
+
+/** Month names, so the day after one (`Nov 3`, `3rd of November`) is not read as a time of day or a length. */
+const MONTH_NAMES = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+/**
+ * The owner's message made ready for reading numbers: curly quotes straightened, lowercased, and the numbers that are not lengths, sizes or times of day blanked so their digits are never read as
+ * one: record IDs (anything shaped like `rcn-...`), days (`2026-11-21`, `21/11/2026`, `11/21`, `21.11.2026`, `Nov 3`, `3rd of November`) and versions (`2.1.3`, `v2.1`).
+ */
+const numbersOf = (text: string): string => text.replace(/[‘’]/g, "'").toLowerCase()
+  .replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ")
+  .replace(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{1,2}\/\d{1,2}\b/g, " ")
+  .replace(/\bv\d+(?:\.\d+)*\b|\b\d+\.\d+\.\d+\b/g, " ")
+  .replace(new RegExp(`\\b(?:${MONTH_NAMES})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b|\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTH_NAMES})\\b`, "g"), " ");
+const NUMBER_WORDS = (): string => Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|");
+const numberOf = (word: string): number => (/^\d/.test(word) ? Number(word) : DURATION_NUMBERS[word]!);
+/** The hours of the clock in words ("from two to four am"). */
+const HOUR_WORDS: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+/** A time of day as people write it: `4`, `4:30`, `4.30`, `4am`, `4 p.m.`, `four`, `half past 4`, `quarter to five`, `midnight`, `noon`. Not one when a unit follows (`4 hours`, `5 GB`, `one of`). */
+const CLOCK = (() => {
+  const hour = `(?:\\d{1,2}|${Object.keys(HOUR_WORDS).sort((x, y) => y.length - x.length).join("|")})`;
+  const units = [...Object.keys(DURATION_UNITS), "kb", "mb", "gb", "tb", "kib", "mib", "gib", "tib", "gig", "gigs", "meg", "megs", "bytes?", "percent", "of"].sort((x, y) => y.length - x.length).join("|");
+  return `(?<![0-9a-z.:,])(?:midnight|noon|midday|(?:half|quarter)\\s+(?:past|to)\\s+${hour}|${hour}(?:[:.]\\d{2}|\\s+o'?clock)?)(?:\\s*[ap]\\.?m\\b\\.?)?(?![0-9a-z:%]|\\.\\d|\\s*(?:${units})\\b|\\s*%)`;
+})();
+const WEEKDAYS = "mon(?:day)?|tue(?:s|sday)?|wed(?:nesday)?|thu(?:rs|rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?";
+/** Words before a bare hour that say it is a time of day ("at 2", "from 2", "tonight 2 to 4", "Saturday 2-4"); after a comma or at the start of the message one needs none. */
+const TIME_BEFORE = `from|between|at|after|around|about|tonight|today|tomorrow|morning|night|evening|afternoon|overnight|${WEEKDAYS}|it|window|downtime|outage|maintenance|starting|start|starts|begin|begins|do|run|say`;
+/** Words after a bare hour that say it is a time of day ("2 to 4 London time", "until 4 in the morning", "between 2 and 3 tonight"); a following thing counted ("2 to 3 hosts") says it is not. */
+const TIME_AFTER = `to|through|thru|until|till|til|and|or|then|end|ends|ending|finish|finishes|finishing|stop|stops|stopping|done|wrap|with|in|on|tonight|today|tomorrow|this|next|for|so|but|if|when|o'?clock|oclock|sharp|ish|local|utc|gmt|bst|cet|cest|[ecmp][sd]?t|eastern|central|mountain|pacific|(?:[a-z]+\\s+){0,2}time|${WEEKDAYS}|morning|night|evening|afternoon|overnight|at\\s+night|please|is|works|would|should|will|ok|okay|fine|thanks`;
+/** The minutes after midnight a time of day written as `CLOCK` may mean: one marked am or pm, or past 12, is read that way only; one without is read both ways round the clock. */
+function clockTimes(written: string): number[] {
+  const x = written.trim().replace(/\s+o'?clock$/, "");
+  if (x === "midnight") return [0];
+  if (x === "noon" || x === "midday") return [720];
+  const m = /^(?:(half|quarter)\s+(past|to)\s+)?(\d{1,2}|[a-z]+)(?:[:.](\d{2}))?(?:\s*([ap])\.?m\b\.?)?$/.exec(x);
+  if (m === null) return [];
+  const h = /^\d/.test(m[3]!) ? Number(m[3]) : HOUR_WORDS[m[3]!];
+  if (h === undefined || (m[1] !== undefined && m[4] !== undefined) || (m[1] === "half" && m[2] === "to")) return [];
+  const mm = m[4] === undefined ? 0 : Number(m[4]);
+  if (mm > 59) return [];
+  let hours: number[];
+  if (m[5] !== undefined) {
+    if (h < 1 || h > 12) return [];
+    hours = [(h % 12) + (m[5] === "p" ? 12 : 0)];
+  } else if (h === 24) {
+    if (mm !== 0 || m[1] !== undefined) return [];
+    hours = [0];
+  } else if (h > 24) return [];
+  else hours = h === 0 || h > 12 ? [h] : [h, (h + 12) % 24];
+  const shift = m[1] === "half" ? 30 : m[1] === "quarter" ? (m[2] === "past" ? 15 : -15) : 0;
+  return hours.map((hh) => (hh * 60 + mm + shift + 1440) % 1440);
+}
+
+/**
+ * Whether the owner's own words give this length of a maintenance window in minutes (card K07): a length said outright ("for 90 minutes", "an hour", "2 hrs", "half an hour"), hours and minutes
+ * together ("an hour and a half", "two and a half hours", "2 hours and 30 minutes", "1h30m", "an hour and a quarter"), or an end time after the start the proposal shows, with that start written too
+ * ("from 2 to 4am", "3am until 4:30", "between 2 and 3", "2-4am", "at 11pm, done by 1am", "from 10pm till midnight"). An end time written without am or pm is read both ways round the clock; the length
+ * the window would be set with is still shown on the proposal for the owner to confirm. A length said as when the window starts or how early to prepare ("in 2 hours", "30 minutes before", "the next
+ * day") is not its length. A number the model chose is not the owner's, so a length found nowhere in the words is asked for instead of proposed.
+ */
+export function windowLengthInWords(minutes: number, start: unknown, text: string): boolean {
+  if (!Number.isSafeInteger(minutes) || minutes <= 0) return false;
+  const n = NUMBER_WORDS();
+  const amount = `(?:\\d+(?:\\.\\d+)?|half\\s+an?|${n})[ -]?(?:${Object.keys(DURATION_UNITS).sort((x, y) => y.length - x.length).join("|")})\\b`;
+  // Lengths that say when the window starts or when to prepare, not how long it lasts.
+  const t = numbersOf(text)
+    .replace(new RegExp(`(?<!\\b(?:done|finished|over|complete|completed)\\s)\\b(?:in|within)\\s+(?:the\\s+next\\s+)?${amount}`, "g"), " ")
+    .replace(new RegExp(`${amount}\\s+(?:before|ahead|early|earlier|beforehand|prior|in\\s+advance|ago)\\b`, "g"), " ")
+    .replace(new RegExp(`\\b(?:every|each)\\s+${amount}`, "g"), " ")
+    .replace(/\b(?:the\s+)?(?:next|following)\s+day\b|\ba\s+day\s+(?:after|later)\b/g, " ");
+  if (durationInWords(minutes * 60, t)) return true;
+  // Hours and minutes said together, and halves and quarters of an hour.
+  // As in `durationInWords`, a number in words is apart from its unit ("ah am I late" is not an hour and a minute).
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|(?:${n})(?=[ -]))[ -]?(?:hours?|hrs?|h)(?:,?\\s*and)?\\s*(\\d+|(?:${n})(?=[ -]))[ -]?(?:minutes?|mins?|m)\\b`, "g"))) if (numberOf(m[1]!) * 60 + numberOf(m[2]!) === minutes) return true;
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.,])(\\d+|${n})\\s+(?:hours?\\s+and\\s+a\\s+(half|quarter)|and\\s+a\\s+(half|quarter)\\s+hours?)\\b`, "g"))) if (numberOf(m[1]!) * 60 + ((m[2] ?? m[3]) === "half" ? 30 : 15) === minutes) return true;
+  if (minutes === 15 && /\b(?:a\s+)?quarter\s+of\s+an\s+hour\b/.test(t)) return true;
+  if (minutes === 45 && /\bthree\s+quarters\s+of\s+an\s+hour\b/.test(t)) return true;
+  // An end time after the start the proposal shows: the start must be written too, so a start the model chose cannot make a length out of an end time.
+  const at = typeof start === "string" ? /^(\d{2}):(\d{2})$/.exec(start) : null;
+  if (at === null) return false;
+  const from = Number(at[1]) * 60 + Number(at[2]);
+  const fits = (end: number): boolean => (end - from + 1440) % 1440 === minutes;
+  const isStart = (written: string): boolean => clockTimes(written).includes(from);
+  // A bare hour ("2", "four") is a time of day only where a time is spoken of: not "2 to 3 hosts", "scale from 2 to 4 workers", "release 2-3 tonight" or "version 2 through 4 are broken". One marked
+  // am or pm, written with minutes, or midnight or noon needs no such check.
+  const bare = (x: string): boolean => /^\s*(?:\d{1,2}|[a-z]+)\s*$/.test(x) && !/midnight|noon|midday/.test(x);
+  const before = (at: number): boolean => new RegExp(`(?:^|[^\\sa-z0-9'])\\s*$|\\b(?:${TIME_BEFORE})\\s+$`).test(t.slice(Math.max(0, at - 40), at));
+  const after = (at: number): boolean => new RegExp(`^(?:\\s*$|\\s*[^\\sa-z0-9']|\\s+(?:${TIME_AFTER})\\b)`).test(t.slice(at, at + 60));
+  // A range with both ends written: "from 2 to 4am", "2-4am", "between 2 and 3", "10pm till midnight".
+  for (const m of t.matchAll(new RegExp(`(${CLOCK})\\s*(?:to|through|thru|until|till|til|-|–|—)\\s*(${CLOCK})|\\bbetween\\s+(${CLOCK})\\s+and\\s+(${CLOCK})`, "dg"))) {
+    const [si, ei] = m[1] !== undefined ? [1, 2] : [3, 4];
+    const [s, e] = [m[si]!, m[ei]!];
+    // `11-03` is a day, not a range: a dash range's end is not written with a leading zero.
+    if (/^\s*[-–—]/.test(m[0].slice(s.length)) && /^0\d$/.test(e.trim())) continue;
+    if (bare(s) && bare(e) && !(before(m.indices![si]![0]) && after(m.indices![ei]![1]))) continue;
+    if (isStart(s) && clockTimes(e).some(fits)) return true;
+  }
+  // An end time said alone ("at 2 ... until 4", "at 11pm, done by 1am"), with the start written elsewhere in the words as a time of day. A bare "to 4" or "by 4" says an end only when marked
+  // am or pm, written with minutes, or midnight or noon ("rollback to 2", "up to 2 hours" are not end times); "until 4", "done by 4" and "ending at 4" always do.
+  const written = [...t.matchAll(new RegExp(CLOCK, "g"))].map((m) => ({ at: m.index, text: m[0] })).filter((w) => !bare(w.text) || (before(w.at) && after(w.at + w.text.length)));
+  const marked = (e: string): boolean => /[ap]\.?m|:|midnight|noon|midday/.test(e);
+  for (const m of t.matchAll(new RegExp(`(\\b(?:until|till|til|(?:done|finished|over|complete|completed|back|wrapped\\s+up|wrap\\s+up)\\s+by|(?:end|ends|ending|finish|finishes|finishing|stop|stops|stopping)(?:\\s+at)?)\\s+(?:about\\s+|around\\s+)?|\\b(?:to|through|thru|by)\\s+)(${CLOCK})`, "g"))) {
+    const e = m[2]!;
+    if (/^(?:to|through|thru|by)\s/.test(m[1]!) && !marked(e)) continue;
+    const endAt = m.index + m[1]!.length;
+    if (bare(e) && !after(endAt + e.length)) continue;
+    if (written.some((w) => w.at !== endAt && isStart(w.text)) && clockTimes(e).some(fits)) return true;
+  }
+  return false;
+}
+
+/** Whether the owner's own words give this preparation lead in minutes (card K07): a length said outright, or none at all ("0 minutes", "no lead time", "no preparation lead"). */
+export function leadInWords(minutes: number, text: string): boolean {
+  if (!Number.isSafeInteger(minutes) || minutes < 0) return false;
+  if (minutes === 0) return /(?:^|[^0-9.])(?:0|zero)\s*(?:minutes?|mins?|m)\b|\bno\s+(?:preparation\s+)?lead\b/.test(numbersOf(text));
+  // A length said as how long ago something happened ("5 minutes ago") is not a lead.
+  return durationInWords(minutes * 60, numbersOf(text).replace(/\b(?:\d+(?:\.\d+)?|[a-z-]+)\s*(?:minutes?|mins?|m|hours?|hrs?|h)\s+ago\b/g, " "));
+}
+
+const SIZE_UNITS: Readonly<Record<string, readonly number[]>> = {
+  b: [1], byte: [1], bytes: [1],
+  kb: [1e3, 1024], kilobyte: [1e3, 1024], kilobytes: [1e3, 1024], kib: [1024],
+  mb: [1e6, 1024 ** 2], megabyte: [1e6, 1024 ** 2], megabytes: [1e6, 1024 ** 2], mib: [1024 ** 2], meg: [1e6, 1024 ** 2], megs: [1e6, 1024 ** 2],
+  gb: [1e9, 1024 ** 3], gigabyte: [1e9, 1024 ** 3], gigabytes: [1e9, 1024 ** 3], gib: [1024 ** 3], gig: [1e9, 1024 ** 3], gigs: [1e9, 1024 ** 3], g: [1e9, 1024 ** 3],
+  tb: [1e12, 1024 ** 4], terabyte: [1e12, 1024 ** 4], terabytes: [1e12, 1024 ** 4], tib: [1024 ** 4],
+};
+/**
+ * Whether the owner's own words give this amount of free space in bytes (card K07, a window's `minFreeBytes`): "5 GB", "2 gigabytes", "500 MiB", "1.5 TB", "a gigabyte", "0 bytes". A size in
+ * gigabytes and the like may be read in powers of ten or of 1024 (people mean either); the exact number of bytes is shown on the proposal for the owner to confirm.
+ */
+export function sizeInWords(bytes: number, text: string): boolean {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) return false;
+  const t = numbersOf(text).replace(/(\d),(?=\d{3}\b)/g, "$1");
+  const units = Object.keys(SIZE_UNITS).sort((x, y) => y.length - x.length).join("|");
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|(?:${NUMBER_WORDS()}|zero)(?=[ -]))[ -]?(${units})\\b`, "g"))) {
+    const n = m[1] === "zero" ? 0 : numberOf(m[1]!);
+    if (SIZE_UNITS[m[2]!]!.some((u) => Math.round(n * u) === bytes)) return true;
   }
   return false;
 }
@@ -586,7 +727,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   // The owner's words to a meeting apply at once, but words that amend the motion change what is voted on and restart its round and vote (card M05): shown first.
   if (op === "meeting.floor.address" && args["amend"] !== undefined) return "it changes the motion's wording, and a fresh round and vote follow, so it is shown first";
   // Forbidding best effort is the narrowing direction (a stricter launch rule): it applies at once when the owner's words say it. Allowing it is shown first.
-  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "wip.backup.set" && args["enabled"] === false && args["remote"] === undefined) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op === "routing.budget.set" ? "a route's reply limit and reasoning cap apply from its next model call, and a reply cut off at the limit is continued with a nudge to stop deliberating and act, so the change is shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op === "credential.issue" ? "a new credential replaces the old one at once and is shown only once, so it is shown first" : op === "credential.revoke" ? "taking a credential away stops that agent or host at once, so it is shown first" : op === "host.local.set" ? "running agents on this computer decides where work and code run, so it is shown first" : op === "host.move-work" ? "moving the work off a host re-places what is running on it, so it is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op === "critical.mark" ? "the critical path decides what comes first for you and what pages you, so a change to it is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.open-vote" ? "opening a vote starts the clock on a decision the team will carry out, so it is shown first" : op === "meeting.record.close-vote" ? "counting the vote now settles the motion and an adopted decision is carried out, so it is shown first" : op === "meeting.record.table" ? "tabling a motion ends it without a vote and cannot be taken back, so it is shown first" : op === "meeting.proc.rule" ? "a ruling on the objections decides whether the vote is held and what is recorded as dissent, so it is shown first" : op === "meeting.proc.untable" ? "overruling a tabling puts a motion the meeting set aside to a vote, so it is shown first" : op === "meeting.proc.begin" ? "starting the procedure asks the members to comment and puts the motion on the way to a vote, so it is shown first" : op === "meeting.proc.advance" ? "a step of the procedure asks a member for a turn of its model, so it is shown first" : op === "meeting.floor.cq-rule" ? "a ruling on a challenged chair question decides whether the question is asked of the member, so it is shown first" : op === "meeting.proc.owner-message" ? "a message to a meeting is read by every member who speaks after it, so it is shown first" : op === "meeting.record.outcomes" ? (args["askOwner"] === true ? "handing outcomes back settles agenda topics and puts a question to you for each decision the meeting left open, so it is shown first" : "handing outcomes back settles agenda topics in the conversations they came from, so it is shown first") : op === "meeting.record.finish" ? "ending a meeting cannot be taken back and motions not concluded are voided, so it is shown first" : op === "meeting.record.apply" ? "it carries out changes to your project that a vote or your answer agreed, so it is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : op.startsWith("release.") ? "a release action is shown first" : "a role's capabilities are shown first";
+  if (spec.mode === "propose" && !(op === "workers.limits.besteffort" && args["enabled"] === false) && !(op === "wip.backup.set" && args["enabled"] === false && args["remote"] === undefined) && !(op === "maintenance.site.set" && args["rule"] === "deny")) return op.startsWith("maintenance.") ? "an environment change or a rule for one is shown first" : op === "project.create" ? "a new project is drafted first" : op.startsWith("grant.") ? "a right is shown first" : op.startsWith("capacity.") ? "how many attempts may run at once is shown first" : op.startsWith("placement.") ? "where your local-only data may go is shown first" : op === "catalog.policy.change" ? "what happens to running tool calls when a version is revoked is shown first" : op.startsWith("catalog.") ? "withdrawing a tool version is shown first, with the calls it would reach" : op.startsWith("events.") ? "which event sources wake your agents is shown first" : op.startsWith("budget.") ? "money and spending limits are shown first" : op === "routing.budget.set" ? "a route's reply limit and reasoning cap apply from its next model call, and a reply cut off at the limit is continued with a nudge to stop deliberating and act, so the change is shown first" : op.startsWith("routing.") ? "which models work may reach is shown first" : op.startsWith("difficulty.") ? "how tasks are matched to models is shown first" : op === "credential.issue" ? "a new credential replaces the old one at once and is shown only once, so it is shown first" : op === "credential.revoke" ? "taking a credential away stops that agent or host at once, so it is shown first" : op === "host.local.set" ? "running agents on this computer decides where work and code run, so it is shown first" : op === "host.move-work" ? "moving the work off a host re-places what is running on it, so it is shown first" : op.startsWith("host.quiet") ? "what happens to the work of a host that stops reporting is shown first" : op === "critical.mark" ? "the critical path decides what comes first for you and what pages you, so a change to it is shown first" : op.startsWith("project.branches.") ? "which branches are protected is shown first" : op === "meeting.record.open-vote" ? "opening a vote starts the clock on a decision the team will carry out, so it is shown first" : op === "meeting.record.close-vote" ? "counting the vote now settles the motion and an adopted decision is carried out, so it is shown first" : op === "meeting.record.table" ? "tabling a motion ends it without a vote and cannot be taken back, so it is shown first" : op === "meeting.proc.rule" ? "a ruling on the objections decides whether the vote is held and what is recorded as dissent, so it is shown first" : op === "meeting.proc.untable" ? "overruling a tabling puts a motion the meeting set aside to a vote, so it is shown first" : op === "meeting.proc.begin" ? "starting the procedure asks the members to comment and puts the motion on the way to a vote, so it is shown first" : op === "meeting.proc.advance" ? "a step of the procedure asks a member for a turn of its model, so it is shown first" : op === "meeting.floor.cq-rule" ? "a ruling on a challenged chair question decides whether the question is asked of the member, so it is shown first" : op === "meeting.proc.owner-message" ? "a message to a meeting is read by every member who speaks after it, so it is shown first" : op === "meeting.record.outcomes" ? (args["askOwner"] === true ? "handing outcomes back settles agenda topics and puts a question to you for each decision the meeting left open, so it is shown first" : "handing outcomes back settles agenda topics in the conversations they came from, so it is shown first") : op === "meeting.record.finish" ? "ending a meeting cannot be taken back and motions not concluded are voided, so it is shown first" : op === "meeting.record.apply" ? "it carries out changes to your project that a vote or your answer agreed, so it is shown first" : op === "meeting.record.owner-respond" ? "your answer to a meeting decision is shown first: it is final (a decision cannot be answered twice), and agreeing lets its changes go ahead" : op === "standup.prepare" ? "preparing a stand-up now tells its agents and builds their briefs before the usual time, so it is shown first" : op === "standup.add-statement" ? "a note goes into an agent's brief for the stand-up, so it is shown first" : op === "workspace.request" ? "changing a task's checkout (integrating, landing, refreshing, quarantining or committing it) is shown first" : op === "handoff.takeover" ? "a takeover by force stops the agent's work on the task at once, so it is shown first" : op.startsWith("release.") ? "a release action is shown first" : "a role's capabilities are shown first";
   // Moving a task up to a profile that may spend more is a spending decision: shown first in every profile, as a budget raise is.
   if (op === "difficulty.set" && context.raisesSpend === true) return "it moves the task to a profile that may spend more, so it is shown first";
   if (context.quoted && (!PLAIN_EDITS.has(op) || (op === "project.update" && args["state"] !== undefined))) return "your message carried quoted text, so this is shown first";
