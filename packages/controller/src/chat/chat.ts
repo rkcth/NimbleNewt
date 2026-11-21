@@ -1122,6 +1122,16 @@ export class ChatService {
         fillNotes.push(`For version ${quotedText(item["releaseVersion"], 40)}: the release that flagged it.`);
       }
     }
+    // Retiring a document by chat (Q03 leftover, first review): the owner chose it by its title or place, so the proposal names it by them (not only by its ID) and says how many update tasks go with it;
+    // one already retired is answered at once rather than proposed.
+    if (intent.op === "doc.obligation.retire" && typeof args["obligationId"] === "string") {
+      const item = await this.#get(token, "doc.obligation.get", { id: args["obligationId"] });
+      if (item === undefined) return refuse("not_found", "no such documentation obligation");
+      const title = `${quotedText(String(item["title"]), 80)} (${args["obligationId"]})`;
+      if (item["retired"] !== undefined) return refuse("invalid_command", `${title} was already taken away, so nothing was proposed.`);
+      const open = (Array.isArray(item["updates"]) ? (item["updates"] as { state?: unknown }[]) : []).filter((u) => u.state === "open").length;
+      fillNotes.push(`Takes away ${title} at ${quotedText(String(item["location"]), 80)}, kept by ${String(item["owner"])}${open === 0 ? "; it has no open update task" : `; its ${open} open update task${open === 1 ? " is" : "s are"} cancelled unless already started`}.`);
+    }
     if (intent.op === "release.activate") {
       delete args["digest"];
       delete args["migrationPlan"];

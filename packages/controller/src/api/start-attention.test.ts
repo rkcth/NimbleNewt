@@ -95,5 +95,14 @@ test("status.attention and the chat's attention view name a deliverable accepted
     const text = (told.result.item.lines as { text: string }[]).map((l) => l.text).join("\n");
     assert.match(text, /Deliverable "Install guide" \(version 1, accepted\) on Write the guide was checked against contract version 1; the task's contract has since changed its acceptance criteria \(now version 3\)/);
     assert.ok(!text.includes("covers upgrade"), "the contract's own words are not shown");
+    // A newer artifact of the same name replaces the one the accepted version names (`artifact_replaced`), through the state API and the chat.
+    const replaced = async () => ((await call("status.attention", { projectId: project, kind: "stale_artifact" })).result.items as any[]).filter((i) => i.detail.reason === "artifact_replaced");
+    assert.deepEqual(await replaced(), []);
+    const newer = (await artifacts.publish({ commandId: "a2", actor: owner.id, name: "guide", projectId: project, taskId: task, files: [{ path: "guide.txt", content: Buffer.from("the guide, again") }] })).id;
+    const r = await replaced();
+    assert.equal(r.length, 1);
+    assert.deepEqual([r[0].kind, r[0].agentId, r[0].cite.kind, r[0].cite.id, r[0].detail.artifacts], ["stale_artifact", ann.id, "deliverable", id, [{ artifactId: art, name: "guide", replacedBy: newer }]]);
+    const told2 = await call("status.ask", { request: { kind: "attention", projectId: project, attentionKind: "stale_artifact" } });
+    assert.match((told2.result.item.lines as { text: string }[]).map((l) => l.text).join("\n"), /Deliverable "Install guide" \(version 1, accepted\) on Write the guide names an artifact \("guide"\) that a newer artifact of the same name has replaced/);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

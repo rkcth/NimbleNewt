@@ -715,6 +715,360 @@ for (const backend of backends) {
     assert.ok(!said(told!.lines).includes("sk-live"));
   });
 
+  suite("attention: a deliverable whose standing version names an artifact that a newer one of the same name replaced is a stale artifact (artifact_replaced), filtered, paged, under the deliverable's read rule, names only with the artifact right (card U13)", async (c) => {
+    const ann = await c.agent("ann", [{ action: "task.read", project: c.project }, { action: "artifact.read", project: c.project }]);
+    const acceptance = AcceptanceService.withEpoch(c.storage, c.epoch, {
+      rolesOf: async () => [],
+      contractVersion: async (taskId) => (await c.contracts.get(c.owner, taskId))?.version ?? 0,
+      verifyArtifact: async (id) => { const r = await c.artifacts.verify(id); return { ok: r.ok, problems: r.problems.length }; },
+    }, options);
+    const status = c.rebuild({}, { deliverables: acceptance });
+    const t = await c.ready("guide task");
+    const other = await c.ready("other task");
+    const publish = async (name: string, taskId = t): Promise<string> => { now += MIN; return (await c.artifacts.publish({ commandId: cid("art"), actor: c.owner.id, name, projectId: c.project, taskId, files: [{ path: "g.txt", content: Buffer.from(cid("bytes")) }] })).id; };
+    const deliver = async (title: string, artifactIds: string[], opts: { scope?: string; accept?: boolean; submit?: boolean; taskId?: string } = {}): Promise<string> => {
+      const d = await acceptance.draft(c.owner, { commandId: cid("d"), taskId: opts.taskId ?? t, type: "document", title, responsibleAgent: ann.id, accessScope: opts.scope ?? "task", artifacts: artifactIds.map((artifactId) => ({ artifactId })) });
+      if (opts.submit === false) return d.id;
+      await acceptance.submit(c.owner, { commandId: cid("s"), id: d.id, expectedRevision: d.revision, contractVersion: 0 });
+      if (opts.accept !== false) { await acceptance.startReview(c.owner, { commandId: cid("r"), id: d.id, version: 1 }); await acceptance.accept(c.owner, { commandId: cid("a"), id: d.id, version: 1 }); }
+      return d.id;
+    };
+    const g1 = await publish("guide");
+    const notes = await publish("notes");
+    const otherArt = await publish("guide", other);
+    const accepted = await deliver("Install guide", [g1]);
+    const submitted = await deliver("Guide and notes", [g1, notes], { accept: false });
+    const privateOne = await deliver("Private ‮ guide", [g1], { scope: "owner" });
+    const drafted = await deliver("Only a draft", [g1], { submit: false });
+    const onOther = await deliver("Other guide", [otherArt], { taskId: other });
+    const view = (q: Record<string, unknown> = {}, by: Principal = c.owner, s: StatusService = status) => s.attention(by, { projectId: c.project, kind: "stale_artifact", ...q } as never);
+    const stale = async (q: Record<string, unknown> = {}, by: Principal = c.owner, s: StatusService = status) => (await view(q, by, s)).items.filter((i) => i.detail["reason"] === "artifact_replaced");
+    const ids = (items: readonly { detail: Readonly<Record<string, unknown>> }[]): string[] => items.map((i) => String(i.detail["deliverableId"])).sort();
+    assert.deepEqual(await stale(), [], "nothing is replaced yet");
+    // A newer artifact of the same name on ANOTHER task replaces nothing here.
+    await publish("guide", other);
+    assert.deepEqual(ids(await stale({ taskId: t })), [], "another task's artifact does not replace this task's");
+    assert.deepEqual(ids(await stale({ taskId: other })), [onOther], "on its own task it does");
+    const g2 = await publish("guide");
+    const firstReplaced = (await c.artifacts.get(g2))!;
+    const g3 = await publish("guide");
+    const before = (await acceptance.get(c.owner, accepted))!["revision"];
+    const items = await stale({ taskId: t });
+    assert.deepEqual(ids(items), [accepted, submitted, privateOne].sort(), "submitted, accepted and owner-scoped are stale, a draft is not");
+    assert.ok(!items.some((i) => i.detail["deliverableId"] === drafted));
+    const a = items.find((i) => i.detail["deliverableId"] === accepted)!;
+    assert.deepEqual({ ...a.detail }, { deliverableId: accepted, title: "\"Install guide\"", reason: "artifact_replaced", version: 1, state: "accepted", artifacts: [{ artifactId: g1, name: "guide", replacedBy: g3 }] });
+    assert.equal(a.kind, "stale_artifact");
+    assert.equal(a.at, firstReplaced.createdAt, "at is when the first newer artifact was recorded");
+    assert.equal(a.agentId, "ann");
+    assert.deepEqual([a.cite.kind, a.cite.id], ["deliverable", accepted]);
+    assert.match(a.summary, /Deliverable "Install guide" \(version 1, accepted\) on guide task names an artifact \("guide"\) that a newer artifact of the same name has replaced/);
+    // Only the replaced artifact is named, not the notes that are still the newest of their name.
+    assert.deepEqual(items.find((i) => i.detail["deliverableId"] === submitted)!.detail["artifacts"], [{ artifactId: g1, name: "guide", replacedBy: g3 }]);
+    assert.match(items.find((i) => i.detail["deliverableId"] === privateOne)!.summary, /"Private \\u202e guide"/, "the title is quoted with its control character escaped");
+    // A version that names the old and the newest copy delivers the latest work; one that names a middle copy does not.
+    const both = await deliver("Both copies", [g1, g3], { accept: false });
+    const middle = await deliver("Middle copy", [g2], { accept: false });
+    const now2 = await stale({ taskId: t });
+    assert.ok(!now2.some((i) => i.detail["deliverableId"] === both), "naming the newest copy too is not stale");
+    const m = now2.find((i) => i.detail["deliverableId"] === middle)!;
+    assert.deepEqual(m.detail["artifacts"], [{ artifactId: g2, name: "guide", replacedBy: g3 }]);
+    const g3at = (await c.artifacts.get(g3))!.createdAt;
+    assert.equal(m.at, g3at, "the middle copy was first replaced when the newest one was recorded");
+    // Filters: time on `at` (since exclusive, until inclusive), the responsible agent, the task, its state.
+    assert.deepEqual(ids(await stale({ taskId: t, since: a.at })), [middle]);
+    assert.deepEqual(ids(await stale({ taskId: t, until: a.at })), [accepted, submitted, privateOne].sort());
+    assert.equal((await stale({ taskId: t, agentId: "bob" })).length, 0);
+    assert.equal((await stale({ taskId: t, agentId: "ann" })).length, 4);
+    assert.equal((await stale({ taskId: t, state: "done" })).length, 0);
+    // Paging one a page reaches every stale deliverable of the task once, in ID order, after the superseded artifacts.
+    const seen: string[] = [];
+    const kinds: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < 30; i++) {
+      const page = await view({ taskId: t, limit: 1, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      for (const x of page.items) { kinds.push(String(x.detail["reason"])); if (x.detail["reason"] === "artifact_replaced") seen.push(String(x.detail["deliverableId"])); }
+      cursor = page.next;
+      if (cursor === undefined) break;
+    }
+    assert.equal(cursor, undefined, "the pages end");
+    assert.deepEqual(seen, [accepted, submitted, privateOne, middle].sort(), "each once, in ID order");
+    assert.ok(kinds.lastIndexOf("superseded") < kinds.indexOf("artifact_replaced"), "the deliverables come after the task's own superseded artifacts");
+    // Rights: the deliverable's own read rule; artifact names and the newer artifact only with the artifact right.
+    const reader = await c.agent("reader", [{ action: "task.read", project: c.project }]);
+    const readerItems = await stale({ taskId: t }, reader);
+    assert.deepEqual(ids(readerItems), [accepted, submitted, middle].sort(), "a task reader does not see the owner-scoped one");
+    const r1 = readerItems.find((i) => i.detail["deliverableId"] === accepted)!;
+    assert.deepEqual(r1.detail["artifacts"], [{ artifactId: g1 }], "no name or newer artifact without the artifact right");
+    assert.ok(!r1.summary.includes("\"guide\"") && !JSON.stringify(r1).includes(g3), "the summary names no artifact either");
+    assert.match(r1.summary, /names an artifact that a newer artifact of the same name has replaced/);
+    assert.equal((await stale({ taskId: t }, ann)).length, 4, "the responsible agent sees its owner-scoped one");
+    const scopedElsewhere = { ...ann, taskScope: { taskId: other, projectId: c.project } } as Principal;
+    assert.deepEqual(ids((await status.attention(scopedElsewhere, { projectId: c.project, kind: "stale_artifact" })).items.filter((i) => i.detail["reason"] === "artifact_replaced")), [onOther], "a credential limited to one task sees only that task's");
+    const stranger = await c.agent("stranger", [{ action: "task.read", project: c.other }]);
+    assert.equal((await stale({}, stranger)).length, 0);
+    const host = await c.host("h1");
+    assert.equal((await acceptance.artifactsReplaced(host, t, new Map([[g1, { newest: g3, firstAt: a.at! }]]))).items.length, 0, "a host reads no deliverable");
+    // Without the port (or the deliverable service), deliverables are never listed for this reason.
+    assert.equal((await stale({}, c.owner, c.rebuild({}, { deliverables: { contractStale: (by, taskId) => acceptance.contractStale(by, taskId) } }))).length, 0);
+    assert.equal((await stale({}, c.owner, c.status)).length, 0);
+    // Bounded reads, counted: nothing replaced costs nothing; otherwise the index, each deliverable, and the version of each standing readable one.
+    assert.deepEqual(await acceptance.artifactsReplaced(c.owner, t, new Map()), { items: [], reads: 0 });
+    const counted = await acceptance.artifactsReplaced(c.owner, t, new Map([[g1, { newest: g3, firstAt: a.at! }]]));
+    assert.equal(counted.reads, 1 + 6 + 5, "index, the task's 6 deliverables, 5 standing versions (the draft's version is not read)");
+    // Read only: asking changes no revision.
+    assert.equal((await acceptance.get(c.owner, accepted))!["revision"], before);
+    // A new version naming the newest copy clears it once submitted.
+    const cur = (await acceptance.get(c.owner, accepted))!;
+    const nv = await acceptance.newVersion(c.owner, { commandId: cid("nv"), id: accepted, expectedRevision: Number(cur["revision"]), artifacts: [{ artifactId: g3 }] });
+    await acceptance.submit(c.owner, { commandId: cid("s"), id: accepted, expectedRevision: nv.revision, contractVersion: 0 });
+    assert.ok(!(await stale({ taskId: t })).some((i) => i.detail["deliverableId"] === accepted), "submitted with the newest copy");
+    // The chat's `attention` kind tells it in a cited line.
+    const told = await status.ask(c.owner, { kind: "attention", projectId: c.project, attentionKind: "stale_artifact" });
+    cited(told!.lines);
+    assert.match(said(told!.lines), /Deliverable "Guide and notes" \(version 1, submitted\) on guide task names an artifact \("guide"\) that a newer artifact of the same name has replaced, so it may not deliver the latest work\./);
+    // The reads the port reports count against the attention scan budget: a port that reports more reads than the budget ends the owner-wide scan after the first task that had a
+    // replacement (two tasks here have one, so another task always follows it), with a cursor to go on from.
+    const asked: string[] = [];
+    const heavy = c.rebuild({}, { deliverables: { contractStale: async () => ({ items: [], reads: 0 }), artifactsReplaced: async (_by, taskId) => { asked.push(taskId); return { items: [], reads: 1_000_000 }; } } });
+    const cut = await heavy.attention(c.owner, { kind: "stale_artifact" });
+    assert.deepEqual([asked.length, cut.scanLimited, cut.next !== undefined], [1, true, true], "the port's reads end the scan");
+    // At most 100 deliverables of a task are read, however long its index: the index, then 100 records (the extra IDs name no record), then the standing versions among them.
+    const idxRef = { kind: "deliverable-index", id: t };
+    const idx = (await c.storage.getAggregate(idxRef))!;
+    const realIds = (idx.body as { ids: string[] }).ids;
+    assert.equal(realIds.length, 6);
+    const padded = [...realIds, ...Array.from({ length: 150 }, (_, i) => `dlv-${"a".repeat(17)}${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}a`)];
+    await c.storage.applyOperation({ operationId: cid("raw"), epoch: c.epoch, actor: "owner:test", correlationId: cid("co"), at: at(), changes: [{ type: "update", ref: idxRef, expectedRevision: idx.revision, body: { ...(idx.body as object), ids: padded } }], audit: [{ type: "test.long-index", subject: idxRef, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    const capped = await acceptance.artifactsReplaced(c.owner, t, new Map([[g1, { newest: g3, firstAt: a.at! }]]));
+    assert.equal(capped.reads, 1 + 100 + 5, "the index, 100 deliverable records (6 real, 94 missing) and the 5 standing versions among them");
+    assert.deepEqual(ids(await stale({ taskId: t })), [submitted, privateOne, middle].sort(), "the real ones are still found");
+  });
+
+  suite("attention: artifact_replaced second review: who sees what (owner, members with and without the artifact right, task credentials, the responsible agent, host, stranger, retired agent), name case, a vanished replacement, pages with items added and removed between them, 1,000 deliverables and 500 artifacts (card U13)", async (c) => {
+    const acceptance = AcceptanceService.withEpoch(c.storage, c.epoch, { rolesOf: async () => [], contractVersion: async () => 0, verifyArtifact: async () => ({ ok: true, problems: 0 }) }, options);
+    const status = c.rebuild({}, { deliverables: acceptance });
+    const ann = await c.agent("ann", [{ action: "task.read", project: c.project }, { action: "artifact.read", project: c.project }]);
+    const gone = await c.agent("gone", [{ action: "task.read", project: c.project }, { action: "artifact.read", project: c.project }]);
+    const t = await c.ready("matrix task");
+    const other = await c.ready("other task");
+    const publish = async (name: string, taskId = t): Promise<string> => { now += MIN; return (await c.artifacts.publish({ commandId: cid("art"), actor: c.owner.id, name, projectId: c.project, taskId, files: [{ path: "g.txt", content: Buffer.from(cid("bytes")) }] })).id; };
+    const deliver = async (taskId: string, title: string, artifactIds: string[], opts: { scope?: string; responsible?: string } = {}): Promise<string> => {
+      const d = await acceptance.draft(c.owner, { commandId: cid("d"), taskId, type: "document", title, responsibleAgent: opts.responsible ?? ann.id, accessScope: opts.scope ?? "task", artifacts: artifactIds.map((artifactId) => ({ artifactId })) });
+      await acceptance.submit(c.owner, { commandId: cid("s"), id: d.id, expectedRevision: d.revision, contractVersion: 0 });
+      return d.id;
+    };
+    const replacedItems = async (by: Principal, q: Record<string, unknown> = {}, s: StatusService = status) => (await s.attention(by, { projectId: c.project, kind: "stale_artifact", ...q } as never)).items.filter((i) => i.detail["reason"] === "artifact_replaced");
+    const ids = (items: readonly { detail: Readonly<Record<string, unknown>> }[]): string[] => items.map((i) => String(i.detail["deliverableId"])).sort();
+    const g1 = await publish("guide");
+    const k1 = await publish("Readme");
+    const o1 = await publish("guide", other);
+    const open = await deliver(t, "Open guide", [g1]);
+    const priv = await deliver(t, "Private guide", [g1], { scope: "owner", responsible: gone.id });
+    const cased = await deliver(t, "Readme only", [k1]);
+    const onOther = await deliver(other, "Other guide", [o1]);
+    // Name case: another spelling is another name, so "README" replaces nothing (as for the superseded artifacts).
+    await publish("README");
+    const g2 = await publish("guide");
+    await publish("guide", other);
+    assert.ok(!(await replacedItems(c.owner, { taskId: t })).some((i) => i.detail["deliverableId"] === cased), "another case of the name is another name");
+
+    // Who sees what, on this task: [deliverables listed, names and the newer artifact shown].
+    const named = [{ artifactId: g1, name: "guide", replacedBy: g2 }];
+    const bare = [{ artifactId: g1 }];
+    const reader = await c.agent("reader", [{ action: "task.read", project: c.project }]);
+    const artOnly = await c.agent("artonly", [{ action: "artifact.read", project: c.project }]);
+    const stranger = await c.agent("stranger", [{ action: "task.read", project: c.other }, { action: "artifact.read", project: c.other }]);
+    const host = await c.host("h1");
+    const scoped = (p: Principal, taskId: string): Principal => ({ ...p, taskScope: { taskId, projectId: c.project } }) as Principal;
+    const matrix: [string, Principal, string[], unknown][] = [
+      ["owner", c.owner, [open, priv].sort(), named],
+      ["member with task.read and artifact.read (responsible for the task-scoped one only)", ann, [open], named],
+      ["member with task.read only", reader, [open], bare],
+      ["member with artifact.read only (cannot read the task)", artOnly, [], undefined],
+      ["task credential of this task, with the artifact right", scoped(ann, t), [open], named],
+      ["task credential of this task, without the artifact right", scoped(reader, t), [open], bare],
+      ["task credential of another task", scoped(ann, other), [], undefined],
+      ["the agent responsible for the owner-scoped one", gone, [open, priv].sort(), named],
+      ["host", host, [], undefined],
+      ["stranger (rights on another project only)", stranger, [], undefined],
+    ];
+    for (const [who, by, want, artifacts] of matrix) {
+      const got = await replacedItems(by, { taskId: t });
+      assert.deepEqual(ids(got), want, who);
+      for (const i of got) {
+        assert.deepEqual(i.detail["artifacts"], artifacts, `${who}: what is shown of the artifacts`);
+        if (artifacts === bare) assert.ok(!JSON.stringify(i).includes("\"guide\"") && !JSON.stringify(i).includes(g2), `${who}: no artifact name or newer artifact anywhere in the item`);
+      }
+    }
+    // The other task's credential sees its own task's item.
+    assert.deepEqual(ids(await replacedItems(scoped(ann, other), { taskId: other })), [onOther]);
+    // The port applies the task credential's limit itself (not only the overview's task check): asked directly about this task, it shows another task's credential nothing.
+    const g1map = new Map([[g1, { newest: g2, firstAt: at() }]]);
+    assert.deepEqual((await acceptance.artifactsReplaced(scoped(ann, other), t, g1map)).items, [], "a credential limited to another task");
+    assert.deepEqual((await acceptance.artifactsReplaced(scoped(ann, t), t, g1map)).items.map((i) => i.id), [open], "a credential limited to this task");
+    // A retired agent: retirement takes its grants and disables it. With the grants gone it sees nothing (not even the deliverable it is responsible for), and once disabled it cannot be named at all.
+    const goneRecord = (await c.principals.get(gone.id))!;
+    await c.principals.setGrants(c.owner, { commandId: cid("ng"), principalId: gone.id, expectedRevision: goneRecord.revision, grants: [] } as never);
+    const stripped = (await c.principals.current(gone.id))!;
+    assert.deepEqual(await replacedItems(stripped, { taskId: t }), [], "no grants: nothing");
+    assert.deepEqual((await acceptance.artifactsReplaced(stripped, t, new Map([[g1, { newest: g2, firstAt: at() }]]))).items, [], "the port shows it nothing either");
+    await c.principals.disable(c.owner, { commandId: cid("dis"), principalId: gone.id, expectedRevision: (await c.principals.get(gone.id))!.revision } as never);
+    assert.equal(await c.principals.current(gone.id), undefined, "a disabled agent is no principal");
+    // The item for the owner still names the retired agent as responsible.
+    assert.equal((await replacedItems(c.owner, { taskId: t })).find((i) => i.detail["deliverableId"] === priv)!.agentId, "gone");
+
+    // The replacement vanishes (a restore that leaves it out): the old copy is the newest of its name again, so nothing is replaced.
+    const g2ref = { kind: "artifact", id: g2 };
+    const g2agg = (await c.storage.getAggregate(g2ref))!;
+    await c.storage.applyOperation({ operationId: cid("raw"), epoch: c.epoch, actor: "owner:test", correlationId: cid("co"), at: at(), changes: [{ type: "delete", ref: g2ref, expectedRevision: g2agg.revision }], audit: [{ type: "test.drop-artifact", subject: g2ref, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    assert.deepEqual(await replacedItems(c.owner, { taskId: t }), [], "the replacement gone: not stale");
+    // Replaced twice, then the newest copy vanishes: the middle copy is the newest, so a version naming it is not stale, and one naming the first copy is (replaced by the middle one, at its time).
+    const g3 = await publish("guide");
+    const g3at = (await c.artifacts.get(g3))!.createdAt;
+    const g4 = await publish("guide");
+    const onMiddle = await deliver(t, "Middle copy", [g3]);
+    assert.deepEqual(ids(await replacedItems(c.owner, { taskId: t })), [open, priv, onMiddle].sort());
+    const g4ref = { kind: "artifact", id: g4 };
+    await c.storage.applyOperation({ operationId: cid("raw"), epoch: c.epoch, actor: "owner:test", correlationId: cid("co"), at: at(), changes: [{ type: "delete", ref: g4ref, expectedRevision: (await c.storage.getAggregate(g4ref))!.revision }], audit: [{ type: "test.drop-artifact", subject: g4ref, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+    const afterDrop = await replacedItems(c.owner, { taskId: t });
+    assert.deepEqual(ids(afterDrop), [open, priv].sort(), "the middle copy is the newest again");
+    assert.deepEqual(afterDrop.find((i) => i.detail["deliverableId"] === open)!.detail["artifacts"], [{ artifactId: g1, name: "guide", replacedBy: g3 }]);
+    assert.equal(afterDrop.find((i) => i.detail["deliverableId"] === open)!.at, g3at);
+    // Only the current version counts: version 1 named the fresh copy, version 2 (submitted) names a replaced one, so version 2 is listed; a draft version 3 takes it off the list.
+    const two = await deliver(t, "Two versions", [g3]);
+    let rec = (await acceptance.get(c.owner, two))!;
+    const v2 = await acceptance.newVersion(c.owner, { commandId: cid("nv"), id: two, expectedRevision: Number(rec["revision"]), artifacts: [{ artifactId: g1 }] });
+    assert.ok(!(await replacedItems(c.owner, { taskId: t })).some((i) => i.detail["deliverableId"] === two), "a draft current version is not listed");
+    await acceptance.submit(c.owner, { commandId: cid("s"), id: two, expectedRevision: v2.revision, contractVersion: 0 });
+    const twoItem = (await replacedItems(c.owner, { taskId: t })).find((i) => i.detail["deliverableId"] === two)!;
+    assert.equal(twoItem.detail["version"], 2);
+    rec = (await acceptance.get(c.owner, two))!;
+    await acceptance.newVersion(c.owner, { commandId: cid("nv"), id: two, expectedRevision: Number(rec["revision"]), artifacts: [{ artifactId: g1 }] });
+    assert.ok(!(await replacedItems(c.owner, { taskId: t })).some((i) => i.detail["deliverableId"] === two), "a newer draft version stands in for it");
+
+    // Pages of two with items added and removed between them: nothing is handed out twice, nothing fails, everything stale throughout is reached once, a cleared one is not.
+    const p = await c.ready("paging task");
+    const x1 = await publish("x", p);
+    const pd: string[] = [];
+    for (let i = 0; i < 7; i++) pd.push(await deliver(p, `Paged ${i}`, [x1]));
+    await publish("x", p);
+    const x3 = await publish("x", p);
+    const sortedPd = [...pd].sort();
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    let added: string | undefined;
+    let cursorAtAdd: string | undefined;
+    const cleared: string[] = [];
+    const clear = async (id: string): Promise<void> => {
+      const r = (await acceptance.get(c.owner, id))!;
+      const nv = await acceptance.newVersion(c.owner, { commandId: cid("nv"), id, expectedRevision: Number(r["revision"]), artifacts: [{ artifactId: x3 }] });
+      await acceptance.submit(c.owner, { commandId: cid("s"), id, expectedRevision: nv.revision, contractVersion: 0 });
+      cleared.push(id);
+    };
+    for (; pages < 40; ) {
+      const page = await status.attention(c.owner, { taskId: p, kind: "stale_artifact", limit: 2, ...(cursor === undefined ? {} : { afterId: cursor }) });
+      pages++;
+      for (const x of page.items) if (x.detail["reason"] === "artifact_replaced") seen.push(String(x.detail["deliverableId"]));
+      cursor = page.next;
+      if (cursor === undefined) break;
+      if (pages === 2) {
+        // The item the cursor names is cleared (the cursor's record is no longer stale), the last one not yet reached is cleared, and a new stale one is added.
+        cursorAtAdd = seen[seen.length - 1]!;
+        await clear(cursorAtAdd);
+        await clear(sortedPd[sortedPd.length - 1]!);
+        added = await deliver(p, "Added later", [x1]);
+      }
+    }
+    assert.equal(cursor, undefined, "the pages end");
+    assert.ok(pages >= 3, `three pages or more (${pages})`);
+    assert.equal(new Set(seen).size, seen.length, "nothing handed out twice");
+    assert.deepEqual(seen, [...seen].sort(), "in deliverable ID order");
+    for (const id of sortedPd.slice(0, -1)) assert.equal(seen.filter((s) => s === id).length, 1, "each one stale throughout (or until after it was handed out) is reached once");
+    assert.ok(!seen.includes(sortedPd[sortedPd.length - 1]!), "one cleared before it was reached is not handed out");
+    // The added one has a fresh random ID: it is reached when its ID sorts after the cursor, and skipped otherwise (the cursor names the last item handed out, as for every kind).
+    assert.equal(seen.includes(added!), added! > cursorAtAdd!, "the added one is reached exactly when it sorts after the cursor");
+    assert.equal(cleared.length, 2);
+
+    // 1,000 deliverables over 10 tasks (100 each, the most a task holds) and 500 artifacts on one task: every stale deliverable is reached once over the pages, the owner-wide scan stays bounded.
+    const big = await c.ready("big task");
+    const firstCopies: string[] = [];
+    for (let i = 0; i < 250; i++) firstCopies.push(await publish(`file ${i}`, big));
+    const lastCopies: string[] = [];
+    for (let i = 0; i < 250; i++) lastCopies.push(await publish(`file ${i}`, big));
+    const many = await deliver(big, "Twenty files", firstCopies.slice(0, 20));
+    // The task's 250 superseded artifacts come first (rank 3): page past them.
+    let manyItem: Awaited<ReturnType<typeof replacedItems>>[number] | undefined;
+    let bigPages = 0;
+    for (let after: string | undefined; ; bigPages++) {
+      const page = await status.attention(c.owner, { taskId: big, kind: "stale_artifact", limit: 100, ...(after === undefined ? {} : { afterId: after }) });
+      manyItem ??= page.items.find((i) => i.detail["deliverableId"] === many);
+      after = page.next;
+      if (after === undefined) break;
+    }
+    assert.equal(bigPages, 2, "250 superseded artifacts and the deliverable take three pages of 100");
+    assert.ok(manyItem !== undefined);
+    assert.deepEqual(manyItem.detail["artifacts"], firstCopies.slice(0, 20).map((id, i) => ({ artifactId: id, name: `file ${i}`, replacedBy: lastCopies[i] })));
+    assert.match(manyItem.summary, /names 20 artifacts \("file 0", "file 1", .*"file 19"\) that newer artifacts of the same names have replaced/);
+    // Ten tasks, each with one real deliverable copied to 100 (the records are the real ones under new IDs).
+    const beforeBulk = at();
+    const tasks: string[] = [];
+    const firsts: string[] = [];
+    const all: string[] = [];
+    for (let k = 0; k < 10; k++) {
+      const tk = await c.ready(`bulk ${k}`);
+      const a1 = await publish("bulk", tk);
+      const real = await deliver(tk, `Bulk ${k}`, [a1]);
+      await publish("bulk", tk);
+      const d = (await c.storage.getAggregate({ kind: "deliverable", id: real }))!;
+      const v = (await c.storage.getAggregate({ kind: "deliverable-version", id: `${real}.1` }))!;
+      const idxRef = { kind: "deliverable-index", id: tk };
+      const idx = (await c.storage.getAggregate(idxRef))!;
+      const copies = Array.from({ length: 99 }, (_, i) => `dlv-${"b".repeat(16)}${String.fromCharCode(97 + k)}${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}a`);
+      // At most 100 changes per operation: the copies in batches, then the index.
+      const creates = copies.flatMap((id) => [{ type: "create", ref: { kind: "deliverable", id }, body: d.body }, { type: "create", ref: { kind: "deliverable-version", id: `${id}.1` }, body: { ...(v.body as object), deliverableId: id } }]);
+      const raw = (changes: unknown[]) => c.storage.applyOperation({ operationId: cid("raw"), epoch: c.epoch, actor: "owner:test", correlationId: cid("co"), at: at(), changes, audit: [{ type: "test.bulk-deliverables", subject: idxRef, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeTimers: [], settleEffects: [], completeDeliveries: [] } as never);
+      for (let i = 0; i < creates.length; i += 100) await raw(creates.slice(i, i + 100));
+      await raw([{ type: "update", ref: idxRef, expectedRevision: idx.revision, body: { ...(idx.body as object), ids: [real, ...copies] } }]);
+      tasks.push(tk);
+      firsts.push(a1);
+      all.push(real, ...copies);
+    }
+    assert.equal(all.length, 1000);
+    const perTask = await acceptance.artifactsReplaced(c.owner, tasks[0]!, new Map([[firsts[0]!, { newest: "art-newest", firstAt: at() }]]));
+    assert.deepEqual([perTask.items.length, perTask.reads], [100, 1 + 100 + 100], "one task costs the index, 100 records and 100 versions");
+    // Owner-wide: every bulk deliverable is reached exactly once over the pages.
+    const reached: string[] = [];
+    let next: string | undefined;
+    for (let rounds = 0; rounds < 200; rounds++) {
+      const page = await status.attention(c.owner, { kind: "stale_artifact", limit: 100, ...(next === undefined ? {} : { afterId: next }) });
+      assert.ok(page.artifactsPartial !== true, "the artifact records were all read");
+      for (const x of page.items) if (x.detail["reason"] === "artifact_replaced" && tasks.includes(x.taskId)) reached.push(String(x.detail["deliverableId"]));
+      next = page.next;
+      if (next === undefined) break;
+    }
+    assert.equal(next, undefined, "the pages end");
+    assert.deepEqual([reached.length, new Set(reached).size], [1000, 1000], "each bulk deliverable reached once");
+    // With a small scan budget (600 records) and a time span that matches nothing, the calls stop early with a cursor (each bulk task costs 201 reads) and the calls go on to the end.
+    const small = c.rebuild({ scanPages: 3, scanPageSize: 200 }, { deliverables: acceptance });
+    let calls = 0;
+    let limitedCalls = 0;
+    next = undefined;
+    for (; calls < 100; ) {
+      const page = await small.attention(c.owner, { kind: "stale_artifact", until: beforeBulk, limit: 100, ...(next === undefined ? {} : { afterId: next }) });
+      calls++;
+      assert.ok(page.artifactsPartial !== true);
+      assert.ok(!page.items.some((x) => tasks.includes(x.taskId)), "nothing of the bulk tasks is in the time span");
+      if (page.scanLimited === true) limitedCalls++;
+      next = page.next;
+      if (next === undefined) break;
+    }
+    assert.equal(next, undefined, "the calls end");
+    // The bulk tasks cost 10 x 201 reads against 600 a call (checked between tasks, so a call reads at most 600 + 201): at least three calls, two or more of them stopped early.
+    assert.ok(limitedCalls >= 2 && calls >= 3, `the budget stopped the scan (${limitedCalls} of ${calls} calls)`);
+  });
+
   suite("attention: contract_changed edge cases: a contract changed back, a credential limited to one task, old records without a contract version, a missing contract version, a long history, title text that reads like an instruction, bounded reads, nothing written (card U13)", async (c) => {
     const acceptance = AcceptanceService.withEpoch(c.storage, c.epoch, {
       rolesOf: async () => [],
