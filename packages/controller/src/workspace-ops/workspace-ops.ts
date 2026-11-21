@@ -118,7 +118,7 @@ export interface WorkspaceRecordBody {
   readonly blocker?: string;
   /** For a `reapply` that moved the checkout onto a newer head (card H12p): the number of this refresh round for the task (the first is 1). Not set for any other request, nor for a refresh that found the checkout at the head already. */
   readonly round?: number;
-  /** The integrator lease a landing was made under (card P10), for the record. */
+  /** The integrator lease a landing, or an integration on a project with a landing branch (card P10, sixth slice), was made under, for the record. */
   readonly lease?: { readonly leaseId: string; readonly fence: number };
   /** A `release` of an approved submission (card H12o): which submission, the base and tree that were approved, and who approved it (a reviewer, or `review_disabled_single_agent`). */
   readonly submission?: { readonly id: string; readonly base: string; readonly tree: string; readonly approvedBy: string };
@@ -163,6 +163,13 @@ export interface WorkspaceDeps {
    * before the host is asked (a long quiesce may outlast the lease); it throws when the lease is not the caller's live hold on the landing branch. When absent (no lease service composed), landings are not gated here.
    */
   readonly landingLease?: (by: Principal, call: { taskId: string; projectId: string; leaseId: unknown; fence: unknown }) => Promise<{ readonly leaseId: string; readonly fence: number } | void>;
+  /**
+   * Card P10 (sixth slice): the gate of an `integration`, which writes the checkout's uncommitted work into the shared tree the landing branch's work lands in. Answers `undefined` when the project names no landing
+   * branch (nothing is leased or queued there: the integration runs as before); otherwise the integration is made only under the landing branch's integrator lease (the caller's live hold; the owner may leave it out
+   * and the live holder's is used) and only by the owner while that branch's landing queue is empty, and the branch and lease used are answered. Throws when refused (settings that cannot be read included). Asked when
+   * the request is made and again right before the host is asked, with the lease the first showing used: the second answer must be the same branch and lease. When absent, integrations are not gated here.
+   */
+  readonly integrationGate?: (by: Principal, call: { taskId: string; projectId: string; leaseId: unknown; fence: unknown }) => Promise<{ readonly branch: string; readonly leaseId: string; readonly fence: number } | undefined>;
   /**
    * Whether a code submission is approved (card H12o, `SubmissionService.approvalOf`). Needed for a `release` that names `submissionId`; without it such a release is `unavailable`. Asked when the request is made and again
    * right before the host is asked (a review may say `changes` while the task is made quiet).
@@ -250,8 +257,16 @@ export class WorkspaceOpService {
     // A landing is made only under the project's integrator lease (card P10): checked before anything is recorded or frozen, and again right before the host is asked.
     // The check may answer the lease it used (the owner may leave it out); the second showing checks that same hold, never a lease taken in between.
     let leased: { leaseId: unknown; fence: unknown } | undefined = operation === "landing" && this.#deps.landingLease !== undefined ? { leaseId: command.leaseId, fence: command.fence } : undefined;
+    // An integration writes the same shared tree (card P10, sixth slice): on a project with a landing branch it is made under that branch's lease too, by the owner, while the branch's landing queue is empty.
+    const integrationGate = operation === "integration" ? this.#deps.integrationGate : undefined;
+    let integratedOn: string | undefined;
     if (leased !== undefined) { const shown = await this.#deps.landingLease!(by, { taskId, projectId, ...leased }); if (shown !== undefined) leased = { leaseId: shown.leaseId, fence: shown.fence }; }
-    else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "only a landing is made under an integrator lease");
+    else if (integrationGate !== undefined) {
+      const shown = await integrationGate(by, { taskId, projectId, leaseId: command.leaseId, fence: command.fence });
+      if (shown !== undefined) { leased = { leaseId: shown.leaseId, fence: shown.fence }; integratedOn = shown.branch; }
+      else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "the project names no landing branch, so no integrator lease covers this integration");
+    }
+    else if (command.leaseId !== undefined || command.fence !== undefined) invalid("leaseId", "only a landing (and, on a project with a landing branch, an integration) is made under an integrator lease");
     // A release may name an approved submission of the task (card H12o): checked before anything is recorded or frozen, and again right before the host is asked.
     let submission: WorkspaceRecordBody["submission"];
     const queue = operation === "landing" ? this.#deps.landingQueue : undefined;
@@ -281,7 +296,13 @@ export class WorkspaceOpService {
       const approvedNow = submission;
       const queuedNow = queued;
       // The second showing: the same lease, the same approval, and the same place in the queue (the oldest, the same submission; or, for the owner's landing of nothing queued, a queue that is still empty).
-      const again = pinned === undefined && approvedNow === undefined && queue === undefined ? undefined : async () => {
+      const again = pinned === undefined && approvedNow === undefined && queue === undefined && integrationGate === undefined ? undefined : async () => {
+        // An integration (card P10, sixth slice): the same answer as at the first showing (no landing branch then and now, or the same branch under the same hold), and the queue still empty.
+        if (integrationGate !== undefined) {
+          const now = await integrationGate(by, { taskId, projectId, leaseId: pinned?.leaseId, fence: pinned?.fence });
+          if (now?.branch !== integratedOn || now?.leaseId !== pinned?.leaseId || now?.fence !== pinned?.fence) throw new DomainError("fenced", "the landing branch or its integrator lease changed while the task was made quiet");
+          return;
+        }
         if (pinned !== undefined) await this.#deps.landingLease!(by, { taskId, projectId, ...pinned });
         if (approvedNow !== undefined) await this.#stillApproved(approvedNow, taskId);
         if (queue !== undefined) {
@@ -563,7 +584,7 @@ export class WorkspaceOpService {
         quietAttempts = quiet.attempts.map((a) => a.attemptId);
         // The quiesce may have taken a while: the lease is shown once more right before the host writes anything, and a lease that is no longer the caller's live hold means nothing is asked of the host.
         if (stillLeased !== undefined) {
-          try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : error instanceof QueueMoved ? `the submission is no longer the oldest approved one in the landing queue, so nothing was landed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
+          try { await stillLeased(); } catch (error) { return { ok: false as const, reason: body.operation === "release" ? `the submission is no longer approved, so nothing was committed: ${safe(error, 300)}` : body.operation === "integration" ? `the landing branch's integrator lease or landing queue no longer allows this integration, so nothing was written to the shared workspace: ${safe(error, 300)}` : error instanceof QueueMoved ? `the submission is no longer the oldest approved one in the landing queue, so nothing was landed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
         }
         // The integrator's mechanical re-apply (card P10): a queued submission approved on an older commit of the landing branch is moved onto its head when none of its files changed there since (exactly the approved
         // change, proven by the host), so the checks below run on the tree that would land. Overlapping files: nothing is written, nothing lands, and the work goes back to its author (below, after the quiesce).

@@ -245,6 +245,21 @@ export class LandingQueueOps {
   }
 
   /**
+   * What an `integration` (card H12l: the checkout's uncommitted changes written into the shared tree) must show about the landing branch's queue before it writes (card P10, sixth slice). An integration carries work
+   * no review approved into the tree the landing branch's work lands in, and the files it leaves there refuse every landing until somebody commits or clears them. So it is made only as the owner's unqueued landing
+   * is: by the owner, and only while the queue of `branch` holds nothing (no entry, no reserved place); an integrator or any agent never (it lands only queued submissions, so it carries no content of its own).
+   * The workspace service asks when the request is made and again right before the host is asked. Throws `invalid_transition` when refused.
+   */
+  async checkIntegration(by: Principal, call: { taskId: string; projectId: string; branch: string }): Promise<void> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("invalid_transition", `on a project with a landing branch (${call.branch.slice(0, 80)}) only the owner shares a task's unreviewed work into the shared tree; an integrator lands only approved submissions from the landing queue (landing.queue.add)`);
+    const q = await this.#queue.get(call.projectId, call.branch);
+    const head = frontOf(q);
+    if (head === undefined) return;
+    const waiting = q.entries.length, reserved = (q.reservations ?? []).length;
+    throw new DomainError("invalid_transition", `the landing queue of branch ${call.branch.slice(0, 80)} is not empty (${waiting} waiting${reserved === 0 ? "" : `, ${reserved} reserved`}; task ${head.taskId} is first), so task ${call.taskId}'s unreviewed work is not shared into the shared tree now: queued work lands first (landing.queue.list shows it; landing.queue.remove takes work out)`);
+  }
+
+  /**
    * A landing waits behind the first place (card P10). When that place has been first for `holdMs` or longer, the director is told, once per first place: it holds the branch, and someone decides whether it goes on
    * (its author is approved and it lands) or is taken out. The notice goes first and the mark after it: a notice that could not be given is given at the next refused landing (the notices are named by command ID,
    * and their text depends only on the first place, so two refusals at the same moment tell once). Best effort: a failure to mark or tell never changes the landing's own answer.
