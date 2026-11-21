@@ -933,12 +933,14 @@ export class GitBridge {
     // Disjoint means no shared path, and no path of one side inside a folder the other side changed as a file (a file that became a folder, or the other way round). Paths are compared as the same file would be on a
     // case-insensitive or normalising filesystem (`collisionKey`: case, Unicode normalisation, ignorable characters), so `Foo` and `foo`, or the NFC and NFD spellings of a name, count as one path. A Git attribute file
     // changed on one side overlaps every path of the other side in its folder or below (attributes decide how the files are converted when the landed files are committed: the approved bytes must not be committed under
-    // rules the review did not see).
+    // rules the review did not see). A Git ignore file is treated the same way (second review): an ignore rule the branch added can hide a file the work adds, so the landed file would not show as waiting to be
+    // committed (`sharedTree` lists no ignored file) and would be left out of the integrator's commit.
     const key = (p: string): string => collisionKey(p.split("/"));
     const inside = (a: string, b: string): boolean => a.startsWith(`${b}/`);
     const attributesOver = (attr: string, p: string): boolean => {
       const parts = attr.split("/");
-      if (fold(parts[parts.length - 1]!) !== ".gitattributes") return false;
+      const name = fold(parts[parts.length - 1]!);
+      if (name !== ".gitattributes" && name !== ".gitignore") return false;
       const folder = parts.slice(0, -1).join("/");
       return folder === "" || inside(p, folder);
     };

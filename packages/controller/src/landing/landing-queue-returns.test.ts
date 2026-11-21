@@ -19,7 +19,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 };
 
 for (const backend of backends) {
-  const rig = async (o: { limit?: number; assignee?: string | undefined; active?: (agentId: string) => boolean; dropProof?: boolean; restack?: false } = {}) => {
+  const rig = async (o: { limit?: number; assignee?: string | undefined; active?: (agentId: string) => boolean; dropProof?: boolean; skewProof?: boolean; restack?: false } = {}) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     const options = { clock: w.clock.now, pause: async () => undefined };
@@ -62,7 +62,7 @@ for (const backend of backends) {
         files = filesOf(call.reappliedFrom.tree);
       } else files = filesOf(s.tree);
       commits.push({ id: oid(commits.length + 1), files });
-      return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: files.length, submission: s.id, base: s.base, tree: s.tree, ...(call.reappliedFrom === undefined || o.dropProof === true ? {} : { reappliedFrom: { base: call.reappliedFrom.base, tree: call.reappliedFrom.tree } }) } };
+      return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: files.length, submission: s.id, base: s.base, tree: s.tree, ...(call.reappliedFrom === undefined || o.dropProof === true ? {} : { reappliedFrom: { base: call.reappliedFrom.base, tree: o.skewProof === true ? oid(999_999) : call.reappliedFrom.tree } }) } };
     };
     const restack = async (call: { requestId: string; taskId: string; projectId: string; quietAttempts: readonly string[]; submission: { id: string; base: string; tree: string } }): Promise<RestackOutcome> => {
       calls.push({ what: "restack", call });
@@ -127,7 +127,7 @@ for (const backend of backends) {
   });
 
   test(`${backend.name}: a host that does not confirm the proof of a re-applied landing keeps the entry; a host without re-apply refuses a stale landing as before (card P10)`, async () => {
-    for (const variant of [{ dropProof: true }, { restack: false as const }]) {
+    for (const variant of [{ dropProof: true }, { skewProof: true }, { restack: false as const }]) {
       const r = await rig(variant);
       try {
         const ivy = await r.person("ivy");
@@ -139,7 +139,7 @@ for (const backend of backends) {
         const land = await r.lander(ivy, t1);
         assert.equal((await land(t1)).state, "done");
         const second = await land(t2);
-        if ("dropProof" in variant) {
+        if ("dropProof" in variant || "skewProof" in variant) {
           assert.equal(second.state, "done");
           assert.match(second.summary ?? "", /did not confirm that exactly submission .* landed, so it stays in the landing queue/);
         } else {
@@ -182,6 +182,10 @@ for (const backend of backends) {
       const s2b = r.submit(t2, r.head(), ["src/a.ts", "src/b.ts"]);
       await r.ops.queueApproved(s2b, "rv2b");
       assert.deepEqual(await r.queued(), [t2]);
+      // Second review: a return of the old submission while the task's newer one is queued takes nothing out and counts nothing (only that very submission is returned).
+      assert.equal(await r.ops.returned({ requestId: "wsr-cccccccccccccccccccc", taskId: t2, projectId: r.w.project, branch: "main", submissionId: s2, paths: ["x"], assignee: "agent:ann" }), undefined);
+      assert.deepEqual(await r.queued(), [t2]);
+      assert.equal((await r.list()).returns.find((x) => x.taskId === t2)?.count, 1);
       assert.equal((await land(t2)).state, "done");
       assert.deepEqual((await r.list()).returns, []);
       // A return of a submission that is no longer queued does nothing and counts nothing.

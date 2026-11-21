@@ -179,3 +179,56 @@ test("the disjoint test folds names and follows renames and attribute files: a c
     assert.equal(sh(tFree.checkout, ...tFree.g, "rev-parse", "refs/nn/base"), head);
   } finally { await done(r.dir); }
 });
+
+test("second review: an executable-bit change is re-applied exactly, a link in the work is refused, a branch ignore file over the work's new file overlaps, no hook of the checkout's git directory runs, and a branch that moves again is re-applied from the earlier re-apply and lands only after the proof against the approved change (card P10)", { skip }, async () => {
+  const r = await rig();
+  try {
+    const mode = await r.work("tsk-mode", { "src/new.ts": "export const n = 1;\n" });
+    execFileSync("chmod", ["+x", join(mode.checkout, "src", "a.ts")]);
+    sh(mode.checkout, ...mode.g, "add", "-A"); sh(mode.checkout, ...mode.g, "commit", "-q", "-m", "executable");
+    const modeTree = sh(mode.checkout, ...mode.g, "rev-parse", "HEAD^{tree}");
+    const link = await r.work("tsk-link", { "src/l.ts": "export const l = 1;\n" });
+    const blob = execFileSync("git", ["--git-dir", link.gitDir, "hash-object", "-w", "--stdin"], { input: "src/a.ts", encoding: "utf8" }).trim();
+    sh(link.checkout, ...link.g, "update-index", "--add", "--cacheinfo", `120000,${blob},src/link`);
+    await writeFile(join(link.checkout, "src", "link"), "src/a.ts");
+    sh(link.checkout, ...link.g, "commit", "-q", "-m", "a link");
+    const linkTree = sh(link.checkout, ...link.g, "rev-parse", "HEAD^{tree}");
+    const ignored = await r.work("tsk-ignored", { "gen/x.out": "generated\n" });
+    // Hooks planted in the checkout's git directory: none may run during the re-apply (read-tree, commit-tree, update-ref) or the landing.
+    const marker = join(r.dir, "hook-ran");
+    for (const name of ["reference-transaction", "post-checkout", "post-index-change", "post-commit", "pre-commit"]) {
+      await mkdir(join(mode.gitDir, "hooks"), { recursive: true });
+      await writeFile(join(mode.gitDir, "hooks", name), `#!/bin/sh\necho ${name} >> ${JSON.stringify(marker)}\n`, { mode: 0o755 });
+    }
+    const head = r.commitShared({ "docs/c.md": "# c, newer\n", "gen/.gitignore": "*.out\n" }, "other work landed");
+    const ask = (taskId: string, base: string, tree: string) => r.ws.port.restack({ requestId: rid(), taskId, projectId: "prj-one", submission: { id: S, base, tree } });
+    // The ignore file the branch added hides the work's new file: overlap, nothing moved.
+    assert.deepEqual(await ask("tsk-ignored", r.base, ignored.tree), { ok: true, state: "overlap", paths: ["gen/x.out"], head });
+    // A link entry in the work is never re-applied.
+    const l = await ask("tsk-link", r.base, linkTree);
+    assert.equal(l.ok, false, JSON.stringify(l));
+    assert.match((l as { reason: string }).reason, /link or a submodule entry/);
+    assert.equal(sh(link.checkout, ...link.g, "rev-parse", "refs/nn/base"), r.base);
+    // The executable bit is part of the change: re-applied exactly (old and new mode), and no hook ran.
+    const m = await ask("tsk-mode", r.base, modeTree);
+    assert.equal((m as { state?: string }).state, "reapplied", JSON.stringify(m));
+    const first = m as { base: string; tree: string };
+    assert.match(sh(mode.checkout, ...mode.g, "diff", "--raw", "--no-renames", head, "HEAD"), /^:100644 100755 [0-9a-f]+ [0-9a-f]+ M\tsrc\/a\.ts$/m);
+    assert.equal(await readFile(marker, "utf8").catch(() => ""), "", "no hook of the checkout's git directory ran");
+    // The branch moves again: the earlier re-apply no longer lands (its base is not the head) ...
+    const head2 = r.commitShared({ "docs/d.md": "# d\n" }, "more work landed");
+    const late = await r.ws.port.run(call("landing", "tsk-mode", { submission: { id: S, base: first.base, tree: first.tree }, reappliedFrom: { base: r.base, tree: modeTree } }));
+    assert.equal(late.ok, false);
+    // ... it is re-applied again from the earlier re-apply, proven against the approved change, and lands; a proof against anything but the approved change is refused.
+    const m2 = await ask("tsk-mode", r.base, modeTree);
+    assert.equal((m2 as { state?: string }).state, "reapplied", JSON.stringify(m2));
+    const second = m2 as { base: string; tree: string; previous: string; recovered: boolean };
+    assert.deepEqual([second.base, second.previous, second.recovered], [head2, head, false]);
+    const wrongFrom = await r.ws.port.run(call("landing", "tsk-mode", { submission: { id: S, base: second.base, tree: second.tree }, reappliedFrom: { base: first.base, tree: modeTree } }));
+    assert.equal(wrongFrom.ok, false, "the approved tree on a base it was not approved on is not the approved change");
+    const landed = await r.ws.port.run(call("landing", "tsk-mode", { submission: { id: S, base: second.base, tree: second.tree }, reappliedFrom: { base: r.base, tree: modeTree } }));
+    assert.equal(landed.ok, true, JSON.stringify(landed));
+    assert.equal(await readFile(join(r.shared, "src", "new.ts"), "utf8"), "export const n = 1;\n");
+    assert.equal(await readFile(marker, "utf8").catch(() => ""), "", "no hook ran during the landing either");
+  } finally { await done(r.dir); }
+});
