@@ -937,12 +937,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         let branch: string | undefined;
         try { branch = (await landingBranchOf(call)).branch; } catch { throw new DomainError("unavailable", "the landing settings could not be read, so it is not known whether the integration needs the integrator lease; nothing was written"); }
         if (branch === undefined) return undefined;
+        // Who may, and the queue, first (P10 sixth-slice review): an agent is told plainly that only the owner integrates here, not asked for a lease that would never let it.
+        await landingQueueOps.checkIntegration(by, { taskId: call.taskId, projectId: call.projectId, branch });
         let lease: { leaseId: string; fence: number };
         try { lease = await integratorLeaseOps.checkLanding(by, { ...call, branch }); } catch (error) {
           if (error instanceof DomainError) throw new DomainError(error.code, `an integration writes the shared tree of landing branch ${branch.slice(0, 80)}, so it is made under that branch's integrator lease, as a landing is: ${error.message}`.slice(0, 600), error.field === undefined ? {} : { field: error.field });
           throw error;
         }
-        await landingQueueOps.checkIntegration(by, { taskId: call.taskId, projectId: call.projectId, branch });
         return { branch, ...lease };
       },
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "task", id: n.taskId }, detail: n.text }); },

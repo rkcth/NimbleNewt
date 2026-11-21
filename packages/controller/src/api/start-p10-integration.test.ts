@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -41,6 +41,10 @@ test("an integration on a project with a landing branch is made under the integr
     assert.equal(unleased.error?.code, "fenced", JSON.stringify(unleased));
     assert.match(unleased.error?.message ?? "", /an integration writes the shared tree of landing branch main, so it is made under that branch's integrator lease, as a landing is: no integrator holds the lease/);
 
+    // An agent holding no lease is told that only the owner integrates here, not asked for a lease that would never let it.
+    const noLease = await integrate(ann, "w1a");
+    assert.equal(noLease.error?.code, "invalid_transition", JSON.stringify(noLease));
+    assert.match(noLease.error?.message ?? "", /only the owner shares a task's unreviewed work/);
     const lease = (await call(ann, "integrator.lease.acquire", { taskId: task, branch: "main", ttlMs: 600_000 }, "a1")).result.item;
     // The integrator itself shares no unreviewed work (it lands only queued, approved submissions).
     const byAnn = await integrate(ann, "w2", { leaseId: lease.leaseId, fence: lease.fence });
@@ -63,5 +67,5 @@ test("an integration on a project with a landing branch is made under the integr
     // The holder gives the lease back: the owner's integration is refused again.
     assert.ok((await call(ann, "integrator.lease.release", { leaseId: lease.leaseId, fence: lease.fence }, "r1")).ok);
     assert.equal((await integrate(O, "w6")).error?.code, "fenced");
-  } finally { await c.close(); }
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 5 }); }
 });

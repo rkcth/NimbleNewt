@@ -30,6 +30,7 @@ for (const backend of backends) {
     const approvals = new Map<string, QueueApproval>();
     let branch: string | undefined = "main";
     let unreadable = false;
+    const retired = new Set<string>();
     const landingBranch = async (): Promise<string | undefined> => { if (unreadable) throw new Error("settings damaged"); return branch; };
     /** One controller's services on the shared store: its own queue and lease services and doors, and the integration gate composed from them. */
     const services = () => {
@@ -38,13 +39,13 @@ for (const backend of backends) {
         landingBranch,
         projectOfTask: async (t) => ((await w.storage.getAggregate({ kind: "task", id: t }))?.body as { projectId?: string } | undefined)?.projectId,
       });
-      const leaseOps = new IntegratorLeaseOps(IntegratorLeaseService.withEpoch(w.storage, w.epoch, options), { landingBranch });
+      const leaseOps = new IntegratorLeaseOps(IntegratorLeaseService.withEpoch(w.storage, w.epoch, options), { landingBranch, activeAgent: async (id) => !retired.has(id) });
       const integrationGate: NonNullable<WorkspaceDeps["integrationGate"]> = async (by, call) => {
         let b: string | undefined;
         try { b = await landingBranch(); } catch { throw new DomainError("unavailable", "the landing settings could not be read"); }
         if (b === undefined) return undefined;
-        const lease = await leaseOps.checkLanding(by, { ...call, branch: b });
         await queue.checkIntegration(by, { taskId: call.taskId, projectId: call.projectId, branch: b });
+        const lease = await leaseOps.checkLanding(by, { ...call, branch: b });
         return { branch: b, ...lease };
       };
       return { queue, leaseOps, integrationGate };
@@ -68,7 +69,7 @@ for (const backend of backends) {
     const recorded = async (by: Principal, commandId: string) => w.storage.getAggregate({ kind: "workspace-request", id: derivedId("wsr", scopedCommandId(by.id, commandId)) });
     const integrate = (by: Principal, commandId: string, extra: Record<string, unknown> = {}, svc = workspace()) => svc.request(by, { commandId, operation: "integration", taskId: extra["taskId"] as string, reason: "share the work", ...extra } as never);
     return {
-      store, w, one, two, person, task, approve, calls, workspace, recorded, integrate,
+      store, w, one, two, person, task, approve, calls, workspace, recorded, integrate, retired,
       setBranch: (b: string | undefined) => { branch = b; }, setUnreadable: (u: boolean) => { unreadable = u; }, setBeforeRun: (f: () => Promise<void>) => { beforeRun = f; },
       close: () => store.close(),
     };
@@ -84,9 +85,9 @@ for (const backend of backends) {
       assert.equal(await r.recorded(r.w.owner, "o1"), undefined, "nothing recorded");
       assert.equal(r.calls.length, 0);
       const lease = await r.one.leaseOps.acquire(ivy, { commandId: "li", taskId: t1, branch: "main", ttlMs: 10 * MIN });
-      // An agent: without a lease, with a wrong fence, and the holder itself (it lands only queued, approved work, so it shares nothing unreviewed).
-      await refuses("invalid_command", () => r.integrate(eve, "e1", { taskId: t1 }), /give leaseId and fence/);
-      await refuses("fenced", () => r.integrate(ivy, "i0", { taskId: t1, leaseId: lease.leaseId, fence: lease.fence + 1 }));
+      // An agent: without a lease, with a wrong fence, and the holder itself (it lands only queued, approved work, so it shares nothing unreviewed). Each is told that only the owner integrates here, not asked for a lease.
+      await refuses("invalid_transition", () => r.integrate(eve, "e1", { taskId: t1 }), /only the owner shares a task's unreviewed work/);
+      await refuses("invalid_transition", () => r.integrate(ivy, "i0", { taskId: t1, leaseId: lease.leaseId, fence: lease.fence + 1 }), /only the owner shares/);
       await refuses("invalid_transition", () => r.integrate(ivy, "i1", { taskId: t1, leaseId: lease.leaseId, fence: lease.fence }), /only the owner shares a task's unreviewed work/);
       assert.equal(r.calls.length, 0, "no refused integration reached the host");
       // The owner, leaving the lease out: the live hold is used and recorded; a repeat answers the record without asking the host again.
@@ -181,6 +182,37 @@ for (const backend of backends) {
       const ok = await r.integrate(r.w.owner, "o4", { taskId: t1 });
       assert.equal(ok.state, "done", JSON.stringify(ok));
       assert.equal(ok.lease?.leaseId, lease.leaseId);
+      assert.equal(r.calls.length, 1);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: an expired hold or a retired holder covers no integration, at the first showing or when it lapses while the task is made quiet (card P10, sixth-slice review)`, async () => {
+    const r = await rig();
+    try {
+      const ivy = await r.person("ivy");
+      const t1 = await r.task("one");
+      const lease = await r.one.leaseOps.acquire(ivy, { commandId: "li", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      // The hold runs out while the task is made quiet: the pinned hold no longer holds, nothing is written.
+      r.setBeforeRun(async () => { r.setBeforeRun(async () => undefined); r.w.clock.advance(11 * MIN); });
+      const lapsed = await r.integrate(r.w.owner, "o1", { taskId: t1 });
+      assert.equal(lapsed.state, "refused", JSON.stringify(lapsed));
+      assert.match(lapsed.summary ?? "", /no longer allows this integration, so nothing was written/);
+      // Expired at the first showing: refused before anything is recorded, whether the owner names the hold or leaves it out.
+      await refuses("fenced", () => r.integrate(r.w.owner, "o2", { taskId: t1 }));
+      await refuses("fenced", () => r.integrate(r.w.owner, "o3", { taskId: t1, leaseId: lease.leaseId, fence: lease.fence }));
+      assert.equal(await r.recorded(r.w.owner, "o2"), undefined);
+      assert.equal(r.calls.length, 0);
+      // A fresh hold, its holder retired while the task is made quiet: refused; retired at the first showing: refused before anything is recorded.
+      const again = await r.one.leaseOps.acquire(ivy, { commandId: "li2", taskId: t1, branch: "main", ttlMs: 10 * MIN });
+      r.setBeforeRun(async () => { r.setBeforeRun(async () => undefined); r.retired.add("ivy"); });
+      const gone = await r.integrate(r.w.owner, "o4", { taskId: t1 });
+      assert.equal(gone.state, "refused", JSON.stringify(gone));
+      assert.match(gone.summary ?? "", /no longer an active agent/);
+      await refuses("fenced", () => r.integrate(r.w.owner, "o5", { taskId: t1, leaseId: again.leaseId, fence: again.fence }), /no longer an active agent/);
+      assert.equal(await r.recorded(r.w.owner, "o5"), undefined);
+      // Back in service with a live hold: the integration goes ahead once.
+      r.retired.delete("ivy");
+      assert.equal((await r.integrate(r.w.owner, "o6", { taskId: t1 })).state, "done");
       assert.equal(r.calls.length, 1);
     } finally { await r.close(); }
   });
