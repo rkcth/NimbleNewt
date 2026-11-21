@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { openNodeJsonlStorage } from "@earendil-works/pi-durable/storage/jsonl/node";
 import {
-  GenerationRefused, ModelRelay, bridgeCommandId, streamTapFor,
+  GenerationRefused, ModelRelay, streamTapFor,
   type ControllerStorage, type ModelStreamCall, type ModelStreamTap,
 } from "@nimblenewt/controller";
 import { BRIDGE_REPLAY, PiAdapter, type AdapterTool } from "@nimblenewt/pi-adapter";
@@ -52,11 +53,17 @@ export type EndOrder = "recorded first" | "read first";
 export interface StreamController extends ToolController { readonly replyEnded: () => Promise<void>; readonly toolCalled: () => void; readonly order: EndOrder }
 
 /**
- * The `push` tool as the production tool bridge runs it (L05d, `ToolExecutionService#admitted`): the call is admitted as an effect of the generation the stream recorded, with the bridge's command ID, and run through the ledger.
+ * The `push` tool as the production tool bridge runs it (L05d, `ToolExecutionService#generationCheck` and `#admitted`): the call is checked against its generation, admitted as an effect of the generation the stream recorded
+ * with the bridge's own admission command ID (`bridgeAdmitId`), and run through the ledger. Left out: the bridge's name and arguments check (the scripted model writes one call), its busy wait and its mapping of a failed outcome.
  * The bridge waits briefly (up to 3 s) for a generation that is still streaming, because the reply ends a moment after the worker has read it whole; here the tool waits for the tap's end of the reply this process is reading
  * (an event, no fixed pause), so the order of boundaries is the same in every run. A refusal is answered as the bridge answers it ("it was not run"); with no reply being read (a call presented again after a restart) a
  * generation that is still streaming is refused at once, where the bridge would refuse it after its 3 s.
  */
+/** The command ID the production bridge admits a call with (`ToolExecutionService#admitted`: `ba-` and a digest of the attempt and the call ID). */
+export function bridgeAdmitId(attemptId: string, callId: string): string {
+  return `ba-${createHash("sha256").update(`${attemptId}\0${callId}`).digest("hex").slice(0, 40)}`;
+}
+
 export function streamPushTool(controller: () => StreamController): AdapterTool {
   return {
     name: "push", description: "Pushes the seed order to the supplier", parameters: Type.Object({ ref: Type.String() }), replay: BRIDGE_REPLAY,
@@ -66,12 +73,19 @@ export function streamPushTool(controller: () => StreamController): AdapterTool 
       c.world.chaos.hit("tool: called by the model");
       // Read first: the reply's completion waits for this call (Pi has stored the reply), and the call waits for the completion, as the bridge does.
       if (c.order === "read first") { c.toolCalled(); await c.replyEnded(); }
-      let admitted: Awaited<ReturnType<typeof c.gen.admitCall>>;
-      try { admitted = await c.gen.admitCall(DISPATCHER, { commandId: bridgeCommandId("bridge", c.fence.attemptId, callId), taskId: c.taskId, callId, target: "git.push" }); } catch (error) {
+      // The bridge's check comes first (`#generationCheck`): a call of a generation that was interrupted, superseded or held is refused before the admission. A call that no generation holds the production bridge would run
+      // directly, outside the ledger (a local worker with recording on): the copy does not refuse it quietly but fails the run, so the sweep cannot pass on a path the bridge does not take.
+      const verdict = await c.gen.checkCall(DISPATCHER, { taskId: c.taskId, callId });
+      if (!verdict.recorded) throw new Error(`call ${callId} belongs to no recorded generation: the production bridge would run it outside the ledger`);
+      if (!verdict.ok) return `generation_refused: ${verdict.reason ?? "not a current generation"}; it was not run`;
+      let outcome: Awaited<ReturnType<typeof c.gen.executeCall>>;
+      try {
+        const admitted = await c.gen.admitCall(DISPATCHER, { commandId: bridgeAdmitId(c.fence.attemptId, callId), taskId: c.taskId, callId, target: "git.push" });
+        outcome = await c.gen.executeCall(DISPATCHER, { runId: admitted.runId, toolCallId: admitted.toolCallId }, pushTarget(c.world));
+      } catch (error) {
         if (error instanceof GenerationRefused) return `generation_refused: ${error.reason}; it was not run`;
         throw error;
       }
-      const outcome = await c.gen.executeCall(DISPATCHER, { runId: admitted.runId, toolCallId: admitted.toolCallId }, pushTarget(c.world));
       c.world.chaos.hit("tool: outcome known, not yet returned to the model");
       return `pushed: ${outcome.status}`;
     },
@@ -149,6 +163,13 @@ export function streamInvariants(s: StreamState): string[] {
   const admitted = s.runs.filter((r) => r.p1 === "admitted").length;
   if (admitted > 1) problems.push(`the call is admitted in ${admitted} generations`);
   for (const r of s.runs) if (r.state === "streaming") problems.push(`generation ${r.number} is left streaming`);
+  // Each new reply supersedes the one before (card L05b): every generation but the last is interrupted and the last (the answer) finished, and a superseded generation holds no call that could still be admitted (a
+  // complete, partial or held call there is withdrawn or dropped by the supersession, unless it was admitted before).
+  s.runs.forEach((r, i) => {
+    const last = i === s.runs.length - 1;
+    if (r.state !== (last ? "finished" : "interrupted")) problems.push(`generation ${r.number} is ${r.state}, expected ${last ? "finished (the answer)" : "interrupted (superseded)"}`);
+    if (!last && (r.p1 === "complete" || r.p1 === "partial" || r.p1 === "held")) problems.push(`superseded generation ${r.number} still holds the call as ${r.p1}`);
+  });
   return problems;
 }
 

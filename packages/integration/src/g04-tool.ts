@@ -14,8 +14,9 @@ import { Chaos, Clock, OperationSpy, acknowledgedSurvive, describe, killProblem,
 
 // Card G04, slice "a kill during a protected tool the model calls". The G04 path (`g04-kill.ts`) runs its protected effect from the worker's own code;
 // here the effect is started by a tool the Pi model calls, through the production route a tool bridge write takes (card L05d): the call is recorded
-// in a generation, the generation is completed, the call is admitted as an effect of its generation (`GenerationService.admitCall`, with the bridge's
-// own command ID `bridgeCommandId("bridge", attempt, call)`) and run through the effect ledger (`executeCall`). The controller and the Pi adapter
+// in a generation, the generation is completed, the call is admitted as an effect of its generation (`GenerationService.admitCall`, with a command ID
+// derived from the attempt and the call, `bridgeCommandId("bridge", attempt, call)`; the bridge's own admission ID is `ba-` and a digest of the same two, used by
+// `g04-stream.ts`) and run through the effect ledger (`executeCall`). The controller and the Pi adapter
 // die together by a real SIGKILL at each boundary of that route, and a new process finishes the path. Glue only: every answer comes from the
 // services, the database, the adapter's durable storage and the target's log.
 
