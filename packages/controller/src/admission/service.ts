@@ -3,12 +3,53 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, text } from "../domain/model.js";
 import { CommandRunner, type CommandMeta, type RunnerOptions } from "../domain/runner.js";
 import { CAPS_REF, capsOf } from "./caps.js";
+import { ConfigurationService } from "../configuration/configuration.js";
 import { scopedCommandId } from "../security/credentials.js";
+import { redactText } from "../security/redact.js";
 import type { NoActor, Principal, PrincipalBody } from "../security/principals.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import {
-  DEFAULT_LIMITS, EMPTY_STATE, LIMIT_BOUNDS, WITHDRAWN_KEPT, checkLimits, descendants, laneOf, order, promote, waitReason, capWaitReason, type AdmissionState, type Capacity, type Entry, type Limits, type RequestClass,
+  DEFAULT_LIMITS, EMPTY_STATE, LIMIT_BOUNDS, WITHDRAWN_KEPT, balancePlaces, balanceWaitReason, blockers, checkLimits, workClassOf, descendants, laneOf, order, promote, waitReason, capWaitReason, type AdmissionState, type Balance, type BalancePlaces, type Capacity, type Entry, type Limits, type RequestClass, type WorkClass,
 } from "./policy.js";
+
+/** The P/PC allocation settings admission reads (card B01). Only figures the owner set count: with neither set there is no allocation and admission is as before. */
+export const BALANCE_KEYS = ["workClass.pcFloor", "workClass.pcCeiling"] as const;
+/** How many lent places the balance view lists. */
+export const BALANCE_LENT_SHOWN = 20;
+export type BalanceReader = () => Promise<Balance | undefined>;
+
+/** The allocation from a reader of installation settings (`ConfigurationService.installationSettings`). A figure that is not a whole percentage, or a floor above the ceiling, is damage: it throws. */
+export function balanceFromSettings(read: (keys: readonly string[]) => Promise<Readonly<Record<string, { readonly value: unknown; readonly set: boolean }>>>): BalanceReader {
+  return async () => {
+    const got = await read(BALANCE_KEYS);
+    const figure = (key: string): number | undefined => {
+      const e = Object.hasOwn(got, key) ? got[key] : undefined;
+      if (e === undefined || !e.set) return undefined;
+      if (typeof e.value !== "number" || !Number.isSafeInteger(e.value) || e.value < 0 || e.value > 100) throw new DomainError("integrity", `the P/PC allocation setting ${key} is not a whole percentage`);
+      return e.value;
+    };
+    const floor = figure("workClass.pcFloor"), ceiling = figure("workClass.pcCeiling");
+    if (floor === undefined && ceiling === undefined) return undefined;
+    const b = { floor: floor ?? 0, ceiling: ceiling ?? 100 };
+    if (b.floor > b.ceiling) throw new DomainError("integrity", `the P/PC allocation floor (${b.floor}%) is above its ceiling (${b.ceiling}%)`);
+    return b;
+  };
+}
+
+/** What the owner is told about the P/PC balance of admission now (card B01). */
+export interface BalanceView {
+  /** The allocation in force, in percent; absent when the owner set none (nothing is reserved or capped by class). */
+  readonly allocation?: Balance;
+  readonly places: BalancePlaces & { readonly productive: number };
+  readonly running: { readonly P: number; readonly PC: number };
+  readonly waiting: { readonly P: number; readonly PC: number };
+  /** Production attempts running in places lent from the improvement reserve, oldest first (at most `BALANCE_LENT_SHOWN`), with why. */
+  readonly lent: readonly { readonly requestId: string; readonly at: string; readonly reason: string }[];
+  readonly lentTotal: number;
+  /** Set when improvement work waits while fewer of its reserved places are in use than the allocation keeps: how many are short and why. */
+  readonly unmet?: { readonly short: number; readonly cause: string };
+  readonly revision: number;
+}
 
 const STATE: AggregateRef = { kind: "admission-state", id: "admission" };
 const CLASSES: readonly RequestClass[] = ["productive", "inquiry", "review"];
@@ -16,6 +57,7 @@ const REQUEST_ID = /^req-[a-z2-7]{20}$/;
 const LABEL = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,119}$/;
 const HOST_ID = /^host:[a-z0-9][a-z0-9-]{0,39}$/;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
+const BALANCE_DAMAGED = "waiting for capacity: the owner's P/PC allocation setting cannot be read, nothing new starts until it is repaired";
 
 /** The admission limits the owner sets as host and global quotas (card H10). The spawn limits of attempts (`depth`, `children`) and `patience` stay the start-up figures. */
 export const QUOTA_NAMES = ["productive", "perHost", "control", "queue"] as const;
@@ -37,6 +79,8 @@ function checkCapacity(value: unknown, field: string): Capacity {
 
 export interface RequestAdmission extends CommandMeta {
   readonly class: RequestClass;
+  /** P (production, the default) or PC (improvement), from the task's contract (card B01). Only productive work has one. */
+  readonly workClass?: WorkClass;
   readonly priority?: number;
   /** The host the work runs on (required for productive work). */
   readonly host?: string;
@@ -50,7 +94,7 @@ export interface RequestAdmission extends CommandMeta {
   readonly reportsTo?: string;
 }
 
-export type Where = { readonly state: "running"; readonly entry: Entry } | { readonly state: "waiting"; readonly entry: Entry; readonly position?: number; /** Why it waits ("waiting for capacity: ..."); absent when only order holds it back. */ readonly reason?: string; /** Set only when one of the owner's capacity caps (per project, per agent, fan-in) is full, whatever else also holds it. */ readonly capReason?: string } | { readonly state: "withdrawn"; readonly reason: string } | { readonly state: "absent" };
+export type Where = { readonly state: "running"; readonly entry: Entry } | { readonly state: "waiting"; readonly entry: Entry; readonly position?: number; /** Why it waits ("waiting for capacity: ..."); absent when only order holds it back. */ readonly reason?: string; /** Set only when one of the owner's capacity caps (per project, per agent, fan-in) is full, whatever else also holds it. */ readonly capReason?: string; /** Set only when the owner's P/PC allocation holds it (card B01), whatever else also holds it. */ readonly balanceReason?: string } | { readonly state: "withdrawn"; readonly reason: string } | { readonly state: "absent" };
 
 /**
  * Priority admission and reserved control capacity (card H03). One small durable record holds what is running and what waits, so every decision is made on the whole picture in a single
@@ -62,19 +106,24 @@ export type Where = { readonly state: "running"; readonly entry: Entry } | { rea
  */
 export class AdmissionService {
   readonly #runner: CommandRunner;
+  readonly #balanceReader: BalanceReader;
 
-  private constructor(runner: CommandRunner) {
+  private constructor(runner: CommandRunner, balance: BalanceReader) {
     this.#runner = runner;
+    this.#balanceReader = balance;
   }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions = {}): AdmissionService {
-    return new AdmissionService(new CommandRunner(storage, epoch, options));
+  /** `balance` reads the owner's P/PC allocation (card B01); by default the installation settings on the same storage, so every controller's admission reads the same figures. */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { balance?: BalanceReader } = {}): AdmissionService {
+    const { balance, ...rest } = options;
+    const configuration = balance === undefined ? ConfigurationService.withEpoch(storage, epoch) : undefined;
+    return new AdmissionService(new CommandRunner(storage, epoch, rest), balance ?? balanceFromSettings((keys) => configuration!.installationSettings(keys)));
   }
 
   /** Asks to start something. It is admitted at once if a place is free, otherwise it waits in order; a full queue or a spawn beyond the limits is refused. */
   async request(command: RequestAdmission): Promise<{ id: string; state: "running" | "waiting" | "released"; replayed: boolean }> {
     const result = await this.#retrying(() => this.#runner.command("admission.request", command, async (meta) => {
-      onlyKnown(command, ["commandId", "actor", "class", "priority", "host", "cpus", "memoryMb", "parent", "project", "agent", "reportsTo"]);
+      onlyKnown(command, ["commandId", "actor", "class", "workClass", "priority", "host", "cpus", "memoryMb", "parent", "project", "agent", "reportsTo"]);
       const label = (v: unknown, field: string): string | undefined => (v === undefined ? undefined : typeof v === "string" && LABEL.test(v) ? v : invalid(field, "is not a valid ID"));
       const project = label(command.project, "project"), agent = label(command.agent, "agent"), reportsTo = label(command.reportsTo, "reportsTo");
       const cls = CLASSES.includes(command.class) ? command.class : invalid("class", `must be one of ${CLASSES.join(", ")}`);
@@ -82,6 +131,8 @@ export class AdmissionService {
       if (!Number.isSafeInteger(priority) || priority < 0 || priority > 9) invalid("priority", "must be a whole number from 0 to 9");
       const host = command.host === undefined ? undefined : (typeof command.host === "string" && HOST_ID.test(command.host) ? command.host : invalid("host", "is not a host ID"));
       if (cls === "productive" && host === undefined) invalid("host", "is required for productive work");
+      const workClass = command.workClass === undefined ? undefined : command.workClass === "P" || command.workClass === "PC" ? command.workClass : invalid("workClass", "must be P or PC");
+      if (workClass !== undefined && cls !== "productive") invalid("workClass", "only productive work is production or improvement work; inquiries and reviews are neither");
       const cpus = command.cpus;
       const memoryMb = command.memoryMb;
       if (typeof cpus !== "number" || !Number.isFinite(cpus) || cpus <= 0 || cpus > 1024) invalid("cpus", "must be a number above 0 and at most 1024");
@@ -89,13 +140,14 @@ export class AdmissionService {
       const parent = command.parent === undefined ? undefined : (typeof command.parent === "string" && REQUEST_ID.test(command.parent) ? command.parent : invalid("parent", "is not a request ID"));
       const id = derivedId("req", meta.commandId);
       return {
-        payload: { class: cls, priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }) },
+        payload: { class: cls, ...(workClass === undefined ? {} : { workClass }), priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }) },
         build: async () => {
           const loaded = await this.#load();
           const revision = loaded.revision;
           const state = await this.#prepare(loaded.state);
           // An unreadable caps record stops new requests (nothing starts on a guess); release and the other decisions below never depend on it.
           const caps = await this.#caps();
+          const balance = await this.#balance();
           if ([...state.running, ...state.queue].some((e) => e.id === id)) throw new DomainError("command_conflict", `request ${id} already exists`);
           const depth = parent === undefined ? 0 : await this.#childDepth(state, parent);
           if (depth > state.limits.depth) throw new DomainError("invalid_command", `starting this would make a chain of ${depth} attempts starting attempts; the limit is ${state.limits.depth}`, { field: "parent" });
@@ -106,9 +158,9 @@ export class AdmissionService {
             const cap = state.capacity[host]!;
             if ((cpus as number) > cap.cpus || (memoryMb as number) > cap.memoryMb) throw new DomainError("invalid_command", `${host} can never run a request of ${cpus} CPUs and ${memoryMb} MB (it has ${cap.cpus} and ${cap.memoryMb})`, { field: "cpus" });
           }
-          const entry: Entry = { id, class: cls, priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }), depth, seq: state.nextSeq, skipped: 0, at: this.#runner.now() };
+          const entry: Entry = { id, class: cls, ...(workClass === undefined ? {} : { workClass }), priority, ...(host === undefined ? {} : { host }), cpus: cpus as number, memoryMb: memoryMb as number, ...(parent === undefined ? {} : { parent }), ...(project === undefined ? {} : { project }), ...(agent === undefined ? {} : { agent }), ...(reportsTo === undefined ? {} : { reportsTo }), depth, seq: state.nextSeq, skipped: 0, at: this.#runner.now() };
           const queued: AdmissionState = { ...state, queue: [...state.queue, entry], nextSeq: state.nextSeq + 1 };
-          const after = promote({ ...queued, caps }).state;
+          const after = promote({ ...queued, caps, ...(balance === undefined ? {} : { balance }) }).state;
           // The bound is on what is left waiting: a request that is admitted at once never sat in the queue.
           if (after.queue.length > state.limits.queue) throw new DomainError("unavailable", `the queue is full (${state.limits.queue} waiting); try again later`);
           return this.#built(revision, after, { request: id, class: cls });
@@ -363,9 +415,60 @@ export class AdmissionService {
       return gone === undefined ? { state: "absent" } : { state: "withdrawn", reason: gone.reason };
     }
     const ahead = order(state, laneOf(waiting.class));
-    let reason: string | null = null, capReason: string | null = null;
+    let reason: string | null = null, capReason: string | null = null, balanceReason: string | null = null;
     try { const withCaps = { ...state, caps: await this.#caps() }; reason = waitReason(withCaps, waiting); capReason = capWaitReason(withCaps, waiting); } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; reason = capReason = "waiting for capacity: the owner's capacity limits setting is damaged, nothing new starts until it is repaired"; }
-    return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1, ...(reason === null ? {} : { reason }), ...(capReason === null ? {} : { capReason }) };
+    if (laneOf(waiting.class) === "productive") {
+      try {
+        const balance = await this.#balance();
+        if (balance !== undefined) {
+          let caps: AdmissionState["caps"];
+          try { caps = await this.#caps(); } catch { caps = undefined; }
+          const full = { ...state, ...(caps === undefined ? {} : { caps }), balance };
+          balanceReason = balanceWaitReason(full, waiting);
+          if (reason === null) reason = balanceReason;
+        }
+      } catch (error) { if (!(error instanceof DomainError && error.code === "integrity")) throw error; balanceReason = BALANCE_DAMAGED; reason ??= balanceReason; }
+    }
+    return { state: "waiting", entry: waiting, position: ahead.findIndex((e) => e.id === requestId) + 1, ...(reason === null ? {} : { reason }), ...(capReason === null ? {} : { capReason }), ...(balanceReason === null ? {} : { balanceReason }) };
+  }
+
+  /**
+   * The P/PC balance of admission now (card B01), owner only: the allocation in force and the places it keeps and caps, what runs and waits of each kind, the production attempts running in lent
+   * places (bounded) and, when improvement work waits short of its reserve, why. A damaged allocation setting is refused (`integrity`) rather than shown as no allocation.
+   */
+  async balance(by: Principal): Promise<BalanceView> {
+    if (by.kind !== "owner") throw new DomainError("forbidden", `${by.id} may not read the P/PC balance`);
+    const { state, revision } = await this.#load();
+    const allocation = await this.#balance();
+    const productive = state.limits.productive;
+    const places = allocation === undefined ? { reserved: 0, ceiling: productive, protectedP: 0 } : balancePlaces(productive, allocation);
+    const runningP = state.running.filter((e) => laneOf(e.class) === "productive");
+    const waitingP = state.queue.filter((e) => laneOf(e.class) === "productive");
+    const count = (list: readonly Entry[]) => ({ P: list.filter((e) => workClassOf(e) === "P").length, PC: list.filter((e) => workClassOf(e) === "PC").length });
+    const running = count(runningP), waiting = count(waitingP);
+    const lentAll = runningP.filter((e) => e.lent !== undefined).sort((a, b) => a.seq - b.seq);
+    let unmet: BalanceView["unmet"];
+    const short = places.reserved - running.PC;
+    if (allocation !== undefined && short > 0 && waiting.PC > 0) {
+      let caps: AdmissionState["caps"];
+      try { caps = await this.#caps(); } catch { caps = undefined; }
+      const plain: AdmissionState = { ...state, ...(caps === undefined ? {} : { caps }) };
+      const full: AdmissionState = { ...plain, balance: allocation };
+      const free = productive - runningP.length;
+      const first = order(full, "productive").find((e) => workClassOf(e) === "PC")!;
+      const held = blockers(full, first).filter((b) => b !== "lane");
+      const cause = free === 0
+        ? `every productive place is taken (${running.P} production, ${running.PC} improvement)${lentAll.length === 0 ? "" : `; ${lentAll.length} production attempt${lentAll.length === 1 ? " was" : "s were"} lent a reserved place while no improvement work could use it, and the place${lentAll.length === 1 ? " comes" : "s come"} back as ${lentAll.length === 1 ? "it ends" : "they end"}`}; nothing running is stopped to make room`
+        : held.length > 0 ? (waitReason(plain, first) ?? "the waiting improvement work cannot run yet")
+          : "the waiting improvement work is admitted at the next decision";
+      unmet = { short, cause };
+    }
+    return {
+      ...(allocation === undefined ? {} : { allocation }),
+      places: { productive, ...places }, running, waiting,
+      lent: lentAll.slice(0, BALANCE_LENT_SHOWN).map((e) => ({ requestId: e.id, at: e.at, reason: e.lent! })), lentTotal: lentAll.length,
+      ...(unmet === undefined ? {} : { unmet }), revision,
+    };
   }
 
   async snapshot(): Promise<AdmissionState & { revision: number }> {
@@ -386,15 +489,27 @@ export class AdmissionService {
     return capsOf(found?.body, found?.revision);
   }
 
-  /** Admits what fits under the caps now. A damaged caps record admits nothing new (work waits; stop and release still work) until it is repaired. */
+  /**
+   * The owner's P/PC allocation now (card B01). Any failure to read it is reported as `integrity` with a fixed text (the reader's own message may come from storage and is not passed on), so it is
+   * handled like a damaged caps record: nothing new starts on a guess, while release and stop still work.
+   */
+  async #balance(): Promise<Balance | undefined> {
+    try { return await this.#balanceReader(); } catch (error) {
+      if (error instanceof DomainError && error.code === "integrity") throw new DomainError("integrity", redactText(error.message).slice(0, 200));
+      throw new DomainError("integrity", "the P/PC allocation settings cannot be read");
+    }
+  }
+
+  /** Admits what fits under the caps and the P/PC allocation now. A damaged caps record or allocation admits nothing new (work waits; stop and release still work) until it is repaired. */
   async #promote(state: AdmissionState): Promise<AdmissionState> {
     let caps: NonNullable<AdmissionState["caps"]>;
-    try { caps = await this.#caps(); } catch (error) { if (error instanceof DomainError && error.code === "integrity") return state; throw error; }
-    return promote({ ...state, caps }).state;
+    let balance: Balance | undefined;
+    try { caps = await this.#caps(); balance = await this.#balance(); } catch (error) { if (error instanceof DomainError && error.code === "integrity") return state; throw error; }
+    return promote({ ...state, caps, ...(balance === undefined ? {} : { balance }) }).state;
   }
 
   #built(revision: number, stateWithCaps: AdmissionState, detail: JsonObject) {
-    const { caps: _caps, ...state } = stateWithCaps; void _caps;
+    const { caps: _caps, balance: _balance, ...state } = stateWithCaps; void _caps; void _balance;
     const change: Change = revision === 0
       ? { type: "create", ref: STATE, body: state as unknown as JsonObject }
       : { type: "update", ref: STATE, expectedRevision: revision, body: state as unknown as JsonObject };
