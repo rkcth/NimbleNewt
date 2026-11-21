@@ -506,6 +506,44 @@ for (const backend of backends) {
     assert.equal(await c.config.layer(c.owner, "agent", "agt-aaaaaaaaaaaaaaaaaaaa"), undefined);
   });
 
+  suite("onChanged (card B01 review): told after an apply or a change puts keys in force, told again on a repeat with what that write recorded, never on a refusal or an unchanged value; its failure is not the change's", async (c) => {
+    const told: { layer: string; scopeId: string; keys: string[]; revision: number }[] = [];
+    let fail = false;
+    const config = ConfigurationService.withEpoch(c.storage, c.epoch, { ...options, onChanged: async (e) => { told.push({ layer: e.layer, scopeId: e.scopeId, keys: [...e.keys], revision: e.revision }); if (fail) throw new Error("listener failed"); } });
+    const first = await config.change(c.owner, { commandId: "oc-1", layer: "installation", expectedRevision: 0, set: { "workClass.pcCeiling": 50 } });
+    assert.deepEqual(told, [{ layer: "installation", scopeId: "installation", keys: ["workClass.pcCeiling"], revision: first.revision }]);
+    // A repeat (the caller lost the answer, or stopped before the listener ran) tells it again with the same keys and revision; the listener's own step is keyed by the revision.
+    const again = await config.change(c.owner, { commandId: "oc-1", layer: "installation", expectedRevision: 0, set: { "workClass.pcCeiling": 50 } });
+    assert.equal(again.replayed, true);
+    assert.deepEqual(told.at(-1), told[0]);
+    assert.equal(told.length, 2);
+    // Refused changes and refused applies tell nothing.
+    await refuses("invalid_command", () => config.change(c.owner, { commandId: "oc-2", layer: "installation", set: { "workClass.pcFloor": 80 } }));
+    const staged = await config.stage(c.owner, { commandId: "oc-3", layer: "installation", expectedRevision: first.revision, set: { "workClass.pcFloor": 90 } });
+    const refused = await config.apply(c.owner, { commandId: "oc-4", layer: "installation", expectedRevision: staged.revision });
+    assert.equal(refused.applied, false);
+    const refusedAgain = await config.apply(c.owner, { commandId: "oc-4", layer: "installation", expectedRevision: staged.revision });
+    assert.equal(refusedAgain.applied, false);
+    assert.equal(told.length, 2, "a refusal and its repeat put nothing in force");
+    // An apply that puts keys in force tells it, with only the keys whose value changed; a failing listener does not undo or fail the apply.
+    const fixed = await config.stage(c.owner, { commandId: "oc-5", layer: "installation", expectedRevision: refusedAgain.revision, set: { "workClass.pcFloor": 20, "workClass.pcCeiling": 50 } });
+    fail = true;
+    const applied = await config.apply(c.owner, { commandId: "oc-6", layer: "installation", expectedRevision: fixed.revision });
+    assert.deepEqual([applied.applied, applied.takesEffect], [true, { "workClass.pcFloor": "next-request" }]);
+    assert.deepEqual(told.at(-1), { layer: "installation", scopeId: "installation", keys: ["workClass.pcFloor"], revision: applied.revision });
+    assert.equal((await value(c, "workClass.pcFloor"))!.value, 20, "in force although the listener failed");
+    const appliedAgain = await config.apply(c.owner, { commandId: "oc-6", layer: "installation", expectedRevision: fixed.revision });
+    assert.deepEqual([appliedAgain.applied, appliedAgain.revision], [true, applied.revision]);
+    assert.deepEqual(told.at(-1), told.at(-2), "the repeat of the apply tells the same keys and revision");
+    fail = false;
+    // A change that sets a value already in force changes no key: nothing to tell. Another layer is told with its own scope.
+    const count = told.length;
+    await config.change(c.owner, { commandId: "oc-7", layer: "installation", set: { "workClass.pcFloor": 20 } });
+    assert.equal(told.length, count);
+    const team = await config.change(c.owner, { commandId: "oc-8", layer: "team", scopeId: c.team, set: { "workClass.pcFloor": 30 } });
+    assert.deepEqual(told.at(-1), { layer: "team", scopeId: c.team, keys: ["workClass.pcFloor"], revision: team.revision });
+  });
+
   suite("change: a lock above that lands while a change below is being written makes the change below stale; it never goes into force under the lock", async (c) => {
     // The storage the agent-layer change commits through runs the owner's installation lock first, between the change's read of the layers above and its own write.
     let race: (() => Promise<void>) | undefined;

@@ -314,7 +314,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
-  capacity: { keys: [], about: "the capacity settings in force, in three groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) and the limits on spawning child tasks (depth, live children, children in all): each figure, whether you set it or it is the default, and which are off (owner only)" },
+  capacity: { keys: [], about: "the capacity settings in force, in four groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) the limits on spawning child tasks (depth, live children, children in all), and the P/PC work balance (places kept for improvement work and its ceiling from workClass.pcFloor and pcCeiling, production and improvement attempts running and waiting, places lent to production, whether improvement work is short of its reserve and why): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
   providers: { keys: [], about: "owner only (card U08): each model provider with where it runs, whether it is on and costs money, its model server's address, the NAME of its secret and whether that secret is set, and its models. A key is never shown and is never typed in chat: it is entered on the web page's Secrets form or put in the secret store on the machine" },
   secrets: { keys: [], about: "owner only (card U08): the names of the secrets the installation uses and whether each is set; never a value. A secret is entered write-only on the web page's Secrets form or put in the host's secret store, never typed in chat" },
@@ -655,6 +655,8 @@ export interface StatusDeps {
     readonly limits?: Pick<CapacityLimitsService, "get">;
     readonly quotas?: Pick<AdmissionService, "quotas">;
     readonly swarm?: Pick<SwarmLimitsService, "get">;
+    /** The P/PC work balance of admission (card B01). Absent: the group says it is not offered. */
+    readonly balance?: Pick<AdmissionService, "balance">;
   };
   /**
    * Release testing (card X09b part 2): the same reads the API's `release.gate`, `release.attempts` and `release.status` make, and the candidate list for the owner's `release` status view.
@@ -819,6 +821,7 @@ const capacityWord = (name: string): string => (Object.hasOwn(CAPACITY_WORDS, na
  * still released; the quotas live in the admission record itself, the record admission works from; and `SwarmService` takes its limits from `SwarmLimitsService.effective()`, which throws on a damaged record,
  * so a damaged swarm record spawns nothing at all.
  */
+const BALANCE_DAMAGED = "your P/PC allocation (workClass.pcFloor, workClass.pcCeiling) cannot be read - nothing new productive is admitted until it is repaired; what is already running is not stopped";
 const CAPS_DAMAGED = "the caps record you stored is damaged - nothing new is admitted, not an inquiry, not a review, not productive work - until it is repaired with capacity.limits.change; what is already running is not stopped";
 const SWARM_DAMAGED = "the stored swarm limits are damaged - no child task can be spawned until they are repaired with swarm.limits.change";
 /** A stored figure the controller can work from: a number that is neither missing, nor NaN, nor an infinity. */
@@ -1491,6 +1494,23 @@ export class StatusService {
           const none = !isDamaged && (e === undefined ? s.defaults[name] : e) === 0
             ? name === "depth" ? ": no child task may be spawned at all" : ": no new child task may be spawned now" : "";
           lines.push(line(`${name} (${capacityWord(name)}): ${words}${none}${!isDamaged && damaged.length > 0 ? " - not in force while the record is damaged" : ""}`, c));
+        }
+      }
+    }
+    // ---- the P/PC work balance (card B01): what the allocation keeps and caps, what runs and waits of each kind, lent places and an unmet reservation with its cause.
+    const balanceCite = cite("admission-state", "admission");
+    if (settings.balance === undefined) lines.push(line("P/PC work balance: this controller does not offer it.", balanceCite));
+    else {
+      let b: Awaited<ReturnType<NonNullable<typeof settings.balance>["balance"]>> | undefined;
+      try { b = await settings.balance.balance(by); } catch (error) { lines.push(line(`P/PC work balance: ${capacityProblem(error, BALANCE_DAMAGED)}.`, balanceCite)); }
+      if (b !== undefined) {
+        const c = cite("admission-state", "admission", b.revision === 0 ? undefined : b.revision);
+        const now = `${b.running.P} production and ${b.running.PC} improvement attempt(s) running, ${b.waiting.P} and ${b.waiting.PC} waiting`;
+        if (b.allocation === undefined) lines.push(line(`P/PC work balance: no allocation is set (workClass.pcFloor and workClass.pcCeiling), so no place is kept for improvement (PC) work and none is capped by kind; ${now}.`, c));
+        else {
+          lines.push(line(`P/PC work balance (your allocation: improvement floor ${b.allocation.floor}%, ceiling ${b.allocation.ceiling}% of ${b.places.productive} productive places): ${b.places.reserved} place(s) kept for improvement work, at most ${b.places.ceiling} improvement attempt(s) at once, ${b.places.protectedP} place(s) production always keeps; ${now}.`, c));
+          if (b.lentTotal > 0) lines.push(line(`${b.lentTotal} production attempt(s) run in places lent from the improvement reserve (no improvement work could use them); each place comes back when its attempt ends.`, c));
+          lines.push(line(b.unmet === undefined ? "Improvement work is not short of its reserved places now." : `Improvement work is short of ${b.unmet.short} reserved place(s): ${quoted(b.unmet.cause, 400)}.`, c));
         }
       }
     }

@@ -134,7 +134,7 @@ export interface DispatcherDeps {
   readonly hosts: Pick<HostService, "status">;
   /** The worker hosts, local or remote, in the order they are tried. They all implement the same contract. */
   readonly workers: readonly WorkerHost[];
-  readonly contracts: Pick<ContractService, "priorityOf" | "recoveryOf">;
+  readonly contracts: Pick<ContractService, "priorityOf" | "recoveryOf"> & Partial<Pick<ContractService, "workClassOf">>;
   readonly harnesses: HarnessCatalog;
   readonly policy: Pick<PolicyService, "evaluate"> & Partial<Pick<PolicyService, "contextFor">>;
   /**
@@ -2572,7 +2572,9 @@ export class DispatcherService {
       const priority = await this.#deps.contracts.priorityOf(d.body.taskId);
       // Who the work counts for under the owner's optional caps: its project, its agent and (for a child task) the agent of the task it reports to. A supervisor that cannot be read is simply not counted.
       const reportsTo = await this.#supervisor(d.body.taskId);
-      ask = { n, priority, ...(reportsTo === undefined ? {} : { reportsTo }) };
+      // The P or PC class (card B01) is decided here with the priority and kept on the attempt, so a relabel after this cannot move the attempt's place or its slot time to the other kind.
+      const workClass = this.#deps.contracts.workClassOf === undefined ? undefined : await this.#deps.contracts.workClassOf(d.body.taskId);
+      ask = { n, priority, ...(reportsTo === undefined ? {} : { reportsTo }), ...(workClass === undefined ? {} : { workClass }) };
       const chosen = ask;
       await this.#update(d.body.attemptId, (b) => (b.ask?.n === n ? b : { ...b, ask: chosen }));
       ask = (await this.#load(d.body.attemptId))?.body.ask ?? ask;
@@ -2580,7 +2582,7 @@ export class DispatcherService {
     const commandId = `dpa-req:${d.body.attemptId}:${n}`;
     let asked: { id: string };
     try {
-      asked = await this.#deps.admission.request({ commandId, actor: DISPATCHER_ACTOR, class: "productive", priority: ask.priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(ask.reportsTo === undefined ? {} : { reportsTo: ask.reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
+      asked = await this.#deps.admission.request({ commandId, actor: DISPATCHER_ACTOR, class: "productive", ...(ask.workClass === undefined ? {} : { workClass: ask.workClass }), priority: ask.priority, host: host.hostId, project: d.body.projectId, agent: d.body.agentId, ...(ask.reportsTo === undefined ? {} : { reportsTo: ask.reportsTo }), cpus: host.resources.cpus, memoryMb: host.resources.memoryMb });
     } catch (error) {
       // An entry committed under this very command ID by a request that then could not be repeated as it was (a crash, then a different host or size): the entry is ours. Take it over when it is the same
       // place, otherwise give it back and ask afresh under the next number, so a place is never leaked.

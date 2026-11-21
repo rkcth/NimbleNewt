@@ -1965,6 +1965,31 @@ for (const backend of backendsNamed(backendName)) {
     await c.dispatcher.idle();
   });
 
+  suite("a task's P or PC class is decided once for its admission request and kept on the attempt: relabeling afterwards moves neither its place nor its kind (card B01)", async (c) => {
+    const ann = await c.agent("ann", workGrants(c.project, []));
+    const bob = await c.agent("bob", workGrants(c.project, []));
+    const gate = deferred();
+    c.worker.script = async () => { await gate.promise; return { status: "completed", text: "x" }; };
+    const improvement = await c.task("improve", ann);
+    const production = await c.task("produce", bob);
+    await c.contracts.setContract(c.owner, { commandId: "wc1", taskId: improvement.taskId, expectedVersion: 0, workClass: "PC" });
+    await c.dispatcher.tick();
+    const kind = async (attemptId: string): Promise<[string | undefined, string | undefined]> => {
+      const dd = (await c.dispatcher.get(c.owner, attemptId))!;
+      const s = await c.admission.snapshot();
+      return [[...s.running, ...s.queue].find((e) => e.id === dd.requestId)?.workClass, (dd as unknown as { ask?: { workClass?: string } }).ask?.workClass];
+    };
+    assert.deepEqual(await kind(improvement.attemptId!), ["PC", "PC"]);
+    assert.deepEqual(await kind(production.attemptId!), ["P", "P"]);
+    await c.contracts.setContract(c.owner, { commandId: "wc2", taskId: improvement.taskId, expectedVersion: 1, workClass: "P" });
+    await c.contracts.setContract(c.owner, { commandId: "wc3", taskId: production.taskId, expectedVersion: 0, workClass: "PC" });
+    await c.dispatcher.tick();
+    assert.deepEqual(await kind(improvement.attemptId!), ["PC", "PC"], "the relabel waits for the next request");
+    assert.deepEqual(await kind(production.attemptId!), ["P", "P"]);
+    gate.resolve();
+    await c.dispatcher.idle();
+  });
+
   suite("the spend the policy is given comes from budget accounting, not from the agent", async (c) => {
     const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
     const { taskId } = await c.task("t", ann);
