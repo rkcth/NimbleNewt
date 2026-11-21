@@ -184,8 +184,10 @@ test("second review: an executable-bit change is re-applied exactly, a link in t
   const r = await rig();
   try {
     const mode = await r.work("tsk-mode", { "src/new.ts": "export const n = 1;\n" });
-    execFileSync("chmod", ["+x", join(mode.checkout, "src", "a.ts")]);
-    sh(mode.checkout, ...mode.g, "add", "-A"); sh(mode.checkout, ...mode.g, "commit", "-q", "-m", "executable");
+    // The executable bit is set in the index (git update-index --chmod), which works where the file system has no mode bits (Windows, core.fileMode false, where a chmod alone
+    // leaves nothing to commit); on POSIX the file is made executable too, so the checkout stays clean.
+    if (process.platform !== "win32") execFileSync("chmod", ["+x", join(mode.checkout, "src", "a.ts")]);
+    sh(mode.checkout, ...mode.g, "update-index", "--chmod=+x", "src/a.ts"); sh(mode.checkout, ...mode.g, "commit", "-q", "-m", "executable");
     const modeTree = sh(mode.checkout, ...mode.g, "rev-parse", "HEAD^{tree}");
     const link = await r.work("tsk-link", { "src/l.ts": "export const l = 1;\n" });
     const blob = execFileSync("git", ["--git-dir", link.gitDir, "hash-object", "-w", "--stdin"], { input: "src/a.ts", encoding: "utf8" }).trim();
