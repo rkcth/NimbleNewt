@@ -130,7 +130,7 @@ for (const backend of backends) {
     // An agent cannot cite a review it neither asked for nor may read the task of.
     const rev = await c.review(c.a, c.taskA, c.dev.id);
     await refuses("invalid_command", () => c.obs.submit(c.eve, { commandId: cid("x"), projectId: c.b, summary: "peek", sources: [{ kind: "review", id: rev }] }));
-    const denied = await c.obs.record(c.host, { commandId: "obs-deny:1", kind: "correction", summary: "the owner denied a request to use deploy", sources: [{ kind: "review", id: rev }] });
+    const denied = await c.obs.record(c.host, { commandId: "obs-deny:1", kind: "correction", summary: "the owner denied a request to use deploy", detail: "not on the shared tree", sources: [{ kind: "review", id: rev }, { kind: "task", id: c.taskA }] });
     const id = idOf(denied);
     const told = await c.obs.submit(c.dev2, { commandId: cid("f"), projectId: c.a, summary: "deploy was refused", sources: [{ kind: "review", id: rev }] });
     assert.equal(idOf(told), id);
@@ -141,6 +141,12 @@ for (const backend of backends) {
     assert.equal((await c.obs.get(c.reader, id))?.reporters.length, 2);
     const asReporter = await c.obs.get(c.dev2, id);
     assert.deepEqual([asReporter?.reporters, asReporter?.reportedBy], [[c.dev2.id], "another reporter"]);
+    // Nor who owns or settled it, another reporter's detail, or the context records another reporter named.
+    const settled = await c.obs.dispose(c.mgr, { commandId: cid("d"), observationId: id, expectedRevision: (await c.obs.get(c.mgr, id))!.revision, to: "resolved", reason: "fixed", owner: c.dev.id });
+    const masked = await c.obs.get(c.dev2, id);
+    assert.deepEqual([masked?.owner, masked?.detail, masked?.sources, masked?.history.map((h) => h.by), masked?.revision], ["someone else", undefined, [{ kind: "review", id: rev }], ["someone else", "someone else"], settled.revision]);
+    assert.doesNotMatch(JSON.stringify(masked), new RegExp(`${c.dev.id}(?!2)|${c.mgr.id}|${c.host.id}|shared tree`));
+    assert.deepEqual([(await c.obs.get(c.mgr, id))?.owner, (await c.obs.get(c.mgr, id))?.detail], [c.dev.id, "not on the shared tree"], "a reader of the project's meetings sees all");
     // Credential-shaped words: an agent's are refused, the controller's are replaced.
     await refuses("invalid_command", () => c.obs.submit(c.dev, { commandId: cid("x"), projectId: c.a, summary: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked" }), /credential/);
     const safe = await c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "push failed with ghp_abcdefghijklmnopqrstuvwxyz0123456789", detail: "line one\nAKIAABCDEFGHIJKLMNOP more", sources: [{ kind: "submission", id: await c.submission(c.a, c.taskA) }] });
@@ -174,6 +180,30 @@ for (const backend of backends) {
     assert.deepEqual([later?.rate.created, later?.rate.suppressed, later?.rate.suppressedTotal, later?.rate.lastSuppressed?.why], [1, 1, 2, "open-list"]);
     // Another project is not affected.
     assert.equal((await obs.submit(c.eve, { commandId: cid("f"), projectId: c.b, summary: "fine here" })).outcome, "created");
+  });
+
+  suite("the hour never goes back: a clock set back or a second controller whose clock is behind counts against the hour already recorded", async (c) => {
+    const limits = { perProjectPerHour: 2, perReporterPerHour: 1, open: 50 };
+    const ahead = c.make({ limits });
+    // The other controller's clock is two minutes behind, just before the hour.
+    const behind = c.make({ limits, clock: () => new Date(now - 120_000).toISOString() });
+    at("2026-11-21T11:01:00.000Z");
+    const ev = async () => [{ kind: "submission" as const, id: await c.submission(c.a, c.taskA) }];
+    assert.equal((await ahead.record(c.host, { commandId: cid("s"), kind: "failure", summary: "one", sources: await ev() })).outcome, "created");
+    assert.equal((await ahead.submit(c.dev, { commandId: cid("f"), projectId: c.a, summary: "two" })).outcome, "created");
+    // Behind (10:59): the counts of 11:00 hold; nothing starts again at zero.
+    assert.equal((await behind.record(c.host, { commandId: cid("s"), kind: "failure", summary: "three", sources: await ev() })).outcome, "suppressed");
+    await refuses("unavailable", () => behind.submit(c.dev2, { commandId: cid("f"), projectId: c.a, summary: "four" }), /after 12:00 UTC/);
+    await refuses("unavailable", () => behind.submit(c.dev, { commandId: cid("f"), projectId: c.a, summary: "five" }), /reported 1 .*after 12:00 UTC/);
+    const seen = await behind.open(c.owner, c.a);
+    assert.deepEqual([seen?.rate.hour, seen?.rate.created, seen?.rate.suppressed], ["2026-11-21T11:00:00.000Z", 2, 1]);
+    // The whole clock set back an hour: still the same counts.
+    at("2026-11-21T10:30:00.000Z");
+    assert.equal((await ahead.record(c.host, { commandId: cid("s"), kind: "failure", summary: "six", sources: await ev() })).outcome, "suppressed");
+    // Forward into the next hour: new counts.
+    at("2026-11-21T12:00:00.000Z");
+    assert.equal((await ahead.record(c.host, { commandId: cid("s"), kind: "failure", summary: "seven", sources: await ev() })).outcome, "created");
+    assert.deepEqual([(await ahead.open(c.owner, c.a))?.rate.created, (await ahead.open(c.owner, c.a))?.rate.suppressedTotal], [1, 2]);
   });
 
   suite("a manager settles an observation: promoted to an improvement of the project, dismissed or resolved with a reason, open again; others may not", async (c) => {

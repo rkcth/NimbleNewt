@@ -94,6 +94,9 @@ const OBSERVATION_ID = /^obs-[a-z2-7]{20}$/;
 const SOURCE_ID = /^[a-z]{3,4}-[a-z2-7]{20}$/;
 const AGENT = /^agent:[a-z0-9][a-z0-9-]{0,39}$/;
 interface IndexBody { readonly ids: readonly string[] }
+/** The later of two clock hours (ISO strings in UTC compare as text). */
+const later = (hour: string, recorded: string | undefined): string => (recorded !== undefined && recorded > hour ? recorded : hour);
+const nextHour = (hour: string): string => new Date(Date.parse(hour) + 3_600_000).toISOString().slice(11, 16);
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 
 export class ObservationService {
@@ -188,8 +191,17 @@ export class ObservationService {
     const body = found.body as unknown as ObservationBody;
     if (this.#mayRead(viewer, body.projectId)) return view<ObservationBody>(found);
     if (body.reporters.includes(viewer.id) && inTaskScope(viewer, body.projectId)) {
+      // A reporter that may not read the project's observations sees what it told and the shared event, never who else reported, owns or settled it, nor another reporter's detail or context records.
       const own = view<ObservationBody>(found);
-      return { ...own, reportedBy: own.reportedBy === viewer.id ? viewer.id : "another reporter", reporters: [viewer.id] };
+      const first = own.reportedBy === viewer.id;
+      const { detail, owner, ...rest } = own;
+      return {
+        ...rest, reportedBy: first ? viewer.id : "another reporter", reporters: [viewer.id],
+        ...(first && detail !== undefined ? { detail } : {}),
+        ...(owner === undefined ? {} : { owner: owner === viewer.id ? viewer.id : "someone else" }),
+        sources: first ? own.sources : own.sources.filter((x) => EVENT_KINDS.includes(x.kind)),
+        history: own.history.map((h) => ({ ...h, by: h.by === viewer.id ? viewer.id : "someone else" })),
+      };
     }
     return undefined;
   }
@@ -212,7 +224,7 @@ export class ObservationService {
       if (found !== undefined && (kind === undefined || (found.body as unknown as ObservationBody).kind === kind)) items.push(view<ObservationBody>(found));
     }
     const r = (await this.#runner.get("observation-rate", project))?.body as unknown as ObservationRateBody | undefined;
-    const hour = this.#hour();
+    const hour = later(this.#hour(), r?.hour);
     const rate = r === undefined ? { hour, created: 0, suppressed: 0, suppressedTotal: 0 } : { hour, created: r.hour === hour ? r.created : 0, suppressed: r.hour === hour ? r.suppressed : 0, suppressedTotal: r.suppressedTotal, ...(r.lastSuppressed === undefined ? {} : { lastSuppressed: r.lastSuppressed }) };
     return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}), rate };
   }
@@ -230,16 +242,17 @@ export class ObservationService {
       payload: clean({ ...fields, sources: fields.sources.map((s) => ({ kind: s.kind, id: s.id })), joins }),
       build: async () => {
         const nowIso = this.#runner.now();
-        const hour = this.#hour();
         const rateFound = await this.#runner.get("observation-rate", fields.projectId);
         const prior = rateFound?.body as unknown as ObservationRateBody | undefined;
+        // The hour never goes back: a clock set back, or a second controller whose clock is behind, counts against the hour already recorded instead of starting the counts again.
+        const hour = later(this.#hour(), prior?.hour);
         const rate: ObservationRateBody = prior === undefined || prior.hour !== hour ? { hour, created: 0, byReporter: [], suppressed: 0, suppressedTotal: prior?.suppressedTotal ?? 0, ...(prior?.lastSuppressed === undefined ? {} : { lastSuppressed: prior.lastSuppressed }) } : prior;
         const rateRef: AggregateRef = { kind: "observation-rate", id: fields.projectId };
         const rateChange = (body: ObservationRateBody): Change => (rateFound === undefined ? { type: "create", ref: rateRef, body: body as unknown as JsonObject } : { type: "update", ref: rateRef, expectedRevision: rateFound.revision, body: body as unknown as JsonObject });
         const mine = rate.byReporter.find((x) => x.id === by.id)?.n ?? 0;
         const counted = (): ObservationRateBody["byReporter"] => (origin !== "agent" ? rate.byReporter : rate.byReporter.some((x) => x.id === by.id) ? rate.byReporter.map((x) => (x.id === by.id ? { id: x.id, n: x.n + 1 } : x)) : [...rate.byReporter, { id: by.id, n: 1 }]);
         if (origin === "agent" && (mine >= this.#limits.perReporterPerHour || (mine === 0 && rate.byReporter.length >= OBSERVATION_LIMITS.rateReporters))) {
-          throw new DomainError("unavailable", `you have reported ${mine} observations in this project this hour, the most allowed; try again after ${hour.slice(11, 13)}:59 UTC`);
+          throw new DomainError("unavailable", mine === 0 ? `${OBSERVATION_LIMITS.rateReporters} agents have reported observations in this project this hour, the most tracked; try again after ${nextHour(hour)} UTC` : `you have reported ${mine} observations in this project this hour, the most allowed; try again after ${nextHour(hour)} UTC`);
         }
         const ref: AggregateRef = { kind: "observation", id };
         const found = await this.#runner.get("observation", id);
@@ -255,7 +268,7 @@ export class ObservationService {
         const index = await this.#index(fields.projectId);
         const why = rate.created >= this.#limits.perProjectPerHour ? "rate" : index.ids.length >= this.#limits.open ? "open-list" : undefined;
         if (why !== undefined) {
-          if (origin === "agent") throw new DomainError("unavailable", why === "rate" ? `${rate.created} observations were made in this project this hour, the most allowed; try again after ${hour.slice(11, 13)}:59 UTC` : `${this.#limits.open} observations are already open in this project; a manager settles some first`);
+          if (origin === "agent") throw new DomainError("unavailable", why === "rate" ? `${rate.created} observations were made in this project this hour, the most allowed; try again after ${nextHour(hour)} UTC` : `${this.#limits.open} observations are already open in this project; a manager settles some first`);
           // The controller's event goes on; only the observation is not made, and that is counted where the owner sees it.
           return { ref: rateRef, creates: false, changes: [rateChange({ ...rate, suppressed: rate.suppressed + 1, suppressedTotal: rate.suppressedTotal + 1, lastSuppressed: { at: nowIso, kind: fields.kind, why } })], detail: { projectId: fields.projectId, suppressed: why } };
         }
