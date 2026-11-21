@@ -32,6 +32,8 @@ const wipLastRef = (remote: string, ref: string): string => `refs/nn/wip-last/${
 
 export const GIT_LIMITS = { output: 16 * 1024 * 1024, timeoutMs: 120_000, files: 10_000, fileBytes: 8 * 1024 * 1024 } as const;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** A landing branch name as the owner's `workspace.landing.branch` accepts it (the same shape the controller carries to a remote host). */
+const BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
 /** A full object ID (SHA-1 or SHA-256). */
 const OBJECT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 /** What `snapshot` says of a name with nothing at it. */
@@ -580,11 +582,12 @@ export class GitBridge {
    * The `base` returned is the commit the staging builds on (the checkout's own head, as `stage` reports it): the same as `refs/nn/base` unless the checkout holds a platform commit that has not landed yet (a release, H12o),
    * whose files then count as the agent's (they are not on the landing branch). Reporting the head keeps it equal to what `stage` reports, which the submit compares (first review).
    */
-  async submitView(options: { shared: string; gitDir: string; checkout: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] }> {
+  async submitView(options: { shared: string; gitDir: string; checkout: string; /** The landing branch's head as the host read it (card H12p follow-up: the owner's landing branch when one is set). Absent: the shared repository's checked-out head, as before. */ head?: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] }> {
+    if (options.head !== undefined && !COMMIT.test(options.head)) throw new WorkspaceError("invalid_path", "a submit is checked against a full commit ID");
     const base = await this.#base(options.gitDir);
     const tip = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: options.gitDir })).stdout.trim();
     const sharedGit = await this.#sharedGitDir(options.shared);
-    const head = (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: sharedGit })).stdout.trim();
+    const head = options.head ?? (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: sharedGit })).stdout.trim();
     // The same attribute neutralizing as `stage` (second review): without it a `text`, `eol`, `ident` or encoding attribute in the checkout converts a file back to the base's content here while `stage` carries
     // it changed, so a file the submission carries would be missing from `mine` and its overlap with the landing branch unseen.
     await this.#neutralAttributes(options.gitDir);
@@ -1099,6 +1102,21 @@ export class GitBridge {
   /** The ID of a commit in the shared repository's current head (the controller's own read). */
   async head(shared: string): Promise<string> {
     return (await this.#run(["rev-parse", "--verify", "HEAD^{commit}"], { gitDir: await this.#sharedGitDir(shared) })).stdout.trim();
+  }
+
+  /**
+   * The commit a named branch of the shared repository points at (card H12p follow-up: the author's refresh and the submit's stale check go to the owner's landing branch, whatever the shared working tree has checked out).
+   * Read only. `undefined` when the shared repository has no such branch. A name that is not a plain branch name (the owner's `workspace.landing.branch` shape) is refused, never read as a pattern or an option.
+   */
+  async branchHead(shared: string, branch: string): Promise<string | undefined> {
+    if (typeof branch !== "string" || !BRANCH_NAME.test(branch) || branch.includes("..") || branch.includes("//") || branch.endsWith("/") || branch.endsWith(".lock")) throw new WorkspaceError("invalid_path", "the landing branch is not a plain branch name");
+    const want = `refs/heads/${branch}`;
+    const out = (await this.#run(["for-each-ref", "--format=%(refname)%00%(objectname)", want], { gitDir: await this.#sharedGitDir(shared) })).stdout;
+    for (const line of out.split("\n")) {
+      const [name, id] = line.split("\0");
+      if (name === want && id !== undefined && COMMIT.test(id)) return id;
+    }
+    return undefined;
   }
 }
 

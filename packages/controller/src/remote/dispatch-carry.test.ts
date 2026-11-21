@@ -62,6 +62,41 @@ for (const backend of backends) {
     await refuses("invalid_command", () => ask(landing({ operation: "integration", landing: { branch: "main" } })));
   });
 
+  suite("the author's refresh (reapply) asked of a remote host carries the owner's policy too, so it goes to the landing branch there; an unreadable policy is not sent, no reader sends none, and a policy that cannot be carried is a clean refusal (card H12p follow-up)", async (c) => {
+    const r1 = await c.host("r1");
+    let policy: unknown = { branch: "main", requirePermit: true };
+    const handle = hostWith(c as never, { landingPolicy: async () => { if (policy instanceof Error) throw policy; return policy; } });
+    const seen: WorkspaceCall[] = [];
+    const responder = new WorkspaceResponder({ client: r1.client, busy: () => ["att-busy"], port: { run: async (x) => { seen.push(x); return { ok: true, summary: "refreshed" }; } } });
+    const go = async (call: WorkspaceCall) => { const pending = handle.workspace.run(call); await wait(() => r1.client.workspaceRequests()); responder.handle(await r1.client.workspaceRequests()); return pending; };
+    const reapply = (more: Partial<WorkspaceCall> = {}): WorkspaceCall => landing({ operation: "reapply", reason: "the author refreshes", ...more });
+    assert.deepEqual(await go(reapply({ landing: { branch: "evil" } })), { ok: true, summary: "refreshed" });
+    assert.deepEqual([seen[0]!.operation, seen[0]!.landing], ["reapply", { branch: "main", requirePermit: true }], "the owner's figures, not the caller's");
+    // A policy that names no branch is carried as it is (the host then follows its shared head).
+    policy = {};
+    await go(reapply());
+    assert.deepEqual(seen[1]!.landing, {});
+    // Unreadable: nothing is sent, and the answer says the checkout was left as it was.
+    policy = new Error("settings down");
+    const unreadable = await handle.workspace.run(reapply());
+    assert.equal(unreadable.ok, false);
+    assert.match((unreadable as { reason: string }).reason, /could not be read here, so the refresh was not sent.*left as it was/);
+    assert.deepEqual(await r1.client.workspaceRequests(), [], "nothing was listed for the host");
+    // A policy the request check refuses was never sent: a clean refusal, not a failure that may have changed the checkout.
+    policy = { branch: "a b" };
+    const bad = await handle.workspace.run(reapply());
+    assert.equal(bad.ok, false);
+    assert.match((bad as { reason: string }).reason, /could not be carried to host:r1.*refresh was not sent/);
+    // No reader at all: the refresh is sent with no policy (as before this change).
+    const bare = hostWith(c as never);
+    const pending = bare.workspace.run(reapply({ landing: { branch: "evil" } }));
+    await wait(() => r1.client.workspaceRequests());
+    responder.handle(await r1.client.workspaceRequests());
+    assert.equal((await pending).ok, true);
+    assert.equal("landing" in seen[2]!, false, "a caller's own figures are never carried");
+    assert.equal(seen.length, 3);
+  });
+
   suite("a host that is slow or refuses a landing leaves the policy in no record the host could keep: the request is the same wire shape and the host's refusal comes back as a refusal (card H12a)", async (c) => {
     const r1 = await c.host("r1");
     const handle = hostWith(c as never, { landingPolicy: async () => ({ branch: "main" }) });

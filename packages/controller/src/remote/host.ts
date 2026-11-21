@@ -72,12 +72,18 @@ export class RemoteWorkerHost implements WorkerHost {
         try { policy = await this.options.landingPolicy?.({ taskId: call.taskId, projectId: call.projectId }); } catch { policy = undefined; }
         if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return { ok: false, reason: `the owner's landing policy for this project could not be read here, or names no landing branch, so the landing was not sent to ${this.hostId} (nothing was changed)` };
         call = { ...call, landing: policy };
+      } else if (call.operation === "reapply") {
+        // The author's own refresh goes to the landing branch (card H12p follow-up), so it carries the owner's policy too. A policy that cannot be read is not guessed at: nothing is sent and the checkout stays as it is. A policy
+        // that names no branch is carried as it is (the host then refreshes onto its shared head, as before).
+        let policy: CarriedLanding | undefined;
+        try { policy = this.options.landingPolicy === undefined ? undefined : await this.options.landingPolicy({ taskId: call.taskId, projectId: call.projectId }); } catch { return { ok: false, reason: `the owner's landing policy for this project could not be read here, so the refresh was not sent to ${this.hostId} (your checkout was left as it was)` }; }
+        call = { requestId: call.requestId, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: call.quietAttempts, ...(call.assignee === undefined ? {} : { assignee: call.assignee }), ...(policy === undefined ? {} : { landing: policy }) };
       } else if (call.landing !== undefined) call = { requestId: call.requestId, operation: call.operation, taskId: call.taskId, projectId: call.projectId, reason: call.reason, quietAttempts: call.quietAttempts, ...(call.assignee === undefined ? {} : { assignee: call.assignee }) };
       let answer;
       try { answer = await this.remote.askWorkspace(this.by, this.hostId, call, { waitMs: this.options.workspaceWaitMs ?? 300_000 }); } catch (error) {
         // A landing whose carried policy the request check refuses (malformed, or beyond what a request carries) was never sent (that check runs before anything is listed for the host): a clean refusal, not a failure that
         // may have changed the checkout.
-        if (call.operation === "landing" && error instanceof DomainError && error.code === "invalid_command") return { ok: false, reason: `the owner's landing policy could not be carried to ${this.hostId} (${String(error.message).slice(0, 200)}), so the landing was not sent (nothing was changed)` };
+        if ((call.operation === "landing" || (call.operation === "reapply" && call.landing !== undefined)) && error instanceof DomainError && error.code === "invalid_command") return { ok: false, reason: `the owner's landing policy could not be carried to ${this.hostId} (${String(error.message).slice(0, 200)}), so the ${call.operation === "landing" ? "landing" : "refresh"} was not sent (nothing was changed)` };
         throw error;
       }
       if (answer.ok === false && answer.failed === true) throw new DomainError("unavailable", answer.reason);

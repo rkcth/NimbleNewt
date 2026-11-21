@@ -206,9 +206,9 @@ export class WorkspaceHost {
       const asLanding: HostWorkspaceCall = { requestId: call.requestId, operation: "landing", taskId: call.taskId, projectId: call.projectId, reason: "re-apply", ...(call.quietAttempts === undefined ? {} : { quietAttempts: call.quietAttempts }) };
       const stale = await this.#notNow(asLanding);
       if (stale !== undefined) return no(stale) as HostRestackOutcome;
-      let policy: LandingPolicy | undefined;
-      try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId }); } catch { return no("this host could not read the landing settings (workspace.landing.*), so nothing was re-applied") as HostRestackOutcome; }
-      if (policy !== undefined && typeof policy.refuse === "string") return no(cut(policy.refuse)) as HostRestackOutcome;
+      const read = await this.#policy({ taskId: call.taskId, projectId: call.projectId }, "nothing was re-applied");
+      if ("refuse" in read) return no(read.refuse) as HostRestackOutcome;
+      const policy = read.policy;
       if (policy === undefined || typeof policy.branch !== "string" || policy.branch.length === 0) return no("this host has no landing branch set for the project (workspace.landing.branch), so nothing was re-applied") as HostRestackOutcome;
       let tree;
       try { tree = await this.#options.git.sharedTree(where.shared); } catch (error) { return no(cut(`the shared workspace could not be read: ${(error as Error).message}`)) as HostRestackOutcome; }
@@ -227,6 +227,36 @@ export class WorkspaceHost {
     };
     const sharedKey = await realpath(where.shared).catch(() => where.shared);
     return this.#serial(where.checkout, () => this.#serial(`shared:${sharedKey}`, work));
+  }
+
+  /**
+   * The owner's landing policy for a task as this host's `landing` option gives it (shared by the integrator's re-apply and the author's refresh). A policy that cannot be read, or one the option refuses to name (`refuse`), is a
+   * refusal whose text ends with `nothing` (what was not done); nothing is guessed. `policy` is `undefined` when the host has no `landing` option or it names nothing.
+   */
+  async #policy(call: { readonly taskId: string; readonly projectId: string; readonly carried?: LandingPolicy }, nothing: string): Promise<{ readonly policy: LandingPolicy | undefined } | { readonly refuse: string }> {
+    let policy: LandingPolicy | undefined;
+    try { policy = await this.#options.landing?.({ taskId: call.taskId, projectId: call.projectId, ...(call.carried === undefined ? {} : { carried: call.carried }) }); } catch { return { refuse: `this host could not read the landing settings (workspace.landing.*), so ${nothing}` }; }
+    if (policy !== undefined && policy !== null && typeof policy.refuse === "string") return { refuse: cut(policy.refuse) };
+    return { policy: policy ?? undefined };
+  }
+
+  /**
+   * The landing branch's head as the author's refresh and a submit's stale check read it (card H12p follow-up). With a landing branch set (`workspace.landing.branch`, or the project's own), it is that branch's commit in the
+   * shared repository, whatever the shared working tree has checked out (the owner may have it on another branch for a moment; the work still goes to the landing branch), and a branch the shared repository does not have
+   * is refused. With none set, the shared repository's checked-out head, as before. A policy that cannot be read is refused (as for a landing and a re-apply). Read only. `nothing` names what was not done.
+   */
+  async landingHead(call: { readonly taskId: string; readonly projectId: string; readonly shared: string; readonly carried?: LandingPolicy }, nothing: string): Promise<{ readonly head: string; readonly branch?: string } | { readonly refuse: string }> {
+    const read = await this.#policy(call, nothing);
+    if ("refuse" in read) return read;
+    const branch = read.policy?.branch;
+    const git = this.#options.git;
+    if (typeof branch !== "string" || branch.length === 0) {
+      try { return { head: await git.head(call.shared) }; } catch (error) { return { refuse: cut(`the shared workspace's head could not be read (${(error as Error).message}), so ${nothing}`) }; }
+    }
+    let head: string | undefined;
+    try { head = await git.branchHead(call.shared, branch); } catch (error) { return { refuse: cut(`the landing branch ${JSON.stringify(branch.slice(0, 80))} could not be read in the shared workspace (${(error as Error).message}), so ${nothing}`) }; }
+    if (head === undefined) return { refuse: cut(`the shared workspace has no branch ${JSON.stringify(branch.slice(0, 80))} (the project's landing branch), so ${nothing}; the owner names an existing branch or creates it`) };
+    return { head, branch };
   }
 
   /** Tells the hook of a refusal that is a security sign (see `security`). Everything else is an ordinary refusal and is not reported. */
@@ -431,24 +461,27 @@ export class WorkspaceHost {
    * automatically: a file both sides changed keeps conflict markers and is listed. The shared repository is only read. The answer names the counts, and each conflict by path and kind (at most `conflictsListed`, each path cut to
    * `conflictPath`, the whole detail kept under `detailBytes` so the controller keeps it). At the head already it says so and changes nothing (the agent's own commits stay).
    */
-  async #reapply(where: CheckoutLocation, call?: HostWorkspaceCall): Promise<HostWorkspaceOutcome> {
+  async #reapply(where: CheckoutLocation, call: HostWorkspaceCall): Promise<HostWorkspaceOutcome> {
     const git = this.#options.git;
-    let target: string;
-    try { target = await git.head(where.shared); } catch (error) { return no(`the shared workspace's head could not be read: ${cut((error as Error).message)}`); }
+    // Where the refresh goes (card H12p follow-up): the owner's landing branch when one is set, the same branch a landing and the integrator's re-apply land on; else the shared head, as before.
+    const tip = await this.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: where.shared, ...(call.landing === undefined ? {} : { carried: call.landing }) }, "your checkout was left as it was");
+    if ("refuse" in tip) return no(tip.refuse);
+    const target = tip.head;
+    const onto = tip.branch === undefined ? "the landing branch's head" : `the head of the landing branch ${JSON.stringify(tip.branch.slice(0, 80))}`;
     const before = await git.baseOf(where.gitDir);
-    if (before === target) return { ok: true, summary: `your checkout is already based on the landing branch's head ${target.slice(0, 12)}; nothing to refresh`, detail: { changed: false, base: target } };
+    if (before === target) return { ok: true, summary: cut(`your checkout is already based on ${onto} ${target.slice(0, 12)}; nothing to refresh`), detail: { changed: false, base: target, ...(tip.branch === undefined ? {} : { branch: tip.branch.slice(0, 80) }) } };
     let made;
     try { made = await git.reapply({ shared: where.shared, commit: target, gitDir: where.gitDir, checkout: where.checkout }); } catch (error) {
-      if (call !== undefined) this.#flag(call, error);
+      this.#flag(call, error);
       if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
       throw error;
     }
     const listed = made.conflicts.slice(0, HOST_LIMITS.conflictsListed).map((c) => ({ path: c.path.slice(0, HOST_LIMITS.conflictPath), kind: c.kind }));
-    const detail = (): { [key: string]: HostJson } => ({ changed: !made.unchanged, before: made.previous, base: made.base, kept: made.kept.length, taken: made.taken.length, merged: made.merged.length, conflictCount: made.conflicts.length, conflicts: listed, ...(made.conflicts.length > listed.length ? { conflictsNotListed: made.conflicts.length - listed.length } : {}) });
+    const detail = (): { [key: string]: HostJson } => ({ changed: !made.unchanged, before: made.previous, base: made.base, kept: made.kept.length, taken: made.taken.length, merged: made.merged.length, conflictCount: made.conflicts.length, conflicts: listed, ...(made.conflicts.length > listed.length ? { conflictsNotListed: made.conflicts.length - listed.length } : {}), ...(tip.branch === undefined ? {} : { branch: tip.branch.slice(0, 80) }) });
     while (listed.length > 0 && Buffer.byteLength(JSON.stringify(detail()), "utf8") > HOST_LIMITS.detailBytes) listed.pop();
     const n = made.conflicts.length;
     const counts = `${made.kept.length} of your file(s) kept, ${made.taken.length} taken from the landing branch, ${made.merged.length} merged cleanly`;
-    const summary = n === 0 ? `your work was re-applied onto ${target.slice(0, 12)} (was ${before.slice(0, 12)}): ${counts}, no conflicts` : `your work was re-applied onto ${target.slice(0, 12)} (was ${before.slice(0, 12)}): ${counts}; ${n} file(s) hold conflicts that were NOT resolved and must be fixed by you (an overlapping edit has "<<<<<<< mine" markers; the other kinds are named): ${made.conflicts.slice(0, 5).map((c) => `${c.path.slice(0, 80)} (${c.kind})`).join(", ")}${n > 5 ? ", ..." : ""}`;
+    const summary = n === 0 ? `your work was re-applied onto ${onto} ${target.slice(0, 12)} (was ${before.slice(0, 12)}): ${counts}, no conflicts` : `your work was re-applied onto ${onto} ${target.slice(0, 12)} (was ${before.slice(0, 12)}): ${counts}; ${n} file(s) hold conflicts that were NOT resolved and must be fixed by you (an overlapping edit has "<<<<<<< mine" markers; the other kinds are named): ${made.conflicts.slice(0, 5).map((c) => `${c.path.slice(0, 80)} (${c.kind})`).join(", ")}${n > 5 ? ", ..." : ""}`;
     return { ok: true, summary: cut(summary), detail: detail() };
   }
 
