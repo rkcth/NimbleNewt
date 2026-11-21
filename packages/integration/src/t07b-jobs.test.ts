@@ -10,6 +10,7 @@ import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRel
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, jobLauncher, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
+import { windowHolding } from "./window-support.js";
 
 // Card T07b, end to end: a real local worker (bubblewrap and the worker process running Pi, composed by startController) starts a catalogue tool as a long-running job through its tool bridge and gets a durable handle; the job runs in the
 // sandbox through the real launcher, outlives the attempt that started it, and a later attempt of the same task (a new worker process) reads its state and its output (redacted and quoted) and stops it: the whole process tree ends,
@@ -18,6 +19,10 @@ const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-abcdefghijklmnopqrst";
+// The model's window (36,864 tokens at the current budget): its startup share holds the real fixed part at its budget beside the rest of the largest first call here, measured at 1,359 tokens at
+// card T08's fourth slice (`window-support.ts`). It was 32,768 written out, where that first call (8,567 tokens) went over the startup share of 8,192, so the context check refused it and the test ran on a
+// compacted first call instead of the one it builds (review of card "Prompt growth tests").
+const WINDOW = windowHolding(1_700);
 const TOKEN = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const until = async (ok: () => boolean | Promise<boolean>, ms: number, why: string | (() => string | Promise<string>)): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(typeof why === "function" ? await why() : why); await sleep(50); } };
@@ -107,7 +112,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
       dispatch: {
         manual: true,
         local: {
-          window: () => 32768,
+          window: () => WINDOW,
           build: (services) => {
             const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }) } : undefined) });
             const parts = localWorkerParts<Pick<ToolGateway, "call">["call"]>({
@@ -119,7 +124,7 @@ test("a real local worker starts a job through the bridge; a later attempt reads
                 mkdirSync(home, { recursive: true }); mkdirSync(scratch, { recursive: true });
                 return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
               },
-              model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+              model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
               namespaceId: (order) => services.namespaceId(order as never),
               // Every tool request crosses to the controller's own tool bridge; a first catalogue call parked for review is allowed by the owner at once and asked again with the same call ID.
               bridge: async (order, call, token, request) => {

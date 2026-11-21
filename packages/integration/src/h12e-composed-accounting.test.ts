@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRelay, PolicyService, startController } from "@nimblenewt/controller";
 import { EXEC_PROFILES, LlamaSim, PI, ROUTING_TABLE, simulatedFetch, workGrants } from "@nimblenewt/controller/testing";
 import { SandboxLauncher, appFromRepository, localWorkerParts } from "@nimblenewt/worker";
+import { windowHolding } from "./window-support.js";
 
 // Card H12e through the composed controller: startController builds the cache policies (`dispatch.cache`), the operator's local build hands the attempt's policy to the relay and its `takeUsage` to the host, the real worker
 // process runs Pi in the real sandbox, and its model calls reach the simulated llama-server of C06 through the relay. What the server reports as cache hits is what budget accounting records, per task and per project.
@@ -16,6 +17,10 @@ const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const ANN = "agt-aaaaaaaaaaaaaaaaaaaa", BOB = "agt-bbbbbbbbbbbbbbbbbbbb";
 const LLAMA = "http://llama.test:8080";
+// The model's window (35,840 tokens at the current budget): its startup share holds the real fixed part at its budget beside the rest of the largest first call here, measured at 1,057 tokens at
+// card T08's fourth slice (`window-support.ts`). It was 32,768 written out, where that first call (8,265 tokens) went over the startup share of 8,192, so the context check refused it and the test ran on a
+// compacted first call instead of the one it builds (review of card "Prompt growth tests").
+const WINDOW = windowHolding(1_500);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 async function launcher(): Promise<SandboxLauncher | undefined> {
@@ -67,7 +72,7 @@ test("the composed controller with the real worker process: a project reuses its
       cache: { secret: "installation-secret-0123456789", endpoints: { "localp/small": { url: LLAMA, config: { kind: "llama-cpp", model: "local", route: "localp/small", options: { slots: 2 } } } } },
       local: {
         acceptUnenforcedLimits: true,
-        window: () => 32768,
+        window: () => WINDOW,
         build: (services) => {
           assert.ok(services.cache !== undefined, "the composer hands the host the cache policies");
           const relay = new ModelRelay({ fetch: endpointFetch, endpoint: (route) => (route === "localp/small" ? { url: `${LLAMA}/v1`, headers: () => ({ authorization: "Bearer local" }) } : undefined) });
@@ -79,7 +84,7 @@ test("the composed controller with the real worker process: a project reuses its
               for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
               return dirs;
             },
-            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
             namespaceId: () => "abcdef0123456789",
             bridge: async () => { if (crash.asked) runs.at(-1)!.kill(); return { ok: true, result: { record: { id: "dsk-aaaaaaaaaaaaaaaaaaaa", body: "x" } } }; },
             // The operator's wiring the composer documents: the attempt's one policy goes to the relay, and its key, retention and figures to the host.

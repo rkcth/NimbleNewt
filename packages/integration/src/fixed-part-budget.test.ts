@@ -58,9 +58,9 @@ test("the smallest window that can start a task, and the warning for an accepted
   for (const [w, who] of [[36_864, "the real-process tests w12-anchor, w13-recall, g09-remote-updates, h12bf-composed"], [DEFAULT_CONTEXT_TOKENS, "the launcher's DEFAULT_CONTEXT_TOKENS"]] as const) {
     assert.equal(windowCanStartTask(w, r.systemPromptChars + r.toolSchemaChars), true, `${who} assume ${w} tokens start a task; ${derived(r)}`);
   }
-  // The real-process tests whose windows come from window-support.ts (the W03 rig, h12k-composed-host, w11-job-wake, c07g-route-view) hold the real fixed part beside their own measured first call: the
+  // The real-process tests whose windows come from window-support.ts (the W03 rig, h12k-composed-host, w11-job-wake, c07g-route-view, c09h-local-artifact, h12e-composed-accounting, l05b-model-stream, t07b-jobs) hold the real fixed part beside their own measured first call: the
   // window is worked out on the budget, which the real part is under (the first test here), so it holds the real part too.
-  for (const own of [1_500, 2_600, 3_300]) assert.ok(contextBudget(windowHolding(own)).startupTokens >= Math.ceil((r.systemPromptChars + r.toolSchemaChars) / 3) + own, `windowHolding(${own}); ${derived(r)}`);
+  for (const own of [1_500, 1_700, 2_600, 3_300]) assert.ok(contextBudget(windowHolding(own)).startupTokens >= Math.ceil((r.systemPromptChars + r.toolSchemaChars) / 3) + own, `windowHolding(${own}); ${derived(r)}`);
   assert.equal(windowCanStartTask(24_576), false);
   // The accepted minimum is still the worker's; everything from there up to the startable window carries a warning naming both figures.
   assert.equal(MIN_WORKABLE_CONTEXT_TOKENS, MIN_WORKABLE_WINDOW);

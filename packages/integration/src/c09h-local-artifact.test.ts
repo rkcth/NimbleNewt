@@ -10,6 +10,7 @@ import { AdmissionService, DifficultyService, HostService, LocalWorker, ModelRel
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, SandboxLauncher, appFromRepository, localWorkerParts, ownerPolicyOptions } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
+import { windowHolding } from "./window-support.js";
 
 // Card C09h, end to end: a real local worker (the bubblewrap launcher and the worker process running Pi, composed by startController) publishes its output, a note that is not code, through its tool bridge.
 // The artifact is recorded for the attempt's own task and every step of the run is in the task's activity record: the route, the harness, the artifact (citing it and naming the agent) the message the agent sent and the desk record it wrote.
@@ -18,6 +19,10 @@ const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const AGENT = "agt-abcdefghijklmnopqrst";
+// The model's window (35,840 tokens at the current budget): its startup share holds the real fixed part at its budget beside the rest of the largest first call here, measured at 1,062 tokens at
+// card T08's fourth slice (`window-support.ts`). It was 32,768 written out, where that first call (8,270 tokens) went over the startup share of 8,192, so the context check refused it and the test ran on a
+// compacted first call instead of the one it builds (review of card "Prompt growth tests").
+const WINDOW = windowHolding(1_500);
 const BEN = "agt-bcdefghijklmnopqrstu";
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const until = async (ok: () => boolean | Promise<boolean>, ms: number, why: string | (() => string)): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(typeof why === "function" ? why() : why); await sleep(50); } };
@@ -83,7 +88,7 @@ test("a real local worker publishes its output through the tool bridge, and ever
       dispatch: {
         manual: true,
         local: {
-          window: () => 32768,
+          window: () => WINDOW,
           build: (services) => {
             const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }) } : undefined) });
             const parts = localWorkerParts<Pick<ToolGateway, "call">["call"]>({
@@ -95,7 +100,7 @@ test("a real local worker publishes its output through the tool bridge, and ever
                 mkdirSync(home, { recursive: true }); mkdirSync(scratch, { recursive: true });
                 return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
               },
-              model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: 32768, maxTokens: 1024, reasoning: false, input: ["text"] }),
+              model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
               namespaceId: (order) => services.namespaceId(order as never),
               // Every tool request crosses to the controller's own tool bridge (ToolExecutionService), as the composer hands it to the host builder.
               bridge: async (order, call, token, request) => services.bridge!(order as never, call, token, request) as never,

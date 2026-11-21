@@ -9,6 +9,7 @@ import { AdmissionService, DifficultyService, GenerationService, HostService, Lo
 import { EXEC_PROFILES, PI, ROUTING_TABLE, workGrants } from "@nimblenewt/controller/testing";
 import { SandboxLauncher, appFromRepository, localWorkerParts, type LaunchRecord } from "@nimblenewt/worker";
 import { loopbackFetch, sse } from "./h12-worker-support.js";
+import { windowHolding } from "./window-support.js";
 import { descendantsOf, processesMentioning } from "./h12b-confinement-support.js";
 
 // Card L05b through the composed controller (the rig is the one of H12b/H12f): startController builds the dispatcher and binds its services to the local worker's guards; the local worker host is the real one (the real bubblewrap launcher and the real worker process running
@@ -19,6 +20,10 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", 
 /** Where the CI says the sandbox exists (NIMBLENEWT_REQUIRE_SANDBOX=1) a check that cannot run is a failure, never a silent skip. */
 const skipOrFail = (t: { skip(why: string): void }, why: string): void => { if (required) assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the check cannot run: ${why}`); t.skip(why); };
 const AGENT = "agt-abcdefghijklmnopqrst";
+// The model's window (35,840 tokens at the current budget): its startup share holds the real fixed part at its budget beside the rest of the largest first call here, measured at 1,057 tokens at
+// card T08's fourth slice (`window-support.ts`). It was 32,768 written out, where that first call (8,265 tokens) went over the startup share of 8,192, so the context check refused it and the test ran on a
+// compacted first call instead of the one it builds (review of card "Prompt growth tests").
+const WINDOW = windowHolding(1_500);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const until = async (ok: () => boolean | Promise<boolean>, ms = 30_000, why: string | (() => string) = "timed out waiting"): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(typeof why === "function" ? why() : why); await sleep(50); } };
 const read = (pid: string, file: string): string => { try { return readFileSync(`/proc/${pid}/${file}`, "utf8"); } catch { return ""; } };
@@ -102,7 +107,7 @@ async function rig(real: SandboxLauncher, answer: Model): Promise<Rig> {
     for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
     return dirs;
   };
-  const window = { value: 32768 };
+  const window = { value: WINDOW };
   let local: LocalWorker | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(directory, "c.sqlite") }, argv: [], env: {}, print: () => undefined,

@@ -15,7 +15,7 @@ import { admitFirstCall, type FirstCall } from "./dispatch.js";
  *    (integration) and `setup/small-window.test.ts` ("about N tokens", "N or more is needed in practice").
  *    The C07g real-process test (`integration/c07g-route-view.test.ts`, `FLOOR_CHARS`) sets a floor that must stay above the real fixed part: raise it with the budget.
  *    The real-process tests whose windows come from `integration/src/window-support.ts` (`windowHolding`: the fixed part at this budget beside each test's own measured first call) follow the budget by
- *    themselves: `w03-rig-support.ts` (W03, W04, W05, W10, G09's retained context, L04e, L04g and the other tests on that rig), h12k-composed-host, w11-job-wake and c07g-route-view (card "Prompt growth tests").
+ *    themselves: `w03-rig-support.ts` (W03, W04, W05, W10, G09's retained context, L04e, L04g and the other tests on that rig), h12k-composed-host, w11-job-wake, c07g-route-view, c09h-local-artifact, h12e-composed-accounting, l05b-model-stream and t07b-jobs (card "Prompt growth tests").
  * 3. If the real fixed part no longer starts a task on the window these assume (36,864 tokens since card P03b's first slice, 32,768 before), they must be raised to the new `PRACTICAL_STARTABLE_WINDOW` (or more):
  *    the launcher's `DEFAULT_CONTEXT_TOKENS` (a provider from the configuration document) and the launcher note `u14-launcher.test.ts` pins ("context window assumed 36864 tokens ... under about 36,864"),
  *    the placeholder the interpreter prompt names (`chat/model-interpreter.ts`, "36864 is only the launcher's placeholder"), and the integration tests that run the real worker process on that window: w12-anchor and w13-recall (`WINDOW`), g09-remote-updates
