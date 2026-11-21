@@ -160,12 +160,15 @@ export class LessonService {
         }
         const prior = revises === undefined ? undefined : links.get(revises)!.body;
         const index = await this.#index(projectId);
+        let listed = index.ids;
         if (index.ids.length >= LESSON_LIMITS.current) {
-          // Finished lessons whose proposer cannot be told yet (no task, a retired proposer) stay listed, but only open lessons count against the limit, so they never lock the project; the list itself
-          // holds at most twice the limit.
-          let open = 0;
-          for (const x of index.ids) { const l = await this.#lesson(x); if (l !== undefined && !FINAL.includes(l.body.status)) open++; }
-          if (open >= LESSON_LIMITS.current || index.ids.length >= 2 * LESSON_LIMITS.current) throw new DomainError("unavailable", `${LESSON_LIMITS.current} lessons are open in this project, the most kept; settle some first`);
+          // Finished lessons whose proposer cannot be told yet (no task, a retired proposer) stay listed, but only open lessons count against the limit, so they never lock the project. The list holds at most
+          // twice the limit: when it is full, the oldest finished ones leave it (each stays readable, with its outcome still marked pending), rather than the project refusing new lessons for good.
+          const finished: string[] = [];
+          for (const x of index.ids) { const l = await this.#lesson(x); if (l !== undefined && FINAL.includes(l.body.status)) finished.push(x); }
+          if (index.ids.length - finished.length >= LESSON_LIMITS.current) throw new DomainError("unavailable", `${LESSON_LIMITS.current} lessons are open in this project, the most kept; settle some first`);
+          const over = index.ids.length + 1 - 2 * LESSON_LIMITS.current;
+          if (over > 0) { const drop = new Set(finished.slice(0, over)); listed = index.ids.filter((x) => !drop.has(x)); }
         }
         const taskId = await this.#taskOf(evidence);
         const body: LessonBody = {
@@ -174,7 +177,7 @@ export class LessonService {
           ...(taskId === undefined ? {} : { taskId }), proposedBy: by.id, status: "candidate", stalePremises: [], outcomePending: false, history: [{ at: nowIso, by: by.id, to: "candidate" }],
         };
         const ref: AggregateRef = { kind: "lesson", id };
-        const changes: Change[] = [{ type: "create", ref, body: clean(body) }, this.#indexChange(projectId, index, [...index.ids, id])];
+        const changes: Change[] = [{ type: "create", ref, body: clean(body) }, this.#indexChange(projectId, index, [...listed, id])];
         // A premise knows what rests on it, so a change to it reaches its dependents in the same write.
         for (const x of dependsOn) {
           const got = links.get(x)!;
@@ -236,10 +239,21 @@ export class LessonService {
             const premise = await edits.get(p);
             if (premise?.status !== "accepted") throw new DomainError("invalid_command", `premise ${p} is ${premise?.status ?? "missing"}; it must be accepted first, or this lesson revised to rest on its successor`, { field: "to" });
           }
-          for (const s of got.body.supersedes) {
+          // A version accepted while the version it revises was never in force (a candidate) also replaces the version before that one still current: accepting version 3 over a candidate version 2 must not
+          // leave version 1 accepted beside it. The walk follows `revises` through versions never accepted, at most ten steps; a version already replaced by another version on the way is refused, as below.
+          const supersedes = [...got.body.supersedes];
+          for (let step = 0, at = got.body.revises === undefined ? undefined : await edits.get(got.body.revises); at !== undefined && (at.status === "candidate" || at.status === "evaluating") && at.revises !== undefined; step++) {
+            if (step >= 10) throw new DomainError("invalid_command", `lesson ${id} revises a chain of more than ten versions never accepted; settle the earlier versions first`, { field: "to" });
+            const before = await edits.get(at.revises);
+            if (before === undefined) break;
+            if (before.status === "superseded") throw new DomainError("invalid_command", `an earlier version, lesson ${at.revises}, is already superseded${before.supersededBy === undefined ? "" : ` by ${before.supersededBy}`}; revise the current version instead`, { field: "to" });
+            if (!FINAL.includes(before.status) && !supersedes.includes(at.revises)) supersedes.push(at.revises);
+            at = before;
+          }
+          for (const s of supersedes) {
             const old = await edits.get(s);
             if (old === undefined) continue;
-            if (FINAL.includes(old.status)) throw new DomainError("invalid_command", `lesson ${s} is already ${old.status}${old.supersededBy === undefined ? "" : ` by ${old.supersededBy}`}; revise that one instead`, { field: "to" });
+            if (FINAL.includes(old.status)) throw new DomainError("invalid_command", `lesson ${s} is already ${old.status}${old.supersededBy === undefined ? "" : ` by ${old.supersededBy}`}; ${old.status === "superseded" ? "revise the current version instead" : "propose a new lesson instead"}`, { field: "to" });
             edits.put(s, { ...old, status: "superseded", supersededBy: id, history: [...old.history, { at: nowIso, by: by.id, to: "superseded" as const, cause: id }].slice(-LESSON_LIMITS.history) });
             await this.#stale(edits, s, "superseded", nowIso, by.id);
           }
@@ -290,7 +304,7 @@ export class LessonService {
     if (this.#mayRead(viewer, body.projectId)) return view<LessonBody>(found);
     if (body.proposedBy === viewer.id && inTaskScope(viewer, body.projectId)) {
       const own = view<LessonBody>(found);
-      return { ...own, dependents: [], history: own.history.map((h) => ({ ...h, by: h.by === viewer.id ? viewer.id : "someone else" })), evidence: own.evidence.map((e) => ({ ...e, addedBy: e.addedBy === viewer.id ? viewer.id : "someone else" })) };
+      return { ...own, dependents: [], history: own.history.map((h) => ({ ...h, by: h.by === viewer.id ? viewer.id : "someone else" })), evidence: own.evidence.map((e) => ({ ...e, addedBy: e.addedBy === viewer.id ? viewer.id : "someone else", events: e.events.map((x) => (x.startsWith("account:") && x !== `account:${viewer.id}` ? "account:someone else" : x)) })) };
     }
     return undefined;
   }

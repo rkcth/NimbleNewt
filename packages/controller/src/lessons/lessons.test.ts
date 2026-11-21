@@ -310,6 +310,98 @@ for (const backend of backends) {
     assert.deepEqual((await c.lessons.get(c.owner, dq))!.stalePremises.map((s) => [s.id, s.why]), [[q, "rejected"]]);
   });
 
+  suite("second review: versions in a chain, final decisions, a premise found inconclusive, the proposer's view of events, a stable outcome key, and two controllers deciding at once", async (c) => {
+    // A <- B <- C: accepting version 3 over a candidate version 2 replaces version 1 too (and marks what rested on it); it never leaves two accepted versions of one lineage.
+    const a1 = await c.lesson("Version one"); await c.decide(a1, "accepted");
+    const onA1 = await c.lesson("Rests on version one", { dependsOn: [a1] }); await c.decide(onA1, "accepted");
+    const b1 = await c.lesson("Version two", { revises: a1 });
+    const c1 = await c.lesson("Version three", { revises: b1 });
+    assert.equal((await c.lessons.get(c.owner, c1))!.version, 3);
+    const r = await c.decide(c1, "accepted");
+    assert.deepEqual([await c.status(a1), (await c.lessons.get(c.owner, a1))!.supersededBy, await c.status(b1), await c.status(onA1)], ["superseded", c1, "superseded", "needs-review"]);
+    assert.ok(r.marked.includes(onA1), JSON.stringify(r.marked));
+    // A version 3 on a branch that lost (version 1 already replaced by a rival version 2) cannot be accepted, and nothing changes.
+    const x1 = await c.lesson("X one"); await c.decide(x1, "accepted");
+    const x2 = await c.lesson("X two", { revises: x1 });
+    const x2rival = await c.lesson("X two, rival", { revises: x1 });
+    const x3 = await c.lesson("X three", { revises: x2 });
+    await c.decide(x2rival, "accepted");
+    await refuses("invalid_command", () => c.decide(x3, "accepted"), /earlier version, lesson .* is already superseded/);
+    assert.deepEqual([await c.status(x2), await c.status(x3)], ["candidate", "candidate"]);
+
+    // A full premise makes room only by dropping finished dependents (superseded, inconclusive): every open one (accepted, evaluating, under review, candidate) stays, and is marked when the premise is replaced.
+    const base = await c.lesson("Crowded base"); await c.decide(base, "accepted");
+    const crowd: string[] = [];
+    for (let i = 0; i < 20; i++) crowd.push(await c.lesson(`On base ${i}`, { dependsOn: [base] }));
+    await c.decide(crowd[0]!, "accepted");
+    await c.decide(crowd[1]!, "evaluating");
+    await c.decide(crowd[2]!, "accepted"); await c.decide(crowd[2]!, "needs-review", "look again");
+    await c.decide(await c.lesson("Replaces crowd 3", { revises: crowd[3]! }), "accepted");
+    await c.decide(crowd[4]!, "inconclusive", "cannot tell");
+    const extra = await c.lesson("One more on base", { dependsOn: [base] });
+    const kept = (await c.lessons.get(c.owner, base))!.dependents;
+    assert.deepEqual([kept.length, kept.includes(extra), kept.includes(crowd[3]!), kept.includes(crowd[4]!)], [19, true, false, false]);
+    assert.ok([0, 1, 2, ...Array.from({ length: 15 }, (_, i) => i + 5)].every((i) => kept.includes(crowd[i]!)), "no open lesson leaves its premise's list");
+    const replaced = await c.decide(await c.lesson("Replaces base", { supersedes: [base] }), "accepted");
+    assert.deepEqual([...replaced.marked].sort(), [...kept].sort());
+    assert.deepEqual([await c.status(crowd[0]!), await c.status(crowd[1]!), await c.status(crowd[2]!)], ["needs-review", "evaluating", "needs-review"]);
+
+    // Decisions: rejected and inconclusive are final; an accepted lesson changes only by being taken up for review first.
+    const f = await c.lesson("Final"); await c.decide(f, "rejected", "no");
+    for (const to of ["accepted", "evaluating", "needs-review", "inconclusive"]) await refuses("invalid_command", () => c.decide(f, to), /rejected and cannot become/);
+    const g = await c.lesson("Reopened"); await c.decide(g, "accepted");
+    await refuses("invalid_command", () => c.decide(g, "rejected", "no"), /accepted and cannot become rejected/);
+    await c.decide(g, "needs-review", "look again"); await c.decide(g, "accepted", "still holds");
+    await refuses("invalid_command", async () => c.lessons.propose(c.mgr, { commandId: cid("l"), projectId: c.a, title: "v2", statement: "x", applicability: "y", evidence: [{ kind: "submission", id: await c.submission(c.a, c.taskA) }], revises: f }), /is rejected/);
+
+    // A lesson whose premise was found inconclusive cannot be accepted.
+    const p = await c.lesson("Premise"); const d = await c.lesson("On the premise", { dependsOn: [p] });
+    await c.decide(p, "inconclusive", "cannot tell");
+    assert.deepEqual((await c.lessons.get(c.owner, d))!.stalePremises.map((s) => [s.id, s.why]), [[p, "inconclusive"]]);
+    await refuses("invalid_command", () => c.decide(d, "accepted"), /premise .* is inconclusive/);
+
+    // The proposer's own view hides who else's account a piece rests on, as it hides who added it.
+    const obs = ObservationService.withEpoch(c.storage, c.epoch, options);
+    const mine = ((await obs.submit(c.dev, { commandId: cid("o"), projectId: c.a, summary: "my build is slow" })) as { id: string }).id;
+    const theirs = ((await obs.submit(c.mgr, { commandId: cid("o"), projectId: c.a, summary: "the manager's build is slow" })) as { id: string }).id;
+    const devs = (await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: "Slow builds", statement: "x", applicability: "y", evidence: [{ kind: "observation", id: mine }] })).id;
+    await c.lessons.addEvidence(c.mgr, { commandId: cid("ev"), lessonId: devs, evidence: [{ kind: "observation", id: theirs }] });
+    assert.deepEqual((await c.lessons.get(c.dev, devs))!.evidence.map((e) => e.events), [[`account:${c.dev.id}`], ["account:someone else"]]);
+    assert.deepEqual((await c.lessons.get(c.owner, devs))!.evidence.map((e) => e.events), [[`account:${c.dev.id}`], [`account:${c.mgr.id}`]]);
+
+    // A notice filed but not confirmed is offered again under the same key, so the notice sink files it once.
+    const keys: string[] = [];
+    let confirm = false;
+    const svc = c.make({ outcomes: { deliver: async (x: OutcomeNotice) => { keys.push(x.key); return confirm; } } });
+    const told = (await svc.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: "Told", statement: "x", applicability: "y", evidence: [{ kind: "submission", id: await c.submission(c.a, c.taskA) }] })).id;
+    await c.decide(told, "rejected", "no");
+    await svc.deliverOutcomes(c.host, c.a);
+    await c.make({ outcomes: { deliver: async (x: OutcomeNotice) => { keys.push(x.key); return confirm; } } }).deliverOutcomes(c.host, c.a);
+    confirm = true;
+    await svc.deliverOutcomes(c.host, c.a);
+    await svc.deliverOutcomes(c.host, c.a);
+    const toldKeys = keys.filter((k) => k.startsWith(told));
+    assert.equal(toldKeys.length, 3);
+    assert.equal(new Set(toldKeys).size, 1, JSON.stringify(toldKeys));
+
+    // Two controllers at once: one accepts a lesson resting on P, the other accepts a lesson that supersedes P. Whatever the order, no lesson is left accepted on a superseded premise.
+    for (let round = 0; round < 3; round++) {
+      const prem = await c.lesson(`P${round}`); await c.decide(prem, "accepted");
+      const dep = await c.lesson(`D${round}`, { dependsOn: [prem] });
+      const repl = await c.lesson(`R${round}`, { supersedes: [prem] });
+      const one = c.make(); const two = c.make();
+      const rev = async (x: string) => (await c.lessons.get(c.owner, x))!.revision;
+      const [rd, rr] = [await rev(dep), await rev(repl)];
+      await Promise.allSettled([
+        one.decide(c.mgr, { commandId: cid("d"), lessonId: dep, expectedRevision: rd, to: "accepted", finding: "ok" }),
+        two.decide(c.mgr, { commandId: cid("d"), lessonId: repl, expectedRevision: rr, to: "accepted", finding: "ok" }),
+      ]);
+      assert.equal(await c.status(repl), "accepted", "the replacement always goes through");
+      assert.equal(await c.status(prem), "superseded");
+      assert.notEqual(await c.status(dep), "accepted", `round ${round}: a lesson was left accepted on a superseded premise`);
+    }
+  });
+
   if (backend.name === backends[0]!.name) {
     suite("finished lessons waiting to be told do not count against the open-lesson limit, so a project cannot be locked by them", async (c) => {
       // An agent's lessons with no task have nowhere to be told; rejected, they stay listed (waiting) but are no longer open.
@@ -320,6 +412,20 @@ for (const backend of backends) {
       assert.equal((await c.lessons.get(c.owner, ids[0]!))!.outcomePending, true);
       const fresh = await c.lesson("Room again");
       assert.equal(await c.status(fresh), "candidate");
+      // Second review: finished lessons that can never be told filled the list (1000) for good, and every new lesson was refused as if 500 were open. The oldest finished one now leaves the list instead;
+      // it stays readable, still waiting to be told.
+      for (const id of ids.slice(3)) await c.decide(id, "rejected", "noise");
+      const more: string[] = [];
+      for (let i = 0; i < 499; i++) more.push((await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: `M${i}`, statement: "x", applicability: "y", evidence: [{ kind: "improvement-item", id: await c.improvement(c.a) }] })).id);
+      await c.decide(more[0]!, "rejected", "noise");
+      const all = async (): Promise<string[]> => { const out: string[] = []; let after: string | undefined; do { const p = (await c.lessons.current(c.owner, c.a, { limit: 100, ...(after === undefined ? {} : { afterId: after }) }))!; out.push(...p.items.map((x) => x.id)); after = p.next; } while (after !== undefined); return out; };
+      assert.equal((await all()).length, 1000);
+      const last = await c.lesson("Room at a full list");
+      const listed = await all();
+      assert.deepEqual([listed.length, listed.includes(last), listed.includes(ids[0]!), listed.includes(ids[1]!), listed.includes(fresh)], [1000, true, false, true, true]);
+      assert.deepEqual([(await c.lessons.get(c.owner, ids[0]!))!.status, (await c.lessons.get(c.dev, ids[0]!))!.outcomePending], ["rejected", true]);
+      // Open lessons are never dropped: with 500 open the next is still refused.
+      await refuses("unavailable", async () => { for (let i = 0; i < 2; i++) await c.lesson(`Fill ${i}`); }, /500 lessons are open/);
     });
   }
 }
