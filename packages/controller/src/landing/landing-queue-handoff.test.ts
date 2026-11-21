@@ -112,6 +112,12 @@ for (const backend of backends) {
       await r.handOff(t1, "ann");
       await refuses("not_found", () => r.ops.remove(bob, { commandId: "b3", taskId: t1, reason: "handed back" }));
       assert.equal((await r.ops.remove(ann, { commandId: "a3", taskId: t1, reason: "mine again" })).removed?.submissionId, s1);
+      // Held by a person (not an agent) with the same bare ID as the author: the task is held by someone else, so the author's agent answers for nothing.
+      const a1 = (await r.w.assignments.getAssignment(t1))!;
+      await r.w.assignments.transferTask({ commandId: "tr-person", actor: r.w.owner.id, taskId: t1, expectedRevision: a1.revision, to: { kind: "person", id: "ann" }, reason: "a person takes it" });
+      await refuses("not_found", () => r.ops.add(ann, { commandId: "a4", submissionId: s1 }));
+      assert.equal((await r.ops.add(r.w.owner, { commandId: "o2", submissionId: s1 })).position, 1);
+      await refuses("not_found", () => r.ops.remove(ann, { commandId: "a5", taskId: t1, reason: "held by a person" }));
     } finally { await r.close(); }
   });
 

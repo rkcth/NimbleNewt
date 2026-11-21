@@ -64,5 +64,12 @@ test("after a hand-off the task's new holder answers for its queued work through
     assert.equal((await call(bob.token, "landing.queue.remove", { taskId: task, reason: "released" }, "b3")).error?.code, "not_found");
     assert.equal((await call(ann.token, "landing.queue.remove", { taskId: task, reason: "withdrawn by its author" }, "a3")).ok, true);
     assert.deepEqual(await queue(), []);
+
+    // Held by a person whose bare ID is the same as Bob's agent ID: a person holds the task, not Bob's agent, and not its author either.
+    assert.ok((await call(O, "landing.queue.add", { submissionId: sid }, "o1")).ok);
+    await s.assignments.assignTask({ commandId: "as-person", actor: rob.id, taskId: task, expectedRevision: (await s.assignments.getAssignment(task))!.revision, owner: { kind: "person", id: bob.agentId } } as never);
+    assert.equal((await call(bob.token, "landing.queue.remove", { taskId: task, reason: "not an agent's task" }, "b4")).error?.code, "not_found");
+    assert.equal((await call(ann.token, "landing.queue.remove", { taskId: task, reason: "someone else holds it" }, "a4")).error?.code, "not_found");
+    assert.deepEqual(await queue(), [[sid, ann.id]]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true }); }
 });

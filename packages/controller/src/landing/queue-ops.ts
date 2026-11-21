@@ -126,7 +126,7 @@ export class LandingQueueOps {
 
   /**
    * The controller's own queueing of a submission that has just been approved (a reviewer's `approve`, or a code submission that needs no review because no other agent could review it). Best effort: a submission that
-   * is not approved, a project with no landing branch, or settings that cannot be read leave the queue as it is (the owner, an integrator or the author can still add it). `cause` names what approved it (the review),
+   * is not approved, a project with no landing branch, or settings that cannot be read leave the queue as it is (the owner, an integrator or the task's own agent can still add it). `cause` names what approved it (the review),
    * so a later approval after a `changes` queues it again.
    */
   async queueApproved(submissionId: string, cause: string): Promise<boolean> {
