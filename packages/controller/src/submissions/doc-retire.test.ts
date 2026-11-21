@@ -104,11 +104,18 @@ for (const backend of backends) {
       assert.equal(notices.length, 1, "a repeat sends nothing");
       await verify(guide, [l3, s1]);
       await verify(faq, [l3]);
+      // A title of characters written as two UTF-16 units each, cut inside one at 60 (first review): the notice is cut on a whole character, so its text stays well-formed (a half character is refused, and the notice would be lost).
+      const gr = await read(guide);
+      await docs.record(owner, { commandId: cid("r"), projectId: project, obligationId: guide, expectedRevision: gr.revision, title: `a${"\u{1F4D8}".repeat(40)}`, location: "docs/guide.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login, search] });
+      assert.equal((await read(guide)).state, "verified", "a new title keeps the document verified");
       // The controller's automatic check after independent QA evidence: the owner is told.
       const l4 = code(login, treeB);
       await docs.afterQaEvidence({ evidenceId: derivedId("qae", cid("qa")), taskId: login, submissionId: l4, source: "independent" });
       assert.equal(notices.length, 2);
       assert.match(notices[1]!.text, /2 verified documents went stale/);
+      assert.ok(notices[1]!.text.includes(`"a${"\u{1F4D8}".repeat(29)}"`), notices[1]!.text);
+      assert.doesNotMatch(notices[1]!.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "no half character");
+      assert.ok(notices[1]!.text.length <= 200);
       assert.notEqual(notices[1]!.commandId, notices[0]!.commandId);
       assert.equal((await read(guide)).updates.find((u) => u.state === "open")?.requestedBy, DOC_AUTO_PRINCIPAL.id);
       // A notice that cannot be sent is not the check's failure.
@@ -180,6 +187,19 @@ for (const backend of backends) {
       assert.deepEqual([dropped.length, dropped[0]?.state], [1, "dropped"]);
       assert.equal(await projects.getTask(dropped[0]!.taskId), undefined);
       assert.deepEqual(raced.tasks.find((t) => t.obligationId === notes)?.assigned, false);
+
+      // Retired after the check read the record and before the update task was written (the retirement found no task to cancel): the task just created is cancelled at once, never assigned.
+      const late = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "Changelog", location: "docs/changes.md", audience: "developer", owner: dora.id, applicableVersion: "3.0", implementationRefs: [search] })).id;
+      onCreate = async () => { await docs.retire(owner, { commandId: cid("x"), obligationId: late, expectedRevision: (await read(late)).revision }); };
+      created.length = 0;
+      const raced2 = await docs.impact(owner, { commandId: cid("i"), taskId: search, submissionId: code(search, treeA) });
+      assert.equal(created.length, 1, JSON.stringify(created));
+      assert.match(created[0]!, /Changelog/);
+      const lateUpdate = (await read(late)).updates[0]!;
+      assert.equal(lateUpdate.state, "dropped");
+      assert.equal(await taskState(lateUpdate.taskId), "cancelled", "the task written after the retirement is cancelled");
+      assert.equal(await assignments.getAssignment(lateUpdate.taskId), undefined, "and never assigned");
+      assert.equal(raced2.tasks.find((t) => t.obligationId === late)?.assigned, false);
 
       // A repeat of a retirement whose cancellation failed (the task moved between the read and the cancel) finishes it.
       const old = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "Old FAQ", location: "docs/old.md", audience: "support", owner: dora.id, applicableVersion: "3.0", implementationRefs: [login] })).id;

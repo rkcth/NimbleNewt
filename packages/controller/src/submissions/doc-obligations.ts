@@ -631,10 +631,12 @@ export class DocObligationService {
     for (const m of made) tasks.push({ obligationId: m.obligationId, taskId: m.taskId, assigned: await this.#open(by, m) });
     // Documents that were verified went stale: the owner is told, unless the owner ran this check (they read the answer). After the update tasks, so the notice can say who has them.
     if (wrote && staled.length > 0 && this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id)) {
-      const names = staled.map((d) => `"${d.title.slice(0, 60)}"`).join(", ");
+      // Cut on whole characters (first review): a cut through a character written as two UTF-16 units would leave half of it, which the notice's text check refuses, and the notice would be lost.
+      const cut = (s: string, n: number): string => (s.length <= n ? s : s.slice(0, n).replace(/[\uD800-\uDBFF]$/, ""));
+      const names = staled.map((d) => `"${cut(d.title, 60)}"`).join(", ");
       const text = `${staled.length === 1 ? "A verified document went" : `${staled.length} verified documents went`} stale: ${names}. Update tasks went to their keepers; the docs view shows why.`;
       const noticeId = `doc-stale:${createHash("sha256").update(scoped).digest("hex").slice(0, 40)}`;
-      await this.#ports.notify({ commandId: noticeId, projectId: staled[0]!.projectId, obligationId: staled[0]!.id, text: text.length <= 200 ? text : `${text.slice(0, 196)}...` }).catch(() => undefined);
+      await this.#ports.notify({ commandId: noticeId, projectId: staled[0]!.projectId, obligationId: staled[0]!.id, text: text.length <= 200 ? text : `${cut(text, 196)}...` }).catch(() => undefined);
     }
     return { flagged, tasks, replayed };
   }
@@ -669,6 +671,16 @@ export class DocObligationService {
     // A document retired after the flag was written: its update task is not opened (one not yet created is never created).
     if ((await this.#task(m.taskId)) === undefined && ((await this.#runner.get("doc-obligation", m.obligationId))?.body as unknown as DocObligationBody | undefined)?.retired !== undefined) return false;
     await step(async () => (await this.#task(m.taskId)) !== undefined, () => this.#ports.projects.createTask({ commandId: m.create, actor: by.id, projectId: m.projectId, title: m.title, description: m.description }));
+    // Read again after the task exists (first review): a retirement that committed after the read above found no task to cancel, so the task just created is cancelled here instead. The retirement
+    // writes the record before it reads the tasks and this reads the record after writing the task, so one of the two always sees the other.
+    if (((await this.#runner.get("doc-obligation", m.obligationId))?.body as unknown as DocObligationBody | undefined)?.retired !== undefined) {
+      const found = await this.#runner.get("task", m.taskId);
+      const state = (found?.body as unknown as TaskBody | undefined)?.state;
+      if (found !== undefined && (state === "proposed" || state === "ready" || state === "blocked")) {
+        try { await this.#ports.projects.transitionTask({ commandId: `doc-retire:${m.taskId}:cancel:${found.revision}`, actor: by.id, taskId: m.taskId, expectedRevision: found.revision, to: "cancelled" }); } catch (error) { if (!(error instanceof DomainError)) throw error; }
+      }
+      return false;
+    }
     await step(async () => (await this.#task(m.taskId))?.state !== "proposed", async () => this.#ports.projects.transitionTask({ commandId: `${commandBase}:ready`, actor: by.id, taskId: m.taskId, expectedRevision: (await this.#runner.get("task", m.taskId))!.revision, to: "ready" }));
     try {
       await step(async () => (await this.#runner.get("assignment", assignmentIdOf(m.taskId))) !== undefined, () => this.#ports.assignments.assignTask({ commandId: `${commandBase}:assign`, actor: by.id, taskId: m.taskId, owner: { kind: "agent", id: bare(m.owner) }, reason: "document update" }));

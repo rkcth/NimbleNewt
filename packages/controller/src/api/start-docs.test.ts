@@ -167,18 +167,28 @@ test("documentation obligations through the running controller and the owner's c
     assert.equal((await turn("m9", drop, [{ kind: "command", op: "doc.obligation.retire", args: { obligationId: obligation, reason: "replaced by the new site" }, evidence: drop, basis: "owner" }]))[0].status, "refused", "a reason the owner did not give is refused");
     const retiring = await turn("m10", drop, [{ kind: "command", op: "doc.obligation.retire", args: { obligationId: obligation, reason: "we deleted the landing page" }, evidence: drop, basis: "owner" }]);
     assert.equal(retiring[0].status, "proposed", JSON.stringify(retiring));
+    // The proposal names the document by its title and place, not only by its ID, and says its open update task goes with it (first review).
+    assert.ok((retiring[0].preview as string[]).some((l) => /Takes away "Landing page" \(dob-[a-z2-7]+\) at "site\/index.html", kept by agent:\S+; its 1 open update task is cancelled unless already started/.test(l)), JSON.stringify(retiring[0].preview));
     const retired = await turn("m11", "yes, do that", [{ kind: "apply_proposal", proposalId: retiring[0].proposalId, evidence: "do that", basis: "owner" }]);
     assert.equal(retired[0].status, "applied", JSON.stringify(retired));
     const gone = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
     assert.deepEqual([gone.retired.by, gone.retired.reason, gone.updates.filter((u: any) => u.state === "open").length], [rob.id, "we deleted the landing page", 0]);
     assert.equal((await call(boot.token, "task.get", { taskId: lostTask.taskId })).result.item.state, "cancelled");
     assert.deepEqual((await call(boot.token, "doc.obligation.list", { projectId: project })).result.items.map((i: any) => i.title), ["user guide"]);
+    // Asked again by chat: answered at once, nothing proposed.
+    const twice = await turn("m13", drop, [{ kind: "command", op: "doc.obligation.retire", args: { obligationId: obligation, reason: "we deleted the landing page" }, evidence: drop, basis: "owner" }]);
+    assert.equal(twice[0].status, "refused", JSON.stringify(twice));
+    assert.match(String(twice[0].message ?? JSON.stringify(twice[0])), /already taken away/);
     const docsNow = await turn("m12", q, [{ kind: "status", request: { kind: "docs" }, evidence: q, basis: "owner" }]);
     assert.doesNotMatch((docsNow[0].lines as { text: string }[]).map((l) => l.text).join("\n"), /Landing page/);
     // Through the state API: a retired document is neither verified nor retired again; an agent outside the docs and director roles may not retire.
     assert.equal((await call(dora.token, "doc.obligation.verify", { obligationId: obligation, expectedRevision: gone.revision, documentSubmissionId: updated.result.id, evidence: [sub2] }, "v9")).error.code, "invalid_command");
     const guideId = both[1].id as string;
     assert.equal((await call(quinn.token, "doc.obligation.retire", { obligationId: guideId, expectedRevision: both[1].revision }, "x1")).error.code, "forbidden");
+    // Not from a task credential, even one of a docs agent of the project.
+    const { OPERATION_BY_NAME } = await import("./operations.js");
+    const scoped = { principal: { id: dora.id, kind: "agent", name: "Dora", grants: [], taskScope: { taskId: task, projectId: project } }, docObligations: { retire: async () => assert.fail("a task credential reached the service") } } as never;
+    await assert.rejects(() => OPERATION_BY_NAME.get("doc.obligation.retire")!.run(scoped, { obligationId: guideId, expectedRevision: both[1].revision }, "x0"), (e: any) => e.code === "forbidden" && /task credential/.test(e.message));
     const byDora = await call(dora.token, "doc.obligation.retire", { obligationId: guideId, expectedRevision: both[1].revision }, "x2");
     assert.equal(byDora.ok, true, JSON.stringify(byDora));
     assert.deepEqual((await call(boot.token, "doc.obligation.list", { projectId: project })).result.items, []);
