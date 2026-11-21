@@ -214,13 +214,14 @@ export async function acknowledgedSurvive(storage: ControllerStorage, clean: Cle
   return problems;
 }
 
-/** What a child writes to stderr, followed by the JSON of its boundary label, just before it kills itself. */
+/** What a child writes to stderr, followed by the JSON list of every boundary label it passed (the last one is where it dies), just before it kills itself. */
 export const KILLED_AT = "g04 killed at ";
 
 /**
- * How long a child may take to reach its boundary before the parent kills it and reports it as hung. A child normally dies within seconds (about 10 s on
- * the slowest hosted runner); this is well under the integration package's 300 s file limit, so a hung child fails its own boundary with a reason instead
- * of the whole file running out of time with the child still alive.
+ * How long a child may take to reach its boundary before the parent kills it and reports it as hung. A child normally dies within about 1 s on Linux and
+ * 7 to 10 s on the hosted Windows runner (the slowest seen), so 120 s leaves a margin of more than ten times for a loaded machine. It is per child: the
+ * package's limit (300 s) is per test and one kill test runs about 20 children, so on a slow machine a hang late in a test can still meet the test's
+ * limit first; under the QA job's 50-minute limit it is the deadline that ends a hung child, with its reason.
  */
 export const CHILD_DEADLINE_MS = 120_000;
 
@@ -235,32 +236,47 @@ export function runChild(spec: StoreSpec, directory: string, crashAt: number, sc
   const script = fileURLToPath(new URL("./g04-child.js", import.meta.url));
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, ["--import", guard, script, JSON.stringify(spec), directory, String(crashAt), scenario], { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "", hung = false;
+    let out = "", err = "", hung = false, settled = false, drain: NodeJS.Timeout | undefined;
+    let ended: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     // The parent's own kill at the deadline is recorded before it is sent, so its SIGKILL is never read as the child's.
     const deadline = setTimeout(() => { hung = true; proc.kill("SIGKILL"); }, deadlineMs);
-    proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
-    proc.stderr.on("data", (d: Buffer) => { err += d.toString(); });
-    proc.on("error", (e) => { clearTimeout(deadline); reject(e); });
-    // POSIX reports the signal; Windows reports a terminated process by a non-zero exit code.
-    proc.on("exit", (code, signal) => {
-      clearTimeout(deadline);
+    proc.stdout.setEncoding("utf8").on("data", (d: string) => { out += d; });
+    proc.stderr.setEncoding("utf8").on("data", (d: string) => { err += d; });
+    const finish = (): void => {
+      if (settled || ended === undefined) return;
+      settled = true;
+      clearTimeout(drain);
+      const { code, signal } = ended;
+      // POSIX reports the signal. Windows has no signals: a process ended by `process.kill` (its own or the parent's) reports exit code 1, as an uncaught
+      // error does, so any non-zero code counts as died there and the label the child wrote just before its kill tells the two apart (killProblem).
       const died = process.platform === "win32" ? signal !== null || (code !== null && code !== 0) : signal === "SIGKILL";
       resolve({ killed: died && !hung, hung, out, err: `${err}${code === null || code === 0 ? "" : ` exit ${code}`}` });
+    };
+    proc.on("error", (e) => { clearTimeout(deadline); clearTimeout(drain); if (!settled) { settled = true; reject(e); } });
+    // The result is taken at "close", once stdout and stderr are read to the end: at "exit" the label the child wrote just before its kill may still be
+    // in the pipe (Node does not order the two), and a missing label would read as a kill elsewhere. If something else holds the pipes open after the
+    // child is gone, the result is taken 10 s after its exit with what was read; a label not read by then fails the boundary, it never passes one.
+    proc.on("exit", (code, signal) => {
+      clearTimeout(deadline);
+      ended = { code, signal };
+      drain = setTimeout(finish, 10_000);
     });
+    proc.on("close", finish);
   });
 }
 
 /**
  * Why a child run does not count as a kill at boundary `crashAt` of the uncrashed run, or undefined when it does: the child must have died by its own
- * SIGKILL, not finished, not hung, and must have reported the uncrashed run's label for that boundary (a child whose path took other steps would
- * otherwise die somewhere else unnoticed).
+ * SIGKILL, not finished, not hung, and must have reported the uncrashed run's labels up to and including that boundary (a child whose path took other
+ * steps would otherwise die somewhere else unnoticed).
  */
 export function killProblem(child: ChildRun, labels: readonly string[], crashAt: number, label: string): string | undefined {
-  const tail = child.err.slice(0, 300);
+  const tail = child.err.slice(-300); // the end of stderr: the label, an error and the exit code are written last
   if (child.hung) return `${label}: the child hung, it did not reach its boundary and was killed by the parent (${tail})`;
   if (!child.killed || child.out.includes("finished")) return `${label}: the child was not killed (${tail})`;
-  const expected = labels[crashAt];
-  if (expected === undefined || !child.err.includes(`${KILLED_AT}${JSON.stringify(expected)}\n`)) return `${label}: the child died elsewhere (${tail})`;
+  // The whole list up to the boundary, not only its label: labels repeat (every claim has the same "before" and "after"), so a child that took one step
+  // more or less could otherwise die on an equal label at the same index unnoticed.
+  if (crashAt < 0 || crashAt >= labels.length || !child.err.includes(`${KILLED_AT}${JSON.stringify(labels.slice(0, crashAt + 1))}\n`)) return `${label}: the child died elsewhere (${tail})`;
   return undefined;
 }
 
