@@ -142,7 +142,6 @@ export class IntegratorLeaseOps {
     if (by.kind !== "owner" && !this.#allowed(by, found.projectId)) throw new DomainError("forbidden", `${by.id} no longer has the right integration.lease on this project, so it cannot land under the lease`);
     const holder = by.kind === "owner" ? found.holder : holderOf(by);
     // A holder that was retired or disabled lands nothing, even before its hold runs out (P10 second slice).
-    // A holder that was retired or disabled lands nothing, even before its hold runs out (P10 second slice).
     if (holder !== undefined && this.#options.activeAgent !== undefined && !(await this.#options.activeAgent(holder))) throw new DomainError("fenced", `${holder} is no longer an active agent, so its lease cannot be used to land`);
     if (holder === undefined || !(await this.#leases.valid(leaseId, fence, holder))) throw new DomainError("fenced", `lease ${leaseId} is not held with fence ${fence} by the caller (it expired, was released, or changed hands)`);
     return { leaseId, fence };
