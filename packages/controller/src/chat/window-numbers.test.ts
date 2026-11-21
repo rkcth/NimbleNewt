@@ -109,6 +109,21 @@ test("second review: a bare hour range of things counted is not a time range, an
   assert.equal(sizeInWords(2e12, "at 2 for an hour, step 2 t"), false, "nor a bare t");
 });
 
+test("re-check: a number word run into a unit is another word ('and' is not 'an d', 'am' not 'a m', 'ah' not 'a h')", () => {
+  assert.equal(windowLengthInWords(1440, "02:00", "install at 2 and 3 on Sunday"), false, "'and' is not one day");
+  assert.equal(windowLengthInWords(1440, "02:00", "between 2 and 3 releases are staged"), false, "nor here");
+  assert.equal(windowLengthInWords(60, "02:00", "ah, install at 2, one sec"), false, "'ah' is not an hour");
+  assert.equal(leadInWords(1440, "install at 2 for an hour and back up first"), false, "'and' is not a one-day lead");
+  assert.equal(leadInWords(60, "ah ok, install at 2 for two hours"), false, "'ah' is not an hour's lead");
+  assert.equal(sizeInWords(1, "at 2 for an hour, ab testing is off"), false, "'ab' is not a byte");
+  // Still read: a number word apart from its unit, or joined by a hyphen; digits run into a unit.
+  assert.equal(windowLengthInWords(1440, "02:00", "install at 2 for a day and check it"), true);
+  assert.equal(windowLengthInWords(60, "02:00", "at 2 for a one-hour window and then stop"), true);
+  assert.equal(windowLengthInWords(90, "02:00", "at 2 and keep it open 90m"), true);
+  assert.equal(leadInWords(60, "at 2 for two hours and start preparing an hour before"), true);
+  assert.equal(sizeInWords(1e9, "at 2 for an hour and keep a gigabyte free"), true);
+});
+
 test("a preparation lead counts only when the owner said it, none included", () => {
   assert.equal(leadInWords(30, "install it tonight at 2 for an hour and start preparing 30 minutes before"), true);
   assert.equal(leadInWords(120, "start preparing two hours ahead"), true);

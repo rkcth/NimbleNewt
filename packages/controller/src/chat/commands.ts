@@ -393,7 +393,8 @@ export function durationInWords(seconds: number, text: string): boolean {
   const t = text.replace(/[‘’]/g, "'").toLowerCase().replace(/\b[a-z]+-[a-z0-9-]*\d[a-z0-9-]*/g, " ");
   if (seconds === 1800 && /\bhalf\s+an?\s+hour\b/.test(t)) return true;
   const units = Object.keys(DURATION_UNITS).sort((x, y) => y.length - x.length).join("|");
-  const re = new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})[ -]?(${units})\\b`, "g");
+  // A number in words is apart from its unit ("an hour", "two-day"): run together it is another word ("and" is not "an d", "am" not "a m", "ah" not "a h").
+  const re = new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|(?:${Object.keys(DURATION_NUMBERS).sort((x, y) => y.length - x.length).join("|")})(?=[ -]))[ -]?(${units})\\b`, "g");
   for (const m of t.matchAll(re)) {
     const n = /^\d/.test(m[1]!) ? Number(m[1]) : DURATION_NUMBERS[m[1]!]!;
     if (Math.round(n * DURATION_UNITS[m[2]!]!) === seconds) return true;
@@ -531,7 +532,7 @@ export function sizeInWords(bytes: number, text: string): boolean {
   if (!Number.isSafeInteger(bytes) || bytes < 0) return false;
   const t = numbersOf(text).replace(/(\d),(?=\d{3}\b)/g, "$1");
   const units = Object.keys(SIZE_UNITS).sort((x, y) => y.length - x.length).join("|");
-  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|${NUMBER_WORDS()}|zero)[ -]?(${units})\\b`, "g"))) {
+  for (const m of t.matchAll(new RegExp(`(?:^|[^0-9a-z.])(?<![0-9],)(\\d+(?:\\.\\d+)?|(?:${NUMBER_WORDS()}|zero)(?=[ -]))[ -]?(${units})\\b`, "g"))) {
     const n = m[1] === "zero" ? 0 : numberOf(m[1]!);
     if (SIZE_UNITS[m[2]!]!.some((u) => Math.round(n * u) === bytes)) return true;
   }
