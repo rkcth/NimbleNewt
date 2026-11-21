@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -98,6 +99,14 @@ async function reviewerThroughTheBridge(storage: Storage): Promise<void> {
         const art = good(await send("artifact.publish", { name: "Watering guide", files: [{ path: "guide.md", text: "# Water each bed at dawn." }] }, "ap-1"));
         seen["art"] = art;
         seen["document"] = good(await send("submission.record", { kind: "document", artifactId: art["id"], report: "The guide says when." }, "doc-1"));
+        // An artifact of this task whose stored file changed after publication is refused: the controller checks the files against the digest it recorded before it records that digest.
+        const draftText = "# A draft that is changed on disk later.";
+        const draft = good(await send("artifact.publish", { name: "Draft", files: [{ path: "draft.md", text: draftText }] }, "ap-2"));
+        const blobName = createHash("sha256").update(draftText).digest("hex");
+        const blob = readdirSync(join(d, "blobs"), { withFileTypes: true, recursive: true }).filter((e) => e.isFile() && e.name === blobName).map((e) => join(e.parentPath, e.name));
+        assert.equal(blob.length, 1, "the draft's one stored file");
+        chmodSync(blob[0]!, 0o600); writeFileSync(blob[0]!, "tampered");
+        seen["damaged"] = refused(await send("submission.record", { kind: "document", artifactId: draft["id"] }, "doc-3"), "invalid_command");
         // The rules of the service hold through the bridge: no role Ben lacks, no review of his own document, no artifact of another task, no code, no task or role of the agent's choosing.
         seen["signoff"] = refused(await send("submission.record", { kind: "signoff", subject: codeId, decision: "approve" }, "so-1"), "forbidden");
         seen["self-review"] = refused(await send("submission.record", { kind: "review", subject: seen["document"]["id"], verdict: "approve" }, "rv-2"), "forbidden");
@@ -128,6 +137,7 @@ async function reviewerThroughTheBridge(storage: Storage): Promise<void> {
     const listed = await call(ownerToken, "submission.list", { taskId });
     assert.deepEqual((listed["result"]["items"] as Reply[]).map((x) => x["kind"]).sort(), ["code", "document", "qa", "review"], "nothing else was recorded");
     assert.match(seen["code"], /work-end submit true/);
+    assert.match(seen["damaged"], /no longer matches its files/);
     assert.match(seen["unknown-subject"], /no such submission for this task/);
     assert.match(seen["signoff"], /does not hold the role director/);
   } finally {

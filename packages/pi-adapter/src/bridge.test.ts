@@ -271,7 +271,7 @@ test("submission.record: sent as the call it is, with no way to name a task, a r
   const params = tool(current).parameters as unknown as { properties: Record<string, unknown>; required: string[]; additionalProperties: boolean };
   assert.deepEqual(Object.keys(params.properties), ["kind", "subject", "verdict", "decision", "report", "artifactId"], "no argument names a task, a role, a base, a tree, a patch ID or a digest");
   assert.deepEqual([params.required, params.additionalProperties], [["kind"], false]);
-  assert.match(tool(current).description, /review \(verdict\), qa \(report\), signoff \(decision\); or a document change \(artifactId, report\)\. Code: work-end submit\./);
+  assert.match(tool(current).description, /kind review \(verdict\), qa \(report\) or signoff \(decision\) on submission subject \(sbm-\.\.\.\), or document \(artifactId, report\)\. Code: work-end submit\./);
   const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
   assert.match(String(await tool(old).execute({ kind: "qa", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", report: "r" }, { callId: "call_2" } as never)), /^refused \(unknown_tool\): submission\.record is not available on this controller; nothing was recorded, give your verdict or report in your work-end report$/);
   const refused = createBridge({ send: async () => ({ ok: false, code: "forbidden", message: "a review of your own submission is refused" }) });
