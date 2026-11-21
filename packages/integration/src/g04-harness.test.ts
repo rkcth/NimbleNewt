@@ -40,6 +40,15 @@ test("the whole of the child's output is read before the run is judged (1 MiB wr
   }
 });
 
+test("the run is judged when the output streams close, not at the child's exit: a label that arrives after the exit is still read", async () => {
+  // probe-late kills itself at once; a grandchild holding its stderr writes the label 500 ms later. Judged at the exit, the label would be missing.
+  for (let round = 0; round < 2; round++) {
+    const child: ChildRun = await withDir((dir) => runChild(PROBE_SPEC, dir, 0, "probe-late"));
+    assert.equal(child.killed, true, child.err.slice(-300));
+    assert.equal(killProblem(child, LABELS, 0, "0 probe 0"), undefined, child.err.slice(-300));
+  }
+});
+
 test("a child that passes no kill point finishes and is not a kill", async () => {
   // probe-kill with no kill point (-1): it says "finished" and exits 0, and never opens the unused database.
   const child = await withDir((dir) => runChild(PROBE_SPEC, dir, -1, "probe-kill"));

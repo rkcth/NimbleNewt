@@ -3,6 +3,7 @@
  * (scenario `path`, or `wait`, see g04-wait.ts, or `tool`, see g04-tool.ts) over the given real database with the REAL Pi adapter (durable JSONL storage in <directory>/pi) in the same
  * process, and kills itself with SIGKILL at boundary <crashAt>.
  */
+import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { ANSWER, Chaos, Clock, KILLED_AT, openAdapter, openStore, piConversation, runPath, startProcess, type StoreSpec } from "./g04-fixture.js";
@@ -32,6 +33,14 @@ const chaos: InstanceType<typeof Chaos> = new Chaos(Number(crashAt), () => (writ
 if (scenario === "probe-hang") {
   setInterval(() => undefined, 1 << 30);
   await new Promise<never>(() => undefined);
+}
+// `probe-late` dies at once by its own SIGKILL, and a grandchild that shares its stderr writes the label 500 ms later: the label arrives after the
+// child's exit, so only a parent that waits for the streams to close (not for the exit) reads it.
+if (scenario === "probe-late") {
+  const line = `${KILLED_AT}${JSON.stringify(["probe 0"])}\n`;
+  spawn(process.execPath, ["-e", `setTimeout(() => require("node:fs").writeSync(2, ${JSON.stringify(line)}), 500)`], { stdio: ["ignore", "ignore", "inherit"] });
+  process.kill(process.pid, "SIGKILL");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 }
 if (scenario === "probe-kill") {
   writeAll(2, `${".".repeat(1 << 20)}\n`);

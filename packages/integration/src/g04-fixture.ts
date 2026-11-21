@@ -228,8 +228,8 @@ export const CHILD_DEADLINE_MS = 120_000;
 /** What a child run ended as. `killed`: it died by its own SIGKILL (never by the parent's). `hung`: the parent killed it at the deadline. */
 export interface ChildRun { readonly killed: boolean; readonly hung: boolean; readonly out: string; readonly err: string }
 
-/** The scenarios a child runs. `probe-hang` and `probe-kill` touch no database: they check the harness itself (never reach a boundary; die at one). */
-export type ChildScenario = "path" | "wait" | "tool" | "tool-replay" | "probe-hang" | "probe-kill";
+/** The scenarios a child runs. `probe-hang`, `probe-kill` and `probe-late` touch no database: they check the harness itself (never reach a boundary; die at one; die before their label arrives). */
+export type ChildScenario = "path" | "wait" | "tool" | "tool-replay" | "probe-hang" | "probe-kill" | "probe-late";
 
 /** A child process that runs the whole path (controller and adapter in one process) and kills itself with SIGKILL at a boundary. */
 export function runChild(spec: StoreSpec, directory: string, crashAt: number, scenario: ChildScenario = "path", deadlineMs: number = CHILD_DEADLINE_MS): Promise<ChildRun> {
