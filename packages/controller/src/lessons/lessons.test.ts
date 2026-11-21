@@ -118,6 +118,12 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: "sbm-aaaaaaaaaaaaaaaaaaaa" }] }), /may read/);
     await refuses("invalid_command", () => c.lessons.propose(c.dev2, { commandId: cid("l"), projectId: c.a, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: sbm }] }), /may read/);
     await refuses("invalid_command", async () => c.lessons.propose(c.eve, { commandId: cid("l"), projectId: c.b, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: await c.submission(c.b, c.taskB, "agent:eve") }], dependsOn: [premise] }), /lessons of this project/);
+    // The owner may read everything, yet a lesson of project B still cannot rest on, supersede or contradict a lesson of A, nor cite A's records; nor can B's manager cite them.
+    for (const link of ["dependsOn", "supersedes", "contradicts"]) {
+      await refuses("invalid_command", async () => c.lessons.propose(c.owner, { commandId: cid("l"), projectId: c.b, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: await c.submission(c.b, c.taskB) }], [link]: [premise] } as never), /lessons of this project/);
+    }
+    await refuses("invalid_command", () => c.lessons.propose(c.owner, { commandId: cid("l"), projectId: c.b, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: sbm }] }), /record of this project/);
+    await refuses("invalid_command", async () => c.lessons.propose(c.eve, { commandId: cid("l"), projectId: c.b, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: await c.submission(c.a, c.taskA, "agent:eve") }] }), /record of this project/);
     await refuses("forbidden", () => c.lessons.propose(c.reader, { commandId: cid("l"), projectId: c.a, title: "x", statement: "x", applicability: "x", evidence: [{ kind: "submission", id: sbm }] }));
     await refuses("invalid_command", () => c.lessons.propose(c.mgr, { commandId: cid("l"), projectId: c.a, title: "x", statement: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789", applicability: "x", evidence: [{ kind: "submission", id: sbm }] }), /credential/);
     assert.equal(await c.lessons.get(c.eve, made.id), undefined, "another project's manager sees nothing");
@@ -252,4 +258,68 @@ for (const backend of backends) {
     assert.deepEqual(marked.marked, [], "taking a lesson up for review is not yet a stale premise");
     assert.equal((await c.decide(base, "rejected", "it was wrong")).marked.length, 4);
   });
+
+  suite("an agent's own word counts once however worded; finished lessons free a crowded premise; an acceptance that would stale its own premise is refused; a stale premise carries its latest reason", async (c) => {
+    // Accounts with no event behind them: two reworded friction reports and two proposals by the same agent are one independent piece; another agent's report is a second one.
+    const obs = ObservationService.withEpoch(c.storage, c.epoch, options);
+    const said = async (by: Principal, summary: string) => ((await obs.submit(by, { commandId: cid("o"), projectId: c.a, summary })) as { id: string }).id;
+    const o1 = await said(c.dev, "the build is slow on large changes");
+    const o2 = await said(c.dev, "big changes take ages to build");
+    const o3 = await said(c.mgr, "the build is slow");
+    assert.notEqual(o1, o2, "different words are different observations");
+    const words = (await c.lessons.propose(c.mgr, { commandId: cid("l"), projectId: c.a, title: "Split large changes", statement: "Large changes build slowly.", applicability: "large changes",
+      evidence: [{ kind: "observation", id: o1 }, { kind: "observation", id: o2 }, { kind: "improvement-item", id: await c.improvement(c.a) }, { kind: "improvement-item", id: await c.improvement(c.a) }, { kind: "observation", id: o3 }] })).id;
+    const w = (await c.lessons.get(c.owner, words))!;
+    assert.deepEqual(w.evidence.map((e) => [e.independence, e.repeats ?? null, e.why ?? null]), [
+      ["independent", null, null], ["derived", 0, "same reporter's own account as an earlier piece"], ["derived", 0, "same reporter's own account as an earlier piece"],
+      ["derived", 0, "same reporter's own account as an earlier piece"], ["independent", null, null],
+    ]);
+    assert.equal(w.independentEvidence, 2);
+    // The proposer reading its own lesson sees itself, not who else added evidence.
+    const devs = (await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: "Builds", statement: "x", applicability: "y", evidence: [{ kind: "observation", id: o1 }] })).id;
+    await c.lessons.addEvidence(c.mgr, { commandId: cid("ev"), lessonId: devs, evidence: [{ kind: "submission", id: await c.submission(c.a, c.taskA) }] });
+    assert.deepEqual((await c.lessons.get(c.dev, devs))!.evidence.map((e) => e.addedBy), [c.dev.id, "someone else"]);
+    assert.deepEqual((await c.lessons.get(c.owner, devs))!.evidence.map((e) => e.addedBy), [c.dev.id, c.mgr.id]);
+
+    // Twenty lessons crowd a premise; rejecting some frees room for another, and the finished ones leave its list.
+    const base = await c.lesson("Base");
+    await c.decide(base, "accepted");
+    const crowd: string[] = [];
+    for (let i = 0; i < 20; i++) crowd.push(await c.lesson(`Crowd ${i}`, { dependsOn: [base] }, c.mgr));
+    await refuses("unavailable", () => c.lesson("One more", { dependsOn: [base] }), /20 current lessons resting on it/);
+    await c.decide(crowd[3]!, "rejected", "noise");
+    await c.decide(crowd[7]!, "rejected", "noise");
+    const room = await c.lesson("One more", { dependsOn: [base] });
+    const deps = (await c.lessons.get(c.owner, base))!.dependents;
+    assert.deepEqual([deps.length, deps.includes(room), deps.includes(crowd[3]!), deps.includes(crowd[7]!)], [19, true, false, false]);
+
+    // P rests on Q; L rests on P and supersedes Q: accepting L would send its own premise P to review in the same write, so it is refused and nothing changes.
+    const q = await c.lesson("Q"); await c.decide(q, "accepted");
+    const p = await c.lesson("P", { dependsOn: [q] }); await c.decide(p, "accepted");
+    const l = await c.lesson("L", { dependsOn: [p], supersedes: [q] });
+    await refuses("invalid_command", () => c.decide(l, "accepted"), /premise .* would become needs-review through this acceptance/);
+    assert.deepEqual([await c.status(q), await c.status(p), await c.status(l)], ["accepted", "accepted", "candidate"]);
+
+    // A premise contradicted, then rejected on review: its dependent carries one entry, with the latest reason.
+    const k = await c.lesson("K", { contradicts: [q] });
+    const dq = await c.lesson("Rests on Q", { dependsOn: [q] });
+    await c.decide(k, "accepted");
+    assert.deepEqual((await c.lessons.get(c.owner, dq))!.stalePremises.map((s) => [s.id, s.why]), [[q, "contradicted"]]);
+    const rejected = await c.decide(q, "rejected", "it was wrong");
+    assert.ok(rejected.marked.includes(dq), JSON.stringify(rejected.marked));
+    assert.deepEqual((await c.lessons.get(c.owner, dq))!.stalePremises.map((s) => [s.id, s.why]), [[q, "rejected"]]);
+  });
+
+  if (backend.name === backends[0]!.name) {
+    suite("finished lessons waiting to be told do not count against the open-lesson limit, so a project cannot be locked by them", async (c) => {
+      // An agent's lessons with no task have nowhere to be told; rejected, they stay listed (waiting) but are no longer open.
+      const ids: string[] = [];
+      for (let i = 0; i < 500; i++) ids.push((await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title: `L${i}`, statement: "x", applicability: "y", evidence: [{ kind: "improvement-item", id: await c.improvement(c.a) }] })).id);
+      await refuses("unavailable", () => c.lesson("Over"), /500 lessons are open/);
+      for (const id of ids.slice(0, 3)) await c.decide(id, "rejected", "noise");
+      assert.equal((await c.lessons.get(c.owner, ids[0]!))!.outcomePending, true);
+      const fresh = await c.lesson("Room again");
+      assert.equal(await c.status(fresh), "candidate");
+    });
+  }
 }

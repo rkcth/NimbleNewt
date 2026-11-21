@@ -5730,7 +5730,7 @@ Result: `{ revision }`.
 
 #### `lesson.propose`
 
-Proposes a lesson the project's work taught: its statement, when it applies, and its evidence (1 to 20 records of this project you may read: observation, submission, review, improvement-item or lesson, each `{ kind, id }`). `dependsOn` names the lessons it rests on, `revises` the lesson it is the next version of, `supersedes` and `contradicts` other current lessons (five each at most); they take effect only when it is accepted. The controller marks each piece of evidence independent or derived (the same event as an earlier piece, or another lesson's conclusion). Needs meeting.agenda.
+Proposes a lesson the project's work taught: its statement, when it applies, and its evidence (1 to 20 records of this project you may read: observation, submission, review, improvement-item or lesson, each `{ kind, id }`). `dependsOn` names the lessons it rests on, `revises` the lesson it is the next version of, `supersedes` and `contradicts` other current lessons (five each at most); they take effect only when it is accepted. The controller marks each piece of evidence independent or derived (the same event as an earlier piece, the same author's own word again with no event behind it, or another lesson's conclusion). Needs meeting.agenda.
 
 Arguments:
 

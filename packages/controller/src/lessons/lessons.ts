@@ -18,8 +18,8 @@ import { clean, cut, invalid, plain, whole, type OutcomeSink } from "../standups
  *   when the lesson is accepted, not when it is only proposed.
  * - **Stale premises trigger review.** When a lesson stops holding (superseded, contradicted by an accepted lesson, or found rejected or inconclusive on review), every lesson that rests on it is marked with
  *   that stale premise in the same write, and an accepted one goes to `needs-review`. Only direct dependents are marked (bounded); a review is a manager's decision, never automatic.
- * - **Independent evidence is distinguishable.** Each piece of evidence is reduced by the controller to the events it rests on (a submission, a review, or an observation's own events); a piece that shares an
- *   event with an earlier piece, or that cites another lesson's conclusion, is `derived` and names what it repeats. Only `independent` pieces are counted as independent; the proposer's own claim decides nothing.
+ * - **Independent evidence is distinguishable.** Each piece of evidence is reduced by the controller to the events it rests on (a submission, a review, an observation's own events, or, with no event
+ *   behind it, its author's own account); a piece that shares an event or an author's account with an earlier piece, or that cites another lesson's conclusion, is `derived` and names what it repeats. Only `independent` pieces are counted as independent; the proposer's own claim decides nothing.
  * - **Every candidate can finish.** A candidate, one under evaluation and one under review may be accepted, rejected or found inconclusive, each with the finding in words; rejected and inconclusive are final
  *   and leave the current list once the proposer has been told.
  * - **The proposer is told.** An evaluated outcome (accepted, rejected, inconclusive) of an agent's lesson waits (`outcomePending`) until `deliverOutcomes` has handed it to the sink, which files a notice on
@@ -51,7 +51,7 @@ export interface LessonEvidence {
   readonly independence: "independent" | "derived";
   /** For a derived piece: the earlier piece (its position in the list) it shares an event with, or that it is another lesson's conclusion. */
   readonly repeats?: number;
-  readonly why?: "same event as an earlier piece" | "another lesson's conclusion";
+  readonly why?: "same event as an earlier piece" | "same reporter's own account as an earlier piece" | "another lesson's conclusion";
 }
 
 export type StaleWhy = "superseded" | "contradicted" | "rejected" | "inconclusive";
@@ -147,13 +147,26 @@ export class LessonService {
             const got = await this.#lesson(x);
             if (got === undefined || got.body.projectId !== projectId || !(by.kind === "owner" || this.#mayReadLesson(by, got.body))) invalid(field, "must be lessons of this project that you may read");
             if (FINAL.includes(got!.body.status)) invalid(field, `lesson ${x} is ${got!.body.status}; name its successor or a current lesson`);
-            if (field === "dependsOn" && got!.body.dependents.length >= LESSON_LIMITS.dependents && !got!.body.dependents.includes(id)) throw new DomainError("unavailable", `lesson ${x} already has ${LESSON_LIMITS.dependents} lessons resting on it, the most kept`);
+            if (field === "dependsOn" && got!.body.dependents.length >= LESSON_LIMITS.dependents && !got!.body.dependents.includes(id)) {
+              // Finished lessons are never marked again, so they leave the list to make room: rejecting lessons that crowd a premise frees it, and a much-used premise is never locked by old ones.
+              const live: string[] = [];
+              for (const d of got!.body.dependents) { const dep = await this.#lesson(d); if (dep !== undefined && !FINAL.includes(dep.body.status)) live.push(d); }
+              if (live.length >= LESSON_LIMITS.dependents) throw new DomainError("unavailable", `lesson ${x} already has ${LESSON_LIMITS.dependents} current lessons resting on it, the most kept; settle some first`);
+              links.set(x, { found: got!.found, body: { ...got!.body, dependents: live } });
+              continue;
+            }
             links.set(x, got!);
           }
         }
         const prior = revises === undefined ? undefined : links.get(revises)!.body;
         const index = await this.#index(projectId);
-        if (index.ids.length >= LESSON_LIMITS.current) throw new DomainError("unavailable", `${LESSON_LIMITS.current} lessons are current in this project, the most kept; settle some first`);
+        if (index.ids.length >= LESSON_LIMITS.current) {
+          // Finished lessons whose proposer cannot be told yet (no task, a retired proposer) stay listed, but only open lessons count against the limit, so they never lock the project; the list itself
+          // holds at most twice the limit.
+          let open = 0;
+          for (const x of index.ids) { const l = await this.#lesson(x); if (l !== undefined && !FINAL.includes(l.body.status)) open++; }
+          if (open >= LESSON_LIMITS.current || index.ids.length >= 2 * LESSON_LIMITS.current) throw new DomainError("unavailable", `${LESSON_LIMITS.current} lessons are open in this project, the most kept; settle some first`);
+        }
         const taskId = await this.#taskOf(evidence);
         const body: LessonBody = {
           projectId, title, statement, applicability, lineage: prior?.lineage ?? id, version: prior === undefined ? 1 : prior.version + 1, ...(revises === undefined ? {} : { revises }),
@@ -240,6 +253,13 @@ export class LessonService {
             } else edits.put(x, { ...other, contradictedBy });
           }
         }
+        if (to === "accepted") {
+          // The acceptance's own supersessions and contradictions can send one of its premises to review in this same write: then it cannot be accepted.
+          for (const p of got.body.dependsOn) {
+            const premise = await edits.get(p);
+            if (premise?.status !== "accepted") throw new DomainError("invalid_command", `premise ${p} would become ${premise?.status ?? "missing"} through this acceptance; review it first, or revise this lesson`, { field: "to" });
+          }
+        }
         const cur = (await edits.get(id))!;
         const { finding: _f, ...rest } = cur;
         void _f;
@@ -270,7 +290,7 @@ export class LessonService {
     if (this.#mayRead(viewer, body.projectId)) return view<LessonBody>(found);
     if (body.proposedBy === viewer.id && inTaskScope(viewer, body.projectId)) {
       const own = view<LessonBody>(found);
-      return { ...own, dependents: [], history: own.history.map((h) => ({ ...h, by: h.by === viewer.id ? viewer.id : "someone else" })) };
+      return { ...own, dependents: [], history: own.history.map((h) => ({ ...h, by: h.by === viewer.id ? viewer.id : "someone else" })), evidence: own.evidence.map((e) => ({ ...e, addedBy: e.addedBy === viewer.id ? viewer.id : "someone else" })) };
     }
     return undefined;
   }
@@ -320,8 +340,9 @@ export class LessonService {
     const p = await edits.get(premise);
     for (const d of p?.dependents ?? []) {
       const dep = await edits.get(d);
-      if (dep === undefined || FINAL.includes(dep.status) || dep.stalePremises.some((s) => s.id === premise)) continue;
-      const stalePremises = [...dep.stalePremises, { id: premise, why, at: nowIso }].slice(-LESSON_LIMITS.stale);
+      if (dep === undefined || FINAL.includes(dep.status) || dep.stalePremises.some((s) => s.id === premise && s.why === why)) continue;
+      // A premise already marked for another reason (contradicted, then rejected on review) keeps one entry, with the newer reason.
+      const stalePremises = [...dep.stalePremises.filter((s) => s.id !== premise), { id: premise, why, at: nowIso }].slice(-LESSON_LIMITS.stale);
       edits.put(d, dep.status === "accepted"
         ? { ...dep, stalePremises, status: "needs-review", history: [...dep.history, { at: nowIso, by, to: "needs-review" as const, cause: `premise ${premise} ${why}` }].slice(-LESSON_LIMITS.history) }
         : { ...dep, stalePremises });
@@ -376,7 +397,8 @@ export class LessonService {
       if (found === undefined || p !== projectId || !(by.kind === "owner" || this.#readable(by, r.kind, projectId, b!))) return invalid(`evidence[${i}]`, "must be a record of this project that you may read");
       const events = eventsOf(r.kind, r.id, b!);
       const earlier = r.kind === "lesson" ? -1 : out.findIndex((e) => e.kind !== "lesson" && e.events.some((x) => events.includes(x)));
-      const derived = r.kind === "lesson" ? { independence: "derived" as const, why: "another lesson's conclusion" as const } : earlier >= 0 ? { independence: "derived" as const, repeats: earlier, why: "same event as an earlier piece" as const } : { independence: "independent" as const };
+      const account = earlier >= 0 && out[earlier]!.events.some((x) => events.includes(x) && x.startsWith("account:"));
+      const derived = r.kind === "lesson" ? { independence: "derived" as const, why: "another lesson's conclusion" as const } : earlier >= 0 ? { independence: "derived" as const, repeats: earlier, why: account ? "same reporter's own account as an earlier piece" as const : "same event as an earlier piece" as const } : { independence: "independent" as const };
       out.push({ kind: r.kind, id: r.id, addedBy: by.id, at: nowIso, events, ...derived });
     }
     return out;
@@ -464,12 +486,19 @@ class Edits {
   changes(): Change[] { return [...this.#next.entries()].map(([id, body]) => ({ type: "update", ref: { kind: "lesson", id }, expectedRevision: this.#read.get(id)!.revision, body: clean(body) })); }
 }
 
-/** The events a piece of evidence rests on: a submission or review is its own event; an observation rests on its event sources (or is its own event when it has none); a proposal is its own. */
+/**
+ * The events a piece of evidence rests on: a submission or review is its own event; an observation rests on its event sources. What rests on no event is someone's own account: an observation the controller
+ * made is its own event, but an agent's observation with no event behind it and an improvement proposal are their author's word (`account:<author>`), so the same author's accounts, however worded, count
+ * once.
+ */
 function eventsOf(kind: LessonEvidenceKind, id: string, body: Record<string, unknown>): string[] {
   if (kind === "observation") {
     const sources = ((body["sources"] as readonly { kind?: unknown; id?: unknown }[] | undefined) ?? []).filter((s) => s.kind === "submission" || s.kind === "review").map((s) => `${String(s.kind)}:${String(s.id)}`);
-    return sources.length > 0 ? [...new Set(sources)].sort() : [`observation:${id}`];
+    if (sources.length > 0) return [...new Set(sources)].sort();
+    const author = body["origin"] === "agent" ? (body["owner"] ?? body["reportedBy"]) : undefined;
+    return [typeof author === "string" ? `account:${author}` : `observation:${id}`];
   }
+  if (kind === "improvement-item" && typeof body["proposedBy"] === "string") return [`account:${body["proposedBy"]}`];
   return [`${kind}:${id}`];
 }
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
 import { PI } from "../dispatch/testing/world.js";
 import { lessonOutcomeLoops } from "../dispatch/index.js";
 import type { Principal } from "../security/index.js";
@@ -16,7 +17,9 @@ const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease:
 // the status view says so, and after a restart the lessons are as they were and a replayed proposal makes nothing new.
 test("lessons through the running controller's API: evidence from an observation, acceptance, a revision superseding it, a stale premise, the status view and a restart (card B03)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-lsn-"));
-  const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI] });
+  const open = () => startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    // The dispatcher with no worker host: its loops run on each manual tick, the lessons' outcome loop among them.
+    dispatch: { timer: new ManualTimer(), manual: true, route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }) } });
   let c = await open();
   try {
     const s = c.services;
@@ -76,6 +79,15 @@ test("lessons through the running controller's API: evidence from an observation
     assert.deepEqual([again.ok, again.result.id, again.result.replayed], [true, lesson, true]);
     const list = (await c.api.handle(boot.token, { v: 1, op: "lesson.list", args: { projectId: project } } as never) as any).result.item;
     assert.deepEqual(list.items.map((l: { id: string; status: string }) => [l.id, l.status]), [[lesson, "superseded"], [resting, "needs-review"], [v2, "accepted"]]);
+
+    // The composed dispatcher's loop tells Ann: the notice is filed on the lesson's task, the lesson is marked told and, being final, leaves the current list.
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const tick = await c.dispatch.dispatcher.tick();
+    assert.ok(tick.loops.some((l) => l.name === "lessons.outcomes" && l.ok), JSON.stringify(tick.loops.filter((l) => l.name === "lessons.outcomes" || !l.ok)));
+    const toldNow = (await c.api.handle(ann.token, { v: 1, op: "lesson.get", args: { lessonId: lesson } } as never) as any).result.item;
+    assert.deepEqual([toldNow.outcomePending, typeof toldNow.outcomeToldAt], [false, "string"]);
+    const after = (await c.api.handle(boot.token, { v: 1, op: "lesson.list", args: { projectId: project } } as never) as any).result.item;
+    assert.deepEqual(after.items.map((l: { id: string }) => l.id), [resting, v2]);
 
     // The dispatcher's loop tells the proposers project by project, and one project's failure does not stop the others.
     const asked: string[] = [];
