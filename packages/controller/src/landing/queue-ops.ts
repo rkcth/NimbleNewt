@@ -9,9 +9,12 @@ import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEn
 /**
  * Who may put a submission in a branch's landing queue, take one out and read it, and what a landing must show about the queue before it writes (card P10). The queue service itself takes no caller; this is its door.
  *
- * Adding: the owner, an integrator (the exact right `integration.lease` on the project), or the submission's own author; only an approved code submission, and only on the branch the owner's policy names as the project's
- * landing branch. Approved submissions are also queued by the controller itself when the approval is recorded (`queueApproved`). Taking out: the owner or an integrator, or the author of that entry. Reading: the owner or an
- * integrator. A landing (`checkLanding`) lands only the first place's entry, exactly its approved base and tree.
+ * Adding: the owner, an integrator (the exact right `integration.lease` on the project), or the task's own agent (see "the task's own agent" below); only an approved code submission, and only on the branch the owner's
+ * policy names as the project's landing branch. Approved submissions are also queued by the controller itself when the approval is recorded (`queueApproved`). Taking out: the owner or an integrator, or the task's own
+ * agent. Reading: the owner or an integrator. A landing (`checkLanding`) lands only the first place's entry, exactly its approved base and tree.
+ *
+ * The task's own agent (card P10, hand-off): the agent that holds the task now (`holderOf`), or the submission's author while no other principal holds the task. After a hand-off the new holder answers for the task's
+ * queued work (it is the one that refreshes returned work), and the agent that handed it off no longer adds or takes out the task's work, although the entry still names it as the author (what was approved, by whom).
  *
  * Reservations and escalation (card P10): when a task's author reaches the project's refresh-round cap (`integration.refreshRounds`), `afterRound` reserves the task's place; when the reserved task needs yet another
  * round, the director is told (once per reservation). When the first place has held the branch for `holdMs` while another task's landing is refused behind it, the director is told too (once per first place).
@@ -63,6 +66,11 @@ export interface LandingQueueOpsOptions {
   readonly isDirector?: (by: Principal, projectId: string) => Promise<boolean>;
   /** See `LANDING_HOLD_MS`. */
   readonly holdMs?: number;
+  /**
+   * The principal that holds the task now (its current assignee, `agent:<id>`), or undefined when nobody holds it. Absent: the author rule alone (the submitter adds and takes out its task's work). Throwing: the
+   * caller is judged as neither the holder nor an author (fails closed; the owner, integrators and directors are not affected).
+   */
+  readonly holderOf?: (taskId: string) => Promise<string | undefined>;
 }
 export interface QueuedLanding { readonly submissionId: string; readonly base: string; readonly tree: string; readonly branch: string }
 
@@ -83,6 +91,19 @@ export class LandingQueueOps {
     try { return await this.#options.isDirector(by, projectId); } catch { return false; }
   }
 
+  /**
+   * Whether `by` answers for task `taskId`'s queued work as its own agent (no integrator or director right): it holds the task now, or it is `author` while no other principal holds it. A task credential counts
+   * only for its own task.
+   */
+  async #ownAgent(by: Principal, taskId: string): Promise<(author: string) => boolean> {
+    if (by.taskScope !== undefined && by.taskScope.taskId !== taskId) return () => false;
+    if (this.#options.holderOf === undefined) return (author) => author === by.id;
+    let holder: string | undefined;
+    try { holder = await this.#options.holderOf(taskId); } catch { return () => false; }
+    if (holder !== undefined && holder !== "") return () => holder === by.id;
+    return (author) => author === by.id;
+  }
+
   async #branch(taskId: string, projectId: string): Promise<string> {
     let branch: string | undefined;
     try { branch = await this.#options.landingBranch({ taskId, projectId }); } catch { throw new DomainError("unavailable", "the landing settings could not be read, so the landing queue's branch is not known"); }
@@ -95,8 +116,8 @@ export class LandingQueueOps {
     onlyKnown(command, ["commandId", "submissionId"]);
     if (typeof command.submissionId !== "string" || !SUBMISSION.test(command.submissionId)) throw new DomainError("invalid_command", "submissionId: is not a submission ID", { field: "submissionId" });
     const a = await this.#options.approvalOf(command.submissionId);
-    const author = a !== undefined && by.id === a.submittedBy && (by.taskScope === undefined || by.taskScope.taskId === a.taskId);
-    if (a === undefined || !(author || this.#integrator(by, a.projectId))) throw refused(`submission ${command.submissionId}`);
+    if (a === undefined) throw refused(`submission ${command.submissionId}`);
+    if (!this.#integrator(by, a.projectId) && !(await this.#ownAgent(by, a.taskId))(a.submittedBy)) throw refused(`submission ${command.submissionId}`);
     if (!a.approved) throw new DomainError("review_invalid", `submission ${command.submissionId} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); only approved work is queued to land`, { field: "submissionId" });
     const branch = await this.#branch(a.taskId, a.projectId);
     const r = await this.#queue.enqueue({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId: a.projectId, branch, submissionId: command.submissionId, taskId: a.taskId, base: a.base, tree: a.tree, author: a.submittedBy, ...(a.submittedAt === undefined ? {} : { submittedAt: a.submittedAt }) });
@@ -153,10 +174,12 @@ export class LandingQueueOps {
       if (!integrator && error instanceof DomainError && error.code === "forbidden") throw refused(`task ${taskId}`);
       throw error;
     }
-    // The author of the entry may take its own work out, judged on the entry inside the queue's own write (not on an earlier read, which an entry added at the same moment could make stale). A repeat of the caller's
-    // own recorded command is answered by the service; anything else is told nothing exists.
+    // The task's own agent may take its work out (the holder now, or the entry's author while nobody else holds the task), judged on the entry inside the queue's own write (not on an earlier read, which an entry
+    // added at the same moment could make stale; the holder is read just before, so a hand-off at that very moment is judged on the holder before it). A repeat of the caller's own recorded command is answered by
+    // the service; anything else is told nothing exists.
     // A director of the project may take any entry out and end a reservation (card P10: escalation goes to the director, who decides).
-    const allowed = integrator ? undefined : (e: LandingQueueEntry): boolean => e.author === by.id && (by.taskScope === undefined || by.taskScope.taskId === taskId);
+    const own = integrator ? undefined : await this.#ownAgent(by, taskId);
+    const allowed = own === undefined ? undefined : (e: LandingQueueEntry): boolean => own(e.author);
     try {
       return { ...(await this.#queue.remove({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId, branch, taskId, reason, ...(allowed === undefined ? {} : { allowed }) })), branch };
     } catch (error) {
