@@ -266,7 +266,7 @@ test("the guide's hand-off conversations, run line by line through the launcher 
 
     const chat = live.controller.chat!;
     const wrapped = { api: live.controller.api, chat: { submit: async (...a: Parameters<typeof chat.submit>) => { const t = await chat.submit(...a); turns.push(t as unknown as Turn); return t; } } };
-    const say = async (step: { you: string; replies: string[] }): Promise<Turn["outcomes"]> => {
+    const say = async (step: { you: string; replies: string[] }): Promise<{ outcomes: Turn["outcomes"]; reply: string }> => {
       const out: string[] = [];
       const before = turns.length;
       await runTerminalChat({ controller: wrapped as never, ownerToken: live.ownerToken, input: lines([step.you]), write: (t) => out.push(t) });
@@ -276,13 +276,20 @@ test("the guide's hand-off conversations, run line by line through the launcher 
       assert.ok(!outcomes.some((o) => o.status === "refused"), `"${step.you}" was refused: ${reply}`);
       for (const quote of step.replies) assert.ok(quotedIn(quote, reply), `the guide quotes "${quote}" for "${step.you}", but the chat printed:\n${reply}`);
       if (/^yes\b/.test(step.you)) assert.ok(outcomes.length > 0 && outcomes.every((o) => o.status === "applied"), `"${step.you}" applied what was shown: ${reply}`);
-      return outcomes;
+      return { outcomes, reply };
     };
+    const agentId = async (name: string): Promise<string> => ((await call(live, "agent.list")).result.items as { id: string; friendlyName: string }[]).find((a) => a.friendlyName === name)!.id;
     const kinds = (o: Turn["outcomes"]) => o.map((x) => [x.status, x.op ?? null]);
 
     let prepared: string | undefined;
     for (const step of steps) {
-      const outcomes = await say(step);
+      const { outcomes, reply } = await say(step);
+      // The guide: Bob needs rights in Garden first, or the hand-off is refused.
+      if (step.you === "yes, add him") {
+        const early = await call(live, "handoff.prepare", { taskId, to: { kind: "agent", id: await agentId("Bob") }, reason: "before Bob has rights" }, "early");
+        assert.ok(!early.ok && /no right to work in the task's project/.test(early.error.message), `a hand-off to Bob before he has rights in Garden is refused: ${JSON.stringify(early)}`);
+        assert.equal(await going(), undefined);
+      }
       // What the guide says about each step: asking for the hand-off moves nothing yet, the package lacks what the example task has not got, and finishing with gaps is shown first.
       if (step.you.startsWith("Hand Add a greeting")) {
         assert.deepEqual(kinds(outcomes), [["applied", "handoff.prepare"]]);
@@ -290,13 +297,15 @@ test("the guide's hand-off conversations, run line by line through the launcher 
         prepared = (await going())?.id;
         assert.ok(prepared !== undefined, "a hand-off is going on for the task");
       }
+      // The guide: the answer names agents by their IDs.
+      if (step.you.startsWith("In Garden")) assert.ok(reply.includes(ann) && reply.includes(await agentId("Bob")), `the hand-off status names Ann and Bob by ID: ${reply}`);
       if (step.you.startsWith("Finish handing over")) {
         assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "handing over with gaps is shown first");
         assert.deepEqual(await holder(), { kind: "agent", id: ann }, "nothing moved before the yes");
       }
     }
     // Where the guide says the first conversation ends: the task is Bob's, still ready, the move is in the task's record, and the hand-off is recorded with the gaps the owner accepted.
-    const bob = ((await call(live, "agent.list")).result.items as { id: string; friendlyName: string }[]).find((a) => a.friendlyName === "Bob")!;
+    const bob = { id: await agentId("Bob") };
     assert.deepEqual(await holder(), { kind: "agent", id: bob.id });
     assert.equal((await call(live, "task.get", { taskId })).result.item.state, "ready");
     assert.equal(await going(), undefined, "no hand-off is still going on for the task");
@@ -304,21 +313,38 @@ test("the guide's hand-off conversations, run line by line through the launcher 
     assert.equal(done.phase, "transferred");
     assert.equal(done.reason, "Ann is away this week");
     assert.deepEqual(done.acceptedGaps.missing, ["acceptanceCriteria", "unfinishedWork", "nextAction"], "the gaps the guide quotes are the ones accepted");
-    const moved = async (to: string): Promise<boolean> => ((await call(live, "activity.steps", { taskId })).result.steps as { kind: string; summary: string }[]).some((x) => x.kind === "ownership" && x.summary.includes(to));
+    // The latest move in the task's record, which must name the new holder as the one the task went to.
+    const lastMove = async (): Promise<{ summary: string; manifest?: { refs?: { kind: string; id: string }[] } } | undefined> => ((await call(live, "activity.steps", { taskId })).result.steps as { kind: string; summary: string }[]).filter((x) => x.kind === "ownership").at(-1);
+    const moved = async (to: string): Promise<boolean> => (await lastMove())?.summary.includes(`to agent ${to}.`) === true;
     assert.ok(await moved(bob.id), "the move is in the task's record");
 
     // The further lines: a hand-off back to Ann is prepared and cancelled (the task stays Bob's), a cover until Friday is shown first with its time and dropped, and a takeover by force is shown first and moves the task.
     for (const step of moreSteps) {
-      const outcomes = await say(step);
+      const { outcomes, reply } = await say(step);
       if (step.you.startsWith("Hand Add a greeting")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.prepare"]]); assert.ok((await going()) !== undefined); }
       if (step.you.startsWith("Cancel")) { assert.deepEqual(kinds(outcomes), [["applied", "handoff.cancel"]]); assert.equal(await going(), undefined, "the cancelled hand-off is over"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }, "cancelling moves nothing"); }
-      if (step.you.startsWith("Let Ann cover")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a time to give the task back is shown first"); assert.equal(await going(), undefined, "nothing is prepared before the yes"); }
+      if (step.you.startsWith("Let Ann cover")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a time to give the task back is shown first"); assert.ok(reply.includes(friday), `the proposal shows the time the task goes back (${friday}): ${reply}`); assert.equal(await going(), undefined, "nothing is prepared before the yes"); }
       if (step.you.startsWith("no,")) { assert.deepEqual(outcomes.map((o) => o.status), ["discarded"]); assert.equal(await going(), undefined); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }); }
       if (step.you.startsWith("Take Add a greeting")) { assert.deepEqual(outcomes.map((o) => o.status), ["proposed"], "a takeover by force is shown first"); assert.deepEqual(await holder(), { kind: "agent", id: bob.id }); }
     }
     assert.deepEqual(await holder(), { kind: "agent", id: ann }, "the takeover gave the task to Ann");
     assert.ok(await moved(ann), "and is in the task's record");
+    // The guide: the takeover is recorded as a forced one.
+    const forcedId = (await lastMove())?.manifest?.refs?.find((r) => r.kind === "handoff")?.id;
+    assert.ok(forcedId !== undefined && forcedId !== prepared, "the takeover's move names its own hand-off");
+    const forced = (await call(live, "handoff.get", { handoffId: forcedId })).result.item;
+    assert.deepEqual([forced.mode, forced.phase, forced.reason], ["forced", "transferred", "Bob is not answering"], "the takeover is recorded as a forced one, with the owner's reason");
+    assert.ok(forced.exception !== undefined, "and as an exception");
     assert.deepEqual(asked, [...steps, ...moreSteps].map((s) => s.you), "every line went to the model once, and nothing else did");
+    // The guide: `/nimblenewt.agent-list {}` shows which ID is whose.
+    const listed: string[] = [];
+    await runTerminalChat({ controller: wrapped as never, ownerToken: live.ownerToken, input: lines(["/nimblenewt.agent-list {}"]), write: (t) => listed.push(t) });
+    const list = listed.join("").replace(/\r\n/g, "\n");
+    const json = /Ran nimblenewt\.agent-list:\n([\s\S]*)$/.exec(list)?.[1];
+    assert.ok(json !== undefined, `the agent list ran:\n${list}`);
+    const items = (JSON.parse(json) as { items: { id: string; friendlyName: string }[] }).items;
+    for (const [name, id] of [["Ann", ann], ["Bob", bob.id]] as const) assert.ok(items.some((a) => a.id === id && a.friendlyName === name), `the agent list shows ${name} with the ID ${id}:\n${list}`);
+    assert.equal(asked.length, steps.length + moreSteps.length, "a typed command is not read by the model");
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

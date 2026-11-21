@@ -158,7 +158,7 @@ What happens at each step:
 
 - **Asking for the hand-off moves nothing yet.** It is done at once ("Done: handoff.prepare."), because it only gets the task ready to move: Ann's work on the task is brought to a safe stop and the package is put together. The task stays Ann's until the hand-off is finished. Your reason ("Ann is away this week") is kept with the hand-off; NimbleNewt only takes a reason that is in your own words.
 - **Name the task by its title.** For anything that changes a task, the chat checks that the task's title appears in what you wrote. A question can name the project too ("In Garden, ..."); NimbleNewt then keeps that project in focus for later questions.
-- **The answer tells you what the package lacks.** Here it lacks the acceptance criteria (the example task was given none) and the unfinished work and next step, which come from the notes an agent leaves while it works (Ann has not started yet). NimbleNewt does not make up what it does not have. The answer names agents by their IDs (`agt-...`); `/nimblenewt.agent-list {}` shows which ID is whose.
+- **The answer tells you what the package lacks.** Here it lacks the acceptance criteria (the example task was given none) and the unfinished work and next step, which come from the progress NimbleNewt saves while an agent works (Ann has not started yet). NimbleNewt does not make up what it does not have. The answer names agents by their IDs (`agt-...`); `/nimblenewt.agent-list {}` shows which ID is whose.
 - **Finishing with gaps is always shown first.** Handing over a package with something missing is your decision, so it is shown before anything moves; "gaps and all" says you accept them, and they are recorded with the hand-off. If the package is complete, finishing works like any other step of your profile (on strict it is shown first too).
 - **After the yes, the task is Bob's.** It stays ready for work, and the move is written in the task's record.
 
@@ -179,14 +179,14 @@ You: no, drop that
 NimbleNewt: Proposal ... discarded.
 
 You: Take Add a greeting to the README over for Ann, Bob is not answering
-NimbleNewt: Proposed, nothing has happened yet ... Take task over by force
+NimbleNewt: Proposed, nothing has happened yet (a takeover by force stops the agent's work on the task at once, so it is shown first). ... Take task over by force
 
 You: yes, take it over
 NimbleNewt: Applied proposal
 ```
 
 - **Cancelling** a hand-off that is not finished moves nothing: the task stays where it was (here, with Bob).
-- **Covering for a while** is a hand-off with a time to give the task back. That time is always shown first and must be at most 30 days ahead. Once you have said yes and finished the hand-off, the task goes back by itself at that time, as long as whoever asked for the cover may still control the task and the task is still with the agent covering it.
+- **Covering for a while** is a hand-off with a time to give the task back. That time is always shown first, as an exact date and time in UTC, world standard time (for example "returnAt=2026-11-27T17:00:00.000Z"; the Z at the end means UTC, so 17:00 there is noon in New York in winter): the assistant works it out from your words ("until Friday"), so check it before you say yes, and say the time you mean if it is wrong. It must be at most 30 days ahead. Once you have said yes and finished the hand-off, the task goes back by itself at that time, as long as whoever asked for the cover may still control the task and the task is still with the agent covering it.
 - **Taking a task over by force** is for when the agent holding it cannot get it ready (for example it has stopped answering). It is always shown first. It force-stops that agent's work on the task at once, takes whatever package exists without waiting, and records the move as a forced one.
 
 ## How much the team may do on its own
