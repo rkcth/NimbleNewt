@@ -176,7 +176,7 @@ export interface WorkspaceAsk {
   readonly reason: string;
   readonly quietAttempts: readonly string[];
   readonly assignee?: string;
-  /** A landing only (card H12a): the owner's landing policy as the controller read it, bounded and checked. A host holds it against its own configuration and can only be made stricter by it. */
+  /** A landing (card H12a) and the author's refresh (`reapply`, card H12p follow-up) only: the owner's landing policy as the controller read it, bounded and checked. A host holds it against its own configuration and can only be made stricter by it. */
   readonly landing?: import("../workspace-ops/workspace-ops.js").CarriedLanding;
   /** `verify` only (card H12a): the check of an attempt's done (card W05) asked of the host that holds the attempt. */
   readonly verify?: { readonly attemptId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly evidence: readonly string[]; readonly maxOutputBytes: number };

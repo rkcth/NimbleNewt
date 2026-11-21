@@ -37,7 +37,7 @@ import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js
 import { ACTIVITY_KINDS, clipText, type ActivityService, type ExplanationBody } from "../activity/activity.js";
 import { REPLAY_LABELS, type ReplayService, type ReplayStep } from "../activity/replay.js";
 import type { ArtifactBody } from "../artifacts/service.js";
-import type { StaleDeliverable } from "../submissions/acceptance.js";
+import type { ArtifactReplacement, ReplacedDeliverable, StaleDeliverable } from "../submissions/acceptance.js";
 import type { DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
@@ -152,7 +152,8 @@ export const ATTENTION_KINDS: readonly AttentionKind[] = ["paused_assignee", "un
  * When an artifact counts as stale (card U13, ASSUMPTION): (1) `superseded`, a newer artifact with the same name was recorded on the same task, so anyone still pointing at this one has an old version; or (2) `aged`, the newest
  * artifact of a task that is still open (not done or cancelled) was recorded more than this many days ago and nothing newer followed, so the deliverable may no longer match the work; or (3) `contract_changed`, a versioned
  * deliverable (card Q01) whose newest version is submitted, under review or accepted was checked against a task contract version whose work fields (expected result, acceptance criteria, required evidence, checks) have
- * changed since (`at` is when they first changed; the deliverable service decides which deliverables the caller may read). No file is read: the records are enough.
+ * changed since (`at` is when they first changed; the deliverable service decides which deliverables the caller may read); or (4) `artifact_replaced`, such a deliverable's
+ * standing version names an artifact of the task that a newer artifact of the same name has replaced and does not name that newest one (`at` is when the first replacement was recorded). No file is read: the records are enough.
  */
 export const STALE_ARTIFACT_DAYS = 7;
 /** The contract's work fields in the owner's words, for the `contract_changed` line. */
@@ -333,7 +334,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   meeting_desk_reads: { keys: ["occurrenceId", "deskRecordId", "limit"], about: "what a meeting's chair read from absent members' desks and shared working notes (card M05b): each file with whose it is, its revision, how big it was, who read it and when, in the order the reads happened, and every refused attempt to change one (reading never changes, wakes or interrupts anyone); the meeting is named by its occurrence ID, which the meetings answer cites" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
-  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
+  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since, or names an artifact a newer one of the same name replaced), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest" },
   critical_path: { keys: [], about: "what the owner marked as the critical path (tasks, goals and projects), whether each is still open, and which decisions waiting for the owner hold it up (owner only; the owner marks and unmarks by chat)" },
   setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
@@ -729,7 +730,11 @@ export interface StatusDeps {
    * The versioned deliverables of a task (card Q01) that the caller may read and that stand on a task contract changed since in what it asks for (card U13's `contract_changed` stale artifact). The service applies its own
    * read rule; `reads` is the number of records it read, counted against the attention scan. Absent: deliverables are never listed as stale.
    */
-  readonly deliverables?: { contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }> };
+  readonly deliverables?: {
+    contractStale(by: Principal, taskId: string): Promise<{ readonly items: readonly StaleDeliverable[]; readonly reads: number }>;
+    /** The readable deliverables of a task whose standing version names an artifact a newer one of the same name replaced (`artifact_replaced`). Absent: never listed for that reason. */
+    artifactsReplaced?(by: Principal, taskId: string, replaced: ReadonlyMap<string, ArtifactReplacement>): Promise<{ readonly items: readonly ReplacedDeliverable[]; readonly reads: number }>;
+  };
   /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
   readonly defects?: Pick<DefectService, "forTask">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
@@ -3251,6 +3256,35 @@ export class StatusService {
           if (agent !== undefined && maker !== agent) continue;
           const fields = d.fields.map((f) => CONTRACT_FIELD_WORDS[f] ?? "its work").join(", ");
           push(4, d.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), ...(d.changedAt === undefined ? {} : { at: d.changedAt }), summary: `Deliverable ${quoted(d.title, 120)} (version ${d.version}, ${d.state}) on ${base.title} was checked against contract version ${d.checkedAgainst}; the task's contract has since changed ${fields} (now version ${d.contractVersion}), so it may no longer be what the task asks for.${d.firstChangeBeyond === undefined ? "" : ` Its first change is more than ${d.firstChangeBeyond} contract versions back, so the time given is when the current version was stored; the work changed earlier.`}`, detail: { deliverableId: d.id, title: quoted(d.title, 120), reason: "contract_changed", version: d.version, state: d.state, checkedAgainst: d.checkedAgainst, contractVersion: d.contractVersion, fields: [...d.fields], at: d.firstChangeBeyond === undefined ? "first_change" : "current_version" }, cite: cite("deliverable", d.id, d.revision) });
+          if (found.length > limit) return;
+        }
+      }
+      // Versioned deliverables whose standing version names an artifact that a newer artifact of the same name on the task has replaced (`artifact_replaced`). The replacements come from the
+      // task's artifact records; the deliverable service decides which deliverables the caller may read. Artifact names and the newer artifact are shown only to a caller with the artifact right.
+      const replacedBy = this.#deps.deliverables?.artifactsReplaced;
+      if (want("stale_artifact") && replacedBy !== undefined && (floor === undefined || floor.rank <= 5)) {
+        const all = await artifactsOf(taskId);
+        const replaced = new Map<string, { newest: string; firstAt: string }>();
+        const names = new Map<string, string>();
+        // One pass per name, oldest first (by record time, then ID): every artifact but the newest of its name is replaced, first by the one recorded right after it.
+        const byName = new Map<string, { id: string; createdAt: string }[]>();
+        for (const art of all) { names.set(art.id, art.name); const list = byName.get(art.name) ?? []; list.push(art); byName.set(art.name, list); }
+        for (const list of byName.values()) {
+          list.sort((x, y) => (x.createdAt < y.createdAt ? -1 : x.createdAt > y.createdAt ? 1 : x.id < y.id ? -1 : 1));
+          const newest = list[list.length - 1]!.id;
+          for (let i = 0; i + 1 < list.length; i++) replaced.set(list[i]!.id, { newest, firstAt: list[i + 1]!.createdAt });
+        }
+        const r = await replacedBy.call(this.#deps.deliverables, by, taskId, replaced);
+        examined += r.reads;
+        const named = this.#mayReadArtifacts(by, body.projectId);
+        for (const d of [...r.items].sort((x, y) => (x.id < y.id ? -1 : 1))) {
+          if (floor !== undefined && floor.rank === 5 && d.id <= floor.id) continue;
+          if (!inRange(d.replacedAt)) continue;
+          const maker = d.responsibleAgent.replace(/^agent:/, "");
+          if (agent !== undefined && maker !== agent) continue;
+          const count = d.artifacts.length;
+          const which = named ? ` (${d.artifacts.map((a) => quoted(names.get(a.artifactId) ?? a.artifactId, 80)).join(", ")})` : "";
+          push(5, d.id, { kind: "stale_artifact", ...base, agentId: shown(maker, 80), at: d.replacedAt, summary: `Deliverable ${quoted(d.title, 120)} (version ${d.version}, ${d.state}) on ${base.title} names ${count === 1 ? "an artifact" : `${count} artifacts`}${which} that ${count === 1 ? "a newer artifact of the same name has" : "newer artifacts of the same names have"} replaced, so it may not deliver the latest work.`, detail: { deliverableId: d.id, title: quoted(d.title, 120), reason: "artifact_replaced", version: d.version, state: d.state, artifacts: d.artifacts.map((a) => (named ? { artifactId: a.artifactId, name: shown(names.get(a.artifactId) ?? "", 120), replacedBy: a.newest } : { artifactId: a.artifactId })) }, cite: cite("deliverable", d.id, d.revision) });
           if (found.length > limit) return;
         }
       }

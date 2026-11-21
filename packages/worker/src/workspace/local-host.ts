@@ -127,13 +127,16 @@ export class LocalWorkspaces {
   }
 
   /**
-   * What a submit of the task's work is checked against (card H12n, `GitBridge.submitView`): the checkout's base, the shared repository's head (the landing branch), the files the agent changed and the files the landing branch
-   * changed since the base. `undefined`: this host holds no checkout for the task.
+   * What a submit of the task's work is checked against (card H12n, `GitBridge.submitView`): the checkout's base, the landing branch's head, the files the agent changed and the files the landing branch changed since the base.
+   * The landing branch's head is the one the author's refresh goes to (card H12p follow-up, `WorkspaceHost.landingHead`): the owner's landing branch when one is set, else the shared repository's checked-out head. A landing
+   * policy that cannot be read, or a landing branch the shared repository does not have, throws `unavailable` (the submit is refused as unavailable). `undefined`: this host holds no checkout for the task.
    */
   async submitView(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] } | undefined> {
     const where = this.locate(call);
     if (where === undefined) return undefined;
-    return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout });
+    const tip = await this.host.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: where.shared }, "the submit could not be checked");
+    if ("refuse" in tip) throw new WorkspaceError("unavailable", tip.refuse);
+    return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout, head: tip.head });
   }
 
   /**

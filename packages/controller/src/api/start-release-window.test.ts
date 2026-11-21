@@ -90,6 +90,29 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     assert.equal(two[0]!.status, "refused", JSON.stringify(two));
     assert.ok(JSON.stringify(two).includes(id) && JSON.stringify(two).includes(id2) && /which one/.test(JSON.stringify(two)), JSON.stringify(two));
 
+    // Every number the window would be set with is the owner's own: a length, a preparation lead or a free-space figure the interpreter added is refused and asked for, and nothing is proposed;
+    // the same numbers said in the owner's own way ("from 3 to 5am", "start getting ready 30 minutes before", "make sure 5 GB is free") are proposed and shown.
+    const base = { candidateId: id, date: later, time: "03:00", timeZone: "Europe/London" };
+    const noLength = `put ${id} on the day after tomorrow at 3am London time`;
+    const proposalsBefore = (await owner("release.window.list", {})).result.windows.length;
+    for (const [mid, words, extra, why] of [
+      ["q1", noLength, { durationMinutes: 60 }, /How long the maintenance window should last is not in your message/],
+      ["q2", `${noLength} for an hour`, { durationMinutes: 90 }, /How long the maintenance window should last is not in your message/],
+      ["q3", `${noLength} for an hour`, { durationMinutes: 60, prepareLeadMinutes: 30 }, /How early preparation should start is not in your message/],
+      ["q4", `${noLength} for an hour`, { durationMinutes: 60, minFreeBytes: 5 * 1024 ** 3 }, /How much free space the update needs is not in your message/],
+      ["q5", `${noLength} for an hour`, { durationMinutes: 60, healthDeadlineSeconds: 600 }, /How long the new release has to show it started well is not in your message/],
+    ] as const) {
+      const out = await turn(mid, words, [{ kind: "command", op: "release.window.set", args: { ...base, ...extra }, evidence: words, basis: "owner" }]);
+      assert.equal(out[0]!.status, "refused", JSON.stringify(out));
+      assert.match(JSON.stringify(out), why);
+      assert.ok(!JSON.stringify(out).includes("proposalId\":\"prop-"), "nothing is proposed");
+    }
+    const said = `put ${id} on the day after tomorrow from 3 to 5am London time, start getting ready 30 minutes before and make sure 5 GB is free`;
+    const ok = await turn("q6", said, [{ kind: "command", op: "release.window.set", args: { ...base, durationMinutes: 120, prepareLeadMinutes: 30, minFreeBytes: 5 * 1024 ** 3 }, evidence: said, basis: "owner" }]);
+    assert.equal(ok[0]!.status, "proposed", JSON.stringify(ok));
+    for (const part of ["lasts 120 minutes", "starts 30 minutes before", `needs ${5 * 1024 ** 3} bytes free`]) assert.ok(JSON.stringify(ok[0]).includes(part), `${part} in ${JSON.stringify(ok[0])}`);
+    assert.equal((await owner("release.window.list", {})).result.windows.length, proposalsBefore, "a proposal sets nothing");
+
     const shown = await turn("m1", text, [{ kind: "command", op: "release.window.set", args: { candidateId: id, digest: sha("an invented digest"), date, time, timeZone: "UTC", durationMinutes: 60, minFreeBytes: 0 }, evidence: text, basis: "owner" }]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
     assert.ok(JSON.stringify(shown[0]!.preview).includes(staged.digest), "the staged digest is filled in by the controller");

@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent, each presented again after a crash (G04 follow-up: the controller answers it from its records)", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-optin", "toolbox-pins", "toolbox-proposal", "toolbox-revoke", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "submission-record", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-optin", "toolbox-pins", "toolbox-proposal", "toolbox-revoke", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
@@ -256,6 +256,26 @@ test("dependency.record: sent as the call it is, with no way to name a task; an 
   assert.match(String(await tool(old).execute({ dependencies: [] }, { callId: "call_2" } as never)), /^refused \(unknown_tool\): dependency\.record is not available on this controller; nothing was recorded/);
   const refused = createBridge({ send: async () => ({ ok: false, code: "invalid_command", message: "dependencies[0].hash: is not what the file holds now" }) });
   assert.match(String(await tool(refused).execute({ dependencies: [] }, { callId: "call_3" } as never)), /^refused \(invalid_command\): dependencies\[0\]\.hash/);
+});
+
+// Card Q01b (bridge): a reviewer, qa, docs or director agent records its submission with submission-record. The tool names no task, role, tree or digest (the controller takes the attempt's task, the kind's role and,
+// for a document, the digest it recorded for the artifact); code is not a kind it offers words for; an older controller without the operation is answered in words.
+test("submission.record: sent as the call it is, with no way to name a task, a role, a tree or a digest; an older controller's 'not an operation of the bridge' is answered in words (card Q01b)", async () => {
+  const tool = (b: ReturnType<typeof createBridge>) => b.tools.find((t) => t.name === bridgeToolName("submission.record"))!;
+  assert.equal(bridgeToolName("submission.record"), "nimblenewt__submission-record");
+  const answered: BridgeRequest[] = [];
+  const current = createBridge({ send: async (r) => { answered.push(r); return { ok: true, result: { id: "sbm-bbbbbbbbbbbbbbbbbbbb", revision: 1, replayed: false } }; } });
+  const text = await tool(current).execute({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, { callId: "call_1" } as never);
+  assert.deepEqual(answered.map((r) => [r.op, r.callId, r.args]), [["submission.record", "call_1", { kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }]]);
+  assert.match(String(text), /"id":"sbm-bbbbbbbbbbbbbbbbbbbb"/);
+  const params = tool(current).parameters as unknown as { properties: Record<string, unknown>; required: string[]; additionalProperties: boolean };
+  assert.deepEqual(Object.keys(params.properties), ["kind", "subject", "verdict", "decision", "report", "artifactId"], "no argument names a task, a role, a base, a tree, a patch ID or a digest");
+  assert.deepEqual([params.required, params.additionalProperties], [["kind"], false]);
+  assert.match(tool(current).description, /kind review \(verdict\), qa \(report\) or signoff \(decision\) on submission subject \(sbm-\.\.\.\), or document \(artifactId, report\)\. Code: work-end submit\./);
+  const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
+  assert.match(String(await tool(old).execute({ kind: "qa", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", report: "r" }, { callId: "call_2" } as never)), /^refused \(unknown_tool\): submission\.record is not available on this controller; nothing was recorded, give your verdict or report in your work-end report$/);
+  const refused = createBridge({ send: async () => ({ ok: false, code: "forbidden", message: "a review of your own submission is refused" }) });
+  assert.equal(String(await tool(refused).execute({ kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }, { callId: "call_3" } as never)), "refused (forbidden): a review of your own submission is refused");
 });
 
 test("the toolbox tools (card T08) are always there, name no task, project or agent, and say in words when an older controller does not have them", async () => {

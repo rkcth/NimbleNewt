@@ -1884,7 +1884,7 @@ Result: `{ item }`: `{ observedAt, lines, ... }`, or `not_found` when the subjec
 
 #### `status.attention`
 
-What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), tool calls whose result is not known (`uncertain_tool_result`), and stale artifacts (`stale_artifact`: a newer artifact of the same name exists on the task, or the newest artifact of a still-open task is more than 7 days old, or a versioned deliverable's newest version was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since: `reason` `contract_changed`, `at` when they first changed, or when the current contract version was stored if the first change is more than 20 versions back, which `detail.at` says: `first_change` or `current_version`; the deliverable cited). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task; artifacts: the artifact right on the project; deliverables: the right `deliverable.record.list` asks for); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`.
+What in the overview needs a person's eye, as a paged list: assignees whose work is paused (`paused_assignee`), workers that reported the work and can no longer be relied on, a host not heard from or revoked (`unreachable_worker`), tool calls whose result is not known (`uncertain_tool_result`), and stale artifacts (`stale_artifact`: a newer artifact of the same name exists on the task, or the newest artifact of a still-open task is more than 7 days old, or a versioned deliverable's newest version was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since: `reason` `contract_changed`, `at` when they first changed, or when the current contract version was stored if the first change is more than 20 versions back, which `detail.at` says: `first_change` or `current_version`; or its newest standing version names an artifact of the task that a newer artifact of the same name has replaced and not that newest one: `reason` `artifact_replaced`, `at` when the first replacement was recorded, artifact names and the newer artifact only for a caller with the artifact right; the deliverable cited). Read only. Each kind needs the same right as its neighbour (pauses and workers: the right to read the task's assignment; tool calls: the tool-history right on the task; artifacts: the artifact right on the project; deliverables: the right `deliverable.record.list` asks for); what the caller may not see is never listed. Only the owner may leave out both `projectId` and `taskId`.
 
 Arguments:
 
@@ -1893,7 +1893,7 @@ Arguments:
 - `agentId` (optional): only this agent (the task's owner of record, the caller of the tool, the one who recorded the artifact, or the deliverable's responsible agent)
 - `state` (optional): only tasks in this state
 - `kind` (optional): `paused_assignee`, `unreachable_worker`, `uncertain_tool_result` or `stale_artifact`
-- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time, when the artifact was replaced or recorded, when the contract's work first changed)
+- `since` (optional): only items after this UTC time (the pause time, the last sign of work, the call time, when the artifact was replaced or recorded, when the contract's work first changed, when a deliverable's artifact was first replaced)
 - `until` (optional): only items up to this UTC time
 - `limit` (optional): 1 to 100, default 50
 - `after` (optional): the `next` of the previous page
@@ -2954,7 +2954,7 @@ Result: The window.
 
 #### `release.window.list`
 
-Owner, or an agent granted exactly `release.manage` (card K07): the maintenance windows, newest opening first (up to 50), and the releases quarantined after a failed window.
+Owner, or an agent granted exactly `release.manage` (card K07): the maintenance windows, the open one (scheduled, prepared or activated) first and then the rest newest opening first (up to 50), and the releases quarantined after a failed window.
 
 Arguments:
 
@@ -4036,14 +4036,14 @@ Completion: finished when accepted (`completed: true`).
 
 #### `work.refresh`
 
-An agent refreshes its own checkout onto the landing branch's current head before it submits (card H12p). Your work (changed, new and ignored files, committed or not) is re-applied three-way: a file only you changed stays, a file only the landing branch changed is taken, a file both changed is merged line by line. Overlapping edits are NEVER resolved for you: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is listed (a file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content are listed too and keep your side). You fix every conflict yourself and re-run your checks before you submit. There is no pause: it runs while you work and is one call at a time with the task's other workspace operations (a second one is `unavailable`: ask again). Files in your checkout may now differ from what you read earlier, so read them again. A refresh that moved you onto a newer head is one refresh round of the task; the rounds are carried on your submission. Asking when you are at the head already changes nothing. Only the attempt's own agent, while it runs; the same command again returns the recorded answer.
+An agent refreshes its own checkout onto the landing branch's current head before it submits (card H12p). The landing branch is the owner's (the project's own, else `workspace.landing.branch`), the same one a landing and the integrator's re-apply use and the one your submit is checked against; with none set it is the shared workspace's current head. A landing branch the shared repository does not have, or settings that cannot be read, refuse the refresh and leave your checkout as it was. Your work (changed, new and ignored files, committed or not) is re-applied three-way: a file only you changed stays, a file only the landing branch changed is taken, a file both changed is merged line by line. Overlapping edits are NEVER resolved for you: the file keeps conflict markers (`<<<<<<< mine`, `||||||| base`, `>>>>>>> landing <commit>`) and is listed (a file one side deleted and the other changed, a file that is not text, and a file added on both sides with different content are listed too and keep your side). You fix every conflict yourself and re-run your checks before you submit. There is no pause: it runs while you work and is one call at a time with the task's other workspace operations (a second one is `unavailable`: ask again). Files in your checkout may now differ from what you read earlier, so read them again. A refresh that moved you onto a newer head is one refresh round of the task; the rounds are carried on your submission. Asking when you are at the head already changes nothing. Only the attempt's own agent, while it runs; the same command again returns the recorded answer.
 
 Arguments:
 
 - `attemptId`: your attempt
 - `commandId`: required
 
-Result: `{ item }`: the recorded request (`state`, `summary`, `detail` with `changed`, `before`, `base`, `kept`, `taken`, `merged`, `conflictCount` and `conflicts` as `{ path, kind }`, and `round`).
+Result: `{ item }`: the recorded request (`state`, `summary`, `detail` with `changed`, `before`, `base`, `kept`, `taken`, `merged`, `conflictCount` and `conflicts` as `{ path, kind }`, `branch` when a landing branch is set, and `round`).
 
 Completion: finished when accepted (`completed: true`).
 
@@ -7967,7 +7967,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `submission.record`
 
-An agent records one submission in the role it holds: a code submission (author) names the base, tree and patch ID of its work, a review (reviewer), qa report (qa), document (docs) or sign-off (director) names the submission it is about. Evidence must be bound to the submitted tree or artifact. A code submission must come from the owner of the task's current attempt and records that attempt (`attemptId`); a review or qa report on one's own submission is always refused; a code submission records whether review is required, and `review_disabled_single_agent` when no other agent of the project could review. Agents only. Repeating the same command ID records once.
+An agent records one submission in the role it holds: a code submission (author) names the base, tree and patch ID of its work, a review (reviewer), qa report (qa), document (docs) or sign-off (director) names the submission it is about. Evidence must be bound to the submitted tree or artifact. A code submission must come from the owner of the task's current attempt and records that attempt (`attemptId`); a review or qa report on one's own submission is always refused; a code submission records whether review is required, and `review_disabled_single_agent` when no other agent of the project could review. Agents only. A local worker records a review, qa report, sign-off or document change through its tool bridge (`nimblenewt__submission-record`): its own task only, the role follows the kind, and a document names an artifact of the task, whose recorded digest is used while its files still match; its code is submitted with `work.end` (submit), never through the bridge. Repeating the same command ID records once.
 
 Arguments:
 

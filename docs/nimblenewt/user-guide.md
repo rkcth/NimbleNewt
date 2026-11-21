@@ -115,9 +115,79 @@ What to notice:
 
 ### After the conversation: the work starts
 
-Running agents on this computer counts from the **next start**. Press Ctrl-D and run `node scripts/nimblenewt.mjs start` again. The start-up messages then say that the worker host on this computer is running agents in a sandbox, the setup list shows the host as done, and Ann begins the task by herself. Ask "how is the README task going?" or "what is waiting for me?" whenever you like.
+Running agents on this computer counts from the **next start**. Press Ctrl-D and run `node scripts/nimblenewt.mjs start` again. The start-up messages then say that the worker host on this computer is running agents in a sandbox, the setup list shows the host as done, and Ann begins the task by herself. Ask "what is waiting for me?", or about one task with its project and title ("in Garden, how is Add a greeting to the README going?"), whenever you like.
 
 If something is not right, `node scripts/nimblenewt.mjs status` prints the setup list and stops, and the [troubleshooting guide](troubleshooting.md) lists the common problems.
+
+## Handing a task to another agent
+
+Sometimes a task should move to another agent: the first one is away, busy with something more urgent, or not the right fit. A **hand-off** moves the task together with a **package**, which is what the next agent needs to carry on: the task's description and acceptance criteria, the work done so far and what is left, the next step, shared drafts, what the task holds locked, and the duties the first agent answers for. The package holds only what the new agent may see; never private scratch notes or keys.
+
+Continuing the example: Ann will be away, so Bob, a second author, takes over her task. Bob needs rights in Garden first, or the hand-off is refused (an agent with no right to work in the project cannot take a task there).
+
+<!-- d01:handoff -->
+```
+You: Add an agent called Bob as an author
+NimbleNewt: Proposed, nothing has happened yet ... Create agent: friendlyName=Bob, roles=["author"].
+
+You: yes, add him
+NimbleNewt: Applied proposal
+
+You: Let Bob work on Garden
+NimbleNewt: Proposed, nothing has happened yet (a right is shown first). ... These are the rights the role author of "Bob" stands for, each only in "Garden".
+
+You: yes, give them
+NimbleNewt: Applied proposal
+
+You: Hand Add a greeting to the README over to Bob, Ann is away this week
+NimbleNewt: Done: handoff.prepare.
+
+You: In Garden, how is the hand-off of Add a greeting to the README going?
+NimbleNewt: Now focused on project ...
+NimbleNewt: Hand-off from ... to ..., prepared: ready. ... "Ann is away this week"
+NimbleNewt: The package is missing: acceptanceCriteria, unfinishedWork, nextAction.
+
+You: Finish handing over Add a greeting to the README, gaps and all
+NimbleNewt: Proposed, nothing has happened yet ... Complete hand-off of task: acceptGaps=true
+
+You: yes, hand it over
+NimbleNewt: Applied proposal
+```
+
+What happens at each step:
+
+- **Asking for the hand-off moves nothing yet.** It is done at once ("Done: handoff.prepare."), because it only gets the task ready to move: Ann's work on the task is brought to a safe stop and the package is put together. The task stays Ann's until the hand-off is finished. Your reason ("Ann is away this week") is kept with the hand-off; NimbleNewt only takes a reason that is in your own words.
+- **Name the task by its title.** For anything that changes a task, the chat checks that the task's title appears in what you wrote. A question can name the project too ("In Garden, ..."); NimbleNewt then keeps that project in focus for later questions.
+- **The answer tells you what the package lacks.** Here it lacks the acceptance criteria (the example task was given none) and the unfinished work and next step, which come from the progress NimbleNewt saves while an agent works (Ann has not started yet). NimbleNewt does not make up what it does not have. The answer names agents by their IDs (`agt-...`); `/nimblenewt.agent-list {}` shows which ID is whose.
+- **Finishing with gaps is always shown first.** Handing over a package with something missing is your decision, so it is shown before anything moves; "gaps and all" says you accept them, and they are recorded with the hand-off. If the package is complete, finishing works like any other step of your profile (on strict it is shown first too).
+- **After the yes, the task is Bob's.** It stays ready for work, and the move is written in the task's record.
+
+Three more things you can say about a hand-off, continuing from there (the task is now Bob's):
+
+<!-- d01:handoff-more -->
+```
+You: Hand Add a greeting to the README back to Ann, Bob is needed elsewhere
+NimbleNewt: Done: handoff.prepare.
+
+You: Cancel the hand-off of Add a greeting to the README
+NimbleNewt: Done: handoff.cancel.
+
+You: Let Ann cover Add a greeting to the README until Friday, Bob is needed elsewhere
+NimbleNewt: Proposed, nothing has happened yet ... Prepare hand-off of task: ... returnAt=
+
+You: no, drop that
+NimbleNewt: Proposal ... discarded.
+
+You: Take Add a greeting to the README over for Ann, Bob is not answering
+NimbleNewt: Proposed, nothing has happened yet (a takeover by force stops the agent's work on the task at once, so it is shown first). ... Take task over by force
+
+You: yes, take it over
+NimbleNewt: Applied proposal
+```
+
+- **Cancelling** a hand-off that is not finished moves nothing: the task stays where it was (here, with Bob).
+- **Covering for a while** is a hand-off with a time to give the task back. That time is always shown first, as an exact date and time in UTC, world standard time (for example "returnAt=2026-11-27T17:00:00.000Z"; the Z at the end means UTC, so 17:00 there is noon in New York in winter): the assistant works it out from your words ("until Friday"), so check it before you say yes, and say the time you mean if it is wrong. It must be at most 30 days ahead. Once you have said yes and finished the hand-off, the task goes back by itself at that time, as long as whoever asked for the cover may still control the task, the task is still with the agent covering it, and the first agent can still take it (not retired, still with rights in the project). If not, the task stays with the agent covering it and the task's record says why.
+- **Taking a task over by force** is for when the agent holding it cannot get it ready (for example it has stopped answering). It is always shown first. It force-stops that agent's work on the task at once, takes whatever package exists without waiting, and records the move as a forced one.
 
 ## How much the team may do on its own
 
@@ -243,4 +313,4 @@ The [getting-started guide](getting-started.md) lists every step in more detail,
 
 ## How this guide is kept true
 
-`packages/integration/src/d01-user-guide.test.ts` runs this guide: it starts NimbleNewt from an empty folder, sends every "You" line of the example conversation to the real chat (a scripted stand-in plays the model, so no model is called), and fails if a step does not happen as shown or a quoted answer is not what NimbleNewt really prints. It also runs every typed order of [the recovery section](#when-the-assistant-is-down-stopping-and-recovering-without-the-model) with the model servers switched off, and checks the key refusal. The install lines are run too: `init` with exactly the options shown, into a fresh folder, must write settings the launcher accepts (only `secret set` is not run, because it would write to the real secret store of the machine running the test). `scripts/d02-docs.test.mjs` checks that every command, path, option and link written in the text of this guide exists. What a test cannot show is whether a real model understands your own wording; the scripted stand-in only proves that the steps exist and work once understood.
+`packages/integration/src/d01-user-guide.test.ts` runs this guide: it starts NimbleNewt from an empty folder, sends every "You" line of the example conversation to the real chat (a scripted stand-in plays the model, so no model is called), and fails if a step does not happen as shown or a quoted answer is not what NimbleNewt really prints. The two hand-off conversations of [Handing a task to another agent](#handing-a-task-to-another-agent) are run the same way, starting from where the first conversation ends, and the test checks what the guide says about each step: nothing moves when a hand-off is asked for or cancelled, the gaps quoted are the ones accepted, the task ends with Bob and then, after the takeover, with Ann. It also runs every typed order of [the recovery section](#when-the-assistant-is-down-stopping-and-recovering-without-the-model) with the model servers switched off, and checks the key refusal. The install lines are run too: `init` with exactly the options shown, into a fresh folder, must write settings the launcher accepts (only `secret set` is not run, because it would write to the real secret store of the machine running the test). `scripts/d02-docs.test.mjs` checks that every command, path, option and link written in the text of this guide exists. What a test cannot show is whether a real model understands your own wording; the scripted stand-in only proves that the steps exist and work once understood.

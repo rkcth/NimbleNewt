@@ -512,3 +512,29 @@ test("two different binary changes never share a patch ID: the staged patch carr
     assert.notEqual(one.patchId, two.patchId, "the patch ID names the binary content, not only the file name");
   } finally { await w.done(); }
 });
+
+test("a submit is checked against the same landing branch head the author's refresh goes to: the owner's landing branch, not the shared tree's checked-out branch; a missing landing branch refuses the view (card H12p follow-up)", { skip }, async () => {
+  const w = await world();
+  let branch = "main";
+  const ws = new LocalWorkspaces({ root: join(w.dir, "work2"), git: w.git, shared: (p) => (p === "prj-one" ? w.shared : undefined), busy: () => [], landing: () => ({ branch, requirePermit: false }), clock: () => "2026-11-21T10:00:00.000Z" });
+  try {
+    const scope = { taskId: "tsk-one", projectId: "prj-one" };
+    const made = await ws.ensure(scope);
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    await writeFile(join(w.shared, "other.ts"), "export const o = 1;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "landed");
+    const onMain = sh(w.shared, "rev-parse", "HEAD");
+    sh(w.shared, "checkout", "-q", "-b", "side");
+    await writeFile(join(w.shared, "src", "a.ts"), "export const a = 99;\n");
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "side");
+    const view = await ws.submitView(scope);
+    assert.deepEqual([view?.head, view?.landed, view?.mine], [onMain, ["other.ts"], ["src/a.ts"]], "the landing branch's head and its changes; the other branch's change to src/a.ts is not an overlap");
+    // The author refreshes onto that head through the port; the next view then has nothing stale.
+    const r = await ws.port.run(call("reapply"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const after = await ws.submitView(scope);
+    assert.deepEqual([after?.base, after?.head, after?.landed], [onMain, onMain, []]);
+    branch = "trunk";
+    await assert.rejects(ws.submitView(scope), /no branch "trunk"/);
+  } finally { await w.done(); }
+});
