@@ -1446,9 +1446,11 @@ for (const backend of backends) {
     const { taskId } = await c.task("t", ann);
     const seen: { token: unknown; raw: { op: string; commandId?: string; args: Record<string, unknown> } }[] = [];
     const D = "f".repeat(64);
-    const artifacts = new Map<string, { taskId?: string; manifestDigest: string; intact: boolean }>([
-      ["art-mine", { taskId, manifestDigest: D, intact: true }], ["art-other", { taskId: "task-aaaaaaaaaaaaaaaaaaaa", manifestDigest: "0".repeat(64), intact: true }],
-      ["art-loose", { manifestDigest: "1".repeat(64), intact: true }], ["art-damaged", { taskId, manifestDigest: "2".repeat(64), intact: false }],
+    // `read` records each artifact whose files were checked: only ones of the attempt's own task are.
+    const read: string[] = [];
+    const art = (id: string, taskOf: string | undefined, digest: string, intact: boolean) => [id, { ...(taskOf === undefined ? {} : { taskId: taskOf }), manifestDigest: digest, intact: async () => { read.push(id); return intact; } }] as const;
+    const artifacts = new Map<string, { taskId?: string; manifestDigest: string; intact: () => Promise<boolean> }>([
+      art("art-mine", taskId, D, true), art("art-other", "task-aaaaaaaaaaaaaaaaaaaa", "0".repeat(64), true), art("art-loose", undefined, "1".repeat(64), true), art("art-damaged", taskId, "2".repeat(64), false),
     ]);
     const asked: string[] = [];
     const deps = {
@@ -1505,6 +1507,7 @@ for (const backend of backends) {
     assert.deepEqual(seen[0]!.raw.args, { kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve", taskId, role: "reviewer" });
     assert.notEqual(seen[0]!.raw.commandId, seen[1]!.raw.commandId);
     assert.deepEqual(asked, ["art-mine", "art-other", "art-loose", "art-none", "art-damaged", "bad id"], "the artifact is looked up only for a document change that names one and passes the field check");
+    assert.deepEqual(read, ["art-mine", "art-damaged"], "the files of an artifact of another task (or of none) are never read for the agent");
   });
 
   suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {

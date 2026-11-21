@@ -29,7 +29,7 @@ import { admitFirstCall, type FirstCall } from "./dispatch.js";
  * Done again at card T08's fourth slice (2,537 + 19,087 characters, about 7,200 tokens, 36,864 startable and in practice; T08's third slice had already brought the tools to 18,887): the toolbox proposal operations are one
  *    bridge tool with an action, and the toolbox descriptions were shortened, so the window told stays 36,864. Budget 2,800 + 19,400 (22,200: the most the floor may be is 22,248, the largest fixed part that starts a task on
  *    36,864); C07g floor 22,750 stays above it; h12bf's compaction case keeps about 1,600 tokens to spare at 98,304. The next tool or rule over the budget raises the window told to 40,960 (step 3).
- * Card Q01b's bridge slice added `submission.record` (577 characters) within the budget by shortening other descriptions: 2,537 + 19,210 characters, still about 7,200 tokens (21,749 is the most that rounds to it).
+ * Card Q01b's bridge slice added `submission.record` (577 characters) within the budget by shortening other descriptions: 2,537 + 19,210 characters, still about 7,200 tokens (21,747, 7,249 tokens, is the most that rounds to it: no room is left at that figure).
  */
 export const WORKER_FIXED_PART = { systemPromptChars: 2_537, toolSchemaChars: 19_210 } as const;
 /** The most the real fixed part may grow to before the budget test fails: a little room over the measured figures, no more. It is also the floor counted for a route nobody has measured (`ROUTE_FLOOR_DEFAULTS`). */

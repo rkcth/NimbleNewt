@@ -1841,7 +1841,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // Card T02d close-out: each running call is also on the durable record, so another controller process on this store lists it and the owner's revoke question and choice reach it.
         runRecords: RunningCallStore.withEpoch(storage, epoch),
         // Card Q01b (bridge): a document change names an artifact of the attempt's task; the digest is the one recorded at publication, taken only while the files still match it. Without an artifact directory there is none.
-        ...(checked === undefined ? {} : { artifactOf: async (id: string) => { const a = await checked.get(id); return a === undefined ? undefined : { ...(a.taskId === undefined ? {} : { taskId: a.taskId }), manifestDigest: a.manifestDigest, intact: (await checked.verify(id)).ok }; } }),
+        // The files are read (`intact`) only when the bridge asks, after it has found the artifact to be of the attempt's own task: another task's artifact is never read for an agent.
+        ...(checked === undefined ? {} : { artifactOf: async (id: string) => { const a = await checked.get(id); return a === undefined ? undefined : { ...(a.taskId === undefined ? {} : { taskId: a.taskId }), manifestDigest: a.manifestDigest, intact: async () => (await checked.verify(id)).ok }; } }),
         revocationOwner: async (id) => { const p = await principals.get(id); return p === undefined || p.kind !== "owner" || p.state !== "active" ? undefined : { id: p.id, kind: p.kind, name: p.name, grants: p.grants }; },
       });
     }

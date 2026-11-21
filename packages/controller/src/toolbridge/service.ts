@@ -135,9 +135,9 @@ export interface ToolExecutionDeps {
   readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
   /**
    * Card Q01b (bridge): an artifact as the controller recorded it and whether its files still match (`ArtifactService.get` and `verify`), so a document change submitted through the bridge names the digest the controller
-   * recorded for an artifact of the attempt's own task, never one the agent writes. Absent: a document change through the bridge is refused as unavailable.
+   * recorded for an artifact of the attempt's own task, never one the agent writes. `intact` reads the files; it is called only for an artifact of the attempt's own task. Absent: a document change through the bridge is refused as unavailable.
    */
-  readonly artifactOf?: (artifactId: string) => Promise<{ readonly taskId?: string; readonly manifestDigest: string; readonly intact: boolean } | undefined>;
+  readonly artifactOf?: (artifactId: string) => Promise<{ readonly taskId?: string; readonly manifestDigest: string; readonly intact: () => Promise<boolean> } | undefined>;
   readonly hosts: Pick<HostService, "status">;
   readonly admission: Pick<AdmissionService, "snapshot">;
   readonly runner: ScriptRunner;
@@ -873,9 +873,9 @@ export class ToolExecutionService {
       if (this.#deps.artifactOf === undefined) return refusal("unavailable", "artifacts are not kept by this controller; a document change cannot be submitted here");
       let found: Awaited<ReturnType<NonNullable<ToolExecutionDeps["artifactOf"]>>>;
       try { found = await this.#deps.artifactOf(artifactId); } catch (error) { if (isDomainError(error, "invalid_command")) return refusal("invalid_command", `artifactId: ${error.message}`); throw error; }
-      // Another task's artifact is answered as one that does not exist: the attempt reaches its own task only.
+      // Another task's artifact is answered as one that does not exist, and its files are not read: the attempt reaches its own task only.
       if (found === undefined || found.taskId !== c.taskId) return refusal("not_found", `no artifact ${artifactId.slice(0, 80)} of this task`);
-      if (!found.intact) return refusal("invalid_command", `artifact ${artifactId.slice(0, 80)} no longer matches its files; publish the document again and submit the new artifact`);
+      if (!(await found.intact())) return refusal("invalid_command", `artifact ${artifactId.slice(0, 80)} no longer matches its files; publish the document again and submit the new artifact`);
       body = { ...body, artifactDigest: `sha256:${found.manifestDigest}` };
     }
     const response = await this.#deps.state.handle(token, { v: 1, op: "submission.record", commandId: bridgeCommandId("bridge", c.attemptId, c.callId), args: body });
