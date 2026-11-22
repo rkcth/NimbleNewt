@@ -24,7 +24,7 @@ type Commit = { commitId: string; at: string; permitted?: boolean };
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
     ask(by: Principal): Promise<string>; owner: Principal; task: string; svc: SubmissionService; calls: string[];
-    agent(name: string, roles: string[]): Promise<Principal>; commits: Map<string, Commit>; opens: Map<string, { operation: string; at: string }>; failing: { on: boolean };
+    agent(name: string, roles: string[]): Promise<Principal>; commits: Map<string, Commit>; opens: Map<string, { operation: string; at: string }>; failing: { on: boolean }; asked: Map<string, string[]>;
     plain(): Promise<string>;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
@@ -42,7 +42,8 @@ for (const backend of backends) {
         return p;
       };
       const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Fix the parser" })).id;
-      const svc = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], options);
+      const asked = new Map<string, string[]>();
+      const svc = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...options, reviewAssignments: async (principalId: string) => asked.get(principalId) ?? [] });
       const assignments = AssignmentService.withEpoch(world.storage, epoch, projects, options);
       const base = { assignments, waits: WaitService.withEpoch(world.storage, epoch, assignments, options), blockers: BlockerService.withEpoch(world.storage, epoch, options), contracts: ContractService.withEpoch(world.storage, epoch, options) };
       const commits = new Map<string, Commit>();
@@ -53,7 +54,7 @@ for (const backend of backends) {
       const view = (extra: object) => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) }, ...extra }, options);
       const status = view({ submissionRelease });
       const text = async (s: StatusService, by: Principal): Promise<string> => ((await s.ask(by, { kind: "submissions", taskId: task }))?.lines ?? []).map((l) => l.text).join("\n");
-      await body({ ask: (by) => text(status, by), owner, task, svc, calls, agent, commits, opens, failing, plain: () => text(view({}), owner) });
+      await body({ ask: (by) => text(status, by), owner, task, svc, calls, agent, commits, opens, failing, asked, plain: () => text(view({}), owner) });
     } finally { await world.close(); }
   });
 
@@ -69,9 +70,14 @@ for (const backend of backends) {
     assert.deepEqual(c.calls, []);
     tick();
     await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: sub.id, verdict: "approve" });
-    assert.match(await c.ask(c.owner), /Commit: not made yet; the approved work stays uncommitted in the task's checkout until a release request/);
+    // Nothing open: no later automatic commit is promised, and nothing is said of what the checkout holds now.
+    const none = await c.ask(c.owner);
+    assert.match(none, /Commit: not made yet; it is committed only when a release request commits it\. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again\./);
+    assert.doesNotMatch(none, /stays uncommitted in the task's checkout/);
     c.opens.set(c.task, { operation: "release", at: "2026-11-22T10:05:00.000Z" });
     assert.match(await c.ask(ann), /Commit: not made yet; a release request has been open on the task's checkout since 2026-11-22T10:05:00\.000Z\./);
+    c.opens.set(c.task, { operation: "integration", at: "2026-11-22T10:05:30.000Z" });
+    assert.match(await c.ask(ann), /Commit: not made yet; an integration request has been open on the task's checkout since 2026-11-22T10:05:30\.000Z\./);
     c.opens.clear();
     c.commits.set(sub.id, { commitId: "ab".repeat(20), at: "2026-11-22T10:06:00.000Z", permitted: true });
     assert.match(await c.ask(c.owner), /Commit: made in the task's checkout \(abababababab\) at 2026-11-22T10:06:00\.000Z, as a review-gate permit commit\./);
@@ -80,6 +86,12 @@ for (const backend of backends) {
     // Someone who may read the task but did not write the code is told nothing about its commit or review, and nothing is read for it.
     c.calls.length = 0;
     assert.doesNotMatch(await c.ask(stranger), /Commit:/);
+    assert.deepEqual(c.calls, []);
+    // A reviewer asked to review this code reads it but did not write it: the line is shown without review or commit state, and nothing is read for it.
+    c.asked.set(rev.id, [sub.id]);
+    const seen = await c.ask(rev);
+    assert.match(seen, new RegExp(`code submission ${sub.id} .*shown to the owner and its author only`));
+    assert.doesNotMatch(seen, /Commit:/);
     assert.deepEqual(c.calls, []);
   });
 

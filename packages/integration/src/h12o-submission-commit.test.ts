@@ -131,6 +131,10 @@ test("an approved submission is committed once through the release operation on 
     // The submissions view (sixth slice) says so: the owner is told the commit and that it is a permit commit; the author, who made the code, also reads it.
     const viewOf = async (token: string, taskId: string): Promise<string> => { const v = (await api(c, token, "status.ask", { request: { kind: "submissions", taskId } })) as { ok: boolean; result: { item: { lines: { text: string }[] } } }; assert.equal(v.ok, true, JSON.stringify(v)); return v.result.item.lines.map((l) => l.text).join("\n"); };
     assert.match(await viewOf(boot.token, one.task), new RegExp(`Commit: made in the task's checkout \\(${autoRecord.commitId.slice(0, 12)}\\) at \\S+, as a review-gate permit commit\\.`));
+    const madeWords = new RegExp(`Commit: made in the task's checkout \\(${autoRecord.commitId.slice(0, 12)}\\)`);
+    assert.match(await viewOf((await s.principals.issueCredential(owner, `agent:${agent}`)).token, one.task), madeWords);
+    // The reviewer did not write the code (and holds no review request naming it here, so it reads only its own review): it is not told the commit. The unit test covers a reviewer that does read the code.
+    assert.doesNotMatch(await viewOf(rev, one.task), /Commit:/);
     const hostCallsAfterApproval = hostCalls;
     const done = await release(one.task, sub1, "rel-1");
     assert.equal(done.ok, true, JSON.stringify(done));
@@ -164,7 +168,7 @@ test("an approved submission is committed once through the release operation on 
     // The automatic release met the changed checkout: refused, nothing committed, no record of a commit; the request is kept.
     assert.equal(git2("rev-parse", "HEAD"), base2);
     assert.equal(await c.storage.getAggregate({ kind: "submission-commit", id: sub2 }), undefined);
-    assert.match(await viewOf(boot.token, two.task), /Commit: not made yet; the approved work stays uncommitted in the task's checkout until a release request/);
+    assert.match(await viewOf(boot.token, two.task), /Commit: not made yet; it is committed only when a release request commits it\. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again\./);
     const stale = await release(two.task, sub2, "rel-3");
     assert.equal(stale.result.state, "refused");
     assert.match(stale.result.summary, /no longer holds the approved work of submission .*its files changed/);

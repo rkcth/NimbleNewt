@@ -2516,8 +2516,8 @@ export class StatusService {
   }
 
   /**
-   * Whether the platform has committed an approved code submission in its task's checkout (card H12o sixth slice): the recorded commit (short ID, time, permit or plain), else "not committed yet" (with an open release request
-   * named). Read-only; a failed read says it could not be read, never "not committed". Empty without the dependency.
+   * Whether the platform has committed an approved code submission in its task's checkout (card H12o sixth slice): the recorded commit (short ID, time, permit or plain), else "not committed yet" (with the request open on the
+   * checkout named). A record without `permitted` is a plain commit: the field came with the first permit commits (H12o permit slice), so no older record is a permit commit. Read-only; a failed read says it could not be read, never "not committed". Empty without the dependency.
    */
   async #commitWords(submissionId: string, taskId: string): Promise<string> {
     const r = this.#deps.submissionRelease;
@@ -2526,7 +2526,11 @@ export class StatusService {
       const made = await r.commit(submissionId);
       if (made !== undefined) return ` Commit: made in the task's checkout (${shown(made.commitId, 40).slice(0, 12)}) at ${made.at}, ${made.permitted === true ? "as a review-gate permit commit" : "as a plain platform commit (not a permit commit, so a landing that requires the permit does not take it)"}.`;
       const open = await r.open(taskId);
-      return open === undefined ? " Commit: not made yet; the approved work stays uncommitted in the task's checkout until a release request (the owner's, or the one an approval by a reviewer makes) commits it." : ` Commit: not made yet; a ${shown(open.operation, 40)} request has been open on the task's checkout since ${open.at}.`;
+      // No open request: nothing is about to commit it. A reviewer's approval asks for a release only when it is given (`releaseApproved`, never retried), and a checkout that moved on since may no longer hold it,
+      // so the words neither promise a later automatic commit nor say what the checkout holds now.
+      if (open === undefined) return " Commit: not made yet; it is committed only when a release request commits it. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again.";
+      const operation = shown(open.operation, 40);
+      return ` Commit: not made yet; ${/^[aeiou]/i.test(operation) ? "an" : "a"} ${operation} request has been open on the task's checkout since ${open.at}.`;
     } catch { return " Commit: could not be read just now."; }
   }
 
