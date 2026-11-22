@@ -412,20 +412,22 @@ export class SubmissionService {
     return undefined;
   }
 
-  /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review whose verdict list moved. */
-  /** A director sign-off is kept in its subject's own list (the landing's `director` check reads it by the subject, never by scanning the table); at most `MAX_VERDICTS` per submission. */
+  /**
+   * A director sign-off is kept in its subject's own list (the landing's `director` check reads it by the subject, never by scanning the table). The newest `MAX_VERDICTS` are kept and older ones drop off the
+   * front: only the newest decides, so a sign-off is never refused for the list's size (a decline after many approvals must still take an approval back).
+   */
   async #signoffChange(id: string, body: SubmissionBody): Promise<Change[]> {
     if (body.kind !== "signoff" || body.subject === undefined || body.decision === undefined) return [];
     const ref = { kind: SIGNOFFS, id: body.subject };
     const current = await this.#runner.get(SIGNOFFS, body.subject);
     const list = ((current?.body as unknown as SignoffsBody | undefined)?.signoffs ?? []);
     if (list.some((r) => r.id === id)) return [];
-    if (list.length >= MAX_VERDICTS) throw new DomainError("unavailable", `submission ${body.subject} already has ${MAX_VERDICTS} director sign-offs; submit the work again for a new sign-off`);
-    const next: SignoffsBody = { signoffs: [...list, { id, decision: body.decision, by: body.submittedBy, at: body.submittedAt }] };
+    const next: SignoffsBody = { signoffs: [...list, { id, decision: body.decision, by: body.submittedBy, at: body.submittedAt }].slice(-MAX_VERDICTS) };
     return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
   }
+  /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review or sign-off whose list moved. */
   async #contention(id: string, body: SubmissionBody): Promise<DomainError> {
-    if ((await this.#runner.get("submission", id)) === undefined && (body.kind === "review" || body.kind === "signoff")) return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
+    if ((await this.#runner.get("submission", id)) === undefined && (body.kind === "review" || body.kind === "signoff")) return new VerdictRace("unavailable", `another ${body.kind === "signoff" ? "sign-off" : "review"} of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
     // Two document changes of one project at the same moment both add to the project's index (card Q03b): the one that lost is built again from the index as it now is.
     if ((await this.#runner.get("submission", id)) === undefined && body.kind === "document") return new DocIndexRace("unavailable", `another document change of this project was recorded at the same moment; send this one again`);
     return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);

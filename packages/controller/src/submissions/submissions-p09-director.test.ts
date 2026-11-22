@@ -42,7 +42,7 @@ for (const backend of backends) {
       } finally { await world.close(); }
     });
 
-  suite("the newest director sign-off is answered with the submission (none: no director field); a repeat records once; a later decline replaces an approval; at most 50 are kept", async (c) => {
+  suite("the newest director sign-off is answered with the submission (none: no director field); a repeat records once; a later decline replaces an approval; the newest 50 are kept, so a 51st decline still decides", async (c) => {
     const ann = await c.agent("ann", ["author"]);
     const dee = await c.agent("dee", ["director"]);
     const dot = await c.agent("dot", ["director"]);
@@ -60,9 +60,20 @@ for (const backend of backends) {
     // A sign-off does not change what a review says.
     assert.equal((await c.svc.approvalOf(code.id))?.approved, false);
     for (let i = 0; i < 48; i++) await c.svc.record(i % 2 === 0 ? dee : dot, { commandId: cid("many"), taskId: c.task, kind: "signoff", role: "director", subject: code.id, decision: "approve" });
-    await refuses("unavailable", () => c.svc.record(dee, { commandId: cid("so"), taskId: c.task, kind: "signoff", role: "director", subject: code.id, decision: "decline" }), /already has 50 director sign-offs/);
     assert.equal(((await c.raw("submission-signoffs", code.id)) as { signoffs: unknown[] }).signoffs.length, 50);
     assert.equal((await gate(code.id))?.signoff?.newest, "approve");
+    // The 51st, a decline, is recorded and decides: the list keeps the newest 50 (the oldest drops off), so a decline is never refused for the list's size.
+    const late = await c.svc.record(dee, { commandId: cid("so"), taskId: c.task, kind: "signoff", role: "director", subject: code.id, decision: "decline" });
+    const kept = ((await c.raw("submission-signoffs", code.id)) as { signoffs: { id: string }[] }).signoffs.map((x) => x.id);
+    assert.equal(kept.length, 50);
+    assert.equal(kept.includes(first.id), false, "the oldest sign-off dropped off");
+    assert.equal(kept[kept.length - 1], late.id);
+    assert.equal(kept[0], decline.id);
+    assert.deepEqual((await gate(code.id))?.signoff, { newest: "decline", by: dee.id, signoffId: late.id });
+    // And an approval after it decides again.
+    const again = await c.svc.record(dot, { commandId: cid("so"), taskId: c.task, kind: "signoff", role: "director", subject: code.id, decision: "approve" });
+    assert.deepEqual((await gate(code.id))?.signoff, { newest: "approve", by: dot.id, signoffId: again.id });
+    assert.equal(((await c.raw("submission-signoffs", code.id)) as { signoffs: unknown[] }).signoffs.length, 50);
     // Only a code submission is answered; a document or a sign-off ID is not one.
     assert.equal(await gate(first.id), undefined);
     assert.equal(await gate("sbm-aaaaaaaaaaaaaaaaaaaa"), undefined);
@@ -102,7 +113,7 @@ for (const backend of backends) {
       return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
     } });
     const signoff = { commandId: "p09-bounded-1", taskId: c.task, kind: "signoff" as const, role: "director", subject: code.id, decision: "approve" as const };
-    await refuses("unavailable", () => c.open({}, losing).record(dee, signoff), /recorded at the same moment; send this one again/);
+    await refuses("unavailable", () => c.open({}, losing).record(dee, signoff), /another sign-off of submission sbm-[a-z2-7]+ was recorded at the same moment; send this one again/);
     assert.equal(writes, 5, "built and written again at most five times in all");
     assert.equal(await c.raw("submission-signoffs", code.id), undefined, "nothing was recorded");
     assert.equal("director" in ((await c.svc.approvalOf(code.id)) ?? {}), false);
