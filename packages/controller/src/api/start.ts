@@ -1132,6 +1132,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           if (typeof subject === "string") { if (e.verdict === "approve") await landingQueueOps.queueApproved(subject, e.submissionId); else await landingQueueOps.withdrawUnapproved(subject, e.submissionId); }
         }
       } catch { /* best effort: the queue is still reachable through landing.queue.add */ }
+      // Card H12o: a reviewer's approval of a code submission is committed by the platform in the task's own checkout at once as a review-gate permit commit, so reviewed work can land. Only a reviewer's
+      // approval: a code submission that needs no review (one-agent project) is never committed automatically (its plain commit could not land under the default permit rule and would stay in the checkout as an
+      // unpermitted commit in front of later reviewed work); the owner's own release still does it. Best effort: a task with a live attempt, a remote host or a refusal leaves it to the owner's `workspace.request` release.
+      try {
+        if (e.kind === "review" && e.verdict === "approve") {
+          const subject = ((await storage.getAggregate({ kind: "submission", id: e.submissionId }))?.body as { subject?: unknown } | undefined)?.subject;
+          if (typeof subject === "string") await workspaceOps.releaseApproved(subject, e.submissionId);
+        }
+      } catch { /* best effort */ }
       // Card B02: a review that asked for changes or rejected the work is a failed review, observed once per review submission.
       if (e.kind === "review" && (e.verdict === "changes" || e.verdict === "reject")) await observe({ commandId: `obs-review:${e.submissionId}`, kind: "failed-review", summary: `${e.submittedBy} ${e.verdict === "reject" ? "rejected" : "asked for changes to"} the work submitted on task ${e.taskId}.`, sources: [{ kind: "submission", id: e.submissionId }] });
       // Card Q02 follow-up: a newer tree of the task settles the QA re-checks still pending on its older code (best effort; the next QA evidence on the newer tree catches a missed one).
