@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,7 +16,7 @@ const call = (operation: HostWorkspaceCall["operation"], more: Partial<HostWorks
 const S = "sbm-aaaaaaaaaaaaaaaaaaaa";
 const sub = (base: string, tree: string) => ({ id: S, base, tree });
 
-async function rig(requirePermit = true) {
+async function rig(requirePermit = true, task = "tsk-one") {
   const dir = await mkdtemp(join(tmpdir(), "nn-p10p-"));
   const shared = join(dir, "shared");
   await mkdir(join(shared, "src"), { recursive: true });
@@ -27,10 +27,10 @@ async function rig(requirePermit = true) {
   const base = sh(shared, "rev-parse", "HEAD");
   const git = await GitBridge.create({ scratch: join(dir, "scratch") });
   const ws = new LocalWorkspaces({ root: join(dir, "work"), git, shared: (p) => (p === "prj-one" ? shared : undefined), busy: () => [], landing: () => ({ branch: "main", requirePermit }), clock: () => "2026-11-22T10:00:00.000Z" });
-  const made = await ws.ensure({ taskId: "tsk-one", projectId: "prj-one" });
+  const made = await ws.ensure({ taskId: task, projectId: "prj-one" });
   const g = ["--git-dir", made.gitDir, "--work-tree", made.checkout];
   const edit = async (files: Record<string, string>) => { for (const [p, c] of Object.entries(files)) { await mkdir(join(made.checkout, p, ".."), { recursive: true }); await writeFile(join(made.checkout, p), c); } };
-  const permitCommit = async (trailers = ["Reviewed-by: owner", "NimbleNewt-Request: cgr-abc", "NimbleNewt-Task: tsk-one"]) => {
+  const permitCommit = async (trailers = ["Reviewed-by: owner", "NimbleNewt-Request: cgr-abc", `NimbleNewt-Task: ${task}`]) => {
     const s = await git.stage({ gitDir: made.gitDir, checkout: made.checkout });
     await git.commit({ gitDir: made.gitDir, checkout: made.checkout, permit: { base: s.base, tree: s.tree, filesDigest: filesDigest(s.files), message: "reviewed work", author: { name: "ann", email: "ann@agents.invalid" }, committer: { name: "NimbleNewt", email: "c@nimblenewt.invalid" }, trailers } });
     return s.tree;
@@ -107,18 +107,20 @@ test("a permit commit of another task does not pass its permit on, and a branch 
     assert.equal(wrong.ok && wrong.state, "reapplied");
     assert.equal((await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one" })).length, 1, "marks of another task do not make a permit for this one");
   } finally { await r.done(); }
-  const s = await rig();
+  // Another task than the one the other tests use, so the re-apply's task mark is shown to be the task's own.
+  const s = await rig(true, "tsk-two");
   try {
     await s.edit({ "src/a.ts": "export const a = 2;\n" });
     const tree = await s.permitCommit();
     await s.moveShared({ "docs/c.md": "# c\n" });
-    const first = await s.ws.port.restack({ requestId: rid(), taskId: "tsk-one", projectId: "prj-one", submission: sub(s.base, tree) });
+    const first = await s.ws.port.restack({ requestId: rid(), taskId: "tsk-two", projectId: "prj-one", submission: sub(s.base, tree) });
     assert.equal(first.ok && first.state, "reapplied");
     const head2 = await s.moveShared({ "docs/d.md": "# d\n" });
-    const second = await s.ws.port.restack({ requestId: rid(), taskId: "tsk-one", projectId: "prj-one", submission: sub(s.base, tree) });
+    const second = await s.ws.port.restack({ requestId: rid(), taskId: "tsk-two", projectId: "prj-one", submission: sub(s.base, tree) });
     assert.equal(second.ok && second.state, "reapplied", JSON.stringify(second));
-    assert.deepEqual(await s.git.unpermitted({ gitDir: s.made.gitDir, taskId: "tsk-one" }), []);
-    const landed = await s.ws.port.run(call("landing", { submission: sub(head2, (second as { tree: string }).tree), reappliedFrom: { base: s.base, tree } }));
+    assert.deepEqual(await s.git.unpermitted({ gitDir: s.made.gitDir, taskId: "tsk-two" }), []);
+    assert.match(sh(s.made.checkout, ...s.g, "log", "-1", "--format=%B"), /^NimbleNewt-Task: tsk-two$/m);
+    const landed = await s.ws.port.run(call("landing", { taskId: "tsk-two", submission: sub(head2, (second as { tree: string }).tree), reappliedFrom: { base: s.base, tree } }));
     assert.equal(landed.ok, true, JSON.stringify(landed));
   } finally { await s.done(); }
 });
@@ -134,5 +136,52 @@ test("with requirePermit false an agent's own commit is still re-applied and lan
     assert.equal(sh(r.made.checkout, ...r.g, "diff", "--name-status", next, "HEAD"), "M\tsrc/a.ts");
     const landed = await r.ws.port.run(call("landing", { submission: sub(next, (out as { tree: string }).tree), reappliedFrom: { base: r.base, tree } }));
     assert.equal(landed.ok, true, JSON.stringify(landed));
+  } finally { await r.done(); }
+});
+
+// A read-only file is still written by an administrator account, so the check needs an ordinary one.
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+test("the re-apply is listed in the permit ledger before the head moves: when the ledger line cannot be written nothing moves, and a later re-apply lands", { skip: skip || (asRoot ? "running as root: a read-only file is still writable" : false) }, async () => {
+  const r = await rig();
+  try {
+    await r.edit({ "src/a.ts": "export const a = 2;\n" });
+    const tree = await r.permitCommit();
+    const before = r.head();
+    const baseBefore = sh(r.made.checkout, ...r.g, "rev-parse", "refs/nn/base");
+    const onto = await r.moveShared({ "docs/c.md": "# c\n" });
+    // A read-only ledger is still read (the permit commit is listed) but the new line cannot be appended (as with a full disk or a crash at that point).
+    const ledger = permitLedgerPath(r.made.gitDir);
+    const lines = await readFile(ledger, "utf8");
+    await chmod(ledger, 0o444);
+    await assert.rejects(r.git.restack({ shared: r.shared, onto, gitDir: r.made.gitDir, checkout: r.made.checkout, submission: sub(r.base, tree), permit: { taskId: "tsk-one", requestId: rid() } }));
+    assert.equal(r.head(), before, "the head did not move to a commit the ledger does not list");
+    assert.equal(sh(r.made.checkout, ...r.g, "rev-parse", "refs/nn/base"), baseBefore, "the base did not move");
+    assert.equal(sh(r.made.checkout, ...r.g, "status", "--porcelain=v1"), "", "the checkout is unchanged");
+    await chmod(ledger, 0o600);
+    assert.equal(await readFile(ledger, "utf8"), lines, "nothing was listed");
+    const out = await r.ws.port.restack({ requestId: rid(), taskId: "tsk-one", projectId: "prj-one", submission: sub(r.base, tree) });
+    assert.equal(out.ok && out.state, "reapplied", JSON.stringify(out));
+    const landed = await r.ws.port.run(call("landing", { submission: sub(onto, (out as { tree: string }).tree), reappliedFrom: { base: r.base, tree } }));
+    assert.equal(landed.ok, true, JSON.stringify(landed));
+  } finally { await r.done(); }
+});
+
+test("the permit check of a re-apply reads exactly the commits it replaces (a range), not whatever the head is by then", { skip }, async () => {
+  const r = await rig();
+  try {
+    await r.edit({ "src/a.ts": "export const a = 2;\n" });
+    await r.permitCommit();
+    const permitted = r.head();
+    await r.edit({ "src/b.ts": "export const b = 2;\n" });
+    r.plainCommit();
+    const own = r.head();
+    const base = sh(r.made.checkout, ...r.g, "rev-parse", "refs/nn/base");
+    // HEAD is the agent's own commit; the range up to the permit commit alone is permitted, the range up to HEAD is not.
+    assert.deepEqual(await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one", range: { base, head: permitted } }), []);
+    assert.deepEqual(await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one", range: { base, head: own } }), [own]);
+    assert.deepEqual(await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one" }), [own]);
+    sh(r.made.checkout, ...r.g, "reset", "-q", "--hard", permitted);
+    assert.deepEqual(await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one", range: { base, head: own } }), [own], "a range does not follow HEAD");
+    await assert.rejects(r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one", range: { base: "HEAD", head: own } }), /full commit IDs/);
   } finally { await r.done(); }
 });

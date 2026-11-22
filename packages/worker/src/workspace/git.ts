@@ -843,9 +843,11 @@ export class GitBridge {
   }
 
   /** The commits between the base and the checkout's head (oldest last, as git lists them) that were not made through a commit permit for this task (they are not in the host-side permit ledger, or lack the marks): the `NimbleNewt-Request:` and `NimbleNewt-Task:` trailers the review gate adds (A06). */
-  async unpermitted(options: { gitDir: string; taskId: string }): Promise<string[]> {
-    const base = await this.#base(options.gitDir);
-    const out = (await this.#run(["log", "--format=%H%x1f%B%x1e", `${base}..HEAD`], { gitDir: options.gitDir })).stdout.split("\x1e").map((x) => x.trim()).filter(Boolean);
+  async unpermitted(options: { gitDir: string; taskId: string; range?: { base: string; head: string } }): Promise<string[]> {
+    // `range`: exactly these commits (the ones a re-apply replaces, read once), not whatever the base and head are by the time this runs.
+    if (options.range !== undefined && (!COMMIT.test(options.range.base) || !COMMIT.test(options.range.head))) throw new WorkspaceError("invalid_path", "a range names full commit IDs");
+    const base = options.range?.base ?? (await this.#base(options.gitDir));
+    const out = (await this.#run(["log", "--format=%H%x1f%B%x1e", `${base}..${options.range?.head ?? "HEAD"}`], { gitDir: options.gitDir })).stdout.split("\x1e").map((x) => x.trim()).filter(Boolean);
     // The marks in a message are text anybody can type: a commit is permitted only when `commit()` listed it in the host-side ledger as well.
     const listed = new Set((await readFile(permitLedgerPath(options.gitDir), "utf8").catch(() => "")).split("\n").map((l) => l.split(" ")[0]!).filter((x) => COMMIT.test(x)));
     return out.flatMap((entry) => {
@@ -975,7 +977,7 @@ export class GitBridge {
     // The proof, before anything moves: the change from the head to the new tree is exactly the approved change.
     if (!(await this.sameChange({ gitDir: options.gitDir, a: { base: sub.base, tree: sub.tree }, b: { base: options.onto, tree: built } }))) throw new WorkspaceError("stale", `submission ${sub.id} could not be re-applied as exactly the approved change; nothing was re-applied`);
     // The permit passes on only from permitted work: every commit being replaced must itself be a permit commit of this task.
-    const permitted = options.permit !== undefined && TRAILER_VALUE.test(options.permit.taskId) && TRAILER_VALUE.test(options.permit.requestId) && (await this.unpermitted({ gitDir: options.gitDir, taskId: options.permit.taskId })).length === 0;
+    const permitted = options.permit !== undefined && TRAILER_VALUE.test(options.permit.taskId) && TRAILER_VALUE.test(options.permit.requestId) && (await this.unpermitted({ gitDir: options.gitDir, taskId: options.permit.taskId, range: { base, head } })).length === 0;
     const marks = permitted ? `NimbleNewt-Request: ${options.permit!.requestId}\nNimbleNewt-Task: ${options.permit!.taskId}\n` : "";
     const message = `Re-applied submission ${sub.id}\n\nRe-applied by NimbleNewt onto ${options.onto} (the landing branch's head), unchanged: exactly the approved change, whose files the landing branch did not change since ${base}. ${permitted ? "A permit commit: the work it carries was committed through the review gate's permit and the change is proven identical." : "Not a review-gate permit commit."}\n\nNimbleNewt-Submission: ${sub.id}\nNimbleNewt-Reapplied-From: ${base}\n${marks}`;
     const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
