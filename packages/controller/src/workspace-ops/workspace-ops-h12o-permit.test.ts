@@ -112,4 +112,26 @@ for (const backend of backends) {
       assert.equal(r.calls[0]!.permit, true);
     } finally { await r.store.close(); }
   });
+
+  test(`${backend.name}: an approval that changes while the task is made quiet (to the author's own, or to the one-agent approval) refuses the permit release before the host is asked (card H12o, permit slice)`, async () => {
+    const r = await rig();
+    try {
+      const svc = r.service();
+      for (const [i, later] of [{ approvedBy: "agent:ann", submittedBy: "agent:ann" }, { approvedBy: "review_disabled_single_agent", submittedBy: "agent:ann" }].entries()) {
+        r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" });
+        r.setBeforeRun(() => { r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, ...later }); });
+        const out = await svc.request(r.owner, { commandId: `s${i}`, operation: "release", taskId: r.task, reason: "commit", submissionId: S1 });
+        assert.equal(out.state, "refused", out.summary);
+        assert.match(out.summary ?? "", i === 0 ? /own author/ : /no longer approved by a reviewer/);
+        assert.equal(r.calls.length, 0);
+        assert.equal(await svc.submissionCommit(S1), undefined);
+      }
+      // A second reviewer's approval in between still approves it as a reviewer's: the permit is asked.
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" });
+      r.setBeforeRun(() => { r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev2", submittedBy: "agent:ann" }); });
+      const ok = await svc.request(r.owner, { commandId: "s9", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 });
+      assert.equal(ok.state, "done", ok.summary);
+      assert.equal(r.calls[0]!.permit, true);
+    } finally { await r.store.close(); }
+  });
 }

@@ -414,6 +414,8 @@ export class WorkspaceOpService {
   async #stillApproved(s: NonNullable<WorkspaceRecordBody["submission"]>, taskId: string): Promise<void> {
     const now = await this.#approved(s.id, taskId);
     if (now.base !== s.base || now.tree !== s.tree) throw new DomainError("review_invalid", `submission ${s.id} changed`, { field: "submissionId" });
+    // The permit is asked from the first showing's approval (card H12o, permit slice): it holds only while a reviewer's approval still approves it.
+    if (reviewerApproved(s.approvedBy) && !reviewerApproved(now.approvedBy)) throw new DomainError("review_invalid", `submission ${s.id} is no longer approved by a reviewer`, { field: "submissionId" });
   }
 
   /** The commit made for an approved submission (card H12o), when one was recorded. It takes no caller, so it is not an API operation (the release's own record, `workspace.get`, names it to whoever may read that). */

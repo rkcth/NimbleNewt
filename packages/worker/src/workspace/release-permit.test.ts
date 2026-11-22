@@ -168,3 +168,24 @@ test("an agent's own commit never gets the permit: a moved base refuses a permit
     assert.equal(await readFile(join(r.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
   } finally { await r.done(); }
 });
+
+test("a permit release on top of an agent's own commit says a landing that requires the permit refuses, and the landing does", { skip }, async () => {
+  const r = await rig(true);
+  try {
+    await r.edit({ "src/b.ts": "export const b = 2;\n" });
+    r.plainCommit();
+    const own = r.head();
+    await r.edit({ "src/a.ts": "export const a = 2;\n" });
+    const s = await staged(r);
+    assert.equal(s.base, own);
+    const out = await r.ws.port.run(releaseCall(s, true));
+    assert.equal(out.ok, true, JSON.stringify(out));
+    const d = detailOf(out);
+    assert.deepEqual([d["permitted"], d["permitRequiredToLand"]], [true, true]);
+    assert.match((out as { summary: string }).summary, /other commits of the checkout are not review-gate permit commits/);
+    assert.deepEqual(await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one" }), [own]);
+    const landed = await r.ws.port.run(call("landing", { submission: s }));
+    assert.equal(landed.ok, false, JSON.stringify(landed));
+    assert.equal(await readFile(join(r.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+  } finally { await r.done(); }
+});
