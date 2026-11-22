@@ -7,7 +7,12 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
-import { QaEvidenceService } from "./index.js";
+import { AssignmentService } from "../domain/assignments.js";
+import { BlockerService } from "../domain/blockers.js";
+import { WaitService } from "../domain/waits.js";
+import { ContractService } from "../planning/contracts.js";
+import { StatusService } from "../status/index.js";
+import { QaEvidenceService, type QaProjectView } from "./index.js";
 
 after(stopServer);
 
@@ -132,6 +137,58 @@ for (const backend of backends) {
       assert.equal(short.scanLimited, true, "a scan that stops before the end says so");
       assert.ok(gates <= 2 && short.items.length <= 2);
       assert.equal((await svc.project(owner, project, { tasks: 200, pageSize: 2, reads: 20 })).scanLimited, false, "small pages to the end are complete");
+
+      // Two code submissions of one task at the same time: the same one is chosen on every backend and whatever the scan order (the greater ID), not whichever the table yields last.
+      const tTie = await mkTask("Tied");
+      const tied = [await code(tTie, "2026-11-22T09:50:00.000Z", "a"), await code(tTie, "2026-11-22T09:50:00.000Z", "b")];
+      const greater = [...tied].sort()[1]!;
+      for (const pageSize of [1, 500]) assert.equal((await svc.project(owner, project, { tasks: 200, pageSize, reads: 100 })).items.find((i) => i.taskId === tTie)?.submissionId, greater, `a tie is settled by ID (pages of ${pageSize})`);
+    } finally { await world.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: the qa_project status text never reads as "nothing waits" when the view is partial, and says what was left out (card Q02 review)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(world.storage, epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Fix\u202e the login \u{1F600}".repeat(10) })).id;
+      let view: QaProjectView = { projectId: project, counts: { passes: 0, waiting: 0, stale: 0, failing: 0 }, items: [], truncated: false, scanLimited: false };
+      const assignments = AssignmentService.withEpoch(world.storage, epoch, projects, options);
+      const status = StatusService.withEpoch(world.storage, epoch, {
+        assignments, waits: WaitService.withEpoch(world.storage, epoch, assignments, options), blockers: BlockerService.withEpoch(world.storage, epoch, options), contracts: ContractService.withEpoch(world.storage, epoch, options),
+        qa: { list: async () => { throw new Error("not used"); }, gate: async () => { throw new Error("not used"); }, project: async (by: Principal) => { if (by.kind !== "owner") throw new DomainError("not_found", "no such project"); return view; } } as never,
+      }, options);
+      const said = async (): Promise<string> => (await status.ask(owner, { kind: "qa_project", projectId: project }))!.lines.map((l) => l.text).join("\n");
+
+      assert.match(await said(), /nothing waits for QA/, "a complete empty view: nothing waits");
+      for (const flags of [{ truncated: true, scanLimited: false }, { truncated: false, scanLimited: true }, { truncated: true, scanLimited: true }]) {
+        view = { ...view, ...flags };
+        const text = await said();
+        assert.doesNotMatch(text, /nothing waits/, `a partial empty view must not say nothing waits: ${JSON.stringify(flags)}`);
+        assert.match(text, /incomplete, so tasks may still wait for QA/);
+        assert.equal(/Only part of the stored submissions was looked at/.test(text), flags.scanLimited);
+        assert.equal(/Only the tasks with the newest code submissions were read/.test(text), flags.truncated);
+      }
+      const item = { taskId: task, title: "Fix\u202e the login \u{1F600}".repeat(10), submissionId: "sbm-x", tree: "f".repeat(64), submittedAt: "2026-11-22T08:00:00.000Z", state: "waiting" as const, reasons: ["no_evidence"], counts: { passed: 0, failed: 0, blocked: 0, notRun: 0, missing: 0 }, pendingRechecks: [] };
+      view = { ...view, items: [item], counts: { passes: 0, waiting: 1, stale: 0, failing: 0 }, truncated: false, scanLimited: true };
+      const listed = await said();
+      assert.match(listed, /^1 task\(s\) wait for QA.*newer code of a listed task, may exist/m, "a partial non-empty view says a listed task's newer code may be missing");
+      assert.doesNotMatch(listed, /\u202e/, "an invisible control character of the title is escaped");
+      const quotedTitle = /Task "([^"]*)"/.exec(listed)?.[1] ?? "";
+      assert.ok(quotedTitle.length <= 80 && quotedTitle.endsWith("..."), `the title is clipped: ${quotedTitle}`);
+      assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(quotedTitle) && quotedTitle.includes("\u{1F600}"), "whole characters only: no half character is left by the clip");
+      view = { ...view, scanLimited: false };
+      assert.doesNotMatch(await said(), /may exist/, "a complete view adds no partial note");
+      // The QA service's refusal reads as an unknown project (the same as one that does not exist).
+      const agentId = (await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "far", grants: [] })).id;
+      void agentId;
+      const far = await principals.authenticate((await principals.issueCredential(owner, "agent:far")).token);
+      assert.equal(await status.ask(far, { kind: "qa_project", projectId: project }), undefined);
     } finally { await world.close(); }
   });
 }

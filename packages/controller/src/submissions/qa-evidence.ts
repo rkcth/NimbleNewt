@@ -549,11 +549,6 @@ export class QaEvidenceService {
   }
 
   /**
-   * Whether the independent QA evidence for one code submission passes, read only. Only current evidence that still holds counts: a self-check never does. Every required check needs a `passed`
-   * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so,
-   * and so is every check named by independent evidence that no longer holds and whose re-check is not done (it is `missing` until a re-check names it again); no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
-   */
-  /**
    * The project's QA picture (card Q02, project QA view): for each task of the project the caller may read, its NEWEST code submission (by `submittedAt`, then ID) and where it stands with QA.
    * `passes`: the gate passes. `waiting`: no independent evidence at all, current or stale (the work waits for QA; a self-check does not count; the checks the contract requires then also read as missing). `stale`: evidence existed but no longer holds, or a re-check is pending.
    * `failing`: current evidence has failed, blocked, not-run or missing checks, or relies on a superseded decision. Older submissions of a task are not shown (the newest is the work). Read only; a task
@@ -601,6 +596,11 @@ export class QaEvidenceService {
     return { projectId, counts, items, truncated, scanLimited };
   }
 
+  /**
+   * Whether the independent QA evidence for one code submission passes, read only. Only current evidence that still holds counts: a self-check never does. Every required check needs a `passed`
+   * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so,
+   * and so is every check named by independent evidence that no longer holds and whose re-check is not done (it is `missing` until a re-check names it again); no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
+   */
   async gate(by: Principal, submissionIdValue: string): Promise<QaGate> { return (await this.gateBound(by, submissionIdValue)).gate; }
 
   /**
