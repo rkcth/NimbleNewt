@@ -1,7 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { assignmentIdOf } from "../domain/assignment-model.js";
-import { derivedId } from "../domain/ids.js";
+import { derivedId, operationIdOf } from "../domain/ids.js";
 import { commandId as checkCommandId, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { ProjectService } from "../domain/service.js";
@@ -645,11 +645,14 @@ export class DocObligationService {
             changes.push({ type: "update", ref: { kind: "doc-obligation", id: f.id }, expectedRevision: f.revision, body: json(next) });
           }
           flagged = found.map((f) => f.id);
-          return { ref: { kind: "doc-obligation", id: found[0]!.id }, creates: false, changes, detail: { flagged } };
+          // The stale documents are kept in the audit detail (at most 20, titles cut whole) so a repeat of this check can send the notice a stop after the write lost (card Q03).
+          return { ref: { kind: "doc-obligation", id: found[0]!.id }, creates: false, changes, detail: { flagged, ...(staled.length === 0 ? {} : { staled: staled.slice(0, 20).map((d) => ({ id: d.id, projectId: d.projectId, title: wholeCut(d.title, 60) })) }) } };
         },
       }));
       replayed = result.replayed;
       wrote = !result.replayed;
+      // A repeat sends the notice again under the same notice ID (the controller keeps one notice per ID), so a stop between the write and the notice, or a notice that could not be sent, is made up.
+      if (replayed) staled = await this.#recordedStaled(scoped);
     } catch (error) {
       if (error !== nothing) throw error;
     }
@@ -667,15 +670,30 @@ export class DocObligationService {
     const tasks: { obligationId: string; taskId: string; assigned: boolean }[] = [];
     for (const m of made) tasks.push({ obligationId: m.obligationId, taskId: m.taskId, assigned: await this.#open(by, m) });
     // Documents that were verified went stale: the owner is told, unless the owner ran this check (they read the answer). After the update tasks, so the notice can say who has them.
-    if (wrote && staled.length > 0 && this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id)) {
+    if (staled.length > 0 && this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id)) {
       // Cut on whole characters (first review): a cut through a character written as two UTF-16 units would leave half of it, which the notice's text check refuses, and the notice would be lost.
-      const cut = (s: string, n: number): string => (s.length <= n ? s : s.slice(0, n).replace(/[\uD800-\uDBFF]$/, ""));
+      const cut = wholeCut;
       const names = staled.map((d) => `"${cut(d.title, 60)}"`).join(", ");
       const text = `${staled.length === 1 ? "A verified document went" : `${staled.length} verified documents went`} stale: ${names}. Update tasks went to their keepers; the docs view shows why.`;
       const noticeId = `doc-stale:${createHash("sha256").update(scoped).digest("hex").slice(0, 40)}`;
       await this.#ports.notify({ commandId: noticeId, projectId: staled[0]!.projectId, obligationId: staled[0]!.id, text: text.length <= 200 ? text : `${cut(text, 196)}...` }).catch(() => undefined);
     }
     return { flagged, tasks, replayed };
+  }
+
+  /** The documents the check recorded as gone stale (from its audit entry), for a repeat that must send the notice again. Nothing when the entry cannot be read. */
+  async #recordedStaled(scopedId: string): Promise<{ id: string; projectId: string; title: string }[]> {
+    try {
+      const stored = await this.#runner.storage.getOperation(operationIdOf(scopedId));
+      const seq = stored?.result.auditSeqs[0];
+      if (seq === undefined) return [];
+      const entry = (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
+      const list = entry?.seq === seq ? entry.detail["staled"] : undefined;
+      if (!Array.isArray(list)) return [];
+      const out: { id: string; projectId: string; title: string }[] = [];
+      for (const d of list) { const o = d as Record<string, unknown>; if (typeof o["id"] === "string" && typeof o["projectId"] === "string" && typeof o["title"] === "string") out.push({ id: o["id"], projectId: o["projectId"], title: o["title"] }); }
+      return out;
+    } catch { return []; }
   }
 
   /** An update task some step of opening has not reached: not created, still proposed, or ready without an assignment. */
@@ -780,4 +798,9 @@ export function docVerifyCode(b: Pick<DocObligationBody, "implementationRefs" | 
  */
 export function landingDocsGate(service: DocObligationService): (taskId: string, submissionId: string) => ReturnType<DocObligationService["landing"]> {
   return async (taskId, submissionId) => service.landing(DOC_AUTO_PRINCIPAL, { taskId, submissionId });
+}
+
+/** Cut to at most `n` units on whole characters: a cut through a character written as two UTF-16 units would leave half of it, which the notice's text check refuses. */
+function wholeCut(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n).replace(/[\uD800-\uDBFF]$/, "");
 }

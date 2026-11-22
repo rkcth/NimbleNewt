@@ -52,12 +52,15 @@ for (const backend of backends) {
         transitionTask: (c: Parameters<ProjectService["transitionTask"]>[0]) => projects.transitionTask(c),
       };
       const assignments = AssignmentService.withEpoch(world.storage, projects.epoch, projects, options);
+      const attempts: string[] = [];
+      let lose = false;
       const notices: { commandId: string; projectId: string; obligationId: string; text: string }[] = [];
       const docs = DocObligationService.withEpoch(world.storage, projects.epoch, {
         rolesOf: async (id) => roles.get(id) ?? [],
         gate: async (_by, s) => gates.get(s) ?? ((): never => { throw new DomainError("not_found", "no such submission"); })(),
         projects: wrapped as never, assignments,
-        notify: async (x) => { notices.push(x); },
+        // Like the controller's notifications: one notice per notice ID, however often it is sent; `attempts` counts every send, and `lose` makes the next send fail (a stop before the notice).
+        notify: async (x) => { attempts.push(x.commandId); if (lose) { lose = false; throw new DomainError("unavailable", "no channel"); } if (!notices.some((n) => n.commandId === x.commandId)) notices.push(x); },
       }, options);
       const ann = await agent("ann", ["author"]);
       const dora = await agent("dora", ["docs"]);
@@ -88,20 +91,32 @@ for (const backend of backends) {
       const l2 = code(login, treeB);
       assert.deepEqual([...(await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: l2 })).flagged].sort(), [guide, faq].sort());
       assert.equal(notices.length, 0, "the owner's own check sends no notice");
+      // Nor does the owner's own check sent again (the repeat reads the stored answer, and the record of what went stale must not turn it into a notice).
+      const ownerCheck = cid("i");
+      const l2b = code(login, treeA);
+      await docs.impact(owner, { commandId: ownerCheck, taskId: login, submissionId: l2b });
+      await docs.impact(owner, { commandId: ownerCheck, taskId: login, submissionId: l2b });
+      assert.equal(attempts.length, 0, "the owner's check and its repeat send nothing");
       await verify(guide, [l2, s1]);
       await verify(faq, [l2]);
       // A docs agent's check that makes verified documents stale: one notice naming them, about the first.
       const l3 = code(login, treeA);
       const agentCheck = cid("i");
+      lose = true;
       await docs.impact(dora, { commandId: agentCheck, taskId: login, submissionId: l3 });
-      assert.equal(notices.length, 1);
+      // The notice was lost (the send failed after the write); the check itself stands.
+      assert.equal(notices.length, 0, "the first send was lost");
+      assert.equal(attempts.length, 1);
+      await docs.impact(dora, { commandId: agentCheck, taskId: login, submissionId: l3 });
+      assert.equal(notices.length, 1, "the repeat of the same check makes the lost notice up");
       assert.equal(notices[0]!.projectId, project);
       assert.ok([guide, faq].includes(notices[0]!.obligationId));
       assert.match(notices[0]!.text, /^2 verified documents went stale: .*"User guide".*"FAQ"|^2 verified documents went stale: .*"FAQ".*"User guide"/);
       assert.ok(notices[0]!.text.length <= 200);
-      // The same check again is a replay: no second notice.
+      // The same check again once more: the same notice ID, so the controller keeps one notice; the owner's own repeat of a check sends nothing.
       await docs.impact(dora, { commandId: agentCheck, taskId: login, submissionId: l3 });
-      assert.equal(notices.length, 1, "a repeat sends nothing");
+      assert.equal(notices.length, 1, "a repeat leaves one notice");
+      assert.ok(attempts.every((a) => a === notices[0]!.commandId), "every send of this check carries the same notice ID");
       await verify(guide, [l3, s1]);
       await verify(faq, [l3]);
       // A title of characters written as two UTF-16 units each, cut inside one at 60 (first review): the notice is cut on a whole character, so its text stays well-formed (a half character is refused, and the notice would be lost).
