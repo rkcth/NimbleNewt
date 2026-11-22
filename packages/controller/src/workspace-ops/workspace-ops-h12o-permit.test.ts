@@ -1,0 +1,94 @@
+import assert from "node:assert/strict";
+import { after, test } from "node:test";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import { DomainError } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
+import { ProjectService } from "../domain/service.js";
+import { scopedCommandId } from "../security/credentials.js";
+import { PrincipalService } from "../security/index.js";
+import { WorkspaceOpService, type WorkspaceCall, type WorkspaceDeps, type WorkspaceOutcome } from "./index.js";
+
+after(stopServer);
+
+// Card H12o (permit slice): the controller marks a submission's release as a permit commit only when a reviewer approved it. Before: a release that names an approved submission commits exactly its tree on its base, once. The controller's side: what is refused before anything is recorded, what the host is told,
+// the one commit record per submission written with the release that made or found the commit, a repeat answered from that record, and a retry or restart between the commit and its record.
+const options = { clock: () => "2026-11-17T10:00:00.000Z", pause: async () => undefined };
+const BASE = "b".repeat(40), TREE = "e".repeat(40), COMMIT = "c".repeat(40), OTHER = "f".repeat(40);
+const S1 = "sbm-aaaaaaaaaaaaaaaaaaaa", S2 = "sbm-bbbbbbbbbbbbbbbbbbbb";
+const refuses = async (code: string, run: () => Promise<unknown>, match?: RegExp) => assert.rejects(run, (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, code, e.message); if (match !== undefined) assert.match(e.message, match); return true; });
+/** What the local host answers for a submission's release (see `WorkspaceHost.#release`). */
+const committed = (call: WorkspaceCall, more: { recovered?: boolean; commit?: string; tree?: string; submission?: string | null } = {}): WorkspaceOutcome => ({
+  ok: true, summary: "committed",
+  detail: { committed: true, commit: more.commit ?? COMMIT, parent: call.submission!.base, tree: more.tree ?? call.submission!.tree, files: 1, ...(more.submission === null ? {} : { submission: more.submission ?? call.submission!.id }), recovered: more.recovered === true, changed: more.recovered !== true },
+});
+
+for (const backend of backends) {
+  const rig = async () => {
+    const store = await backend.open();
+    const projects = await ProjectService.open(store.storage, { holder: "c1", ...options });
+    const principals = PrincipalService.withEpoch(store.storage, projects.epoch, options);
+    const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+    const project = (await projects.createProject({ commandId: "p", actor: owner.id, name: "P" })).id;
+    const task = (await projects.createTask({ commandId: "t", actor: owner.id, projectId: project, title: "T" })).id;
+    const other = (await projects.createTask({ commandId: "t2", actor: owner.id, projectId: project, title: "T2" })).id;
+    // The submissions as `SubmissionService.approvalOf` would answer: S1 of `task`, S2 of `other`.
+    const approvals = new Map<string, { taskId: string; base: string; tree: string; approved: boolean; approvedBy?: string; reason?: string }>([
+      [S1, { taskId: task, base: BASE, tree: TREE, approved: false, reason: "no reviewer has approved it yet" }],
+      [S2, { taskId: other, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev" }],
+    ]);
+    const calls: WorkspaceCall[] = [];
+    let answer: (call: WorkspaceCall) => Promise<WorkspaceOutcome> = async (call) => committed(call);
+    let beforeRun: () => void = () => undefined;
+    const deps = (more: Partial<WorkspaceDeps> = {}): WorkspaceDeps => ({
+      quiesce: { around: async (_scope, _op, run) => { beforeRun(); return run({ attempts: [] } as never); } },
+      portOf: async () => ({ run: async (call) => { calls.push(call); return answer(call); } }),
+      approvalOf: async (id) => approvals.get(id),
+      ...more,
+    });
+    const service = (more: Partial<WorkspaceDeps> = {}) => WorkspaceOpService.withEpoch(store.storage, projects.epoch, deps(more), options);
+    const recorded = async (commandId: string) => store.storage.getAggregate({ kind: "workspace-request", id: derivedId("wsr", scopedCommandId(owner.id, commandId)) });
+    return { store, owner, project, task, other, approvals, calls, service, recorded, setAnswer: (f: typeof answer) => { answer = f; }, setBeforeRun: (f: () => void) => { beforeRun = f; } };
+  };
+
+  test(`${backend.name}: a reviewer's approval makes the release a permit commit and the record says what the host answered; the one-agent approval never does (card H12o, permit slice)`, async () => {
+    const r = await rig();
+    try {
+      const svc = r.service();
+      // A reviewer's approval: the host is told `permit`, and its confirmation is kept on the commit record.
+      r.approvals.set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:rev" });
+      r.setAnswer(async (call) => { const o = committed(call); return { ...o, detail: { ...(o as { detail: object }).detail, permitted: true } } as WorkspaceOutcome; });
+      const first = await svc.request(r.owner, { commandId: "p1", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 });
+      assert.equal(first.state, "done", first.summary);
+      assert.equal(r.calls[0]!.permit, true);
+      assert.equal((await svc.submissionCommit(S1))?.permitted, true);
+      // Asking again is answered from the record and does not ask the host.
+      await svc.request(r.owner, { commandId: "p2", operation: "release", taskId: r.task, reason: "again", submissionId: S1 });
+      assert.equal(r.calls.length, 1);
+      // The one-agent approval (no reviewer judged it): no permit asked, whatever the host answers; a host that answers `permitted` for it is recorded as the host said only if it did.
+      r.approvals.set(S2, { taskId: r.other, base: BASE, tree: TREE, approved: true, approvedBy: "review_disabled_single_agent" });
+      r.setAnswer(async (call) => committed(call));
+      const single = await svc.request(r.owner, { commandId: "p3", operation: "release", taskId: r.other, reason: "commit", submissionId: S2 });
+      assert.equal(single.state, "done", single.summary);
+      assert.equal(r.calls[1]!.permit, undefined, "no permit is asked for a one-agent approval");
+      assert.equal((await svc.submissionCommit(S2))?.permitted, undefined);
+      // A plain release never carries it.
+      r.setAnswer(async () => ({ ok: true, summary: "plain", detail: { committed: true, commit: OTHER, parent: BASE, tree: TREE, files: 1, changed: true } }));
+      const plain = await svc.request(r.owner, { commandId: "p4", operation: "release", taskId: r.other, reason: "plain" });
+      assert.equal(plain.state, "done");
+      assert.equal(r.calls[2]!.permit, undefined);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a host that makes a plain commit for a reviewer-approved request is recorded as not permitted (card H12o, permit slice)`, async () => {
+    const r = await rig();
+    try {
+      r.approvals.set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:rev" });
+      const svc = r.service();
+      r.setAnswer(async (call) => committed(call));
+      const out = await svc.request(r.owner, { commandId: "q1", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 });
+      assert.equal(out.state, "done");
+      assert.equal(r.calls[0]!.permit, true);
+      assert.equal((await svc.submissionCommit(S1))?.permitted, undefined, "the record never claims a permit the host did not confirm");
+    } finally { await r.store.close(); }
+  });
+}

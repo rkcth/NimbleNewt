@@ -132,8 +132,13 @@ test("an approved submission is committed once through the release operation on 
     assert.equal(git1("rev-parse", "HEAD"), d.commit);
     assert.equal(git1("log", "-1", "--format=%T"), sub.tree);
     assert.match(git1("log", "-1", "--format=%B"), new RegExp(`^NimbleNewt-Submission: ${sub1}$`, "m"));
-    const made = (await c.storage.getAggregate({ kind: "submission-commit", id: sub1 }))?.body as { commitId?: string; requestId?: string; recovered?: boolean } | undefined;
+    const made = (await c.storage.getAggregate({ kind: "submission-commit", id: sub1 }))?.body as { commitId?: string; requestId?: string; recovered?: boolean; permitted?: boolean } | undefined;
     assert.deepEqual([made?.commitId, made?.requestId, made?.recovered], [d.commit, done.result.id, false]);
+    // A reviewer other than the author approved it, so the commit is a review-gate permit commit (card H12o, permit slice): the permit's marks, a line in the host's permit ledger, so a landing that requires the
+    // permit (this host's default policy) no longer refuses it; the record keeps what the host confirmed.
+    assert.deepEqual([d.permitted, d.permitRequiredToLand, made?.permitted], [true, false, true]);
+    assert.match(git1("log", "-1", "--format=%B"), new RegExp(`^NimbleNewt-Request: ${done.result.id}$`, "m"));
+    assert.deepEqual(await git.unpermitted({ gitDir: where1.gitDir, taskId: one.task }), []);
     // Asked again: the recorded commit, the host not asked, no second commit.
     const calls = hostCalls;
     const again = await release(one.task, sub1, "rel-2");
@@ -163,8 +168,9 @@ test("an approved submission is committed once through the release operation on 
     assert.deepEqual([retry.result.state, retry.result.detail.commit, retry.result.detail.recovered], ["done", committed, true]);
     assert.equal(git2("rev-list", "--count", `${base2}..HEAD`), "1");
     assert.equal(git2("log", "-1", "--format=%T"), sub2Body.tree);
-    const made2 = (await c.storage.getAggregate({ kind: "submission-commit", id: sub2 }))?.body as { commitId?: string; recovered?: boolean } | undefined;
-    assert.deepEqual([made2?.commitId, made2?.recovered], [committed, true]);
+    const made2 = (await c.storage.getAggregate({ kind: "submission-commit", id: sub2 }))?.body as { commitId?: string; recovered?: boolean; permitted?: boolean } | undefined;
+    assert.deepEqual([made2?.commitId, made2?.recovered, made2?.permitted], [committed, true, true]);
+    assert.deepEqual(await git.unpermitted({ gitDir: where2.gitDir, taskId: two.task }), []);
     for (const f of finishes) f();
     await c.dispatch.dispatcher.idle();
   } finally { for (const f of finishes) f(); await c.close(); try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing to open */ } rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

@@ -31,6 +31,10 @@ const RECORD = "workspace-request";
 const OPEN = "workspace-open";
 /** One record per task: how many refresh rounds the author has made (card H12p), counted in the same write that records the finished request. */
 const ROUNDS = "workspace-rounds";
+/** The approval a one-agent project records instead of a review (`REVIEW_DISABLED_SINGLE_AGENT` of the submission service): no reviewer judged the work, so it is never a permit. */
+const NO_REVIEWER = "review_disabled_single_agent";
+/** Whether a submission's recorded approval is a reviewer's (card H12o, permit slice): the only approval that makes its commit a review-gate permit commit. */
+const reviewerApproved = (approvedBy: string): boolean => approvedBy !== NO_REVIEWER && approvedBy.length > 0;
 /** One record per approved submission that was committed (card H12o). */
 const SUBMISSION_COMMIT = "submission-commit";
 const SUBMISSION_ID = /^sbm-[a-z2-7]{20}$/;
@@ -49,6 +53,11 @@ export interface WorkspaceCall {
   readonly quietAttempts: readonly string[];
   /** The agent the task is assigned to (the request is recorded against it, and what is carried into the shared workspace is attributed to it). Absent when nobody is assigned. */
   readonly assignee?: string;
+  /**
+   * A `release` of an approved submission whose approval is a reviewer's (card H12o, permit slice): the host makes the commit a review-gate permit commit. Never set for the single-agent approval (no reviewer judged it) nor
+   * for any other operation.
+   */
+  readonly permit?: true;
   /**
    * The owner's landing policy as the controller read it for this landing (card H12a). Set only by the remote host's port, which reads it fresh from the same reader a local host uses and carries it in the request to a
    * host that cannot read the controller's settings. A local host reads the policy itself and ignores this.
@@ -138,7 +147,7 @@ export interface WorkspaceRecordBody {
   readonly returned?: { readonly paths: readonly string[]; readonly to?: string; readonly cycles?: number; readonly limit?: number; readonly escalated?: boolean };
 }
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
-export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean }
+export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean; /** Whether the host made or found the commit as a review-gate permit commit (a reviewer's approval). Absent on records made before this was kept. */ readonly permitted?: boolean }
 export interface WorkspaceAnswer extends WorkspaceRecordBody { readonly id: string; readonly replayed: boolean }
 
 export interface WorkspaceDeps {
@@ -616,7 +625,7 @@ export class WorkspaceOpService {
           }
         }
         // The host is told both what the queue says lands (card P10: base == head, exactly that tree) and the tree the checks ran on (card P09); it lands only when both hold.
-        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }), ...(body.queued === undefined ? {} : reapplied === undefined ? { submission: { id: body.queued.submissionId, base: body.queued.base, tree: body.queued.tree } } : { submission: { id: body.queued.submissionId, base: reapplied.base, tree: reapplied.tree }, reappliedFrom: { base: body.queued.base, tree: body.queued.tree } }), ...(gated?.tree === undefined || gated.required.length === 0 ? {} : { checkedTree: gated.tree }) });
+        const answer = await port!.run({ requestId: id, operation: body.operation, taskId: body.taskId, projectId: body.projectId, reason: body.reason, quietAttempts, ...(body.assignee === undefined ? {} : { assignee: body.assignee }), ...(body.submission === undefined ? {} : { submission: { id: body.submission.id, base: body.submission.base, tree: body.submission.tree } }), ...(body.operation === "release" && body.submission !== undefined && reviewerApproved(body.submission.approvedBy) ? { permit: true as const } : {}), ...(body.queued === undefined ? {} : reapplied === undefined ? { submission: { id: body.queued.submissionId, base: body.queued.base, tree: body.queued.tree } } : { submission: { id: body.queued.submissionId, base: reapplied.base, tree: reapplied.tree }, reappliedFrom: { base: body.queued.base, tree: body.queued.tree } }), ...(gated?.tree === undefined || gated.required.length === 0 ? {} : { checkedTree: gated.tree }) });
         if (answer !== null && typeof answer === "object" && answer.ok === true) {
           const found = (answer.detail ?? {}) as { changed?: unknown; landed?: unknown; written?: unknown; kept?: unknown; keptFiles?: unknown; partial?: unknown };
           changed = found.changed !== false;
@@ -722,10 +731,10 @@ export class WorkspaceOpService {
   async #commitChange(requestId: string, final: WorkspaceRecordBody): Promise<Change[]> {
     const s = final.submission;
     if (final.operation !== "release" || s === undefined || final.state !== "done") return [];
-    const d = (final.detail ?? {}) as { committed?: unknown; alreadyRecorded?: unknown; commit?: unknown; parent?: unknown; tree?: unknown; submission?: unknown; recovered?: unknown };
+    const d = (final.detail ?? {}) as { committed?: unknown; alreadyRecorded?: unknown; commit?: unknown; parent?: unknown; tree?: unknown; submission?: unknown; recovered?: unknown; permitted?: unknown };
     if (d.committed !== true || d.alreadyRecorded === true || d.submission !== s.id || typeof d.commit !== "string" || !OID.test(d.commit) || d.parent !== s.base || d.tree !== s.tree) return [];
     if ((await this.#runner.get(SUBMISSION_COMMIT, s.id)) !== undefined) return [];
-    const body: SubmissionCommitBody = { submissionId: s.id, taskId: final.taskId, commitId: d.commit, parent: s.base, tree: s.tree, requestId, at: this.#runner.now(), recovered: d.recovered === true };
+    const body: SubmissionCommitBody = { submissionId: s.id, taskId: final.taskId, commitId: d.commit, parent: s.base, tree: s.tree, requestId, at: this.#runner.now(), recovered: d.recovered === true, ...(d.permitted === true ? { permitted: true } : {}) };
     return [{ type: "create", ref: { kind: SUBMISSION_COMMIT, id: s.id }, body: json(body) }];
   }
 
