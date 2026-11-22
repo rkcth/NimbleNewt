@@ -94,7 +94,7 @@ import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationSe
 import { replayResolvers } from "../activity/replay-resolvers.js";
 import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
-import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, SubmissionService, attemptOfAgents } from "../submissions/index.js";
+import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, SubmissionService, attemptOfAgents, landingQaGate } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute, targetOf } from "../routing/index.js";
 import { LANDING_SETTING_KEYS, landingPolicyFrom } from "./landing-policy.js";
@@ -969,13 +969,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       landingGate: (call) => landingGate.evaluate(call),
       tellAuthor: async (n) => { await messages.noticeFromController({ commandId: n.commandId, taskId: n.taskId, to: n.to.startsWith("agent:") ? n.to : `agent:${n.to}`, purpose: "your landing was refused by the required checks", text: n.text }); },
     });
-    const landingQaReader = { id: "service:landing-gate", kind: "owner", name: "landing-gate", grants: [] } as unknown as Principal;
     const landingGate = new LandingGate({
       requiredChecks: async (projectId) => (await integration.effective(projectId)).requiredChecks,
       tests: (taskId, authors) => contracts.landingTests(taskId, authors),
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
       // Card P09: the `qa` check reads the submission's QA gate (independent evidence, as the owner would).
-      qaGate: async (submissionId) => qaEvidence.gate(landingQaReader, submissionId),
+      qaGate: async (submissionId) => landingQaGate(qaEvidence)(submissionId),
       now: () => new Date().toISOString(),
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });

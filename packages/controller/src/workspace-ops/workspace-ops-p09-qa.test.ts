@@ -7,7 +7,7 @@ import { ProjectService } from "../domain/service.js";
 import { LandingGate, type LandingCheckHostReport } from "../landing/index.js";
 import { IntegrationPolicyService } from "../policy/integration-policy.js";
 import { PrincipalService, type Principal } from "../security/index.js";
-import { QaEvidenceService } from "../submissions/index.js";
+import { QaEvidenceService, landingQaGate } from "../submissions/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { WorkspaceOpService, type WorkspacePort, type WorkspaceDeps } from "./index.js";
 
@@ -51,12 +51,12 @@ for (const backend of backends) {
     const approvals = new Map<string, { taskId: string; base: string; tree: string; patchId?: string; approved: boolean; approvedBy?: string; newest?: "approve" | "changes" | "reject"; submittedBy?: string }>([
       [sub, { taskId: task, base: BASE, tree: TREE, patchId: PATCH, approved: true, approvedBy: "agent:rev", newest: "approve", submittedBy: ann.id }],
     ]);
-    const reader = { id: "service:landing-gate", kind: "owner", name: "landing-gate", grants: [] } as unknown as Principal;
     const gate = new LandingGate({
       requiredChecks: async (p) => (await integration.effective(p)).requiredChecks,
       tests: async () => undefined,
       approvalOf: async (id) => approvals.get(id),
-      qaGate: async (id: string) => qaService.gate(reader, id),
+      // The controller's own composition (start.ts uses the same function).
+      qaGate: landingQaGate(qaService),
       now: options.clock,
     });
     const host = { change: { base: BASE, head: HEAD, tree: TREE, patchId: PATCH } as LandingCheckHostReport["change"], reviewedPatch: PATCH as string | undefined, during: undefined as undefined | (() => Promise<void>) };
@@ -82,7 +82,15 @@ for (const backend of backends) {
     const service = WorkspaceOpService.withEpoch(store.storage, projects.epoch, deps(), options);
     const land = (commandId: string, submissionId: string | undefined = sub) => service.request(owner, { commandId, operation: "landing", taskId: task, reason: "ready", ...(submissionId === undefined ? {} : { submissionId }) });
     const evidence = (by: Principal, result: string, extra: { submissionId?: string } = {}) => qaService.record(by, { commandId: cid("ev"), submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "smoke", result }], ...extra });
-    return { store, owner, ann, qa, task, sub, approvals, host, calls, told, land, evidence, plant, integration, project };
+    // A second code submission of the same task (another tree), and one of another task.
+    const sub2 = derivedId("sbm", cid("sub2"));
+    await plant("submission", sub2, { ...code, tree: OLD_TREE, patchId: NEW_PATCH, submittedAt: "2026-11-18T09:10:00.000Z" });
+    approvals.set(sub2, { taskId: task, base: BASE, tree: OLD_TREE, patchId: NEW_PATCH, approved: true, approvedBy: "agent:rev", newest: "approve", submittedBy: ann.id });
+    const otherTask = (await projects.createTask({ commandId: cid("t2"), actor: owner.id, projectId: project, title: "T2" })).id;
+    const foreign = derivedId("sbm", cid("subx"));
+    await plant("submission", foreign, { ...code, taskId: otherTask });
+    approvals.set(foreign, { taskId: otherTask, base: BASE, tree: TREE, patchId: PATCH, approved: true, approvedBy: "agent:rev", newest: "approve", submittedBy: ann.id });
+    return { store, owner, ann, qa, task, sub, sub2, foreign, approvals, host, calls, told, land, evidence, plant, integration, project };
   };
 
   test(`${backend.name}: the qa check passes only on independent evidence for the named submission; none, a self-check, a failure, blocked and not-run each refuse and go back to the author (card P09)`, async () => {
@@ -172,6 +180,29 @@ for (const backend of backends) {
       const unreviewed = await r.land("b3");
       assert.deepEqual(unreviewed.checks!.results.map((x) => [x.check, x.result]), [["review", "fail"], ["qa", "pass"]]);
       assert.equal(unreviewed.state, "refused");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: evidence for another submission of the task, a submission of another task, and evidence made stale by a contract change do not count (card P09)`, async () => {
+    const r = await rig();
+    try {
+      // An independent pass on another submission (another tree) of the same task says nothing about the named one.
+      await r.evidence(r.qa, "passed", { submissionId: r.sub2 });
+      const other = await r.land("o1");
+      assert.deepEqual([other.state, other.checks!.results[0]!.result], ["refused", "not_run"], other.summary);
+      assert.match(other.checks!.results[0]!.summary, /no_evidence/);
+      // Evidence of another task's submission (same tree and patch) cannot be used by naming it: the request does not find it for this task (the gate's own task check is in landing-gate.test.ts).
+      assert.equal((await r.evidence(r.qa, "passed", { submissionId: r.foreign })).source, "independent");
+      await assert.rejects(r.land("o2", r.foreign), (error: { code?: string }) => error.code === "not_found");
+      assert.equal(r.calls.runs.length, 0);
+      // A pass that held, then the task contract changed: the evidence is stale and the landing is refused.
+      await r.evidence(r.qa, "passed");
+      assert.equal((await r.land("o3")).state, "done");
+      await r.plant("task-contract", r.task, { taskId: r.task, version: 1, acceptanceCriteria: ["the page loads"], requiredEvidence: [], checks: [{ name: "smoke", run: ["true"] }] });
+      const stale = await r.land("o4");
+      assert.deepEqual([stale.state, stale.checks!.results[0]!.result], ["refused", "fail"], stale.summary);
+      assert.match(stale.checks!.results[0]!.summary, /stale_evidence/);
+      assert.equal(r.calls.runs.length, 1);
     } finally { await r.store.close(); }
   });
 }

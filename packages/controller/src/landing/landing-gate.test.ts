@@ -180,6 +180,7 @@ test("qa: a passed gate passes; a gate for another tree or task, a missing gate 
   assert.deepEqual((await qaRun({})).results.map((x) => x.result), ["pass"]);
   assert.equal((await qaRun({ tree: OLD_TREE })).results[0]!.result, "not_run");
   assert.equal((await qaRun({ taskId: "tsk-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run");
+  assert.equal((await qaRun({ submissionId: "sbm-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run", "a gate for another submission does not count");
   assert.equal((await qaRun(undefined)).results[0]!.result, "not_run");
   const thrown = await qaRun(async () => { throw new Error("storage down"); });
   assert.deepEqual([thrown.passed, thrown.results[0]!.result], [false, "not_run"]);
