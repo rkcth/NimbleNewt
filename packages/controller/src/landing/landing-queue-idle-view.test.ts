@@ -139,7 +139,7 @@ for (const backend of backends) {
       const late = stuck(await view(r, r.w.owner));
       assert.equal(late.length, 1);
       assert.match(late[0]!, /longer than the 12 h bound: while approved work waits behind it the controller ends the reservation at its next regular round, or at the next landing asked for behind it, which is then judged on the queue without the place \(it goes ahead when its submission is then first\); with nothing waiting behind it nothing ends it; taking the task out with landing\.queue\.remove lets others land at once\./);
-      // Nothing ended it on a clock: the view only reads.
+      // The view only reads (no controller round runs in this rig): the place is still there.
       assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
       const out = await (await r.lander(ivy, t2))(t2);
       assert.equal(out.state, "done", out.summary);

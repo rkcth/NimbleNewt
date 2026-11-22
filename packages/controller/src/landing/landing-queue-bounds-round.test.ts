@@ -11,7 +11,7 @@ import { WaitService } from "../domain/waits.js";
 import { ContractService } from "../planning/contracts.js";
 import { StatusService } from "../status/index.js";
 import { WorkspaceOpService, type WorkspaceCall, type WorkspaceOutcome } from "../workspace-ops/index.js";
-import { IntegratorLeaseOps, IntegratorLeaseService, LANDING_QUEUE_LIMITS, LandingQueueOps, LandingQueueService, frontOf, type QueueApproval } from "./index.js";
+import { BOUNDS_SWEEP_EVERY_MS, IntegratorLeaseOps, IntegratorLeaseService, LANDING_QUEUE_LIMITS, LandingQueueOps, LandingQueueService, frontOf, type QueueApproval } from "./index.js";
 
 after(stopServer);
 // Card P10, eleventh slice: the controller's regular round over the bounds that end a stuck first place (`LandingQueueOps.sweepBounds`). Until then both bounds were looked at only when a landing was asked for
@@ -262,6 +262,45 @@ for (const backend of backends) {
       assert.deepEqual(await r.ops.sweepBounds(), { checked: 1, released: 0, partial: false });
       assert.deepEqual(await r.queued(), [[1, t1], [2, t2]]);
       assert.equal(released(r).length, 0);
+    } finally { await r.close(); }
+  });
+  test(`${backend.name}: the branch judged is the one the task waiting behind the place lands on, as at a refused landing: a waiting task whose own setting names another branch ends nothing (card P10, eleventh slice review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    try {
+      // The first place's task still lands on main, but the task waiting behind it is now judged on another branch (a task's own landing setting): no landing behind the place can be asked for on main.
+      const away = await reservedAway(r, "-away", "main");
+      r.w.clock.advance(13 * HOUR);
+      r.branches.set(away.t2, "release");
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 0, released: 0, partial: false });
+      // A landing of that task asked for now is judged on its own branch and ends nothing either.
+      assert.equal(await r.ops.checkLanding(r.w.owner, { taskId: away.t2, projectId: r.w.project, submissionId: undefined }), undefined, "judged on the empty queue of its own branch");
+      const q = await r.queue.get(r.w.project, "main");
+      assert.deepEqual([q.front?.taskId, (q.reservations ?? []).length, released(r).length], [away.t1, 1, 0], "the reserved place stays");
+      // The other way round: the first place's own task names another branch, the waiting task lands on main: a landing asked for behind the place would end it, and so does the round.
+      r.branches.set(away.t2, "main");
+      r.branches.set(away.t1, "release");
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 1, released: 1, partial: false });
+      assert.deepEqual(released(r).map((t) => t.taskId), [away.t1]);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: the dispatcher's throttled round walks the queues at most once a minute of the queue's clock, and an unthrottled call always walks (card P10, eleventh slice review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    try {
+      const { t1, t2 } = await reservedAway(r);
+      r.w.clock.advance(12 * HOUR - MIN);
+      assert.deepEqual(await r.ops.sweepBounds({ throttled: true }), { checked: 1, released: 0, partial: false });
+      r.w.clock.advance(MIN);
+      // Past the release bound, but within a minute of the last walk: skipped, nothing ended.
+      r.w.clock.advance(-1);
+      assert.deepEqual(await r.ops.sweepBounds({ throttled: true }), { checked: 0, released: 0, partial: false, skipped: true });
+      assert.equal((await r.list()).front?.taskId, t1);
+      r.w.clock.advance(1);
+      assert.equal(BOUNDS_SWEEP_EVERY_MS, MIN);
+      assert.deepEqual(await r.ops.sweepBounds({ throttled: true }), { checked: 1, released: 1, partial: false });
+      assert.equal((await r.list()).front?.taskId, t2);
+      assert.deepEqual((await r.ops.sweepBounds({ throttled: true })).skipped, true, "the next tick at the same moment is skipped");
+      assert.equal((await r.ops.sweepBounds()).skipped, undefined, "an unthrottled call walks");
     } finally { await r.close(); }
   });
 }
