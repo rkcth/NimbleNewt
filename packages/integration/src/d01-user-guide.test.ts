@@ -434,9 +434,14 @@ test("every status view the guide's finished-work section lists is a real status
   assert.ok(real.size > 30, "the status kinds were read from the source");
   assert.deepEqual([...rows.map((l) => l.kind)].sort(), [...FINISHED_WORK_KINDS].sort(), "the guide lists exactly the finished-work views this test knows");
   for (const l of rows) assert.ok(real.has(l.kind), `${l.kind} is not a status kind`);
-  // Each view and each owner control the section names is described in the prose around the block, in words.
-  const text = guide();
-  for (const word of ["Submissions", "QA", "Defects", "unfinished defects", "Documents of a task", "landing queue", "reserved place", "escalated", "accept it as is", "let the repair go on", "withdraw", "director", "Release after a reviewer", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
+  // Each view and each owner control the section names is described in the prose of that section (from its heading to the next one of the same level), in words.
+  const whole = guide();
+  const from = whole.indexOf("\n## Checking on finished work");
+  assert.ok(from >= 0, "the guide has the finished-work section");
+  const next = whole.indexOf("\n## ", from + 1);
+  const text = whole.slice(from, next < 0 ? undefined : next);
+  // The views and controls are the section's bold terms (a plain word such as "withdraw" would still be found inside "withdrawn" after the control itself was dropped).
+  for (const word of ["**Submissions**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**release**", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
 
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
   // The stand-in reads the owner's words the way the interpreter prompt asks a model to: a task view names the task by its title (the chat finds it in the project in focus), and a project view
