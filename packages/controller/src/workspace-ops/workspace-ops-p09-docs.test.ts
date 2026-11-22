@@ -174,7 +174,7 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
-  test(`${backend.name}: a document recorded while the host runs the checks refuses the landing; no submission, no reader and an unreadable answer are not run (card P09)`, async () => {
+  test(`${backend.name}: a document recorded while the host runs the checks refuses the landing; a landing that names no submission is not run (no reader and an unreadable answer: landing-gate.test.ts) (card P09)`, async () => {
     const r = await rig();
     try {
       r.host.during = async () => { await r.record("Late guide"); };
@@ -186,6 +186,28 @@ for (const backend of backends) {
       assert.deepEqual([unnamed.state, unnamed.checks!.results[0]!.result], ["refused", "not_run"]);
       assert.match(unnamed.checks!.results[0]!.summary, /names no code submission/);
       assert.equal(r.calls.runs.length, 0);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a document verified against another submission of the task with the very same tree counts while that code's QA gate passes; the reader refuses code of another task (card P09)`, async () => {
+    const r = await rig();
+    try {
+      const ob = await r.record("Guide");
+      await r.passed(r.sub);
+      await r.verify(ob.id, r.sub, await r.document());
+      // The same code submitted again (no QA evidence of its own): the document stands on the first submission's tested code.
+      const again = derivedId("sbm", cid("again"));
+      await r.plant("submission", again, { taskId: r.task, projectId: r.project, kind: "code", role: "author", submittedBy: r.ann.id, submittedAt: "2026-11-18T09:20:00.000Z", makesCommit: true, base: BASE, tree: TREE, patchId: PATCH, evidence: [] });
+      r.approvals.set(again, { taskId: r.task, base: BASE, tree: TREE, patchId: PATCH, approved: true, approvedBy: "agent:rev", newest: "approve", submittedBy: r.ann.id });
+      const same = await r.land("s1", again);
+      assert.equal(same.state, "done", same.summary);
+      // That tested code loses its QA gate: the document no longer stands on tested code, and the summary names the code it was verified against.
+      await r.passed(r.sub, "failed");
+      const lost = await r.land("s2", again);
+      assert.deepEqual([lost.state, lost.checks!.results[0]!.result], ["refused", "fail"], lost.summary);
+      assert.ok(lost.checks!.results[0]!.summary.includes(`verified against (${r.sub}) no longer passes its QA gate`), lost.checks!.results[0]!.summary);
+      // Read directly, the reader refuses a submission of another task (the landing gate compares the task too).
+      await assert.rejects(landingDocsGate(r.docService)(r.task, r.foreign), /is code of task/);
     } finally { await r.store.close(); }
   });
 

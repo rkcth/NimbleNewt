@@ -123,7 +123,7 @@ test("a reviewer's approval carries over to another tree only while the patch ID
   assert.match(unnamed.summary, /names no reviewed code submission/);
 });
 
-test("qa, docs and director are not collected at landing yet, so they do not pass; a project that requires nothing is not gated and the host is not asked; unreadable required checks throw (card P09)", async () => {
+test("qa and docs without their readers wired, and director (not collected at landing yet), do not pass; a project that requires nothing is not gated and the host is not asked; unreadable required checks throw (card P09)", async () => {
   const r = await gate({ required: ["qa", "docs", "director"] }).g.evaluate({ taskId: TASK, projectId: "proj-x", host: host({}).h });
   assert.equal(r.passed, false);
   assert.deepEqual(r.results.map((x) => [x.check, x.result]), [["qa", "not_run"], ["docs", "not_run"], ["director", "not_run"]]);
@@ -224,6 +224,26 @@ test("docs: nothing pending passes; pending documents fail and are named; a gate
   assert.equal(thrown.results[0]!.result, "not_run");
   assert.match(thrown.results[0]!.summary, /storage down/);
   assert.equal((await docsRun({}, { submissionId: undefined })).results[0]!.result, "not_run");
+});
+
+test("docs: many pending documents: at most five are named whole within the summary and the rest are counted (card P09)", async () => {
+  const many = (n: number, title: (i: number) => string) => Array.from({ length: n }, (_, i) => ({ obligationId: `dob-${String(i).repeat(20)}`, title: title(i), reason: "never verified" }));
+  const short = await docsRun({ checked: 9, pending: many(7, (i) => `G${i}`) });
+  assert.deepEqual([short.passed, short.results[0]!.result], [false, "fail"]);
+  const s = short.results[0]!.summary;
+  assert.match(s, /^7 of 9 document\(s\)/);
+  for (let i = 0; i < 5; i++) assert.ok(s.includes(`G${i} (never verified)`), `names G${i}: ${s}`);
+  assert.ok(!s.includes("G5") && !s.includes("G6"), "names no more than five");
+  assert.match(s, /; and 2 more$/);
+  assert.match((await docsRun({ checked: 2, pending: many(2, (i) => `G${i}`) })).results[0]!.summary, /G0 \(never verified\); G1 \(never verified\)$/, "nothing is counted when all are named");
+  // Long titles: only what fits is named whole; the first is shortened when it alone is too long; the count is never cut off.
+  const long = (await docsRun({ checked: 4, pending: many(4, (i) => `${String(i).repeat(120)}`) })).results[0]!.summary;
+  assert.ok(long.length <= 300, long);
+  assert.match(long, /; and 3 more$/);
+  const huge = (await docsRun({ checked: 3, pending: many(3, (i) => `${String(i).repeat(200)}`) })).results[0]!.summary;
+  assert.ok(huge.length <= 300, huge);
+  assert.match(huge, /0{20}\.\.\.; and 2 more$/);
+  assert.equal((await docsRun({ checked: 0, pending: many(1, () => "G") })).results[0]!.result, "not_run", "a count below the pending documents is an unreadable answer");
 });
 
 test("docs: without a documents gate wired the check is not collected, as before (card P09)", async () => {

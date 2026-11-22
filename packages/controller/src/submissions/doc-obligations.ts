@@ -537,6 +537,8 @@ export class DocObligationService {
     const gate = await this.#ports.gate(by, command.submissionId);
     if (gate.taskId !== taskId) bad("submissionId", `is code of task ${gate.taskId}, not ${taskId}`);
     const pending: { obligationId: string; title: string; reason: string }[] = [];
+    // Many documents can stand on the same code: each submission's QA gate is read once per landing (a project keeps up to DOC_LIMITS.perProject documents).
+    const gates = new Map<string, Awaited<ReturnType<DocObligationPorts["gate"]>>>([[command.submissionId, gate]]);
     let checked = 0;
     for (const id of (await this.#index(task.projectId)).body.ids) {
       const found = await this.#runner.get("doc-obligation", id);
@@ -549,7 +551,8 @@ export class DocObligationService {
         const was = b.verification?.evidence.find((e) => e.taskId === taskId);
         if (was === undefined) return `it was not verified against any tested code of task ${taskId}`;
         if (was.tree !== gate.tree) return `it was verified against tree ${was.tree.slice(0, 12)}, not this code (tree ${gate.tree.slice(0, 12)})`;
-        const g = was.submissionId === command.submissionId ? gate : await this.#ports.gate(by, was.submissionId);
+        let g = gates.get(was.submissionId);
+        if (g === undefined) { g = await this.#ports.gate(by, was.submissionId); gates.set(was.submissionId, g); }
         return g.verdict === "passed" ? undefined : `the tested code it was verified against (${was.submissionId}) no longer passes its QA gate`;
       };
       const reason = await why();

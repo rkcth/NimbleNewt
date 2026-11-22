@@ -203,10 +203,25 @@ export class LandingGate {
     let g: DocsGateView | undefined;
     try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.docsGate(call.taskId, call.submissionId); } catch (error) { return no("not_run", `the documentation could not be read: ${String((error as Error)?.message ?? error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
-    if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree || !Array.isArray(g.pending)) return no("not_run", `the documentation of ${call.submissionId} could not be read for the tree it names`);
+    if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree || !Array.isArray(g.pending) || typeof g.checked !== "number" || g.checked < g.pending.length) return no("not_run", `the documentation of ${call.submissionId} could not be read for the tree it names`);
     if (g.pending.length > 0) {
-      const names = g.pending.slice(0, 5).map((p) => `${p.title} (${p.reason})`).join("; ");
-      return no("fail", `${g.pending.length} of ${g.checked} document(s) describing this task are not verified against ${call.submissionId} (tree ${g.tree.slice(0, 12)}): ${names}${g.pending.length > 5 ? "; ..." : ""}`);
+      // Up to five documents are named whole while they fit the summary (the first always, shortened if it must be); the rest are counted, so the author knows how many remain.
+      const head = `${g.pending.length} of ${g.checked} document(s) describing this task are not verified against ${call.submissionId} (tree ${g.tree.slice(0, 12)}): `;
+      const room = LANDING_GATE_LIMITS.summary - 20;
+      let names = "";
+      let shown = 0;
+      for (const p of g.pending.slice(0, 5)) {
+        const part = `${String(p.title)} (${String(p.reason)})`;
+        const next = shown === 0 ? part : `${names}; ${part}`;
+        if (head.length + next.length > room) {
+          if (shown === 0) { names = `${part.slice(0, Math.max(0, room - head.length - 3))}...`; shown = 1; }
+          break;
+        }
+        names = next;
+        shown += 1;
+      }
+      const more = g.pending.length - shown;
+      return no("fail", `${head}${names}${more > 0 ? `; and ${more} more` : ""}`);
     }
     // The documents were verified against the submission's tree; that counts for the integrated tree only while the patch is the one the host computes from that base and tree.
     const computed = typeof report.reviewedPatchId === "string" && PATCH.test(report.reviewedPatchId) && a.base === before.base && a.tree === before.tree ? report.reviewedPatchId : undefined;
