@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
+import { assignmentIdOf } from "../domain/assignment-model.js";
 import { derivedId } from "../domain/ids.js";
 import { artifactId as checkArtifactId, commandId as checkCommandId, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
@@ -126,14 +127,16 @@ export const REVIEW_DISABLED_SINGLE_AGENT = "review_disabled_single_agent" as co
 export type RolesOf = (principalId: string, scope: { readonly projectId: string; readonly taskId: string }, by: Principal) => Promise<readonly string[]>;
 
 /** The task's current attempt, when it has one: who owns it (a principal ID) and its state. Only an active attempt, or one that has just succeeded (the attempt is ending with this submission), may submit code. */
-export type AttemptOf = (taskId: string) => Promise<{ readonly ownerId: string; readonly state: string; readonly attemptId?: string } | undefined>;
+export type AttemptOf = (taskId: string) => Promise<{ readonly ownerId: string; readonly state: string; readonly attemptId?: string; readonly guards?: readonly AttemptGuard[] } | undefined>;
+/** A record the attempt check read, at the revision it read it (card Q01b): the submission commits only if each is still at that revision, so an attempt that ends or moves between the read and the write is not recorded under. */
+export interface AttemptGuard { readonly kind: string; readonly id: string; readonly revision: number }
 
 /** The attempt port over the assignment service: the task's active attempt, owned by the agent principal `agent:<id>`-style owner ID the assignment names. */
 export const attemptOfAssignments = (assignments: AssignmentService): AttemptOf => async (taskId) => {
   const asg = await assignments.getAssignment(taskId);
   if (asg === undefined || asg.activeAttemptId === undefined) return undefined;
   const attempt = await assignments.getAttempt(asg.activeAttemptId);
-  return attempt === undefined ? undefined : { ownerId: attempt.owner.id, state: attempt.state, attemptId: asg.activeAttemptId };
+  return attempt === undefined ? undefined : { ownerId: attempt.owner.id, state: attempt.state, attemptId: asg.activeAttemptId, guards: [{ kind: "assignment", id: assignmentIdOf(taskId), revision: asg.revision }, { kind: "attempt", id: asg.activeAttemptId, revision: attempt.revision }] };
 };
 
 export interface SubmissionOptions extends RunnerOptions {
@@ -317,6 +320,7 @@ export class SubmissionService {
       : (await this.#reviewers(task.projectId, by.id)).filter((r) => r !== by.id).length === 0 ? { required: false, reason: REVIEW_DISABLED_SINGLE_AGENT } : { required: true };
     const asked: SubmissionBody = { taskId, projectId: task.projectId, kind, role, submittedBy: by.id, submittedAt: this.#runner.now(), makesCommit: false, ...fields, evidence, ...(review === undefined ? {} : { review }) };
     let body: SubmissionBody = asked;
+    let guards: readonly AttemptGuard[] = [];
     const result = await this.#runner.command("submission.record", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       // Like the time, the attempt is what the controller observed, not what the agent asked: it is not in the compared payload (as before this field existed), so a replay keeps the first record
       // and its attempt, and records from before the field still replay.
@@ -329,9 +333,10 @@ export class SubmissionService {
           if (attempt === undefined || attempt.ownerId !== by.id || (attempt.state !== "active" && attempt.state !== "succeeded")) throw new DomainError("forbidden", "a code submission must come from the agent that owns the task's current attempt");
           if (from !== undefined && attempt.attemptId !== from.attemptId) throw new DomainError("forbidden", "the attempt this work came from is no longer the task's current attempt");
           if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
+          guards = attempt.guards ?? [];
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body)), ...(await this.#docIndexChange(id, body))], detail: { taskId, kind, role }, contention: () => this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -383,6 +388,12 @@ export class SubmissionService {
       if (chunk.length < pageSize) return { items };
     }
     return { items, ...(after === undefined ? {} : { next: this.#seal(by, taskId, after) }), scanLimited: true };
+  }
+
+  /** When a record the attempt check read has changed since (the attempt ended, or the task moved to another agent, between the read and the write), the refusal; otherwise nothing. */
+  async #guarded(guards: readonly AttemptGuard[]): Promise<DomainError | undefined> {
+    for (const g of guards) if ((await this.#runner.get(g.kind, g.id))?.revision !== g.revision) return new DomainError("forbidden", "the task's attempt changed while this submission was being recorded, so it was not recorded; check the task and send it again if it is still yours");
+    return undefined;
   }
 
   /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review whose verdict list moved. */
