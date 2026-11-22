@@ -6503,6 +6503,7 @@ Arguments:
 - `reason` (optional): for an approval or a defect: why (default: answered from the Needs-you list)
 - `taskId` (optional): for a held resume: the item's task
 - `projectId` (optional): for a question a meeting asked: the item's project
+- `expectedRevision` (optional): for a defect: the item's `revision` (an answer to an earlier escalation of the same defect is refused; in chat it is taken from the item)
 
 Result: `{ ... }`: what was answered.
 

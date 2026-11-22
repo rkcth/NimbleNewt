@@ -77,8 +77,9 @@ test("through the running controller the team-wide defect risks are answered in 
     const viaApi = await call(boot.token, "status.ask", { request: { kind: "defect_risks", projectId: project } });
     assert.deepEqual(viaApi.result.item.lines.map((l: any) => l.text), lines);
     assert.ok(viaApi.result.item.lines[1].cites.some((x: any) => x.kind === "defect" && x.id === major), "the line cites the defect");
-    // Another project's agent is told nothing of it; an agent of this project reads it.
-    assert.equal((await call(far.token, "status.ask", { request: { kind: "defect_risks", projectId: project } })).result.item.lines[0].text.slice(0, 20), "No unfinished defect");
+    // Another project's agent is told nothing of it, not even that the project exists; an agent of this project reads it.
+    assert.equal((await call(far.token, "status.ask", { request: { kind: "defect_risks", projectId: project } })).error.code, "not_found");
+    assert.equal((await call(far.token, "status.ask", { request: { kind: "defect_risks", projectId: other } })).result.item.lines[0].text.slice(0, 20), "No unfinished defect");
     assert.match((await call(rev.token, "status.ask", { request: { kind: "defect_risks", projectId: project } })).result.item.lines[0].text, /^2 unfinished/);
 
     const needs = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item;
@@ -102,6 +103,40 @@ test("through the running controller the team-wide defect risks are answered in 
     // Another answer to an item that no longer waits is refused, and so is an answer the item does not offer.
     assert.equal((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "accept-as-is" }, "na2")).error.code, "invalid_transition");
     assert.equal((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "maybe" }, "na3")).error.code, "invalid_command");
+
+    // The item is one escalation of the defect, named by its revision: a proposal drawn up for it and confirmed after the defect escalated again is refused, never applied to the newer escalation.
+    let version = 2;
+    const failAgain = async (k: string) => {
+      const now = (await call(ann.token, "deliverable.record.get", { id })).result.item;
+      const v = await call(ann.token, "deliverable.version.new", { id, expectedRevision: now.revision, artifacts: [{ artifactId: art }] }, `n-${k}`);
+      assert.ok((await call(ann.token, "deliverable.submit", { id, expectedRevision: v.result.revision, contractVersion: 0 }, `s-${k}`)).ok);
+      version++;
+      assert.ok((await call(ann.token, "defect.repair", { id: major, version }, `rp-${k}`)).ok);
+      assert.ok((await call(rev.token, "defect.review", { id: major, verdict: "not-fixed", reason: "the backup step is still missing" }, `rv-${k}`)).ok);
+    };
+    await failAgain("2");
+    const listedTwice = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.items[0];
+    assert.deepEqual([listedTwice.kind, listedTwice.id, listedTwice.revision], ["defect", major, (await call(boot.token, "defect.get", { id: major })).result.item.revision]);
+    const accept = "accept the backup step as it is";
+    const stale = await turn("m-c", accept, [{ kind: "command", op: "needs-you.answer", args: { itemTopic: "backup step", answer: "accept-as-is" }, evidence: accept, basis: "owner" }]);
+    assert.equal(stale[0].status, "proposed", JSON.stringify(stale));
+    // The model may not set the revision itself.
+    const forged = await turn("m-d", "accept the backup step as it is now", [{ kind: "command", op: "needs-you.answer", args: { itemTopic: "backup step", answer: "accept-as-is", expectedRevision: 1 }, evidence: "accept the backup step as it is now", basis: "owner" }]);
+    assert.notEqual(forged[0].status, "proposed", JSON.stringify(forged));
+    // Meanwhile the owner lets the repair go on from the list, and it fails again.
+    assert.ok((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "repair-again", expectedRevision: listedTwice.revision }, "na4")).ok);
+    await failAgain("3");
+    assert.equal((await call(boot.token, "defect.get", { id: major })).result.item.state, "escalated");
+    const late = await turn("m-e", "yes, do that", [{ kind: "apply_proposal", proposalId: stale[0].proposalId, evidence: "do that", basis: "owner" }]);
+    assert.notEqual(late[0].status, "applied", JSON.stringify(late));
+    assert.match(JSON.stringify(late), /escalated again/);
+    const still = (await call(boot.token, "defect.get", { id: major })).result.item;
+    assert.deepEqual([still.state, still.cycles, still.overrideRecords.map((o: any) => o.outcome)], ["escalated", 3, ["repair-again", "repair-again"]]);
+    // The escalation listed now is answered.
+    const listedNow = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.items[0];
+    assert.equal(listedNow.revision, still.revision);
+    assert.ok((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "accept-as-is", expectedRevision: listedNow.revision }, "na5")).ok);
+    assert.equal((await call(boot.token, "defect.get", { id: major })).result.item.state, "overridden");
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

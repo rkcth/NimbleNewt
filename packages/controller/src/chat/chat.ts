@@ -1505,11 +1505,12 @@ export class ChatService {
       if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "itemTopic must be text");
       // An ID is only ever one the owner just picked from the choices offered (it is checked against the list below); a kind is never given.
       if (args["kind"] !== undefined) return refuse("invalid_command", "an item of the Needs-you list is named in your words (itemTopic), not by a kind");
+      if (args["expectedRevision"] !== undefined) return refuse("invalid_command", "the revision of an item of the Needs-you list is taken from the list, not given");
       const picked = args["id"];
       if (picked !== undefined && typeof picked !== "string") return refuse("invalid_command", "id must be text");
       const listed = await this.#deps.api.handle(token, { v: API_VERSION, op: "status.ask", args: { request: { kind: "needs_you", limit: 50 } } });
       if (!listed.ok) return refuse(listed.error.code, listed.error.message);
-      const all = ((((listed.result["item"] ?? listed.result) as Record<string, unknown>)["items"] ?? []) as { kind: string; id: string; projectId?: string; taskId?: string; text: string; answer: { kind: string; choices?: string[] } }[]);
+      const all = ((((listed.result["item"] ?? listed.result) as Record<string, unknown>)["items"] ?? []) as { kind: string; id: string; projectId?: string; taskId?: string; text: string; answer: { kind: string; choices?: string[] }; revision?: number }[]);
       const words = typeof named === "string" ? named.trim().toLowerCase() : "";
       const given = typeof args["answer"] === "string" ? args["answer"] : "";
       // Only an item the owner's answer can mean: a choice the item offers, or the owner's own words for an item that takes words (a bare "allow" explains nothing, so it fits no blocker or question).
@@ -1522,6 +1523,8 @@ export class ChatService {
       args["kind"] = one.kind; args["id"] = one.id;
       if (one.projectId !== undefined && one.kind === "meeting-question") args["projectId"] = one.projectId;
       if (one.taskId !== undefined && one.kind === "held-resume") args["taskId"] = one.taskId;
+      // A defect's item is the escalation listed now: the proposal carries its revision, so a "yes" given after the defect escalated again is refused rather than applied to the new escalation.
+      if (one.kind === "defect" && typeof one.revision === "number") args["expectedRevision"] = one.revision;
       labels[one.id] = one.text.slice(0, 80);
     }
     // A question a stand-up asked the owner (card M03h), named by any part of the topic or the words asked, or the only one waiting. The answer is the owner's own words (the text guard below holds them to the message); an unclear name asks.

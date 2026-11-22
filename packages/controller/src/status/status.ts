@@ -461,12 +461,12 @@ export type StatusRequest =
 
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
 /** One item of the Needs-you list as data: what it is, what it is about and how the owner answers it in place. */
-export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string }
+export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string; /** For a defect: the revision of the escalation listed, which `needs-you.answer` takes as `expectedRevision`. */ readonly revision?: number }
 /** What kind of thing waits for the owner, and how it is answered in place (`needs-you.answer`, card U11d). */
 export type NeedKind = "defect" | "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "blocker";
 /** How an item is answered: one of the named choices, or the owner's own words. */
 export type NeedAnswer = { readonly kind: "choice"; readonly choices: readonly string[] } | { readonly kind: "words" };
-interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer }
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer; revision?: number }
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
@@ -2325,7 +2325,8 @@ export class StatusService {
     const at = this.#runner.now();
     if (this.#deps.defects === undefined) return { observedAt: at, lines: [line("Defects are not tracked on this controller.", cite("project", projectId))] };
     if ((await this.#runner.get("project", projectId)) === undefined) return undefined;
-    const found = await this.#deps.defects.unresolved(by, { projectId, cap: 30 });
+    let found: Awaited<ReturnType<DefectService["unresolved"]>>;
+    try { found = await this.#deps.defects.unresolved(by, { projectId, cap: 30 }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
     const partial = found.scanLimited ? " Only part of the stored defects was looked at, so other defects may exist." : "";
     const c = found.counts;
     const total = c.escalated + c.awaitingCheck + c.open;
@@ -2934,7 +2935,7 @@ export class StatusService {
       const esc = await this.#deps.defects.unresolved(by, { cap: 51, escalatedOnly: true });
       if (esc.counts.escalated > 50 || esc.scanLimited) truncated.push("escalated defects");
       for (const x of esc.items.slice(0, 50)) {
-        all.push({ text: `Defect ${x.id} (${x.severity}) failed ${x.cycles} repair check(s), the limit of ${x.limit}: ${quoted(x.finding.text, 120)} (accept it as is, or repair again)`, cites: [cite("defect", x.id, x.revision), cite("deliverable", x.deliverableId), cite("task", x.taskId)], taskId: x.taskId, projectId: x.projectId, since: x.reportedAt, id: x.id, rank: 5, kind: "defect", answer: { kind: "choice", choices: ["accept-as-is", "repair-again"] } });
+        all.push({ text: `Defect ${x.id} (${x.severity}) failed ${x.cycles} repair check(s), the limit of ${x.limit}: ${quoted(x.finding.text, 120)} (accept it as is, or repair again)`, cites: [cite("defect", x.id, x.revision), cite("deliverable", x.deliverableId), cite("task", x.taskId)], taskId: x.taskId, projectId: x.projectId, since: x.reportedAt, id: x.id, rank: 5, kind: "defect", answer: { kind: "choice", choices: ["accept-as-is", "repair-again"] }, revision: x.revision });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
@@ -3043,7 +3044,7 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
     if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
-    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text }));
+    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text, ...(i.revision === undefined ? {} : { revision: i.revision }) }));
     return { observedAt: this.#runner.now(), lines, items: views, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
   }
 

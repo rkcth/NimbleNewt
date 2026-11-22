@@ -2,7 +2,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { commandId as checkCommandId, taskId as checkTaskId, text } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
-import { inTaskScope } from "../security/access.js";
+import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -484,12 +484,14 @@ export class DefectService {
 
   /**
    * The defects that are not finished (state `open`, `repair-submitted` or `escalated`), for the chat's `defect_risks` status and the Needs-you list (card Q04): across one project, or across every project for the
-   * owner. Only defects whose deliverable the caller may read are counted; an agent must name a project. Escalated first, then by severity, then the oldest. The scan reads the defect records a page at a time and is
+   * owner. Only defects whose deliverable the caller may read are counted; an agent must name a project it may read (`not_found` otherwise). Escalated first, then by severity, then the oldest. The scan reads the defect records a page at a time and is
    * bounded (`scanLimited` says it stopped early, so the answer may be missing defects); the items are cut at `cap` and the counts cover everything found.
    */
   async unresolved(by: Principal, query: { readonly projectId?: string; readonly cap?: number; readonly escalatedOnly?: boolean } = {}): Promise<{ readonly counts: { readonly escalated: number; readonly awaitingCheck: number; readonly open: number }; readonly items: readonly (DefectBody & { readonly id: string; readonly revision: number; readonly limit: number })[]; readonly scanLimited: boolean }> {
     if (by.kind !== "owner" && by.kind !== "agent") return { counts: { escalated: 0, awaitingCheck: 0, open: 0 }, items: [], scanLimited: false };
     if (by.kind === "agent" && query.projectId === undefined) bad("projectId", "is needed");
+    // A project the agent may not read is not found, like in the other project views: the answer does not tell it the project exists.
+    if (by.kind === "agent" && !allows(by, "task.read", query.projectId)) hidden("project");
     const cap = query.cap === undefined ? 50 : query.cap;
     const readable = new Map<string, boolean>();
     const limits = new Map<string, number>();

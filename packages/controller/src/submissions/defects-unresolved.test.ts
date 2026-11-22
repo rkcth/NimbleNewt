@@ -110,8 +110,10 @@ for (const backend of backends) {
       assert.deepEqual([cut.items.length, cut.counts.escalated + cut.counts.open], [1, 3]);
       // An agent reads only what it may read, and must name the project.
       assert.deepEqual((await svc.unresolved(far, { projectId: p2 })).items.map((x) => x.id), [waiting]);
-      const hidden = await svc.unresolved(far, { projectId: p1 });
-      assert.deepEqual([hidden.items.length, hidden.counts], [0, { escalated: 0, awaitingCheck: 0, open: 0 }]);
+      // A project the agent may not read is not found (its existence is not told), also for a task credential of another project.
+      await assert.rejects(() => svc.unresolved(far, { projectId: p1 }), (e: unknown) => e instanceof DomainError && e.code === "not_found");
+      await assert.rejects(() => svc.unresolved({ ...rev, taskScope: { taskId: t2, projectId: p2 } } as Principal, { projectId: p1 }), (e: unknown) => e instanceof DomainError && e.code === "not_found");
+      assert.deepEqual((await svc.unresolved({ ...rev, taskScope: { taskId: t2, projectId: p2 } } as Principal, { projectId: p2 })).items.map((x) => x.id), [waiting]);
       await assert.rejects(() => svc.unresolved(far), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
       // The escalated defect is answered from the Needs-you list (needs-you.answer, kind defect): only the owner, never an agent or a task credential.
       const answer = OPERATIONS.find((o) => o.name === "needs-you.answer")!;
@@ -135,6 +137,23 @@ for (const backend of backends) {
       const after2 = await svc.unresolved(owner, { projectId: p1 });
       assert.deepEqual(after2.counts, { escalated: 0, awaitingCheck: 0, open: 3 });
       assert.equal(after2.items.find((x) => x.id === failed)!.cycles, 1);
+      // The item names the escalation by the defect's revision: once the defect escalated again, an answer carrying the earlier escalation's revision is refused and changes nothing; the current one is applied.
+      const seenAt = (first["revision"] as number) - 1;
+      const v3 = await newVersion(g1);
+      await svc.repair(ann, { commandId: cid("rp"), id: failed, version: v3 });
+      await svc.review(rev, { commandId: cid("rv"), id: failed, verdict: "not-fixed", reason: "still wrong again" });
+      const reEscalated = (await svc.get(owner, failed))!;
+      assert.deepEqual([reEscalated["state"], reEscalated["cycles"]], ["escalated", 2]);
+      await assert.rejects(() => answerAs(owner, { kind: "defect", id: failed, answer: "accept-as-is", expectedRevision: seenAt }, cid("na")), refusedWith("invalid_transition"));
+      await assert.rejects(() => answerAs(owner, { kind: "defect", id: failed, answer: "accept-as-is", expectedRevision: "x" }, cid("na")), refusedWith("invalid_command"));
+      assert.equal(((await svc.get(owner, failed))!)["state"], "escalated", "the stale answer changed nothing");
+      // The repeat of the first answer is still answered from its record, whatever revision it carries.
+      assert.equal((await answerAs(owner, { kind: "defect", id: failed, answer: "repair-again", expectedRevision: seenAt }, once)).item["replayed"], true);
+      const listed = (await svc.unresolved(owner, { escalatedOnly: true })).items.find((x) => x.id === failed)!;
+      assert.equal(listed.revision, reEscalated["revision"]);
+      const second = (await answerAs(owner, { kind: "defect", id: failed, answer: "accept-as-is", expectedRevision: listed.revision }, cid("na"))).item;
+      assert.equal(second["replayed"], false);
+      assert.equal(((await svc.get(owner, failed))!)["state"], "overridden");
     } finally {
       await world.close();
     }
