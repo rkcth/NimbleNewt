@@ -111,6 +111,42 @@ for (const backend of backends) {
       assert.equal((await svc.gate(owner, sub)).verdict, "failed");
     } finally { await world.close(); }
   });
+
+  test(`${backend.name}: two tasks changed to the same contract version, with evidence indexes at the same revision, each have their own evidence invalidated (the automatic command ID names the task) (card Q02)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "qa", grants: [{ action: "task.read", project }] });
+      const qa: Principal = await principals.authenticate((await principals.issueCredential(owner, "agent:qa")).token);
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const plant = async (kind: string, id: string, body: object): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
+      };
+      const svc = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf: async () => ["qa"] }, options);
+      const contract = (task: string, v: number, criteria: string[]) => ({ taskId: task, projectId: project, version: v, changedBy: owner.id, acceptanceCriteria: criteria, priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [{ name: "unit", run: ["true"] }], permissions: [], recovery: "native-continuation" });
+      const set = async (task: string, v: number, criteria: string[]): Promise<void> => { await plant("task-contract", task, contract(task, v, criteria)); await plant("task-contract-version", `${task}.${v}`, { ...contract(task, v, criteria), changedAt: "2026-11-22T09:10:00.000Z" }); };
+      const evidence: { task: string; id: string }[] = [];
+      for (const title of ["A", "B"]) {
+        const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title })).id;
+        const sub = derivedId("sbm", cid("sub"));
+        await plant("submission", sub, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-22T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
+        await set(task, 1, ["works"]);
+        const rec = await svc.record(qa, { commandId: cid("r"), submissionId: sub, criteriaRevision: 1, environment: "linux", observedAt: "2026-11-22T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] });
+        evidence.push({ task, id: rec.id });
+      }
+      const [a, b] = evidence as [{ task: string; id: string }, { task: string; id: string }];
+      assert.equal((await runner.get("qa-evidence-index", a.task))!.revision, (await runner.get("qa-evidence-index", b.task))!.revision, "both indexes at the same revision: only the task tells the two automatic checks apart");
+      await set(a.task, 2, ["works", "is fast"]);
+      await set(b.task, 2, ["works", "is fast"]);
+      assert.deepEqual((await svc.contractChanged(a.task)).invalidated, [a.id]);
+      assert.deepEqual((await svc.contractChanged(b.task)).invalidated, [b.id], "the second task's check is its own, not a replay of (or a conflict with) the first's");
+      for (const e of evidence) assert.equal((await svc.list(owner, e.task)).items[0]!.state, "invalidated");
+    } finally { await world.close(); }
+  });
 }
 
 test("contract.set tells the QA service only after the contract change is stored, never fails or changes the answer because the QA service failed, and tells nothing when the change is refused (card Q02)", async () => {
@@ -126,6 +162,10 @@ test("contract.set tells the QA service only after the contract change is stored
   assert.deepEqual(await op.run({ principal, contracts, qaEvidence: laterFailing } as never, { taskId: "task-b", expectedVersion: 1 } as never, "c2"), { id: "task-b", revision: 4, replayed: false });
   await assert.rejects(() => op.run({ principal, contracts, qaEvidence: failing } as never, { taskId: "task-refused", expectedVersion: 1 } as never, "c3"), (e: unknown) => e instanceof DomainError && e.code === "stale_revision");
   assert.deepEqual(order, ["set task-a", "qa task-a", "set task-b", "qa task-b", "set task-refused"], "a refused change tells the QA service nothing");
+  // The answer waits for the QA service's check to finish, so the owner sees the re-check straight away.
+  const slow = { contractChanged: async (taskId: string) => { await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r)); order.push(`qa done ${taskId}`); return { taskId, invalidated: [], rechecks: [] }; } };
+  await op.run({ principal, contracts, qaEvidence: slow } as never, { taskId: "task-d", expectedVersion: 1 } as never, "c5");
+  assert.equal(order.at(-1), "qa done task-d", "contract.set answers only after the QA check ended");
   // A controller without the QA service still changes contracts.
   assert.deepEqual(await op.run({ principal, contracts } as never, { taskId: "task-c", expectedVersion: 1 } as never, "c4"), { id: "task-c", revision: 4, replayed: false });
 });
