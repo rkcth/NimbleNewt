@@ -3,7 +3,7 @@ import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { TERMINAL } from "../dispatch/model.js";
 import type { Principal } from "../security/principals.js";
 import type { SubmissionService } from "../submissions/index.js";
-import type { EndingAttempt, Landed, WorkEndDeps } from "./work-end.js";
+import { SubmitRefused, overlapOf, shownFiles, type EndingAttempt, type Landed, type WorkEndDeps } from "./work-end.js";
 
 type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "submitView" | "stageWork" | "verifyDone" | "addNote" | "notesOf" | "answerQuestions" | "interrogateDone" | "recordReport">>;
 
@@ -72,12 +72,23 @@ export function stagedSubmit(deps: {
   readonly principalOf: (agentId: string) => Promise<Principal | undefined>;
   /** How many refresh rounds (card H12p) the task's author has made; carried on the submission as `refreshRound`. Absent: 0, as before. */
   readonly refreshRounds?: (attempt: EndingAttempt) => Promise<number>;
+  /**
+   * The landing read, asked once more AFTER the staging (card H12n, second slice): a process still running in the sandbox can add a file between the check that precedes the staging and the staging itself.
+   * The staged files are then judged against what the landing branch changed since the base; an overlap, or a read that cannot be made, refuses the submit (`SubmitRefused`, which the ending records as `submit_refused`). Absent: no second check, as before.
+   */
+  readonly landing?: WorkEndDeps["landing"];
 }): NonNullable<WorkEndDeps["submit"]> {
   return async (attempt, base, key) => {
     const by = await deps.principalOf(attempt.agentId);
     if (by === undefined) throw new DomainError("forbidden", `${attempt.agentId} cannot act, so its work cannot be submitted`);
     const staged = await deps.stage(attempt);
     if (staged.base !== base) throw new DomainError("checkout_changed", `the staged work is based on ${staged.base}, not on ${base} that was checked; it was not submitted`);
+    if (deps.landing !== undefined) {
+      const l = await deps.landing(attempt.taskId, attempt.attemptId).catch(() => undefined);
+      if (l === undefined) throw new SubmitRefused(undefined, [], "the checkout's base could not be checked again after the work was staged");
+      const overlap = overlapOf({ base: l.base, head: l.head, mine: staged.files, landed: l.landed });
+      if (overlap.length > 0) throw new SubmitRefused(l.head, overlap, `the landing branch moved to ${l.head} and changed ${overlap.length} of the staged files (${shownFiles(overlap)}); nothing was submitted`);
+    }
     const refreshRound = deps.refreshRounds === undefined ? 0 : await deps.refreshRounds(attempt);
     const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound }, { attemptId: attempt.attemptId });
     return { submissionId: made.id };

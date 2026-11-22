@@ -47,8 +47,9 @@ export function shownFiles(files: readonly string[]): string {
 }
 
 export class SubmitRefused extends DomainError {
-  constructor(readonly head: string, readonly overlapping: readonly string[]) {
-    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${shownFiles(overlapping)}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
+  /** `message` replaces the standard refusal text (the second check after the staging words its own). `head` is undefined when the landing branch could not be read. */
+  constructor(readonly head: string | undefined, readonly overlapping: readonly string[], message?: string) {
+    super("invalid_command", message !== undefined ? `submit refused: ${message}` : `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${shownFiles(overlapping)}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
     this.name = "SubmitRefused";
   }
 }
@@ -460,8 +461,14 @@ export class WorkEndService {
         value = clean({ typed: "submit_unavailable" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_unavailable`, summary) });
       } else {
         try { value = { submissionId: (await this.#deps.submit(attempt, body.base!, stepKey(attemptId, "submitted"))).submissionId }; } catch (error) {
+          if (error instanceof SubmitRefused) {
+            // The check made after the staging (stagedSubmit's `landing`): typed like the one made before it, never as a staging failure.
+            const summary = `submit_refused: ${redactText(error.message.replace(/^submit refused: /, "")).slice(0, 400)}; the attempt ended without a submission`;
+            value = clean({ typed: "submit_refused" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_refused`, summary) });
+          } else {
           const summary = `release_failed: staging or opening the submission failed (${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}); the attempt ended without one`;
           value = clean({ typed: "release_failed" as const, summary, blocker: await this.#blocker(body, `${attemptId}:release_failed:submit`, summary) });
+          }
         }
       }
       body = (await step("submitted", value)).body;

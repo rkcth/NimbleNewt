@@ -327,6 +327,28 @@ test("a checkout that cannot be read again after the calls settle is never taken
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+test("a file the agent's process added between the check and the staging, which the landing branch also changed, is not submitted: the ending is submit_refused with a blocker and nothing is recorded (card H12n second slice)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  let reads = 0;
+  const { c, boot, owner, project } = await world(d, {
+    // First read (the request) and second read (after the settle) see no overlap; the third (after the staging) finds the late file changed on the landing branch.
+    landing: async () => { reads++; return reads >= 3 ? { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["late.txt"] } : { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["other.txt"] }; },
+    stage: async () => ({ base: B, tree: "b".repeat(40), patchId: "c".repeat(40), files: ["beds.txt", "late.txt"] }),
+  });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1")).ok);
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.outcome, rec?.typed, rec?.submissionId], ["ended", "submit_refused", undefined], JSON.stringify(rec));
+    assert.ok(rec?.blocker !== undefined);
+    assert.match(rec?.summary ?? "", /late\.txt/);
+    assert.equal(reads, 3);
+    assert.deepEqual((await call(c, boot.token, "submission.list", { taskId: one.task })).result?.items, []);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 test("with landing but no stage the submit still ends plainly as submit_unavailable with a blocker (card H12n, submit binding)", async () => {
   const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
   const { c, owner, project } = await world(d, { landing: async () => ({ base: B, head: B, mine: [], landed: [] }) });

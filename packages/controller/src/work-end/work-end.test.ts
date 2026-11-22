@@ -4,7 +4,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { DomainError } from "../domain/errors.js";
 import type { Principal } from "../security/principals.js";
 import { buildWorld } from "../dispatch/testing/world.js";
-import { SubmitRefused, WorkEndService, type WorkEndDeps, overlapOf, type EndingAttempt, type Landed, type SettleReport } from "./index.js";
+import { SubmitRefused, WorkEndService, stagedSubmit, type WorkEndDeps, overlapOf, type EndingAttempt, type Landed, type SettleReport } from "./index.js";
 import type { DoneCheck, ReportCheck } from "./work-end.js";
 import { scopedCommandId } from "../security/credentials.js";
 
@@ -32,6 +32,8 @@ for (const backend of backends) {
     landed?: Landed; settle?: SettleReport; submitFails?: boolean; noSubmit?: boolean;
     /** Landing answers, one per call (the last repeats). */
     landings?: Landed[];
+    /** The submit port refuses with this (the check made after the staging). */
+    submitRefuses?: SubmitRefused;
     finishCrashOnce?: boolean; freezeFailsOnce?: boolean;
     onSettle?: () => Promise<void> | void; onSubmit?: () => Promise<void> | void;
     /** Runs after the guard and before the dispatcher ends the attempt (a drop landing in that gap). */
@@ -71,7 +73,7 @@ for (const backend of backends) {
       },
       paused: async () => state.paused,
       landing: async () => { const ls = opts.landings; const i = state.landingCalls++; return ls ? ls[Math.min(i, ls.length - 1)]! : landed; },
-      ...(opts.noSubmit ? {} : { submit: async (_a: EndingAttempt, _b: string, key: string) => { state.keys.push(key); await opts.onSubmit?.(); state.submits++; if (opts.submitFails) throw new Error("git said no"); return { submissionId: "sub-1" }; } }),
+      ...(opts.noSubmit ? {} : { submit: async (_a: EndingAttempt, _b: string, key: string) => { state.keys.push(key); await opts.onSubmit?.(); state.submits++; if (opts.submitFails) throw new Error("git said no"); if (opts.submitRefuses !== undefined) throw opts.submitRefuses; return { submissionId: "sub-1" }; } }),
       blockers: { openBlocker: async (c) => { state.blockerIds.push(c.commandId ?? ""); return w.blockers.openBlocker(c); } },
       tell: async (_a, m, key) => { state.keys.push(key); state.told.push(m); },
     };
@@ -169,6 +171,23 @@ for (const backend of backends) {
       await q.service.request(q.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true });
       assert.equal((await q.service.complete("att-1")).outcome, "submitted");
     } finally { await q.store.close(); }
+  });
+
+  test(`${backend.name}: a refusal from the check after the staging ends the attempt plainly as submit_refused with one blocker, not as release_failed; a replay changes nothing (H12n second slice)`, async () => {
+    const r = await rig({ submitRefuses: new SubmitRefused("h9", ["late.ts"], "the landing branch moved to h9 and changed 1 of the staged files (late.ts); nothing was submitted") });
+    try {
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done", message: "see you" });
+      const done = await r.service.complete("att-1");
+      assert.deepEqual([done.outcome, done.typed, done.submissionId], ["ended", "submit_refused", undefined]);
+      assert.match(done.summary ?? "", /^submit_refused: the landing branch moved to h9 and changed 1 of the staged files \(late\.ts\)/);
+      assert.doesNotMatch(done.summary ?? "", /release_failed|submit refused: submit refused/);
+      assert.ok(done.blocker !== undefined);
+      assert.deepEqual(r.state.blockerIds.filter((b) => b.includes("submit_refused")).length, 1);
+      assert.equal(r.state.blockerIds.filter((b) => b.includes("release_failed")).length, 0);
+      assert.equal(r.state.finished.length, 1); assert.deepEqual(r.state.told, ["see you"]);
+      const again = await r.service.complete("att-1");
+      assert.equal(again.replayed, true); assert.equal(r.state.submits, 1); assert.equal(r.state.finished.length, 1);
+    } finally { await r.store.close(); }
   });
 
   test(`${backend.name}: a failing or missing submission becomes a plain end with a blocker, never a lost ending (H12n)`, async () => {
@@ -558,3 +577,28 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 }
+
+// The check made after the staging (card H12n, second slice): a pure port test, no storage.
+test("stagedSubmit with a landing read: the staged files are judged again after the staging (H12n second slice)", async () => {
+  const ann = { id: "agent:ann" } as unknown as Principal;
+  const attempt: EndingAttempt = { attemptId: "att-1", taskId: "t1", projectId: "p1", agentId: "agent:ann", live: true };
+  const recorded: unknown[] = [];
+  const submissions = { record: async (_by: Principal, input: unknown) => { recorded.push(input); return { id: "sub-1" }; } } as never;
+  const mk = (files: string[], landing?: WorkEndDeps["landing"]) => stagedSubmit({ stage: async () => ({ base: "h1", tree: "t".repeat(40), patchId: "p".repeat(40), files }), submissions, principalOf: async () => ann, ...(landing === undefined ? {} : { landing }) });
+  const rejected = (run: Promise<unknown>) => assert.rejects(run, (e: unknown) => e instanceof SubmitRefused);
+  // A file staged that the landing branch changed since a stale base: refused, nothing recorded, the files named.
+  await assert.rejects(mk(["a.ts", "late.ts"], async () => ({ base: "h1", head: "h2", mine: ["a.ts"], landed: ["late.ts", "z.ts"] }))(attempt, "h1", "k1"), (e: unknown) => {
+    assert.ok(e instanceof SubmitRefused); assert.equal(e.head, "h2"); assert.deepEqual(e.overlapping, ["late.ts"]); assert.match(e.message, /changed 1 of the staged files \(late\.ts\)/); return true;
+  });
+  // The files the first check saw (`mine`) are not what is judged: the staged ones are.
+  await assert.rejects(mk(["a.ts"], async () => ({ base: "h1", head: "h2", mine: ["only-first-check.ts"], landed: ["a.ts"] }))(attempt, "h1", "k1"), SubmitRefused);
+  // An unreadable checkout is never "no overlap".
+  await rejected(mk(["a.ts"], async () => undefined)(attempt, "h1", "k1"));
+  await rejected(mk(["a.ts"], async () => { throw new Error("host gone"); })(attempt, "h1", "k1"));
+  assert.deepEqual(recorded, [], "nothing was recorded by any refusal");
+  // A stale base with no shared file, a current base even with the same file listed, and no landing read at all, still submit.
+  assert.deepEqual(await mk(["a.ts"], async () => ({ base: "h1", head: "h2", mine: [], landed: ["z.ts"] }))(attempt, "h1", "k2"), { submissionId: "sub-1" });
+  assert.deepEqual(await mk(["a.ts"], async () => ({ base: "h1", head: "h1", mine: [], landed: ["a.ts"] }))(attempt, "h1", "k3"), { submissionId: "sub-1" });
+  assert.deepEqual(await mk(["a.ts"])(attempt, "h1", "k4"), { submissionId: "sub-1" });
+  assert.equal(recorded.length, 3);
+});
