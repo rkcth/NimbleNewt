@@ -8,7 +8,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { RETENTION_DEFAULTS, RetentionService } from "../retention/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
-import { ACCEPTANCE_LIMIT, CatalogService, PROPOSAL_TEXT_KIND, SNAPSHOT_KIND, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace, versionIdOf } from "./index.js";
+import { ACCEPTANCE_LIMIT, CatalogService, PROPOSAL_KIND, PROPOSAL_LIMITS, PROPOSAL_TEXT_KIND, SNAPSHOT_KIND, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace, versionIdOf } from "./index.js";
 
 // Card T08 (second slice): improvement and promotion proposals with maintainer decisions, rebase and recheck, snapshots of released text, maintainer revocation and the notices pushed to authors and fork owners.
 after(stopServer);
@@ -471,6 +471,186 @@ for (const backend of backends) {
     assert.deepEqual(await c.cat.dropVersion(c.owner, { name: "toolbox.lint", version: "1.0.0", revision: old.revision, keep: 1 }), { dropped: true });
     assert.equal(await c.storage.getAggregate({ kind: SNAPSHOT_KIND, id: versionIdOf("toolbox.lint", "1.0.0") }), undefined);
     for (const v of ["1.1.0", "1.2.0"]) assert.notEqual(await c.storage.getAggregate({ kind: SNAPSHOT_KIND, id: versionIdOf("toolbox.lint", v) }), undefined, v);
+  });
+
+  suite("slice 6: an author's ended proposals are kept only up to a bound (the oldest are removed with their record); one accepted and not yet released is never removed and counts as ended when released", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "faster", tests: "ran it" })).proposalId;
+    const limit = PROPOSAL_LIMITS.settledPerAuthor;
+    const keep = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: keep, decision: "accept" });
+    const gone: string[] = [];
+    const ended: string[] = [];
+    for (let i = 0; i < limit + 2; i += 1) {
+      const id = await propose();
+      if (i % 2 === 0) await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: id });
+      else await c.props.decide(maya.p, { commandId: cid("d"), proposalId: id, decision: "reject", reason: "no" });
+      ended.push(id);
+    }
+    gone.push(...ended.slice(0, 2));
+    for (const id of gone) { await refuses("not_found", () => c.props.get(cody.p, id), /no such proposal/); await refuses("not_found", () => c.props.get(c.owner, id), /no such proposal/); }
+    for (const id of ended.slice(2)) assert.notEqual(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id }), undefined, id);
+    assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit + 1, "the bound and the accepted one");
+    assert.equal((await c.props.get(cody.p, keep)).state, "accepted", "an accepted proposal not yet released is not counted and not removed");
+    // Releasing the kept one now ends it: it joins the ended list and pushes the oldest out.
+    const released = await c.props.decide(maya.p, { commandId: cid("d"), proposalId: keep, decision: "accept", version: "1.1.0" });
+    assert.equal(released.released?.version, "1.1.0");
+    await refuses("not_found", () => c.props.get(cody.p, ended[2]!), /no such proposal/);
+    assert.equal((await c.props.get(cody.p, keep)).released?.version, "1.1.0");
+    assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit, "the released one counts among the ended ones now");
+    // A proposal waiting is never removed, and an index written before the bound (no list of ended ones) starts the list with the next ended proposal.
+    const better3 = await c.note(cody.p, "console.log('lint, faster still')");
+    const propose3 = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better3, rationale: "faster", tests: "ran it" })).proposalId;
+    const waiting = await propose3();
+    await c.poke("toolbox-proposer", (await c.storage.listAggregates("toolbox-proposer", { limit: 5 }))[0]!.id, (b) => { const { settled: _drop, ...rest } = b; return rest; });
+    const last = await propose3();
+    await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: last });
+    assert.equal((await c.props.get(cody.p, waiting)).state, "open");
+    assert.equal((await c.props.get(cody.p, last)).state, "withdrawn", "the only ended proposal on the new list");
+    assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit + 2, "nothing older was removed: the list began again");
+  });
+
+  suite("slice 6 review: a removal is audited with who, what and how it ended (no proposal text); only the author's ended proposals are removed, a few per write; a repeat of a removed ending is refused and recreates nothing; endings at the same moment keep one list", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "a private rationale", tests: "a private test note" })).proposalId;
+    const audits = async () => { const all: { type: string; subject?: { kind: string; id: string }; detail: Record<string, unknown> }[] = []; for (let after = 0; ;) { const page = await c.storage.listAudit({ afterSeq: after, limit: 500 }); all.push(...page); if (page.length < 500) return all; after = page.at(-1)!.seq; } };
+    const removedIds = async () => (await audits()).filter((a) => a.type === "toolbox.proposal.remove").map((a) => a.subject!.id);
+    const index = async () => { const rows = await c.storage.listAggregates("toolbox-proposer", { limit: 5 }); assert.equal(rows.length, 1); return rows[0]!; };
+    const waiting = await propose();
+    const accepted = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: accepted, decision: "accept" });
+    const withdrawn: { id: string; commandId: string }[] = [];
+    for (let i = 0; i < 3; i += 1) { const id = await propose(); const commandId = cid("wd"); await c.props.withdraw(cody.p, { commandId, proposalId: id }); withdrawn.push({ id, commandId }); }
+    const [e1, e2, e3] = withdrawn.map((w) => w.id) as [string, string, string];
+    // A kept text left behind by an ended proposal (none is, normally) goes with its record.
+    await c.storage.applyOperation({ operationId: cid("put"), epoch: c.epoch, actor: "test", correlationId: "put", at: new Date().toISOString(), changes: [{ type: "create", ref: { kind: PROPOSAL_TEXT_KIND, id: e1 }, body: { proposalId: e1, digest: "x", sources: [], executable: "left behind", at: "2026-11-18T12:00:00.000Z" } }], audit: [{ type: "test.put", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    // The list as stored is not as this service writes it: a waiting and an accepted-unreleased proposal, an unknown ID, a value that is not an ID, and more IDs than the bound.
+    const filler = Array.from({ length: 60 }, (_, i) => `tpp-${"c".repeat(18)}${"abcdefghijklmnopqrstuvwxyz"[Math.floor(i / 26)]}${"abcdefghijklmnopqrstuvwxyz"[i % 26]}`);
+    await c.poke("toolbox-proposer", (await index()).id, (b) => ({ ...b, settled: [waiting, accepted, NO_ID, 42, e1, e2, e3, ...filler] }));
+    const before = (await removedIds()).length;
+    const e4 = await propose();
+    await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: e4 });
+    // Five entries leave the list in this write (waiting, accepted, NO_ID, e1, e2); only e1 and e2 are records this author ended, so only they are removed.
+    assert.deepEqual((await removedIds()).slice(before), [e1, e2]);
+    for (const id of [e1, e2]) assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id }), undefined, id);
+    assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id: e1 }), undefined, "the left-behind text went with its proposal");
+    assert.equal((await c.props.get(cody.p, waiting)).state, "open", "a waiting proposal named on the list is never removed");
+    assert.equal((await c.props.get(cody.p, accepted)).state, "accepted", "an accepted proposal not yet released named on the list is never removed");
+    assert.equal((await c.props.get(cody.p, e3)).state, "withdrawn", "at most five entries leave in one write");
+    const settled = (await index()).body.settled as string[];
+    assert.deepEqual(settled, [e3, ...filler, e4], "the oldest left; the newest ending is last; the value that is not an ID is gone");
+    const all = await audits();
+    const gone = all.find((a) => a.type === "toolbox.proposal.remove" && a.subject?.id === e1)!;
+    assert.deepEqual(gone.detail, { proposalId: e1, author: cody.p.id, target: "toolbox.lint", state: "withdrawn", why: `the author's oldest ended proposal beyond the ${PROPOSAL_LIMITS.settledPerAuthor} kept` });
+    assert.ok(all.some((a) => a.type === "toolbox.proposal.text.remove" && a.subject?.id === e1), "the text's removal is audited too");
+    assert.doesNotMatch(JSON.stringify(all), /a private rationale|a private test note|left behind/, "no proposal text in the audit log");
+    // A repeat of the ending of a removed proposal is refused as not found and recreates nothing.
+    await refuses("not_found", () => c.props.withdraw(cody.p, { commandId: withdrawn[0]!.commandId, proposalId: e1 }), /no such proposal/);
+    assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: e1 }), undefined);
+    // Three endings at the same moment, one a release by the owner of the proposal accepted earlier without a version. They all write the author's list; one that lost only that race (its proposal unchanged) is
+    // built again by the service, so all three go through without the caller sending anything again: one list, each ending on it once, five removals per ending, none twice.
+    const x = await propose(); const y = await propose();
+    const was = (await removedIds()).length;
+    const endings = [
+      () => c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: x }),
+      () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: y, decision: "reject", reason: "no" }),
+      () => c.props.decide(c.owner, { commandId: cid("d"), proposalId: accepted, decision: "accept", version: "1.1.0" }),
+    ];
+    const first = await Promise.allSettled(endings.map((run) => run()));
+    for (const r of first) assert.equal(r.status, "fulfilled", r.status === "rejected" ? String(r.reason) : "");
+    assert.equal((await c.props.get(cody.p, accepted)).released?.version, "1.1.0");
+    const after = (await index()).body.settled as string[];
+    assert.equal(new Set(after).size, after.length, "no ID twice");
+    assert.deepEqual([...after].slice(-3).sort(), [accepted, x, y].sort(), "the three endings are the newest");
+    assert.equal(after.length, settled.length + 3 - 15, "each of the three writes took five off the front");
+    assert.deepEqual(after.slice(0, -3), settled.slice(15), "taken off in order, none lost");
+    const now = await removedIds();
+    assert.deepEqual(now.slice(was), [e3], "only e3 among the fifteen taken off was a record");
+    assert.equal(new Set(now).size, now.length, "no proposal removed twice");
+    assert.equal((await c.props.get(cody.p, waiting)).state, "open");
+  });
+
+  suite("slice 6 second review: an ending that lost a race only on the author's list is built again and goes through (a rejection, a withdrawal, a later release); one that lost to a change of the proposal is refused; a race every time is refused after the bound with nothing applied", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "faster", tests: "ran it" })).proposalId;
+    const r1 = await propose();
+    const indexId = (await c.storage.listAggregates("toolbox-proposer", { limit: 5 }))[0]!.id;
+    // The same store, except that before the next `left` writes touching the record `kind`/`id`, another write moves that record on (what a second maintainer's decision at the same moment does).
+    // `between`, when set, runs once just before the rebuild starts (the second look for the command's record after a lost write: the first is the runner's own check before it refuses), so a change there lands after
+    // the service has seen the proposal unchanged and before the rebuild reads anything.
+    const race: { kind: string; id: string; left: number; writes: number; between?: (() => Promise<void>) | undefined; looks: number } = { kind: "toolbox-proposer", id: indexId, left: 0, writes: 0, looks: -1 };
+    const store = new Proxy(c.storage, {
+      get(target, key) {
+        if (key === "applyOperation") {
+          return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => {
+            if (input.changes.some((ch) => ch.ref.kind === race.kind && ch.ref.id === race.id)) { race.writes += 1; if (race.left > 0) { race.left -= 1; await c.poke(race.kind, race.id, (b) => b); if (race.between !== undefined) race.looks = 2; } }
+            return target.applyOperation(input);
+          };
+        }
+        if (key === "getOperation") {
+          return async (operationId: string) => {
+            if (race.looks > 0 && --race.looks === 0 && race.between !== undefined) { const run = race.between; race.between = undefined; await run(); }
+            return target.getOperation(operationId);
+          };
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const cat = CatalogService.withEpoch(store, c.epoch, c.desks, options);
+    const props = ToolboxProposalService.withEpoch(store, c.epoch, cat, c.desks, options, async () => undefined);
+    // A rejection and a withdrawal that lose on the author's list go through on a later build.
+    Object.assign(race, { left: 1, writes: 0 });
+    assert.equal((await props.decide(maya.p, { commandId: cid("d"), proposalId: r1, decision: "reject", reason: "no" })).state, "rejected");
+    assert.equal(race.writes, 2, "built and sent twice");
+    const w1 = await propose();
+    Object.assign(race, { left: 2, writes: 0 });
+    assert.equal((await props.withdraw(cody.p, { commandId: cid("wd"), proposalId: w1 })).state, "withdrawn");
+    assert.equal(race.writes, 3);
+    // A release of a proposal accepted earlier writes the author's list too (it ends there), and is built again the same way.
+    const a1 = await propose();
+    await props.decide(maya.p, { commandId: cid("d"), proposalId: a1, decision: "accept" });
+    Object.assign(race, { left: 1, writes: 0 });
+    assert.equal((await props.decide(c.owner, { commandId: cid("d"), proposalId: a1, decision: "accept", version: "1.1.0" })).released?.version, "1.1.0");
+    assert.equal(race.writes, 2);
+    assert.equal((await props.get(c.owner, a1)).released?.version, "1.1.0");
+    assert.deepEqual(((await c.storage.getAggregate({ kind: "toolbox-proposer", id: indexId }))!.body as { settled: string[] }).settled, [r1, w1, a1], "each on the list once");
+    // A race every time: refused after the bound, saying what changed, with nothing applied.
+    const better2 = await c.note(cody.p, "console.log('lint, faster still')");
+    const r2 = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better2, rationale: "faster", tests: "ran it" })).proposalId;
+    const at = (await props.get(c.owner, r2)).revision;
+    Object.assign(race, { left: PROPOSAL_LIMITS.resends, writes: 0 });
+    await refuses("stale_revision", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /another change for the same author .* send it again/);
+    assert.equal(race.writes, PROPOSAL_LIMITS.resends);
+    assert.equal((await props.get(c.owner, r2)).revision, at, "nothing of it applied");
+    // A write that lost to a change of the proposal itself is refused as before (sent once): the decider reads it again.
+    Object.assign(race, { kind: PROPOSAL_KIND, id: r2, left: 1, writes: 0 });
+    await refuses("stale_revision", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /the proposal changed at the same moment; read it again/);
+    assert.equal(race.writes, 1, "not built again");
+    assert.equal((await props.get(c.owner, r2)).state, "open");
+    // A rebuild judges the command again from the state it reads: the author withdraws between the lost write and the rebuild, so the rejection is refused, not applied over the withdrawal.
+    Object.assign(race, { kind: "toolbox-proposer", id: indexId, left: 1, writes: 0, between: async () => { await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: r2 }); } });
+    await refuses("invalid_command", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /the proposal is withdrawn; it cannot be given reject/);
+    assert.equal(race.between, undefined, "the withdrawal ran between the two builds");
+    assert.equal(race.writes, 1, "the rebuild was refused before it wrote");
+    const withdrawn = await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: r2 });
+    assert.equal((withdrawn!.body as { state: string }).state, "withdrawn");
+    assert.ok(!((withdrawn!.body as { history: { event: string }[] }).history.some((h) => h.event === "reject")), "no rejection recorded");
+    // The same for a release: the owner publishes a newer version between the lost write and the rebuild, so the proposal's base is no longer the version in use and the release is refused (rebase first), with nothing released.
+    const better3 = await c.note(cody.p, "console.log('lint, fastest')");
+    const a2 = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better3, rationale: "fastest", tests: "ran it" })).proposalId;
+    await props.decide(maya.p, { commandId: cid("d"), proposalId: a2, decision: "accept" });
+    const newer = await c.note(cody.p, "console.log('lint 1.2')");
+    Object.assign(race, { left: 1, writes: 0, between: async () => { await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.2.0", manifest, instructionsRecordId: better3, executableRecordId: newer } as never); } });
+    await refuses("stale_revision", () => props.decide(c.owner, { commandId: cid("d"), proposalId: a2, decision: "accept", version: "1.3.0" }), /is at 1\.2\.0, not 1\.1\.0.*rebase it first/);
+    assert.equal(race.between, undefined, "the release ran between the two builds");
+    assert.equal(race.writes, 1, "the rebuild was refused before it wrote");
+    assert.equal((await props.get(c.owner, a2)).state, "accepted");
+    assert.equal((await props.get(c.owner, a2)).released, undefined, "nothing released");
+    assert.equal(await c.cat.get(c.owner, "toolbox.lint", "1.3.0"), undefined);
   });
 
   suite("a maintainer revokes a shared version its grant covers (finish or cancel only); the fork owners are sent a notice once; other maintainers get not_found", async (c) => {

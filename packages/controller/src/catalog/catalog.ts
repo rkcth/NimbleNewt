@@ -161,6 +161,8 @@ export const proposalTextRef = (proposalId: string): AggregateRef => ({ kind: PR
 /** The audit entries a write that removes kept proposal text carries (storage requires one per removed record). */
 export const proposalTextAudit = (changes: readonly { readonly type: string; readonly ref: AggregateRef }[], why: string): { type: string; subject: AggregateRef; detail: JsonObject }[] =>
   changes.filter((c) => c.type === "delete" && c.ref.kind === PROPOSAL_TEXT_KIND).map((c) => ({ type: "toolbox.proposal.text.remove", subject: c.ref, detail: { proposalId: c.ref.id, why } }));
+/** What `extra` adds to a version's write: its changes, and the audit entries of records it removes that the catalogue does not describe itself (an author's oldest ended proposal, card T08). */
+export type ExtraChanges = readonly import("../storage/types.js").Change[] | { readonly changes: readonly import("../storage/types.js").Change[]; readonly audit: readonly import("../storage/types.js").AuditEntry[] };
 function snapshotOf(v: VersionBody, texts: { instructions: string; executable?: string }, at: string): SnapshotBody {
   return { versionId: versionIdOf(v.name, v.version), name: v.name, version: v.version, digest: v.digest, sources: [...new Set([v.instructional.recordId, ...(v.executable === undefined ? [] : [v.executable.recordId])])], instructions: texts.instructions, ...(texts.executable === undefined ? {} : { executable: texts.executable }), at };
 }
@@ -402,7 +404,7 @@ export class CatalogService {
     /** A shared release from a proposal: the version the entry must still be choosing (an improvement), or `absent` (a promotion names a free name). */
     expect?: { chosen: string } | "absent";
     payload?: JsonObject;
-  }, extra?: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<readonly import("../storage/types.js").Change[]>): Promise<{ versionId: string; name: string; digest: string }> {
+  }, extra?: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<ExtraChanges>): Promise<{ versionId: string; name: string; digest: string }> {
     const { canonical, layer, kind, version, manifest, instructional, executable, audience, maintainer } = plan;
     if (typeof version !== "string" || !VERSION.test(version)) invalid("version", "must be major.minor.patch");
     const entryId = derivedId("cat", canonical);
@@ -443,7 +445,9 @@ export class CatalogService {
         const keepAudience = audience ?? prior?.audience;
         const { texts, pins } = plan.sources === undefined ? plan : await plan.sources();
         const nextEntry: EntryBody = { name: canonical, layer, kind, ...(layer === "agent" ? { owner: by.id } : {}), latest: version, versions: [...(prior?.versions ?? []), version], revoked: prior?.revoked ?? [], ...(prior?.deprecated === undefined ? {} : { deprecated: prior.deprecated }), ...(keepAudience === undefined ? {} : { audience: keepAudience }) };
-        const more = extra === undefined ? [] : await extra(prior, { versionId, digest });
+        const added = extra === undefined ? [] : await extra(prior, { versionId, digest });
+        const more = "changes" in added ? added.changes : added;
+        const audit = [...proposalTextAudit(more, "released"), ...("changes" in added ? added.audit : [])];
         return {
           ref: vref, creates: true,
           changes: [
@@ -456,7 +460,7 @@ export class CatalogService {
             ...more,
           ],
           detail: { name: canonical, version, kind, layer },
-          ...(proposalTextAudit(more, "released").length === 0 ? {} : { audit: proposalTextAudit(more, "released") }),
+          ...(audit.length === 0 ? {} : { audit }),
           contention: async () => new DomainError("stale_revision", `${canonical} changed at the same moment; ${op === "catalog.register" ? "register" : "ask"} again`),
         };
       },
@@ -477,7 +481,7 @@ export class CatalogService {
     audience?: Audience; expect: { chosen: string } | "absent"; payload: JsonObject;
     /** The proposal whose kept text (`PROPOSAL_TEXT_KIND`) is read when an author's record has moved on since it was proposed. */
     proposalId?: string;
-  }, extra: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<readonly import("../storage/types.js").Change[]>): Promise<{ versionId: string; name: string; digest: string }> {
+  }, extra: (prior: EntryBody | undefined, made: { versionId: string; digest: string }) => Promise<ExtraChanges>): Promise<{ versionId: string; name: string; digest: string }> {
     const parsed = parseName(command.name);
     if (parsed === null || parsed.layer !== "toolbox") return invalid("name", "must be a shared tool name");
     const maintainer = by.kind === "agent";
