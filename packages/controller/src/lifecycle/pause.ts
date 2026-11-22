@@ -493,12 +493,15 @@ export class PauseService implements PauseGuard, PauseLookup {
     return { state, replayed: result.replayed };
   }
 
-  /** Whether the task's latest generation (L05) is still streaming. Read straight from its records so this package does not depend on that one. */
+  /**
+   * Whether the task's latest generation (L05) is still streaming. Read straight from its records so this package does not depend on that one. A generation left `streaming` under an older primary epoch (G04 slice 7)
+   * is not: the controller that began it is gone, so no stream will add to it or end it. A record without an epoch (begun before that field) still counts as streaming.
+   */
   async #streaming(taskId: string): Promise<boolean> {
     const gate = (await this.#runner.get("generation-gate", `ggate-${taskId.slice(5)}`))?.body as unknown as { current?: number } | undefined;
     if (gate?.current === undefined) return false;
-    const run = (await this.#runner.get("generation-run", `grun-${taskId.slice(5)}-${pad(gate.current)}`))?.body as unknown as { state?: string } | undefined;
-    return run?.state === "streaming";
+    const run = (await this.#runner.get("generation-run", `grun-${taskId.slice(5)}-${pad(gate.current)}`))?.body as unknown as { state?: string; epoch?: unknown } | undefined;
+    return run?.state === "streaming" && !(typeof run.epoch === "number" && run.epoch < this.#runner.epoch);
   }
 
   // ---- background settlement ---------------------------------------------------------------------------------------------------

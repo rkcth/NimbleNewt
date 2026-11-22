@@ -458,12 +458,14 @@ export class RetentionService {
       if (candidates.length > limit) { candidates.length = limit; partial = true; }
     }
     if (values.generationRunDays !== null) {
-      // Recorded model replies (K06 retention of card L05b): only runs that are over, and that hold no call that could still be admitted.
+      // Recorded model replies (K06 retention of card L05b): only runs that are over, and that hold no call that could still be admitted. A run left `streaming` under an older primary epoch is over (G04 slice 7: the
+      // controller that began it is gone); one without an epoch (begun before that field) is still kept.
       const cutoff = now - values.generationRunDays * DAY;
       const complete = await scan(this.#runner, "generation-run", (a) => {
         if (Date.parse(a.updatedAt) >= cutoff) return;
-        const run = a.body as { state?: unknown; toolCalls?: { state?: unknown }[]; projectId?: unknown };
-        if (run.state === "streaming" || run.state === "held" || (run.toolCalls ?? []).some((c) => c.state === "complete" || c.state === "held" || c.state === "admitted")) return;
+        const run = a.body as { state?: unknown; epoch?: unknown; toolCalls?: { state?: unknown }[]; projectId?: unknown };
+        const gone = typeof run.epoch === "number" && run.epoch < this.#runner.epoch;
+        if ((run.state === "streaming" && !gone) || run.state === "held" || (run.toolCalls ?? []).some((c) => c.state === "complete" || c.state === "held" || c.state === "admitted")) return;
         candidates.push({ kind: "generation-run", id: a.id, revision: a.revision, projectId: typeof run.projectId === "string" ? run.projectId : undefined, ageDays: Math.floor((now - Date.parse(a.updatedAt)) / DAY) });
       });
       if (!complete) partial = true;

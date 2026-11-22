@@ -392,6 +392,7 @@ for (const backend of backends) {
     const run = await begin(gen, ann, task);
     await call(gen, ann, run, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });
     await call(gen, ann, run, 2, "c2", { name: "push", argumentsDelta: '{"ref":' });
+    await call(gen, ann, run, 3, "c3", { name: "push", argumentsDelta: '{"ref":"dev"}', done: true });
     assert.equal((await gen.view(ann, run))!.run.state, "streaming");
     // The same primary epoch (a second service in the process that is streaming it) still refuses: the stream may be about to end.
     await refusedFor("streaming", () => admit(reopen(), ann, run));
@@ -401,7 +402,8 @@ for (const backend of backends) {
     assert.equal((await next.view(ann, run))!.run.state, "streaming");
     const first = await admit(next, ann, run, { commandId: "adm-gone" });
     const seen = (await next.view(ann, run))!.run;
-    assert.deepEqual([seen.state, seen.finishedAt !== undefined, seen.toolCalls.map((c) => c.state)], ["finished", true, ["admitted", "dropped"]]);
+    // The other complete call is left complete (as `complete` leaves it), and is admitted later from the finished generation.
+    assert.deepEqual([seen.state, seen.finishedAt !== undefined, seen.toolCalls.map((c) => c.state)], ["finished", true, ["admitted", "dropped", "complete"]]);
     assert.equal(seen.toolCalls[1]!.reason, "the stream ended before its arguments were complete");
     assert.equal(seen.toolCalls[0]!.effectId, first.effectId);
     // The same command again answers the same effect; another ask for the call is refused as admitted; the old relay's late end and pieces are refused.
@@ -409,7 +411,10 @@ for (const backend of backends) {
     assert.deepEqual([again.effectId, again.replayed], [first.effectId, true]);
     await refusedFor("admitted", () => admit(next, ann, run));
     await refusedFor("stale", () => next.complete(ann, { commandId: cid("late"), runId: run }));
-    await refusedFor("stale", () => text(next, ann, run, 3, "late"));
+    await refusedFor("stale", () => text(next, ann, run, 4, "late"));
+    const third = await admit(next, ann, run, { toolCallId: "c3" });
+    assert.notEqual(third.effectId, first.effectId);
+    assert.deepEqual((await next.view(ann, run))!.run.toolCalls.map((c) => c.state), ["admitted", "dropped", "admitted"]);
     // A generation held by a hold is still refused, whatever its epoch.
     const held = await begin(next, ann, task);
     await call(next, ann, held, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });

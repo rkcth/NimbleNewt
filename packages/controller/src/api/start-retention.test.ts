@@ -446,10 +446,14 @@ test("recorded model replies (generation runs) are kept by default; with generat
   const { c, boot, call, project, put } = await world(d);
   try {
     const run = (state: string, calls: object[] = []) => ({ taskId: "tsk-aaaaaaaaaaaaaaaaaaaa", projectId: project, owner: "svc:dispatcher", number: 1, contextRevision: 1, state, text: "hello", chunks: 1, toolCalls: calls, late: [], lateCount: 0, startedAt: "2020-01-01T00:00:00.000Z", sensitive: true });
-    const ids = { done: "grun-aaaaaaaaaaaaaaaaaaaa-0000000001", live: "grun-aaaaaaaaaaaaaaaaaaaa-0000000002", callable: "grun-aaaaaaaaaaaaaaaaaaaa-0000000003" };
+    const ids = { done: "grun-aaaaaaaaaaaaaaaaaaaa-0000000001", live: "grun-aaaaaaaaaaaaaaaaaaaa-0000000002", callable: "grun-aaaaaaaaaaaaaaaaaaaa-0000000003", gone: "grun-aaaaaaaaaaaaaaaaaaaa-0000000004", ours: "grun-aaaaaaaaaaaaaaaaaaaa-0000000005", goneCallable: "grun-aaaaaaaaaaaaaaaaaaaa-0000000006" };
     await put("generation-run", ids.done, run("failed"));
     await put("generation-run", ids.live, run("streaming"));
     await put("generation-run", ids.callable, run("finished", [{ id: "c1", name: "t", args: "{}", state: "complete" }]));
+    // G04 slice 7: streaming under an older primary epoch (its controller is gone) is over; under this controller's epoch it is not; with a complete call it could still be admitted.
+    await put("generation-run", ids.gone, { ...run("streaming"), epoch: c.epoch - 1 });
+    await put("generation-run", ids.ours, { ...run("streaming"), epoch: c.epoch });
+    await put("generation-run", ids.goneCallable, { ...run("streaming", [{ id: "c1", name: "t", args: "{}", state: "complete" }]), epoch: c.epoch - 1 });
     const old = new Date(Date.now() - 40 * 86_400_000).toISOString();
     const realGet = c.storage.getAggregate.bind(c.storage); const realList = c.storage.listAggregates.bind(c.storage);
     const back = (a: any) => (a?.kind === "generation-run" ? { ...a, updatedAt: old } : a);
@@ -461,10 +465,13 @@ test("recorded model replies (generation runs) are kept by default; with generat
     assert.equal(idle.candidates.length, 0);
     assert.ok((await call(boot.token, "retention.settings.set", { generationRunDays: 30 }, "g1")).ok);
     const preview = (await call(boot.token, "retention.run", {}, "g2")).result;
-    assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id), [ids.done]);
+    assert.deepEqual(preview.candidates.map((x: { id: string }) => x.id).sort(), [ids.done, ids.gone]);
     assert.ok((await call(boot.token, "retention.run", { dryRun: false, confirm: preview.digest }, "g3")).ok);
     assert.equal(await has(ids.done), false, "the old failed run is removed");
-    assert.equal(await has(ids.live), true, "a run still streaming is kept");
+    assert.equal(await has(ids.gone), false, "a run left streaming by a controller that is gone is removed");
+    assert.equal(await has(ids.live), true, "a run still streaming (no epoch recorded) is kept");
+    assert.equal(await has(ids.ours), true, "a run streaming under this controller is kept");
+    assert.equal(await has(ids.goneCallable), true, "a gone run with a call that could still be admitted is kept");
     assert.equal(await has(ids.callable), true, "a run with a call that could still be admitted is kept");
   } finally { await c.close(); clean(d); }
 });
