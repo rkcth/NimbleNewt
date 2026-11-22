@@ -862,7 +862,7 @@ export const MEETING_CONTROL_EXEMPT: ReadonlySet<string> = new Set(["motionId", 
 /** Fixed choices and record references of one command only: `response` is one of three choices and `decisionId` is checked against the decisions waiting for the owner (card M02h). */
 export const OWNER_RESPOND_EXEMPT: ReadonlySet<string> = new Set(["response", "decisionId"]);
 /** The fixed choices an item of the Needs-you list offers (card U11d): an answer that is one of them need not be spelled out in the owner's words ("yes, go ahead" is allow); any other answer is the owner's own words and must be in the message. */
-export const NEED_CHOICES: ReadonlySet<string> = new Set(["allow", "deny", "agree", "decline", "approve", "done"]);
+export const NEED_CHOICES: ReadonlySet<string> = new Set(["allow", "deny", "agree", "decline", "approve", "done", "accept-as-is", "repair-again"]);
 /** A recovery step's `action` is one of six fixed rungs (and the step is always shown first); its `text` must still be the owner's own words (card V02c). */
 export const RECOVERY_STEP_EXEMPT: ReadonlySet<string> = new Set(["action"]);
 /**

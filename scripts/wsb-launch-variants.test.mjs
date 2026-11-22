@@ -193,7 +193,9 @@ test("the real launcher: exit code and both outputs, a program that does not end
   assert.equal(hung.error?.code, "ETIMEDOUT");
   assert.match(variantLine(1, "nodeDetached", hung, 1_000), /: no answer within 1000 ms \(stopped\) after/);
   const missing = await realLaunch({ file: "nn-no-such-program-wsbv", args: [], timeoutMs: 120_000 });
-  assert.equal(missing.error?.code, "ENOENT");
+  // A PATH lookup reports ENOENT, or EACCES when a PATH directory is unreadable to this user (seen on the Mac runner); never success or another error.
+  assert.ok(["ENOENT", "EACCES"].includes(missing.error?.code), `a missing program reports ENOENT or EACCES, got ${missing.error?.code}`);
+  assert.notEqual(missing.status, 0);
   // Detached, as variant 1 runs it.
   const detached = await realLaunch({ file: process.execPath, args: ["-e", "process.exitCode = 0"], detached: true, windowsHide: false, timeoutMs: 120_000 });
   assert.equal(detached.status, 0);

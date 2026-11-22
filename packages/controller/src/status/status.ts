@@ -285,6 +285,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them)" },
+  defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved or accepted as is) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
@@ -399,6 +400,7 @@ export type StatusRequest =
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
+  | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
   | { readonly kind: "docs"; readonly projectId: string }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
@@ -459,12 +461,12 @@ export type StatusRequest =
 
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
 /** One item of the Needs-you list as data: what it is, what it is about and how the owner answers it in place. */
-export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string }
+export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string; /** For a defect: the revision of the escalation listed, which `needs-you.answer` takes as `expectedRevision`. */ readonly revision?: number }
 /** What kind of thing waits for the owner, and how it is answered in place (`needs-you.answer`, card U11d). */
-export type NeedKind = "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "blocker";
+export type NeedKind = "defect" | "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "blocker";
 /** How an item is answered: one of the named choices, or the owner's own words. */
 export type NeedAnswer = { readonly kind: "choice"; readonly choices: readonly string[] } | { readonly kind: "words" };
-interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer }
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer; revision?: number }
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
@@ -750,7 +752,7 @@ export interface StatusDeps {
     artifactsReplaced?(by: Principal, taskId: string, replaced: ReadonlyMap<string, ArtifactReplacement>): Promise<{ readonly items: readonly ReplacedDeliverable[]; readonly reads: number }>;
   };
   /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
-  readonly defects?: Pick<DefectService, "forTask">;
+  readonly defects?: Pick<DefectService, "forTask" | "unresolved">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
@@ -980,6 +982,7 @@ export class StatusService {
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
+      case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
@@ -2328,6 +2331,27 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
+  /** The unfinished defects of a project (card Q04): counts, then each defect, escalated first. The defect service's read rules apply (only defects whose deliverable the caller may read). */
+  async defectRiskLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.defects === undefined) return { observedAt: at, lines: [line("Defects are not tracked on this controller.", cite("project", projectId))] };
+    if ((await this.#runner.get("project", projectId)) === undefined) return undefined;
+    let found: Awaited<ReturnType<DefectService["unresolved"]>>;
+    try { found = await this.#deps.defects.unresolved(by, { projectId, cap: 30 }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const partial = found.scanLimited ? " Only part of the stored defects was looked at, so other defects may exist." : "";
+    const c = found.counts;
+    const total = c.escalated + c.awaitingCheck + c.open;
+    if (total === 0) return { observedAt: at, lines: [line(`No unfinished defect of this project that you may read was found: nothing waits on a repair or a check.${partial}`, cite("project", projectId))] };
+    const lines: Line[] = [line(`${total} unfinished defect(s): ${c.escalated} escalated to you (they wait for your decision), ${c.awaitingCheck} repaired and waiting for a check, ${c.open} open and waiting for a repair.${partial}`, cite("project", projectId))];
+    const words: Record<string, string> = { open: "open, waiting for a repair", "repair-submitted": "repaired, waiting for a check", escalated: "escalated to you: accept it as is, or let the repair go on" };
+    for (const x of found.items) {
+      lines.push(line(`Defect ${x.id} (${x.severity}) in task ${x.taskId}, deliverable ${x.deliverableId} version ${x.version}: ${words[x.state] ?? x.state}; ${x.cycles} of ${x.limit} repair and review cycles used; responsible ${shown(x.responsibleAgent, 60)}. Finding: ${quoted(x.finding.text, 160)}.`, cite("defect", x.id), cite("deliverable", x.deliverableId), cite("task", x.taskId)));
+    }
+    if (total > found.items.length) lines.push(line(`${total - found.items.length} more unfinished defect(s) are not shown; defect.list lists the defects of one deliverable.`, cite("project", projectId)));
+    return { observedAt: at, lines };
+  }
+
   /** The project's QA picture (card Q02): what waits for QA, what no longer holds, what fails and what passes, per task's newest code submission. The QA service's read rules apply. */
   async qaProjectLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
@@ -2918,6 +2942,14 @@ export class StatusService {
         all.push({ text: `${quoted(h.title, 60)} is held before it resumes: ${h.changes.length} change${h.changes.length === 1 ? "" : "s"} since it stopped ${heldWhy(h.changes.length, h.notReviewed === undefined ? 0 : (h.notReviewedCount ?? h.changes.length), h.notReviewed)}: ${names}${h.changes.length > 3 ? ` and ${h.changes.length - 3} more` : ""} (approve the resume to let it go on, or decline it, which releases the task)`, cites: [cite("resume-check", h.checkId), cite("task", h.taskId)], taskId: h.taskId, since: h.since, id: h.checkId, rank: 3, kind: "held-resume", answer: { kind: "choice", choices: ["approve", "decline"] } });
       }
     }
+    // Defects escalated to the owner (card Q04): the repair and review cycles reached the limit, so the owner decides (accept the work as it is, or let the repair go on once more), answered in place.
+    if (this.#deps.defects !== undefined && by.kind === "owner") {
+      const esc = await this.#deps.defects.unresolved(by, { cap: 51, escalatedOnly: true });
+      if (esc.counts.escalated > 50 || esc.scanLimited) truncated.push("escalated defects");
+      for (const x of esc.items.slice(0, 50)) {
+        all.push({ text: `Defect ${x.id} (${x.severity}) failed ${x.cycles} repair check(s), the limit of ${x.limit}: ${quoted(x.finding.text, 120)} (accept it as is, or repair again)`, cites: [cite("defect", x.id, x.revision), cite("deliverable", x.deliverableId), cite("task", x.taskId)], taskId: x.taskId, projectId: x.projectId, since: x.reportedAt, id: x.id, rank: 5, kind: "defect", answer: { kind: "choice", choices: ["accept-as-is", "repair-again"] }, revision: x.revision });
+      }
+    }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.
     let owned = 0;
     let blockersCut = false;
@@ -3024,7 +3056,7 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
     if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
-    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text }));
+    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text, ...(i.revision === undefined ? {} : { revision: i.revision }) }));
     return { observedAt: this.#runner.now(), lines, items: views, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
   }
 
