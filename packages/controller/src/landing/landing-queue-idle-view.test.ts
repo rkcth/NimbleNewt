@@ -119,7 +119,7 @@ for (const backend of backends) {
     const out = await status.landingQueueLines(by, r.w.project);
     return out?.lines.map((l) => l.text);
   };
-  const stuck = (lines: string[] | undefined): string[] => (lines ?? []).filter((l) => /no approved submission since|not counted yet|longer than the/.test(l));
+  const stuck = (lines: string[] | undefined): string[] => (lines ?? []).filter((l) => /no approved submission since|not counted yet|cannot be counted from|longer than the/.test(l));
 
   test(`${backend.name}: the owner is shown since when a reserved place is idle and when it ends, then that it is past the bound, and it is gone once released (card P10, tenth slice)`, async () => {
     const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
@@ -132,13 +132,13 @@ for (const backend of backends) {
       const early = stuck(await view(r, r.w.owner));
       assert.equal(early.length, 1, early.join("|"));
       assert.match(early[0]!, new RegExp(`Task ${t1}'s reserved place has had no approved submission since ${idle.replace(/[.]/g, "\\.")}; once that has lasted 12 h \\(at ${new Date(Date.parse(idle) + 12 * HOUR).toISOString().replace(/[.]/g, "\\.")}\\)`));
-      assert.match(early[0]!, /checked only when a landing of a submission queued behind it is asked for \(that landing then goes ahead\), not on a clock; approved work coming back first stops the count/);
+      assert.match(early[0]!, /checked only when a landing of a submission queued behind it is asked for \(the place is ended first and that landing is then judged on the queue without it\), not on a clock; approved work coming back first stops the count/);
       r.w.clock.advance(12 * HOUR - MIN);
       assert.match(stuck(await view(r, r.w.owner)).join("|"), /; once that has lasted 12 h \(at /, "a minute under the bound");
       r.w.clock.advance(MIN);
       const late = stuck(await view(r, r.w.owner));
       assert.equal(late.length, 1);
-      assert.match(late[0]!, /longer than the 12 h bound: the next landing asked for a submission queued behind it ends the reservation first and then goes ahead \(nothing ends it on a clock; taking the task out with landing\.queue\.remove lets others land at once\)/);
+      assert.match(late[0]!, /longer than the 12 h bound: the next landing asked for a submission queued behind it ends the reservation first and is then judged on the queue without it \(it goes ahead when its submission is then first; nothing ends it on a clock; taking the task out with landing\.queue\.remove lets others land at once\)/);
       // Nothing ended it on a clock: the view only reads.
       assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
       const out = await (await r.lander(ivy, t2))(t2);
@@ -202,7 +202,7 @@ for (const backend of backends) {
       r.w.clock.advance(MIN);
       const said = stuck(await view(r, r.w.owner));
       assert.equal(said.length, 1);
-      assert.match(said[0]!, new RegExp(`Task ${t1} has been first since .*longer than the 4 h bound, and has not landed; the director \\(the owner, when no director can be told\\) is told when a landing is refused behind it \\(nothing tells on a clock\\)\\. Land it, or take it out`));
+      assert.match(said[0]!, new RegExp(`Task ${t1} has been first since .*longer than the 4 h bound, and has not landed; when a landing is refused behind it the director is told and the owner gets a notice \\(one that needs the owner when no director can be told\\); nothing tells on a clock\\. Land it, or take it out`));
       // A landing refused behind it tells the director; the plain "told" line replaces the warning.
       await refuses("invalid_transition", async () => (await r.lander(ivy, t2))(t2), /lands first/);
       assert.equal(r.told.filter((t) => t.why === "front").length, 1);
@@ -266,7 +266,8 @@ for (const backend of backends) {
         const all = (await view(r, r.w.owner))!;
         const lines = stuck(all);
         assert.equal(lines.length, 1, `${bad}: ${lines.join("|")}`);
-        assert.match(lines[0]!, /the time it has been idle is not counted yet/, bad);
+        assert.match(lines[0]!, /its recorded idle time cannot be counted from, so the controller does not end the reservation by itself\. Taking the task out with landing\.queue\.remove lets others land\./, bad);
+        assert.doesNotMatch(lines[0]!, /not counted yet|count starts/, bad);
         for (const l of all) assert.doesNotMatch(l, /NaN|Invalid Date|undefined|275760/, bad);
       }
     } finally { await r.close(); }
@@ -284,5 +285,61 @@ for (const backend of backends) {
         for (const l of all) assert.doesNotMatch(l, /NaN|Invalid Date/, bad);
       }
     } finally { await h.close(); }
+  });
+  test(`${backend.name}: past the bound, a landing of a submission that is not next ends the place but is still refused behind the next one (card P10, tenth slice review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2 } = await reservedAway(r);
+      const t3 = await r.task("three");
+      await r.ops.queueApproved(r.submit(t3, r.head()), "q3");
+      r.w.clock.advance(12 * HOUR);
+      assert.match(stuck(await view(r, r.w.owner)).join("|"), /is then judged on the queue without it \(it goes ahead when its submission is then first;/);
+      await refuses("invalid_transition", async () => (await r.lander(ivy, t3))(t3), new RegExp(`task ${t2}.*lands first`));
+      assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [], `the place of ${t1} was ended by that landing`);
+      assert.deepEqual(await r.queued(), [[1, t2], [2, t3]]);
+      assert.equal(r.calls.length, 0, "nothing reached the host");
+      assert.deepEqual(stuck(await view(r, r.w.owner)), []);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: an unreadable stored idle time stays through later writes and nothing ends the place by itself, as the view says (card P10, tenth slice review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2 } = await reservedAway(r);
+      await setFront(r, (front) => ({ ...front, idleSince: "not a time" }), "bad-idle-kept");
+      // A later write of the queue keeps it (`settled` keeps the same first place's idle time), so the view does not promise a count.
+      await r.ops.queueApproved(r.submit(await r.task("three"), r.head()), "q3");
+      assert.equal((await r.list()).front!.idleSince, "not a time");
+      r.w.clock.advance(24 * HOUR);
+      await refuses("invalid_transition", async () => (await r.lander(ivy, t2))(t2), /holds the first place/);
+      assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1], "not ended");
+      const lines = stuck(await view(r, r.w.owner));
+      assert.equal(lines.length, 1, lines.join("|"));
+      assert.match(lines[0]!, /cannot be counted from, so the controller does not end the reservation by itself/);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a task credential of the owner or of an integrator is shown nothing of the queue (card P10, tenth slice review)`, async () => {
+    const r = await rig({ cap: 2 });
+    try {
+      const { t1 } = await reservedAway(r);
+      const integrator = await r.person("ivy");
+      const scope = { taskId: t1, projectId: r.w.project };
+      assert.equal(await view(r, { ...r.w.owner, taskScope: scope } as Principal), undefined);
+      assert.equal(await view(r, { ...integrator, taskScope: scope } as Principal), undefined);
+      await refuses("not_found", () => r.ops.list({ ...integrator, taskScope: scope } as Principal, { projectId: r.w.project }));
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a bound under a minute is shown in seconds, never as 0 min (card P10, tenth slice review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 30_000 });
+    try {
+      await reservedAway(r);
+      const lines = stuck(await view(r, r.w.owner));
+      assert.equal(lines.length, 1);
+      assert.match(lines[0]!, /once that has lasted 30 s /);
+    } finally { await r.close(); }
   });
 }
