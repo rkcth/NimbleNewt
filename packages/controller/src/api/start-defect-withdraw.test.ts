@@ -102,8 +102,9 @@ test("through the running controller a defect reported by mistake is withdrawn b
     assert.equal((await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.count, 0, "it left the Needs-you list");
     assert.match((await risks())[0]!, /^No unfinished defect/);
     const shown = (await call(boot.token, "status.ask", { request: { kind: "defects", taskId: task } })).result.item.lines.map((l: any) => l.text).join("\n");
-    assert.match(shown, /withdrawn as mistaken by \S+ \("I looked at the wrong version"\)/);
-    assert.match(shown, /withdrawn as mistaken by agent:\S+ \("I misread step 1; it is fine"\)/);
+    // Who withdrew it (the owner, the reporting agent) and why, then the rest of the line as for any other defect.
+    assert.ok(shown.includes(`: withdrawn as mistaken by ${rob.id} ("I looked at the wrong version"); the report stays on the record; 2 of 1 repair and review cycles used.`), shown);
+    assert.ok(shown.includes(`: withdrawn as mistaken by ${rev.id} ("I misread step 1; it is fine"); the report stays on the record; 0 of 1 repair and review cycles used.`), shown);
     assert.match(shown, /2 defect\(s\) found, 0 unresolved/);
   } finally {
     await c.close();

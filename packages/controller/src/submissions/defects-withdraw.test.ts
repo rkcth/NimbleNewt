@@ -181,7 +181,7 @@ for (const backend of backends) {
       const viaOp = await report2("reported through the operation table");
       await assert.rejects(() => run(rev, { id: viaOp.id, reason: "x", extra: 1 }, cid("w")), (e) => code(e, "invalid_command"));
       await assert.rejects(() => run(rev, { id: viaOp.id, reason: "x".repeat(2001) }, cid("w")), (e) => code(e, "invalid_command"));
-      await assert.rejects(() => run(rev, { id: viaOp.id, reason: "no command ID" }));
+      await assert.rejects(() => run(rev, { id: viaOp.id, reason: "no command ID" }), (e) => code(e, "invalid_command") && /commandId/.test((e as Error).message));
       await assert.rejects(() => run(far, { id: viaOp.id, reason: "far" }, cid("w")), (e) => code(e, "not_found"));
       await assert.rejects(() => run(ann, { id: viaOp.id, reason: "responsible" }, cid("w")), (e) => code(e, "forbidden"));
       assert.equal((await get(viaOp.id))["state"], "open", "nothing applied by a refused call");
