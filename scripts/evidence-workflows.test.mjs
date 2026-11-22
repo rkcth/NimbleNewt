@@ -181,10 +181,12 @@ test("own-hardware: the job-context diagnostic (card wsb-console) runs once befo
   const j = job(text, "sandbox-windows");
   const s = step(j, "wsbctx");
   assert.match(s, /\n {8}continue-on-error: true\n/);
-  assert.match(s, /\n {8}timeout-minutes: 5\n/);
-  assert.match(s, /node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs > "\$RUNNER_TEMP\/wsb-job-context\.txt"/);
-  // Only the redacted copy is printed or added to the summary.
-  assert.doesNotMatch(s.replace(/node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, ""), /wsb-job-context\.mjs/);
+  // 10 minutes: the context script stops itself at 240 s, the launch variants (card wsb-variants) at 290 s.
+  assert.match(s, /\n {8}timeout-minutes: 10\n/);
+  assert.match(s, /node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs > "\$RUNNER_TEMP\/wsb-job-context\.txt"\n {10}node scripts\/wsb-launch-variants\.mjs 2>&1 \| node scripts\/redact-log\.mjs >> "\$RUNNER_TEMP\/wsb-job-context\.txt"\n/);
+  // Only the redacted copy is printed or added to the summary (the variants are appended to the same file, after the context lines).
+  assert.doesNotMatch(s.replace(/node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, "").replace(/node scripts\/wsb-launch-variants\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, ""), /wsb-job-context\.mjs|wsb-launch-variants\.mjs/);
+  assert.match(s, /cat "\$RUNNER_TEMP\/wsb-job-context\.txt"; echo '```'; \} >> "\$GITHUB_STEP_SUMMARY"/);
   // After the build, before every step that runs wsb (the Sandbox tests are the first).
   assert.ok(j.indexOf("id: wsbctx") > j.indexOf("npm run build") && j.indexOf("id: wsbctx") < j.indexOf("id: wsb\n"));
   // A record, not evidence: the outcome step does not read it.
@@ -194,4 +196,5 @@ test("own-hardware: the job-context diagnostic (card wsb-console) runs once befo
   assert.ok(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(j)[1]) >= stepSum + 30, `job limit below ${stepSum + 30}`);
   // No other job runs it.
   assert.equal(text.split("wsb-job-context.mjs").length - 1, 1);
+  assert.equal(text.split("node scripts/wsb-launch-variants.mjs").length - 1, 1);
 });

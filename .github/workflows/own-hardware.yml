@@ -84,7 +84,7 @@ jobs:
     if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, nimblenewt-windows]
     # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
-    # The job's limit is above the sum of every step's own limit (385 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
+    # The job's limit is above the sum of every step's own limit (390 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
     # (a self-hosted runner's job may run longer than a hosted one's 360 minutes).
     timeout-minutes: 420
     steps:
@@ -155,14 +155,18 @@ jobs:
           exit 0
       # Diagnostic only (card wsb-console): what this job's own process looks like before its first `wsb` call (account kind, integrity level, session, console, job object,
       # parents and service, window station and desktop, environment variable NAMES) and one `wsb list` with a 45 s limit, to compare with the same call made by hand.
-      # Fixed words only, through the credential scanner and the log redaction; it always exits 0 and the outcome step does not read it.
+      # Then (card wsb-variants) `wsb list` once in each of five other ways (node detached, cmd with NUL and files, powershell -Command, a new console, a one-shot scheduled task
+      # removed afterwards), 45 s each and under 290 s in all (scripts/wsb-launch-variants.mjs), appended to the same record.
+      # Fixed words only, through the credential scanner and the log redaction; both always exit 0 and the outcome step does not read them.
+      # 10 minutes: the context script stops itself at 240 s and the variants at 290 s.
       - name: Record the job's process context before wsb
         id: wsbctx
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 10
         shell: bash
         run: |
           node scripts/wsb-job-context.mjs 2>&1 | node scripts/redact-log.mjs > "$RUNNER_TEMP/wsb-job-context.txt"
+          node scripts/wsb-launch-variants.mjs 2>&1 | node scripts/redact-log.mjs >> "$RUNNER_TEMP/wsb-job-context.txt"
           cat "$RUNNER_TEMP/wsb-job-context.txt"
           { echo "## The job's process context before wsb (diagnostic)"; echo '```'; cat "$RUNNER_TEMP/wsb-job-context.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Run the real Windows Sandbox tests

@@ -139,6 +139,12 @@ const MARKERS = [["grpc", /grpc/i], ["localhost:80", /localhost:80\b/i], ["deadl
 
 /** One `wsb list` call's outcome as fixed words, the markers seen, and its error output's first line cleaned and cut. */
 export function wsbListLine(r, timeoutMs = WSB_LIST_TIMEOUT_MS) {
+  const d = describeRun(r, timeoutMs);
+  return `wsb list (once, limit ${timeoutMs} ms): ${d.outcome} after ${d.ms} ms; output lines ${d.lines}; markers: ${d.markers}; first error line: ${d.message}`;
+}
+
+/** The parts of a `wsb` call's line (also used by scripts/wsb-launch-variants.mjs): outcome, duration in ms, output lines, markers and the cleaned first error line. */
+export function describeRun(r, timeoutMs = WSB_LIST_TIMEOUT_MS) {
   const ms = Number.isFinite(r?.durationMs) ? Math.round(r.durationMs) : -1;
   const code = r?.error?.code;
   let outcome;
@@ -155,7 +161,7 @@ export function wsbListLine(r, timeoutMs = WSB_LIST_TIMEOUT_MS) {
   const first = err.split(/\r?\n/).map((l) => l.trim()).find((l) => l !== "") ?? "";
   // Control characters out, then the credential scanner (which also cuts); the workflow redacts personal names after this.
   const message = first === "" ? "none" : safeMessage(first.replace(/[\u0000-\u001f\u007f]/g, " "), 160);
-  return `wsb list (once, limit ${timeoutMs} ms): ${outcome} after ${ms < 0 ? "unknown" : ms} ms; output lines ${lines}; markers: ${markers.length > 0 ? markers.join(", ") : "none"}; first error line: ${message}`;
+  return { outcome, ms: ms < 0 ? "unknown" : String(ms), lines, markers: markers.length > 0 ? markers.join(", ") : "none", message };
 }
 
 /** Every line for the log: the fixed prefix, and the credential scanner once more over the whole line (a line it changes is printed as changed). */
