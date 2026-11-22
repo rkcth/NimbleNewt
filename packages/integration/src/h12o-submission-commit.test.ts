@@ -123,21 +123,28 @@ test("an approved submission is committed once through the release operation on 
     const sub = (await api(c, boot.token, "submission.get", { submissionId: sub1 })).result.item;
     const verdict = await api(c, rev, "submission.record", { taskId: one.task, kind: "review", role: "reviewer", subject: sub1, verdict: "approve" }, "rv-1");
     assert.equal(verdict.ok, true, JSON.stringify(verdict));
+    // Automatic release (card H12o): nobody asked. The approval itself made the platform commit, as the controller's own request (the attempt had ended, so nothing was frozen); the owner's request that follows is answered from the record.
+    const autoRecord = (await c.storage.getAggregate({ kind: "submission-commit", id: sub1 }))?.body as { requestId?: string; commitId?: string } | undefined;
+    assert.ok(autoRecord?.commitId !== undefined, "the approval was followed by the release");
+    assert.equal(git1("rev-parse", "HEAD"), autoRecord.commitId);
+    assert.equal(((await c.storage.getAggregate({ kind: "workspace-request", id: autoRecord.requestId! }))?.body as { requestedBy?: string } | undefined)?.requestedBy, "service:workspace-release");
+    const hostCallsAfterApproval = hostCalls;
     const done = await release(one.task, sub1, "rel-1");
     assert.equal(done.ok, true, JSON.stringify(done));
     const d = done.result.detail;
     assert.equal(done.result.state, "done", done.result.summary);
-    assert.deepEqual([d.committed, d.submission, d.recovered, d.parent, d.tree], [true, sub1, false, sub.base, sub.tree]);
+    assert.equal(hostCalls, hostCallsAfterApproval, "the host was not asked again");
+    assert.deepEqual([d.committed, d.submission, d.alreadyRecorded, d.parent, d.tree], [true, sub1, true, sub.base, sub.tree]);
     assert.deepEqual(done.result.submission, { id: sub1, base: sub.base, tree: sub.tree, approvedBy: `agent:${reviewer}` });
     assert.equal(git1("rev-parse", "HEAD"), d.commit);
     assert.equal(git1("log", "-1", "--format=%T"), sub.tree);
     assert.match(git1("log", "-1", "--format=%B"), new RegExp(`^NimbleNewt-Submission: ${sub1}$`, "m"));
     const made = (await c.storage.getAggregate({ kind: "submission-commit", id: sub1 }))?.body as { commitId?: string; requestId?: string; recovered?: boolean; permitted?: boolean } | undefined;
-    assert.deepEqual([made?.commitId, made?.requestId, made?.recovered], [d.commit, done.result.id, false]);
+    assert.deepEqual([made?.commitId, made?.requestId, made?.recovered], [d.commit, autoRecord.requestId, false]);
     // A reviewer other than the author approved it, so the commit is a review-gate permit commit (card H12o, permit slice): the permit's marks, a line in the host's permit ledger, so a landing that requires the
     // permit (this host's default policy) no longer refuses it; the record keeps what the host confirmed.
-    assert.deepEqual([d.permitted, d.permitRequiredToLand, made?.permitted], [true, false, true]);
-    assert.match(git1("log", "-1", "--format=%B"), new RegExp(`^NimbleNewt-Request: ${done.result.id}$`, "m"));
+    assert.deepEqual([d.permitted, made?.permitted], [true, true]);
+    assert.match(git1("log", "-1", "--format=%B"), new RegExp(`^NimbleNewt-Request: ${autoRecord.requestId}$`, "m"));
     assert.deepEqual(await git.unpermitted({ gitDir: where1.gitDir, taskId: one.task }), []);
     // Asked again: the recorded commit, the host not asked, no second commit.
     const calls = hostCalls;
@@ -148,9 +155,12 @@ test("an approved submission is committed once through the release operation on 
 
     // Task two: approved, then a stray file appears in the checkout: refused, nothing committed.
     const sub2Body = (await api(c, boot.token, "submission.get", { submissionId: sub2 })).result.item;
-    assert.equal((await api(c, rev, "submission.record", { taskId: two.task, kind: "review", role: "reviewer", subject: sub2, verdict: "approve" }, "rv-2")).ok, true);
     const base2 = git2("rev-parse", "HEAD");
     await writeFile(join(where2.checkout, "src", "stray.ts"), "export const s = 1;\n");
+    assert.equal((await api(c, rev, "submission.record", { taskId: two.task, kind: "review", role: "reviewer", subject: sub2, verdict: "approve" }, "rv-2")).ok, true);
+    // The automatic release met the changed checkout: refused, nothing committed, no record of a commit; the request is kept.
+    assert.equal(git2("rev-parse", "HEAD"), base2);
+    assert.equal(await c.storage.getAggregate({ kind: "submission-commit", id: sub2 }), undefined);
     const stale = await release(two.task, sub2, "rel-3");
     assert.equal(stale.result.state, "refused");
     assert.match(stale.result.summary, /no longer holds the approved work of submission .*its files changed/);
