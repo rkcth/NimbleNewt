@@ -295,12 +295,12 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
-  test(`${backend.name}: a queue record written before the idle time existed is not ended on its first-place time; the next write of the queue starts the clock (card P10, eighth slice)`, async () => {
+  for (const mode of ["another write", "a refused landing alone"] as const) test(`${backend.name}: a queue record written before the idle time existed is not ended on its first-place time; ${mode} starts the clock (card P10, eighth slice)`, async () => {
     const r = await rig({ cap: 2, releaseMs: 12 * HOUR, holdMs: 100 * HOUR });
     try {
       const ivy = await r.person("ivy");
       const { t1, t2 } = await reservedAway(r);
-      // An older controller left the record without `idleSince` while t1's place had been first (as an approved entry) for two days.
+      // An older controller left the record without `idleSince` while t1's place had been first (as an approved entry) for two days, and had already told the director (so no escalation write comes).
       const queueId = LandingQueueService.queueIdOf(r.w.project, "main");
       const runner = new CommandRunner(r.w.storage, r.w.epoch, { clock: r.w.clock.now, pause: async () => undefined });
       r.w.clock.advance(48 * HOUR);
@@ -311,24 +311,36 @@ for (const backend of backends) {
           const body = current.body as unknown as { front: { idleSince?: string } };
           const { idleSince: _dropped, ...front } = body.front;
           const ref = { kind: "landing-queue", id: queueId };
-          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: JSON.parse(JSON.stringify({ ...body, front })) }], detail: {} };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: JSON.parse(JSON.stringify({ ...body, front: { ...front, escalated: true } })) }], detail: {} };
         },
       }));
       assert.equal((await r.list()).front!.idleSince, undefined);
       const since = (await r.list()).front!.since;
-      const land = await r.lander(ivy, t2);
-      await refuses("invalid_transition", () => land(t2), /holds the first place/);
-      assert.equal(await r.queue.releaseIdle({ projectId: r.w.project, branch: "main", taskId: t1, since, olderThanMs: 12 * HOUR }), undefined, "the write does not count from the first-place time either");
+      assert.equal(await r.queue.releaseIdle({ projectId: r.w.project, branch: "main", taskId: t1, since, olderThanMs: 12 * HOUR }), undefined, "the write does not count from the first-place time");
       assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
-      // A write of the queue (another task's work approved) starts the clock now.
-      const t3 = await r.task("three");
-      await r.ops.queueApproved(r.submit(t3, oid(2)), "rv9");
-      assert.equal(typeof (await r.list()).front!.idleSince, "string");
-      r.w.clock.advance(12 * HOUR - MIN);
+      const land = await r.lander(ivy, t2);
+      const started = new Date(r.w.clock.now()).toISOString();
+      if (mode === "another write") {
+        // A write of the queue (another task's work approved) starts the clock now.
+        const t3 = await r.task("three");
+        await r.ops.queueApproved(r.submit(t3, oid(2)), "rv9");
+        assert.equal((await r.list()).front!.idleSince, started);
+      } else {
+        // Nothing else writes the queue: the refused landing itself starts the clock (it ends nothing on that call), and a later refusal does not move it.
+        await refuses("invalid_transition", () => land(t2), /holds the first place/);
+        assert.equal((await r.list()).front!.idleSince, started);
+        assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
+        assert.equal(await r.queue.startIdleClock({ projectId: r.w.project, branch: "main", taskId: t1, since }), false, "a clock already started is not started again");
+      }
+      r.w.clock.advance(HOUR);
+      await refuses("invalid_transition", () => land(t2), /holds the first place/);
+      assert.equal((await r.list()).front!.idleSince, started);
+      r.w.clock.advance(11 * HOUR - MIN);
       await refuses("invalid_transition", () => land(t2), /holds the first place/);
       r.w.clock.advance(MIN);
       assert.equal((await land(t2)).state, "done");
       assert.deepEqual((await r.list()).reservations, []);
+      assert.equal(r.told.filter((t) => t.why === "released").length, 1);
     } finally { await r.close(); }
   });
 

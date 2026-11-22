@@ -468,4 +468,27 @@ export class LandingQueueService {
     })))).replayed) ended = undefined; } catch (error) { if (!nothing(error)) throw error; ended = undefined; }
     return ended;
   }
+
+  /**
+   * Starts the idle clock of a first place that has no approved entry in a record written before `idleSince` existed (card P10, eighth slice): the place's idle time is unknown, so it counts from now. Without
+   * this a queue nobody writes (its escalation already marked, nothing new approved) would never start the clock, and its reserved place would hold the branch for good. A separate command from the release (its own
+   * command ID), judged inside its own write: it writes only while that task is still the same first place with no entry, holds its reservation and has no `idleSince`. Answers whether it wrote.
+   */
+  async startIdleClock(command: { projectId: string; branch: string; taskId: string; since: string }): Promise<boolean> {
+    const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
+    try {
+      return !(await retried(() => this.#runner.command("landing.queue.idle", { commandId: `lq-idle:${queueId}:${command.taskId}:${command.since}`.slice(0, 120), actor: "service:landing-queue" }, async () => ({
+        payload: { projectId: command.projectId, branch: command.branch, taskId: command.taskId, since: command.since },
+        build: async () => {
+          const current = await this.#runner.get(KIND, queueId);
+          const q = current?.body as unknown as LandingQueueBody | undefined;
+          const first = q === undefined ? undefined : frontOf(q);
+          if (q === undefined || current === undefined || first === undefined || first.taskId !== command.taskId || first.entry !== undefined || !(q.reservations ?? []).some((x) => x.taskId === command.taskId)
+            || q.front?.taskId !== command.taskId || q.front.since !== command.since || q.front.idleSince !== undefined) throw new DomainError("invalid_transition", NOTHING);
+          const ref: AggregateRef = { kind: KIND, id: queueId };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled(q, this.#runner.now())) }], detail: { taskId: command.taskId, idleClock: true, since: command.since }, contention: async () => new DomainError("stale_revision", RACE) };
+        },
+      })))).replayed;
+    } catch (error) { if (!nothing(error)) throw error; return false; }
+  }
 }

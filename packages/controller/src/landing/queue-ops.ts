@@ -293,7 +293,9 @@ export class LandingQueueOps {
    * wins), tells the task's holder (the task goes to the back when its refreshed work is approved) and the director and the owner. Best effort: answers whether the place was ended; a failure leaves the queue as it was.
    */
   async #releaseIdle(projectId: string, branch: string, front: LandingQueueFront | undefined, taskId: string): Promise<boolean> {
-    if (front === undefined || front.taskId !== taskId || front.idleSince === undefined) return false;
+    if (front === undefined || front.taskId !== taskId) return false;
+    // A record written before the idle time existed: its clock starts now (best effort; the next refused landing tries again), and nothing is ended on this call.
+    if (front.idleSince === undefined) { try { await this.#queue.startIdleClock({ projectId, branch, taskId, since: front.since }); } catch { /* the next refused landing starts it */ } return false; }
     const releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS;
     const idle = Date.parse(front.idleSince), now = Date.parse(this.#queue.now());
     if (!Number.isFinite(idle) || !Number.isFinite(now) || now - idle < releaseMs) return false;
