@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Check } from "../policy/integration-policy.js";
-import { LandingGate, landingChecksText, type ContractTests, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
+import { LandingGate, landingChecksText, type QaGateView, type ContractTests, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
 
 // Card P09: the landing gate judges the project's required checks on the exact tree a landing would make. Not run counts as failed; a reviewer's approval carries over to another tree only while the patch ID is unchanged.
 const BASE = "b".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), OTHER_PATCH = "c".repeat(40);
@@ -167,4 +167,37 @@ test("when the gate stops waiting for the host, it aborts the call's signal so t
   const ok = await make({ landingChecks: async (call) => { inTime = call.signal; return { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [{ name: "slow", state: "passed" }] }; } });
   assert.equal(ok.passed, true);
   assert.equal(inTime?.aborted, false);
+});
+
+// Card P09 (third slice): the qa check with a fake QA gate (the real one is exercised in workspace-ops-p09-qa.test.ts).
+const qaGate = (g: Partial<QaGateView> | undefined | (() => Promise<QaGateView | undefined>)) => new LandingGate({
+  requiredChecks: async () => ["qa"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z",
+  qaGate: async (id) => (typeof g === "function" ? g() : g === undefined ? undefined : { taskId: TASK, submissionId: id, tree: TREE, verdict: "passed" as const, reasons: [], ...g }),
+});
+const qaRun = (g: Parameters<typeof qaGate>[0], opts: { submissionId?: string | undefined } = { submissionId: SUB }) => qaGate(g).evaluate({ taskId: TASK, projectId: "proj-x", ...(opts.submissionId === undefined ? {} : { submissionId: opts.submissionId }), host: host({}).h });
+
+test("qa: a passed gate passes; a gate for another tree or task, a missing gate and a thrown read are not run; failure reasons are told (card P09)", async () => {
+  assert.deepEqual((await qaRun({})).results.map((x) => x.result), ["pass"]);
+  assert.equal((await qaRun({ tree: OLD_TREE })).results[0]!.result, "not_run");
+  assert.equal((await qaRun({ taskId: "tsk-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run");
+  assert.equal((await qaRun({ submissionId: "sbm-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run", "a gate for another submission does not count");
+  assert.equal((await qaRun(undefined)).results[0]!.result, "not_run");
+  const thrown = await qaRun(async () => { throw new Error("storage down"); });
+  assert.deepEqual([thrown.passed, thrown.results[0]!.result], [false, "not_run"]);
+  assert.match(thrown.results[0]!.summary, /storage down/);
+  const bad = await qaRun({ verdict: "failed", reasons: ["check_failed", "stale_evidence"] });
+  assert.deepEqual([bad.passed, bad.results[0]!.result], [false, "fail"]);
+  assert.match(bad.results[0]!.summary, /check_failed, stale_evidence/);
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["no_evidence"] })).results[0]!.result, "not_run");
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["no_evidence", "check_missing"] })).results[0]!.result, "not_run", "no evidence against required checks is not run too");
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["decision_superseded", "no_evidence", "check_missing"] })).results[0]!.result, "fail");
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["check_missing"] })).results[0]!.result, "fail", "evidence that leaves a required check out failed");
+  assert.equal((await qaRun({}, { submissionId: undefined })).results[0]!.result, "not_run");
+});
+
+test("qa: without a QA gate wired the check is not collected, as before (card P09)", async () => {
+  const g = new LandingGate({ requiredChecks: async () => ["qa"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z" });
+  const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
+  assert.deepEqual([r.passed, r.results[0]!.result], [false, "not_run"]);
+  assert.match(r.results[0]!.summary, /not collected/);
 });

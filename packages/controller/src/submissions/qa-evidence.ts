@@ -604,6 +604,15 @@ export class QaEvidenceService {
   }
 }
 
+/**
+ * The QA gate as the landing gate reads it (card P09, the `qa` required check): read as the controller at the owner's level, so every task's gate can be read; the landing gate itself checks the task, the submission and
+ * the tree. One function, used by `start.ts` and by the tests, so the controller's composition is the one tested.
+ */
+export function landingQaGate(service: QaEvidenceService): (submissionId: string) => Promise<QaGate> {
+  const reader = { id: "service:landing-gate", kind: "owner", name: "landing-gate", grants: [] } as unknown as Principal;
+  return async (submissionId) => service.gate(reader, submissionId);
+}
+
 /** A stale reason in plain words (the owner reads it). */
 export function reasonText(r: QaStaleReason): string {
   switch (r.kind) {
