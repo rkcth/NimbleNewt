@@ -19,8 +19,12 @@ for (const backend of backends) {
       const status = view(true);
       assert.deepEqual(STATUS_KINDS["landing_settings"]?.keys, ["projectId"]);
 
-      const first = (await status.landingSettingsLines(w.owner, w.project))!;
+      // The first read makes the project's record (as integration.get does); three at once on a project with none make one record, and all three say the same.
+      const firsts = await Promise.all([1, 2, 3].map(async () => (await status.landingSettingsLines(w.owner, w.project))!));
+      const first = firsts[0]!;
       const text = first.lines.map((l) => l.text).join("\n");
+      for (const f of firsts) assert.equal(f.lines.map((l) => l.text).join("\n"), text);
+      assert.match(text, /\(revision 1\); the installation allows landing on main by itself\./, text);
       assert.match(text, /How finished work lands in project Garden: /, text);
       assert.match(text, /Who integrates: /, text);
       assert.match(text, /Checks required before work lands: tests/, text);
@@ -36,7 +40,14 @@ for (const backend of backends) {
       assert.match(now, /Who integrates: a person\./, now);
       assert.match(now, /up to 5 time\(s\)/, now);
       assert.match(now, /set for this project by you/, now);
-      await integration.set(w.owner, { commandId: "is-2", projectId: w.project, requiredChecks: [] } as never);
+      // The installation's lock: a project set to main-automatic is held at the integration branch, and the view says both what the setting says and what holds it.
+      await integration.set(w.owner, { commandId: "is-1b", projectId: w.project, landing: "main-automatic" } as never);
+      assert.match((await status.landingSettingsLines(w.owner, w.project))!.lines[0]!.text, /: main-automatic: it goes to main by itself once its required checks pass/);
+      await integration.setDefault(w.owner, { commandId: "id-1", forbidMainAutomatic: true } as never);
+      const held = (await status.landingSettingsLines(w.owner, w.project))!.lines.map((l) => l.text).join("\n");
+      assert.match(held, /: integration-branch: it is merged onto a separate integration branch[^\n]*\(the setting says main-automatic, but the installation's lock holds main-automatic back\)\./, held);
+      assert.match(held, /the installation forbids landing on main by itself\./, held);
+      await integration.set(w.owner, { commandId: "is-2", projectId: w.project, landing: "integration-branch", requiredChecks: [] } as never);
       assert.match((await status.landingSettingsLines(w.owner, w.project))!.lines.map((l) => l.text).join("\n"), /Checks required before work lands: none\./);
 
       // Only the owner reads it (as the settings reader itself): an agent with project rights is told nothing, and so is a project that does not exist.

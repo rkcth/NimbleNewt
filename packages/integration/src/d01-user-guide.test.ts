@@ -445,7 +445,8 @@ test("every status view the guide's finished-work section lists is a real status
 
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
   // The stand-in reads the owner's words the way the interpreter prompt asks a model to: a task view names the task by its title (the chat finds it in the project in focus), and a project view
-  // ("... in Garden") moves the focus to the project the owner named, then asks for the view of the project in focus. No ID is handed over: the chat resolves both from the owner's words.
+  // ("... in Garden") moves the focus to the project the owner named, its evidence the owner's own phrase naming it (the word before the name and the name: a phrase not in the sentence is refused, and that refusal
+  // fails the row rather than leaving the focus an earlier row set), then asks for the view of the project in focus. No ID is handed over: the chat resolves both from the owner's words.
   const TASK_KINDS = new Set(["submissions", "qa", "defects", "task_docs"]);
   const fetch: typeof globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
@@ -453,7 +454,7 @@ test("every status view the guide's finished-work section lists is a real status
     const row = rows.find((l) => l.say === said);
     const intents = row === undefined ? [{ kind: "none", reason: "not in the guide" }]
       : TASK_KINDS.has(row.kind) ? [intent("status", { request: { kind: row.kind, taskTitle: TASK } }, row.say)]
-      : [{ kind: "switch_focus", projectName: "Garden", evidence: "in Garden", basis: "owner" }, intent("status", { request: { kind: row.kind } }, row.say)];
+      : [{ kind: "switch_focus", projectName: "Garden", evidence: /\S+ Garden\b/.exec(row.say)?.[0] ?? "Garden", basis: "owner" }, intent("status", { request: { kind: row.kind } }, row.say)];
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
   };
   let l: Awaited<ReturnType<typeof launch>> | undefined;
@@ -476,7 +477,7 @@ test("every status view the guide's finished-work section lists is a real status
       const out: string[] = [];
       await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([row.say]), write: (t) => out.push(t) });
       const printed = out.join("").replace(/\s+/g, " ");
-      assert.ok(!/not in the guide|Which project do you mean|invalid_command|not_found/i.test(printed), `${row.kind}: the chat did not answer the guide's words:\n${printed}`);
+      assert.ok(!/not in the guide|Which project do you mean|invalid_command|not_found|not a phrase of your own message/i.test(printed), `${row.kind}: the chat did not answer the guide's words:\n${printed}`);
       // The chat's answer is the view's own text (the first line, whitespace folded), not only some reply of the stand-in.
       assert.ok(printed.includes(viewLines[0]!.replace(/\s+/g, " ")), `${row.kind}: the chat did not print the view's answer "${viewLines[0]}":\n${printed}`);
     }

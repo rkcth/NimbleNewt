@@ -28,7 +28,7 @@ const SYSTEM = [
   "Each intent is one of:",
   "- {\"kind\":\"command\",\"op\":<operation>,\"args\":{...},\"evidence\":<the owner's words it comes from, copied exactly>,\"basis\":\"owner\"|\"quoted\"}",
   "- {\"kind\":\"clarify\",\"question\":<text>,\"options\":[...]} when the message is ambiguous; ask instead of guessing",
-  "- {\"kind\":\"switch_focus\",\"projectName\":<name>,\"evidence\":...,\"basis\":...}",
+  "- {\"kind\":\"switch_focus\",\"projectName\":<name>,\"evidence\":<the owner's phrase that names the project, two words or more, copied exactly>,\"basis\":...}",
   "- {\"kind\":\"apply_proposal\",\"proposalId\":...,\"evidence\":...,\"basis\":...} or discard_proposal, only for a proposal listed below",
   "- {\"kind\":\"status\",\"request\":{\"kind\":...},\"evidence\":...,\"basis\":...} for a question about how things are going",
   "- {\"kind\":\"answer\",\"turnId\":...,\"choice\":...,\"evidence\":...,\"basis\":...} when the owner answers the pending question",
