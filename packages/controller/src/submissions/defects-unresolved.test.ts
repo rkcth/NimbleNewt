@@ -114,6 +114,10 @@ for (const backend of backends) {
       await assert.rejects(() => svc.unresolved(far, { projectId: p1 }), (e: unknown) => e instanceof DomainError && e.code === "not_found");
       await assert.rejects(() => svc.unresolved({ ...rev, taskScope: { taskId: t2, projectId: p2 } } as Principal, { projectId: p1 }), (e: unknown) => e instanceof DomainError && e.code === "not_found");
       assert.deepEqual((await svc.unresolved({ ...rev, taskScope: { taskId: t2, projectId: p2 } } as Principal, { projectId: p2 })).items.map((x) => x.id), [waiting]);
+      // An agent that may read only one task of the project (a grant for that task) still sees the defects of that task's deliverables.
+      const oneTask = { ...far, grants: [{ action: "task.read", project: p1, resource: { kind: "task", id: t1 } }] } as unknown as Principal;
+      assert.deepEqual((await svc.unresolved(oneTask, { projectId: p1 })).counts, { escalated: 1, awaitingCheck: 0, open: 2 });
+      await assert.rejects(() => svc.unresolved(oneTask, { projectId: p2 }), (e: unknown) => e instanceof DomainError && e.code === "not_found");
       await assert.rejects(() => svc.unresolved(far), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
       // The escalated defect is answered from the Needs-you list (needs-you.answer, kind defect): only the owner, never an agent or a task credential.
       const answer = OPERATIONS.find((o) => o.name === "needs-you.answer")!;

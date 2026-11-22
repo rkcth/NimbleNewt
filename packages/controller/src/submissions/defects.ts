@@ -490,8 +490,9 @@ export class DefectService {
   async unresolved(by: Principal, query: { readonly projectId?: string; readonly cap?: number; readonly escalatedOnly?: boolean } = {}): Promise<{ readonly counts: { readonly escalated: number; readonly awaitingCheck: number; readonly open: number }; readonly items: readonly (DefectBody & { readonly id: string; readonly revision: number; readonly limit: number })[]; readonly scanLimited: boolean }> {
     if (by.kind !== "owner" && by.kind !== "agent") return { counts: { escalated: 0, awaitingCheck: 0, open: 0 }, items: [], scanLimited: false };
     if (by.kind === "agent" && query.projectId === undefined) bad("projectId", "is needed");
-    // A project the agent may not read is not found, like in the other project views: the answer does not tell it the project exists.
-    if (by.kind === "agent" && !allows(by, "task.read", query.projectId)) hidden("project");
+    // A project the agent may not read is not found, like in the other project views: the answer does not tell it the project exists. An agent that reads only some of its deliverables (a task.read grant for
+    // one task, or a role for a deliverable shared with the project) still sees the defects it may read; it is told not_found only when it reads none there (as the deliverable list of a task does).
+    const readsProject = by.kind !== "agent" || allows(by, "task.read", query.projectId);
     const cap = query.cap === undefined ? 50 : query.cap;
     const readable = new Map<string, boolean>();
     const limits = new Map<string, number>();
@@ -519,7 +520,8 @@ export class DefectService {
       }
       if (chunk.length < UNRESOLVED_PAGE) { scanLimited = false; break; }
     }
-    const rank = (x: DefectBody): number => (x.state === "escalated" ? 0 : 1);
+    if (!readsProject && found.length === 0) hidden("project");
+    const rank =(x: DefectBody): number => (x.state === "escalated" ? 0 : 1);
     const sev = (x: DefectBody): number => DEFECT_SEVERITIES.indexOf(x.severity);
     found.sort((a, b) => rank(a) - rank(b) || sev(a) - sev(b) || (a.reportedAt < b.reportedAt ? -1 : a.reportedAt > b.reportedAt ? 1 : 0) || (a.id < b.id ? -1 : 1));
     const counts = { escalated: 0, awaitingCheck: 0, open: 0 };
