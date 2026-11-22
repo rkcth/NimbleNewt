@@ -95,7 +95,7 @@ import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationSe
 import { replayResolvers } from "../activity/replay-resolvers.js";
 import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, recordedSubmission, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
-import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, SubmissionService, attemptOfAgents, landingDirectorGate, landingDocsGate, landingQaGate } from "../submissions/index.js";
+import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, SubmissionService, decisionChangeHook, attemptOfAgents, landingDirectorGate, landingDocsGate, landingQaGate } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute, targetOf } from "../routing/index.js";
 import { LANDING_SETTING_KEYS, landingPolicyFrom } from "./landing-policy.js";
@@ -887,7 +887,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       await activity.record({ id: "service:branches", kind: "service", name: "branches", grants: [] } as Principal, { commandId: `brn-act:${createHash("sha256").update(`${e.key}|${e.what}`).digest("hex").slice(0, 40)}`, taskId: e.taskId, kind: "branch", summary: `A side line of work ${e.branchId} ${words}${typeof purpose === "string" ? `: ${purpose}` : ""}.`, branch: e.branchId, manifest: { refs: [{ kind: "context-branch", id: e.branchId }] }, outcome: "confirmed" } as never);
     } });
     // Decisions recorded here block the next action of affected tasks through the stored guard; interrupting a generation already running is the dispatcher's own instance of the service (card C08b).
-    const decisions = DecisionService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), effects: EffectService.withEpoch(storage, epoch, assignments) });
+    let qaForDecisions: QaEvidenceService | undefined; // set where the QA service is made; read when a decision change reaches a task (card Q02)
+    const decisions = DecisionService.withEpoch(storage, epoch, { events: EventService.withEpoch(storage, epoch), effects: EffectService.withEpoch(storage, epoch, assignments), taskReached: decisionChangeHook(() => qaForDecisions) });
     // A new request for more budget tells the owner when it is addressed to them (card R05c). Only the controller's own facts go in the notice, never the requester's words.
     const notifyAggregate: NotifyAggregate = async (n) => { await notifications.emitFromController({ commandId: `bgt-agg-${n.noticeId}`, kind: "maintenance", level: "needs-you", ref: { kind: "budget-aggregate", id: n.noticeId }, detail: `${n.text.slice(0, 400)} Change it with budget.aggregate.set.` }); };
     const budgets = BudgetService.withEpoch(storage, epoch, { agreedLimits: () => agreedLimits.effective(), notifyAggregate, notify: async (n) => { if (n.to === "owner") await notifications.emitFromController({ commandId: `bgt-req-${n.requestId}`, kind: "maintenance", level: "needs-you", ref: { kind: "budget-request", id: n.requestId }, detail: `${n.requestedBy} asked for more budget for task ${n.taskId} (${n.costMicros} millionths, ${n.computeMs} ms of compute). Decide it with budget.decide.` }); else if (n.to.startsWith("agent:")) { const { purpose, text } = holderNotice(n); await messages.noticeFromController({ commandId: `bgt-hold-${n.requestId}`, taskId: n.parentTaskId ?? n.taskId, to: n.to, purpose, text, admit: "budget.manage" }); } } });
@@ -1188,6 +1189,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       recorded: async (e) => { try { await docObligations.afterQaEvidence(e); } catch (error) { await docCheckFailed(`doc-impact-failed:${e.evidenceId}`, { kind: "qa-evidence", id: e.evidenceId }, e.projectId, `QA evidence ${e.evidenceId} of task ${e.taskId}`, error); } },
       invalidated: async (e) => { try { await docObligations.afterQaInvalidation(e); } catch (error) { await docCheckFailed(`doc-lost-failed:${e.evidence[0]!.evidenceId}`, { kind: "qa-evidence", id: e.evidence[0]!.evidenceId }, e.projectId, `QA evidence of task ${e.taskId} was invalidated`, error); } },
     });
+    qaForDecisions = qaEvidence;
     // Documentation obligations (card Q03): verified against code whose QA gate passes (read as the caller), the newest independently checked code of a task found in its QA evidence; update tasks are ordinary tasks, created ready and assigned to the document's owner.
     const docObligations = DocObligationService.withEpoch(storage, epoch, {
       rolesOf: (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()),

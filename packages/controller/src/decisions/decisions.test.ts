@@ -859,4 +859,29 @@ for (const backend of backends) {
     // Propagation records are the owner's, a host's or a service's to read.
     assert.equal(await r.decisions.propagation(r.ann, "dpr-x"), undefined);
   });
+  // Card Q02 (fifth slice): each task a superseded decision reaches is handed to the QA hook, once per pass, and a failing hook never fails or holds back the decision.
+  suite("a superseded decision tells the QA hook about each task that relies on it, and a failing hook changes nothing about the decision", async (r) => {
+    const told: string[] = [];
+    r.deps.taskReached = async (taskId) => { told.push(taskId); };
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    await link(r, r.t2, { kind: "task", id: r.t2 }, [old.id], r.ben);
+    assert.equal(told.length, 0, "linking tells nothing");
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "done");
+    assert.deepEqual([...told].sort(), [r.t1, r.t2].sort(), "each reached task, once");
+    // A hook that fails (or throws before it returns a promise) leaves the decision recorded and its propagation done.
+    r.deps.taskReached = (): Promise<void> => { throw new Error("QA is down"); };
+    const second = await r.recorded({ statement: "Use SQLite", wording: "use SQLite, not MySQL", basedOn: 2 });
+    assert.equal(second.propagation, "done");
+    r.deps.taskReached = async () => { throw new Error("QA is down"); };
+    const third = await r.recorded({ statement: "Use Oracle", wording: "use Oracle, not SQLite", basedOn: 3 });
+    assert.equal(third.propagation, "done");
+    // A decision no task relies on tells nothing.
+    told.length = 0;
+    r.deps.taskReached = async (taskId) => { told.push(taskId); };
+    await r.recorded({ topic: "colour", statement: "Use blue", wording: "we use blue", basedOn: 0 });
+    await r.recorded({ topic: "colour", statement: "Use red", wording: "we use red", basedOn: 1 });
+    assert.equal(told.length, 0);
+  });
 }

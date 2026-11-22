@@ -413,6 +413,21 @@ export class QaEvidenceService {
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
+  /**
+   * Card Q02 (fifth slice): told by the decision service, best effort, when an owner decision that a task relies on was superseded, disputed or resolved (the propagation pass reaches the task). The task's QA
+   * evidence is looked at at once, as `check` would, by the QA service itself, so evidence judged against a decision that no longer stands is invalidated and its re-check scheduled without anyone asking. Same
+   * rules as `contractChanged` (a task with no evidence is not read further; nothing stale writes nothing; each state of the evidence index is looked at once), under its own command ID prefix.
+   */
+  async decisionChanged(taskIdValue: string): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[] }> {
+    const taskId = checkTaskId(taskIdValue);
+    if (await this.#task(taskId) === undefined) return { taskId, invalidated: [], rechecks: [] };
+    const contract = await this.#contract(taskId);
+    const index = await this.#index(taskId);
+    if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
+    const r = await this.#checkTask(QA_SERVICE, `qa-dec-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId);
+    return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
+  }
+
   async #checkTask(by: Principal, commandId: string, taskId: string): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
     let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
     const stale = async (): Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]> => {
@@ -711,4 +726,12 @@ export function reasonText(r: QaStaleReason): string {
     case "decision_superseded": return `owner decision ${r.decisionId} is ${r.state}`;
     case "decision_not_cited": return `the task now relies on owner decision ${r.decisionId}, which it was not checked against`;
   }
+}
+
+/**
+ * The hook the decision service calls for each task a decision change reaches (card Q02, fifth slice). `api/start.ts` and the tests build it from this one function, so what runs in the controller is what is tested.
+ * The QA service is read when the hook runs (the decision service is made before it). A failure is swallowed: a QA fault never fails or holds back a decision; `qa.evidence.check` and the gate still catch it.
+ */
+export function decisionChangeHook(qa: () => Pick<QaEvidenceService, "decisionChanged"> | undefined): (taskId: string) => Promise<void> {
+  return async (taskId) => { try { await qa()?.decisionChanged(taskId); } catch { /* best effort */ } };
 }

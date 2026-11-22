@@ -74,6 +74,8 @@ export interface DecisionDeps {
   readonly generation?: GenerationService;
   /** Reads the effect ledger, to record effects that already happened. */
   readonly effects?: EffectService;
+  /** Told, best effort, for each task a superseded, disputed or resolved decision reaches (card Q02: the task's QA evidence is looked at). A failure is not the decision's error. */
+  readonly taskReached?: (taskId: string) => Promise<void>;
 }
 
 /** The newest live entry that applies to a task (or to the project when none is named): a task-level decision made after the project-wide one overrides it for that task, and never the other way round. */
@@ -627,6 +629,8 @@ export class DecisionService implements DecisionGuard {
           if (!published.accepted) { failures.push({ taskId, step: step_, code: "backpressure", message: published.reason }); pendingTasks.push(taskId); steps[taskId] = step; continue; }
           step = { ...step, notified: published.seq };
         }
+        // The links are marked (or, for a dispute, the decision's state is what counts): other records bound to the decision are looked at. Repeats are harmless (nothing stale writes nothing).
+        if (this.#deps.taskReached !== undefined) { try { await this.#deps.taskReached(taskId); } catch { /* best effort */ } }
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_epoch") throw error;
         failures.push({ taskId, step: step_, code: error instanceof DomainError ? error.code : "error", message: error instanceof Error ? error.message : String(error) });
