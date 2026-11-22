@@ -123,9 +123,20 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
-  test(`${backend.name}: a sign-off on another submission of the task does not count for the landed one (card P09)`, async () => {
+  test(`${backend.name}: a sign-off on another submission of the task does not count for the landed one, not even one with the very same tree and patch, nor one on a document submission (card P09)`, async () => {
     const r = await rig();
     try {
+      // Another code submission of the task with exactly the landed tree and patch: its approval is its own, never the landed submission's.
+      const twin = await r.code(TREE, PATCH);
+      await r.signoff(r.dee, "approve", twin);
+      // A document submission of the same task, signed off: its list is keyed by the document, which no landing reads.
+      r.roles.set(r.ann.id, ["author", "docs"]);
+      const doc = (await r.svc.record(r.ann, { commandId: cid("doc"), taskId: r.task, kind: "document", role: "docs", artifactDigest: `sha256:${"0".repeat(64)}` })).id;
+      await r.signoff(r.dot, "approve", doc);
+      const twinOut = await r.land("o0");
+      assert.deepEqual([twinOut.state, twinOut.checks!.results[0]!.result], ["refused", "not_run"], twinOut.summary);
+      assert.match(twinOut.checks!.results[0]!.summary, /no director has signed off/);
+      assert.equal(r.calls.runs.length, 0);
       const other = await r.code(OLD_TREE, NEW_PATCH);
       await r.signoff(r.dee, "approve", other);
       const out = await r.land("o1");
