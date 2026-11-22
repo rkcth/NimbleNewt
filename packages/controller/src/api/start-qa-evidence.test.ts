@@ -209,3 +209,30 @@ test("the owner reaches QA by chat: the qa status kind and qa.evidence.check are
   assert.equal(CHAT_OPS["qa.evidence.check"]?.mode, "apply");
   assert.ok((acceptedArgs("qa.evidence.check") ?? []).includes("taskTitle"));
 });
+
+test("the owner asks what waits for QA across the project: the qa_project status kind lists each task's newest code version, and an unreadable project is not found (card Q02)", async () => {
+  const w = await world("qa-project");
+  try {
+    const { call, boot, project, task } = w;
+    assert.deepEqual(STATUS_KINDS["qa_project"]?.keys, ["projectId"]);
+    const qa = await w.hire("Quinn", ["qa"], project);
+    const far = await w.hire("Far", ["qa"], w.other);
+    const ask = async (token: string, projectId: string) => call(token, "status.ask", { request: { kind: "qa_project", projectId } });
+    const empty = await ask(boot.token, project);
+    assert.match(empty.result.item.lines[0].text, /nothing waits for QA/);
+    const sub = await w.code(tree, "s1");
+    const waiting = (await ask(boot.token, project)).result.item.lines.map((l: { text: string }) => l.text).join("\n");
+    assert.match(waiting, /1 task\(s\) wait for QA/);
+    assert.match(waiting, new RegExp(`Task "Fix the login" \\(${task}\\) waits for QA: submission ${sub}, tree ${tree.slice(0, 12)}`));
+    assert.match(waiting, /no evidence/);
+    const rec = await call(qa.token, "qa.evidence.record", { submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: ran, checks: [{ name: "unit", result: "failed" }] }, "q1");
+    assert.equal(rec.ok, true, JSON.stringify(rec));
+    const failing = (await ask(qa.token, project)).result.item.lines.map((l: { text: string }) => l.text).join("\n");
+    assert.match(failing, /0 task\(s\) wait for QA .* 1 fail QA, 0 pass/);
+    assert.match(failing, /fails QA: .*check failed; passed 0, failed 1/);
+    await call(qa.token, "qa.evidence.record", { submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: ran, checks: [{ name: "unit", result: "passed" }] }, "q2");
+    assert.match((await ask(boot.token, project)).result.item.lines.map((l: { text: string }) => l.text).join("\n"), /, 1 pass;/);
+    // Another project's agent cannot see this project's QA picture.
+    assert.equal((await ask(far.token, project)).ok, false);
+  } finally { await w.done(); }
+});

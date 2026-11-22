@@ -1,6 +1,6 @@
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
-import { commandId as checkCommandId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
+import { commandId as checkCommandId, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { relianceIdOf, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -94,6 +94,26 @@ export interface QaGate {
   readonly pendingRechecks: readonly string[];
 }
 
+/** One task's newest code submission and where it stands with QA (the project QA view). */
+export interface QaProjectItem {
+  readonly taskId: string;
+  readonly title: string;
+  readonly submissionId: string;
+  readonly tree: string;
+  readonly submittedAt: string;
+  readonly state: "passes" | "waiting" | "stale" | "failing";
+  readonly reasons: readonly string[];
+  readonly counts: QaGate["counts"];
+  readonly pendingRechecks: readonly string[];
+}
+export interface QaProjectView {
+  readonly projectId: string;
+  readonly counts: { readonly passes: number; readonly waiting: number; readonly stale: number; readonly failing: number };
+  readonly items: readonly QaProjectItem[];
+  readonly truncated: boolean;
+  readonly scanLimited: boolean;
+}
+
 /** A re-check of the submission that new evidence did not settle: the checks the invalidated record named that no evidence of that source on the submission names again yet. */
 export interface QaOpenRecheck { readonly id: string; readonly missing: readonly string[] }
 
@@ -122,7 +142,7 @@ const TREE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const CHECKERS = ["qa", "reviewer"] as const;
 /** The notification store keeps at most this much detail text. */
 const NOTICE_CHARS = 200;
-export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000 } as const;
+export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, projectScanReads: 20 } as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hidden = (what: string): never => { throw new DomainError("not_found", `no such ${what}`); };
@@ -533,6 +553,47 @@ export class QaEvidenceService {
    * result in the newest such record that names it; failed, blocked, not-run and missing are each counted and each fail. With no required checks, every check named in any such record is judged so,
    * and so is every check named by independent evidence that no longer holds and whose re-check is not done (it is `missing` until a re-check names it again); no record at all fails. A task relying on a superseded decision fails whatever the evidence says.
    */
+  /**
+   * The project's QA picture (card Q02, project QA view): for each task of the project the caller may read, its NEWEST code submission (by `submittedAt`, then ID) and where it stands with QA.
+   * `passes`: the gate passes. `waiting`: no independent evidence at all, current or stale (the work waits for QA; a self-check does not count; the checks the contract requires then also read as missing). `stale`: evidence existed but no longer holds, or a re-check is pending.
+   * `failing`: current evidence has failed, blocked, not-run or missing checks, or relies on a superseded decision. Older submissions of a task are not shown (the newest is the work). Read only; a task
+   * the caller may not read is not listed or counted. Scans at most `scan` submissions (`scanLimited` when more exist) and lists at most `QA_LIMITS.projectTasks` tasks (`truncated`).
+   */
+  async project(by: Principal, projectIdValue: string): Promise<QaProjectView> {
+    const projectId = checkProjectId(projectIdValue);
+    const proj = await this.#runner.get("project", projectId);
+    const mayRead = by.kind === "owner" || (by.kind === "agent" && (by.taskScope === undefined || inTaskScope(by, projectId)) && allows(by, "task.read", projectId));
+    if (proj === undefined || !mayRead) return hidden("project");
+    const newest = new Map<string, { id: string; at: string }>();
+    let after: string | undefined;
+    let scanLimited = true;
+    for (let read = 0; read < QA_LIMITS.projectScanReads; read++) {
+      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const row of chunk) {
+        after = row.id;
+        const b = row.body as unknown as SubmissionBody;
+        if (b.projectId !== projectId || b.kind !== "code" || b.tree === undefined || !TREE.test(b.tree)) continue;
+        const had = newest.get(b.taskId);
+        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt });
+      }
+      if (chunk.length < 500) { scanLimited = false; break; }
+    }
+    const items: QaProjectItem[] = [];
+    for (const [taskId, sub] of [...newest].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) {
+      const task = await this.#task(taskId);
+      if (task === undefined || !this.#reads(by, task, taskId)) continue;
+      const g = await this.gate(by, sub.id);
+      const state: QaProjectItem["state"] = g.verdict === "passed" ? "passes" : g.reasons.includes("no_evidence") ? "waiting" : g.reasons.includes("stale_evidence") || g.pendingRechecks.length > 0 ? "stale" : "failing";
+      items.push({ taskId, title: task.title, submissionId: sub.id, tree: g.tree, submittedAt: sub.at, state, reasons: g.reasons, counts: g.counts, pendingRechecks: g.pendingRechecks });
+    }
+    const counts = { passes: 0, waiting: 0, stale: 0, failing: 0 };
+    for (const i of items) counts[i.state]++;
+    const order = { waiting: 0, stale: 1, failing: 2, passes: 3 } as const;
+    items.sort((x, y) => order[x.state] - order[y.state] || (x.taskId < y.taskId ? -1 : 1));
+    const truncated = items.length > QA_LIMITS.projectTasks;
+    return { projectId, counts, items: items.slice(0, QA_LIMITS.projectTasks), truncated, scanLimited };
+  }
+
   async gate(by: Principal, submissionIdValue: string): Promise<QaGate> { return (await this.gateBound(by, submissionIdValue)).gate; }
 
   /**
