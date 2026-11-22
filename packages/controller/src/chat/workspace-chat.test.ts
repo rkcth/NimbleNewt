@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { ModelInterpreter } from "./model-interpreter.js";
-import { CHAT_OPS, acceptedArgs } from "./index.js";
+import { CHAT_OPS, acceptedArgs, foreignValue } from "./index.js";
+import { WORKSPACE_REQUEST_EXEMPT } from "./commands.js";
 import { cid, openWorld } from "./testing/harness.js";
 
 after(stopServer);
@@ -62,6 +63,15 @@ for (const backend of backends) {
       const released = await chat.applyProposal(w.ownerToken, { commandId: cid("a"), proposalId: proposed.outcomes[0]!.proposalId! });
       assert.equal(released.applied, true, JSON.stringify(released));
       assert.deepEqual(asked[1], { operation: "release", taskId: t, reason: "commit the approved weed code", submissionId: sub });
+      // The exemption covers the ID only: a reason the owner never gave is still refused beside it, and outside workspace.request (and doc.*) the ID is still checked against the owner's words.
+      const madeUp = "commit the approved weed code now";
+      script[madeUp] = [cmd("workspace.request", { operation: "release", taskId: t, submissionId: sub, reason: "the owner waived the review" }, madeUp)];
+      const refusedRelease = await chat.submit(w.ownerToken, { messageId: cid("m"), text: madeUp });
+      assert.equal(refusedRelease.outcomes[0]!.status, "refused", JSON.stringify(refusedRelease.outcomes[0]));
+      assert.match(String(refusedRelease.outcomes[0]!.message), /reason/);
+      assert.equal(asked.length, 2);
+      assert.equal(foreignValue({ submissionId: sub }, madeUp), "submissionId");
+      assert.equal(foreignValue({ submissionId: sub }, madeUp, "", undefined, WORKSPACE_REQUEST_EXEMPT), undefined);
 
       const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
       await assert.rejects(chat.submit(ann.token, { messageId: cid("n"), text }), (e: unknown) => (e as { code?: string }).code === "forbidden");
