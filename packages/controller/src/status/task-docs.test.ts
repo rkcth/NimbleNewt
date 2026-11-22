@@ -24,7 +24,7 @@ let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 
 for (const backend of backends) {
-  test(`${backend.name}: the task_docs view lists only the documents that describe the task and says what is due for it, apart from flags that concern the document's other tasks (card Q03)`, async () => {
+  test(`${backend.name}: the task_docs view lists only the documents that describe the task and counts every flagged one as due for it, as the landing docs gate does (card Q03)`, async () => {
     const world = await backend.open();
     try {
       const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
@@ -73,6 +73,13 @@ for (const backend of backends) {
       const status0 = StatusService.withEpoch(world.storage, epoch, base, options);
       const ask = async (by: Principal, taskId: string) => status.ask(by, { kind: "task_docs", taskId });
       const text = async (taskId: string): Promise<string> => said((await ask(owner, taskId))!.lines);
+      // The view's count of documents due must be what the landing docs gate holds pending for the task's code (review: a view that says nothing is due while the gate refuses landing misleads).
+      const agrees = async (taskId: string, submissionId: string): Promise<void> => {
+        const pending = (await docs.landing(owner, { taskId, submissionId })).pending.length;
+        const first = (await ask(owner, taskId))!.lines[0]!.text;
+        const due = /No documentation is due for this task/.test(first) ? 0 : Number(/Documentation is due for this task: (\d+) document/.exec(first)?.[1] ?? "-1");
+        assert.equal(due, pending, `view and gate disagree for ${taskId}: ${first}`);
+      };
 
       // No document at all, and a task nothing describes: said plainly, not an empty answer.
       assert.match(await text(login), /No documentation obligations are recorded for this project/);
@@ -84,7 +91,7 @@ for (const backend of backends) {
 
       // Never checked: both documents of the login task are due, the pricing page (search only) is not mentioned.
       const unchecked = await text(login);
-      assert.match(unchecked, /^2 document\(s\) describe Login: 2 flagged \(0 stale, 2 unverified\), 0 verified against tested code\. Documentation is due for this task: 2 document\(s\)\./);
+      assert.match(unchecked, /^2 document\(s\) describe Login: 2 flagged \(0 stale, 2 unverified\), 0 verified against tested code\. Documentation is due for this task: 2 document\(s\); the docs gate holds its landing/);
       assert.match(unchecked, /Guide/); assert.match(unchecked, /FAQ/);
       assert.doesNotMatch(unchecked, /Pricing/, "a document that does not describe the task is left out");
       for (const l of (await ask(owner, login))!.lines) assert.ok(l.cites.length > 0, `uncited: ${l.text}`);
@@ -96,28 +103,32 @@ for (const backend of backends) {
       await verify(guide, [l1, s1]);
       await verify(faq, [l1]);
       await verify(pricing, [s1]);
-      assert.match(await text(login), /^2 document\(s\) describe Login: 0 flagged \(0 stale, 0 unverified\), 2 verified against tested code\. No documentation is due for this task\./);
+      assert.match(await text(login), /^2 document\(s\) describe Login: 0 flagged \(0 stale, 0 unverified\), 2 verified against tested code\. No documentation is due for this task \(the docs gate still checks/);
       assert.match(await text(search), /^2 document\(s\) describe Search: 0 flagged/);
+      await agrees(login, l1); await agrees(search, s1);
 
-      // New tested code of the login task: the guide and the FAQ go stale and are due for login; the guide is flagged for login, so the search view
-      // lists the guide as not due for search (its other task), and the pricing page stays verified and is the only thing search has not got flagged.
+      // New tested code of the login task: the guide and the FAQ go stale and are due for login. The guide is flagged for login only, yet the docs gate holds the
+      // search task's landing too (a verification names code of every task the document describes), so it is due for search as well, with a note that the flag names its other task.
       const l2 = code(login, treeB);
       await docs.impact(owner, { commandId: cid("i"), taskId: login, submissionId: l2 });
       const loginNow = await text(login);
-      assert.match(loginNow, /^2 document\(s\) describe Login: 2 flagged \(2 stale, 0 unverified\), 0 verified against tested code\. Documentation is due for this task: 2 document\(s\)\./);
+      assert.match(loginNow, /^2 document\(s\) describe Login: 2 flagged \(2 stale, 0 unverified\), 0 verified against tested code\. Documentation is due for this task: 2 document\(s\); the docs gate holds its landing/);
       assert.match(loginNow, /Update tasks open: /);
-      assert.doesNotMatch(loginNow, /Not due for this task/);
+      assert.doesNotMatch(loginNow, /Flagged for other tasks/);
       const searchNow = await text(search);
-      assert.match(searchNow, /^2 document\(s\) describe Search: 1 flagged \(1 stale, 0 unverified\), 1 verified against tested code\. No documentation is due for this task\./);
-      assert.match(searchNow, /Not due for this task: it was flagged for other tasks it describes\./);
+      assert.match(searchNow, /^2 document\(s\) describe Search: 1 flagged \(1 stale, 0 unverified\), 1 verified against tested code\. Documentation is due for this task: 1 document\(s\); the docs gate holds its landing until each is verified again\./);
+      assert.match(searchNow, /Guide.*Flagged for other tasks it describes, not for this one; it still holds this task's landing until it is verified again/);
+      assert.doesNotMatch(searchNow, /Pricing.*Flagged for other tasks/, "a verified document carries no flag note");
+      await agrees(login, l2); await agrees(search, s1);
       assert.doesNotMatch(searchNow, /FAQ/, "the FAQ does not describe the search task");
 
       // A release flags every document, so it is due for every task the document describes.
       await verify(guide, [l2, s1]);
       await verify(faq, [l2]);
       await docs.release(owner, { commandId: cid("rel"), projectId: project, version: "2.0" });
-      assert.match(await text(search), /^2 document\(s\) describe Search: 2 flagged .*Documentation is due for this task: 2 document\(s\)\./);
-      assert.doesNotMatch(await text(search), /Not due for this task/);
+      assert.match(await text(search), /^2 document\(s\) describe Search: 2 flagged .*Documentation is due for this task: 2 document\(s\); the docs gate holds its landing/);
+      assert.doesNotMatch(await text(search), /Flagged for other tasks/, "a release flag names every task of the document");
+      await agrees(search, s1);
 
       // Who may ask: a task the viewer may not read is not found (nothing about its documents is said); a controller with no documentation service says so.
       assert.equal(await ask(stranger, login), undefined);
@@ -128,7 +139,19 @@ for (const backend of backends) {
       assert.equal(await ask(scoped(search), login), undefined, "a credential of another task may not ask about this one");
       assert.ok((await ask(scoped(login), login)) !== undefined, "a credential of the task itself may");
       assert.ok((await ask(dora, login)) !== undefined, "an agent that may read the project's tasks may ask");
+      // An agent of the project with no right to read its tasks, and a client that may read the task but not the documents (they are kept for the owner and agents): not found, nothing said.
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "nogrant", grants: [] });
+      const nogrant = await principals.authenticate((await principals.issueCredential(owner, "agent:nogrant")).token);
+      assert.equal(await ask(nogrant, login), undefined);
+      assert.equal(await ask({ ...dora, id: "client:c", kind: "client" } as Principal, login), undefined);
       await assert.rejects(async () => status.ask(owner, { kind: "task_docs", taskId: login, projectId: project } as never), /projectId: is not a field/);
+
+      // At most 30 documents are shown, but the counts cover all of them and the view says how many are left out.
+      for (let i = 0; i < 31; i++) await record(`Export page ${i}`, [export_]);
+      const many = (await ask(owner, export_))!.lines;
+      assert.match(many[0]!.text, /^31 document\(s\) describe Export: 31 flagged \(0 stale, 31 unverified\), 0 verified against tested code\. Documentation is due for this task: 31 document\(s\)/);
+      assert.equal(many.filter((l) => /^User document /.test(l.text)).length, 30);
+      assert.match(many[many.length - 1]!.text, /^1 more document\(s\) are not shown here/);
     } finally { await world.close(); }
   });
 }

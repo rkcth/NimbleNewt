@@ -116,7 +116,7 @@ test("documentation obligations through the running controller and the owner's c
     const forTask = await turn("m3b", qt, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Fix the login" }, evidence: qt, basis: "owner" }]);
     assert.equal(forTask[0].status, "answered", JSON.stringify(forTask));
     const taskText = (forTask[0].lines as { text: string }[]).map((l) => l.text).join("\n");
-    assert.match(taskText, /^1 document\(s\) describe Fix the login: 1 flagged \(1 stale, 0 unverified\), 0 verified against tested code\. Documentation is due for this task: 1 document\(s\)\./);
+    assert.match(taskText, /^1 document\(s\) describe Fix the login: 1 flagged \(1 stale, 0 unverified\), 0 verified against tested code\. Documentation is due for this task: 1 document\(s\); the docs gate holds its landing/);
     assert.match(taskText, new RegExp(`Update tasks open: ${updateTask} \\(assigned`));
     const qn = "what documentation is due for the moon task?";
     const noTask = await turn("m3c", qn, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Moon landing" }, evidence: qn, basis: "owner" }]);
