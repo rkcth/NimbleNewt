@@ -285,6 +285,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them)" },
+  submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved or accepted as is) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
@@ -400,6 +401,7 @@ export type StatusRequest =
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
+  | { readonly kind: "submissions"; readonly taskId: string }
   | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
   | { readonly kind: "docs"; readonly projectId: string }
@@ -755,6 +757,8 @@ export interface StatusDeps {
   readonly defects?: Pick<DefectService, "forTask" | "unresolved">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
+  /** The submissions of a task (card Q01b), read with the submission service's own rule (`list`, `approvalOf` of what it listed). Absent: the `submissions` view says submissions are not kept here. */
+  readonly submissions?: Pick<SubmissionService, "list" | "approvalOf">;
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
@@ -982,6 +986,7 @@ export class StatusService {
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
+      case "submissions": { onlyKnown(request, ["kind", "taskId"]); return this.submissionLines(by, request.taskId); }
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
@@ -2328,6 +2333,51 @@ export class StatusService {
       const owed = [...new Set((before?.checks ?? []).map((c) => c.name))].filter((name) => (required.length === 0 || required.includes(name)) && !named.has(name)).slice(0, 10).map((name) => quoted(name, 80));
       lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.${owed.length === 0 ? "" : ` It must name again: ${owed.join(", ")}.`}`, cite("qa-recheck", r.id), cite("task", taskId)));
     }
+    return { observedAt: at, lines };
+  }
+
+  /**
+   * What was submitted on a task (card Q01b): the code submissions (newest first, at most 5) each with its review state and newest director sign-off, then the newest other submissions (at most 10).
+   * The submission service's read rule applies (`list`: the owner sees all; an agent sees what it made or was asked to review), so the view never shows a submission `submission.get` would not. Report text is quoted and cut.
+   */
+  async submissionLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined) return undefined;
+    const body = task.body as unknown as TaskBody;
+    if (!this.#mayReadTask(by, body.projectId, taskId)) return undefined;
+    const at = this.#runner.now();
+    if (this.#deps.submissions === undefined) return { observedAt: at, lines: [line("Submissions are not kept on this controller.", cite("task", taskId))] };
+    let found: Awaited<ReturnType<SubmissionService["list"]>>;
+    try { found = await this.#deps.submissions.list(by, taskId, { limit: 100 }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const partial = found.next !== undefined || found.scanLimited === true ? " Only part of the stored submissions was looked at, so older ones, or others, may exist." : "";
+    const title = shown(body.title);
+    if (found.items.length === 0) return { observedAt: at, lines: [line(`Nothing you may read has been submitted on ${title} yet: no code, review, QA report, document change or director sign-off.${partial}`, cite("task", taskId))] };
+    const newestFirst = [...found.items].sort((x, y) => (x.submittedAt < y.submittedAt ? 1 : x.submittedAt > y.submittedAt ? -1 : x.id < y.id ? 1 : -1));
+    const count = (k: string): number => newestFirst.filter((i) => i.kind === k).length;
+    const lines: Line[] = [line(`${newestFirst.length} submission(s) of ${title} on record, newest first: ${count("code")} code, ${count("review")} review, ${count("qa")} QA, ${count("document")} document, ${count("signoff")} sign-off.${partial}`, cite("task", taskId))];
+    const codes = newestFirst.filter((i) => i.kind === "code");
+    if (codes.length === 0) lines.push(line(`No code has been submitted on ${title} yet, so there is nothing for a reviewer or a director to approve and nothing to land.`, cite("task", taskId)));
+    for (const [index, c] of codes.slice(0, 5).entries()) {
+      const a = await this.#deps.submissions.approvalOf(c.id);
+      let review: string;
+      if (a === undefined) review = "unknown";
+      else if (a.approved) review = a.approvedBy === "review_disabled_single_agent" ? "not required (no other agent of the project could review it)" : `approved by ${shown(a.approvedBy ?? "?", 80)}`;
+      else if (a.newest !== undefined) review = `the newest review says ${a.newest}; it waits for a new submission from its author`;
+      else review = "none yet; it waits for a reviewer";
+      const d = a?.director;
+      const director = d === undefined ? "none" : d.newest === "approve" ? `approved by ${shown(d.by, 80)}` : `declined by ${shown(d.by, 80)} (a project that requires the director check does not land it)`;
+      const ev = c.evidence.length === 0 ? "" : ` Its author's own check evidence: ${c.evidence.filter((e) => e.result === "pass").length} pass, ${c.evidence.filter((e) => e.result === "fail").length} fail, ${c.evidence.filter((e) => e.result === "not_run").length} not run.`;
+      lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Review: ${review}. Director sign-off: ${director}.${ev}${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
+    }
+    if (codes.length > 5) lines.push(line(`${codes.length - 5} older code submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
+    const others = newestFirst.filter((i) => i.kind !== "code");
+    for (const o of others.slice(0, 10)) {
+      const about = o.subject === undefined ? "" : ` on ${o.subject}`;
+      const what = o.kind === "review" ? `Review${about}: ${o.verdict ?? "?"}` : o.kind === "signoff" ? `Director sign-off${about}: ${o.decision ?? "?"}` : o.kind === "qa" ? `QA report${about}${o.report === undefined ? "" : `: ${quoted(o.report, 120)}`}` : `Document change${o.artifactId === undefined ? "" : ` (artifact ${o.artifactId})`}${o.report === undefined ? "" : `: ${quoted(o.report, 120)}`}`;
+      lines.push(line(`${what}. ${o.id} by ${shown(o.submittedBy, 80)} at ${o.submittedAt}.`, cite("submission", o.id, o.revision), cite("task", taskId)));
+    }
+    if (others.length > 10) lines.push(line(`${others.length - 10} older review, QA, document or sign-off submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
     return { observedAt: at, lines };
   }
 
