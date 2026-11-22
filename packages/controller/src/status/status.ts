@@ -289,6 +289,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved or accepted as is) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
+  task_docs: { keys: ["taskId|taskTitle"], about: "the documentation due for one task (card Q03): the documents that describe it, which are verified against its tested code and which are flagged (unverified or stale) and why, the update tasks open for them (assigned or not), what would verify each, and the tested code each was last verified against; a task no document describes says so" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
@@ -401,6 +402,7 @@ export type StatusRequest =
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
+  | { readonly kind: "task_docs"; readonly taskId: string }
   | { readonly kind: "submissions"; readonly taskId: string }
   | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
@@ -988,6 +990,7 @@ export class StatusService {
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
+      case "task_docs": { onlyKnown(request, ["kind", "taskId"]); return this.taskDocLines(by, request.taskId); }
       case "submissions": { onlyKnown(request, ["kind", "taskId"]); return this.submissionLines(by, request.taskId); }
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
@@ -2244,7 +2247,7 @@ export class StatusService {
    * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
    * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
    */
-  async docLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async docLines(by: Principal, projectIdValue: string, forTask?: { readonly id: string; readonly title: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
     const at = this.#runner.now();
     if (this.#deps.docs === undefined) return { observedAt: at, lines: [line("Documentation obligations are not kept on this controller.", cite("project", projectId))] };
@@ -2252,25 +2255,47 @@ export class StatusService {
     try { list = await this.#deps.docs.list(by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
     if (list.items.length === 0) return { observedAt: at, lines: [line("No documentation obligations are recorded for this project: no document is tied to the behaviour it describes yet.", cite("project", projectId))] };
     const order = { stale: 0, unverified: 1, verified: 2 } as const;
-    const items = [...list.items].sort((a, b) => order[a.state] - order[b.state]);
+    // One task's view (card Q03): only the documents that describe it.
+    const mine = forTask === undefined ? list.items : list.items.filter((i) => i.implementationRefs.includes(forTask.id));
+    if (forTask !== undefined && mine.length === 0) return { observedAt: at, lines: [line(`No document is tied to ${shown(forTask.title)}: none of this project's ${list.items.length} tracked document(s) describes it, so nothing is due. If a document should describe it, record that (the docs view lists the project's documents).`, cite("task", forTask.id), cite("project", projectId))] };
+    const items = [...mine].sort((a, b) => order[a.state] - order[b.state]);
     const lines: Line[] = [];
     const flagged = items.filter((i) => i.state !== "verified").length;
-    lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    // Due for one task: never checked since it was recorded (no reasons yet), or flagged for this task or a release; a document flagged only for the other tasks it describes is not due for this one.
+    const dueHere = (d: (typeof items)[number]): boolean => d.state !== "verified" && (forTask === undefined || (d.reasons ?? []).length === 0 || (d.reasons ?? []).some((r) => r.kind === "release_changed" || r.taskId === forTask.id));
+    const due = items.filter(dueHere).length;
+    if (forTask === undefined) lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    else lines.push(line(`${items.length} document(s) describe ${shown(forTask.title)}: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${items.length - flagged} verified against tested code. ${due === 0 ? "No documentation is due for this task." : `Documentation is due for this task: ${due} document(s).`}`, cite("task", forTask.id), cite("project", projectId)));
     // One read of the project's document changes per flag time (card Q03b review): a release flags many documents at the same moment, and each read may go through the whole index.
     const changesSince = new Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>();
     for (const d of items.slice(0, 30)) {
       const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
       const v = d.verification;
       const verified = v === undefined ? "" : ` Last verified ${v.verifiedAt} by ${shown(v.verifiedBy, 80)} for version ${quoted(v.version, 40)}: document change ${v.documentSubmissionId} (${v.artifactDigest.slice(0, 19)}) against ${v.evidence.map((e) => `tree ${e.tree.slice(0, 12)} of ${e.taskId} (${e.submissionId})`).join(", ")}.`;
+      // For one task, say which of the flags concern it (a release flag concerns every task of the document), so "is anything due for this task" is answered apart from the document's other tasks.
+      const elsewhere = forTask === undefined || d.state === "verified" || dueHere(d) ? "" : " Not due for this task: it was flagged for other tasks it describes.";
       const state = d.state === "verified" ? "Verified." : d.state === "unverified" ? `FLAGGED: unverified (not checked against tested code since it was recorded)${(d.reasons ?? []).length === 0 ? "" : `; since then ${(d.reasons ?? []).map(docReasonText).join("; ")}`}.` : `FLAGGED: stale: ${(d.reasons ?? []).map(docReasonText).join("; ")}.`;
       const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
       const open: string[] = [];
       for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
       const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d, changesSince);
-      lines.push(line(`${head}. ${state}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
+      lines.push(line(`${head}. ${state}${elsewhere}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
     }
-    if (list.items.length > 30) lines.push(line(`${list.items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
+    if (items.length > 30) lines.push(line(`${items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
     return { observedAt: at, lines };
+  }
+
+  /**
+   * The documentation due for one task (card Q03): the project's documents that describe the task (the `docs` view's lines for them, with flags that concern other tasks of the same document marked as
+   * such). Needs the right to read the task, and then the documents' own read rule.
+   */
+  async taskDocLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined) return undefined;
+    const body = task.body as unknown as TaskBody;
+    if (!this.#mayReadTask(by, body.projectId, taskId)) return undefined;
+    return this.docLines(by, body.projectId, { id: taskId, title: body.title });
   }
 
   /**

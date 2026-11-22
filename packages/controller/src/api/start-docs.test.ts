@@ -111,6 +111,18 @@ test("documentation obligations through the running controller and the owner's c
     assert.match(text, new RegExp(`Promotional document "Landing page" .*FLAGGED: stale: task ${task} has new tested code \\(submission ${sub2}.*Claims: "Sign in with a passkey".*Update tasks open: ${updateTask} \\(assigned`));
     assert.equal((await call(far.token, "status.ask", { request: { kind: "docs", projectId: project } })).error.code, "not_found");
 
+    // One task's documentation by chat, in free words (the task by its title, the project in focus): only the documents describing it, and a title that fits no task is refused.
+    const qt = "what documentation is due for the login task?";
+    const forTask = await turn("m3b", qt, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Fix the login" }, evidence: qt, basis: "owner" }]);
+    assert.equal(forTask[0].status, "answered", JSON.stringify(forTask));
+    const taskText = (forTask[0].lines as { text: string }[]).map((l) => l.text).join("\n");
+    assert.match(taskText, /^1 document\(s\) describe Fix the login: 1 flagged \(1 stale, 0 unverified\), 0 verified against tested code\. Documentation is due for this task: 1 document\(s\)\./);
+    assert.match(taskText, new RegExp(`Update tasks open: ${updateTask} \\(assigned`));
+    const qn = "what documentation is due for the moon task?";
+    const noTask = await turn("m3c", qn, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Moon landing" }, evidence: qn, basis: "owner" }]);
+    assert.equal(noTask[0].status, "refused", JSON.stringify(noTask));
+    assert.equal((await call(far.token, "status.ask", { request: { kind: "task_docs", taskId: task } })).error.code, "not_found");
+
     // A release by chat (shown first): the document is flagged for the release version, and a verification must name it.
     const ship = "we are shipping 2.0, flag the docs";
     const rel = await turn("m4", ship, [{ kind: "command", op: "doc.release.check", args: { version: "2.0" }, evidence: ship, basis: "owner" }]);
