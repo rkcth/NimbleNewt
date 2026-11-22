@@ -18,8 +18,8 @@ const tree = "e".repeat(64);
 const MANY = 120; // above the 100-change limit of one operation (two changes per stale record)
 
 /** The storage with a switch: the next write of an operation type fails once it is its `nth` (a stop in the middle of a multi-write task). */
-function stopping(storage: ControllerStorage): { storage: ControllerStorage; arm(type: string, nth: number): void; disarm(): void; count(type: string): number } {
-  let armed: { type: string; nth: number } | undefined;
+function stopping(storage: ControllerStorage): { storage: ControllerStorage; arm(type: string, nth: number, first?: () => Promise<unknown>): void; disarm(): void; count(type: string): number } {
+  let armed: { type: string; nth: number; first?: () => Promise<unknown> } | undefined;
   const seen = new Map<string, number>();
   const proxy = new Proxy(storage, {
     get(target, key) {
@@ -27,7 +27,13 @@ function stopping(storage: ControllerStorage): { storage: ControllerStorage; arm
         return async (input: OperationInput) => {
           const type = input.audit[0]?.type ?? "";
           const before = seen.get(type) ?? 0;
-          if (armed !== undefined && armed.type === type && before + 1 === armed.nth) throw new Error("stopped");
+          if (armed !== undefined && armed.type === type && before + 1 === armed.nth) {
+            // With `first`: something else is written just before this write (a race), once, and this write then goes on.
+            if (armed.first === undefined) throw new Error("stopped");
+            const first = armed.first;
+            armed = undefined;
+            await first();
+          }
           const result = await target.applyOperation(input);
           seen.set(type, before + 1);
           return result;
@@ -37,7 +43,7 @@ function stopping(storage: ControllerStorage): { storage: ControllerStorage; arm
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  return { storage: proxy, arm: (type, nth) => { armed = { type, nth: (seen.get(type) ?? 0) + nth }; }, disarm: () => { armed = undefined; }, count: (type) => seen.get(type) ?? 0 };
+  return { storage: proxy, arm: (type, nth, first) => { armed = { type, nth: (seen.get(type) ?? 0) + nth, ...(first === undefined ? {} : { first }) }; }, disarm: () => { armed = undefined; }, count: (type) => seen.get(type) ?? 0 };
 }
 
 for (const backend of backends) {
@@ -185,6 +191,119 @@ for (const backend of backends) {
       assert.deepEqual(await svc.contractChanged(task), { taskId: task, invalidated: [], rechecks: [] });
       assert.equal(flaky.count("qa.evidence.check"), writes);
       for (const states of (await items()).values()) assert.deepEqual(states, ["queued"]);
+    } finally { await world.close(); }
+  });
+
+  test(`${backend.name}: the evidence changes between a stopped check and its repeat: the repeat invalidates what is stale now, claims only records that are invalidated, and a caller's own command ID ending in ':chunk:1' is not mistaken for a chunk (card Q02, batch fix)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      const roles = new Map<string, string[]>();
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "qa", grants: [{ action: "task.read", project }] });
+      const qa: Principal = await principals.authenticate((await principals.issueCredential(owner, "agent:qa")).token);
+      roles.set(qa.id, ["qa"]);
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const plant = async (kind: string, id: string, body: object, update = false): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id, update }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
+      };
+      const flaky = stopping(world.storage);
+      const healthy = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [] }, options);
+      const svc = QaEvidenceService.withEpoch(flaky.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [] }, options);
+      const sub = derivedId("sbm", cid("sub"));
+      await plant("submission", sub, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-18T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
+      const contract = (v: number, criteria: string[]) => ({ taskId: task, projectId: project, version: v, changedBy: owner.id, acceptanceCriteria: criteria, priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [{ name: "unit", run: ["true"] }], permissions: [], recovery: "native-continuation" });
+      const setContract = async (v: number, criteria: string[]): Promise<void> => {
+        await plant("task-contract", task, contract(v, criteria), v > 1);
+        await plant("task-contract-version", `${task}.${v}`, { ...contract(v, criteria), changedAt: `2026-11-18T08:0${v}:00.000Z` });
+      };
+      const add = async (v: number, commandId = cid("r")): Promise<string> => (await healthy.record(qa, { commandId, submissionId: sub, criteriaRevision: v, decisions: [], environment: "env", observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] })).id;
+      const state = async (): Promise<Map<string, string>> => new Map((await healthy.list(owner, task)).items.map((i) => [i.id, i.state]));
+      await setContract(1, ["works"]);
+      const k = cid("k");
+      // The caller's own earlier command whose ID is the check's ID followed by ':chunk:1'.
+      const ids = [await add(1, `${k}:chunk:1`)];
+      for (let i = 0; i < MANY; i++) ids.push(await add(1));
+
+      // Grows: the check stops after its first chunk; then one more record is added and the contract changes again, so it is stale too.
+      await setContract(2, ["works", "c0"]);
+      flaky.arm("qa.evidence.check", 2);
+      await assert.rejects(svc.check(qa, { commandId: k, taskId: task }), /stopped/);
+      flaky.disarm();
+      assert.equal([...(await state()).values()].filter((s) => s === "invalidated").length, 40);
+      ids.push(await add(2));
+      await setContract(3, ["works", "c0", "c1"]);
+      const resumed = await svc.check(qa, { commandId: k, taskId: task });
+      assert.equal(resumed.replayed, false);
+      assert.equal(new Set(resumed.invalidated).size, resumed.invalidated.length, "no record named twice");
+      assert.deepEqual([...resumed.invalidated].sort(), [...ids].sort(), "every record: the first run's chunk and what is stale now, the new one included");
+      const now = await state();
+      for (const id of resumed.invalidated) assert.equal(now.get(id), "invalidated", "a record the answer names is invalidated");
+      assert.equal(flaky.count("qa.evidence.check"), 1 + 3, "40, then 40 + 40 + 2");
+
+      // Shrinks: a second check stops after its first chunk; the contract then goes back to the criteria the rest was judged on, so they hold again. The repeat writes nothing and claims nothing more.
+      const later: string[] = [];
+      for (let i = 0; i < 50; i++) later.push(await add(3));
+      await setContract(4, ["works", "c0", "c1", "c2"]);
+      const k2 = cid("k");
+      flaky.arm("qa.evidence.check", 2);
+      await assert.rejects(svc.check(qa, { commandId: k2, taskId: task }), /stopped/);
+      flaky.disarm();
+      const writes = flaky.count("qa.evidence.check");
+      await setContract(5, ["works", "c0", "c1"]);
+      // Nothing is stale, so it answers as any check that finds nothing (as before the batch fix).
+      assert.deepEqual(await svc.check(qa, { commandId: k2, taskId: task }), { taskId: task, invalidated: [], rechecks: [], replayed: false });
+      assert.equal(flaky.count("qa.evidence.check"), writes);
+      const end = await state();
+      assert.deepEqual([later.filter((id) => end.get(id) === "invalidated").length, later.filter((id) => end.get(id) === "current").length], [40, 10]);
+    } finally { await world.close(); }
+  });
+
+  test(`${backend.name}: a resumed check that loses the race for its next chunk to another check still answers with the whole run (card Q02, batch fix)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      const roles = new Map<string, string[]>();
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "qa", grants: [{ action: "task.read", project }] });
+      const qa: Principal = await principals.authenticate((await principals.issueCredential(owner, "agent:qa")).token);
+      roles.set(qa.id, ["qa"]);
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const plant = async (kind: string, id: string, body: object, update = false): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id, update }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
+      };
+      const flaky = stopping(world.storage);
+      const healthy = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [] }, options);
+      const svc = QaEvidenceService.withEpoch(flaky.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [] }, options);
+      const sub = derivedId("sbm", cid("sub"));
+      await plant("submission", sub, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-18T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
+      const contract = (v: number, criteria: string[]) => ({ taskId: task, projectId: project, version: v, changedBy: owner.id, acceptanceCriteria: criteria, priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [{ name: "unit", run: ["true"] }], permissions: [], recovery: "native-continuation" });
+      await plant("task-contract", task, contract(1, ["works"]));
+      await plant("task-contract-version", `${task}.1`, { ...contract(1, ["works"]), changedAt: "2026-11-18T08:00:00.000Z" });
+      const ids: string[] = [];
+      for (let i = 0; i < 45; i++) ids.push((await healthy.record(qa, { commandId: cid("r"), submissionId: sub, criteriaRevision: 1, decisions: [], environment: "env", observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] })).id);
+      await plant("task-contract", task, contract(2, ["works", "more"]), true);
+      await plant("task-contract-version", `${task}.2`, { ...contract(2, ["works", "more"]), changedAt: "2026-11-18T08:01:00.000Z" });
+      const k = cid("k");
+      flaky.arm("qa.evidence.check", 2);
+      await assert.rejects(svc.check(qa, { commandId: k, taskId: task }), /stopped/);
+      // The repeat: its first chunk answers as a repeat; just before its second chunk is written, another check invalidates the rest.
+      let other: readonly string[] = [];
+      flaky.arm("qa.evidence.check", 1, async () => { other = (await healthy.check(owner, { commandId: cid("k"), taskId: task })).invalidated; });
+      const answer = await svc.check(qa, { commandId: k, taskId: task });
+      flaky.disarm();
+      assert.equal(other.length, 5, "the other check took the last five");
+      assert.equal(answer.concurrent, true);
+      assert.deepEqual([...answer.invalidated].sort(), [...ids].sort(), "the first run's chunk and what the other check invalidated");
+      assert.equal(answer.rechecks.length, 45);
     } finally { await world.close(); }
   });
 

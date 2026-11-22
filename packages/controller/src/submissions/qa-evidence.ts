@@ -440,9 +440,12 @@ export class QaEvidenceService {
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
-  /** The stored command ID of chunk `n` of a check: the first chunk is the command itself, later ones are derived from it (and the chunk number), so a repeat finds each one where it was. */
+  /**
+   * The stored command ID of chunk `n` of a check: the first chunk is the command itself, later ones are derived from it (and the chunk number), so a repeat finds each one where it was. The separator is `/`,
+   * which a command ID cannot hold, so a derived ID never equals the scoped ID of another command of the same caller (with `:`, the command `x:chunk:1` would have been chunk 1 of `x`).
+   */
   #chunkId(principalId: string, commandId: string, n: number): string {
-    return n === 0 ? scopedCommandId(principalId, commandId) : `${principalId}:${createHash("sha256").update(`${commandId}:chunk:${n}`).digest("hex").slice(0, 32)}`;
+    return n === 0 ? scopedCommandId(principalId, commandId) : `${principalId}:${createHash("sha256").update(`${commandId}/chunk/${n}`).digest("hex").slice(0, 32)}`;
   }
 
   /**
@@ -530,7 +533,8 @@ export class QaEvidenceService {
       fresh.rechecks.push(...made.rechecks.map((r) => r.id));
       if (made.invalidated.length < QA_LIMITS.chunk) break;
     }
-    if (concurrent) return { taskId, ...fresh, replayed: false, concurrent: true };
+    // The answer of a call that lost a race still names the chunks an earlier run of this command wrote (a resumed call), like the answer of one that did not.
+    if (concurrent) return { taskId, invalidated: [...earlier.invalidated, ...fresh.invalidated], rechecks: [...earlier.rechecks, ...fresh.rechecks], replayed: false, concurrent: true };
     // A pure repeat answers as before (nothing new written); a call that carried on after a stop reports the whole run.
     if (!wrote) return { taskId, invalidated: [], rechecks: [], replayed: true };
     return { taskId, invalidated: [...earlier.invalidated, ...fresh.invalidated], rechecks: [...earlier.rechecks, ...fresh.rechecks], replayed: false };
