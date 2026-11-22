@@ -66,6 +66,8 @@ test("through the running controller a defect reported by mistake is withdrawn b
     assert.ok((await call(ann.token, "defect.repair", { id: wrong, version: 2 }, "rp1")).ok);
     assert.ok((await call(rev.token, "defect.review", { id: wrong, verdict: "not-fixed", reason: "still missing" }, "rv1")).ok);
     assert.equal((await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.count, 1);
+    // A failed check confirmed it: its reporter can no longer take it back, only the owner can.
+    assert.equal((await call(rev.token, "defect.withdraw", { id: wrong, reason: "never mind" }, "w4")).error.code, "forbidden");
 
     // The owner takes it back in their own words: shown first, an invented reason is refused, the revision cannot be supplied by the model.
     const words = "that backup step defect was a mistake, I looked at the wrong version, drop it";

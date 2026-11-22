@@ -82,6 +82,11 @@ for (const backend of backends) {
       await assert.rejects(() => svc.withdraw(ann, { commandId: cid("w"), id: open.id, reason: "responsible agent" }), (e) => code(e, "forbidden"));
       await assert.rejects(() => svc.withdraw(rev, { commandId: cid("w"), id: open.id, reason: "  " }), (e) => code(e, "invalid_command"));
       await assert.rejects(() => svc.withdraw(rev, { commandId: cid("w"), id: open.id, reason: "x", expectedRevision: open.revision + 5 }), (e) => code(e, "stale_revision"));
+      // Another project's agent, a client and the reporter's credential for another task do not learn the defect exists; the owner's task credential is not the owner.
+      await assert.rejects(() => svc.withdraw(far, { commandId: cid("w"), id: open.id, reason: "far" }), (e) => code(e, "not_found"));
+      await assert.rejects(() => svc.withdraw({ kind: "client", id: "client:web" } as unknown as Principal, { commandId: cid("w"), id: open.id, reason: "client" }), (e) => code(e, "not_found"));
+      await assert.rejects(() => svc.withdraw({ ...rev, taskScope: { taskId: t2, projectId: p2 } } as Principal, { commandId: cid("w"), id: open.id, reason: "other task" }), (e) => code(e, "not_found"));
+      await assert.rejects(() => svc.withdraw({ ...owner, taskScope: { taskId: t1, projectId: p1 } } as Principal, { commandId: cid("w"), id: open.id, reason: "task credential" }), (e) => code(e, "forbidden"));
       assert.equal((await get(open.id))["state"], "open");
       const command = cid("w");
       const done = await svc.withdraw(rev, { commandId: command, id: open.id, reason: "I read version 1, it was version 2", expectedRevision: open.revision });
@@ -105,6 +110,9 @@ for (const backend of backends) {
       await svc.repair(ann, { commandId: cid("rp"), id: esc.id, version: v2 });
       await svc.review(rev, { commandId: cid("rv"), id: esc.id, verdict: "not-fixed", reason: "still wrong" });
       assert.deepEqual((await svc.unresolved(owner, { escalatedOnly: true })).items.map((x) => x.id), [esc.id]);
+      // A failed check confirmed the finding and it waits for the owner: its reporter can no longer take it back (and so never restarts its count by reporting it again).
+      await assert.rejects(() => svc.withdraw(rev, { commandId: cid("w"), id: esc.id, reason: "never mind" }), (e) => code(e, "forbidden"));
+      assert.equal((await get(esc.id))["state"], "escalated");
       await svc.withdraw(owner, { commandId: cid("w"), id: esc.id, reason: "the report itself was mistaken" });
       assert.deepEqual((await svc.unresolved(owner, { escalatedOnly: true })).items, []);
       assert.deepEqual((await svc.unresolved(owner, { projectId: p1 })).items.map((x) => x.id), [other.id]);
@@ -121,6 +129,50 @@ for (const backend of backends) {
       await assert.rejects(() => svc.withdraw(owner, { commandId: cid("w"), id: other.id, reason: "too late" }), (x) => code(x, "invalid_transition"));
       const listed = (await svc.list(owner, g1.id)).items.map((x) => [x["id"], x["state"]]);
       assert.deepEqual(listed, [[open.id, "withdrawn"], [esc.id, "withdrawn"], [other.id, "overridden"]]);
+
+      // Concurrency on a second deliverable. A repair and a withdrawal both pinned to the revision read: exactly one applies, the other is refused as stale.
+      const g2 = await deliverable(p1, t1, "Guide 2");
+      const g2v2 = await newVersion(g2);
+      const report2 = (finding: string): Promise<{ id: string; revision: number }> => svc.report(rev, { commandId: cid("f"), deliverableId: g2.id, version: 1, finding, severity: "minor" });
+      const a = await report2("race pinned");
+      const pinned = await Promise.allSettled([
+        svc.repair(ann, { commandId: cid("rp"), id: a.id, version: g2v2, expectedRevision: a.revision }),
+        svc.withdraw(rev, { commandId: cid("w"), id: a.id, reason: "race", expectedRevision: a.revision }),
+      ]);
+      assert.equal(pinned.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(pinned));
+      assert.ok(pinned.every((r) => r.status === "fulfilled" || code(r.reason, "stale_revision")), JSON.stringify(pinned));
+      assert.equal((await get(a.id))["state"], pinned[0].status === "fulfilled" ? "repair-submitted" : "withdrawn");
+      // Unpinned: a command that loses the race is refused (stale or no longer possible), never applied over the other; the record says what won, and nothing brings a withdrawn defect back.
+      const b = await report2("race unpinned");
+      const loose = await Promise.allSettled([svc.repair(ann, { commandId: cid("rp"), id: b.id, version: g2v2 }), svc.withdraw(rev, { commandId: cid("w"), id: b.id, reason: "race" })]);
+      assert.ok(loose.some((r) => r.status === "fulfilled"), JSON.stringify(loose));
+      assert.ok(loose.every((r) => r.status === "fulfilled" || code(r.reason, "stale_revision") || code(r.reason, "invalid_transition")), JSON.stringify(loose));
+      assert.equal((await get(b.id))["state"], loose[1].status === "fulfilled" ? "withdrawn" : "repair-submitted");
+      if (loose[1].status === "fulfilled") await assert.rejects(() => svc.repair(ann, { commandId: cid("rp"), id: b.id, version: g2v2 }), (e) => code(e, "invalid_transition"));
+      // The owner's decision and the owner's withdrawal at once: exactly one applies and the record says which.
+      const c2 = await report2("race decision");
+      const decision = await Promise.allSettled([
+        svc.override(owner, { commandId: cid("o"), id: c2.id, outcome: "accept-as-is", reason: "fine" }),
+        svc.withdraw(owner, { commandId: cid("w"), id: c2.id, reason: "mistaken" }),
+      ]);
+      assert.equal(decision.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(decision));
+      assert.ok(decision.every((r) => r.status === "fulfilled" || code(r.reason, "invalid_transition") || code(r.reason, "stale_revision")), JSON.stringify(decision));
+      assert.equal((await get(c2.id))["state"], decision[0].status === "fulfilled" ? "overridden" : "withdrawn");
+      // A reporter that did work of the repair under check may not withdraw the defect (it would dismiss the check of its own work); the owner may.
+      const mine = await report2("repaired with the reporter's help");
+      await svc.repair(ann, { commandId: cid("rp"), id: mine.id, version: g2v2 });
+      const vRef = { kind: "deliverable-version", id: `${g2.id}.${g2v2}` };
+      const vAgg = (await runner.get("deliverable-version", vRef.id))!;
+      await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { id: vRef.id }, build: async () => ({ ref: vRef, creates: false, changes: [{ type: "update" as const, ref: vRef, expectedRevision: vAgg.revision, body: { ...vAgg.body, createdBy: rev.id } as unknown as JsonObject }], detail: {} }) }));
+      await assert.rejects(() => svc.withdraw(rev, { commandId: cid("w"), id: mine.id, reason: "it is fine now" }), (e) => code(e, "forbidden"));
+      assert.equal((await get(mine.id))["state"], "repair-submitted");
+      await svc.withdraw(owner, { commandId: cid("w"), id: mine.id, reason: "a duplicate of another report" });
+      assert.equal((await get(mine.id))["state"], "withdrawn");
+      // The reason is redacted: a credential-shaped value does not reach the record.
+      const secret = await report2("secret reason");
+      const key = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+      await svc.withdraw(rev, { commandId: cid("w"), id: secret.id, reason: `mistaken, the key ${key} was not the problem` });
+      assert.ok(!JSON.stringify(await get(secret.id)).includes(key), "the secret is redacted from the record");
       // The state API names the operation and an agent without a task credential for another project reads nothing.
       assert.ok(OPERATIONS.some((o) => o.name === "defect.withdraw"));
       void (null as unknown as JsonObject);

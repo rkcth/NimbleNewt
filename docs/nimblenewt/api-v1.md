@@ -8032,7 +8032,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `defect.withdraw`
 
-Takes a defect report back as mistaken (card Q04): the agent that reported it, or the owner, with the `reason` (a wrong version, a duplicate, a misreading). Works on a defect that is `open`, `repair-submitted` or `escalated` and ends it as `withdrawn`; the report, its checks and any owner decision stay on the record (a failed check stays failed) and it is no longer counted as unfinished, so it leaves the Needs-you list and the `defect_risks` view. A fixed, accepted or withdrawn defect is refused (`invalid_transition`). `expectedRevision` refuses a stale view.
+Takes a defect report back as mistaken (card Q04): the owner, or the agent that reported it while no check of a repair has failed and when it did none of the repair's work (after a failed check, and so once escalated, only the owner), with the `reason` (a wrong version, a duplicate, a misreading). Works on a defect that is `open`, `repair-submitted` or `escalated` and ends it as `withdrawn`; the report, its checks and any owner decision stay on the record (a failed check stays failed) and it is no longer counted as unfinished, so it leaves the Needs-you list and the `defect_risks` view. A fixed, accepted or withdrawn defect is refused (`invalid_transition`). `expectedRevision` refuses a stale view.
 
 Arguments:
 

@@ -140,7 +140,8 @@ const revisionOf = (value: unknown): number | undefined => {
  * findings still unresolved; it never changes a check, so a failed check stays failed, and the cycle count is never reset.
  *
  * Who checks: the owner, or an agent that may read the deliverable, holds the reviewer, qa or director role in the project and did none of the work of the version it judges (a QA agent that made the repair is
- * one of its contributors and cannot pass it). Who repairs: the responsible agent or the owner. Who overrides: the owner only.
+ * one of its contributors and cannot pass it). Who repairs: the responsible agent or the owner. Who overrides: the owner only. Who withdraws a mistaken report: the owner, or the reporting
+ * agent while no check of a repair has failed and when it did none of the repair's work.
  */
 export class DefectService {
   readonly #runner: CommandRunner;
@@ -421,7 +422,8 @@ export class DefectService {
 
   /**
    * Takes a defect report back as mistaken (card Q04, the withdrawal): the agent that reported it, or the owner, says why (a wrong version, a duplicate, a misreading). It works while the defect is `open`,
-   * `repair-submitted` or `escalated` and ends it as `withdrawn`. Nothing is erased: the report, its checks and the owner's decisions stay on the record and a failed check stays failed; the defect is only no
+   * `repair-submitted` or `escalated` and ends it as `withdrawn`. The reporting agent may do so only while no check of a repair has failed (so never once it escalated) and when it did none of the repair's work;
+   * after that only the owner may. Nothing is erased: the report, its checks and the owner's decisions stay on the record and a failed check stays failed; the defect is only no
    * longer counted as unfinished. A fixed, accepted or already withdrawn defect is refused (those have their own outcome).
    */
   async withdraw(by: Principal, command: NoActor & { id: string; reason: string; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean }> {
@@ -434,9 +436,21 @@ export class DefectService {
       payload: { id: command.id, reason, expectedRevision: expected ?? null },
       build: async () => {
         const { agg, body } = await this.#load(by, command.id);
-        if (by.kind !== "owner" && !(by.kind === "agent" && by.id === body.reportedBy)) throw new DomainError("forbidden", "only the agent that reported the defect, or the owner, may withdraw it");
+        // The owner's own credential, not one limited to a task (a task credential acts for the task, never as the owner).
+        const owner = by.kind === "owner" && by.taskScope === undefined;
+        if (!owner && !(by.kind === "agent" && by.id === body.reportedBy)) throw new DomainError("forbidden", "only the agent that reported the defect, or the owner, may withdraw it");
         if (expected !== undefined && agg.revision !== expected) throw new DomainError("stale_revision", `the defect is at revision ${agg.revision}, not ${expected}`, { currentRevision: agg.revision });
         if (isFinished(body.state)) throw new DomainError("invalid_transition", `the defect is already ${body.state}`);
+        if (!owner) {
+          // Once a check of a repair found it not fixed, the finding was confirmed by that check (and an escalated defect waits for the owner's decision): only the owner may take it back then. So the reporter
+          // cannot remove a confirmed finding from the owner's lists, and withdrawing and reporting again never starts a confirmed finding over at cycle 0.
+          if (body.cycles > 0 || body.state === "escalated") throw new DomainError("forbidden", `a check of its repair found it not fixed (${body.cycles} cycle(s)): only the owner may withdraw it now`);
+          // A reporter that did work of the repair under check would be dismissing the check of its own work.
+          if (body.repairVersion !== undefined) {
+            const d = (await this.#runner.get("deliverable", body.deliverableId))!.body as unknown as DeliverableBody;
+            if (this.#contributors(d, await this.#version(body.deliverableId, body.repairVersion)).has(by.id)) throw new DomainError("forbidden", `an agent that did the work of the repair, version ${body.repairVersion}, may not withdraw the defect`);
+          }
+        }
         const { replacedRepair: _was, ...rest } = body;
         const next: DefectBody = { ...rest, state: "withdrawn", resolution: { kind: "withdrawn", by: by.id, at: this.#runner.now(), ref: command.id, reason: redactText(reason) } };
         const ref = { kind: "defect", id: command.id };
