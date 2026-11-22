@@ -25,7 +25,8 @@ for (const backend of backends) {
   const suite = (name: string, body: (c: {
     ask(by: Principal, taskId: string): Promise<string[] | undefined>; owner: Principal; task: string; project: string; svc: SubmissionService;
     agent(name: string, roles: string[], project?: string): Promise<Principal>; mkTask(title: string): Promise<string>; bare(): StatusService;
-    assign(reviewer: Principal, submissionId: string): void; scanned(pageSize: number, reads: number): StatusService;
+    assign(reviewer: Principal, submissionId: string): void; scanned(pageSize: number, reads: number): StatusService; elsewhere: string;
+    lone(reviewersAvailable: () => Promise<string[]>): StatusService & { svc: SubmissionService };
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -42,7 +43,6 @@ for (const backend of backends) {
         roles.set(p.id, held);
         return p;
       };
-      void elsewhere;
       const mkTask = async (title: string): Promise<string> => (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title })).id;
       const task = await mkTask("Fix the parser");
       const asked = new Map<string, string[]>();
@@ -57,7 +57,12 @@ for (const backend of backends) {
         return StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => small.list(by, t, q), approvalOf: (id) => small.approvalOf(id) } }, options);
       };
       const assign = (reviewer: Principal, submissionId: string): void => { asked.set(reviewer.id, [...(asked.get(reviewer.id) ?? []), submissionId]); };
-      await body({ ask, owner, task, project, svc, agent, mkTask, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), assign, scanned });
+      // A service that knows who could review (card H12o): with no other agent, a code submission records that no review is required.
+      const lone = (reviewersAvailable: () => Promise<string[]>): StatusService & { svc: SubmissionService } => {
+        const s = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, reviewersAvailableIn: async () => reviewersAvailable() });
+        return Object.assign(StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => s.list(by, t, q), approvalOf: (id) => s.approvalOf(id) } }, options), { svc: s });
+      };
+      await body({ ask, owner, task, project, svc, agent, mkTask, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), assign, scanned, elsewhere, lone });
     } finally { await world.close(); }
   });
 
@@ -122,11 +127,45 @@ for (const backend of backends) {
   suite("only what the caller may read is shown: the author sees its own code, a stranger with task read sees nothing, an agent of another project gets not found", async (c) => {
     const ann = await c.agent("ann", ["author"]);
     const stranger = await c.agent("stranger", []);
-    const alien = await c.agent("alien", ["author"], "prj-zzzzzzzzzzzzzzzzzzzz").catch(() => undefined);
-    await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T("a"), patchId: PATCH });
+    // An agent with task read in another project only (an earlier version enrolled it on a project that does not exist, so the check never ran).
+    const alien = await c.agent("alien", ["author"], c.elsewhere);
+    const code = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T("a"), patchId: PATCH });
     assert.match((await c.ask(ann, c.task))![0]!, /^1 submission\(s\)/);
     assert.match((await c.ask(stranger, c.task))![0]!, /^Nothing you may read has been submitted on Fix the parser yet/);
-    if (alien !== undefined) assert.equal(await c.ask(alien, c.task), undefined);
+    assert.equal(await c.ask(alien, c.task), undefined);
+    // A task credential reads its own task only: the author scoped to another task of the project gets not found, scoped to this one it sees its code.
+    const other = await c.mkTask("Another task");
+    assert.equal(await c.ask({ ...ann, taskScope: { taskId: other, projectId: c.project } }, c.task), undefined);
+    assert.match((await c.ask({ ...ann, taskScope: { taskId: c.task, projectId: c.project } }, c.task))![1]!, new RegExp(`^Newest code submission ${code.id} .*Review: none yet`));
+  });
+
+  suite("a reject is shown as the newest review (the landing gate fails it), and a code submission no other agent could review says review is not required", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const code = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T("a"), patchId: PATCH });
+    tick();
+    await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve" });
+    tick();
+    await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "reject" });
+    let text = (await c.ask(c.owner, c.task))!;
+    assert.match(text[1]!, /Review: the newest review says reject; it waits for a new submission from its author\. Director sign-off: none\.$/, "a later reject takes the approval back and no approval note is given");
+    const solo = c.lone(async () => [ann.id]);
+    const other = await c.mkTask("Fix the parser");
+    tick();
+    const alone = await solo.svc.record(ann, { commandId: cid("s"), taskId: other, kind: "code", role: "author", base: BASE, tree: T("b"), patchId: PATCH });
+    text = (await solo.ask(c.owner, { kind: "submissions", taskId: other }))!.lines.map((l) => l.text);
+    assert.match(text[1]!, new RegExp(`^Newest code submission ${alone.id} .*Review: not required \\(no other agent of the project could review it\\)\\. Director sign-off: none\\. An approval counts at landing only while the change's patch stays the one approved\\.$`));
+  });
+
+  suite("a scan that stops early before finding anything does not say that nothing was submitted", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const busy = await c.mkTask("Busy task");
+    for (let i = 0; i < 6; i++) { tick(); await c.svc.record(ann, { commandId: cid("s"), taskId: busy, kind: "code", role: "author", base: BASE, tree: String(i).repeat(40), patchId: PATCH }); }
+    // Pages of 1 row, one read a call: 5 calls look at 5 of the 6 rows, none of them this task's.
+    const text = (await c.scanned(1, 1).ask(c.owner, { kind: "submissions", taskId: c.task }))!.lines.map((l) => l.text);
+    assert.deepEqual(text, ["No submission you may read on Fix the parser was found among the stored submissions looked at, but not every stored submission was looked at, so some may exist; submission.list can page through the rest."]);
+    // With the whole table read it is a plain "nothing submitted".
+    assert.match((await c.scanned(2, 5).ask(c.owner, { kind: "submissions", taskId: c.task }))!.lines[0]!.text, /^Nothing you may read has been submitted on Fix the parser yet/);
   });
 
   suite("more than five code submissions and ten others are cut with a line saying so; a view is bounded, not silent", async (c) => {

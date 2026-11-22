@@ -2365,7 +2365,8 @@ export class StatusService {
     const found = { items };
     const partial = more ? " Not every stored submission was looked at, so newer or older ones may exist; \"newest\" here means the newest of those read." : "";
     const title = shown(body.title);
-    if (found.items.length === 0) return { observedAt: at, lines: [line(`Nothing you may read has been submitted on ${title} yet: no code, review, QA report, document change or director sign-off.${partial}`, cite("task", taskId))] };
+    // An empty scan that stopped early is not "nothing was submitted": the task's submissions may sit in the part of the table not looked at.
+    if (found.items.length === 0) return { observedAt: at, lines: [line(more ? `No submission you may read on ${title} was found among the stored submissions looked at, but not every stored submission was looked at, so some may exist; submission.list can page through the rest.` : `Nothing you may read has been submitted on ${title} yet: no code, review, QA report, document change or director sign-off.`, cite("task", taskId))] };
     const newestFirst = [...found.items].sort((x, y) => (x.submittedAt < y.submittedAt ? 1 : x.submittedAt > y.submittedAt ? -1 : x.id < y.id ? 1 : -1));
     const count = (k: string): number => newestFirst.filter((i) => i.kind === k).length;
     const lines: Line[] = [line(`${newestFirst.length} submission(s) of ${title} ${by.kind === "owner" ? "on record" : "you may read"}, newest first: ${count("code")} code, ${count("review")} review, ${count("qa")} QA, ${count("document")} document, ${count("signoff")} sign-off.${partial}`, cite("task", taskId))];

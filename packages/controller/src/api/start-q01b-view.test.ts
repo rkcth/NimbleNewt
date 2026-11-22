@@ -8,6 +8,7 @@ import { PI } from "../dispatch/testing/world.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startTestServer, withClient, type TestServer } from "../storage/postgres/testing/server.js";
 import { startController, type Controller, type StartOptions } from "./index.js";
+import { OPERATION_BY_NAME } from "./operations.js";
 
 // Card Q01b (fourth slice) through the composed controller: the owner asks in free words what was submitted on a task and whether it was reviewed or signed off; the interpreter is told of the `submissions` view in its prompt and
 // picks it (no fixed phrase); the state API gives the same lines.
@@ -102,6 +103,8 @@ for (const store of stores) {
       const none = (await call(bystander.token, "status.ask", { request: { kind: "submissions", taskId: task } })).result.item.lines.map((l: { text: string }) => l.text);
       assert.match(none[0], /^Nothing you may read has been submitted/);
       assert.equal((await call(boot.token, "status.ask", { request: { kind: "submissions", taskId: task, extra: 1 } })).ok, false);
+      // The status.ask operation summary (and so the api docs) names the kind.
+      assert.match(OPERATION_BY_NAME.get("status.ask")!.summary, /`submissions` \(what was submitted on a task, card Q01b:.*`\{ kind: "submissions", taskId \}`\)/);
     } finally { await c.close(); await db.close(); }
   });
 }
