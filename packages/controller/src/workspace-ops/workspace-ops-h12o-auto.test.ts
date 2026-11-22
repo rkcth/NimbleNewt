@@ -128,6 +128,47 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: two approvals at once commit once (the second meets the running release and records nothing), and a lookup that throws is nothing, never an error (card H12o, automatic release)`, async () => {
+    const r = await rig();
+    try {
+      let open!: () => void;
+      const gate = new Promise<void>((ok) => { open = ok; });
+      let entered!: () => void;
+      const inHost = new Promise<void>((ok) => { entered = ok; });
+      const slow = WorkspaceOpService.withEpoch(r.store.storage, (await ProjectService.open(r.store.storage, { holder: "c1", ...options })).epoch, {
+        quiesce: { around: async (_s, _o, run) => run({ attempts: [] } as never) },
+        portOf: async () => ({ run: async (call) => { r.calls.push(call); entered(); await gate; return committed(call, call.permit === true); } }),
+        approvalOf: async (id) => r.approvals.get(id),
+        attempts: { live: async () => [], frozenReason: async () => undefined, release: async () => undefined },
+      }, options);
+      const first = slow.releaseApproved(S1, "two-1");
+      await inHost;
+      assert.equal(await slow.releaseApproved(S1, "two-2"), undefined, "the second approval meets the running release");
+      assert.equal(await r.recorded("rel-auto:two-2", SERVICE), undefined);
+      open();
+      assert.equal((await first)?.state, "done");
+      assert.equal(r.calls.length, 1);
+      assert.equal((await slow.submissionCommit(S1))?.commitId, COMMIT);
+      // A lookup that throws (the submissions, the attempts) answers nothing; the recording call that asked is never failed by it.
+      const throwing = WorkspaceOpService.withEpoch(r.store.storage, (await ProjectService.open(r.store.storage, { holder: "c1", ...options })).epoch, {
+        quiesce: { around: async (_s, _o, run) => run({ attempts: [] } as never) },
+        portOf: async () => ({ run: async (call) => { r.calls.push(call); return committed(call, true); } }),
+        approvalOf: async () => { throw new Error("the submissions could not be read"); },
+      }, options);
+      assert.equal(await throwing.releaseApproved("sbm-bbbbbbbbbbbbbbbbbbbb", "t1"), undefined);
+      r.approvals.set("sbm-bbbbbbbbbbbbbbbbbbbb", { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" });
+      const liveThrows = WorkspaceOpService.withEpoch(r.store.storage, (await ProjectService.open(r.store.storage, { holder: "c1", ...options })).epoch, {
+        quiesce: { around: async (_s, _o, run) => run({ attempts: [] } as never) },
+        portOf: async () => ({ run: async (call) => { r.calls.push(call); return committed(call, true); } }),
+        approvalOf: async (id) => r.approvals.get(id),
+        attempts: { live: async () => { throw new Error("the attempts could not be read"); }, frozenReason: async () => undefined, release: async () => undefined },
+      }, options);
+      assert.equal(await liveThrows.releaseApproved("sbm-bbbbbbbbbbbbbbbbbbbb", "t2"), undefined);
+      assert.equal(r.calls.length, 1, "the host was not asked for either");
+      for (const c of ["t1", "t2"]) assert.equal(await r.recorded(`rel-auto:${c}`, SERVICE), undefined, c);
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: an approval taken back while the task is made quiet refuses the automatic release before the host is asked; a control service has no way to ask for another operation (card H12o, automatic release)`, async () => {
     const r = await rig();
     try {
