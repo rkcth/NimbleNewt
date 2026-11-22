@@ -16,14 +16,12 @@ function route(): string[] { return ["before generation.admit", "after generatio
   "tool: outcome known, not yet returned to the model"]; }
 
 /**
- * What each kill must end as (the result part: pushed, the effect, what the model was told). Recorded first: every kill ends like the uncrashed run. Read first: so does every kill, except the two between Pi storing the
- * whole reply and the controller completing its generation (the tool called, the completion not begun): the restarted Pi presents the call again, its generation is still streaming and nothing will ever complete it (the
- * relay that streamed it died), so the bridge refuses the call ("streaming", it was not run): nothing is pushed and the model is told so. Safe (never pushed twice, never told "pushed" wrongly) but not the uncrashed
- * result: the gap this slice measured, left open (implementation notes, G04 slice 6).
+ * What each kill must end as (the result part: pushed, the effect, what the model was told). Every kill, in both orders, ends like the uncrashed run. Until G04 slice 7 the two kills between Pi storing the whole reply and the
+ * controller completing its generation (read first: the tool called, the completion not begun) ended "nothing pushed, the model told it did not run", because a generation left streaming by the dead controller refused its
+ * calls for good; the generation now records the epoch of its controller, and a stream left under an older epoch admits its complete call and ends in the same commit.
  */
-export const NOT_RUN_RESULT = "nothing pushed, no effect, model told it did not finish";
-export function expectedResult(order: EndOrder, label: string): string {
-  return order === "read first" && /tool: called by the model$|before generation\.complete$/.test(label) ? NOT_RUN_RESULT : CLEAN_RESULT;
+export function expectedResult(_order: EndOrder, _label: string): string {
+  return CLEAN_RESULT;
 }
 
 /**
@@ -36,7 +34,7 @@ export function defineStreamKillTests(engineName: string, order: EndOrder, heavy
   const engine = engines.find((e) => e.name === engineName)!;
   after(stopServer);
   const what = order === "read first"
-    ? "when Pi has stored the whole reply before the controller completes its generation (the production relay's order), ends like the uncrashed run at every boundary except the two between those, where the call presented again is refused as still streaming and the model is told it was not run (the gap this slice measured); never pushed twice, nothing left streaming"
+    ? "when Pi has stored the whole reply before the controller completes its generation (the production relay's order), ends like the uncrashed run at every boundary, including the two between those, where the restarted controller treats the generation its dead predecessor left streaming as ended and admits the complete call (slice 7); never pushed twice, nothing left streaming"
     : "when the controller completes the generation before Pi stores the reply, ends every time exactly like the uncrashed run: pushed once, confirmed and reported to the model, the call admitted in one generation, no generation left streaming";
   test(`${engine.name}: a real SIGKILL at every boundary of the model's reply through the production relay and stream tap (the generation begun, the tool call recorded, the reply completed) and of the tool's route, ${what}, nothing acknowledged lost`, { skip: heavy ? HEAVY_SKIP : false }, async () => {
     const clean = await withEngine(engine, (spec, dir) => cleanStreamRun(spec, dir, order));

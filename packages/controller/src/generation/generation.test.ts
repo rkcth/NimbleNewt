@@ -4,6 +4,7 @@ import { AssignmentService } from "../domain/assignments.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
 import { EffectService, type EffectBridge, type EffectRequest } from "../domain/effects.js";
 import { ProjectService } from "../domain/service.js";
+import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
@@ -43,7 +44,7 @@ class Outside {
 for (const backend of backends) {
   interface Ctx {
     owner: Principal; a: string; task: string; other: string; gen: GenerationService; reopen(hooks?: { afterGuardRead?: () => Promise<void> }): GenerationService; effects: EffectService;
-    assignments: AssignmentService; projects: ProjectService; ann: Principal; ben: Principal; mgr: Principal; eve: Principal;
+    assignments: AssignmentService; projects: ProjectService; restart(): Promise<GenerationService>; strip(runId: string): Promise<void>; ann: Principal; ben: Principal; mgr: Principal; eve: Principal;
   }
   const suite = (name: string, body: (c: Ctx) => Promise<void>) =>
     test(`${backend.name}: ${name}`, async () => {
@@ -67,7 +68,24 @@ for (const backend of backends) {
         const ben = await agent("ben", [{ action: "attempt.work", project: a }, { action: "effect.perform", project: a }]);
         const mgr = await agent("mgr", [{ action: "assignment.manage", project: a }, { action: "assignment.read", project: a }, { action: "attempt.work", project: a }]);
         const eve = await agent("eve", [{ action: "attempt.work", project: b }, { action: "assignment.manage", project: b }]);
-        await body({ owner, a, task, other, gen: make(), reopen: make, effects, assignments, projects, ann, ben, mgr, eve });
+        // A new process: a new primary epoch (the earlier one is fenced out) and a fresh service over the same storage.
+        const restart = async () => {
+          const next = await ProjectService.open(world.storage, { holder: `c${n++}`, ...options });
+          const asg = AssignmentService.withEpoch(world.storage, next.epoch, next, options);
+          return GenerationService.withEpoch(world.storage, next.epoch, { assignments: asg, effects: EffectService.withEpoch(world.storage, next.epoch, asg, { holder: "exec-2", ...options }) }, options);
+        };
+        // A record written before the epoch field existed: the epoch is removed from it.
+        const strip = async (runId: string) => {
+          const next = await ProjectService.open(world.storage, { holder: `c${n++}`, ...options });
+          const runner = new CommandRunner(world.storage, next.epoch, options);
+          const ref = { kind: "generation-run" as const, id: runId };
+          await runner.command("test.strip-epoch", { commandId: cid("strip"), actor: "system" }, async () => {
+            const found = (await runner.get("generation-run", runId))!;
+            const { epoch: _epoch, ...rest } = found.body as Record<string, unknown>;
+            return { payload: { runId }, build: async () => ({ ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: found.revision, body: rest as never }], detail: {} }) };
+          });
+        };
+        await body({ owner, a, task, other, gen: make(), reopen: make, effects, assignments, projects, restart, strip, ann, ben, mgr, eve });
       } finally { await world.close(); }
     });
 
@@ -368,6 +386,46 @@ for (const backend of backends) {
       await gen.release(mgr, { commandId: cid("rel"), taskId: task, reason: "next" });
       assert.equal(outside.executions.length, 0);
     }
+  });
+
+  suite("a generation left streaming by a controller that died (an older primary epoch) admits its complete call, ends in the same commit and drops what was partial (G04 slice 7)", async ({ gen, reopen, restart, ann, task, mgr }) => {
+    const run = await begin(gen, ann, task);
+    await call(gen, ann, run, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });
+    await call(gen, ann, run, 2, "c2", { name: "push", argumentsDelta: '{"ref":' });
+    assert.equal((await gen.view(ann, run))!.run.state, "streaming");
+    // The same primary epoch (a second service in the process that is streaming it) still refuses: the stream may be about to end.
+    await refusedFor("streaming", () => admit(reopen(), ann, run));
+    // A partial call of a gone generation is refused as incomplete, and the run is left as it was.
+    const next = await restart();
+    await refusedFor("incomplete", () => admit(next, ann, run, { toolCallId: "c2" }));
+    assert.equal((await next.view(ann, run))!.run.state, "streaming");
+    const first = await admit(next, ann, run, { commandId: "adm-gone" });
+    const seen = (await next.view(ann, run))!.run;
+    assert.deepEqual([seen.state, seen.finishedAt !== undefined, seen.toolCalls.map((c) => c.state)], ["finished", true, ["admitted", "dropped"]]);
+    assert.equal(seen.toolCalls[1]!.reason, "the stream ended before its arguments were complete");
+    assert.equal(seen.toolCalls[0]!.effectId, first.effectId);
+    // The same command again answers the same effect; another ask for the call is refused as admitted; the old relay's late end and pieces are refused.
+    const again = await next.admitEffect(ann, { commandId: "adm-gone", runId: run, toolCallId: "c1", kind: "git-push", target: "repo:main" });
+    assert.deepEqual([again.effectId, again.replayed], [first.effectId, true]);
+    await refusedFor("admitted", () => admit(next, ann, run));
+    await refusedFor("stale", () => next.complete(ann, { commandId: cid("late"), runId: run }));
+    await refusedFor("stale", () => text(next, ann, run, 3, "late"));
+    // A generation held by a hold is still refused, whatever its epoch.
+    const held = await begin(next, ann, task);
+    await call(next, ann, held, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });
+    await next.interrupt(mgr, { commandId: cid("hold"), taskId: task, mode: "finish_and_hold", reason: "wait" });
+    const later = await restart();
+    await refusedFor("held", () => admit(later, ann, held));
+    assert.equal((await later.view(ann, held))!.run.state, "streaming");
+  });
+
+  suite("a streaming generation without an epoch (a record from before the field) is refused as still streaming, whichever process asks (G04 slice 7)", async ({ gen, restart, strip, ann, task }) => {
+    const run = await begin(gen, ann, task);
+    await call(gen, ann, run, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });
+    await strip(run);
+    const next = await restart();
+    await refusedFor("streaming", () => admit(next, ann, run));
+    assert.equal((await next.view(ann, run))!.run.state, "streaming");
   });
 
   suite("effects are admitted atomically with their checks, once, and only from a finished current generation", async ({ gen, effects, ann, ben, task }) => {

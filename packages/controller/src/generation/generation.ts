@@ -77,6 +77,8 @@ export interface RunBody {
   readonly fence?: Fence;
   /** The generation began while a pause gate on the task stood (card L05c); it was recorded, and its calls cannot be admitted until the pause is lifted. */
   readonly beganPaused?: true;
+  /** The primary epoch of the controller that began the generation (G04 slice 7). A generation still `streaming` under an older epoch has no stream left to end it: its controller died. Absent on records begun before this field. */
+  readonly epoch?: number;
   readonly state: RunState;
   readonly text: string;
   /** Chunks applied so far; the next must be numbered one more. */
@@ -242,7 +244,7 @@ export class GenerationService {
           const id = runIdOf(taskId, number);
           const ref: AggregateRef = { kind: "generation-run", id };
           const run: RunBody = {
-            taskId, projectId: task.projectId, owner: principal.id, number, contextRevision: bound, ...(fence === undefined ? {} : { fence }), ...(stood ? { beganPaused: true as const } : {}),
+            taskId, projectId: task.projectId, owner: principal.id, number, contextRevision: bound, epoch: this.#runner.epoch, ...(fence === undefined ? {} : { fence }), ...(stood ? { beganPaused: true as const } : {}),
             state: "streaming", text: "", chunks: 0, toolCalls: [], late: [], lateCount: 0, startedAt: at, sensitive: true,
           };
           changes.push(this.#write(gate.ref, gate.revision, { ...gate.body, runs: number, current: number }), { type: "create", ref, body: clean(run) }, ...paused, ...(guard?.changes ?? []));
@@ -515,7 +517,10 @@ export class GenerationService {
           if (call!.state === "admitted") throw new GenerationRefused("admitted", `tool call ${call!.id} is already admitted`);
           if (call!.state === "withdrawn") throw new GenerationRefused("interrupted", `tool call ${call!.id} was withdrawn`);
           if (call!.state !== "complete" && call!.state !== "held") throw new GenerationRefused("incomplete", `tool call ${call!.id} is ${call!.state}: only a complete call becomes an effect`);
-          if (run.state === "streaming") throw new GenerationRefused("streaming", `generation ${found.id} is still streaming`);
+          // G04 slice 7: a generation still streaming under an older primary epoch has lost its controller, so nothing will ever complete it. A call whose arguments were recorded complete is admitted, and the generation is
+          // ended in the same commit (partial calls dropped, as `complete` does); the worker only runs a tool once it has read the whole reply. Records without an epoch are refused as before.
+          const gone = run.state === "streaming" && run.epoch !== undefined && run.epoch < this.#runner.epoch;
+          if (run.state === "streaming" && !gone) throw new GenerationRefused("streaming", `generation ${found.id} is still streaming`);
           const input = JSON.parse(call!.args) as JsonObject;
           const guard = run.fence === undefined ? undefined : await this.#assignments!.guardFor(run.fence).check(run.taskId);
           const inputDigest = sha256(canonicalJson(input));
@@ -523,7 +528,8 @@ export class GenerationService {
           const effectRef: AggregateRef = { kind: "effect", id: effectId };
           const effect: EffectBody = { kind, target, input, inputDigest, key: effectId, createdBy: principal.id, taskId: run.taskId, ...(run.fence === undefined ? {} : { fence: run.fence }), started: false };
           const entry: EffectEntry = { effectId, ...(run.fence === undefined ? {} : { attemptId: run.fence.attemptId }), target, inputDigest, reconciliationHandle: effectId };
-          const next: RunBody = { ...run, toolCalls: run.toolCalls.map((c) => (c.id === call!.id ? { ...c, state: "admitted", effectId } : c)) };
+          const calls = run.toolCalls.map((c): ToolCall => (c.id === call!.id ? { ...c, state: "admitted", effectId } : gone && c.state === "partial" ? { ...c, state: "dropped", reason: "the stream ended before its arguments were complete" } : c));
+          const next: RunBody = { ...run, toolCalls: calls, ...(gone ? { state: "finished" as const, finishedAt: this.#runner.now() } : {}) };
           return {
             ref, creates: false,
             changes: mergeChanges([this.#write(ref, current.revision, next), { type: "check", ref: gate.ref, expectedRevision: gate.revision }, { type: "create", ref: effectRef, body: effect as unknown as JsonObject }, ...paused, ...(guard?.changes ?? [])]),
