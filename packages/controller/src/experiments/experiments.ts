@@ -323,7 +323,11 @@ export class ExperimentService {
         return { ref: { kind: "experiment", id }, creates: false, changes, detail: { projectId: b.projectId, verdict: judged.verdict } };
       },
     })));
-    return { revision: result.revision, verdict };
+    if (!result.replayed) return { revision: result.revision, verdict };
+    // A repeated command is answered from its record without building again, so the verdict is the one stored with the result (an experiment is concluded once).
+    const stored = (await this.#get(id))?.body.result;
+    if (stored === undefined) throw new DomainError("integrity", `experiment ${id}: the result recorded by this command is not found`);
+    return { revision: result.revision, verdict: stored.verdict };
   }
 
   /** Withdraws an experiment that has not started (the proposer, or the owner or a manager). It stays listed. */

@@ -226,7 +226,15 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.conclude(open, c.eve));
     await refuses("forbidden", () => c.conclude(open, c.reader));
     await refuses("stale_revision", () => c.svc.conclude(c.mgr, { commandId: cid("c"), experimentId: open, expectedRevision: 1, finding: "x" }));
-    await c.conclude(open);
+    // The same conclusion sent again (another controller) answers with the verdict it reached, not a default.
+    const end = { commandId: cid("c"), experimentId: open, expectedRevision: await c.rev(open), finding: "read the runs" };
+    const ended = await c.svc.conclude(c.mgr, end);
+    assert.deepEqual(await c.make().conclude(c.mgr, end), ended);
+    const better = await c.started();
+    await c.run(better); await c.run(better);
+    const once = { commandId: cid("c"), experimentId: better, expectedRevision: await c.rev(better), finding: "good" };
+    assert.equal((await c.svc.conclude(c.mgr, once)).verdict, "improved");
+    assert.equal((await c.make().conclude(c.mgr, once)).verdict, "improved", "a replay answers with the stored verdict");
     await refuses("invalid_command", () => c.conclude(open), /is concluded/);
     await refuses("invalid_command", () => c.run(open), /is concluded/);
   });
@@ -337,6 +345,33 @@ for (const backend of backends) {
     await Promise.all([c.svc.conclude(c.mgr, { commandId: cid("c"), experimentId: p, expectedRevision: rp, finding: "p" }), other.conclude(c.mgr2, { commandId: cid("c"), experimentId: q, expectedRevision: rq, finding: "q" })]);
     const both = [...(await c.body(p)).result!.savings, ...(await c.body(q)).result!.savings];
     for (const m of ["timeToAcceptedSeconds", "reworkCount", "costPerSuccess"]) assert.deepEqual(both.filter((s) => s.metric === m).map((s) => s.counted).sort(), [false, true], m);
+    // Two controllers reporting the last run the budget allows at once: one is kept and pauses it, the other is refused, and the budget is not overrun.
+    const edge = await c.started({ budget: { maxRuns: 2, maxCost: 1000 }, minRuns: 1 });
+    await c.run(edge);
+    const last = await Promise.allSettled([c.run(edge), other.recordRun(c.mgr, { commandId: cid("r"), experimentId: edge, ...runArgs() } as never)]);
+    assert.deepEqual(last.map((o) => (o.status === "fulfilled" ? `${o.value.run} ${o.value.status}` : (o.reason as DomainError).code)).sort(), ["2 paused", "unavailable"]);
+    assert.deepEqual([(await c.body(edge)).runs.length, (await c.body(edge)).spent.runs], [2, 2]);
+  });
+
+  suite("a task credential acts only in its own task's project", async (c) => {
+    const id = await c.started({ budget: { maxRuns: 10, maxCost: 100 } });
+    const elsewhere = (p: Principal): Principal => ({ ...p, taskScope: { taskId: "task-elsewhere", projectId: c.b } }) as Principal;
+    const here = (p: Principal): Principal => ({ ...p, taskScope: { taskId: "task-here", projectId: c.a } }) as Principal;
+    const before = await c.rev(id);
+    await refuses("forbidden", () => c.run(id, {}, elsewhere(c.dev)));
+    await refuses("forbidden", () => c.run(id, {}, elsewhere(c.mgr)));
+    await refuses("forbidden", () => c.conclude(id, elsewhere(c.mgr)));
+    await refuses("forbidden", () => c.svc.raiseBudget(elsewhere(c.mgr), { commandId: cid("b"), experimentId: id, expectedRevision: before, maxRuns: 20, maxCost: 100, reason: "more" }));
+    await refuses("forbidden", () => c.svc.propose(elsewhere(c.dev), { commandId: cid("x"), projectId: c.a, title: "T", proposal: PROPOSAL, affectedKey: "k" } as never));
+    const fresh = await c.propose();
+    await refuses("forbidden", () => c.svc.pin(elsewhere(c.mgr), { commandId: cid("p"), experimentId: fresh, expectedRevision: 1, criteria: criteria() } as never));
+    await refuses("forbidden", () => c.svc.withdraw(elsewhere(c.dev), { commandId: cid("w"), experimentId: fresh, expectedRevision: 1, reason: "no" }));
+    assert.equal(await c.svc.get(elsewhere(c.dev), id), undefined);
+    assert.equal(await c.svc.list(elsewhere(c.mgr), c.a), undefined);
+    assert.equal(await c.rev(id), before, "nothing refused changed it");
+    // In its own project the same agent acts as usual.
+    assert.deepEqual(await c.run(id, {}, here(c.dev)), { run: 1, status: "running" });
+    assert.ok(await c.svc.get(here(c.dev), id));
   });
 }
 
