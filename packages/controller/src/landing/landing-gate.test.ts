@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Check } from "../policy/integration-policy.js";
-import { LandingGate, landingChecksText, type QaGateView, type ContractTests, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
+import { LandingGate, landingChecksText, type QaGateView, type DocsGateView, type ContractTests, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
 
 // Card P09: the landing gate judges the project's required checks on the exact tree a landing would make. Not run counts as failed; a reviewer's approval carries over to another tree only while the patch ID is unchanged.
 const BASE = "b".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), OTHER_PATCH = "c".repeat(40);
@@ -123,7 +123,7 @@ test("a reviewer's approval carries over to another tree only while the patch ID
   assert.match(unnamed.summary, /names no reviewed code submission/);
 });
 
-test("qa, docs and director are not collected at landing yet, so they do not pass; a project that requires nothing is not gated and the host is not asked; unreadable required checks throw (card P09)", async () => {
+test("qa and docs without their readers wired, and director (not collected at landing yet), do not pass; a project that requires nothing is not gated and the host is not asked; unreadable required checks throw (card P09)", async () => {
   const r = await gate({ required: ["qa", "docs", "director"] }).g.evaluate({ taskId: TASK, projectId: "proj-x", host: host({}).h });
   assert.equal(r.passed, false);
   assert.deepEqual(r.results.map((x) => [x.check, x.result]), [["qa", "not_run"], ["docs", "not_run"], ["director", "not_run"]]);
@@ -197,6 +197,74 @@ test("qa: a passed gate passes; a gate for another tree or task, a missing gate 
 
 test("qa: without a QA gate wired the check is not collected, as before (card P09)", async () => {
   const g = new LandingGate({ requiredChecks: async () => ["qa"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z" });
+  const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
+  assert.deepEqual([r.passed, r.results[0]!.result], [false, "not_run"]);
+  assert.match(r.results[0]!.summary, /not collected/);
+});
+
+// Card P09 (fourth slice): the docs check with a fake documents gate (the real one is exercised in workspace-ops-p09-docs.test.ts).
+const docsGate = (g: Partial<DocsGateView> | undefined | (() => Promise<DocsGateView | undefined>)) => new LandingGate({
+  requiredChecks: async () => ["docs"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z",
+  docsGate: async (taskId, id) => (typeof g === "function" ? g() : g === undefined ? undefined : { taskId, submissionId: id, tree: TREE, checked: 1, pending: [], ...g }),
+});
+const docsRun = (g: Parameters<typeof docsGate>[0], opts: { submissionId?: string | undefined } = { submissionId: SUB }) => docsGate(g).evaluate({ taskId: TASK, projectId: "proj-x", ...(opts.submissionId === undefined ? {} : { submissionId: opts.submissionId }), host: host({}).h });
+
+test("docs: nothing pending passes; pending documents fail and are named; a gate for another tree, task or submission, a missing gate and a thrown read are not run (card P09)", async () => {
+  assert.deepEqual((await docsRun({})).results.map((x) => x.result), ["pass"]);
+  assert.match((await docsRun({ checked: 0 })).results[0]!.summary, /no documentation obligation describes this task/);
+  const pending = await docsRun({ checked: 3, pending: [{ obligationId: "dob-aaaaaaaaaaaaaaaaaaaa", title: "User guide", reason: "it was never verified against tested code" }] });
+  assert.deepEqual([pending.passed, pending.results[0]!.result], [false, "fail"]);
+  assert.match(pending.results[0]!.summary, /1 of 3 document\(s\).*User guide \(it was never verified/);
+  assert.equal((await docsRun({ tree: OLD_TREE })).results[0]!.result, "not_run");
+  assert.equal((await docsRun({ taskId: "tsk-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run");
+  assert.equal((await docsRun({ submissionId: "sbm-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run", "a gate for another submission does not count");
+  assert.equal((await docsRun(undefined)).results[0]!.result, "not_run");
+  assert.equal((await docsRun({ pending: undefined as never })).results[0]!.result, "not_run", "an unreadable answer is not a pass");
+  const thrown = await docsRun(async () => { throw new Error("storage down"); });
+  assert.equal(thrown.results[0]!.result, "not_run");
+  assert.match(thrown.results[0]!.summary, /storage down/);
+  assert.equal((await docsRun({}, { submissionId: undefined })).results[0]!.result, "not_run");
+});
+
+test("docs: many pending documents: at most five are named whole within the summary and the rest are counted (card P09)", async () => {
+  const many = (n: number, title: (i: number) => string) => Array.from({ length: n }, (_, i) => ({ obligationId: `dob-${String(i).repeat(20)}`, title: title(i), reason: "never verified" }));
+  const short = await docsRun({ checked: 9, pending: many(7, (i) => `G${i}`) });
+  assert.deepEqual([short.passed, short.results[0]!.result], [false, "fail"]);
+  const s = short.results[0]!.summary;
+  assert.match(s, /^7 of 9 document\(s\)/);
+  for (let i = 0; i < 5; i++) assert.ok(s.includes(`G${i} (never verified)`), `names G${i}: ${s}`);
+  assert.ok(!s.includes("G5") && !s.includes("G6"), "names no more than five");
+  assert.match(s, /; and 2 more$/);
+  assert.match((await docsRun({ checked: 2, pending: many(2, (i) => `G${i}`) })).results[0]!.summary, /G0 \(never verified\); G1 \(never verified\)$/, "nothing is counted when all are named");
+  // Long titles: only what fits is named whole; the first is shortened when it alone is too long; the count is never cut off.
+  const long = (await docsRun({ checked: 4, pending: many(4, (i) => `${String(i).repeat(120)}`) })).results[0]!.summary;
+  assert.ok(long.length <= 300, long);
+  assert.match(long, /; and 3 more$/);
+  const huge = (await docsRun({ checked: 3, pending: many(3, (i) => `${String(i).repeat(200)}`) })).results[0]!.summary;
+  assert.ok(huge.length <= 300, huge);
+  assert.match(huge, /0{20}\.\.\.; and 2 more$/);
+  assert.equal((await docsRun({ checked: 0, pending: many(1, () => "G") })).results[0]!.result, "not_run", "a count below the pending documents is an unreadable answer");
+});
+
+test("a cut never leaves half a character: document names, a long summary and a failing command's output tail of emoji, in both parities, and a lone surrogate in the input (card P09)", async () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const smile = "\u{1F600}";
+  for (const lead of ["", "x"]) {
+    const named = (await docsRun({ checked: 1, pending: [{ obligationId: "dob-aaaaaaaaaaaaaaaaaaaa", title: `${lead}${smile.repeat(100)}`, reason: "never verified" }] })).results[0]!.summary;
+    assert.doesNotMatch(named, lone, JSON.stringify(named));
+    assert.match(named, new RegExp(`${smile}\\.\\.\\.$`, "u"));
+    const thrown = (await docsRun(async () => { throw new Error(`\uD800${lead}${smile.repeat(200)}`); })).results[0]!.summary;
+    assert.ok(thrown.length <= 300, String(thrown.length));
+    assert.doesNotMatch(thrown, lone, JSON.stringify(thrown));
+    const { h } = host((call) => ({ checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [{ name: call.checks[0]!.name, state: "failed", exitCode: 1, output: `${lead}${smile.repeat(600)}\uDC00` }, { name: "lint", state: "passed", exitCode: 0 }] }));
+    const note = (await gate({ tests: unit, approval: approved }).g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: h })).results[0]!.runs![0]!.note!;
+    assert.ok(note.startsWith("...") && note.length <= 300, note);
+    assert.doesNotMatch(note, lone, JSON.stringify(note));
+  }
+});
+
+test("docs: without a documents gate wired the check is not collected, as before (card P09)", async () => {
+  const g = new LandingGate({ requiredChecks: async () => ["docs"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z" });
   const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
   assert.deepEqual([r.passed, r.results[0]!.result], [false, "not_run"]);
   assert.match(r.results[0]!.summary, /not collected/);

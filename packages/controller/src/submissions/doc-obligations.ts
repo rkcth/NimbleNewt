@@ -524,6 +524,43 @@ export class DocObligationService {
     return { flagged: [...flagged], tasks };
   }
 
+  /**
+   * What the landing gate reads for the `docs` required check (card P09, fourth slice): READ ONLY, nothing is flagged or opened. Of the project's documents still kept that describe the task (`implementationRefs`), every one that
+   * is not verified against this code (the submission named, or another submission of the task with the very same tree) whose QA gate still passes is pending, with the reason in plain words: never verified, flagged
+   * stale, verified for a task but not for this one, or checked against other code or code that lost its QA gate. A task no document describes has nothing pending. The gate's tree is the submission's own, so the landing gate can bind it to the landed patch.
+   */
+  async landing(by: Principal, command: { taskId: string; submissionId: string }): Promise<{ taskId: string; submissionId: string; tree: string; checked: number; pending: readonly { obligationId: string; title: string; reason: string }[] }> {
+    const taskId = checkTaskId(command.taskId);
+    if (typeof command.submissionId !== "string" || !SBM.test(command.submissionId)) bad("submissionId", "is not a submission ID");
+    const task = await this.#task(taskId);
+    if (task === undefined || !this.#reads(by, task.projectId)) return hidden("task");
+    const gate = await this.#ports.gate(by, command.submissionId);
+    if (gate.taskId !== taskId) bad("submissionId", `is code of task ${gate.taskId}, not ${taskId}`);
+    const pending: { obligationId: string; title: string; reason: string }[] = [];
+    // Many documents can stand on the same code: each submission's QA gate is read once per landing (a project keeps up to DOC_LIMITS.perProject documents).
+    const gates = new Map<string, Awaited<ReturnType<DocObligationPorts["gate"]>>>([[command.submissionId, gate]]);
+    let checked = 0;
+    for (const id of (await this.#index(task.projectId)).body.ids) {
+      const found = await this.#runner.get("doc-obligation", id);
+      const b = found?.body as unknown as DocObligationBody | undefined;
+      if (found === undefined || b === undefined || b.retired !== undefined || !b.implementationRefs.includes(taskId)) continue;
+      checked += 1;
+      const why = async (): Promise<string | undefined> => {
+        if (b.state === "unverified") return "it was never verified against tested code";
+        if (b.state === "stale") return `it is stale and its update is still due${b.reasons === undefined || b.reasons.length === 0 ? "" : ` (${docReasonText(b.reasons[b.reasons.length - 1]!)})`}`;
+        const was = b.verification?.evidence.find((e) => e.taskId === taskId);
+        if (was === undefined) return `it was not verified against any tested code of task ${taskId}`;
+        if (was.tree !== gate.tree) return `it was verified against tree ${was.tree.slice(0, 12)}, not this code (tree ${gate.tree.slice(0, 12)})`;
+        let g = gates.get(was.submissionId);
+        if (g === undefined) { g = await this.#ports.gate(by, was.submissionId); gates.set(was.submissionId, g); }
+        return g.verdict === "passed" ? undefined : `the tested code it was verified against (${was.submissionId}) no longer passes its QA gate`;
+      };
+      const reason = await why();
+      if (reason !== undefined) pending.push({ obligationId: id, title: b.title, reason });
+    }
+    return { taskId, submissionId: command.submissionId, tree: gate.tree, checked, pending };
+  }
+
   /** A release of `version`: every document of the project that applies to another version (user, developer, support and promotional alike) is flagged stale with an update task for its owner. */
   async release(by: Principal, command: NoActor & { projectId: string; version: string }): Promise<{ projectId: string; version: string; flagged: readonly string[]; byAudience: Readonly<Record<DocAudience, number>>; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
     only(command, ["commandId", "projectId", "version"]);
@@ -735,4 +772,12 @@ export function docVerifyCode(b: Pick<DocObligationBody, "implementationRefs" | 
   for (const e of b.verification?.evidence ?? []) if (out[e.taskId] === undefined && !lost.has(e.submissionId)) out[e.taskId] = e.submissionId;
   for (const t of Object.keys(out)) if (!b.implementationRefs.includes(t)) delete out[t];
   return out;
+}
+
+/**
+ * The documents gate as the landing gate reads it (card P09, the `docs` required check): read as the controller at the owner's level; the landing gate itself checks the task, the submission and the tree. One function,
+ * used by `start.ts` and by the tests, so the controller's composition is the one tested.
+ */
+export function landingDocsGate(service: DocObligationService): (taskId: string, submissionId: string) => ReturnType<DocObligationService["landing"]> {
+  return async (taskId, submissionId) => service.landing(DOC_AUTO_PRINCIPAL, { taskId, submissionId });
 }
