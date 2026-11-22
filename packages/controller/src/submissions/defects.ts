@@ -15,9 +15,10 @@ export const DEFECT_SEVERITIES = ["critical", "major", "minor"] as const;
 export type DefectSeverity = (typeof DEFECT_SEVERITIES)[number];
 /**
  * `open`: found, waiting for a repair. `repair-submitted`: the responsible agent named a newer version that repairs it, waiting for a check. `resolved`: a check found it fixed. `escalated`: the repair and review
- * cycles reached the configured limit, so the owner decides. `overridden`: the owner accepted the work with the finding remaining (the failed checks stay failed).
+ * cycles reached the configured limit, so the owner decides. `overridden`: the owner accepted the work with the finding remaining (the failed checks stay failed). `withdrawn`: the reporter (or the owner) took the
+ * report back as mistaken (a wrong version, a duplicate, a misreading); the report and its checks stay on the record, and the finding is not counted as fixed, accepted or unresolved.
  */
-export const DEFECT_STATES = ["open", "repair-submitted", "resolved", "escalated", "overridden"] as const;
+export const DEFECT_STATES = ["open", "repair-submitted", "resolved", "escalated", "overridden", "withdrawn"] as const;
 export type DefectState = (typeof DEFECT_STATES)[number];
 /** The owner's two answers to a defect: accept the work as it is with the finding remaining, or let the repair go on once more (the cycle count is kept, never reset). */
 export const OVERRIDE_OUTCOMES = ["accept-as-is", "repair-again"] as const;
@@ -62,7 +63,7 @@ export interface DefectBody {
   readonly checkSeq: number;
   /** The owner's decisions on it, oldest first (`defect-override` records). */
   readonly overrides: readonly string[];
-  readonly resolution?: { readonly kind: "fixed" | "accepted-as-is"; readonly by: string; readonly at: string; readonly ref: string };
+  readonly resolution?: { readonly kind: "fixed" | "accepted-as-is" | "withdrawn"; readonly by: string; readonly at: string; readonly ref: string; /** Why a withdrawn report was taken back (redacted). */ readonly reason?: string };
 }
 
 /** One check of a repair. Immutable: a failed check is never rewritten, whatever the owner decides later. */
@@ -124,6 +125,8 @@ const object = (command: unknown, known: readonly string[]): void => {
 };
 const escalationText = (id: string, severity: DefectSeverity, deliverableId: string, cycles: number, limit: number): string =>
   `Defect ${id} (${severity}) in deliverable ${deliverableId} failed ${cycles} repair check(s), the limit of ${limit}: it waits for your decision (accept as is, or repair again).`;
+/** A defect that no longer waits for anything: fixed, accepted as it is, or withdrawn. */
+export const isFinished = (state: DefectState): boolean => state === "resolved" || state === "overridden" || state === "withdrawn";
 const revisionOf = (value: unknown): number | undefined => {
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value) || (value as number) < 1) bad("expectedRevision", "must be the revision you read");
@@ -377,7 +380,7 @@ export class DefectService {
       build: async () => {
         const { agg, body } = await this.#load(by, command.id);
         if (expected !== undefined && agg.revision !== expected) throw new DomainError("stale_revision", `the defect is at revision ${agg.revision}, not ${expected}`, { currentRevision: agg.revision });
-        if (body.state === "resolved" || body.state === "overridden") throw new DomainError("invalid_transition", `the defect is already ${body.state}`);
+        if (isFinished(body.state)) throw new DomainError("invalid_transition", `the defect is already ${body.state}`);
         if (command.outcome === "repair-again" && body.state === "open") throw new DomainError("invalid_transition", "the defect is open already: its repair goes on");
         // A submitted repair waits for its check: sending the defect back to `open` would drop that repair unchecked (the next repair must name a newer version).
         if (command.outcome === "repair-again" && body.state === "repair-submitted") throw new DomainError("invalid_transition", "the defect has a repair waiting for its check: its repair goes on");
@@ -390,7 +393,7 @@ export class DefectService {
           const o = other === command.id ? agg : await this.#runner.get("defect", other);
           if (o === undefined) continue;
           const ob = o.body as unknown as DefectBody;
-          if (ob.state === "resolved" || ob.state === "overridden") continue;
+          if (isFinished(ob.state)) continue;
           const lv = await lastVerdict(other, ob.checkSeq);
           remaining.push({ defectId: other, severity: ob.severity, state: ob.state, cycles: ob.cycles, finding: ob.finding.text.slice(0, 300), ...(lv === undefined ? {} : { lastVerdict: lv }) });
           // The list is what stood when the owner decided: another defect changing meanwhile makes the decision retry on the new picture.
@@ -414,6 +417,33 @@ export class DefectService {
       },
     }));
     return { id: result.id, overrideId, revision: result.revision, replayed: result.replayed };
+  }
+
+  /**
+   * Takes a defect report back as mistaken (card Q04, the withdrawal): the agent that reported it, or the owner, says why (a wrong version, a duplicate, a misreading). It works while the defect is `open`,
+   * `repair-submitted` or `escalated` and ends it as `withdrawn`. Nothing is erased: the report, its checks and the owner's decisions stay on the record and a failed check stays failed; the defect is only no
+   * longer counted as unfinished. A fixed, accepted or already withdrawn defect is refused (those have their own outcome).
+   */
+  async withdraw(by: Principal, command: NoActor & { id: string; reason: string; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    object(command, ["commandId", "id", "reason", "expectedRevision"]);
+    const commandId = checkCommandId(command.commandId);
+    if (typeof command.id !== "string" || !ID.test(command.id)) bad("id", "is not a defect ID");
+    const reason = text(command.reason, "reason", { min: 1, max: MAX_REASON, multiline: true });
+    const expected = revisionOf(command.expectedRevision);
+    const result = await this.#runner.command("defect.withdraw", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
+      payload: { id: command.id, reason, expectedRevision: expected ?? null },
+      build: async () => {
+        const { agg, body } = await this.#load(by, command.id);
+        if (by.kind !== "owner" && !(by.kind === "agent" && by.id === body.reportedBy)) throw new DomainError("forbidden", "only the agent that reported the defect, or the owner, may withdraw it");
+        if (expected !== undefined && agg.revision !== expected) throw new DomainError("stale_revision", `the defect is at revision ${agg.revision}, not ${expected}`, { currentRevision: agg.revision });
+        if (isFinished(body.state)) throw new DomainError("invalid_transition", `the defect is already ${body.state}`);
+        const { replacedRepair: _was, ...rest } = body;
+        const next: DefectBody = { ...rest, state: "withdrawn", resolution: { kind: "withdrawn", by: by.id, at: this.#runner.now(), ref: command.id, reason: redactText(reason) } };
+        const ref = { kind: "defect", id: command.id };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: agg.revision, body: next as unknown as JsonObject }], detail: { defect: command.id, withdrawn: true } };
+      },
+    }));
+    return { id: result.id, revision: result.revision, replayed: result.replayed };
   }
 
   // ---- queries ---------------------------------------------------------------------------------------------------------------
@@ -504,7 +534,7 @@ export class DefectService {
       for (const row of chunk) {
         after = row.id;
         const b = row.body as unknown as DefectBody;
-        if (b.state === "resolved" || b.state === "overridden") continue;
+        if (isFinished(b.state)) continue;
         if (query.projectId !== undefined && b.projectId !== query.projectId) continue;
         if (query.escalatedOnly === true && b.state !== "escalated") continue;
         let ok = readable.get(b.deliverableId);

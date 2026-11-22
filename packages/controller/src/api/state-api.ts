@@ -156,7 +156,7 @@ export interface StateApiDeps {
   readonly simulation?: Pick<SimulationService, "open" | "get" | "observe" | "operate" | "close">;
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
   /** Defects, repair and review cycles and owner overrides (card Q04). */
-  readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "get" | "list">;
+  readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "withdraw" | "get" | "list">;
   /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
   readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate"> & { contractChanged?: QaEvidenceService["contractChanged"] };
   /** Documentation obligations and their impact (card Q03). */
