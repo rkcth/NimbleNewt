@@ -112,6 +112,8 @@ const MAX_PER_DELIVERABLE = 100;
 const MAX_EVIDENCE = 10;
 const MAX_FINDING = 2000;
 const MAX_REASON = 2000;
+const UNRESOLVED_PAGE = 500;
+const UNRESOLVED_PAGES = 20;
 const CHECKERS = ["reviewer", "qa", "director"] as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -478,5 +480,48 @@ export class DefectService {
     }
     if (deliverables.length === 0 && by.kind !== "owner") return undefined;
     return { title: task.title, limit: await this.#limit(task.projectId), deliverables };
+  }
+
+  /**
+   * The defects that are not finished (state `open`, `repair-submitted` or `escalated`), for the chat's `defect_risks` status and the Needs-you list (card Q04): across one project, or across every project for the
+   * owner. Only defects whose deliverable the caller may read are counted; an agent must name a project. Escalated first, then by severity, then the oldest. The scan reads the defect records a page at a time and is
+   * bounded (`scanLimited` says it stopped early, so the answer may be missing defects); the items are cut at `cap` and the counts cover everything found.
+   */
+  async unresolved(by: Principal, query: { readonly projectId?: string; readonly cap?: number; readonly escalatedOnly?: boolean } = {}): Promise<{ readonly counts: { readonly escalated: number; readonly awaitingCheck: number; readonly open: number }; readonly items: readonly (DefectBody & { readonly id: string; readonly revision: number; readonly limit: number })[]; readonly scanLimited: boolean }> {
+    if (by.kind !== "owner" && by.kind !== "agent") return { counts: { escalated: 0, awaitingCheck: 0, open: 0 }, items: [], scanLimited: false };
+    if (by.kind === "agent" && query.projectId === undefined) bad("projectId", "is needed");
+    const cap = query.cap === undefined ? 50 : query.cap;
+    const readable = new Map<string, boolean>();
+    const limits = new Map<string, number>();
+    const found: (DefectBody & { id: string; revision: number; limit: number })[] = [];
+    let after: string | undefined;
+    let scanLimited = true;
+    for (let page = 0; page < UNRESOLVED_PAGES; page++) {
+      const chunk = await this.#runner.list("defect", { ...(after === undefined ? {} : { afterId: after }), limit: UNRESOLVED_PAGE });
+      for (const row of chunk) {
+        after = row.id;
+        const b = row.body as unknown as DefectBody;
+        if (b.state === "resolved" || b.state === "overridden") continue;
+        if (query.projectId !== undefined && b.projectId !== query.projectId) continue;
+        if (query.escalatedOnly === true && b.state !== "escalated") continue;
+        let ok = readable.get(b.deliverableId);
+        if (ok === undefined) {
+          const d = (await this.#runner.get("deliverable", b.deliverableId))?.body as unknown as DeliverableBody | undefined;
+          ok = d !== undefined && (await this.#readable(by, d, b.deliverableId));
+          readable.set(b.deliverableId, ok);
+        }
+        if (!ok) continue;
+        let limit = limits.get(b.projectId);
+        if (limit === undefined) { limit = await this.#limit(b.projectId); limits.set(b.projectId, limit); }
+        found.push({ id: row.id, revision: row.revision, ...b, limit });
+      }
+      if (chunk.length < UNRESOLVED_PAGE) { scanLimited = false; break; }
+    }
+    const rank = (x: DefectBody): number => (x.state === "escalated" ? 0 : 1);
+    const sev = (x: DefectBody): number => DEFECT_SEVERITIES.indexOf(x.severity);
+    found.sort((a, b) => rank(a) - rank(b) || sev(a) - sev(b) || (a.reportedAt < b.reportedAt ? -1 : a.reportedAt > b.reportedAt ? 1 : 0) || (a.id < b.id ? -1 : 1));
+    const counts = { escalated: 0, awaitingCheck: 0, open: 0 };
+    for (const x of found) { if (x.state === "escalated") counts.escalated++; else if (x.state === "repair-submitted") counts.awaitingCheck++; else counts.open++; }
+    return { counts, items: found.slice(0, cap), scanLimited };
   }
 }
