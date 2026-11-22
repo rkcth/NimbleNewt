@@ -36,10 +36,13 @@ if (scenario === "probe-hang") {
   await new Promise<never>(() => undefined);
 }
 // `probe-late` dies at once by its own SIGKILL, and a grandchild that shares its stderr writes the label 500 ms later: the label arrives after the
-// child's exit, so only a parent that waits for the streams to close (not for the exit) reads it.
+// child's exit, so only a parent that waits for the streams to close (not for the exit) reads it. The grandchild is `detached`: on Windows libuv puts
+// every child it spawns into a job object of the spawning process that ends its members when that process dies, so an attached grandchild is ended
+// with the child (before it writes) and the label never comes; a detached one is left out of that job and lives on, as it does on POSIX either way
+// (there `detached` only gives it a session of its own). Its stderr is still the inherited pipe, so the parent's stream stays open until it writes.
 if (scenario === "probe-late") {
   const line = `${KILLED_AT}${JSON.stringify(["probe 0"])}\n`;
-  spawn(process.execPath, ["-e", `setTimeout(() => require("node:fs").writeSync(2, ${JSON.stringify(line)}), 500)`], { stdio: ["ignore", "ignore", "inherit"] });
+  spawn(process.execPath, ["-e", `setTimeout(() => require("node:fs").writeSync(2, ${JSON.stringify(line)}), 500)`], { stdio: ["ignore", "ignore", "inherit"], detached: true });
   process.kill(process.pid, "SIGKILL");
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
 }
