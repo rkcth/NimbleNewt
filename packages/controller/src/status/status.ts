@@ -2325,7 +2325,7 @@ export class StatusService {
     try { view = await this.#deps.qa.project(by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
     if (view.items.length === 0) return { observedAt: at, lines: [line(`No task of this project has a code submission yet${view.scanLimited ? " in the part of the records looked at" : ""}: nothing waits for QA.`, cite("project", projectId))] };
     const c = view.counts;
-    const lines: Line[] = [line(`${c.waiting} task(s) wait for QA (no independent check yet), ${c.stale} have QA evidence that no longer holds or a re-check pending, ${c.failing} fail QA, ${c.passes} pass; each is its newest code submission.${view.scanLimited ? " Only the oldest part of the records was looked at, so more may exist." : ""}${view.truncated ? ` Only the first ${view.items.length} tasks are listed.` : ""}`, cite("project", projectId))];
+    const lines: Line[] = [line(`${c.waiting} task(s) wait for QA (no independent check yet), ${c.stale} have QA evidence that no longer holds or a re-check pending, ${c.failing} fail QA, ${c.passes} pass; each is its newest code submission.${view.scanLimited ? " Only part of the stored submissions was looked at, so more may exist." : ""}${view.truncated ? ` Only the ${view.items.length} task(s) with the newest code submissions were read; more may exist.` : ""}`, cite("project", projectId))];
     const words = { waiting: "waits for QA", stale: "has QA evidence that no longer holds", failing: "fails QA", passes: "passes QA" } as const;
     for (const i of view.items.slice(0, 50)) {
       const k = i.counts;

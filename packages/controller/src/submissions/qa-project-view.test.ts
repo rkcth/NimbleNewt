@@ -99,13 +99,39 @@ for (const backend of backends) {
       assert.equal(staled.items.find((i) => i.taskId === tPass)?.state, "stale", "the criteria changed after the evidence: it no longer holds");
       assert.deepEqual([staled.counts.stale, staled.counts.passes], [1, 0]);
 
-      // Who may read what: a qa agent of the project sees it; one of another project and the author without the role of a reader see nothing of it.
+      // Who may read what: a qa agent of the project sees it; an agent of another project sees nothing of it, and an unknown project reads the same.
       assert.equal((await svc.project(qa, project)).items.length, 5);
       await assert.rejects(() => svc.project(stranger, project), (e: unknown) => e instanceof DomainError && e.code === "not_found");
       await assert.rejects(() => svc.project(owner, "proj-" + "a".repeat(20)), (e: unknown) => e instanceof DomainError && e.code === "not_found");
       await assert.rejects(() => svc.project(owner, "nope"), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+      // A task credential (scoped to one task) is refused the project-wide view, even for its own task's project: it has the qa view of its own task.
+      await assert.rejects(() => svc.project({ ...qa, taskScope: { taskId: tWait, projectId: project } }, project), (e: unknown) => e instanceof DomainError && e.code === "not_found");
       // Reading changes nothing: the view twice is the same.
       assert.deepEqual(await svc.project(owner, project), staled);
+
+      // A submission that names this project for a task of another project is not shown: the task's own project decides.
+      const stray = await code(tOther, "2026-11-22T09:00:00.000Z", "8");
+      const afterStray = await svc.project(owner, project);
+      assert.equal(afterStray.items.some((i) => i.taskId === tOther || i.submissionId === stray), false, "another project's task is never listed");
+      assert.deepEqual(afterStray.counts, staled.counts);
+
+      // Bounds: the gates of at most `tasks` tasks are read, the newest code first (the stray task is looked at and skipped); a short scan says so.
+      let gates = 0;
+      const gateOf = svc.gate.bind(svc);
+      (svc as unknown as { gate: typeof svc.gate }).gate = async (by, id) => { gates++; return gateOf(by, id); };
+      const two = await svc.project(owner, project, { tasks: 2, pageSize: 500, reads: 20 });
+      assert.equal(gates, 2, "only two gates were read");
+      assert.equal(two.items.length, 2);
+      assert.equal(two.truncated, true);
+      assert.equal(two.scanLimited, false);
+      const firstTied = [tWait, tSelf, tFail, tPass].sort()[0]!;
+      assert.deepEqual(two.items.map((i) => i.taskId).sort(), [tNew, firstTied].sort(), "the newest code first, then by task ID");
+      assert.equal(two.counts.passes + two.counts.waiting + two.counts.stale + two.counts.failing, 2, "the counts cover the tasks read");
+      gates = 0;
+      const short = await svc.project(owner, project, { tasks: 200, pageSize: 2, reads: 1 });
+      assert.equal(short.scanLimited, true, "a scan that stops before the end says so");
+      assert.ok(gates <= 2 && short.items.length <= 2);
+      assert.equal((await svc.project(owner, project, { tasks: 200, pageSize: 2, reads: 20 })).scanLimited, false, "small pages to the end are complete");
     } finally { await world.close(); }
   });
 }

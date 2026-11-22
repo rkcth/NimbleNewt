@@ -16360,3 +16360,14 @@ Card Q02 stays planned. Branch `card-q02-s3` off origin/main `5a70b070`. Plain w
 - **ASSUMPTION:** the newest code submission of a task is "the work" QA owes a verdict on; older ones are not shown. Reversible: list every submission.
 - **ASSUMPTION:** "waits for QA" means the gate has no independent evidence at all (current or stale); evidence that went stale is shown as `stale` instead, since someone must check again rather than for the first time.
 - **ASSUMPTION:** no new owner control: the view is a read through the existing status door, reachable by chat in free words.
+
+### Q02 third slice review (Claude agent, Opus, 2026-11-22)
+
+Reviewed 73a217c4 (origin/main still 5a70b070, no merge needed).
+
+- **Cost bound fixed.** The view read the QA gate of EVERY task with a code submission (up to the 10,000 scanned) and only then cut the list to 200, so the 200 cap did not bound the work. Now the tasks with the newest code submissions come first and the gate is read for at most 200 of them, looking at no more than 400 tasks; `truncated` says more were left, and the counts and order cover the tasks read. Worst case per ask: 20 list reads of 500 rows, at most 400 task reads and 200 gates.
+- **Task credentials refused.** An agent credential scoped to one task passed the project check (`task.read` in its own project). The project-wide view now refuses it as `not_found`; it keeps the `qa` view of its own task.
+- **Task's own project decides.** A submission naming this project for a task of another project is skipped (the task's `projectId` is checked too), so no other project's task can appear.
+- **Wording.** The scan note said "the oldest part of the records", but the submission table is in hash order of IDs; it now says "part of the stored submissions". The truncation note says which tasks were read and that more may exist.
+- **Tests added** (`qa-project-view.test`, 4 backends): task credential refused; a stray submission for another project's task is not listed; at most `tasks` gates are read (counted), newest code first; `truncated`; a short scan reports `scanLimited` and small pages to the end do not. Mutation checks on the built file, each restored byte-identical: task credential allowed (4 fail), task project not checked (4), no gate cap (4), oldest first (4), scan end not detected (4), truncation not reported (4), waiting not recognised (4).
+- **Seen, left as is.** A gate still costs up to its own bound (evidence and re-checks of one task); `stale` takes precedence over `failing` when a re-check is pending; a passing gate with a pending re-check reads `passes`, as the landing gate does. The status text's truncation and scan notes are not asserted through the API.

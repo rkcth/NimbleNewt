@@ -557,18 +557,20 @@ export class QaEvidenceService {
    * The project's QA picture (card Q02, project QA view): for each task of the project the caller may read, its NEWEST code submission (by `submittedAt`, then ID) and where it stands with QA.
    * `passes`: the gate passes. `waiting`: no independent evidence at all, current or stale (the work waits for QA; a self-check does not count; the checks the contract requires then also read as missing). `stale`: evidence existed but no longer holds, or a re-check is pending.
    * `failing`: current evidence has failed, blocked, not-run or missing checks, or relies on a superseded decision. Older submissions of a task are not shown (the newest is the work). Read only; a task
-   * the caller may not read is not listed or counted. Scans at most `scan` submissions (`scanLimited` when more exist) and lists at most `QA_LIMITS.projectTasks` tasks (`truncated`).
+   * the caller may not read is not listed or counted. The owner, or an agent with the project's task read right; a task credential (scoped to one task) is refused: it has the `qa` view of its own task.
+   * Bounded: scans at most `reads` pages of `pageSize` submissions (`scanLimited` when more exist; the table is in hash order of IDs, not time order), and reads the gate of at most `tasks` tasks, those with the
+   * newest code submissions first, looking at no more than twice that many tasks (`truncated` when more were left); counts and order cover the tasks read.
    */
-  async project(by: Principal, projectIdValue: string): Promise<QaProjectView> {
+  async project(by: Principal, projectIdValue: string, limits: { readonly tasks: number; readonly pageSize: number; readonly reads: number } = { tasks: QA_LIMITS.projectTasks, pageSize: 500, reads: QA_LIMITS.projectScanReads }): Promise<QaProjectView> {
     const projectId = checkProjectId(projectIdValue);
     const proj = await this.#runner.get("project", projectId);
-    const mayRead = by.kind === "owner" || (by.kind === "agent" && (by.taskScope === undefined || inTaskScope(by, projectId)) && allows(by, "task.read", projectId));
+    const mayRead = by.kind === "owner" || (by.kind === "agent" && by.taskScope === undefined && allows(by, "task.read", projectId));
     if (proj === undefined || !mayRead) return hidden("project");
     const newest = new Map<string, { id: string; at: string }>();
     let after: string | undefined;
     let scanLimited = true;
-    for (let read = 0; read < QA_LIMITS.projectScanReads; read++) {
-      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+    for (let read = 0; read < limits.reads; read++) {
+      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: limits.pageSize });
       for (const row of chunk) {
         after = row.id;
         const b = row.body as unknown as SubmissionBody;
@@ -576,22 +578,27 @@ export class QaEvidenceService {
         const had = newest.get(b.taskId);
         if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt });
       }
-      if (chunk.length < 500) { scanLimited = false; break; }
+      if (chunk.length < limits.pageSize) { scanLimited = false; break; }
     }
+    // The tasks with the newest code first, so a bounded read covers the work most recently submitted.
+    const candidates = [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
     const items: QaProjectItem[] = [];
-    for (const [taskId, sub] of [...newest].sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) {
+    let looked = 0;
+    for (const [taskId, sub] of candidates) {
+      if (items.length >= limits.tasks || looked >= limits.tasks * 2) break;
+      looked++;
       const task = await this.#task(taskId);
-      if (task === undefined || !this.#reads(by, task, taskId)) continue;
+      if (task === undefined || task.projectId !== projectId || !this.#reads(by, task, taskId)) continue;
       const g = await this.gate(by, sub.id);
       const state: QaProjectItem["state"] = g.verdict === "passed" ? "passes" : g.reasons.includes("no_evidence") ? "waiting" : g.reasons.includes("stale_evidence") || g.pendingRechecks.length > 0 ? "stale" : "failing";
       items.push({ taskId, title: task.title, submissionId: sub.id, tree: g.tree, submittedAt: sub.at, state, reasons: g.reasons, counts: g.counts, pendingRechecks: g.pendingRechecks });
     }
+    const truncated = looked < candidates.length;
     const counts = { passes: 0, waiting: 0, stale: 0, failing: 0 };
     for (const i of items) counts[i.state]++;
     const order = { waiting: 0, stale: 1, failing: 2, passes: 3 } as const;
     items.sort((x, y) => order[x.state] - order[y.state] || (x.taskId < y.taskId ? -1 : 1));
-    const truncated = items.length > QA_LIMITS.projectTasks;
-    return { projectId, counts, items: items.slice(0, QA_LIMITS.projectTasks), truncated, scanLimited };
+    return { projectId, counts, items, truncated, scanLimited };
   }
 
   async gate(by: Principal, submissionIdValue: string): Promise<QaGate> { return (await this.gateBound(by, submissionIdValue)).gate; }
