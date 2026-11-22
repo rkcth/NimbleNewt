@@ -614,6 +614,8 @@ export class DocObligationService {
     let staledTotal = 0;
     let replayed = false;
     let wrote = false;
+    // Documents that were verified went stale: the owner is told, unless the owner ran this check (they read the answer).
+    const tells = this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id);
     // The command always goes through the runner, so a command ID used before is answered with its result, or refused as `command_conflict` when it was used with other arguments, even when there is
     // nothing new to write now. Nothing new (asked again, or a concurrent check wrote the same flags first) is not an error: the open update tasks are finished below.
     const nothing = new DomainError("not_found", "no document has anything new to flag");
@@ -655,7 +657,8 @@ export class DocObligationService {
       wrote = !result.replayed;
       staledTotal = staled.length;
       // A repeat sends the notice again under the same notice ID (the controller keeps one notice per ID), so a stop between the write and the notice, or a notice that could not be sent, is made up.
-      if (replayed) ({ docs: staled, total: staledTotal } = await this.#recordedStaled(scoped));
+      // Only when a notice would be sent at all (not for the owner's own check).
+      if (replayed) ({ docs: staled, total: staledTotal } = tells ? await this.#recordedStaled(scoped) : { docs: [], total: 0 });
     } catch (error) {
       if (error !== nothing) throw error;
     }
@@ -672,8 +675,8 @@ export class DocObligationService {
     }
     const tasks: { obligationId: string; taskId: string; assigned: boolean }[] = [];
     for (const m of made) tasks.push({ obligationId: m.obligationId, taskId: m.taskId, assigned: await this.#open(by, m) });
-    // Documents that were verified went stale: the owner is told, unless the owner ran this check (they read the answer). After the update tasks, so the notice can say who has them.
-    if (staled.length > 0 && this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id)) {
+    // The notice, after the update tasks, so it can say who has them.
+    if (staled.length > 0 && tells && this.#ports.notify !== undefined) {
       // Cut on whole characters (first review): a cut through a character written as two UTF-16 units would leave half of it, which the notice's text check refuses, and the notice would be lost.
       const cut = wholeCut;
       // At most the 20 names the audit entry keeps, so the notice a repeat sends again reads the same.
@@ -686,8 +689,8 @@ export class DocObligationService {
   }
 
   /**
-   * The documents the check recorded as gone stale (from its own audit entry: the entry of this operation), and how many went stale in all, for a repeat that must send the notice again. Nothing when
-   * the entry cannot be read or was written before it kept them.
+   * The documents the check recorded as gone stale (from its own audit entry: the entry of this operation) that are not verified again nor retired since, and how many in all, for a repeat that must
+   * send the notice again. Nothing when the entry cannot be read or was written before it kept them.
    */
   async #recordedStaled(scopedId: string): Promise<{ docs: { id: string; projectId: string; title: string }[]; total: number }> {
     const none = { docs: [], total: 0 };
@@ -701,8 +704,15 @@ export class DocObligationService {
       if (entry === undefined || !Array.isArray(list)) return none;
       const docs: { id: string; projectId: string; title: string }[] = [];
       for (const d of list.slice(0, 20)) { const o = d as Record<string, unknown>; if (typeof o["id"] === "string" && typeof o["projectId"] === "string" && typeof o["title"] === "string") docs.push({ id: o["id"], projectId: o["projectId"], title: o["title"] }); }
-      const total = entry.detail["staledTotal"];
-      return { docs, total: typeof total === "number" && Number.isSafeInteger(total) && total > docs.length ? total : docs.length };
+      const recorded = entry.detail["staledTotal"];
+      const total = typeof recorded === "number" && Number.isSafeInteger(recorded) && recorded > docs.length ? recorded : docs.length;
+      // A document verified again, or retired, since the check is left out (a repeat long after must not call it stale), and the count drops by as many; those beyond the 20 kept are not re-read.
+      const still: typeof docs = [];
+      for (const d of docs) {
+        const b = (await this.#runner.get("doc-obligation", d.id))?.body as unknown as DocObligationBody | undefined;
+        if (b !== undefined && b.retired === undefined && b.state !== "verified") still.push(d);
+      }
+      return { docs: still, total: total - (docs.length - still.length) };
     } catch { return none; }
   }
 

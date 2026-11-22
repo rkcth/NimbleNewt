@@ -62,6 +62,7 @@ for (const backend of backends) {
       };
       const assignments = AssignmentService.withEpoch(world.storage, projects.epoch, projects, options);
       const attempts: string[] = [];
+      const texts: string[] = [];
       let lose = false;
       const notices: { commandId: string; projectId: string; obligationId: string; text: string }[] = [];
       const docs = DocObligationService.withEpoch(world.storage, projects.epoch, {
@@ -69,7 +70,7 @@ for (const backend of backends) {
         gate: async (_by, s) => gates.get(s) ?? ((): never => { throw new DomainError("not_found", "no such submission"); })(),
         projects: wrapped as never, assignments,
         // Like the controller's notifications: one notice per notice ID, however often it is sent; `attempts` counts every send, and `lose` makes the next send fail (a stop before the notice).
-        notify: async (x) => { attempts.push(x.commandId); if (lose) { lose = false; throw new DomainError("unavailable", "no channel"); } if (!notices.some((n) => n.commandId === x.commandId)) notices.push(x); },
+        notify: async (x) => { attempts.push(x.commandId); texts.push(x.text); if (lose) { lose = false; throw new DomainError("unavailable", "no channel"); } if (!notices.some((n) => n.commandId === x.commandId)) notices.push(x); },
       }, options);
       const ann = await agent("ann", ["author"]);
       const dora = await agent("dora", ["docs"]);
@@ -128,6 +129,10 @@ for (const backend of backends) {
       assert.ok(attempts.every((a) => a === notices[0]!.commandId), "every send of this check carries the same notice ID");
       await verify(guide, [l3, s1]);
       await verify(faq, [l3]);
+      // Both documents were verified again since: a repeat of the check now sends nothing (it would call verified documents stale).
+      const sends = attempts.length;
+      await docs.impact(dora, { commandId: agentCheck, taskId: login, submissionId: l3 });
+      assert.equal(attempts.length, sends, "no document of the check is still stale: nothing is sent");
       // A title of characters written as two UTF-16 units each, cut inside one at 60 (first review): the notice is cut on a whole character, so its text stays well-formed (a half character is refused, and the notice would be lost).
       const gr = await read(guide);
       await docs.record(owner, { commandId: cid("r"), projectId: project, obligationId: guide, expectedRevision: gr.revision, title: `a${"\u{1F4D8}".repeat(40)}`, location: "docs/guide.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login, search] });
@@ -157,6 +162,10 @@ for (const backend of backends) {
       assert.equal((await read(guide)).updates.find((u) => u.state === "open")?.requestedBy, DOC_AUTO_PRINCIPAL.id);
       // A notice that cannot be sent is not the check's failure.
       await verify(guide, [l4, s1]);
+      // The guide was verified again since: a repeat of the automatic check names only the FAQ, still stale, and counts one (same notice ID, so the controller keeps its one notice).
+      await docs.afterQaEvidence({ evidenceId: qaEvidence, taskId: login, submissionId: l4, source: "independent" });
+      assert.match(texts[texts.length - 1]!, /^A verified document went stale: "Frequently asked questions x+"\. Update tasks/, texts[texts.length - 1]);
+      assert.equal(attempts[attempts.length - 1], notices[1]!.commandId);
       const failing = DocObligationService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => roles.get(id) ?? [], gate: async (_by, s) => gates.get(s)!, projects: wrapped as never, assignments, notify: async () => { throw new DomainError("unavailable", "no channel"); } }, options);
       const l5 = code(login, treeA);
       // (The FAQ was last verified against tree A, the tree of this code, so only the guide is flagged.)
@@ -282,6 +291,7 @@ for (const backend of backends) {
       const runner = new CommandRunner(world.storage, projects.epoch, options);
       const gates = new Map<string, { verdict: "passed" | "failed"; tree: string; taskId: string }>();
       const attempts: string[] = [];
+      const texts: string[] = [];
       let lose = false;
       const notices: { commandId: string; projectId: string; obligationId: string; text: string }[] = [];
       const assignments = AssignmentService.withEpoch(world.storage, projects.epoch, projects, options);
@@ -289,18 +299,19 @@ for (const backend of backends) {
         rolesOf: async (id) => (id === dora.id ? ["docs"] : []),
         gate: async (_by, x) => gates.get(x) ?? ((): never => { throw new DomainError("not_found", "no such submission"); })(),
         projects: { createTask: (c: Parameters<ProjectService["createTask"]>[0]) => projects.createTask(c), transitionTask: (c: Parameters<ProjectService["transitionTask"]>[0]) => projects.transitionTask(c) } as never, assignments,
-        notify: async (x) => { attempts.push(x.commandId); if (lose) { lose = false; throw new DomainError("unavailable", "no channel"); } if (!notices.some((y) => y.commandId === x.commandId)) notices.push(x); },
+        notify: async (x) => { attempts.push(x.commandId); texts.push(x.text); if (lose) { lose = false; throw new DomainError("unavailable", "no channel"); } if (!notices.some((y) => y.commandId === x.commandId)) notices.push(x); },
       }, options);
       const code = (tree: string): string => { const id = derivedId("sbm", cid("code")); gates.set(id, { verdict: "passed", tree, taskId: login }); return id; };
       const l1 = code(treeA);
       const ids: string[] = [];
-      for (let i = 0; i < 21; i++) {
-        const id = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: `D${i}`, location: `docs/d${i}.md`, audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login] })).id;
+      const verifyDoc = async (id: string, evidence: string): Promise<void> => {
         const sub = derivedId("sbm", cid("doc"));
-        const found = await runner.get("submission", sub);
-        assert.equal(found, undefined);
         await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { sub }, build: async () => ({ ref: { kind: "submission", id: sub }, creates: true, changes: [{ type: "create" as const, ref: { kind: "submission", id: sub }, body: { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-21T10:00:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] } as JsonObject }], detail: {} }) }));
-        await docs.verify(dora, { commandId: cid("v"), obligationId: id, expectedRevision: ((await docs.get(owner, id)) as unknown as { revision: number }).revision, documentSubmissionId: sub, evidence: [l1] });
+        await docs.verify(dora, { commandId: cid("v"), obligationId: id, expectedRevision: ((await docs.get(owner, id)) as unknown as { revision: number }).revision, documentSubmissionId: sub, evidence: [evidence] });
+      };
+      for (let i = 0; i < 21; i++) {
+        const id = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: String.fromCharCode(65 + i), location: `docs/d${i}.md`, audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login] })).id;
+        await verifyDoc(id, l1);
         ids.push(id);
       }
       // The same check twice at once; whichever copy sends first loses its send.
@@ -312,8 +323,11 @@ for (const backend of backends) {
       assert.equal(attempts.length, 2, "both copies sent the notice");
       assert.equal(attempts[0], attempts[1], "under the same notice ID");
       assert.equal(notices.length, 1, "the copy that sent second made up the lost notice");
-      assert.match(notices[0]!.text, /^21 verified documents went stale: "D/);
+      assert.match(notices[0]!.text, /^21 verified documents went stale: "[A-U]"/);
       assert.ok(notices[0]!.text.length <= 200);
+      // One-letter titles, so all 21 names would fit in 200 characters: each send (the writer's and the other copy's) names exactly 20, the 20 the entry keeps.
+      assert.equal(texts.length, 2);
+      for (const t of texts) assert.ok(!t.endsWith("...") && (t.match(/"[A-U]"/g) ?? []).length === 20, t);
       const recorded = await entryOf(world.storage as never, dora.id, check.commandId);
       assert.equal((recorded["staled"] as unknown[]).length, 20, "the audit entry keeps at most 20 documents");
       assert.equal(recorded["staledTotal"], 21, "and the whole count");
@@ -322,6 +336,25 @@ for (const backend of backends) {
       const watching = DocObligationService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => (id === dora.id ? ["docs"] : []), gate: async (_by, x) => gates.get(x)!, projects: { createTask: (c: Parameters<ProjectService["createTask"]>[0]) => projects.createTask(c), transitionTask: (c: Parameters<ProjectService["transitionTask"]>[0]) => projects.transitionTask(c) } as never, assignments, notify: async (x) => { sent.push(`${x.commandId}|${x.projectId}|${x.obligationId}|${x.text}`); } }, options);
       assert.equal((await watching.impact(dora, check)).replayed, true);
       assert.deepEqual(sent, [`${notices[0]!.commandId}|${notices[0]!.projectId}|${notices[0]!.obligationId}|${notices[0]!.text}`]);
+      // Two of the named documents verified again since: a repeat leaves them out and counts 19 (the one beyond the 20 kept is not re-read and still counts); the notice is about the first still stale.
+      const named = recorded["staled"] as { id: string; title: string }[];
+      for (const d of named.slice(0, 2)) await verifyDoc(d.id, check.submissionId);
+      sent.length = 0;
+      assert.equal((await watching.impact(dora, check)).replayed, true);
+      assert.equal(sent.length, 1);
+      const [sentId, sentProject, sentDoc, sentText] = sent[0]!.split("|");
+      assert.deepEqual([sentId, sentProject, sentDoc], [notices[0]!.commandId, project, named[2]!.id]);
+      assert.match(sentText!, /^19 verified documents went stale: /);
+      assert.equal((sentText!.match(/"[A-U]"/g) ?? []).length, 18, sentText);
+      for (const d of named.slice(0, 2)) assert.ok(!sentText!.includes(`"${d.title}"`), sentText);
+      // A named document retired since is left out too.
+      await docs.retire(owner, { commandId: cid("ret"), obligationId: named[2]!.id, expectedRevision: ((await docs.get(owner, named[2]!.id)) as unknown as { revision: number }).revision });
+      sent.length = 0;
+      await watching.impact(dora, check);
+      assert.equal(sent.length, 1);
+      assert.match(sent[0]!, /\|18 verified documents went stale: /);
+      assert.equal(sent[0]!.split("|")[2], named[3]!.id);
+      assert.ok(!sent[0]!.includes(`"${named[2]!.title}"`), sent[0]);
     } finally {
       await world.close();
     }
