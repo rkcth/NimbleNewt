@@ -13,7 +13,9 @@ import { GitBridge, LocalWorkspaces } from "@nimblenewt/worker";
 // commits exactly the approved tree in the task's own checkout, behind the quiesce, on the host that holds it (the local worker over a real git repository). Before the approval it is refused; asking again answers the
 // recorded commit; a host answer lost after the commit is followed by a retry that finds the commit and records it, with one commit made; work changed after the approval is refused.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
+// It needs git only (no sandbox), so it runs on every platform that has git. Under NIMBLENEWT_REQUIRE_SANDBOX=1 on Linux (CI), a missing git fails instead of passing nothing.
 const skip = hasGit ? false : "git is not installed";
+if (!hasGit && process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1" && process.platform === "linux") test("git is installed where the sandbox is required (card H12o)", () => assert.fail("NIMBLENEWT_REQUIRE_SANDBOX=1 on Linux but git is not installed, so the H12o release test would pass nothing"));
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
 const ext4 = async () => ({ type: "ext4", network: false });

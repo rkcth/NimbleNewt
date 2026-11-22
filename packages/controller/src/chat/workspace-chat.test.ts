@@ -21,8 +21,8 @@ test("the interpreter is told about workspace requests, with the operation and t
 
 for (const backend of backends) {
   test(`${backend.name}: the owner quarantines a task's checkout by chat: shown first, applied once on the owner's word with the owner's reason; a reason the owner never gave and an agent are refused (card H12m)`, async () => {
-    const asked: { operation: string; taskId: string; reason: string }[] = [];
-    const stub = { request: async (_by: unknown, c: { operation: string; taskId: string; reason: string }) => { asked.push({ operation: c.operation, taskId: c.taskId, reason: c.reason }); return { id: "wsr-aaaaaaaaaaaaaaaaaaaa", state: "done", operation: c.operation, taskId: c.taskId, summary: "moved aside", replayed: false }; }, get: async () => undefined };
+    const asked: { operation: string; taskId: string; reason: string; submissionId?: string }[] = [];
+    const stub = { request: async (_by: unknown, c: { operation: string; taskId: string; reason: string; submissionId?: string }) => { asked.push({ operation: c.operation, taskId: c.taskId, reason: c.reason, ...(c.submissionId === undefined ? {} : { submissionId: c.submissionId }) }); return { id: "wsr-aaaaaaaaaaaaaaaaaaaa", state: "done", operation: c.operation, taskId: c.taskId, summary: "moved aside", replayed: false }; }, get: async () => undefined };
     const script: Record<string, unknown> = {};
     const w = await openWorld(backend, script, undefined, { workspaceOps: stub as never });
     try {
@@ -49,6 +49,19 @@ for (const backend of backends) {
       assert.equal(refused.outcomes[0]!.status, "refused", JSON.stringify(refused.outcomes[0]));
       assert.match(String(refused.outcomes[0]!.message), /reason/);
       assert.equal(asked.length, 1);
+
+      // Card H12o sixth slice: the submissions view tells the owner approved code is not committed yet; the owner asks in plain words and the interpreter supplies the submission ID from that view.
+      // The ID is a record the service checks (a submission of that task, approved by another reviewer), so it need not be typed; the proposal shows it before anything runs.
+      const commitText = "commit the approved weed code";
+      const sub = "sbm-abcdefghijklmnopqrst";
+      script[commitText] = [cmd("workspace.request", { operation: "release", taskId: t, submissionId: sub, reason: "commit the approved weed code" }, commitText)];
+      const proposed = await chat.submit(w.ownerToken, { messageId: cid("m"), text: commitText });
+      assert.equal(proposed.outcomes[0]!.status, "proposed", JSON.stringify(proposed.outcomes[0]));
+      assert.match(String(proposed.outcomes[0]!.preview), new RegExp(`submissionId=${sub}`), JSON.stringify(proposed.outcomes[0]!.preview));
+      assert.equal(asked.length, 1, "nothing is asked until the owner confirms");
+      const released = await chat.applyProposal(w.ownerToken, { commandId: cid("a"), proposalId: proposed.outcomes[0]!.proposalId! });
+      assert.equal(released.applied, true, JSON.stringify(released));
+      assert.deepEqual(asked[1], { operation: "release", taskId: t, reason: "commit the approved weed code", submissionId: sub });
 
       const ann = await w.agent("ann", [{ action: "*", project: "*" }]);
       await assert.rejects(chat.submit(ann.token, { messageId: cid("n"), text }), (e: unknown) => (e as { code?: string }).code === "forbidden");
