@@ -1135,7 +1135,9 @@ for (const backend of backendsNamed(backendName)) {
 
   suite("two ends of one attempt at once join the first, also while the end hook is awaited; a hook that hangs or throws does not hold the end (card H12n review fix 1)", async (c) => {
     const errors: unknown[] = [];
-    c.dispatcher = c.restart({}, { endHookMs: 60, onError: (e) => errors.push(e) });
+    // Part one: the hook's limit is far longer than the test, so nothing but the test's own gate lets the first end go on (a short limit raced the checks below: on a slow machine the hook was cut off
+    // between the revision reads and the end wrote to the attempt, which the test then took for a write by the joined stop).
+    c.dispatcher = c.restart({}, { endHookMs: 600_000, onError: (e) => errors.push(e) });
     const a = await running(c, "ann");
     await c.dispatcher.tick();
     await a.started.promise;
@@ -1144,20 +1146,38 @@ for (const backend of backendsNamed(backendName)) {
     c.dispatcher.onEnd(async () => { calls++; return gate.promise; });
     // Handlers are attached at once: a stop that rejects before the suite looks at it must never be an unhandled rejection, and nothing may still run when the storage closes.
     const first = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "first" }).then(() => undefined, (e: unknown) => e);
+    let second: Promise<unknown> = Promise.resolve(undefined);
+    // Every check while the hook is held is inside the `try`: a failed one (also the wait for the hook, or a read) must not leave the end waiting for the long limit, which would keep the test process alive for it.
+    try {
     // The hook is reached after a few storage round trips; wait for it instead of a fixed time (a slow server needs more than 10 ms).
     for (let i = 0; i < 500 && calls === 0; i++) await new Promise((r) => setTimeout(r, 10));
     assert.equal(calls, 1, "the first end reached the hook");
     const revisionOf = async () => (await c.storage.listAggregates("dispatch", { limit: 100 })).find((x) => (x.body as unknown as { attemptId: string }).attemptId === a.attemptId)!.revision;
     const before = await revisionOf();
-    const second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" }).then(() => undefined, (e: unknown) => e);
-    await new Promise((r) => setTimeout(r, 20));
+    second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" }).then(() => undefined, (e: unknown) => e);
+    // The second stop cannot answer before the first end does (it joins it), so a pause here only gives it time to go wrong; nothing else writes to the attempt while the hook is held.
+    await new Promise((r) => setTimeout(r, 50));
     assert.equal(calls, 1, "the second end joined the first while the hook was still awaited");
     assert.equal(await revisionOf(), before, "a joined stop writes nothing to the attempt");
-    // The hook never answers: the end goes on with the dispatcher's own outcome after the limit, and says so.
+    } finally { gate.resolve(undefined); }
     assert.deepEqual(await Promise.all([first, second]), [undefined, undefined], "neither stop rejects");
     assert.equal((await c.assignments.getAttempt(a.attemptId))!.state, "abandoned");
+    assert.equal(calls, 1, "the joined stop did not run the hook again");
+    a.release.resolve();
+    await c.dispatcher.idle();
+    // Part two: the hook never answers. The end goes on with the dispatcher's own outcome after the limit, and says so; neither stop rejects.
+    c.dispatcher = c.restart({}, { endHookMs: 60, onError: (e) => errors.push(e) });
+    const h = await running(c, "hana");
+    await c.dispatcher.tick();
+    await h.started.promise;
+    const never = deferred<undefined>();
+    c.dispatcher.onEnd(async () => never.promise);
+    const stops = [c.dispatcher.stop(c.owner, h.attemptId, { emergency: true, reason: "hung one" }).then(() => undefined, (e: unknown) => e), c.dispatcher.stop(c.owner, h.attemptId, { emergency: true, reason: "hung two" }).then(() => undefined, (e: unknown) => e)];
+    assert.deepEqual(await Promise.all(stops), [undefined, undefined], "neither stop rejects");
+    assert.equal((await c.assignments.getAttempt(h.attemptId))!.state, "abandoned");
     assert.ok(errors.some((e) => /did not answer within 60 ms/.test(String(e))), errors.map(String).join("|"));
-    gate.resolve(undefined);
+    never.resolve(undefined);
+    h.release.resolve();
     await c.dispatcher.idle();
     // A hook that throws: the attempt still ends, and the error is reported.
     const b = await running(c, "bob");
