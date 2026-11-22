@@ -289,6 +289,37 @@ export class LandingQueueOps {
   }
 
   /**
+   * The controller's own round over the bounds that end a stuck first place (card P10, eleventh slice). Until now both bounds were looked at only when a landing was asked for behind the place, so a place nobody
+   * worked on, with approved work waiting behind it and nobody asking to land that work, stayed until somebody did. This round looks, on the controller's regular rounds, at every project's landing branch queue that
+   * has approved work waiting BEHIND the first place (an entry of another task) and does exactly what a refused landing behind it does: ends a reserved first place that has had no approved submission for `releaseMs`
+   * (`#releaseIdle`: the same write, the same notices), and otherwise tells the director once when the first place has held the branch for `holdMs` (`#heldTooLong`). It lands nothing, queues nothing and removes
+   * no approved submission; with nothing waiting behind the place nothing is ended or told (an owner's unqueued landing, or an empty rest of the queue, ends nothing, as before). Only the branch the owner's policy names
+   * now is looked at (an old branch's queue is not landed from), and a branch that cannot be read is skipped (fail closed). One queue's failure does not stop the others. Answers how many places it ended and how many
+   * queues it looked at; never throws for a queue.
+   */
+  async sweepBounds(): Promise<{ checked: number; released: number; partial: boolean }> {
+    const { queues, partial } = await this.#queue.queuesWithEntries();
+    let checked = 0, released = 0;
+    for (const q of queues) {
+      try {
+        const head = frontOf(q);
+        if (head === undefined || !q.entries.some((e) => e.taskId !== head.taskId)) continue;
+        let landing: string | undefined;
+        try { landing = await this.#options.landingBranch({ taskId: head.taskId, projectId: q.projectId }); } catch { continue; }
+        if (landing === undefined || landing !== q.branch) continue;
+        checked++;
+        if (head.entry === undefined && await this.#releaseIdle(q.projectId, q.branch, q.front, head.taskId)) {
+          // Counted when the place is no longer that reserved place (this round ended it, or another call just did).
+          released++;
+          continue;
+        }
+        await this.#heldTooLong(q.projectId, q.branch, q.front, head.entry === undefined);
+      } catch { /* this queue is looked at again at the next round */ }
+    }
+    return { checked, released, partial };
+  }
+
+  /**
    * A landing waits behind the first place (card P10). When that place has been first for `holdMs` or longer, the director is told, once per first place: it holds the branch, and someone decides whether it goes on
    * (its author is approved and it lands) or is taken out. The notice goes first and the mark after it: a notice that could not be given is given at the next refused landing (the notices are named by command ID,
    * and their text depends only on the first place, so two refusals at the same moment tell once). Best effort: a failure to mark or tell never changes the landing's own answer.

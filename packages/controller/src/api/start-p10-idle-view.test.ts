@@ -61,7 +61,7 @@ test("the owner sees in chat, as through the state API, since when a reserved fi
     const apiLines = (viaApi.result.item.lines as { text: string }[]).map((l) => l.text);
     const stuck = apiLines.filter((l) => /no approved submission since/.test(l));
     assert.equal(stuck.length, 1, apiLines.join("\n"));
-    assert.match(stuck[0]!, new RegExp(`^Task ${one.task}'s reserved place has had no approved submission since ${idle.replace(/[.]/g, "\\.")}; once that has lasted 12 h \\(at ${new Date(Date.parse(idle) + 12 * 3_600_000).toISOString().replace(/[.]/g, "\\.")}\\) the controller ends the reservation by itself, checked only when a landing of a submission queued behind it is asked for`));
+    assert.match(stuck[0]!, new RegExp(`^Task ${one.task}'s reserved place has had no approved submission since ${idle.replace(/[.]/g, "\\.")}; once that has lasted 12 h \\(at ${new Date(Date.parse(idle) + 12 * 3_600_000).toISOString().replace(/[.]/g, "\\.")}\\) the controller ends the reservation by itself, checked on the controller's regular rounds`));
     assert.ok(apiLines.some((l) => l.includes(`Task ${two.task}`)), "the approved work behind it is listed");
 
     await c.chat!.setFocus(O, { commandId: "f1", projectId: project });
