@@ -412,3 +412,55 @@ test("with every model server down, each typed recovery order in the guide runs 
     assert.equal(modelCalls, tried);
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+// The views the guide's "Checking on finished work" section describes. Each is one status kind; the section's block lists the kind and a sentence to say. The test below asks every sentence of the block through the
+// real chat (a scripted stand-in plays the model, so the table below is only its "understanding") and fails when a listed kind is not a real status kind, when the chat does not answer it, or when a kind that
+// section has to cover is missing from the guide.
+const FINISHED_WORK_KINDS = ["submissions", "qa", "qa_project", "defects", "defect_risks", "task_docs", "landing_queue"];
+const statusKindsInSource = (): Set<string> => {
+  const source = readFileSync(join(repository, "packages", "controller", "src", "status", "status.ts"), "utf8");
+  const union = /export type StatusRequest =([\s\S]*?)\n\nexport|export type StatusRequest =([\s\S]*?);\n/.exec(source)?.[0] ?? "";
+  return new Set([...union.matchAll(/readonly kind: "([a-z_]+)"/g)].map((m) => m[1]!));
+};
+const finishedWorkLines = (): { kind: string; say: string }[] => blocksAfter(guide(), "status-kinds")[0]!.split("\n").map((x) => x.trim()).filter((x) => x.length > 0).map((x) => {
+  const m = /^([a-z_]+)\s+"(.+)"$/.exec(x);
+  assert.ok(m !== null, `a status-kinds line is a kind and a quoted sentence: ${x}`);
+  return { kind: m[1]!, say: m[2]! };
+});
+
+test("every status view the guide's finished-work section lists is a real status kind, is described in full, and is answered by the chat for the words the guide shows (card D01)", async () => {
+  const rows = finishedWorkLines();
+  const real = statusKindsInSource();
+  assert.ok(real.size > 30, "the status kinds were read from the source");
+  assert.deepEqual([...rows.map((l) => l.kind)].sort(), [...FINISHED_WORK_KINDS].sort(), "the guide lists exactly the finished-work views this test knows");
+  for (const l of rows) assert.ok(real.has(l.kind), `${l.kind} is not a status kind`);
+  // Each view and each owner control the section names is described in the prose around the block, in words.
+  const text = guide();
+  for (const word of ["Submissions", "QA", "Defects", "unfinished defects", "Documents of a task", "landing queue", "reserved place", "escalated", "accept it as is", "let the repair go on", "withdraw", "director", "Release after a reviewer", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
+
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
+  let ids: { project: string; task: string } | undefined;
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const said = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    const row = rows.find((l) => l.say === said);
+    const request = row === undefined ? undefined : /^(submissions|qa|defects|task_docs)$/.test(row.kind) ? { kind: row.kind, taskId: ids!.task } : { kind: row.kind, projectId: ids!.project };
+    const intents = row === undefined ? [{ kind: "none", reason: "not in the guide" }] : [intent("status", { request }, row.say)];
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
+    const live = l;
+    const project = (await call(live, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call(live, "task.create", { projectId: project, title: "Add a greeting to the README" }, "t1")).result.id as string;
+    ids = { project, task };
+    for (const row of rows) {
+      const out: string[] = [];
+      await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([row.say]), write: (t) => out.push(t) });
+      const printed = out.join("");
+      assert.ok(printed.trim().length > 0, `${row.kind}: the chat printed nothing`);
+      assert.ok(!/not in the guide|Which project do you mean|invalid_command|unknown/i.test(printed), `${row.kind}: the chat did not answer the guide's words:\n${printed}`);
+    }
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
