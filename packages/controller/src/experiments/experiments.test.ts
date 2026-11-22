@@ -148,10 +148,13 @@ for (const backend of backends) {
     await tamper(id);
     await refuses("integrity", () => c.run(id), /seal/);
     await refuses("integrity", () => c.conclude(id), /seal/);
+    // A budget raise renews the seal, so it must check the old one first: changed criteria are refused, never re-sealed.
+    await refuses("integrity", async () => c.svc.raiseBudget(c.mgr, { commandId: cid("b"), experimentId: id, expectedRevision: await c.rev(id), maxRuns: 10, maxCost: 100, reason: "more" }), /seal/);
+    assert.notEqual(sealOf((await c.body(id)).criteria!), (await c.body(id)).criteriaDigest, "the changed criteria were not re-sealed");
   });
 
   suite("a run must name a disposable environment and report exactly the pinned metrics and cases; only the proposer or a judge reports", async (c) => {
-    const id = await c.started();
+    const id = await c.started({ budget: { maxRuns: 10, maxCost: 100 } });
     await refuses("invalid_command", () => c.run(id, { environment: { ref: "env-1", disposable: false } }), /disposable/);
     await refuses("invalid_command", () => c.run(id, { environment: { ref: "env-1" } }), /disposable/);
     await refuses("invalid_command", () => c.run(id, { environment: undefined }), /environment/);
@@ -175,6 +178,10 @@ for (const backend of backends) {
     const first = await c.svc.recordRun(c.dev, r);
     const second = await c.make().recordRun(c.dev, r);
     assert.deepEqual([first.run, second.run, (await c.body(id)).runs.length], [3, 3, 3]);
+    // After a later run, the replay still answers with its own run, not the newest.
+    assert.deepEqual(await c.run(id, {}, c.mgr), { run: 4, status: "running" });
+    assert.deepEqual(await c.make().recordRun(c.dev, r), { run: 3, status: "running" });
+    assert.equal((await c.body(id)).runs.length, 4);
   });
 
   suite("the verdict is the controller's: improved, no-change, worse (a metric or a case the baseline passed) or inconclusive, and every result is kept", async (c) => {
@@ -275,6 +282,14 @@ for (const backend of backends) {
     // Not improved (no metric reached the 5% bar except cost, 10%): its cost saving is a duplicate of the first.
     assert.equal((await c.body(flat)).result!.verdict, "improved");
     assert.deepEqual(await sv(flat), [["costPerSuccess", false, first]]);
+    // A metric that improved under the pinned 5% bar is not claimed, so a later improvement that clears it on the same work still counts.
+    const small = await c.started({}, { affectedKey: "ops reviews" });
+    const later = await c.started({}, { affectedKey: "ops reviews" });
+    for (let i = 0; i < 2; i++) { await c.run(small, { metrics: { ...good, costPerSuccess: 9.8 } }); await c.run(later); }
+    await c.conclude(small);
+    await c.conclude(later);
+    assert.deepEqual(await sv(small), [["timeToAcceptedSeconds", true, null], ["reworkCount", true, null]], "2% on cost is under the bar");
+    assert.deepEqual(await sv(later), [["timeToAcceptedSeconds", false, small], ["reworkCount", false, small], ["costPerSuccess", true, null]]);
     // A different project's claim is its own: the index is per project.
     assert.equal(await c.svc.list(c.eve, c.b).then((l) => l!.items.length), 0);
   });
@@ -314,6 +329,14 @@ for (const backend of backends) {
     ]);
     assert.deepEqual(outcomes.map((o) => o.status).sort(), ["fulfilled", "rejected"]);
     assert.equal((await c.body(id)).status, "concluded");
+    // Two improvements on the same work concluded at once by two controllers: each saving is counted exactly once between them.
+    const p = await c.started({}, { affectedKey: "race" });
+    const q = await c.started({}, { affectedKey: "race" });
+    for (const e of [p, q]) { await c.run(e); await c.run(e); }
+    const [rp, rq] = [await c.rev(p), await c.rev(q)];
+    await Promise.all([c.svc.conclude(c.mgr, { commandId: cid("c"), experimentId: p, expectedRevision: rp, finding: "p" }), other.conclude(c.mgr2, { commandId: cid("c"), experimentId: q, expectedRevision: rq, finding: "q" })]);
+    const both = [...(await c.body(p)).result!.savings, ...(await c.body(q)).result!.savings];
+    for (const m of ["timeToAcceptedSeconds", "reworkCount", "costPerSuccess"]) assert.deepEqual(both.filter((s) => s.metric === m).map((s) => s.counted).sort(), [false, true], m);
   });
 }
 

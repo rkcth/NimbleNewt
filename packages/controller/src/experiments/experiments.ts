@@ -48,6 +48,8 @@ export interface Criteria {
 }
 export interface Run {
   readonly n: number;
+  /** The experiment's revision this run produced: a replayed command finds its own run by it. */
+  readonly revision: number;
   readonly at: string;
   readonly by: string;
   readonly environment: string;
@@ -127,7 +129,8 @@ export function judge(criteria: Criteria, runs: readonly Run[]): Omit<Result, "a
   const regressed = values.some((v) => v < -criteria.maxRegressionPct) || failedCases.length > 0;
   const gained = values.some((v) => v > 0 && v >= criteria.minImprovementPct);
   const verdict: Verdict = runs.length < criteria.minRuns ? "inconclusive" : regressed ? "worse" : gained ? "improved" : "no-change";
-  const claims = verdict === "improved" ? METRICS.filter((m) => !HIGHER_IS_BETTER.includes(m) && (better[m] ?? 0) > 0) : [];
+  // A saving is claimed only on a metric that itself cleared the pinned bar: a change under it is noise and must not take the (metric, work) claim from a later real improvement.
+  const claims = verdict === "improved" ? METRICS.filter((m) => !HIGHER_IS_BETTER.includes(m) && (better[m] ?? 0) > 0 && (better[m] ?? 0) >= criteria.minImprovementPct) : [];
   return { verdict, runsUsed: runs.length, candidateMetrics, betterPct: better, failedCases, savings: [], claims };
 }
 
@@ -219,9 +222,7 @@ export class ExperimentService {
       if (typeof c.id !== "string" || typeof c.passed !== "boolean") return invalid(`cases[${i}]`, "needs a case id and passed true or false");
       return { id: c.id, passed: c.passed };
     });
-    let status: ExperimentStatus = "running";
-    let run = 0;
-    await this.#retrying(() => this.#runner.command("experiment.run", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
+    const result = await this.#retrying(() => this.#runner.command("experiment.run", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: clean({ experimentId: id, environment, cost, metrics, cases, note }),
       build: async () => {
         const got = await this.#get(id);
@@ -236,17 +237,19 @@ export class ExperimentService {
         const gotCases = cases.map((c) => c.id).sort();
         if (wantCases.length !== gotCases.length || wantCases.some((c, i) => c !== gotCases[i])) invalid("cases", `must report exactly the pinned evaluation cases once each: ${wantCases.join(", ")}`);
         const nowIso = this.#runner.now();
-        run = b.runs.length + 1;
+        const run = b.runs.length + 1;
         const spent = { runs: b.spent.runs + 1, cost: Math.round((b.spent.cost + cost) * 1e6) / 1e6 };
         const out = spent.runs >= b.criteria.budget.maxRuns || spent.cost >= b.criteria.budget.maxCost;
-        status = out ? "paused" : "running";
-        const next: ExperimentBody = { ...b, spent, runs: [...b.runs, { n: run, at: nowIso, by: by.id, environment, cost, metrics, cases, ...(note === undefined ? {} : { note }) }], status, ...(out ? { pausedWhy: "budget" as const, history: this.#history(b, nowIso, by.id, "paused", "budget used up") } : {}) };
+        const status: ExperimentStatus = out ? "paused" : "running";
+        const next: ExperimentBody = { ...b, spent, runs: [...b.runs, { n: run, revision: got.found.revision + 1, at: nowIso, by: by.id, environment, cost, metrics, cases, ...(note === undefined ? {} : { note }) }], status, ...(out ? { pausedWhy: "budget" as const, history: this.#history(b, nowIso, by.id, "paused", "budget used up") } : {}) };
         return { ref: { kind: "experiment", id }, creates: false, changes: [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }], detail: { projectId: b.projectId, run } };
       },
     })));
+    // The run this command wrote (the first time or on a replay) is the one at the revision it produced; the status is the experiment's now.
     const after = await this.#get(id);
-    if (after !== undefined) { run = run || after.body.runs.length; status = after.body.status; }
-    return { run, status };
+    const mine = after?.body.runs.find((r) => r.revision === result.revision);
+    if (after === undefined || mine === undefined) throw new DomainError("integrity", `experiment ${id}: the run recorded by this command is not found at revision ${result.revision}`);
+    return { run: mine.n, status: after.body.status };
   }
 
   /** Raises the budget (never lowers it) with a reason; a paused experiment runs again. The owner or a manager who is not the proposer. */
@@ -265,6 +268,7 @@ export class ExperimentService {
         if (got.found.revision !== expected) throw new DomainError("stale_revision", `experiment ${id} is at revision ${got.found.revision}, not ${expected}`, { currentRevision: got.found.revision });
         const b = got.body;
         if ((b.status !== "running" && b.status !== "paused") || b.criteria === undefined) throw new DomainError("invalid_command", `experiment ${id} is ${b.status}; only a running or paused experiment has a budget to raise`, { field: "experimentId" });
+        if (sealOf(b.criteria) !== b.criteriaDigest) throw new DomainError("integrity", `experiment ${id}: the pinned criteria no longer match their seal`);
         if (maxRuns < b.criteria.budget.maxRuns || maxCost < b.criteria.budget.maxCost || (maxRuns === b.criteria.budget.maxRuns && maxCost === b.criteria.budget.maxCost)) invalid("maxRuns", `the budget can only be raised (now ${b.criteria.budget.maxRuns} runs, cost ${b.criteria.budget.maxCost})`);
         const nowIso = this.#runner.now();
         // The raised budget is part of the sealed criteria, so the seal is renewed in the same write, by the controller, and the old criteria stay in the history of raises.
