@@ -171,6 +171,8 @@ export interface SubmissionOptions extends RunnerOptions {
   readonly listScan?: { readonly pageSize: number; readonly reads: number };
   /** How many of a project's newest document submissions its index keeps (card Q03b), injectable so a test can shrink it. Default `DOC_INDEX_KEPT`. */
   readonly docIndexKept?: number;
+  /** How many tasks one project-wide waiting view reads (card Q01b fifth slice), injectable so a test can shrink it. Default `WAITING_TASKS`. */
+  readonly waitingTasks?: number;
   /**
    * How many refresh rounds the task's author has made, as the controller counted them (card H12p, `WorkspaceOpService.refreshRounds`). When given, a code submission carries THAT number: the agent cannot state its own,
    * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
@@ -249,12 +251,14 @@ export class SubmissionService {
   readonly #rounds: SubmissionOptions["refreshRounds"];
   readonly #scan: { readonly pageSize: number; readonly reads: number };
   readonly #docKept: number;
+  readonly #waitingTasks: number;
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
     this.#runner = rebuildOnVerdictRace(runner); this.#roles = roles; this.#attemptOf = options.attemptOf; this.#reviewers = options.reviewersAvailableIn; this.#assigned = options.reviewAssignments; this.#onRecorded = options.onRecorded; this.#rounds = options.refreshRounds;
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
     this.#docKept = options.docIndexKept ?? DOC_INDEX_KEPT;
+    this.#waitingTasks = options.waitingTasks ?? WAITING_TASKS;
   }
 
   /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
@@ -553,7 +557,7 @@ export class SubmissionService {
     const items: WaitingItem[] = [];
     let looked = 0;
     for (const [taskId, sub] of candidates) {
-      if (looked >= WAITING_TASKS) break;
+      if (looked >= this.#waitingTasks) break;
       looked++;
       const task = await this.#readableTask(by, taskId);
       if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") continue;

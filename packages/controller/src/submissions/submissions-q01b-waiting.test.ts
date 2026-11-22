@@ -26,7 +26,7 @@ for (const backend of backends) {
   const suite = (name: string, body: (c: {
     ask(by: Principal, projectId?: string): Promise<string[] | undefined>; owner: Principal; project: string; elsewhere: string; svc: SubmissionService;
     agent(name: string, roles: string[], project?: string): Promise<Principal>; mkTask(title: string): Promise<string>; finish(taskId: string, to: "done" | "cancelled"): Promise<void>;
-    lone(reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService }; bare(): StatusService; withoutWaiting(): StatusService; scanned(pageSize: number, reads: number): StatusService; count(): Promise<number>;
+    lone(reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService }; bare(): StatusService; withoutWaiting(): StatusService; scanned(pageSize: number, reads: number): StatusService; capped(tasks: number): StatusService; count(): Promise<number>;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -56,6 +56,7 @@ for (const backend of backends) {
       const status = withService(svc);
       const ask = async (by: Principal, projectId = project): Promise<string[] | undefined> => (await status.ask(by, { kind: "submissions_project", projectId }))?.lines.map((l) => l.text);
       const scanned = (pageSize: number, reads: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, listScan: { pageSize, reads } }));
+      const capped = (tasks: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, waitingTasks: tasks }));
       const withoutWaiting = (): StatusService => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) } }, options);
       const lone = (reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService } => { const l = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, reviewersAvailableIn: async () => reviewersAvailable() }); return { svc: l, status: withService(l) }; };
       // Everything stored of the kinds a view could wrongly create: all submissions of every task of the project.
@@ -64,7 +65,7 @@ for (const backend of backends) {
         for (const t of (await projects.listTasks({ projectId: project, limit: 100 })).items) { const l = await svc.list(owner, t.id, { limit: 100 }); total += l.items.length; }
         return total;
       };
-      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, count });
+      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, capped, count });
     } finally { await world.close(); }
   });
 
@@ -135,7 +136,8 @@ for (const backend of backends) {
     await c.svc.record(rev, { commandId: cid("r"), taskId: t1, kind: "review", role: "reviewer", subject: mine.id, verdict: "approve" });
     const own = (await c.ask(ann))!;
     assert.match(own[0]!, /Only the code you submitted yourself is shown/);
-    assert.match(own[0]!, /^0 task\(s\) wait for a reviewer, 0 wait for their author \(changes were asked for\), 0 were approved but the director declined, 1 are approved with no director sign-off yet/);
+    assert.match(own[0]!, /^0 task\(s\) wait for a reviewer, 0 wait for their author \(changes were asked for\), 0 were approved but the director declined, 1 are approved with no director sign-off yet, 0 are approved and signed off; each is the newest code you submitted on the task,/);
+    assert.doesNotMatch(own[0]!, /the task's newest code submission/, "an agent's own newest code need not be the task's newest");
     assert.equal(own.length, 2);
     assert.doesNotMatch(own.join("\n"), /Lexer/);
     // A bystander with task read, and the reviewer (who authored nothing), see no code and no state.
@@ -161,7 +163,8 @@ for (const backend of backends) {
     // Nothing found in a short look is not "nothing is waiting".
     const empty = (await small.ask(bob, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
     assert.equal(empty.length, 1);
-    assert.match(empty[0]!, /^No code submission of an unfinished task you may read was found in what was looked at, but this view is incomplete, so code may still be waiting\. Only part of the stored submissions was looked at/);
+    assert.match(empty[0]!, /^No code submission of an unfinished task you may read was found in what was looked at, but this view is incomplete, so code may still be waiting\. Only part of the stored submissions was looked at, so code of other tasks may exist\./);
+    assert.doesNotMatch(empty[0]!, /listed task/, "nothing is listed, so the empty answer names no listed task");
     const whole = (await c.ask(c.owner))!;
     assert.doesNotMatch(whole.join("\n"), /Only part of the stored/);
     assert.match(whole[0]!, /^3 task\(s\) wait for a reviewer/);
@@ -173,6 +176,50 @@ for (const backend of backends) {
     const t1 = await c.mkTask("Parser");
     const { svc, status } = c.lone(async () => []);
     await svc.record(ann, { commandId: cid("s"), taskId: t1, kind: "code", role: "author", base: BASE, tree: T("a"), patchId: PATCH });
-    assert.match((await status.ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines[1]!.text, /is approved, with no director sign-off yet: submission \S+ by \S+, tree a{12}, submitted \S+, approved by review_disabled_single_agent\./);
+    assert.match((await status.ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines[1]!.text, /is approved, with no director sign-off yet: submission \S+ by \S+, tree a{12}, submitted \S+, review not required \(no other agent of the project could review it\)\.$/);
+  });
+
+  suite("only the tasks with the newest code are read up to the limit, and that is said; a finished task read within the limit is not listed but still uses it", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const ids: string[] = [];
+    for (const title of ["Oldest", "Middle", "Newest"]) { const t = await c.mkTask(title); ids.push(t); await code(c, ann, t, "a"); tick(); }
+    const capped = c.capped(2);
+    const text = (await capped.ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
+    assert.match(text[0]!, /^2 task\(s\) wait for a reviewer,.* Only the tasks with the newest code were read; more tasks with code may exist\.$/);
+    assert.equal(text.length, 3);
+    assert.doesNotMatch(text.join("\n"), /"Oldest"/, "the oldest code is beyond the limit");
+    await c.finish(ids[2]!, "done");
+    const after = (await capped.ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
+    assert.match(after[0]!, /^1 task\(s\) wait for a reviewer,.* Only the tasks with the newest code were read; more tasks with code may exist\.$/);
+    assert.match(after[1]!, /"Middle"/);
+    // Within the limit nothing is said about it.
+    assert.doesNotMatch((await c.ask(c.owner))!.join("\n"), /Only the tasks with the newest code/);
+  });
+
+  suite("a sign-off or approval of older code does not carry to newer code; the newest sign-off decides; equal submit times pick one submission the same way each time", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const dee = await c.agent("dee", ["director"]);
+    const t1 = await c.mkTask("Parser"), t2 = await c.mkTask("Lexer");
+    const old = await code(c, ann, t1, "a");
+    await c.svc.record(rev, { commandId: cid("r"), taskId: t1, kind: "review", role: "reviewer", subject: old.id, verdict: "approve" });
+    await c.svc.record(dee, { commandId: cid("so"), taskId: t1, kind: "signoff", role: "director", subject: old.id, decision: "approve" });
+    assert.match((await c.ask(c.owner))![1]!, /"Parser".* is approved and signed off: /);
+    tick();
+    const newer = await code(c, ann, t1, "b");
+    const text = (await c.ask(c.owner))!;
+    assert.match(text[1]!, new RegExp(`"Parser".* waits for a reviewer: submission ${newer.id} `));
+    await c.svc.record(rev, { commandId: cid("r"), taskId: t1, kind: "review", role: "reviewer", subject: newer.id, verdict: "approve" });
+    assert.match((await c.ask(c.owner))![1]!, /"Parser".* is approved, with no director sign-off yet: /);
+    await c.svc.record(dee, { commandId: cid("so"), taskId: t1, kind: "signoff", role: "director", subject: newer.id, decision: "decline" });
+    assert.match((await c.ask(c.owner))![1]!, /"Parser".* was approved but the director declined: /);
+    await c.svc.record(dee, { commandId: cid("so"), taskId: t1, kind: "signoff", role: "director", subject: newer.id, decision: "approve" });
+    assert.match((await c.ask(c.owner))![1]!, /"Parser".* is approved and signed off: /);
+    await c.svc.record(rev, { commandId: cid("r"), taskId: t1, kind: "review", role: "reviewer", subject: newer.id, verdict: "changes" });
+    assert.match((await c.ask(c.owner))![1]!, /"Parser".* waits for its author \(changes were asked for\): /, "a later review asking for changes takes the approval back");
+    // Two code submissions at the same instant: the one with the greater ID is the newest, as the task's submissions view reads it.
+    const x = await code(c, ann, t2, "c"), y = await code(c, ann, t2, "d");
+    const winner = x.id > y.id ? x.id : y.id;
+    for (let i = 0; i < 2; i++) assert.match((await c.ask(c.owner))!.find((l) => l.includes("Lexer"))!, new RegExp(`submission ${winner} `));
   });
 }
