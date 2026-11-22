@@ -215,7 +215,7 @@ export class WorkspaceHost {
       if (tree.branch !== policy.branch) return no(`the shared workspace is not on the landing branch ${JSON.stringify(policy.branch)}; nothing was re-applied`) as HostRestackOutcome;
       if (tree.entries.length > 0) return no(`the shared workspace holds ${tree.entries.length} uncommitted file(s) (landed changes waiting to be committed, or other work); nothing was re-applied`) as HostRestackOutcome;
       try {
-        const r = await this.#options.git.restack({ shared: where.shared, onto: tree.head, gitDir: where.gitDir, checkout: where.checkout, submission: call.submission });
+        const r = await this.#options.git.restack({ shared: where.shared, onto: tree.head, gitDir: where.gitDir, checkout: where.checkout, submission: call.submission, permit: { taskId: call.taskId, requestId: call.requestId } });
         if (r.state === "current") return { ok: true, state: "current" };
         if (r.state === "overlap") return { ok: true, state: "overlap", paths: r.paths.slice(0, HOST_LIMITS.conflictsListed).map((p) => p.slice(0, HOST_LIMITS.conflictPath)), head: r.head };
         return { ok: true, state: "reapplied", base: r.base, tree: r.tree, previous: r.previous, recovered: r.recovered, taken: r.taken };
