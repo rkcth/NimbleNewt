@@ -42,7 +42,7 @@ for (const backend of backends) {
         const reviews = ReviewService.withEpoch(storage, epoch, options);
         const meetings = MeetingService.withEpoch(storage, epoch, {}, { availability: async () => "available", ...options });
         const standups = StandupService.withEpoch(storage, epoch, { meetings, assignments: built.assignments }, { availability: async () => "available", ...options });
-        extra = { blockers, reviews, meetings, resumeCalls: [], current: { id: "rck-aaaaaaaaaaaaaaaaaaaa" } };
+        extra = { blockers, reviews, meetings, resumeCalls: [], current: { id: "rck-aaaaaaaaaaaaaaaaaaaa" }, escalated: [] };
         const resumes = {
           forTask: async (_by: unknown, _taskId: string) => (extra.current === undefined ? undefined : { id: extra.current.id, phase: "ready" }),
           approve: async (_by: unknown, c: { taskId: string }) => { extra.resumeCalls.push(`approve:${c.taskId}`); return { id: extra.current?.id, phase: "done" }; },
@@ -51,13 +51,15 @@ for (const backend of backends) {
         const status = StatusService.withEpoch(storage, epoch, {
           assignments: built.assignments, waits: WaitService.withEpoch(storage, epoch, built.assignments, options), blockers, contracts: built.contracts,
           reviews: { ownerPending: (owner, limit) => reviews.ownerPending(owner, limit) },
+          // Escalated defects as the defect service lists them for the owner (their tasks are real records, so the item names each task's title).
+          defects: { forTask: async () => { throw new Error("not used"); }, unresolved: async (by: { kind: string }) => (by.kind !== "owner" ? { counts: { escalated: 0, awaitingCheck: 0, open: 0 }, items: [], scanLimited: false } : { counts: { escalated: extra.escalated.length, awaitingCheck: 0, open: 0 }, items: extra.escalated, scanLimited: false }) } as never,
           meetingQuestions: async (by, limit) => { const r = await meetings.openOwnerQuestions(by, limit); return { truncated: r.truncated, items: r.items.map((q) => ({ id: q.id, revision: q.revision, projectId: q.projectId, topic: q.topic, question: q.question, askedAt: q.askedAt })) }; },
         }, options);
         return { status, standups, needsYouAnswers: { reviews, blockers }, resumes: resumes as never };
       });
       try { await body(w, script, extra); } finally { await w.close(); }
     });
-  interface Extra { blockers: BlockerService; reviews: ReviewService; meetings: MeetingService; resumeCalls: string[]; current: { id: string } | undefined }
+  interface Extra { blockers: BlockerService; reviews: ReviewService; meetings: MeetingService; resumeCalls: string[]; current: { id: string } | undefined; escalated: Record<string, unknown>[] }
   const say = (w: World, chat: ChatService, text: string, messageId = cid("m")) => chat.submit(w.ownerToken, { messageId, text });
   const only = (outcomes: readonly Outcome[]): Outcome => { assert.equal(outcomes.length, 1, JSON.stringify(outcomes)); return outcomes[0]!; };
   const list = async (w: World): Promise<{ kind: string; id: string; text: string; answer: { kind: string; choices?: string[] } }[]> => {
@@ -124,6 +126,35 @@ for (const backend of backends) {
     const after = await x.meetings.ownerQuestions(w.owner, f.project);
     assert.deepEqual([after.open.length, after.answered.length, after.answered[0]?.answer], [0, 1, reply]);
     assert.deepEqual(await list(w), [], "nothing is left waiting");
+  });
+
+  suite("two escalated defects in tasks with similar titles: the owner's words that fit both are asked about, each choice shows its own task's whole title, and the words of one title pick that defect", async (w, script, x) => {
+    const project = await w.project("Garden");
+    const short = "Write the backup guide";
+    const long = "Write the backup guide for restoring a laptop from the nightly copy";
+    const tasks = [await w.task(project, short), await w.task(project, long)];
+    const ids = ["dft-aaaaaaaaaaaaaaaaaaaa", "dft-bbbbbbbbbbbbbbbbbbbb"];
+    x.escalated.push(...ids.map((id, n) => ({ id, revision: 3, severity: "major", taskId: tasks[n], projectId: project, deliverableId: `dlv-${"c".repeat(19)}${n}`, cycles: 3, limit: 3, finding: { text: n === 0 ? "A step is missing." : "The restore order is wrong." }, reportedAt: "2026-10-22T09:00:00.000Z", state: "escalated" })));
+    const items = (await list(w)).filter((i) => i.kind === "defect");
+    assert.deepEqual(items.map((i) => i.id), ids, JSON.stringify(items));
+    assert.match(items[0]!.text, new RegExp(`^Defect ${ids[0]} \\(major, in task "${short}"\\) failed 3 repair check`), items[0]!.text);
+    assert.ok(items[1]!.text.includes(`in task "${long}")`), items[1]!.text);
+    const chat = w.chat();
+    const both = "Let the repair of the backup guide defect go on";
+    script[both] = [cmd("needs-you.answer", { itemTopic: "backup guide", answer: "repair-again" }, both)];
+    const asked = only((await say(w, chat, both)).outcomes) as unknown as { status: string; options: string[] };
+    assert.equal(asked.status, "asked", JSON.stringify(asked));
+    assert.equal(asked.options.length, 2, JSON.stringify(asked));
+    // Each choice says which task it is in, whole, and does not spend its room on the ID twice.
+    assert.ok(asked.options[0]!.startsWith(`${ids[0]} (major, in task "${short}") failed 3 repair check`), asked.options[0]);
+    assert.ok(asked.options[1]!.includes(`in task "${long}")`), asked.options[1]);
+    assert.ok(asked.options.every((o) => o.split("dft-").length === 2), JSON.stringify(asked.options));
+    // The words of the longer title fit only its defect.
+    const one = "Let the repair go on for the laptop restoring guide: Write the backup guide for restoring a laptop";
+    script[one] = [cmd("needs-you.answer", { itemTopic: "backup guide for restoring a laptop", answer: "repair-again" }, one)];
+    const picked = only((await say(w, chat, one)).outcomes);
+    assert.equal(picked.status, "proposed", JSON.stringify(picked));
+    assert.ok(JSON.stringify(picked).includes(ids[1]!) && !JSON.stringify(picked).includes(ids[0]!), JSON.stringify(picked));
   });
 
   suite("a choice the item does not offer, a wrong kind of item, an unknown item and an item that is not the owner's are refused and change nothing; only the owner answers, never an agent or a task credential", async (w, script, x) => {

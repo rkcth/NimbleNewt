@@ -28,7 +28,8 @@ for (const backend of backends) {
       assert.match(text, /How finished work lands in project Garden: /, text);
       assert.match(text, /Who integrates: /, text);
       assert.match(text, /Checks required before work lands: tests/, text);
-      assert.match(text, /taken from the approval profile|installation default/, `the source of the default is said: ${text}`);
+      assert.match(text, /These settings are copied from the approval profile when the project's settings were first made \(a later change of the profile does not change them\) \(revision 1\)/, `the source of the default is said: ${text}`);
+      assert.match(text, /Checks required before work lands: tests \(the task's test commands pass on the work as it would land\)/, text);
       assert.ok(first.lines.every((l) => l.cites.some((c) => c.kind === "project" && c.id === w.project)), "every line cites the project");
 
       // A change by the owner is what the view says next, in plain words (the list replaces the old one).
@@ -49,6 +50,15 @@ for (const backend of backends) {
       assert.match(held, /the installation forbids landing on main by itself\./, held);
       await integration.set(w.owner, { commandId: "is-2", projectId: w.project, landing: "integration-branch", requiredChecks: [] } as never);
       assert.match((await status.landingSettingsLines(w.owner, w.project))!.lines.map((l) => l.text).join("\n"), /Checks required before work lands: none\./);
+
+      // A project made after the owner set an installation default takes its values from that default, and the view says so; the earlier project keeps its own.
+      await integration.setDefault(w.owner, { commandId: "id-2", refreshRounds: 4 } as never);
+      const later = (await w.projects.createProject({ commandId: "p-later", actor: w.owner.id, name: "Orchard" } as never)).id;
+      const fresh = (await status.landingSettingsLines(w.owner, later))!.lines.map((l) => l.text).join("\n");
+      assert.match(fresh, /How finished work lands in project Orchard: /, fresh);
+      assert.match(fresh, /up to 4 time\(s\)/, fresh);
+      assert.match(fresh, /These settings are copied from the installation default for new projects when the project's settings were first made \(a later change of that default does not change them\)/, fresh);
+      assert.match((await status.landingSettingsLines(w.owner, w.project))!.lines.map((l) => l.text).join("\n"), /set for this project by you/);
 
       // Only the owner reads it (as the settings reader itself): an agent with project rights is told nothing, and so is a project that does not exist.
       const agent = await w.agent("ivy", [{ action: "integration.lease", project: w.project }, { action: "task.read", project: w.project }]);

@@ -1518,7 +1518,7 @@ export class ChatService {
       const matches = fits.filter((i) => (picked === undefined ? words === "" || i.text.toLowerCase().includes(words) : i.id === picked));
       showFirst = "the item it answers is shown to you first";
       if (matches.length === 0) return refuse("not_found", words === "" ? "nothing in your Needs-you list can be answered that way" : `no item in your Needs-you list that ${given.length > 0 ? "takes that answer " : ""}is about ${quotedText(words, 80)}`);
-      if (matches.length > 1) return { ok: false, kind: "ask", question: "Which item are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.text.slice(0, 60)})`), field: "id", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+      if (matches.length > 1) return { ok: false, kind: "ask", question: "Which item are you answering?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => { /* a defect item begins with its own ID: the choice keeps the room for its severity and task title (two similar titles told apart) */ const own = `Defect ${m.id} `; const said = m.kind === "defect" && m.text.startsWith(own) ? m.text.slice(own.length) : m.text; return said === m.text ? `${m.id} (${m.text.slice(0, 60)})` : `${m.id} ${said.slice(0, 120)}`; }), field: "id", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       const one = matches[0]!;
       args["kind"] = one.kind; args["id"] = one.id;
       if (one.projectId !== undefined && one.kind === "meeting-question") args["projectId"] = one.projectId;
