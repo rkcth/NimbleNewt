@@ -874,7 +874,7 @@ export const SIMULATION_EXEMPT: ReadonlySet<string> = new Set(["scopeId", "servi
 /**
  * A workspace request's `operation` is one of five fixed choices (and the request is always shown first); its `reason` must still be the owner's own words (card H12m). Its `submissionId` is a record the
  * service checks (a code submission of that very task; for a release, approved, and not only by its author) and the proposal shows it (card H12o sixth slice second review). The interpreter sees no earlier
- * answer, so it cannot look the ID up: the prompt has it copy the ID from the owner's message ("commit submission sbm-… of the parser fix") and ask for it when it is missing (card D01 fifth slice).
+ * answer, so it cannot look the ID up: it names the task, and the CHAT finds the task's approved uncommitted code and fills the ID in, asks which when several wait, or refuses (chat/approved-code.ts); an ID the model supplies counts only when that lookup lists it.
  */
 export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation", "submissionId"]);
 
