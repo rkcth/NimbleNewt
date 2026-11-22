@@ -23,6 +23,11 @@ import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEn
  */
 /** How long the first place may hold the branch before the director is told, when another landing waits behind it (ASSUMPTION: four hours; reversible as the `holdMs` option). */
 export const LANDING_HOLD_MS = 4 * 60 * 60 * 1000;
+/**
+ * How long a reserved place may hold the branch with NO approved entry (its work was returned to its author and the refreshed work is not approved yet) before the controller ends the reservation, when another landing
+ * waits behind it (card P10, eighth slice). ASSUMPTION: twelve hours, three times the time the director is given to decide (`LANDING_HOLD_MS`); reversible as the `releaseMs` option.
+ */
+export const LANDING_RESERVATION_RELEASE_MS = 12 * 60 * 60 * 1000;
 /** The refresh-round cap when the project's settings cannot be read (the profiles' default). */
 export const REFRESH_CAP_DEFAULT = 3;
 /** The repair-cycle limit (card Q04, `review.repairCycles`) when the project's settings cannot be read (the setting's default). */
@@ -56,17 +61,19 @@ export interface LandingQueueOpsOptions {
    * Tells the project's director (and the owner) about a landing queue that needs a decision. It is asked before the queue marks the escalation, so a throw (the owner could not be told) leaves it unmarked and it is
    * asked again at the next refused landing or round; a repeat of the same `commandId` must tell nobody twice.
    */
-  readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round" | "returns" | "unassigned"; readonly text: string }) => Promise<void>;
+  readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round" | "returns" | "unassigned" | "released"; readonly text: string }) => Promise<void>;
   /** The repair-cycle limit of the project (card Q04, `review.repairCycles`): conflict returns count against it. Absent or throwing: `REPAIR_CYCLES_DEFAULT`. */
   readonly repairCycles?: (projectId: string) => Promise<number>;
   /** Tells an agent (a notice in its inbox) that its task's work came back to it. A repeat of the same `commandId` must tell nobody twice. */
-  readonly tell?: (notice: { readonly commandId: string; readonly taskId: string; readonly to: string; readonly text: string }) => Promise<void>;
+  readonly tell?: (notice: { readonly commandId: string; readonly taskId: string; readonly to: string; readonly text: string; readonly purpose?: string }) => Promise<void>;
   /** Whether an agent is active (not retired): work returned to a task is told to its holder only while that agent is active. Absent: every holder counts as active. */
   readonly activeAgent?: (agentId: string) => Promise<boolean>;
   /** Whether the caller is a director of the project (it may take entries out and end reservations). Absent: nobody is. */
   readonly isDirector?: (by: Principal, projectId: string) => Promise<boolean>;
   /** See `LANDING_HOLD_MS`. */
   readonly holdMs?: number;
+  /** See `LANDING_RESERVATION_RELEASE_MS`. */
+  readonly releaseMs?: number;
   /**
    * The owner of the task's current assignment as the assignment records it (`{ kind, id }`), or undefined when nobody holds it. Only an agent owner is an agent that holds the task (`isAgentOwner`: the bare or
    * the prefixed ID, and only for an agent principal); a person, role or team owner with the same name holds it for nobody here. Absent: the author rule alone (the submitter adds and takes out its task's work).
@@ -226,6 +233,9 @@ export class LandingQueueOps {
     if (call.submissionId !== undefined && mine?.submissionId !== call.submissionId) throw new DomainError("invalid_transition", `submission ${call.submissionId} is not the submission task ${call.taskId} has in the landing queue of branch ${branch}`, { field: "submissionId" });
     // The first place: the entry or reserved place with the lowest number (card P10). A reserved place waiting for its task's approval holds the branch: nothing else lands before it.
     const head = frontOf(q);
+    // A reserved place whose work is away has held the branch too long: the controller ends it and this landing is judged again on the queue as it is then (the place is gone, so this cannot repeat).
+    // Only a queued submission waiting behind the place asks for that: a landing of a task with nothing queued (the owner's unqueued landing included) is refused as before and ends nothing.
+    if (mine !== undefined && head !== undefined && head.entry === undefined && head.taskId !== call.taskId && await this.#releaseIdle(call.projectId, branch, q.front, head.taskId)) return this.checkLanding(by, call);
     const behind = (message: string): Promise<never> => this.#heldTooLong(call.projectId, branch, q.front, head?.entry === undefined).then(() => { throw new DomainError("invalid_transition", message); });
     const firstIs = head === undefined ? "" : head.entry === undefined ? `task ${head.taskId} holds the first place (reserved after its author reached the refresh-round cap) and waits for its approved submission (the owner, an integrator or a director may take it out with landing.queue.remove, which lets the others land)` : `the oldest (${head.entry.submissionId}, task ${head.taskId}${head.reservation === undefined ? "" : ", a reserved place"})`;
     if (mine === undefined) {
@@ -275,6 +285,35 @@ export class LandingQueueOps {
       await this.#options.escalate({ commandId: `lq-held:${LandingQueueService.queueIdOf(projectId, branch)}:${front.taskId}:${front.since}${waitingForApproval ? ":waiting" : ""}`.slice(0, 120), projectId, taskId: front.taskId, branch, why: "front", text });
       await this.#queue.markEscalated({ kind: "front", projectId, branch, taskId: front.taskId, since: front.since });
     } catch { /* best effort: unmarked, so the next refused landing tells again */ }
+  }
+
+  /**
+   * The bounded hold of a reserved place (card P10, eighth slice). A landing waits behind a first place that has no approved entry (its work was returned to its author, or its approval was taken back). When
+   * that place has had no approved entry for `releaseMs`, the controller ends the reservation (the queue judges it inside its own write, so a take-out, a landing or approved work coming back at the same moment
+   * wins), tells the task's holder (the task goes to the back when its refreshed work is approved) and the director and the owner. Best effort: answers whether the place was ended; a failure leaves the queue as it was.
+   */
+  async #releaseIdle(projectId: string, branch: string, front: LandingQueueFront | undefined, taskId: string): Promise<boolean> {
+    if (front === undefined || front.taskId !== taskId) return false;
+    // A record written before the idle time existed: its clock starts now (best effort; the next refused landing tries again), and nothing is ended on this call.
+    if (front.idleSince === undefined) { try { await this.#queue.startIdleClock({ projectId, branch, taskId, since: front.since }); } catch { /* the next refused landing starts it */ } return false; }
+    const releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS;
+    const idle = Date.parse(front.idleSince), now = Date.parse(this.#queue.now());
+    if (!Number.isFinite(idle) || !Number.isFinite(now) || now - idle < releaseMs) return false;
+    let ended: LandingReservation | undefined;
+    try { ended = await this.#queue.releaseIdle({ projectId, branch, taskId, since: front.since, olderThanMs: releaseMs }); } catch { return false; }
+    if (ended === undefined) {
+      // Not ended by this call: another call may have just ended it (or the place was taken out, or approved work came back); the landing is judged again when the place is no longer that reserved place.
+      try { const now2 = frontOf(await this.#queue.get(projectId, branch)); return now2 === undefined || now2.taskId !== taskId || now2.entry !== undefined; } catch { return false; }
+    }
+    const hours = releaseMs % 3_600_000 === 0 ? `${releaseMs / 3_600_000} h` : `${Math.round(releaseMs / 60_000)} min`;
+    const text = `Task ${taskId}'s reserved place in the landing queue of branch ${branch} was released: it had no approved submission for at least ${hours} while other work waited behind it. Its work was not removed; when its refreshed work is approved it takes its turn at the back of the queue.`;
+    const id = `lq-released:${LandingQueueService.queueIdOf(projectId, branch)}:${taskId}:${front.since}`.slice(0, 120);
+    try {
+      const holder = this.#options.holderOf === undefined ? undefined : await this.#options.holderOf(taskId);
+      if (holder !== undefined && holder.kind === "agent" && this.#options.tell !== undefined && (this.#options.activeAgent === undefined || await this.#options.activeAgent(holder.id))) await this.#options.tell({ commandId: `${id}:holder`.slice(0, 120), taskId, to: holder.id, text, purpose: "your task's reserved place in the landing queue was released" });
+    } catch { /* the director and the owner are still told */ }
+    try { await this.#options.escalate?.({ commandId: id, projectId, taskId, branch, why: "released", text }); } catch { /* the place is already ended; nobody could be told */ }
+    return true;
   }
 
   /**
