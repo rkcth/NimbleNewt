@@ -38,7 +38,7 @@ for (const backend of backends) {
       const now = (await status.landingSettingsLines(w.owner, w.project))!.lines.map((l) => l.text).join("\n");
       assert.match(now, /Checks required before work lands: review \(an independent reviewer approved the change\); director \(/, now);
       assert.doesNotMatch(now, /tests \(/, now);
-      assert.match(now, /; defects \(no defect reported against the task's deliverables is still open, awaiting a check or escalated; owner-accepted and withdrawn ones do not count\)\./, now);
+      assert.match(now, /; defects \(no defect reported against the task's deliverables is still open, awaiting a check or escalated; owner-accepted and withdrawn ones do not block\)\./, now);
       assert.match(now, /Who integrates: a person\./, now);
       assert.match(now, /up to 5 time\(s\)/, now);
       assert.match(now, /set for this project by you/, now);

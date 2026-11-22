@@ -116,6 +116,8 @@ const PATCH = /^[0-9a-f]{40,64}$/;
 const clipEnd = (text: string, max: number): string => { const clean = clip(text, Number.MAX_SAFE_INTEGER); if (clean.length <= max) return clean; let from = clean.length - (max - 3); const c = clean.charCodeAt(from); if (c >= 0xdc00 && c <= 0xdfff) from += 1; return `...${clean.slice(from)}`; };
 // Half a surrogate pair is ill-formed text (refused or mangled by readers and stores): one in the input becomes a space, and no cut ends between the two halves of a pair.
 const clip = (text: string, max: number): string => { const clean = redactText(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu, " ").replace(/\s+/g, " ").trim(); return clean.length <= max ? clean : `${wholeCut(clean, max - 3)}...`; };
+/** An error as text for a check's summary: never throws, whatever was thrown (a value with no `toString`, or a `message` that throws, becomes a fixed phrase), so a failed read still ends as `not_run`. */
+const errorText = (error: unknown): string => { try { return String((error as Error)?.message ?? error); } catch { return "an error that cannot be shown"; } };
 /** At most `max` UTF-16 units of `text`, never ending between the two halves of a surrogate pair. */
 const wholeCut = (text: string, max: number): string => { if (text.length <= max) return text; let end = Math.max(0, max); const c = text.charCodeAt(end - 1); if (end > 0 && c >= 0xd800 && c <= 0xdbff) end -= 1; return text.slice(0, end); };
 
@@ -134,7 +136,7 @@ export class LandingGate {
     // The reviewed submission is read first: the host computes the patch ID of its base and tree, and its submitter is an author whose own contract versions are not used.
     let reviewed: ReviewedSubmission | undefined;
     let reviewProblem: string | undefined;
-    if (call.submissionId !== undefined) { try { reviewed = await this.#deps.approvalOf(call.submissionId); } catch (error) { reviewProblem = String((error as Error)?.message ?? error); } }
+    if (call.submissionId !== undefined) { try { reviewed = await this.#deps.approvalOf(call.submissionId); } catch (error) { reviewProblem = errorText(error); } }
     if (reviewed !== undefined && reviewed.taskId !== call.taskId) reviewed = undefined;
     const authors = [...new Set([call.author, reviewed?.submittedBy].filter((a): a is string => typeof a === "string" && a !== ""))];
     const contract = required.includes("tests") ? await this.#deps.tests(call.taskId, authors) : undefined;
@@ -153,7 +155,7 @@ export class LandingGate {
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the host did not answer within ${Math.round(limit / 1000)} s`)), limit); timer.unref?.(); }),
         ]);
       } finally { if (timer !== undefined) clearTimeout(timer); }
-    } catch (error) { stop.abort(error); /* gave up waiting, or the call failed: the host stops what it still runs */ return none(`the host could not run the landing checks: ${String((error as Error)?.message ?? error)}`); }
+    } catch (error) { stop.abort(error); /* gave up waiting, or the call failed: the host stops what it still runs */ return none(`the host could not run the landing checks: ${errorText(error)}`); }
     if (report === null || typeof report !== "object" || report.checkout !== true) return none("the host holds no checkout for the task");
     const change = report.change;
     if (change === undefined || typeof change !== "object" || !OID.test(String(change.tree)) || !OID.test(String(change.base))) return none(`the change the landing would carry could not be read${typeof report.problem === "string" ? `: ${report.problem}` : ""}`);
@@ -210,7 +212,7 @@ export class LandingGate {
     // Read again after the host's run: evidence can be invalidated while the tests ran; the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
     let g: QaGateView | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.qaGate(call.submissionId); } catch (error) { return no("not_run", `the QA gate could not be read: ${String((error as Error)?.message ?? error)}`); }
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.qaGate(call.submissionId); } catch (error) { return no("not_run", `the QA gate could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the QA gate of ${call.submissionId} could not be read for the tree it names`);
     if (g.verdict !== "passed") {
@@ -235,7 +237,7 @@ export class LandingGate {
     // Read again after the host's run (a director may have declined while the tests ran); the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
     let g: DirectorGateView | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.directorGate(call.submissionId); } catch (error) { return no("not_run", `the director sign-off could not be read: ${String((error as Error)?.message ?? error)}`); }
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.directorGate(call.submissionId); } catch (error) { return no("not_run", `the director sign-off could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the director sign-off of ${call.submissionId} could not be read for the tree it names`);
     if (g.signoff === undefined) return no("not_run", `no director has signed off on ${call.submissionId} yet`);
@@ -255,8 +257,9 @@ export class LandingGate {
     const no = (result: LandingCheckResult, why: string): LandingCheckEntry => ({ check: "defects", result, ...bound, summary: clip(why, LANDING_GATE_LIMITS.summary) });
     if (this.#deps.defectsGate === undefined) return no("not_run", "the defects check is not collected at landing yet, so it has not run for this tree");
     let g: DefectsGateView | undefined;
-    try { g = await this.#deps.defectsGate(call.taskId); } catch (error) { return no("not_run", `the defects of the task could not be read: ${String((error as Error)?.message ?? error)}`); }
-    if (g === undefined || g.taskId !== call.taskId || !Array.isArray(g.items) || typeof g.unresolved !== "number" || typeof g.checked !== "number" || g.checked < g.unresolved) return no("not_run", "the defects of the task could not be read");
+    try { g = await this.#deps.defectsGate(call.taskId); } catch (error) { return no("not_run", `the defects of the task could not be read: ${errorText(error)}`); }
+    // Counts are whole numbers, unresolved within checked, and no more listed than unresolved (a NaN or negative count would otherwise pass).
+    if (g === undefined || g.taskId !== call.taskId || !Array.isArray(g.items) || !Number.isSafeInteger(g.unresolved) || !Number.isSafeInteger(g.checked) || g.unresolved < 0 || g.checked < g.unresolved || g.items.length > g.unresolved) return no("not_run", "the defects of the task could not be read");
     if (g.unresolved > 0) {
       const head = `${g.unresolved} of ${g.checked} defect(s) of this task are not finished: `;
       const room = LANDING_GATE_LIMITS.summary - 20;
@@ -283,7 +286,7 @@ export class LandingGate {
     // Read again after the host's run (a document can be flagged while the tests ran); the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
     let g: DocsGateView | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.docsGate(call.taskId, call.submissionId); } catch (error) { return no("not_run", `the documentation could not be read: ${String((error as Error)?.message ?? error)}`); }
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.docsGate(call.taskId, call.submissionId); } catch (error) { return no("not_run", `the documentation could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree || !Array.isArray(g.pending) || typeof g.checked !== "number" || g.checked < g.pending.length) return no("not_run", `the documentation of ${call.submissionId} could not be read for the tree it names`);
     if (g.pending.length > 0) {
@@ -318,7 +321,7 @@ export class LandingGate {
     if (problem !== undefined) return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${problem}`, LANDING_GATE_LIMITS.summary) };
     // Read again after the host's run (a review may have asked for changes while the tests ran); the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); } catch (error) { return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${String((error as Error)?.message ?? error)}`, LANDING_GATE_LIMITS.summary) }; }
+    try { a = await this.#deps.approvalOf(call.submissionId); } catch (error) { return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${errorText(error)}`, LANDING_GATE_LIMITS.summary) }; }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return { check: "review", result: "not_run", ...bound, summary: `${call.submissionId} is not a code submission of this task` };
     if (!a.approved) return { check: "review", result: a.newest === undefined ? "not_run" : "fail", ...bound, summary: clip(`${call.submissionId} is not approved (${a.reason ?? "no approval"})`, LANDING_GATE_LIMITS.summary) };
     // The patch ID compared is the one the host computed from the reviewed base and tree, never only the submitter's word for it.

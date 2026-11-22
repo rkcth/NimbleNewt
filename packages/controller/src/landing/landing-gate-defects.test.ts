@@ -43,10 +43,19 @@ test("an unfinished defect fails the landing and names the first ones and how ma
   assert.match(many.results[0]!.summary, /; and \d+ more$/);
   const listed = (many.results[0]!.summary.match(/dfc-/g) ?? []).length;
   assert.match(many.results[0]!.summary, new RegExp(`and ${8 - listed} more$`), "the rest are counted exactly");
+  // Exactly one more than the five listed: "and 1 more"; exactly five: no "more" at all.
+  const six = await rig({ view: { taskId: TASK, checked: 6, unresolved: 6, items: [1, 2, 3, 4, 5].map((n) => item(n)) } }).run();
+  assert.equal(six.results[0]!.summary, `6 of 6 defect(s) of this task are not finished: ${[1, 2, 3, 4, 5].map((n) => `${item(n).id} (major, open)`).join("; ")}; and 1 more`);
+  const five = await rig({ view: { taskId: TASK, checked: 5, unresolved: 5, items: [1, 2, 3, 4, 5].map((n) => item(n)) } }).run();
+  assert.equal(five.results[0]!.summary, `5 of 5 defect(s) of this task are not finished: ${[1, 2, 3, 4, 5].map((n) => `${item(n).id} (major, open)`).join("; ")}`);
+  // The summary names defects by ID, severity and state only: the finding text and the deliverable title stay out of it.
+  assert.doesNotMatch(six.results[0]!.summary, /finding|Guide/);
 });
 
 test("a view that cannot be read, is for another task, is inconsistent, or is not wired is not run (each counts as failed)", async () => {
-  for (const view of [undefined, { ...clean, taskId: "task-bbbbbbbbbbbbbbbbbbbb" }, { taskId: TASK, checked: 1, unresolved: 2, items: [] }, { taskId: TASK, checked: 1, unresolved: "1" as never, items: [] }, { taskId: TASK, checked: 0, unresolved: 0, items: "no" as never }]) {
+  for (const view of [undefined, { ...clean, taskId: "task-bbbbbbbbbbbbbbbbbbbb" }, { taskId: TASK, checked: 1, unresolved: 2, items: [] }, { taskId: TASK, checked: 1, unresolved: "1" as never, items: [] }, { taskId: TASK, checked: 0, unresolved: 0, items: "no" as never },
+    { taskId: TASK, checked: 1, unresolved: Number.NaN, items: [] }, { taskId: TASK, checked: Number.NaN, unresolved: 0, items: [] }, { taskId: TASK, checked: 1, unresolved: -1, items: [] },
+    { taskId: TASK, checked: 2, unresolved: 1.5, items: [] }, { taskId: TASK, checked: 2, unresolved: 0, items: [item(1)] }, { taskId: TASK, checked: 3, unresolved: 1, items: [item(1), item(2)] }]) {
     const out = await rig({ view }).run();
     assert.deepEqual([out.passed, ...only(out)], [false, "defects", "not_run"], JSON.stringify(view));
     assert.match(out.results[0]!.summary, /could not be read/);
@@ -54,6 +63,13 @@ test("a view that cannot be read, is for another task, is inconsistent, or is no
   const broken = await rig({ view: async () => { throw new Error("store down"); } }).run();
   assert.deepEqual(only(broken), ["defects", "not_run"]);
   assert.match(broken.results[0]!.summary, /could not be read: store down/);
+  // A thrown value that cannot be turned into text still ends as not run (it does not make the landing itself throw).
+  const odd = await rig({ view: async () => { throw Object.create(null); } }).run();
+  assert.deepEqual([odd.passed, ...only(odd)], [false, "defects", "not_run"]);
+  assert.match(odd.results[0]!.summary, /could not be read: an error that cannot be shown/);
+  const rejected = await rig({ view: () => Promise.reject("plain text") }).run();
+  assert.deepEqual([rejected.passed, ...only(rejected)], [false, "defects", "not_run"]);
+  assert.match(rejected.results[0]!.summary, /could not be read: plain text/);
   const unwired = await rig({ wired: false }).run();
   assert.deepEqual(only(unwired), ["defects", "not_run"]);
   assert.match(unwired.results[0]!.summary, /not collected at landing yet/);

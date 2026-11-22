@@ -123,7 +123,7 @@ await ask("integration.set", { project: projectId, landing: "human-promotes", in
 ```
 
 - A repository is a **local path to a git repository** today; no forge is contacted. Binding with `access: "write"` needs `resource.scope.write`, which the owner has.
-- `integration.set` is optional: without it the profile gives the defaults in the checklist (row 5). Which checks exist: `tests`, `review`, `qa`, `docs`, `director`, `defects`. Gating a landing on the *exact integrated tree* passing is card **P09** (planned); until then a required check is recorded and enforced as far as P08 goes.
+- `integration.set` is optional: without it the profile gives the defaults in the checklist (row 5). Which checks exist: `tests`, `review`, `qa`, `docs`, `director`, `defects`. Gating a landing on the *exact integrated tree* passing is card **P09**: on a local host the landing gate runs or reads each required check for the tree that would land and refuses the landing when one fails or has not run; a remote host cannot run the checks yet, so a gated landing there is refused (the card stays planned until it can).
 - **Version control host and CI** are recorded per project (`versionControl` on `project.create` and `project.update`): `{ host: "github" | "gitlab" | "self-hosted" | "none", hostName?, ci? }`. `hostName` names a self-hosted forge such as Gitea; `none` is a repository with no remote; `ci` is the label you use (`GitHub Actions`, `Jenkins`, `none`). The record changes no behaviour by itself and assumes no forge; `setup.readiness` lists the projects that have not been asked. A project may also have no repository at all.
 
 ### Step 5. Model providers, routes and budgets
