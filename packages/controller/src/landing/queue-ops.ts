@@ -83,7 +83,7 @@ export interface LandingQueueOpsOptions {
   readonly holderOf?: (taskId: string) => Promise<Owner | undefined>;
   /**
    * Where the assignment's holder is recorded (card P10, ninth slice): the record's reference for a task, and how to read the holder (the owner of an `assigned` assignment) from that record's body. With it, a
-   * take-out by the task's own agent is judged on the record as read inside the queue's own write (the record is written back unchanged there), so a hand-off at that same moment is never judged on the holder
+   * take-out by the task's own agent is judged on the record as read inside the queue's own write (its revision is checked in that commit), so a hand-off at that same moment is never judged on the holder
    * before it. A body that cannot be read as an assignment (`ownerOf` throwing) refuses the caller. Absent: the holder is read just before the write through `holderOf`.
    */
   readonly holderRecord?: { readonly refOf: (taskId: string) => AggregateRef; readonly ownerOf: (body: JsonObject) => Owner | undefined };

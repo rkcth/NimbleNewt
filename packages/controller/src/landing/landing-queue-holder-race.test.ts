@@ -10,8 +10,8 @@ import { LandingQueueOps, LandingQueueService, type QueueApproval } from "./inde
 
 after(stopServer);
 
-// Card P10 (ninth slice): a take-out by the task's own agent is judged on the holder as read inside the queue's own write. The assignment record is written back unchanged in that write, so a hand-off at the same
-// moment makes exactly one of the two writes win. The races are made without any pause: the judgment itself performs the hand-off between its read and the commit.
+// Card P10 (ninth slice): a take-out by the task's own agent is judged on the holder as read inside the queue's own write. That write carries a revision check of the assignment record (the record itself is not
+// written), so a hand-off committed between the read and the commit makes the take-out judge again on the new holder. The races are made without any pause: the judgment itself performs the hand-off between its read and the commit.
 const BASE = "b".repeat(40);
 const tree = (n: number): string => n.toString(16).padStart(40, "0");
 const sbm = (n: number): string => `sbm-${"abcdefghijklmnopqrstuvwxyz234567"[n % 32]!.repeat(20)}`;
@@ -106,15 +106,16 @@ for (const backend of backends) {
         return true;
       });
       assert.deepEqual(await r.queued(), [s1]);
-      // The hand-off is done now: bob is the holder and takes it out; the record keeps its owner.
+      // The hand-off is done now: bob is the holder and takes it out; the record keeps its owner and its revision.
       const rev = (await r.w.assignments.getAssignment(t1))!.revision;
       const out = await r.ops.remove(bob, { commandId: "b1", taskId: t1, reason: "mine now" });
       assert.equal(out.removed?.submissionId, s1);
       const after = (await r.w.assignments.getAssignment(t1))!;
       assert.equal((after.owner as Owner).id, "bob", "the holder is unchanged");
-      assert.equal(after.revision, rev + 1, "the take-out wrote the record back (it is the guard)");
-      // The write-back is the cost: a hand-off that was prepared on the earlier revision is told to read again, never applied on a stale view.
-      await refuses("stale_revision", () => r.w.assignments.transferTask({ commandId: "late", actor: r.w.owner.id, taskId: t1, expectedRevision: rev, to: { kind: "agent", id: "ann" }, reason: "stale" }));
+      assert.equal(after.revision, rev, "the take-out only checked the record's revision, it did not write the record");
+      // So a write guarded on the revision read before the take-out (a code submission's attempt check, a hand-off) is not disturbed: this hand-off prepared on that revision applies.
+      await r.w.assignments.transferTask({ commandId: "later", actor: r.w.owner.id, taskId: t1, expectedRevision: rev, to: { kind: "agent", id: "ann" }, reason: "after the take-out" });
+      assert.equal(((await r.w.assignments.getAssignment(t1))!.owner as Owner).id, "ann");
     } finally { await r.close(); }
   });
 
@@ -169,7 +170,7 @@ for (const backend of backends) {
         const entry = (await r.queued()).includes(s);
         if (out.status === "fulfilled") {
           assert.equal(entry, false, "a take-out that answered removed the entry");
-          // Either the take-out came first (then the hand-off was told to read again) or the hand-off came first and ann was still judged on a record that said ann.
+          // The take-out committed while the record still said ann (a hand-off committed before it would have made it judge again and refuse); the hand-off, if it went through, came after.
           if (moved.status === "rejected") assert.equal(held, "ann");
         } else {
           assert.ok(out.reason instanceof DomainError && out.reason.code === "not_found", String(out.reason));

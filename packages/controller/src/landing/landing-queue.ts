@@ -123,8 +123,10 @@ const NOTHING = "landing queue: nothing to write";
 const nothing = (error: unknown): boolean => error instanceof DomainError && error.code === "invalid_transition" && error.message === NOTHING;
 /**
  * Judges a caller on the task's holder inside the take-out's own write (card P10, ninth slice). `ref` is the record that says who holds the task (the assignment); `allowed` gets the entry and that record's body as
- * read in the write (undefined when the task has no record) and says whether the caller may take the entry out. The record is written back unchanged in the same commit, so a change to it at the same moment
- * (a hand-off) makes exactly one of the two writes win; a record that does not exist yet is not guarded (a first assignment at that same moment is judged by the author rule).
+ * read in the write (undefined when the task has no record) and says whether the caller may take the entry out. The commit carries a revision check of that record (not a write: its revision is left as it is,
+ * so other writes guarded on the assignment's revision, such as a code submission's attempt check or a hand-off, are not disturbed by a take-out). A hand-off committed between the read and the commit makes the
+ * check fail and the take-out is built again and judged on the new holder; a hand-off after the commit finds the entry gone. A record that does not exist yet is not guarded (a first assignment at that same
+ * moment is judged by the author rule).
  */
 export interface RemoveHolderGuard {
   readonly ref: AggregateRef;
@@ -271,8 +273,8 @@ export class LandingQueueService {
         // A task with a reserved place and no entry (card P10): taking it out ends the reservation. Only a caller who may take out any entry (no `allowed` rule) may do that.
         const reservedOnly = at < 0 && command.allowed === undefined && command.holder === undefined && command.keepReservation !== true && (q?.reservations ?? []).some((r) => r.taskId === taskId);
         if (current === undefined || q === undefined || (at < 0 && !reservedOnly) || (at >= 0 && command.allowed !== undefined && !command.allowed(q.entries[at]!))) throw new DomainError("not_found", `task ${taskId} has no submission in the landing queue of branch ${command.branch}`);
-        // The task's holder is judged in this same write (card P10, ninth slice): its assignment record is read here and written back unchanged below, so a hand-off at the same moment changes that record and one of
-        // the two writes loses the race (this one is built again and judged on the new holder, or the hand-off lands after and finds the entry gone).
+        // The task's holder is judged in this same write (card P10, ninth slice): its assignment record is read here and its revision is checked in the commit below, so a hand-off committed in between makes
+        // this write lose the race (it is built again and judged on the new holder); a hand-off after the commit finds the entry gone. The check leaves the record's revision as it is.
         let held: { revision: number; body: JsonObject } | undefined;
         if (at >= 0 && command.holder !== undefined) {
           const found = await this.#runner.get(command.holder.ref.kind, command.holder.ref.id);
@@ -301,7 +303,7 @@ export class LandingQueueService {
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return {
           ref, creates: false,
-          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((_, i) => i !== at), reservations, away }, this.#runner.now())) }, ...(held === undefined || command.holder === undefined ? [] : [{ type: "update" as const, ref: command.holder.ref, expectedRevision: held.revision, body: held.body }]), open === undefined ? { type: "create" as const, ref: { kind: OPEN, id: taskId }, body: json({}) } : { type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }],
+          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((_, i) => i !== at), reservations, away }, this.#runner.now())) }, ...(held === undefined || command.holder === undefined ? [] : [{ type: "check" as const, ref: command.holder.ref, expectedRevision: held.revision }]), open === undefined ? { type: "create" as const, ref: { kind: OPEN, id: taskId }, body: json({}) } : { type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }],
           detail: { branch: command.branch, taskId, submissionId: q.entries[at]!.submissionId, reason },
           contention: async () => new DomainError("stale_revision", RACE),
         };
