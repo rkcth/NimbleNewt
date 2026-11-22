@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { BlockerService } from "../domain/blockers.js";
 import { onlyKnown, text } from "../domain/model.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -47,8 +48,9 @@ export function shownFiles(files: readonly string[]): string {
 }
 
 export class SubmitRefused extends DomainError {
-  constructor(readonly head: string, readonly overlapping: readonly string[]) {
-    super("invalid_command", `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${shownFiles(overlapping)}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
+  /** `message` replaces the standard refusal text (the second check after the staging words its own). `head` is undefined when the landing branch could not be read. */
+  constructor(readonly head: string | undefined, readonly overlapping: readonly string[], message?: string) {
+    super("invalid_command", message !== undefined ? `submit refused: ${message}` : `submit refused: the landing branch moved to ${head} and changed ${overlapping.length} of your files (${shownFiles(overlapping)}); refresh with work.refresh (fix any conflicts it lists) and submit again, or end without submitting`);
     this.name = "SubmitRefused";
   }
 }
@@ -147,6 +149,11 @@ export interface WorkEndDeps {
   readonly landing: (taskId: string, attemptId: string) => Promise<Landed | undefined>;
   /** Stages the agent's tree and opens a submission for it; returns its id. Absent: a submit cannot be completed and ends plainly with a blocker. */
   readonly submit?: (attempt: EndingAttempt, base: string, key: string) => Promise<{ readonly submissionId: string }>;
+  /**
+   * The submission `submit` already recorded under this step key, if any (a replay after a stop between the record and the ending's `submitted` step). Asked before the landing check made after the settle,
+   * so a landing branch that moved since, or a checkout that can no longer be read, does not end a recorded submission as `submit_refused` (card H12n second slice). Optional; a failed read counts as none.
+   */
+  readonly recorded?: (attempt: EndingAttempt, key: string) => Promise<{ readonly submissionId: string } | undefined>;
   readonly blockers: Pick<BlockerService, "openBlocker">;
   /** Hands the message to the agent's supervisor or the task thread. Optional. */
   readonly tell?: (attempt: EndingAttempt, message: string, key: string) => Promise<void>;
@@ -447,10 +454,14 @@ export class WorkEndService {
     if (body.submit && body.unverified === undefined && body.steps?.settled?.summary === undefined && body.steps?.submitted === undefined && attempt !== undefined) {
       await this.#guard(attemptId);
       let value: NonNullable<WorkEndSteps["submitted"]>;
+      // A submission already recorded under this step key (a stop came between the record and this step) is the step's answer: the checks below judged it when it was made.
+      const earlier = this.#deps.submit === undefined ? undefined : await this.#deps.recorded?.(attempt, stepKey(attemptId, "submitted")).catch(() => undefined);
       // The landing branch may have moved while the calls settled: the overlap is checked again before anything is staged.
-      const l = await this.#deps.landing(attempt.taskId, attempt.attemptId).catch(() => undefined);
+      const l = earlier !== undefined ? undefined : await this.#deps.landing(attempt.taskId, attempt.attemptId).catch(() => undefined);
       const overlap = l === undefined ? [] : overlapOf(l);
-      if (l === undefined || overlap.length > 0) {
+      if (earlier !== undefined) {
+        value = { submissionId: earlier.submissionId };
+      } else if (l === undefined || overlap.length > 0) {
         const summary = l === undefined
           ? "submit_refused: the checkout's base could not be checked again after the calls settled; the attempt ended without a submission"
           : `submit_refused: the landing branch moved to ${l.head} and changed ${overlap.length} of your files (${shownFiles(overlap)}) while the ending was settling; the attempt ended without a submission`;
@@ -460,8 +471,14 @@ export class WorkEndService {
         value = clean({ typed: "submit_unavailable" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_unavailable`, summary) });
       } else {
         try { value = { submissionId: (await this.#deps.submit(attempt, body.base!, stepKey(attemptId, "submitted"))).submissionId }; } catch (error) {
+          if (error instanceof SubmitRefused) {
+            // The check made after the staging (stagedSubmit's `landing`): typed like the one made before it, never as a staging failure.
+            const summary = `submit_refused: ${safeSlice(redactText(error.message.replace(/^submit refused: /, "")), 400)}; the attempt ended without a submission`;
+            value = clean({ typed: "submit_refused" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_refused`, summary) });
+          } else {
           const summary = `release_failed: staging or opening the submission failed (${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}); the attempt ended without one`;
           value = clean({ typed: "release_failed" as const, summary, blocker: await this.#blocker(body, `${attemptId}:release_failed:submit`, summary) });
+          }
         }
       }
       body = (await step("submitted", value)).body;

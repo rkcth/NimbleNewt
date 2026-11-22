@@ -1,9 +1,11 @@
 import { DomainError } from "../domain/errors.js";
+import { derivedId } from "../domain/ids.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { TERMINAL } from "../dispatch/model.js";
+import { scopedCommandId } from "../security/credentials.js";
 import type { Principal } from "../security/principals.js";
 import type { SubmissionService } from "../submissions/index.js";
-import type { EndingAttempt, Landed, WorkEndDeps } from "./work-end.js";
+import { SubmitRefused, overlapOf, shownFiles, type EndingAttempt, type Landed, type WorkEndDeps } from "./work-end.js";
 
 type Dispatcher = Pick<DispatcherService, "get" | "freeze" | "settle" | "operations" | "finishWith" | "confirmStopped"> & Partial<Pick<DispatcherService, "submitView" | "stageWork" | "verifyDone" | "addNote" | "notesOf" | "answerQuestions" | "interrogateDone" | "recordReport">>;
 
@@ -60,24 +62,59 @@ export interface StagedWork {
   readonly files: readonly string[];
 }
 
+/** This agent's own code submission of this task recorded under the step key `key` (the ID `record` derives from it), or undefined; a read that fails is undefined. */
+async function recordedBy(submissions: Partial<Pick<SubmissionService, "get">>, by: Principal, attempt: EndingAttempt, key: string): Promise<{ readonly submissionId: string } | undefined> {
+  if (submissions.get === undefined) return undefined;
+  const earlier = await submissions.get(by, derivedId("sbm", scopedCommandId(by.id, key))).catch(() => undefined);
+  return earlier !== undefined && earlier.taskId === attempt.taskId && earlier.kind === "code" && earlier.submittedBy === by.id ? { submissionId: earlier.id } : undefined;
+}
+
+/**
+ * The ending's `recorded` port (card H12n second slice): the submission `stagedSubmit` recorded under the step key, looked up the same way, so the ending's check after the settle is not made again for a submission that already exists.
+ * An agent that cannot act finds none (the submit port then refuses as before).
+ */
+export function recordedSubmission(deps: { readonly submissions: Pick<SubmissionService, "get">; readonly principalOf: (agentId: string) => Promise<Principal | undefined> }): NonNullable<WorkEndDeps["recorded"]> {
+  return async (attempt, key) => {
+    const by = await deps.principalOf(attempt.agentId);
+    return by === undefined ? undefined : recordedBy(deps.submissions, by, attempt, key);
+  };
+}
+
 /**
  * The submit port bound to the submission service (card H12n): stages the attempt's work (through the host-provided `stage`) and records ONE code submission in the `author` role, tied to the attempt's task. The command ID is the ending's step key,
- * so a replay records once. The base staged must be the base that was checked for freshness; if the checkout moved in between the submission is not made (the ending then ends plainly with `release_failed`). Nothing here verifies the tree or patch id: that is
+ * so a replay records once (a submission already recorded under the key is returned before anything is staged or checked again). The base staged must be the base that was checked for freshness; if the checkout moved in between the submission is not made (the ending then ends plainly with `release_failed`). Nothing here verifies the tree or patch id: that is
  * the landing queue's check (P08).
  */
 export function stagedSubmit(deps: {
   readonly stage: (attempt: EndingAttempt) => Promise<StagedWork>;
-  readonly submissions: Pick<SubmissionService, "record">;
+  /** `get`, when given, finds a submission this step key already recorded (a replay after a crash between the record and the ending's step), which is returned without staging or checking again. */
+  readonly submissions: Pick<SubmissionService, "record"> & Partial<Pick<SubmissionService, "get">>;
   /** The effective principal of the attempt's agent (`agent:<id>`), or undefined when it cannot act. */
   readonly principalOf: (agentId: string) => Promise<Principal | undefined>;
   /** How many refresh rounds (card H12p) the task's author has made; carried on the submission as `refreshRound`. Absent: 0, as before. */
   readonly refreshRounds?: (attempt: EndingAttempt) => Promise<number>;
+  /**
+   * The landing read, asked once more AFTER the staging (card H12n, second slice): a process still running in the sandbox can add a file between the check that precedes the staging and the staging itself.
+   * The staged files are then judged against what the landing branch changed since the base; an overlap, or a read that cannot be made, refuses the submit (`SubmitRefused`, which the ending records as `submit_refused`). Absent: no second check, as before.
+   */
+  readonly landing?: WorkEndDeps["landing"];
 }): NonNullable<WorkEndDeps["submit"]> {
   return async (attempt, base, key) => {
     const by = await deps.principalOf(attempt.agentId);
     if (by === undefined) throw new DomainError("forbidden", `${attempt.agentId} cannot act, so its work cannot be submitted`);
+    // A replay of a submission already recorded under this key is that record: the checks below judged it when it was made, and a landing branch that moved since (or an attempt no longer live, which cannot be read) must not turn it into a refusal.
+    const earlier = await recordedBy(deps.submissions, by, attempt, key);
+    if (earlier !== undefined) return earlier;
     const staged = await deps.stage(attempt);
     if (staged.base !== base) throw new DomainError("checkout_changed", `the staged work is based on ${staged.base}, not on ${base} that was checked; it was not submitted`);
+    if (deps.landing !== undefined) {
+      const l = await deps.landing(attempt.taskId, attempt.attemptId).catch(() => undefined);
+      if (l === undefined) throw new SubmitRefused(undefined, [], "the checkout's base could not be checked again after the work was staged");
+      // The landing side is read from the base; a checkout that reports another base now is not judged against the staged one (files landed between the two would be missed).
+      if (l.base !== staged.base) throw new SubmitRefused(l.head, [], `the checkout moved after the work was staged (its base is now ${l.base}, the staged work's ${staged.base}); nothing was submitted`);
+      const overlap = overlapOf({ base: l.base, head: l.head, mine: staged.files, landed: l.landed });
+      if (overlap.length > 0) throw new SubmitRefused(l.head, overlap, `the landing branch moved to ${l.head} and changed ${overlap.length} of the staged files (${shownFiles(overlap)}); nothing was submitted`);
+    }
     const refreshRound = deps.refreshRounds === undefined ? 0 : await deps.refreshRounds(attempt);
     const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound }, { attemptId: attempt.attemptId });
     return { submissionId: made.id };

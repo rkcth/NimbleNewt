@@ -288,6 +288,8 @@ export class SubmissionService {
     const unknown = Object.keys(command).filter((k) => !(FIELDS as readonly string[]).includes(k));
     if (unknown.length > 0) bad(unknown[0]!, "is not a field of this command");
     const commandId = checkCommandId(command.commandId);
+    // The ending's step keys (`workend:<attempt>:<step>`) are the controller's: the ending takes a submission recorded under its key as the one it staged (card H12n second slice), so an agent may not make one under it.
+    if (from === undefined && commandId.startsWith("workend:")) bad("commandId", "starting with workend: is kept for the controller's ending of an attempt; use another command ID");
     const kind = command.kind;
     if (!SUBMISSION_KINDS.includes(kind)) bad("kind", `must be one of ${SUBMISSION_KINDS.join(", ")}`);
     const taskId = checkTaskId(command.taskId);

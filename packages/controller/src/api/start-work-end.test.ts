@@ -11,6 +11,7 @@ import { PI, workGrants } from "../dispatch/testing/world.js";
 import { RemoteWorkerClient, WorkspaceResponder } from "../remote/index.js";
 import { FULL_ABILITIES } from "../remote/testing/suite.js";
 import { startController } from "./index.js";
+import { SubmissionService } from "../submissions/index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
 const supported: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.8.0-generic", nodeVersion: "22.19.0" };
@@ -324,6 +325,51 @@ test("a checkout that cannot be read again after the calls settle is never taken
     assert.ok(rec?.blocker !== undefined);
     assert.match(JSON.stringify(rec), /could not be checked again/);
     assert.deepEqual(staged, [], "nothing was staged");
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a file the agent's process added between the check and the staging, which the landing branch also changed, is not submitted: the ending is submit_refused with a blocker and nothing is recorded (card H12n second slice)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  let reads = 0;
+  const { c, boot, owner, project } = await world(d, {
+    // First read (the request) and second read (after the settle) see no overlap; the third (after the staging) finds the late file changed on the landing branch.
+    landing: async () => { reads++; return reads >= 3 ? { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["late.txt"] } : { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["other.txt"] }; },
+    stage: async () => ({ base: B, tree: "b".repeat(40), patchId: "c".repeat(40), files: ["beds.txt", "late.txt"] }),
+  });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1")).ok);
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.outcome, rec?.typed, rec?.submissionId], ["ended", "submit_refused", undefined], JSON.stringify(rec));
+    assert.ok(rec?.blocker !== undefined);
+    assert.match(rec?.summary ?? "", /late\.txt/);
+    assert.equal(reads, 3);
+    assert.deepEqual((await call(c, boot.token, "submission.list", { taskId: one.task })).result?.items, []);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("a submission already recorded under the ending's step key (a stop came between the record and the 'submitted' step) is taken through startController, though the landing branch has since changed the agent's file: nothing staged, no blocker (card H12n second slice, second review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-workend-"));
+  let reads = 0; let stages = 0;
+  const { c, boot, owner, project } = await world(d, {
+    // The request's read finds no overlap; any later read finds the agent's own file changed on the landing branch.
+    landing: async () => { reads++; return reads >= 2 ? { base: B, head: "d".repeat(40), mine: ["beds.txt"], landed: ["beds.txt"] } : { base: B, head: B, mine: ["beds.txt"], landed: [] }; },
+    stage: async () => { stages++; return { base: B, tree: "b".repeat(40), patchId: "c".repeat(40), files: ["beds.txt"] }; },
+  });
+  try {
+    const one = await attemptFor(c, owner, project, 1, ["author"]);
+    await c.dispatch!.dispatcher.tick();
+    // What the ending's submit recorded before the stop, with the same service call (the ending's own attempt passed).
+    const ann = await c.services.principals.authenticate(one.token);
+    const planted = await SubmissionService.withEpoch(c.storage, c.epoch, async () => ["author"]).record(ann, { commandId: `workend:${one.attempt}:submitted`, taskId: one.task, kind: "code", role: "author", base: B, tree: "b".repeat(40), patchId: "c".repeat(40) }, { attemptId: one.attempt });
+    assert.ok((await call(c, one.token, "work.end", { report: "the report", attemptId: one.attempt, submit: true, result: "done" }, "s1")).ok);
+    await c.dispatch!.dispatcher.tick();
+    const rec = await c.services.workEnd.get(one.attempt);
+    assert.deepEqual([rec?.outcome, rec?.typed, rec?.blocker, rec?.submissionId], ["submitted", undefined, undefined, planted.id], JSON.stringify(rec));
+    assert.deepEqual([reads, stages], [1, 0]);
+    assert.deepEqual(((await call(c, boot.token, "submission.list", { taskId: one.task })).result?.items ?? []).map((i: { id: string }) => i.id), [planted.id]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 

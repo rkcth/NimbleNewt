@@ -9,7 +9,7 @@ import { PrincipalService, type Principal } from "../security/index.js";
 import { CommandRunner } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { SubmissionService, type SubmissionBody, type SubmissionOptions } from "./index.js";
-import { stagedSubmit } from "../work-end/index.js";
+import { recordedSubmission, stagedSubmit } from "../work-end/index.js";
 
 after(stopServer);
 
@@ -273,6 +273,51 @@ for (const backend of backends) {
     await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-new" }), /no longer the task's current attempt/);
     const direct = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-later" });
     assert.equal((await gated.get(ann, direct.id))?.attemptId, "att-later");
+  });
+
+  suite("a replay of the ending's submit whose submission is already recorded returns it without staging or reading the landing branch again, so a landing branch that moved since (or an attempt that can no longer be read) does not turn it into a refusal (card H12n second slice review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const svc = c.open(async (id) => c.roles.get(id) ?? []);
+    let staged = 0; let reads = 0;
+    let landing: () => Promise<{ base: string; head: string; mine: string[]; landed: string[] } | undefined> = async () => ({ base: BASE, head: BASE, mine: [], landed: [] });
+    const submit = stagedSubmit({ stage: async () => { staged++; return { base: BASE, tree: T1, patchId: PATCH, files: ["a.ts"] }; }, submissions: svc, principalOf: async () => ann, landing: async () => { reads++; return landing(); } });
+    const ending = { attemptId: "att-1", taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true } as never;
+    const key = cid("end");
+    const made = await submit(ending, BASE, key);
+    assert.deepEqual([staged, reads], [1, 1]);
+    // the landing branch has since changed the same file, then cannot be read at all: the replay is still the recorded submission
+    landing = async () => ({ base: BASE, head: "e".repeat(40), mine: [], landed: ["a.ts"] });
+    assert.equal((await submit(ending, BASE, key)).submissionId, made.submissionId);
+    landing = async () => undefined;
+    assert.equal((await submit(ending, BASE, key)).submissionId, made.submissionId);
+    assert.deepEqual([staged, reads], [1, 1]);
+    // a new key is judged as before: refused, nothing recorded
+    await assert.rejects(submit(ending, BASE, cid("end2")), (e: unknown) => e instanceof DomainError && e.name === "SubmitRefused");
+    assert.equal((await svc.list(ann, c.task, { limit: 10 })).items.length, 1);
+    // another agent's record under the same command ID is never taken as this one's
+    const bob = await c.agent("bob", ["author"]);
+    landing = async () => ({ base: BASE, head: BASE, mine: [], landed: [] });
+    const bobs = stagedSubmit({ stage: async () => ({ base: BASE, tree: T2, patchId: PATCH, files: ["b.ts"] }), submissions: svc, principalOf: async () => bob, landing: async () => landing() });
+    assert.notEqual((await bobs({ ...(ending as object), agentId: bob.id } as never, BASE, key)).submissionId, made.submissionId);
+  });
+
+  suite("the ending's own lookup of its recorded submission finds only this agent's code submission of this task under the step key, and an agent cannot record one under the ending's step keys itself (card H12n second slice, second review)", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    const svc = c.open(async (id) => c.roles.get(id) ?? []);
+    const key = "workend:att-1:submitted";
+    // An agent's own record under the ending's key would be taken as the staged one: refused, nothing recorded; the ending's own record (with its attempt) is made.
+    for (const by of [ann, bob]) await assert.rejects(svc.record(by, { commandId: key, taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /commandId: starting with workend:/.test(e.message));
+    assert.equal((await svc.list(ann, c.task, { limit: 10 })).items.length, 0);
+    const submit = stagedSubmit({ stage: async () => ({ base: BASE, tree: T1, patchId: PATCH, files: ["a.ts"] }), submissions: svc, principalOf: async () => ann });
+    const ending = { attemptId: "att-1", taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true };
+    const made = await submit(ending as never, BASE, key);
+    const recorded = (by: Principal | undefined) => recordedSubmission({ submissions: svc, principalOf: async () => by });
+    assert.deepEqual(await recorded(ann)(ending as never, key), { submissionId: made.submissionId });
+    assert.equal(await recorded(ann)(ending as never, "workend:att-1:other"), undefined);
+    assert.equal(await recorded(ann)({ ...ending, taskId: c.other.task } as never, key), undefined);
+    assert.equal(await recorded(bob)({ ...ending, agentId: bob.id } as never, key), undefined);
+    assert.equal(await recorded(undefined)(ending as never, key), undefined);
   });
 
   suite("a repeat of a code submission is compared with what the controller observed when it was first made: a later refresh round or a change of reviewers does not turn it into a conflict (card Q01b second review)", async (c) => {
