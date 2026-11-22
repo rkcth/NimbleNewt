@@ -5,6 +5,7 @@ import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
+import type { AggregateRef, JsonObject } from "../storage/types.js";
 import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEntry, type LandingQueueFront, type LandingReservation, type LandingReturns } from "./landing-queue.js";
 
 /**
@@ -80,6 +81,12 @@ export interface LandingQueueOpsOptions {
    * Throwing: the caller is judged as neither the holder nor an author (fails closed; the owner, integrators and directors are not affected).
    */
   readonly holderOf?: (taskId: string) => Promise<Owner | undefined>;
+  /**
+   * Where the assignment's holder is recorded (card P10, ninth slice): the record's reference for a task, and how to read the holder (the owner of an `assigned` assignment) from that record's body. With it, a
+   * take-out by the task's own agent is judged on the record as read inside the queue's own write (its revision is checked in that commit), so a hand-off at that same moment is never judged on the holder
+   * before it. A body that cannot be read as an assignment (`ownerOf` throwing) refuses the caller. Absent: the holder is read just before the write through `holderOf`.
+   */
+  readonly holderRecord?: { readonly refOf: (taskId: string) => AggregateRef; readonly ownerOf: (body: JsonObject) => Owner | undefined };
 }
 export interface QueuedLanding { readonly submissionId: string; readonly base: string; readonly tree: string; readonly branch: string }
 
@@ -187,10 +194,22 @@ export class LandingQueueOps {
     // added at the same moment could make stale; the holder is read just before, so a hand-off at that very moment is judged on the holder before it). A repeat of the caller's own recorded command is answered by
     // the service; anything else is told nothing exists.
     // A director of the project may take any entry out and end a reservation (card P10: escalation goes to the director, who decides).
-    const own = integrator ? undefined : await this.#ownAgent(by, taskId);
+    // With `holderRecord` the holder is read inside that write too (card P10, ninth slice), so a hand-off at the same moment makes exactly one of the two writes win.
+    const record = this.#options.holderRecord;
+    const guarded = !integrator && record !== undefined;
+    const own = integrator || guarded ? undefined : await this.#ownAgent(by, taskId);
     const allowed = own === undefined ? undefined : (e: LandingQueueEntry): boolean => own(e.author);
+    const holder = guarded ? {
+      ref: record.refOf(taskId),
+      allowed: (e: LandingQueueEntry, body: JsonObject | undefined): boolean => {
+        if (by.taskScope !== undefined && by.taskScope.taskId !== taskId) return false;
+        let who: Owner | undefined;
+        try { who = body === undefined ? undefined : record.ownerOf(body); } catch { return false; }
+        return who !== undefined ? isAgentOwner(who, by) : e.author === by.id;
+      },
+    } : undefined;
     try {
-      return { ...(await this.#queue.remove({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId, branch, taskId, reason, ...(allowed === undefined ? {} : { allowed }) })), branch };
+      return { ...(await this.#queue.remove({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId, branch, taskId, reason, ...(allowed === undefined ? {} : { allowed }), ...(holder === undefined ? {} : { holder }) })), branch };
     } catch (error) {
       if (!integrator && error instanceof DomainError && error.code === "not_found") throw refused(`task ${taskId}`);
       throw error;

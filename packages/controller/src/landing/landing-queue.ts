@@ -121,6 +121,18 @@ const RACE = "landing queue: lost a race, build again";
 /** A command that finds nothing to write (a reservation already held, an escalation already marked): refused inside, answered outside (never shown to a caller). */
 const NOTHING = "landing queue: nothing to write";
 const nothing = (error: unknown): boolean => error instanceof DomainError && error.code === "invalid_transition" && error.message === NOTHING;
+/**
+ * Judges a caller on the task's holder inside the take-out's own write (card P10, ninth slice). `ref` is the record that says who holds the task (the assignment); `allowed` gets the entry and that record's body as
+ * read in the write (undefined when the task has no record) and says whether the caller may take the entry out. The commit carries a revision check of that record (not a write: its revision is left as it is,
+ * so other writes guarded on the assignment's revision, such as a code submission's attempt check or a hand-off, are not disturbed by a take-out). A hand-off committed between the read and the commit makes the
+ * check fail and the take-out is built again and judged on the new holder; a hand-off after the commit finds the entry gone. A record that does not exist yet is not guarded (a first assignment at that same
+ * moment is judged by the author rule).
+ */
+export interface RemoveHolderGuard {
+  readonly ref: AggregateRef;
+  readonly allowed: (entry: LandingQueueEntry, body: JsonObject | undefined) => boolean | Promise<boolean>;
+}
+
 async function retried<T>(run: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try { return await run(); } catch (error) {
@@ -246,7 +258,7 @@ export class LandingQueueService {
    * Takes a task's entry out of the queue (the owner or the integrator decided it does not land now). `not_found` when the task has no entry, or when `allowed` (the door's rule for a caller who may take out only
    * its own entry) refuses the entry found: it is judged on the entry inside the same write, so an entry put there by someone else at the same moment is never taken out on the strength of an earlier read.
    */
-  async remove(command: { commandId: string; actor: string; projectId: string; branch: string; taskId: string; reason: string; allowed?: (entry: LandingQueueEntry) => boolean; keepReservation?: boolean }): Promise<{ readonly taskId: string; readonly removed?: LandingQueueEntry; readonly reservationEnded?: true; readonly replayed: boolean }> {
+  async remove(command: { commandId: string; actor: string; projectId: string; branch: string; taskId: string; reason: string; allowed?: (entry: LandingQueueEntry) => boolean; holder?: RemoveHolderGuard; keepReservation?: boolean }): Promise<{ readonly taskId: string; readonly removed?: LandingQueueEntry; readonly reservationEnded?: true; readonly replayed: boolean }> {
     const taskId = checkTaskId(command.taskId);
     const reason = text(command.reason, "reason", { min: 1, max: LANDING_QUEUE_LIMITS.reason });
     const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
@@ -259,8 +271,16 @@ export class LandingQueueService {
         const q = current?.body as unknown as LandingQueueBody | undefined;
         const at = q?.entries.findIndex((e) => e.taskId === taskId) ?? -1;
         // A task with a reserved place and no entry (card P10): taking it out ends the reservation. Only a caller who may take out any entry (no `allowed` rule) may do that.
-        const reservedOnly = at < 0 && command.allowed === undefined && command.keepReservation !== true && (q?.reservations ?? []).some((r) => r.taskId === taskId);
+        const reservedOnly = at < 0 && command.allowed === undefined && command.holder === undefined && command.keepReservation !== true && (q?.reservations ?? []).some((r) => r.taskId === taskId);
         if (current === undefined || q === undefined || (at < 0 && !reservedOnly) || (at >= 0 && command.allowed !== undefined && !command.allowed(q.entries[at]!))) throw new DomainError("not_found", `task ${taskId} has no submission in the landing queue of branch ${command.branch}`);
+        // The task's holder is judged in this same write (card P10, ninth slice): its assignment record is read here and its revision is checked in the commit below, so a hand-off committed in between makes
+        // this write lose the race (it is built again and judged on the new holder); a hand-off after the commit finds the entry gone. The check leaves the record's revision as it is.
+        let held: { revision: number; body: JsonObject } | undefined;
+        if (at >= 0 && command.holder !== undefined) {
+          const found = await this.#runner.get(command.holder.ref.kind, command.holder.ref.id);
+          held = found === undefined ? undefined : { revision: found.revision, body: found.body as JsonObject };
+          if (!(await command.holder.allowed(q.entries[at]!, held?.body))) throw new DomainError("not_found", `task ${taskId} has no submission in the landing queue of branch ${command.branch}`);
+        }
         const reservations = command.keepReservation === true ? q.reservations ?? [] : (q.reservations ?? []).filter((r) => r.taskId !== taskId);
         // The controller's withdrawal remembers the place, so a reservation made while the task is away gives it back (card P10).
         const away = command.keepReservation === true && at >= 0 ? [...(q.away ?? []).filter((a) => a.taskId !== taskId), { taskId, seq: q.entries[at]!.seq }].slice(-LANDING_QUEUE_LIMITS.away) : (q.away ?? []).filter((a) => a.taskId !== taskId);
@@ -283,7 +303,7 @@ export class LandingQueueService {
         const ref: AggregateRef = { kind: KIND, id: queueId };
         return {
           ref, creates: false,
-          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((_, i) => i !== at), reservations, away }, this.#runner.now())) }, open === undefined ? { type: "create" as const, ref: { kind: OPEN, id: taskId }, body: json({}) } : { type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }],
+          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, entries: q.entries.filter((_, i) => i !== at), reservations, away }, this.#runner.now())) }, ...(held === undefined || command.holder === undefined ? [] : [{ type: "check" as const, ref: command.holder.ref, expectedRevision: held.revision }]), open === undefined ? { type: "create" as const, ref: { kind: OPEN, id: taskId }, body: json({}) } : { type: "update" as const, ref: { kind: OPEN, id: taskId }, expectedRevision: open.revision, body: open.body as JsonObject }],
           detail: { branch: command.branch, taskId, submissionId: q.entries[at]!.submissionId, reason },
           contention: async () => new DomainError("stale_revision", RACE),
         };

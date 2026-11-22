@@ -1,3 +1,4 @@
+import { assignmentIdOf, type Owner } from "../domain/assignment-model.js";
 import { createHash, randomUUID } from "node:crypto";
 import { assignedTaskIn, projectIds, type RouteProbes } from "../dispatch/loops.js";
 import { createTargetVersions, type TargetVersionOptions } from "../dispatch/target-versions.js";
@@ -921,6 +922,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       isDirector: async (by, projectId) => { const now = new Date().toISOString(); return by.kind === "agent" && (await agents.directorsOf(projectId, now)).includes(by.id); },
       // Card P10 (hand-off): the task's holder now answers for its queued work; the submitter only while nobody else holds the task.
       holderOf: async (taskId) => { const a = await assignments.getAssignment(taskId); return a?.state === "assigned" ? a.owner : undefined; },
+      // Card P10 (ninth slice): a take-out judges the holder on the assignment record inside the queue's own write.
+      holderRecord: { refOf: (taskId) => ({ kind: "assignment", id: assignmentIdOf(taskId) }), ownerOf: (body) => { const a = body as unknown as { state?: string; owner?: Owner }; return a.state === "assigned" ? a.owner : undefined; } },
       escalate: async (n) => {
         const directors = await agents.directorsOf(n.projectId, new Date().toISOString());
         // Only a director that was actually told counts: when none could be (none in the project, or none can receive notices about this task), the owner is asked to decide.
