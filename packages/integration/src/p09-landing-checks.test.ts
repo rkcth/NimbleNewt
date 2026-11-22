@@ -13,7 +13,7 @@ import { GitBridge, LocalWorkspaces, SandboxLauncher } from "@nimblenewt/worker"
 // integrator's landing is gated on the project's required checks (the strict profile's tests and review). The contract's test command runs in bubblewrap on a copy of the integrated tree; while it fails nothing is landed, the
 // results are on the request bound to that tree and the author gets them in its inbox. Once it passes (the owner's contract change), the landing lands exactly that tree and the review is the one given for that patch.
 // The approval queues the submission in the landing queue (card P10): the refused landing leaves it there and the landing that lands takes it out. When the project also requires `qa`, the controller's gate reads the
-// submission's QA gate (third slice): refused without independent evidence, landed once the owner recorded a pass.
+// submission's QA gate (third slice): refused without independent evidence, landed once the owner recorded a pass. It also requires `docs` (fourth slice): refused for a document never verified, landed once it is retired.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -157,6 +157,18 @@ test("a landing is made only when the project's required checks pass on the inte
     // The owner's independent QA evidence on the submission, against the contract in force (version 2).
     const qa = await api(c, boot.token, "qa.evidence.record", { submissionId, criteriaRevision: 2, environment: "linux test", observedAt: "2026-11-18T10:00:00.000Z", checks: [{ name: "unit", result: "passed" }] }, "qa-1");
     assert.deepEqual([qa.ok, qa.result?.source], [true, "independent"], JSON.stringify(qa));
+    // The project now also requires `docs` (fourth slice): a document that describes the task and was never verified against its tested code refuses the landing, named to the author; once the owner retires it (it is no
+    // longer kept) the landing is made. The controller's landing gate reads the documents (read only: the refused landing flags nothing).
+    assert.equal((await api(c, boot.token, "integration.set", { project, requiredChecks: ["tests", "review", "qa", "docs"] }, "req-docs")).ok, true);
+    const doc = await api(c, boot.token, "doc.obligation.record", { projectId: project, title: "User guide", location: "docs/guide.md", audience: "user", owner: `agent:${agent}`, applicableVersion: "1.0", implementationRefs: [task] }, "doc-1");
+    assert.equal(doc.ok, true, JSON.stringify(doc));
+    const noDocs = await land("land-docs");
+    assert.equal(noDocs.result?.state, "refused", JSON.stringify(noDocs));
+    assert.deepEqual([byCheck(noDocs.result)["docs"]!.result, byCheck(noDocs.result)["qa"]!.result], ["fail", "pass"]);
+    assert.match(byCheck(noDocs.result)["docs"]!.summary, /User guide \(it was never verified/, "the document gate was read (not 'not collected')");
+    assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
+    const retired = await api(c, boot.token, "doc.obligation.retire", { obligationId: doc.result.id, expectedRevision: doc.result.revision }, "doc-ret");
+    assert.equal(retired.ok, true, JSON.stringify(retired));
     const landed = await land("land-2");
     assert.equal(landed.result.state, "done", JSON.stringify(landed.result));
     assert.equal(landed.result.detail.landed, true, landed.result.summary);
@@ -164,7 +176,8 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.match(byCheck(landed.result)["review"]!.summary, /approved by agent:.* for this tree/);
     assert.deepEqual([byCheck(landed.result)["qa"]!.result, byCheck(landed.result)["qa"]!.summary], ["pass", "independent QA evidence passed for this tree"]);
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
-    assert.equal(landingCheckCalls, 3, "the checks ran again for the second landing: an earlier result is never reused");
+    assert.equal(byCheck(landed.result)["docs"]!.result, "pass");
+    assert.equal(landingCheckCalls, 4, "the checks ran again for the second landing: an earlier result is never reused");
     assert.deepEqual([landed.result.queued?.submissionId, await queuedNow()], [submissionId, []], "the landing took exactly its submission out of the queue");
     for (const f of finishes) f();
     await c.dispatch.dispatcher.idle();

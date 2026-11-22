@@ -13,7 +13,10 @@ import { redactText } from "../security/redact.js";
  * - `qa` (P09 third slice): the landing names the code submission (`submissionId`); its QA gate (Q02, independent evidence bound to that submission's tree, criteria and decisions) must pass, read again after the host's run,
  *   and the evidence carries over to the integrated tree only while the patch is unchanged (the same host-computed patch ID rule as `review`). A gate that failed fails the check with its reasons; a gate with no independent
  *   evidence at all is `not_run`. Both count as failed.
- * - `docs`, `director`: not collected at landing yet, so they are `not_run` (counted as failed) when required.
+ * - `docs` (P09 fourth slice): the landing names the code submission; every documentation obligation (Q03) still kept that describes the task must be verified against that code (its tree) with the QA gate of that code still
+ *   passing. Pending documents fail the check and are named; a task no document describes has nothing pending. Read again after the host's run and bound to the landed patch exactly as `qa` is (the evidence is for the
+ *   submission's tree). No submission, no reader wired, or an unreadable answer is `not_run`.
+ * - `director`: not collected at landing yet, so it is `not_run` (counted as failed) when required.
  * `not_run` counts as failed: the landing passes only when every required check is `pass`. A host that cannot run the checks or read the change makes every required check `not_run`. A project that requires no check is not gated
  * and the host is not asked. When `tests` had no commands to run (none set, or only by the task's authors), the record says so (`testsNeedOwner`) so the owner can be told. When the gate stops waiting for the host, it aborts
  * the call's `signal` so the host stops the checks' processes.
@@ -72,6 +75,8 @@ export interface ContractTests {
 }
 /** The QA gate of a code submission as the landing gate needs it (`QaEvidenceService.gate`). */
 export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
+/** The documents gate of a code submission as the landing gate needs it (`DocObligationService.landing`): the documents describing the task that are not verified against that code. */
+export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
 export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
 export interface LandingGateDeps {
   /** The project's required checks (`IntegrationPolicyService.effective`). */
@@ -82,6 +87,8 @@ export interface LandingGateDeps {
   readonly approvalOf: (submissionId: string) => Promise<ReviewedSubmission | undefined>;
   /** The QA gate of a code submission (`QaEvidenceService.gate`, read as the controller); absent: the `qa` check is not collected (`not_run`). */
   readonly qaGate?: (submissionId: string) => Promise<QaGateView | undefined>;
+  /** The documentation obligations pending for a code submission (`DocObligationService.landing`, read as the controller); absent: the `docs` check is not collected (`not_run`). */
+  readonly docsGate?: (taskId: string, submissionId: string) => Promise<DocsGateView | undefined>;
   readonly now: () => string;
 }
 
@@ -122,7 +129,7 @@ export class LandingGate {
       let timer: NodeJS.Timeout | undefined;
       try {
         report = await Promise.race([
-          call.host.landingChecks({ taskId: call.taskId, projectId: call.projectId, checks: commands, maxOutputBytes: LANDING_GATE_LIMITS.checkOutputBytes, ...(reviewed === undefined || !(required.includes("review") || required.includes("qa")) ? {} : { reviewed: { base: reviewed.base, tree: reviewed.tree } }), signal: stop.signal }),
+          call.host.landingChecks({ taskId: call.taskId, projectId: call.projectId, checks: commands, maxOutputBytes: LANDING_GATE_LIMITS.checkOutputBytes, ...(reviewed === undefined || !(required.includes("review") || required.includes("qa") || required.includes("docs")) ? {} : { reviewed: { base: reviewed.base, tree: reviewed.tree } }), signal: stop.signal }),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the host did not answer within ${Math.round(limit / 1000)} s`)), limit); timer.unref?.(); }),
         ]);
       } finally { if (timer !== undefined) clearTimeout(timer); }
@@ -139,6 +146,7 @@ export class LandingGate {
       if (check === "tests") results.push(this.#tests(contract, commands, report, bound));
       else if (check === "review") results.push(await this.#review(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "qa") results.push(await this.#qa(call, tree, patchId, bound, reviewed, reviewProblem, report));
+      else if (check === "docs") results.push(await this.#docs(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else results.push({ check, result: "not_run", ...bound, summary: `the ${check} check is not collected at landing yet, so it has not run for this tree` });
     }
     const needOwner = patchId !== undefined && required.includes("tests") && commands.length === 0 ? { testsNeedOwner: contract?.onlyAuthors === true ? ("authors-only" as const) : ("no-commands" as const) } : {};
@@ -183,6 +191,29 @@ export class LandingGate {
     if (a.patchId !== computed) return no("fail", `${call.submissionId} names patch ${String(a.patchId ?? "none").slice(0, 12)}, but its base and tree make patch ${computed.slice(0, 12)}; new QA evidence on a new submission is needed`);
     if (computed !== patchId) return no("fail", `the change differs from what QA checked: the evidence is for patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; new QA evidence is needed`);
     return no("pass", a.tree !== tree ? `independent QA evidence passed for tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : "independent QA evidence passed for this tree");
+  }
+
+  async #docs(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport): Promise<LandingCheckEntry> {
+    const no = (result: LandingCheckResult, why: string): LandingCheckEntry => ({ check: "docs", result, ...bound, summary: clip(why, LANDING_GATE_LIMITS.summary) });
+    if (call.submissionId === undefined) return no("not_run", "the landing names no code submission (submissionId), so no documentation applies to it");
+    if (this.#deps.docsGate === undefined) return no("not_run", "the docs check is not collected at landing yet, so it has not run for this tree");
+    if (problem !== undefined) return no("not_run", `the submission could not be read: ${problem}`);
+    // Read again after the host's run (a document can be flagged while the tests ran); the submission's base and tree never change.
+    let a: ReviewedSubmission | undefined;
+    let g: DocsGateView | undefined;
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.docsGate(call.taskId, call.submissionId); } catch (error) { return no("not_run", `the documentation could not be read: ${String((error as Error)?.message ?? error)}`); }
+    if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
+    if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree || !Array.isArray(g.pending)) return no("not_run", `the documentation of ${call.submissionId} could not be read for the tree it names`);
+    if (g.pending.length > 0) {
+      const names = g.pending.slice(0, 5).map((p) => `${p.title} (${p.reason})`).join("; ");
+      return no("fail", `${g.pending.length} of ${g.checked} document(s) describing this task are not verified against ${call.submissionId} (tree ${g.tree.slice(0, 12)}): ${names}${g.pending.length > 5 ? "; ..." : ""}`);
+    }
+    // The documents were verified against the submission's tree; that counts for the integrated tree only while the patch is the one the host computes from that base and tree.
+    const computed = typeof report.reviewedPatchId === "string" && PATCH.test(report.reviewedPatchId) && a.base === before.base && a.tree === before.tree ? report.reviewedPatchId : undefined;
+    if (computed === undefined) return no("not_run", `the host could not compute the patch ID of what the documents were checked against in ${call.submissionId}${typeof report.reviewedProblem === "string" ? `: ${report.reviewedProblem}` : ""}`);
+    if (a.patchId !== computed) return no("fail", `${call.submissionId} names patch ${String(a.patchId ?? "none").slice(0, 12)}, but its base and tree make patch ${computed.slice(0, 12)}; a new submission and a new documentation check are needed`);
+    if (computed !== patchId) return no("fail", `the change differs from the code the documents were checked against: that is patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; the documents must be verified against the new code`);
+    return no("pass", g.checked === 0 ? "no documentation obligation describes this task" : `all ${g.checked} document(s) describing this task are verified against ${a.tree !== tree ? `tree ${a.tree.slice(0, 12)} (carried over to this tree because the patch is unchanged)` : "this tree"}`);
   }
 
   async #review(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport): Promise<LandingCheckEntry> {

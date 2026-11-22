@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Check } from "../policy/integration-policy.js";
-import { LandingGate, landingChecksText, type QaGateView, type ContractTests, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
+import { LandingGate, landingChecksText, type QaGateView, type DocsGateView, type ContractTests, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
 
 // Card P09: the landing gate judges the project's required checks on the exact tree a landing would make. Not run counts as failed; a reviewer's approval carries over to another tree only while the patch ID is unchanged.
 const BASE = "b".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), OTHER_PATCH = "c".repeat(40);
@@ -197,6 +197,37 @@ test("qa: a passed gate passes; a gate for another tree or task, a missing gate 
 
 test("qa: without a QA gate wired the check is not collected, as before (card P09)", async () => {
   const g = new LandingGate({ requiredChecks: async () => ["qa"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z" });
+  const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
+  assert.deepEqual([r.passed, r.results[0]!.result], [false, "not_run"]);
+  assert.match(r.results[0]!.summary, /not collected/);
+});
+
+// Card P09 (fourth slice): the docs check with a fake documents gate (the real one is exercised in workspace-ops-p09-docs.test.ts).
+const docsGate = (g: Partial<DocsGateView> | undefined | (() => Promise<DocsGateView | undefined>)) => new LandingGate({
+  requiredChecks: async () => ["docs"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z",
+  docsGate: async (taskId, id) => (typeof g === "function" ? g() : g === undefined ? undefined : { taskId, submissionId: id, tree: TREE, checked: 1, pending: [], ...g }),
+});
+const docsRun = (g: Parameters<typeof docsGate>[0], opts: { submissionId?: string | undefined } = { submissionId: SUB }) => docsGate(g).evaluate({ taskId: TASK, projectId: "proj-x", ...(opts.submissionId === undefined ? {} : { submissionId: opts.submissionId }), host: host({}).h });
+
+test("docs: nothing pending passes; pending documents fail and are named; a gate for another tree, task or submission, a missing gate and a thrown read are not run (card P09)", async () => {
+  assert.deepEqual((await docsRun({})).results.map((x) => x.result), ["pass"]);
+  assert.match((await docsRun({ checked: 0 })).results[0]!.summary, /no documentation obligation describes this task/);
+  const pending = await docsRun({ checked: 3, pending: [{ obligationId: "dob-aaaaaaaaaaaaaaaaaaaa", title: "User guide", reason: "it was never verified against tested code" }] });
+  assert.deepEqual([pending.passed, pending.results[0]!.result], [false, "fail"]);
+  assert.match(pending.results[0]!.summary, /1 of 3 document\(s\).*User guide \(it was never verified/);
+  assert.equal((await docsRun({ tree: OLD_TREE })).results[0]!.result, "not_run");
+  assert.equal((await docsRun({ taskId: "tsk-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run");
+  assert.equal((await docsRun({ submissionId: "sbm-bbbbbbbbbbbbbbbbbbbb" })).results[0]!.result, "not_run", "a gate for another submission does not count");
+  assert.equal((await docsRun(undefined)).results[0]!.result, "not_run");
+  assert.equal((await docsRun({ pending: undefined as never })).results[0]!.result, "not_run", "an unreadable answer is not a pass");
+  const thrown = await docsRun(async () => { throw new Error("storage down"); });
+  assert.equal(thrown.results[0]!.result, "not_run");
+  assert.match(thrown.results[0]!.summary, /storage down/);
+  assert.equal((await docsRun({}, { submissionId: undefined })).results[0]!.result, "not_run");
+});
+
+test("docs: without a documents gate wired the check is not collected, as before (card P09)", async () => {
+  const g = new LandingGate({ requiredChecks: async () => ["docs"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z" });
   const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
   assert.deepEqual([r.passed, r.results[0]!.result], [false, "not_run"]);
   assert.match(r.results[0]!.summary, /not collected/);
