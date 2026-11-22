@@ -11,7 +11,7 @@ import { WaitService } from "../domain/waits.js";
 import { ContractService } from "../planning/contracts.js";
 import { StatusService } from "../status/index.js";
 import { WorkspaceOpService, type WorkspaceCall, type WorkspaceOutcome } from "../workspace-ops/index.js";
-import { BOUNDS_SWEEP_EVERY_MS, IntegratorLeaseOps, IntegratorLeaseService, LANDING_QUEUE_LIMITS, LandingQueueOps, LandingQueueService, frontOf, type QueueApproval } from "./index.js";
+import { BOUNDS_SWEEP_EVERY_MS, BOUNDS_SWEEP_POLICY_READS, IntegratorLeaseOps, IntegratorLeaseService, LANDING_QUEUE_LIMITS, LandingQueueOps, LandingQueueService, frontOf, type QueueApproval } from "./index.js";
 
 after(stopServer);
 // Card P10, eleventh slice: the controller's regular round over the bounds that end a stuck first place (`LandingQueueOps.sweepBounds`). Until then both bounds were looked at only when a landing was asked for
@@ -26,7 +26,7 @@ const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match
 type Told = { commandId: string; taskId: string; branch: string; why: "front" | "round" | "returns" | "unassigned" | "released"; text: string };
 
 for (const backend of backends) {
-  const rig = async (o: { cap?: number | (() => Promise<number>); holdMs?: number; releaseMs?: number; gate?: (call: WorkspaceCall) => Promise<void> } = {}) => {
+  const rig = async (o: { cap?: number | (() => Promise<number>); holdMs?: number; releaseMs?: number; sweepPolicyReads?: number; gate?: (call: WorkspaceCall) => Promise<void> } = {}) => {
     const store = await backend.open();
     const w = await buildWorld(store.storage);
     const options = { clock: w.clock.now, pause: async () => undefined };
@@ -40,17 +40,20 @@ for (const backend of backends) {
     /** The landing branch each task is judged on ("main" unless set; "!" cannot be read, "-" names none). */
     const branches = new Map<string, string>();
     const retired = new Set<string>();
+    /** How many landing branches were read (a few settings reads each). */
+    const policyReads = { count: 0 };
     const tells: { taskId: string; to: string; text: string; purpose?: string }[] = [];
     const queue = LandingQueueService.withEpoch(w.storage, w.epoch, options);
     const ops = new LandingQueueOps(queue, {
       approvalOf: async (id) => approvals.get(id),
-      landingBranch: async ({ taskId }) => { const b = branches.get(taskId) ?? "main"; if (b === "!") throw new Error("the landing settings could not be read"); return b === "-" ? undefined : b; },
+      landingBranch: async ({ taskId }) => { policyReads.count++; const b = branches.get(taskId) ?? "main"; if (b === "!") throw new Error("the landing settings could not be read"); return b === "-" ? undefined : b; },
       projectOfTask: async (t) => ((await w.storage.getAggregate({ kind: "task", id: t }))?.body as { projectId?: string } | undefined)?.projectId,
       refreshCap: typeof cap === "function" ? cap : async () => cap ?? 3,
       isDirector: async (by) => directors.has(by.id),
       escalate: async (n) => { if (failing.escalations > 0) { failing.escalations--; throw new Error("the owner could not be told"); } told.push({ commandId: n.commandId, taskId: n.taskId, branch: n.branch, why: n.why, text: n.text }); },
       ...(o.holdMs === undefined ? {} : { holdMs: o.holdMs }),
       ...(o.releaseMs === undefined ? {} : { releaseMs: o.releaseMs }),
+      ...(o.sweepPolicyReads === undefined ? {} : { sweepPolicyReads: o.sweepPolicyReads }),
       holderOf: async (t) => holders.get(t),
       activeAgent: async (id) => !retired.has(id),
       tell: async (n) => { tells.push({ taskId: n.taskId, to: n.to, text: n.text, ...(n.purpose === undefined ? {} : { purpose: n.purpose }) }); },
@@ -94,7 +97,7 @@ for (const backend of backends) {
     };
     const list = () => ops.list(w.owner, { projectId: w.project });
     return {
-      store, w, ops, queue, holders, retired, tells, person, task, branches, submit, takeBack, told, failing, directors, lander, list, calls,
+      store, w, ops, queue, holders, policyReads, retired, tells, person, task, branches, submit, takeBack, told, failing, directors, lander, list, calls,
       head: () => head,
       queued: async () => (await list()).items.map((e) => [e.position, e.taskId]),
       close: () => store.close(),
@@ -225,7 +228,8 @@ for (const backend of backends) {
   });
 
   test(`${backend.name}: a record written before the idle time existed starts its count on a round and ends nothing then (card P10, eleventh slice)`, async () => {
-    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    // A hold bound far away: the round must find the place due for its idle count alone (second review: it reads policies only for a place past a bound).
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR, holdMs: 1_000 * HOUR });
     try {
       const { t1, t2 } = await reservedAway(r);
       const queueId = LandingQueueService.queueIdOf(r.w.project, "main");
@@ -301,6 +305,42 @@ for (const backend of backends) {
       assert.equal((await r.list()).front?.taskId, t2);
       assert.deepEqual((await r.ops.sweepBounds({ throttled: true })).skipped, true, "the next tick at the same moment is skipped");
       assert.equal((await r.ops.sweepBounds()).skipped, undefined, "an unthrottled call walks");
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a round reads no landing policy for a first place within its bounds, and reads at most its budget of policies per walk, then stops (partial) and goes on at the next walk (card P10, eleventh slice second review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR, holdMs: 4 * HOUR, sweepPolicyReads: 1 });
+    try {
+      const main = await reservedAway(r, "-m", "main");
+      const dev = await reservedAway(r, "-d", "dev");
+      r.w.clock.advance(4 * HOUR - MIN);
+      r.policyReads.count = 0;
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 0, released: 0, partial: false }, "both places are within both bounds");
+      assert.equal(r.policyReads.count, 0, "no policy was read for a place within its bounds");
+      r.w.clock.advance(9 * HOUR);
+      // Both places are past the release bound; the budget of one read lets one queue be judged, then the walk stops.
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 1, released: 1, partial: true });
+      assert.equal(r.policyReads.count, 1);
+      assert.equal(released(r).length, 1);
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 1, released: 1, partial: false }, "the next walk reaches the other queue (the first one has nothing due any more)");
+      assert.deepEqual(released(r).map((t) => t.taskId).sort(), [main.t1, dev.t1].sort());
+      assert.equal(BOUNDS_SWEEP_POLICY_READS, 1_000);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a clock set back below the throttled round's last walk walks again at once (card P10, eleventh slice second review)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    try {
+      const { t1, t2 } = await reservedAway(r);
+      r.w.clock.advance(13 * HOUR);
+      // A walk that ends nothing (the follower is judged on another branch for now) still counts as the last walk.
+      r.branches.set(t2, "release");
+      assert.deepEqual(await r.ops.sweepBounds({ throttled: true }), { checked: 0, released: 0, partial: false });
+      r.branches.set(t2, "main");
+      r.w.clock.advance(-HOUR);
+      assert.deepEqual(await r.ops.sweepBounds({ throttled: true }), { checked: 1, released: 1, partial: false }, "a clock set back does not skip");
+      assert.equal((await r.list()).front?.taskId, t2);
+      assert.equal(released(r)[0]?.taskId, t1);
     } finally { await r.close(); }
   });
 }

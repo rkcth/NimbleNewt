@@ -59,12 +59,17 @@ test("the controller's regular round ends a reserved place idle past twelve hour
     const round = async (): Promise<void> => { const t = await c.dispatch!.dispatcher.tick(); const loop = t.loops.find((x: any) => x.name === "landing.queue.bounds"); assert.ok(loop !== undefined, "the round is one of the dispatcher's loops: " + t.loops.map((x: any) => x.name).join(",")); assert.equal(loop.ok, true, JSON.stringify(t.loops.filter((x: any) => !x.ok))); };
     const told = async () => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "task" && i.ref.id === one.task && /reserved place was released/.test(i.detail ?? ""));
     // Just under the bound: nothing.
-    now += 12 * 3_600_000 - 60_000;
+    now += 12 * 3_600_000 - 30_000;
     await round();
     assert.equal((await call(O, "landing.queue.list", { projectId: project })).result.front.taskId, one.task);
     assert.equal((await told()).length, 0);
-    // At the bound the round ends the place by itself; nobody asked to land.
-    now += 60_000;
+    // At the bound, but thirty seconds after the last walk: the dispatcher's round is throttled to one walk a minute, so nothing yet.
+    now += 30_000;
+    await round();
+    assert.equal((await call(O, "landing.queue.list", { projectId: project })).result.front.taskId, one.task, "the dispatcher's round walks at most once a minute");
+    assert.equal((await told()).length, 0);
+    // A minute after the last walk the round ends the place by itself; nobody asked to land.
+    now += 30_000;
     await round();
     const after = (await call(O, "landing.queue.list", { projectId: project })).result;
     assert.deepEqual([after.front.taskId, after.reservations.length, after.items.map((e: any) => e.taskId)], [two.task, 0, [two.task]], JSON.stringify(after));
