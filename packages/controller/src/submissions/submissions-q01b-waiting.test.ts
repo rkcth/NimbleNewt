@@ -27,6 +27,7 @@ for (const backend of backends) {
     ask(by: Principal, projectId?: string): Promise<string[] | undefined>; owner: Principal; project: string; elsewhere: string; svc: SubmissionService;
     agent(name: string, roles: string[], project?: string): Promise<Principal>; mkTask(title: string): Promise<string>; finish(taskId: string, to: "done" | "cancelled"): Promise<void>;
     lone(reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService }; bare(): StatusService; withoutWaiting(): StatusService; scanned(pageSize: number, reads: number): StatusService; listScanned(pageSize: number, reads: number): StatusService; capped(tasks: number): StatusService; count(): Promise<number>; mkTaskIn(projectId: string, title: string): Promise<string>;
+    faulty(fails: (kind: string, id: string) => boolean): StatusService;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -57,6 +58,15 @@ for (const backend of backends) {
       const ask = async (by: Principal, projectId = project): Promise<string[] | undefined> => (await status.ask(by, { kind: "submissions_project", projectId }))?.lines.map((l) => l.text);
       const scanned = (pageSize: number, reads: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, waitingScan: { pageSize, reads } }));
       const listScanned = (pageSize: number, reads: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, listScan: { pageSize, reads } }));
+      // The submission service reads through a store whose `getAggregate` fails for the chosen records; the status service and everything else use the real store.
+      const faulty = (fails: (kind: string, id: string) => boolean): StatusService => {
+        const store = new Proxy(world.storage, { get(target, prop, receiver) {
+          const v = Reflect.get(target, prop, receiver) as unknown;
+          if (prop === "getAggregate") return async (ref: { kind: string; id: string }) => { if (fails(ref.kind, ref.id)) throw new Error("read failed (test)"); return (v as (r: unknown) => Promise<unknown>).call(target, ref); };
+          return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+        } });
+        return withService(SubmissionService.withEpoch(store, epoch, async (id) => roles.get(id) ?? [], svcOptions));
+      };
       const capped = (tasks: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, waitingTasks: tasks }));
       const withoutWaiting = (): StatusService => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) } }, options);
       const lone = (reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService } => { const l = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, reviewersAvailableIn: async () => reviewersAvailable() }); return { svc: l, status: withService(l) }; };
@@ -66,7 +76,7 @@ for (const backend of backends) {
         for (const t of (await projects.listTasks({ projectId: project, limit: 100 })).items) { const l = await svc.list(owner, t.id, { limit: 100 }); total += l.items.length; }
         return total;
       };
-      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, listScanned, capped, count, mkTaskIn: async (projectId: string, title: string) => (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId, title })).id });
+      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, listScanned, capped, count, mkTaskIn: async (projectId: string, title: string) => (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId, title })).id, faulty });
     } finally { await world.close(); }
   });
 
@@ -254,5 +264,18 @@ for (const backend of backends) {
     assert.match(text[0]!, /^7 task\(s\) wait for a reviewer, 0 wait for their author \(changes were asked for\), 0 were approved but the director declined, 4 are approved with no director sign-off yet, 0 are approved and signed off;.* Only the tasks with the newest code were read; more tasks with code may exist\.$/);
     const listed = text.slice(1).map((l) => /"Job (\d\d)"/.exec(l)![1]);
     assert.deepEqual(listed, ["07", "08", "10", "11", "13", "14", "16", "09", "12", "15", "18"]);
+  });
+
+  suite("a read that fails in the middle of a batch fails the whole answer; the task is never left out as if nothing were waiting", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const made: { task: string; sub: string }[] = [];
+    for (let i = 0; i < 12; i++) { const t = await c.mkTask(`Job ${String(i).padStart(2, "0")}`); made.push({ task: t, sub: (await code(c, ann, t, "a")).id }); tick(); }
+    // Newest first: Job 11..04 are the first batch of 8, Job 03..00 the second. Fail one task read and, separately, one submission read, both in the second batch.
+    for (const fails of [(k: string, id: string) => k === "task" && id === made[1]!.task, (k: string, id: string) => k === "submission" && id === made[2]!.sub]) {
+      const status = c.faulty(fails);
+      await assert.rejects(status.ask(c.owner, { kind: "submissions_project", projectId: c.project }), (e: unknown) => !(e instanceof Error && "code" in e && (e as { code: unknown }).code === "not_found"));
+    }
+    // With nothing failing, all 12 are listed.
+    assert.match((await c.faulty(() => false).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines[0]!.text, /^12 task\(s\) wait for a reviewer/);
   });
 }
