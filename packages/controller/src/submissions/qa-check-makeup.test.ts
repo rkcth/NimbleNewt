@@ -6,6 +6,7 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
+import { NotificationService } from "../notifications/index.js";
 import { QaEvidenceService } from "./index.js";
 
 after(stopServer);
@@ -106,6 +107,88 @@ for (const backend of backends) {
       const calls = hookCalls.length;
       await svc.check(qa, { commandId: id, taskId: task });
       assert.deepEqual([delivered.size, hookCalls.length], [0, calls + 1]);
+    } finally { await world.close(); }
+  });
+
+  test(`${backend.name}: the automatic checks make up what a stop after their write lost (the next call has a new command ID), through the controller's notifications, which never bring back a notice the owner cleared (card Q03, eighth slice review)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      const roles = new Map<string, string[]>();
+      const agent = async (nm: string): Promise<Principal> => {
+        await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }] });
+        const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
+        roles.set(p.id, ["qa"]);
+        return p;
+      };
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const plant = async (kind: string, id: string, body: object, update = false): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id, update }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
+      };
+      // The owner's notices exactly as the controller sends them (api/start.ts); a port that can be made to fail stands for the stop after the write.
+      const notifications = NotificationService.withEpoch(world.storage, projects.epoch, options);
+      const hookCalls: string[][] = [];
+      let down = true;
+      const svc = QaEvidenceService.withEpoch(world.storage, projects.epoch, {
+        rolesOf: async (id) => roles.get(id) ?? [],
+        notify: async (x) => { if (down) throw new Error("not delivered"); await notifications.emitFromController({ commandId: x.commandId, kind: "maintenance", level: "notice", ref: { kind: "qa-recheck", id: x.recheckId }, detail: x.text, projectId: x.projectId }); },
+        invalidated: async (e) => { if (down) throw new Error("not run"); hookCalls.push(e.evidence.map((v) => v.evidenceId)); },
+      }, options);
+      const items = async (recheckId: string): Promise<string[]> => (await world.storage.listAggregates("notification-item", { limit: 1000 }))
+        .filter((a) => (a.body as { ref?: { id?: string } }).ref?.id === recheckId).map((a) => (a.body as { state: string }).state);
+      const qa = await agent("qa");
+      const sub = derivedId("sbm", cid("sub"));
+      await plant("submission", sub, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-18T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
+      const contract = (v: number, criteria: string[]) => ({ taskId: task, projectId: project, version: v, changedBy: owner.id, acceptanceCriteria: criteria, priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [{ name: "unit", run: ["true"] }], permissions: [], recovery: "native-continuation" });
+      const setContract = async (v: number, criteria: string[]): Promise<void> => {
+        await plant("task-contract", task, contract(v, criteria), v > 1);
+        await plant("task-contract-version", `${task}.${v}`, { ...contract(v, criteria), changedAt: `2026-11-18T08:0${v}:00.000Z` });
+      };
+      await setContract(1, ["works"]);
+      const ev = { submissionId: sub, criteriaRevision: 1, decisions: [], environment: "linux", observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] };
+      const rec = await svc.record(qa, { commandId: cid("r"), ...ev });
+
+      // A contract change: the automatic check writes, then everything after the write is lost.
+      await setContract(2, ["works", "is fast"]);
+      const lost = await svc.contractChanged(task);
+      assert.deepEqual(lost.invalidated, [rec.id]);
+      const recheck = lost.rechecks[0]!;
+      assert.deepEqual([await items(recheck), hookCalls.length], [[], 0], "the follow-ups were lost");
+
+      // The next automatic call (here the decision pass, then a replay of contract.set) has a new command ID, finds nothing stale, and makes up the follow-ups of the check that wrote the index.
+      down = false;
+      assert.deepEqual(await svc.decisionChanged(task), { taskId: task, invalidated: [], rechecks: [] });
+      assert.deepEqual([await items(recheck), hookCalls], [["queued"], [[rec.id]]]);
+      assert.deepEqual(await svc.contractChanged(task), { taskId: task, invalidated: [], rechecks: [] });
+      assert.deepEqual(await items(recheck), ["queued"], "one notice per re-check, however often it is made up");
+      assert.equal(hookCalls.length, 2);
+
+      // The owner's notice is cleared (the re-check is still pending): a further make-up does not bring it back.
+      assert.deepEqual(await notifications.settleFromController({ commandId: cid("settle"), kind: "maintenance", ref: { kind: "qa-recheck", id: recheck }, projectId: project }), { closed: true });
+      await svc.contractChanged(task);
+      assert.deepEqual(await items(recheck), ["settled"], "a cleared notice is not raised again");
+
+      // A record added since moves the index on: the next automatic call owes nothing for the old check (only a repeat of its own command ID does).
+      await svc.record(qa, { commandId: cid("r"), ...ev, criteriaRevision: 2, environment: "macos" });
+      const calls = hookCalls.length;
+      await svc.contractChanged(task);
+      await svc.decisionChanged(task);
+      assert.equal(hookCalls.length, calls);
+
+      // The same for a check the decision pass started: lost after its write, made up by the next pass.
+      await setContract(3, ["works", "is fast", "is small"]);
+      down = true;
+      const byDecision = await svc.decisionChanged(task);
+      assert.equal(byDecision.invalidated.length, 1, "the record added since");
+      down = false;
+      await svc.decisionChanged(task);
+      assert.deepEqual(hookCalls.at(-1)?.slice().sort(), [...byDecision.invalidated].sort());
+      for (const r of byDecision.rechecks) assert.deepEqual(await items(r), ["queued"]);
     } finally { await world.close(); }
   });
 }

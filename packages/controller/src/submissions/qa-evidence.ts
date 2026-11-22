@@ -127,7 +127,10 @@ export interface QaEvidencePorts {
    * checked against the new evidence). Best effort: a failure never undoes the record and is not the recorder's error; the port reports its own failures.
    */
   readonly recorded?: (e: { readonly evidenceId: string; readonly taskId: string; readonly projectId: string; readonly submissionId: string; readonly source: "self" | "independent" }) => Promise<void>;
-  /** Called after `check` invalidated evidence (not for a repeat, which invalidated nothing new), with each record invalidated. Best effort, like `recorded`. */
+  /**
+   * Called after `check` invalidated evidence, with each record invalidated, and again for a repeat of the same command (card Q03, eighth slice: a stop between the write and this call would lose it). Best
+   * effort, like `recorded`; the port must not do anything twice for the same record (the controller's documentation check is keyed by evidence and decides from the documents' current state).
+   */
   readonly invalidated?: (e: { readonly taskId: string; readonly projectId: string; readonly evidence: readonly { readonly evidenceId: string; readonly submissionId: string }[] }) => Promise<void>;
 }
 
@@ -413,7 +416,7 @@ export class QaEvidenceService {
     const contract = await this.#contract(taskId);
     const index = await this.#index(taskId);
     if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
-    const r = await this.#checkTask(QA_SERVICE, `qa-auto-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId);
+    const r = await this.#checkTask(QA_SERVICE, `qa-auto-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, this.#lastAutomatic(contract.version, index.revision, taskId));
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
@@ -428,11 +431,22 @@ export class QaEvidenceService {
     const contract = await this.#contract(taskId);
     const index = await this.#index(taskId);
     if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
-    const r = await this.#checkTask(QA_SERVICE, `qa-dec-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId);
+    const r = await this.#checkTask(QA_SERVICE, `qa-dec-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, this.#lastAutomatic(contract.version, index.revision, taskId));
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
-  async #checkTask(by: Principal, commandId: string, taskId: string): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
+  /**
+   * The automatic checks (`contractChanged`, `decisionChanged`) name the evidence index revision in their command ID, and a committed check rewrites the index, so after a stop between its write and its
+   * follow-ups the next automatic call (a replay of `contract.set`, the next propagation pass) has a new command ID. The check that could have written the index revision read now is the automatic one at the
+   * revision before it, with the same contract version: its command IDs (both kinds), whose lost follow-ups a call that finds nothing stale makes up. A record added since moved the index on, and then
+   * nothing is looked up (that check's follow-ups are owed only to a repeat of its own ID).
+   */
+  #lastAutomatic(version: number, revision: number | undefined, taskId: string): readonly string[] {
+    if (revision === undefined || revision < 2) return [];
+    return [`qa-auto-${version}-${revision - 1}-${taskId}`, `qa-dec-${version}-${revision - 1}-${taskId}`].map((id) => scopedCommandId(QA_SERVICE.id, id));
+  }
+
+  async #checkTask(by: Principal, commandId: string, taskId: string, previous: readonly string[] = []): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
     let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
     const stale = async (): Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]> => {
       const index = await this.#index(taskId);
@@ -453,6 +467,7 @@ export class QaEvidenceService {
     if (seen.length === 0) {
       // Nothing stale now. If this same command (same caller, same ID) already invalidated evidence, a stop between its write and its notices lost them: make them up (same notice and command IDs, so nothing is doubled).
       await this.#makeUp(scoped, taskId);
+      for (const p of previous) await this.#makeUp(p, taskId);
       return { taskId, invalidated: [], rechecks: [], replayed: false };
     }
     // Another check of the same task at the same moment can do the work first: this one then answers with what that one invalidated (of what this one found stale), not "ask again".
@@ -501,7 +516,7 @@ export class QaEvidenceService {
       const seq = (await this.#runner.storage.getOperation(operationId))?.result.auditSeqs[0];
       if (seq === undefined) return;
       const entry = (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
-      const ids = entry?.seq === seq && entry.operationId === operationId && entry.detail["taskId"] === taskId ? entry.detail["invalidated"] : undefined;
+      const ids = entry?.seq === seq && entry.operationId === operationId && entry.type === "qa.evidence.check" && entry.detail["taskId"] === taskId ? entry.detail["invalidated"] : undefined;
       if (!Array.isArray(ids)) return;
       const evidence: { evidenceId: string; submissionId: string; projectId: string }[] = [];
       for (const id of ids.slice(0, 50)) {
