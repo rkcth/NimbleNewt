@@ -129,7 +129,25 @@ for (const backend of backends) {
       await report(g3, far, "elsewhere");
       assert.deepEqual([(await view(t2)).unresolved, (await view(t1)).unresolved], [1, 7]);
       assert.deepEqual((await view(t2)).items.map((x) => x.deliverableTitle), ["Other task"]);
-      void rev2;
+      // Every record the indexes name is read, not a first page: one unfinished defect reported last, on the task's last deliverable, behind finished ones, still blocks and is counted.
+      const t3 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: p1, title: "T3" })).id;
+      const h1 = await deliverable(p1, t3, "First");
+      const h2 = await deliverable(p1, t3, "Last");
+      for (const d of [h1, h2]) for (let i = 0; i < 6; i++) await svc.withdraw(owner, { commandId: cid("w"), id: (await report(d, rev, `mistaken ${i}`, "minor")).id, reason: "duplicate" });
+      const late = await report(h2, rev2, "the one still open", "minor");
+      assert.deepEqual(await view(t3), { taskId: t3, checked: 13, unresolved: 1, items: [{ id: late.id, severity: "minor", state: "open", finding: "the one still open", deliverableTitle: "Last" }] });
+      // A record an index names that cannot be read is an error (the gate says the defects could not be read), never a defect left out of the count.
+      const swap = async (kind: string, id: string, extra: string): Promise<void> => {
+        const was = (await runner.get(kind, id))!;
+        await runner.command("test.swap", { commandId: cid("sw"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: false, changes: [{ type: "update" as const, ref: { kind, id }, expectedRevision: was.revision, body: { ids: [...(was.body as unknown as { ids: string[] }).ids, extra] } as unknown as JsonObject }], detail: {} }) }));
+      };
+      await swap("defect-index", h1.id, derivedId("dft", cid("ghost")));
+      await assert.rejects(() => gate(t3), (e) => code(e, "integrity"), "a defect the index names but whose record is missing");
+      const t4 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: p1, title: "T4" })).id;
+      await deliverable(p1, t4, "Only");
+      assert.equal((await view(t4)).unresolved, 0);
+      await swap("deliverable-index", t4, derivedId("dlv", cid("ghost")));
+      await assert.rejects(() => gate(t4), (e) => code(e, "integrity"), "a deliverable the index names but whose record is missing");
     } finally { await world.close(); }
   });
 }

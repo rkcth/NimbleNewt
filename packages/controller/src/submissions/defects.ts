@@ -532,13 +532,28 @@ export class DefectService {
    * (`unresolved` counts them all). A defect the owner accepted as it is (`overridden`) is finished: the owner's own decision stands.
    */
   async landing(by: Principal, taskIdValue: string): Promise<DefectsLandingView | undefined> {
-    const read = await this.forTask(by, taskIdValue);
-    if (read === undefined) return undefined;
-    const all = read.deliverables.flatMap((d) => d.defects.map((x) => ({ ...x, deliverableTitle: d.title })));
+    const taskId = checkTaskId(taskIdValue);
+    const task = await this.#runner.get("task", taskId);
+    if (task === undefined || (by.kind !== "owner" && by.kind !== "agent")) return undefined;
+    // Read from the full index records (no paging), and a record an index names but that cannot be read is an error, never a defect left out: the gate must not pass on what it could not see.
+    const all: (DefectBody & { id: string; deliverableTitle: string })[] = [];
+    const ids = ((await this.#runner.get("deliverable-index", taskId))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
+    for (const id of ids) {
+      const agg = await this.#runner.get("deliverable", id);
+      if (agg === undefined) throw new DomainError("integrity", `deliverable ${id} of task ${taskId} is missing`);
+      const d = agg.body as unknown as DeliverableBody;
+      if (!(await this.#readable(by, d, id))) continue;
+      const dids = ((await this.#runner.get("defect-index", id))?.body as unknown as { ids: string[] } | undefined)?.ids ?? [];
+      for (const x of dids) {
+        const f = await this.#runner.get("defect", x);
+        if (f === undefined) throw new DomainError("integrity", `defect ${x} of deliverable ${id} is missing`);
+        all.push({ ...(f.body as unknown as DefectBody), id: x, deliverableTitle: d.title });
+      }
+    }
     const open = all.filter((x) => !isFinished(x.state));
     const rank = (x: DefectBody): number => (x.state === "escalated" ? 0 : 1);
     open.sort((a, b) => rank(a) - rank(b) || DEFECT_SEVERITIES.indexOf(a.severity) - DEFECT_SEVERITIES.indexOf(b.severity) || (a.reportedAt < b.reportedAt ? -1 : a.reportedAt > b.reportedAt ? 1 : 0) || (a.id < b.id ? -1 : 1));
-    return { taskId: checkTaskId(taskIdValue), checked: all.length, unresolved: open.length, items: open.slice(0, LANDING_LISTED).map((x) => ({ id: x.id, severity: x.severity, state: x.state, finding: x.finding.text, deliverableTitle: x.deliverableTitle })) };
+    return { taskId, checked: all.length, unresolved: open.length, items: open.slice(0, LANDING_LISTED).map((x) => ({ id: x.id, severity: x.severity, state: x.state, finding: x.finding.text, deliverableTitle: x.deliverableTitle })) };
   }
 
   /**
