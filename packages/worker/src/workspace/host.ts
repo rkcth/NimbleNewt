@@ -50,6 +50,11 @@ export interface HostWorkspaceCall {
    */
   readonly submission?: ApprovedSubmission;
   /**
+   * A `release` of a submission only (card H12o, permit slice): the controller says a reviewer other than the author approved exactly this submission, so the commit is a review-gate permit commit (it carries the
+   * permit's marks and is listed in the host's permit ledger, and a landing that requires the permit accepts it). Absent: a plain platform commit, as before. Refused on anything but a release of a submission.
+   */
+  readonly permit?: true;
+  /**
    * A `landing` only (card P09): the tree the controller's landing checks ran on. The landing is then made only when the checkout's head commit still has exactly this tree; otherwise it is refused and nothing is written (the
    * checks would not be about what lands).
    */
@@ -136,7 +141,7 @@ export interface WorkspaceHostOptions {
   readonly security?: (event: HostSecurityEvent) => void | Promise<void>;
   /**
    * Whether this host commits a task's work in its own checkout when asked for `release` (card H12o). Off: `release` is answered with a typed refusal, as before (the remote host, whose landing policy is its own configuration,
-   * does not carry it yet). On: the commit is the platform's (see `GitBridge.release`), not a permit commit, and the owner's landing policy is read first (an unreadable policy refuses the release).
+   * does not carry it yet). On: the commit is the platform's (see `GitBridge.release`), a permit commit only for a reviewer-approved submission the controller marks `permit`, and the owner's landing policy is read first (an unreadable policy refuses the release).
    */
   readonly release?: boolean;
   readonly attemptsQuiet?: (attemptIds: readonly string[], call: { readonly taskId: string; readonly projectId: string }) => Promise<boolean> | boolean;
@@ -168,6 +173,7 @@ export class WorkspaceHost {
     if (typeof operation !== "string" || !OPERATIONS.includes(operation)) return no(`the operation ${JSON.stringify(String(operation).slice(0, 30))} is not one this host knows`);
     if (!plainName(taskId) || !plainName(projectId)) return no("the task or project name is malformed");
     if (call.submission !== undefined && ((operation !== "release" && operation !== "landing") || !isApprovedSubmission(call.submission))) return no(operation !== "release" && operation !== "landing" ? "only a release commits a submission, and a landing lands one" : "the submission named is not of the controller's form (an ID, a full base commit and a tree)");
+    if (call.permit !== undefined && (call.permit !== true || operation !== "release" || call.submission === undefined)) return no("only a release of an approved submission can be a permit commit");
     if (call.reappliedFrom !== undefined && (operation !== "landing" || call.submission === undefined || call.reappliedFrom === null || typeof call.reappliedFrom !== "object" || !isApprovedSubmission({ id: call.submission.id, base: (call.reappliedFrom as { base?: unknown }).base, tree: (call.reappliedFrom as { tree?: unknown }).tree }) || Object.keys(call.reappliedFrom).some((k) => k !== "base" && k !== "tree"))) return no("only a landing of a submission names the base and tree it was approved on, as full object IDs");
     if (call.checkedTree !== undefined && (operation !== "landing" || typeof call.checkedTree !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(call.checkedTree))) return no(operation !== "landing" ? "only a landing names the tree its checks ran on" : "the checked tree is not a full object ID");
     if (typeof reason !== "string" || reason.length < 1 || reason.length > 500) return no("the reason is missing or too long");
@@ -432,7 +438,7 @@ export class WorkspaceHost {
 
   /**
    * A release (card H12o): the work the checkout holds is committed in the checkout's own git directory by the platform (`GitBridge.release`), so that a landing finds a commit and not loose files. The owner's landing policy is
-   * read first and a policy that cannot be read refuses the release (nothing is guessed). The commit is not a permit commit: a landing that requires the permit (the default) still refuses it, and the answer says so. Protected
+   * read first and a policy that cannot be read refuses the release (nothing is guessed). The commit is not a permit commit unless the controller marked a reviewer-approved submission `permit`: a landing that requires the permit (the default) refuses any other, and the answer says so. Protected
    * paths are committed like the rest (the commit is in the checkout, not in the shared tree) and named, because a landing keeps them for review. The shared tree is never read or written.
    */
   async #release(call: HostWorkspaceCall, where: CheckoutLocation): Promise<HostWorkspaceOutcome> {
@@ -442,7 +448,7 @@ export class WorkspaceHost {
     if (policy !== undefined && typeof policy.refuse === "string") return no(cut(policy.refuse));
     const patterns = [...(policy?.protectDefaults === false ? [] : DEFAULT_PROTECTED_PATHS), ...(policy?.protectedPaths ?? [])];
     let made;
-    try { made = await git.release({ gitDir: where.gitDir, checkout: where.checkout, requestId: call.requestId, taskId: call.taskId, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), ...(call.submission === undefined ? {} : { submission: call.submission }) }); } catch (error) {
+    try { made = await git.release({ gitDir: where.gitDir, checkout: where.checkout, requestId: call.requestId, taskId: call.taskId, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), ...(call.submission === undefined ? {} : { submission: call.submission }), ...(call.permit === true ? { permit: true } : {}) }); } catch (error) {
       this.#flag(call, error);
       if (error instanceof WorkspaceError && error.code !== "unavailable") return no(cut(error.message));
       throw error;
@@ -450,10 +456,14 @@ export class WorkspaceHost {
     const held = made.files.filter((f) => isProtectedPath(f.path, patterns)).map((f) => f.path.slice(0, 200));
     const ignored = made.ignored.length;
     if (made.commitId === undefined) return { ok: true, summary: `the checkout holds no change from its head; nothing to commit${ignored === 0 ? "" : ` (${ignored} ignored file(s) are not committed and keep a landing from starting)`}`, detail: { committed: false, files: 0, ignored, changed: false } };
-    const needsPermit = policy?.requirePermit !== false;
+    const permitted = made.permitted === true;
+    // A permit commit lands under requirePermit only when every other commit of the checkout since its base is one too (what the landing checks): an agent's own commit under the approved base still refuses it.
+    let others = 0;
+    if (permitted && policy?.requirePermit !== false) { try { others = (await git.unpermitted({ gitDir: where.gitDir, taskId: call.taskId })).length; } catch { others = 1; } }
+    const needsPermit = policy?.requirePermit !== false && (!permitted || others > 0);
     const sub = call.submission === undefined ? {} : { submission: call.submission.id, recovered: made.recovered === true };
-    const summary = `${made.recovered === true ? `submission ${call.submission!.id} was already committed in the checkout as ${made.commitId.slice(0, 12)} (no second commit was made)` : `${made.files.length} file(s)${call.submission === undefined ? "" : ` of approved submission ${call.submission.id}`} committed in the checkout as ${made.commitId.slice(0, 12)}`}${held.length === 0 ? "" : `; ${held.length} protected path(s) are kept for review when it lands`}${ignored === 0 ? "" : `; ${ignored} ignored file(s) are not committed and keep a landing from starting`}${needsPermit ? "; the commit is not a review-gate permit commit, so a landing that requires the permit will refuse it" : ""}`;
-    return { ok: true, summary: cut(summary), detail: { committed: true, commit: made.commitId, parent: made.parent, tree: made.tree, files: made.files.length, ignored, protectedHeld: held.slice(0, HOST_LIMITS.keptListed), permitRequiredToLand: needsPermit, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), ...sub, changed: made.recovered !== true } };
+    const summary = `${made.recovered === true ? `submission ${call.submission!.id} was already committed in the checkout as ${made.commitId.slice(0, 12)} (no second commit was made)` : `${made.files.length} file(s)${call.submission === undefined ? "" : ` of approved submission ${call.submission.id}`} committed in the checkout as ${made.commitId.slice(0, 12)}`}${held.length === 0 ? "" : `; ${held.length} protected path(s) are kept for review when it lands`}${ignored === 0 ? "" : `; ${ignored} ignored file(s) are not committed and keep a landing from starting`}${!needsPermit ? "" : permitted ? "; other commits of the checkout are not review-gate permit commits, so a landing that requires the permit will refuse them" : "; the commit is not a review-gate permit commit, so a landing that requires the permit will refuse it"}`;
+    return { ok: true, summary: cut(summary), detail: { committed: true, commit: made.commitId, parent: made.parent, tree: made.tree, files: made.files.length, ignored, protectedHeld: held.slice(0, HOST_LIMITS.keptListed), permitRequiredToLand: needsPermit, ...(where.attemptId === undefined ? {} : { attemptId: where.attemptId }), ...sub, ...(call.submission === undefined ? {} : { permitted }), changed: made.recovered !== true } };
   }
 
   /**

@@ -680,16 +680,19 @@ export class GitBridge {
    * that unsets `filter`, `ident`, `text` and the working-tree encoding for every path. A Git-named entry, a link or a submodule anywhere refuses the whole commit (`stage`). The head moves from the head it was staged on
    * to the new commit only (a compare-and-swap), and the commit is listed in the release ledger before the head moves. Nothing to commit is not an error: it answers `commitId: undefined`.
    */
-  async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string; submission?: ApprovedSubmission }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[]; recovered?: boolean }> {
+  async release(options: { gitDir: string; checkout: string; requestId: string; taskId: string; attemptId?: string; submission?: ApprovedSubmission; permit?: boolean }): Promise<{ commitId?: string; parent: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[]; recovered?: boolean; permitted?: boolean }> {
     if (!/^wsr-[a-z2-7]{20}$/.test(options.requestId)) throw new WorkspaceError("invalid_path", "a release names a request ID of the controller's form");
     if (!/^[A-Za-z0-9._:-]{1,120}$/.test(options.taskId) || (options.attemptId !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(options.attemptId))) throw new WorkspaceError("invalid_path", "a release names a plain task and attempt");
     const submission = options.submission;
     if (submission !== undefined && !isApprovedSubmission(submission)) throw new WorkspaceError("invalid_path", "a release of a submission names a submission ID and a full base commit and tree");
     // Card H12o: a submission's commit is made once. One this checkout already made (listed in the release ledger against the submission, still in the head's history, with the approved parent and tree) is the
     // answer, whatever happened after it (a controller that stopped before it recorded the commit, a retry under another request ID, more work written on top since).
+    // Card H12o (permit slice): `permit` is the controller saying a reviewer other than the author approved exactly this submission; it makes the commit a review-gate permit commit (marks and a permit-ledger line). It
+    // means nothing without a submission, so it is refused then.
+    if (options.permit === true && submission === undefined) throw new WorkspaceError("invalid_path", "a permit commit is made only for an approved submission");
     if (submission !== undefined) {
       const earlier = await this.#releasedFor(options.gitDir, submission);
-      if (earlier !== undefined) return { commitId: earlier.commitId, parent: submission.base, tree: submission.tree, files: earlier.files, ignored: [], recovered: true };
+      if (earlier !== undefined) return { commitId: earlier.commitId, parent: submission.base, tree: submission.tree, files: earlier.files, ignored: [], recovered: true, permitted: (await this.unpermitted({ gitDir: options.gitDir, taskId: options.taskId, range: { base: submission.base, head: earlier.commitId } })).length === 0 };
     }
     const staged = await this.stage(options);
     if (submission !== undefined) {
@@ -699,17 +702,20 @@ export class GitBridge {
       if (staged.files.length === 0) throw new WorkspaceError("stale", `submission ${submission.id} holds no change from the commit it is based on; nothing was committed`);
     }
     if (staged.files.length === 0) return { parent: staged.base, tree: staged.tree, files: [], ignored: staged.ignored };
-    const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`]), ...(submission === undefined ? [] : [`NimbleNewt-Submission: ${submission.id}`])];
+    const permitted = options.permit === true && submission !== undefined && TRAILER_VALUE.test(options.taskId) && TRAILER_VALUE.test(options.requestId);
+    const trailers = [`NimbleNewt-Task: ${options.taskId}`, `NimbleNewt-Release: ${options.requestId}`, ...(options.attemptId === undefined ? [] : [`NimbleNewt-Attempt: ${options.attemptId}`]), ...(submission === undefined ? [] : [`NimbleNewt-Submission: ${submission.id}`]), ...(permitted ? [`NimbleNewt-Request: ${options.requestId}`] : [])];
     const message = submission === undefined
       ? `Work of task ${options.taskId}${options.attemptId === undefined ? "" : ` (attempt ${options.attemptId})`}\n\nCommitted by NimbleNewt after the agent reported the work done; ${staged.files.length} file(s). Not a reviewed commit.\n\n${trailers.join("\n")}\n`
-      : `Approved submission ${submission.id} of task ${options.taskId}\n\nCommitted by NimbleNewt after the submission was approved; ${staged.files.length} file(s), exactly the submitted tree on the submitted base. Not a review-gate permit commit.\n\n${trailers.join("\n")}\n`;
+      : `Approved submission ${submission.id} of task ${options.taskId}\n\nCommitted by NimbleNewt after the submission was approved; ${staged.files.length} file(s), exactly the submitted tree on the submitted base. ${permitted ? "A permit commit: a reviewer other than its author approved exactly this tree on this base." : "Not a review-gate permit commit."}\n\n${trailers.join("\n")}\n`;
     const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
     const commitId = (await this.#run(["commit-tree", staged.tree, "-p", staged.base, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
     if (!COMMIT.test(commitId)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
     // The ledger line names the submission (a fourth field), so a later release of the same submission finds this commit instead of making another.
     await appendFile(releaseLedgerPath(options.gitDir), `${commitId} ${options.requestId} ${options.attemptId ?? "-"}${submission === undefined ? "" : ` ${submission.id}`}\n`, { mode: 0o600 });
+    // A permit commit is listed in the permit ledger before the head moves, as `commit()` does, so a commit on the branch is always listed.
+    if (permitted) await appendFile(permitLedgerPath(options.gitDir), `${commitId} ${options.requestId}\n`, { mode: 0o600 });
     await this.#run(["update-ref", "HEAD", commitId, staged.base], { gitDir: options.gitDir });
-    return { commitId, parent: staged.base, tree: staged.tree, files: staged.files, ignored: staged.ignored, ...(submission === undefined ? {} : { recovered: false }) };
+    return { commitId, parent: staged.base, tree: staged.tree, files: staged.files, ignored: staged.ignored, ...(submission === undefined ? {} : { recovered: false, permitted }) };
   }
 
   /**
