@@ -328,6 +328,25 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
+  test(`${backend.name}: a walk stopped by its read budget is carried on from that queue at the next walk, so a queue that stays past its bound with nothing judged behind it does not keep the later queues from being reached (card P10, eleventh slice re-check)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR, holdMs: 1_000 * HOUR, sweepPolicyReads: 1 });
+    try {
+      const main = await reservedAway(r, "-m", "main");
+      const dev = await reservedAway(r, "-d", "dev");
+      // The queue the scan reaches first stays past its bound: its follower is judged on another branch, so a read is spent on it each walk and nothing is ended.
+      const order = (await r.queue.queuesWithEntries()).queues.map((q) => q.branch);
+      assert.equal(order.length, 2);
+      const [stuck, later] = order[0] === "main" ? [main, dev] : [dev, main];
+      r.branches.set(stuck.t2, "elsewhere");
+      r.w.clock.advance(13 * HOUR);
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 0, released: 0, partial: true }, "the budget is spent on the first queue");
+      assert.equal(released(r).length, 0);
+      assert.deepEqual(await r.ops.sweepBounds(), { checked: 1, released: 1, partial: true }, "the next walk starts at the queue where the last one stopped");
+      assert.deepEqual(released(r).map((t) => t.taskId), [later.t1]);
+      assert.equal((await r.list()).front?.taskId, main === stuck ? main.t1 : main.t2);
+    } finally { await r.close(); }
+  });
+
   test(`${backend.name}: a clock set back below the throttled round's last walk walks again at once (card P10, eleventh slice second review)`, async () => {
     const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
     try {

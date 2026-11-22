@@ -104,6 +104,11 @@ export class LandingQueueOps {
   readonly #options: LandingQueueOpsOptions;
   /** When the throttled bounds round last walked the queues (the queue's clock, in ms); in memory only, so a restart walks at its first round. */
   #lastSweepAt: number | undefined;
+  /**
+   * The queue at which the last bounds round stopped at its read budget (in memory only): the next round starts there and goes round the list, so queues late in the scan are reached even while queues before them
+   * stay past a bound with nothing judged behind them and spend the budget each round (card P10, eleventh slice re-check).
+   */
+  #sweepResumeAt: string | undefined;
   constructor(queue: LandingQueueService, options: LandingQueueOpsOptions) { this.#queue = queue; this.#options = options; }
 
   /** The owner, or an integrator of the project (exact right, no task credential). */
@@ -309,7 +314,7 @@ export class LandingQueueOps {
    * setting can name another branch than its project's), so the round acts only when at least one waiting entry of another task is judged on this queue's branch now; a branch that cannot be read, or names
    * none, does not count (fail closed). One queue's failure does not stop the others. With `throttled` (the dispatcher's call, every tick) the walk runs at most once per `BOUNDS_SWEEP_EVERY_MS` of the queue's
    * clock (the bounds are hours; the walk reads up to 50 pages of queue records). The waiting tasks' landing branches are read only for a first place past one of the bounds (or a reserved place whose idle count
-   * has not started), at most `BOUNDS_SWEEP_POLICY_READS` per walk (then the walk stops, `partial`). Answers how many places it ended and how many queues past a bound with work waiting behind it it looked at;
+   * has not started), at most `BOUNDS_SWEEP_POLICY_READS` per walk (then the walk stops, `partial`, and the next walk starts at the queue where it stopped). Answers how many places it ended and how many queues past a bound with work waiting behind it it looked at;
    * never throws for a queue.
    */
   async sweepBounds(options: { readonly throttled?: boolean } = {}): Promise<{ checked: number; released: number; partial: boolean; skipped?: true }> {
@@ -323,7 +328,13 @@ export class LandingQueueOps {
     let partial = walk.partial, checked = 0, released = 0, reads = 0;
     const holdMs = this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS, budget = this.#options.sweepPolicyReads ?? BOUNDS_SWEEP_POLICY_READS;
     const now = Date.parse(this.#queue.now());
-    walking: for (const q of walk.queues) {
+    // Start where the last round stopped at its budget (that queue, or the first one after it when it is gone), then go round.
+    const resumeAt = this.#sweepResumeAt;
+    const exact = resumeAt === undefined ? -1 : walk.queues.findIndex((q) => q.queueId === resumeAt);
+    const start = resumeAt === undefined ? 0 : exact >= 0 ? exact : Math.max(0, walk.queues.findIndex((q) => q.queueId > resumeAt));
+    const order = [...walk.queues.slice(start), ...walk.queues.slice(0, start)];
+    this.#sweepResumeAt = undefined;
+    walking: for (const [i, q] of order.entries()) {
       try {
         const head = frontOf(q);
         const front = q.front;
@@ -336,7 +347,8 @@ export class LandingQueueOps {
         let behind = false;
         for (const e of q.entries) {
           if (e.taskId === head.taskId) continue;
-          if (reads >= budget) { partial = true; break walking; }
+          // The next round starts at this queue; when it was this round's first queue (more reads than the budget), at the next one, so each round moves on.
+          if (reads >= budget) { partial = true; this.#sweepResumeAt = (i === 0 ? order[1]?.queueId : undefined) ?? q.queueId; break walking; }
           reads++;
           let landing: string | undefined;
           try { landing = await this.#options.landingBranch({ taskId: e.taskId, projectId: q.projectId }); } catch { continue; }
