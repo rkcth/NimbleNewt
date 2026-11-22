@@ -49,8 +49,8 @@ for (const backend of backends) {
     };
     // The port the controller builds (`start.ts` maps the assignment's bare agent ID to the principal's `agent:` form), with a hook that runs right after the attempt was read.
     const port = (gap: () => Promise<void>): AttemptOf => { const of = attemptOfAssignments(assign); return async (taskId) => { const a = await of(taskId); await gap(); return a === undefined ? undefined : { ...a, ownerId: `agent:${a.ownerId}` }; }; };
-    const svc = (attemptOf: AttemptOf) => SubmissionService.withEpoch(world.storage, projects.epoch, async () => ["author"], { ...options, attemptOf });
-    return { assign, agent, task, admit, port, svc, owner, world };
+    const svc = (attemptOf: AttemptOf, clock = options.clock) => SubmissionService.withEpoch(world.storage, projects.epoch, async () => ["author"], { ...options, clock, attemptOf });
+    return { assign, agent, task, admit, port, svc, owner, world, projects, epoch: projects.epoch };
   };
   const code = (taskId: string, tree = T1) => ({ commandId: cid("s"), taskId, kind: "code" as const, role: "author", base: BASE, tree, patchId: PATCH });
   const refused = async (run: () => Promise<unknown>, match: RegExp): Promise<void> => assert.rejects(run, (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, "forbidden", e.message); assert.match(e.message, match); return true; });
@@ -122,11 +122,60 @@ for (const backend of backends) {
       const a = (await c.assign.getAssignment(t))!;
       await c.assign.finishAttempt({ commandId: cid("f"), actor: c.owner.id, taskId: t, expectedRevision: a.revision, fence: { generation, attemptId }, outcome: "failed" });
     }));
-    await refused(() => s.record(ann, code(t)), /attempt changed while/);
+    const first = code(t);
+    await refused(() => s.record(ann, first), /attempt changed while/);
     const next = await c.admit(t, "ann");
-    const r = await s.record(ann, code(t, T2));
+    // the refused command's ID is not used up: the same command sent again is recorded under the now-current attempt
+    const r = await s.record(ann, first);
+    assert.equal(r.replayed, false);
     assert.equal((await s.get(ann, r.id))?.attemptId, next.attemptId);
     assert.equal(await recorded(s, ann, t), 1);
+    const other = await s.record(ann, code(t, T2));
+    assert.equal((await s.get(ann, other.id))?.attemptId, next.attemptId);
+    assert.equal(await recorded(s, ann, t), 2);
+  });
+
+  suite("two controllers: the other controller ends the attempt between this one's check and write; nothing is recorded", async (c) => {
+    const ann = await c.agent("ann"), t = await c.task();
+    const { attemptId, generation } = await c.admit(t, "ann");
+    const otherAssign = AssignmentService.withEpoch(c.world.storage, c.epoch, c.projects, options);
+    let ended = false;
+    const s = c.svc(c.port(async () => {
+      if (ended) return; ended = true;
+      const a = (await otherAssign.getAssignment(t))!;
+      await otherAssign.finishAttempt({ commandId: cid("f"), actor: c.owner.id, taskId: t, expectedRevision: a.revision, fence: { generation, attemptId }, outcome: "abandoned" });
+    }));
+    await refused(() => s.record(ann, code(t)), /attempt changed while/);
+    assert.equal(await recorded(s, ann, t), 0);
+  });
+
+  suite("a duplicate whose original is recorded and whose attempt then ends while the duplicate is between its check and write answers with the original record, not a refusal", async (c) => {
+    const ann = await c.agent("ann"), t = await c.task();
+    const { attemptId, generation } = await c.admit(t, "ann");
+    const cmd = code(t);
+    const plain = c.svc(c.port(async () => undefined));
+    let original: Awaited<ReturnType<SubmissionService["record"]>> | undefined;
+    // The duplicate runs a moment later (another clock), as a resend does: its write is not byte-identical to the original's, so storage does not simply replay it.
+    const late = c.svc(c.port(async () => {
+      if (original !== undefined) return;
+      original = await plain.record(ann, cmd);
+      const a = (await c.assign.getAssignment(t))!;
+      await c.assign.finishAttempt({ commandId: cid("f"), actor: c.owner.id, taskId: t, expectedRevision: a.revision, fence: { generation, attemptId }, outcome: "succeeded" });
+    }), () => "2026-11-22T10:00:01.000Z");
+    const dup = await late.record(ann, cmd);
+    assert.ok(original !== undefined);
+    assert.deepEqual([dup.id, dup.replayed], [original.id, true]);
+    assert.equal(await recorded(plain, ann, t), 1);
+    assert.equal((await plain.get(ann, dup.id))?.attemptId, attemptId);
+  });
+
+  suite("two controllers: the same submission sent to both at once is recorded once and both answer with it", async (c) => {
+    const ann = await c.agent("ann"), t = await c.task();
+    await c.admit(t, "ann");
+    const cmd = code(t);
+    const [x, y] = await Promise.all([c.svc(c.port(async () => undefined)).record(ann, cmd), c.svc(c.port(async () => undefined)).record(ann, cmd)]);
+    assert.equal(x.id, y.id);
+    assert.equal(await recorded(c.svc(c.port(async () => undefined)), ann, t), 1);
   });
 
   suite("the assignment port names both records it read at their revisions, and each guard is checked on its own", async (c) => {
