@@ -784,6 +784,8 @@ export interface StatusOptions extends RunnerOptions {
 export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, since: 40 } as const;
 /** How many references or links one replay chat line names before it counts the rest (card U09): a step may cite up to 100, which would make one line many kilobytes once quoted. */
 const REPLAY_LINE_ITEMS = 12;
+/** How many `submission.list` pages (of 100) the `submissions` view follows (card Q01b): each page scans at most the service's bounded number of rows, so the view's cost is bounded and a scan that stops early says so. */
+const SUBMISSION_VIEW_PAGES = 5;
 /** How many document changes the `docs` view lists for one flagged document (card Q03b); it says when there are more. */
 const DOC_CANDIDATES = 3;
 /** How many names of one stand-up's roster the stand-ups answer lists before counting the rest (card M03h): a roster may hold 50 principals. */
@@ -2348,17 +2350,34 @@ export class StatusService {
     if (!this.#mayReadTask(by, body.projectId, taskId)) return undefined;
     const at = this.#runner.now();
     if (this.#deps.submissions === undefined) return { observedAt: at, lines: [line("Submissions are not kept on this controller.", cite("task", taskId))] };
-    let found: Awaited<ReturnType<SubmissionService["list"]>>;
-    try { found = await this.#deps.submissions.list(by, taskId, { limit: 100 }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
-    const partial = found.next !== undefined || found.scanLimited === true ? " Only part of the stored submissions was looked at, so older ones, or others, may exist." : "";
+    // `list` walks the submission table in ID order, not time order, so one page is not "the newest": the pages are followed (at most SUBMISSION_VIEW_PAGES calls) and sorted here; a scan that stops early says so.
+    const items: Awaited<ReturnType<SubmissionService["list"]>>["items"] = [];
+    let cursor: string | undefined;
+    let more = false;
+    for (let call = 0; call < SUBMISSION_VIEW_PAGES; call++) {
+      let page: Awaited<ReturnType<SubmissionService["list"]>>;
+      try { page = await this.#deps.submissions.list(by, taskId, { limit: 100, ...(cursor === undefined ? {} : { afterId: cursor }) }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+      items.push(...page.items);
+      cursor = page.next;
+      more = cursor !== undefined;
+      if (!more) break;
+    }
+    const found = { items };
+    const partial = more ? " Not every stored submission was looked at, so newer or older ones may exist; \"newest\" here means the newest of those read." : "";
     const title = shown(body.title);
     if (found.items.length === 0) return { observedAt: at, lines: [line(`Nothing you may read has been submitted on ${title} yet: no code, review, QA report, document change or director sign-off.${partial}`, cite("task", taskId))] };
     const newestFirst = [...found.items].sort((x, y) => (x.submittedAt < y.submittedAt ? 1 : x.submittedAt > y.submittedAt ? -1 : x.id < y.id ? 1 : -1));
     const count = (k: string): number => newestFirst.filter((i) => i.kind === k).length;
-    const lines: Line[] = [line(`${newestFirst.length} submission(s) of ${title} on record, newest first: ${count("code")} code, ${count("review")} review, ${count("qa")} QA, ${count("document")} document, ${count("signoff")} sign-off.${partial}`, cite("task", taskId))];
+    const lines: Line[] = [line(`${newestFirst.length} submission(s) of ${title} ${by.kind === "owner" ? "on record" : "you may read"}, newest first: ${count("code")} code, ${count("review")} review, ${count("qa")} QA, ${count("document")} document, ${count("signoff")} sign-off.${partial}`, cite("task", taskId))];
     const codes = newestFirst.filter((i) => i.kind === "code");
     if (codes.length === 0) lines.push(line(`No code has been submitted on ${title} yet, so there is nothing for a reviewer or a director to approve and nothing to land.`, cite("task", taskId)));
     for (const [index, c] of codes.slice(0, 5).entries()) {
+      // The review and sign-off records are not the caller's to read unless it is the owner or the code's author (who is told them when a landing is refused); a reviewer asked to review this code reads only it,
+      // so it is not shown other reviewers' verdicts or the director's decision here.
+      if (by.kind !== "owner" && c.submittedBy !== by.id) {
+        lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Its review and director sign-off state are shown to the owner and its author only.${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
+        continue;
+      }
       const a = await this.#deps.submissions.approvalOf(c.id);
       let review: string;
       if (a === undefined) review = "unknown";
@@ -2368,7 +2387,9 @@ export class StatusService {
       const d = a?.director;
       const director = d === undefined ? "none" : d.newest === "approve" ? `approved by ${shown(d.by, 80)}` : `declined by ${shown(d.by, 80)} (a project that requires the director check does not land it)`;
       const ev = c.evidence.length === 0 ? "" : ` Its author's own check evidence: ${c.evidence.filter((e) => e.result === "pass").length} pass, ${c.evidence.filter((e) => e.result === "fail").length} fail, ${c.evidence.filter((e) => e.result === "not_run").length} not run.`;
-      lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Review: ${review}. Director sign-off: ${director}.${ev}${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
+      // The landing gate counts an approval or a sign-off only for the patch it was given on (a landing whose change differs needs a new one), so an approval is not shown as more than that.
+      const bound = a !== undefined && (a.approved || d?.newest === "approve") ? " An approval counts at landing only while the change's patch stays the one approved." : "";
+      lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Review: ${review}. Director sign-off: ${director}.${bound}${ev}${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
     }
     if (codes.length > 5) lines.push(line(`${codes.length - 5} older code submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
     const others = newestFirst.filter((i) => i.kind !== "code");
