@@ -234,7 +234,8 @@ export class LandingQueueOps {
     // The first place: the entry or reserved place with the lowest number (card P10). A reserved place waiting for its task's approval holds the branch: nothing else lands before it.
     const head = frontOf(q);
     // A reserved place whose work is away has held the branch too long: the controller ends it and this landing is judged again on the queue as it is then (the place is gone, so this cannot repeat).
-    if (head !== undefined && head.entry === undefined && head.taskId !== call.taskId && await this.#releaseIdle(call.projectId, branch, q.front, head.taskId)) return this.checkLanding(by, call);
+    // Only a queued submission waiting behind the place asks for that: a landing of a task with nothing queued (the owner's unqueued landing included) is refused as before and ends nothing.
+    if (mine !== undefined && head !== undefined && head.entry === undefined && head.taskId !== call.taskId && await this.#releaseIdle(call.projectId, branch, q.front, head.taskId)) return this.checkLanding(by, call);
     const behind = (message: string): Promise<never> => this.#heldTooLong(call.projectId, branch, q.front, head?.entry === undefined).then(() => { throw new DomainError("invalid_transition", message); });
     const firstIs = head === undefined ? "" : head.entry === undefined ? `task ${head.taskId} holds the first place (reserved after its author reached the refresh-round cap) and waits for its approved submission (the owner, an integrator or a director may take it out with landing.queue.remove, which lets the others land)` : `the oldest (${head.entry.submissionId}, task ${head.taskId}${head.reservation === undefined ? "" : ", a reserved place"})`;
     if (mine === undefined) {
@@ -292,9 +293,9 @@ export class LandingQueueOps {
    * wins), tells the task's holder (the task goes to the back when its refreshed work is approved) and the director and the owner. Best effort: answers whether the place was ended; a failure leaves the queue as it was.
    */
   async #releaseIdle(projectId: string, branch: string, front: LandingQueueFront | undefined, taskId: string): Promise<boolean> {
-    if (front === undefined || front.taskId !== taskId) return false;
+    if (front === undefined || front.taskId !== taskId || front.idleSince === undefined) return false;
     const releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS;
-    const idle = Date.parse(front.idleSince ?? front.since), now = Date.parse(this.#queue.now());
+    const idle = Date.parse(front.idleSince), now = Date.parse(this.#queue.now());
     if (!Number.isFinite(idle) || !Number.isFinite(now) || now - idle < releaseMs) return false;
     let ended: LandingReservation | undefined;
     try { ended = await this.#queue.releaseIdle({ projectId, branch, taskId, since: front.since, olderThanMs: releaseMs }); } catch { return false; }

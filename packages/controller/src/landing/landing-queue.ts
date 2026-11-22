@@ -63,7 +63,7 @@ export interface LandingQueueFront {
   readonly taskId: string;
   readonly since: string;
   readonly escalated?: true;
-  /** Since when the first place has had NO approved entry (a reserved place waiting for its task's refreshed work); absent while it has one. The bounded hold of a reserved place counts from here (card P10, eighth slice). */
+  /** Since when the first place has had NO approved entry (a reserved place waiting for its task's refreshed work); absent while it has one, and in a record written before it existed (set again at the next write of the queue). The bounded hold of a reserved place counts from here (card P10, eighth slice). */
   readonly idleSince?: string;
 }
 /**
@@ -442,7 +442,7 @@ export class LandingQueueService {
   /**
    * Ends the reserved place of `taskId` when it has held the branch without an approved entry for `olderThanMs` or longer (card P10, eighth slice: no submission waits forever behind a place whose work was returned
    * to its author). The judgment is made INSIDE the write, on the stored record: the task must still be the first place (the same `front.since`), have no entry, hold the reservation, and have been idle since
-   * `front.idleSince` (else `front.since`) for at least `olderThanMs`. Answers the reservation it ended, or undefined when the queue no longer shows that (another task is first, approved work came back, the
+   * `front.idleSince` for at least `olderThanMs` (a record without it, written before it existed, is not ended). Answers the reservation it ended, or undefined when the queue no longer shows that (another task is first, approved work came back, the
    * place was taken out, the time is not yet up, or a repeat of the same release). A later reservation of the task is a new one.
    */
   async releaseIdle(command: { projectId: string; branch: string; taskId: string; since: string; olderThanMs: number }): Promise<LandingReservation | undefined> {
@@ -455,7 +455,8 @@ export class LandingQueueService {
         const current = await this.#runner.get(KIND, queueId);
         const q = current?.body as unknown as LandingQueueBody | undefined;
         const first = q === undefined ? undefined : frontOf(q);
-        const idle = q?.front === undefined ? NaN : Date.parse(q.front.idleSince ?? q.front.since), now = Date.parse(this.#runner.now());
+        // A record written before `idleSince` existed has none: its idle time is unknown, so nothing is ended until a write of the queue starts the clock (the first place's `since` may be a day as an approved entry).
+        const idle = q?.front?.idleSince === undefined ? NaN : Date.parse(q.front.idleSince), now = Date.parse(this.#runner.now());
         const r = q?.reservations?.find((x) => x.taskId === command.taskId);
         if (q === undefined || current === undefined || r === undefined || first === undefined || first.taskId !== command.taskId || first.entry !== undefined || q.front?.taskId !== command.taskId || q.front.since !== command.since
           || !Number.isFinite(idle) || !Number.isFinite(now) || now - idle < command.olderThanMs) throw new DomainError("invalid_transition", NOTHING);

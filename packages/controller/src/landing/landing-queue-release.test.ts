@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
+import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { buildWorld } from "../dispatch/testing/world.js";
 import type { Principal } from "../security/principals.js";
@@ -11,9 +12,6 @@ after(stopServer);
 // Card P10, eighth slice: a reserved place whose work was returned to its author (no approved entry) holds the branch only for a bound (`releaseMs`, twelve hours counted from when it last had no approved entry). Then
 // the controller ends the reservation, inside the queue's own write, tells the task's holder, the director and the owner, and the landing that waited goes on in the same call. No submission waits forever.
 
-
-// Card P10: after the refresh-round cap a task's place in the landing queue is reserved (it keeps its turn while it has no approved entry, and while that place is first nothing else lands); a reserved
-// task that needs yet another round, and a first place that holds the branch too long while other work waits, are told to the director once; and under steady load no submission waits forever.
 const MIN = 60_000;
 const oid = (n: number): string => n.toString(16).padStart(40, "0");
 const sbm = (n: number): string => { const a = "abcdefghijklmnopqrstuvwxyz234567"; let s = ""; for (let i = 0, v = n; i < 20; i++, v = Math.floor(v / 32)) s += a[v % 32]; return `sbm-${s}`; };
@@ -135,6 +133,9 @@ for (const backend of backends) {
       const released = r.told.filter((t) => t.why === "released");
       assert.deepEqual(released.map((t) => t.taskId), [t1]);
       assert.match(released[0]!.text, new RegExp(`Task ${t1}'s reserved place in the landing queue of branch main was released: it had no approved submission for at least 12 h`));
+      // The task reaching the cap again after the release is reserved at the back: the released place is not given back to it.
+      assert.equal(await r.ops.afterRound({ taskId: t1, projectId: r.w.project, round: 3 }), "reserved");
+      assert.equal((await r.list()).front?.taskId, t3, "a new reservation does not take the released place");
       // The task's refreshed work, approved later, takes its turn at the back.
       const s1b = r.submit(t1, r.head());
       await r.ops.queueApproved(s1b, "rv4");
@@ -263,6 +264,12 @@ for (const backend of backends) {
       const land = await r.lander(ivy, t2);
       await refuses("invalid_transition", () => r.ops.checkLanding(ivy, { taskId: t1, projectId: r.w.project, submissionId: undefined }), /holds a reserved place/);
       assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
+      // A landing of a task with nothing queued is no submission waiting behind the place: an agent's and the owner's are refused as before and end nothing.
+      const t9 = await r.task("nine");
+      await refuses("invalid_transition", () => r.ops.checkLanding(ivy, { taskId: t9, projectId: r.w.project, submissionId: undefined }), /has no approved submission/);
+      await refuses("invalid_transition", () => r.ops.checkLanding(r.w.owner, { taskId: t9, projectId: r.w.project, submissionId: undefined }), /is not empty/);
+      assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
+      assert.equal(r.told.filter((t) => t.why === "released").length, 0);
       // The owner could not be told: the place is ended all the same and the landing goes on.
       r.failing.escalations = 1;
       assert.equal((await land(t2)).state, "done");
@@ -285,6 +292,43 @@ for (const backend of backends) {
       assert.equal((await land(t2)).state, "done");
       assert.deepEqual(r.tells, []);
       assert.equal(r.told.filter((t) => t.why === "released").length, 1);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: a queue record written before the idle time existed is not ended on its first-place time; the next write of the queue starts the clock (card P10, eighth slice)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR, holdMs: 100 * HOUR });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2 } = await reservedAway(r);
+      // An older controller left the record without `idleSince` while t1's place had been first (as an approved entry) for two days.
+      const queueId = LandingQueueService.queueIdOf(r.w.project, "main");
+      const runner = new CommandRunner(r.w.storage, r.w.epoch, { clock: r.w.clock.now, pause: async () => undefined });
+      r.w.clock.advance(48 * HOUR);
+      await runner.command("test.legacy-queue", { commandId: "legacy-queue", actor: "service:test" }, async () => ({
+        payload: {},
+        build: async () => {
+          const current = (await runner.get("landing-queue", queueId))!;
+          const body = current.body as unknown as { front: { idleSince?: string } };
+          const { idleSince: _dropped, ...front } = body.front;
+          const ref = { kind: "landing-queue", id: queueId };
+          return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: JSON.parse(JSON.stringify({ ...body, front })) }], detail: {} };
+        },
+      }));
+      assert.equal((await r.list()).front!.idleSince, undefined);
+      const since = (await r.list()).front!.since;
+      const land = await r.lander(ivy, t2);
+      await refuses("invalid_transition", () => land(t2), /holds the first place/);
+      assert.equal(await r.queue.releaseIdle({ projectId: r.w.project, branch: "main", taskId: t1, since, olderThanMs: 12 * HOUR }), undefined, "the write does not count from the first-place time either");
+      assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
+      // A write of the queue (another task's work approved) starts the clock now.
+      const t3 = await r.task("three");
+      await r.ops.queueApproved(r.submit(t3, oid(2)), "rv9");
+      assert.equal(typeof (await r.list()).front!.idleSince, "string");
+      r.w.clock.advance(12 * HOUR - MIN);
+      await refuses("invalid_transition", () => land(t2), /holds the first place/);
+      r.w.clock.advance(MIN);
+      assert.equal((await land(t2)).state, "done");
+      assert.deepEqual((await r.list()).reservations, []);
     } finally { await r.close(); }
   });
 
