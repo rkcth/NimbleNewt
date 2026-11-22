@@ -69,22 +69,41 @@ test("through the running controller a defect reported by mistake is withdrawn b
     // A failed check confirmed it: its reporter can no longer take it back, only the owner can.
     assert.equal((await call(rev.token, "defect.withdraw", { id: wrong, reason: "never mind" }, "w4")).error.code, "forbidden");
 
-    // The owner takes it back in their own words: shown first, an invented reason is refused, the revision cannot be supplied by the model.
+    // A withdrawal shown to the owner, then the defect changes before the owner agrees (the owner lets the repair go on): the "yes" applies nothing to the changed defect.
+    const early = "drop the backup step defect, it was a misreading";
+    const stale = await turn("m-s0", early, [{ kind: "command", op: "defect.withdraw", args: { id: wrong, reason: "it was a misreading" }, evidence: early, basis: "owner" }]);
+    assert.equal(stale[0].status, "proposed", JSON.stringify(stale));
+    assert.ok((await call(boot.token, "defect.override", { id: wrong, outcome: "repair-again", reason: "let them try again" }, "o1")).ok);
+    const late = await turn("m-s1", "yes, drop it", [{ kind: "apply_proposal", proposalId: stale[0].proposalId, evidence: "drop it", basis: "owner" }]);
+    assert.notEqual(late[0].status, "applied", JSON.stringify(late));
+    assert.equal((await state(wrong)).state, "open", "the stale withdrawal was not applied");
+    // Open again with its failed check counted: still only the owner may take it back.
+    assert.equal((await call(rev.token, "defect.withdraw", { id: wrong, reason: "never mind" }, "w5")).error.code, "forbidden");
+    // The repair goes on and fails its check again: it escalates once more (the count is kept: 2 of 1).
+    const cur3 = (await call(ann.token, "deliverable.record.get", { id })).result.item;
+    const nv3 = await call(ann.token, "deliverable.version.new", { id, expectedRevision: cur3.revision, artifacts: [{ artifactId: art }] }, "n3");
+    assert.ok((await call(ann.token, "deliverable.submit", { id, expectedRevision: nv3.result.revision, contractVersion: 0 }, "s3")).ok);
+    assert.ok((await call(ann.token, "defect.repair", { id: wrong, version: 3 }, "rp2")).ok);
+    assert.ok((await call(rev.token, "defect.review", { id: wrong, verdict: "not-fixed", reason: "still missing" }, "rv2")).ok);
+    assert.equal((await state(wrong)).state, "escalated");
+
+    // The owner takes it back in their own words: shown first, an invented reason is refused, and a revision the model supplied (1, long out of date) is replaced by the one listed when shown.
     const words = "that backup step defect was a mistake, I looked at the wrong version, drop it";
     const invented = await turn("m-0", words, [{ kind: "command", op: "defect.withdraw", args: { id: wrong, reason: "the reporter was out of date" }, evidence: words, basis: "owner" }]);
     assert.notEqual(invented[0].status, "proposed", JSON.stringify(invented));
     assert.equal((await state(wrong)).state, "escalated");
-    const proposed = await turn("m-1", words, [{ kind: "command", op: "defect.withdraw", args: { id: wrong, reason: "I looked at the wrong version" }, evidence: words, basis: "owner" }]);
+    const proposed = await turn("m-1", words, [{ kind: "command", op: "defect.withdraw", args: { id: wrong, reason: "I looked at the wrong version", expectedRevision: 1 }, evidence: words, basis: "owner" }]);
     assert.equal(proposed[0].status, "proposed", JSON.stringify(proposed));
     assert.equal((await state(wrong)).state, "escalated", "nothing changed yet");
     const applied = await turn("m-2", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: "do that", basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     const gone = await state(wrong);
-    assert.deepEqual([gone.state, gone.resolution.kind, gone.resolution.reason, gone.cycles, gone.checks.map((x: any) => x.verdict)], ["withdrawn", "withdrawn", "I looked at the wrong version", 1, ["not-fixed"]]);
+    assert.deepEqual([gone.state, gone.resolution.kind, gone.resolution.reason, gone.cycles, gone.checks.map((x: any) => x.verdict)], ["withdrawn", "withdrawn", "I looked at the wrong version", 2, ["not-fixed", "not-fixed"]]);
     assert.equal((await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.count, 0, "it left the Needs-you list");
     assert.match((await risks())[0]!, /^No unfinished defect/);
     const shown = (await call(boot.token, "status.ask", { request: { kind: "defects", taskId: task } })).result.item.lines.map((l: any) => l.text).join("\n");
-    assert.match(shown, /withdrawn as mistaken/);
+    assert.match(shown, /withdrawn as mistaken by \S+ \("I looked at the wrong version"\)/);
+    assert.match(shown, /withdrawn as mistaken by agent:\S+ \("I misread step 1; it is fine"\)/);
     assert.match(shown, /2 defect\(s\) found, 0 unresolved/);
   } finally {
     await c.close();

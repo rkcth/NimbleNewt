@@ -173,8 +173,47 @@ for (const backend of backends) {
       const key = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
       await svc.withdraw(rev, { commandId: cid("w"), id: secret.id, reason: `mistaken, the key ${key} was not the problem` });
       assert.ok(!JSON.stringify(await get(secret.id)).includes(key), "the secret is redacted from the record");
-      // The state API names the operation and an agent without a task credential for another project reads nothing.
-      assert.ok(OPERATIONS.some((o) => o.name === "defect.withdraw"));
+      // Through the operation table, on every backend: the arguments are checked, the same command ID with another reason is a conflict, a repeat is answered from the record, and the Needs-you answer
+      // to an escalated defect that was withdrawn meanwhile is refused rather than deciding it.
+      const op = OPERATIONS.find((o) => o.name === "defect.withdraw")!;
+      const answer = OPERATIONS.find((o) => o.name === "needs-you.answer")!;
+      const run = (principal: Principal, args: Record<string, unknown>, commandId?: string): Promise<Record<string, any>> => op.run({ principal, defects: svc } as never, args as never, commandId as never) as Promise<Record<string, any>>;
+      const viaOp = await report2("reported through the operation table");
+      await assert.rejects(() => run(rev, { id: viaOp.id, reason: "x", extra: 1 }, cid("w")), (e) => code(e, "invalid_command"));
+      await assert.rejects(() => run(rev, { id: viaOp.id, reason: "x".repeat(2001) }, cid("w")), (e) => code(e, "invalid_command"));
+      await assert.rejects(() => run(rev, { id: viaOp.id, reason: "no command ID" }));
+      await assert.rejects(() => run(far, { id: viaOp.id, reason: "far" }, cid("w")), (e) => code(e, "not_found"));
+      await assert.rejects(() => run(ann, { id: viaOp.id, reason: "responsible" }, cid("w")), (e) => code(e, "forbidden"));
+      assert.equal((await get(viaOp.id))["state"], "open", "nothing applied by a refused call");
+      const opCommand = cid("w");
+      const first = await run(rev, { id: viaOp.id, reason: "x".repeat(2000), expectedRevision: viaOp.revision }, opCommand);
+      assert.deepEqual([first["id"], first["revision"], first["replayed"]], [viaOp.id, viaOp.revision + 1, false]);
+      assert.equal((await run(rev, { id: viaOp.id, reason: "x".repeat(2000), expectedRevision: viaOp.revision }, opCommand))["replayed"], true);
+      await assert.rejects(() => run(rev, { id: viaOp.id, reason: "another reason", expectedRevision: viaOp.revision }, opCommand), (e) => code(e, "command_conflict"));
+      assert.equal((await get(viaOp.id))["state"], "withdrawn");
+      // A failed check counts even after the owner let the repair go on: the defect is open again with its cycle kept, and its reporter still may not take it back (withdrawing and reporting again
+      // would start the confirmed finding over at cycle 0); the owner may.
+      // (Reported by rev2, which did none of version 2's work, so only the failed check stands in the way; rev3 checks it.)
+      const rev3 = await agent("rev3", ["reviewer"], [p1]);
+      const again2 = await svc.report(rev2, { commandId: cid("f"), deliverableId: g2.id, version: 1, finding: "failed once, repair goes on", severity: "minor" });
+      await svc.repair(ann, { commandId: cid("rp"), id: again2.id, version: g2v2 });
+      await svc.review(rev3, { commandId: cid("rv"), id: again2.id, verdict: "not-fixed", reason: "still wrong" });
+      await svc.override(owner, { commandId: cid("o"), id: again2.id, outcome: "repair-again", reason: "once more" });
+      assert.deepEqual([(await get(again2.id))["state"], (await get(again2.id))["cycles"]], ["open", 1]);
+      await assert.rejects(() => run(rev2, { id: again2.id, reason: "never mind" }, cid("w")), (e) => code(e, "forbidden") && /found it not fixed/.test((e as Error).message));
+      assert.equal((await get(again2.id))["state"], "open");
+      await run(owner, { id: again2.id, reason: "the owner takes it back" }, cid("w"));
+      assert.equal((await get(again2.id))["state"], "withdrawn");
+      // An escalation listed on the Needs-you list, then withdrawn by the owner before the answer: the answer decides nothing.
+      const late = await report2("escalates, then withdrawn");
+      await svc.repair(ann, { commandId: cid("rp"), id: late.id, version: g2v2 });
+      await svc.review(rev2, { commandId: cid("rv"), id: late.id, verdict: "not-fixed", reason: "still wrong" });
+      const listed2 = await get(late.id);
+      assert.equal(listed2["state"], "escalated");
+      await run(owner, { id: late.id, reason: "a duplicate", expectedRevision: listed2["revision"] }, cid("w"));
+      await assert.rejects(() => answer.run({ principal: owner, defects: svc } as never, { kind: "defect", id: late.id, answer: "accept-as-is", expectedRevision: listed2["revision"] } as never, cid("a")), (e) => code(e, "invalid_transition"));
+      const answered = await get(late.id);
+      assert.deepEqual([answered["state"], answered["overrideRecords"].length, answered["cycles"]], ["withdrawn", 0, 1]);
       void (null as unknown as JsonObject);
     } finally {
       await world.close();
