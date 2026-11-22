@@ -118,6 +118,9 @@ test("documentation obligations through the running controller and the owner's c
     const taskText = (forTask[0].lines as { text: string }[]).map((l) => l.text).join("\n");
     assert.match(taskText, /^1 document\(s\) describe Fix the login: 1 flagged \(1 stale, 0 unverified\), 0 verified against tested code\. Documentation is due for this task: 1 document\(s\); the docs gate holds its landing/);
     assert.match(taskText, new RegExp(`Update tasks open: ${updateTask} \\(assigned`));
+    // The chat answers with the state API's own lines (the same view, the task resolved from its title).
+    const viaApi = await call(boot.token, "status.ask", { request: { kind: "task_docs", taskId: task } });
+    assert.deepEqual((forTask[0].lines as { text: string }[]).map((l) => l.text), (viaApi.result.item.lines as { text: string }[]).map((l) => l.text));
     const qn = "what documentation is due for the moon task?";
     const noTask = await turn("m3c", qn, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Moon landing" }, evidence: qn, basis: "owner" }]);
     assert.equal(noTask[0].status, "refused", JSON.stringify(noTask));

@@ -69,7 +69,15 @@ for (const backend of backends) {
         await docs.verify(dora, { commandId: cid("v"), obligationId: id, expectedRevision: stored.revision, documentSubmissionId: await documentChange(), evidence });
       };
       const base = { assignments, waits: WaitService.withEpoch(world.storage, epoch, assignments, options), blockers: BlockerService.withEpoch(world.storage, epoch, options), contracts: ContractService.withEpoch(world.storage, epoch, options) };
-      const status = StatusService.withEpoch(world.storage, epoch, { ...base, docs }, options);
+      // The status view reads the QA gate of the code a document was verified against from the same verdicts the docs service (and so the landing docs gate) reads.
+      const qaGate = async (_by: Principal, s: string): Promise<{ taskId: string; submissionId: string; tree: string; verdict: "passed" | "failed"; reasons: string[] }> => {
+        const g = gates.get(s);
+        if (g === undefined) throw new DomainError("not_found", "no such submission");
+        return { ...g, submissionId: s, reasons: g.verdict === "passed" ? [] : ["stale_evidence"] };
+      };
+      const qa = { list: async () => { throw new Error("not read by this view"); }, project: async () => { throw new Error("not read by this view"); }, gate: qaGate } as never;
+      const status = StatusService.withEpoch(world.storage, epoch, { ...base, docs, qa }, options);
+      const statusNoQa = StatusService.withEpoch(world.storage, epoch, { ...base, docs }, options);
       const status0 = StatusService.withEpoch(world.storage, epoch, base, options);
       const ask = async (by: Principal, taskId: string) => status.ask(by, { kind: "task_docs", taskId });
       const text = async (taskId: string): Promise<string> => said((await ask(owner, taskId))!.lines);
@@ -106,6 +114,23 @@ for (const backend of backends) {
       assert.match(await text(login), /^2 document\(s\) describe Login: 0 flagged \(0 stale, 0 unverified\), 2 verified against tested code\. No documentation is due for this task \(the docs gate still checks/);
       assert.match(await text(search), /^2 document\(s\) describe Search: 0 flagged/);
       await agrees(login, l1); await agrees(search, s1);
+
+      // Verified, but the tested code of the login task it was verified against no longer passes its QA gate (a changed task contract or a superseded owner decision fails it with no flag
+      // written; so does QA evidence lost before the automatic check flagged the document): the landing docs gate refuses both documents for login, so both are due for login. The search task's
+      // own code still passes, so the guide holds nothing for search (the gate reads only the landing task's evidence).
+      gates.set(l1, { ...gates.get(l1)!, verdict: "failed" });
+      const lapsedNow = await text(login);
+      assert.match(lapsedNow, /^2 document\(s\) describe Login: 0 flagged \(0 stale, 0 unverified\), 2 verified against tested code \(2 of them no longer hold for this task: verified against code that no longer passes its QA gate\)\. Documentation is due for this task: 2 document\(s\); the docs gate holds its landing/);
+      assert.match(lapsedNow, new RegExp(`Verified, but no longer for this task: the tested code of this task it was verified against \\(${l1}, tree ${treeA.slice(0, 12)}\\) no longer passes its QA gate \\(stale evidence\\)`));
+      assert.match(await text(search), /^2 document\(s\) describe Search: 0 flagged .*verified against tested code\. No documentation is due/);
+      await agrees(login, l1); await agrees(search, s1);
+      // Its gate cannot be read here (no QA service, or the read is refused): not counted as due, but said, since the docs gate checks it.
+      assert.match(said((await statusNoQa.ask(owner, { kind: "task_docs", taskId: login }))!.lines), /^2 document\(s\) describe Login: .*No documentation is due for this task \(the docs gate still checks .*; whether the tested code 2 verified document\(s\) stand on still passes its QA gate could not be read here/);
+      const kept = gates.get(l1)!;
+      gates.delete(l1);
+      assert.match(await text(login), /No documentation is due for this task .*whether the tested code 2 verified document\(s\) stand on still passes its QA gate could not be read here/);
+      gates.set(l1, { ...kept, verdict: "passed" });
+      assert.doesNotMatch(await text(login), /could not be read|no longer hold/);
 
       // New tested code of the login task: the guide and the FAQ go stale and are due for login. The guide is flagged for login only, yet the docs gate holds the
       // search task's landing too (a verification names code of every task the document describes), so it is due for search as well, with a note that the flag names its other task.
