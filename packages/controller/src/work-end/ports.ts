@@ -62,6 +62,24 @@ export interface StagedWork {
   readonly files: readonly string[];
 }
 
+/** This agent's own code submission of this task recorded under the step key `key` (the ID `record` derives from it), or undefined; a read that fails is undefined. */
+async function recordedBy(submissions: Partial<Pick<SubmissionService, "get">>, by: Principal, attempt: EndingAttempt, key: string): Promise<{ readonly submissionId: string } | undefined> {
+  if (submissions.get === undefined) return undefined;
+  const earlier = await submissions.get(by, derivedId("sbm", scopedCommandId(by.id, key))).catch(() => undefined);
+  return earlier !== undefined && earlier.taskId === attempt.taskId && earlier.kind === "code" && earlier.submittedBy === by.id ? { submissionId: earlier.id } : undefined;
+}
+
+/**
+ * The ending's `recorded` port (card H12n second slice): the submission `stagedSubmit` recorded under the step key, looked up the same way, so the ending's check after the settle is not made again for a submission that already exists.
+ * An agent that cannot act finds none (the submit port then refuses as before).
+ */
+export function recordedSubmission(deps: { readonly submissions: Pick<SubmissionService, "get">; readonly principalOf: (agentId: string) => Promise<Principal | undefined> }): NonNullable<WorkEndDeps["recorded"]> {
+  return async (attempt, key) => {
+    const by = await deps.principalOf(attempt.agentId);
+    return by === undefined ? undefined : recordedBy(deps.submissions, by, attempt, key);
+  };
+}
+
 /**
  * The submit port bound to the submission service (card H12n): stages the attempt's work (through the host-provided `stage`) and records ONE code submission in the `author` role, tied to the attempt's task. The command ID is the ending's step key,
  * so a replay records once (a submission already recorded under the key is returned before anything is staged or checked again). The base staged must be the base that was checked for freshness; if the checkout moved in between the submission is not made (the ending then ends plainly with `release_failed`). Nothing here verifies the tree or patch id: that is
@@ -85,10 +103,8 @@ export function stagedSubmit(deps: {
     const by = await deps.principalOf(attempt.agentId);
     if (by === undefined) throw new DomainError("forbidden", `${attempt.agentId} cannot act, so its work cannot be submitted`);
     // A replay of a submission already recorded under this key is that record: the checks below judged it when it was made, and a landing branch that moved since (or an attempt no longer live, which cannot be read) must not turn it into a refusal.
-    if (deps.submissions.get !== undefined) {
-      const earlier = await deps.submissions.get(by, derivedId("sbm", scopedCommandId(by.id, key))).catch(() => undefined);
-      if (earlier !== undefined && earlier.taskId === attempt.taskId && earlier.kind === "code" && earlier.submittedBy === by.id) return { submissionId: earlier.id };
-    }
+    const earlier = await recordedBy(deps.submissions, by, attempt, key);
+    if (earlier !== undefined) return earlier;
     const staged = await deps.stage(attempt);
     if (staged.base !== base) throw new DomainError("checkout_changed", `the staged work is based on ${staged.base}, not on ${base} that was checked; it was not submitted`);
     if (deps.landing !== undefined) {

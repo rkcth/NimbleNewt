@@ -34,6 +34,8 @@ for (const backend of backends) {
     landings?: Landed[];
     /** The submit port refuses with this (the check made after the staging). */
     submitRefuses?: SubmitRefused;
+    /** The `recorded` port: submissions already recorded, by step key; "throws": the read fails. */
+    recorded?: Map<string, string> | "throws";
     finishCrashOnce?: boolean; freezeFailsOnce?: boolean;
     onSettle?: () => Promise<void> | void; onSubmit?: () => Promise<void> | void;
     /** Runs after the guard and before the dispatcher ends the attempt (a drop landing in that gap). */
@@ -52,8 +54,8 @@ for (const backend of backends) {
     await w.principals.enroll(w.owner, { commandId: "en-bob", kind: "agent", name: "bob", grants: [] });
     const bob: Principal = await w.principals.authenticate((await w.principals.issueCredential(w.owner, "agent:bob")).token);
     const { taskId } = await w.task("t", { aid: "ann" });
-    const state: { attempt: EndingAttempt; frozen: string[]; freezeCalls: number; finished: unknown[]; settled: number; submits: number; told: string[]; keys: string[]; blockerIds: string[]; landingCalls: number; crashed: boolean; paused: boolean; live2: boolean } = {
-      attempt: { attemptId: "att-1", taskId, projectId: w.project, agentId: "agent:ann", live: true }, frozen: [], freezeCalls: 0, finished: [], settled: 0, submits: 0, told: [], keys: [], blockerIds: [], landingCalls: 0, crashed: false, paused: false, live2: true,
+    const state: { attempt: EndingAttempt; frozen: string[]; freezeCalls: number; finished: unknown[]; settled: number; submits: number; told: string[]; keys: string[]; blockerIds: string[]; landingCalls: number; crashed: boolean; paused: boolean; live2: boolean; recordedAsks: string[] } = {
+      attempt: { attemptId: "att-1", taskId, projectId: w.project, agentId: "agent:ann", live: true }, frozen: [], freezeCalls: 0, finished: [], settled: 0, submits: 0, told: [], keys: [], blockerIds: [], landingCalls: 0, crashed: false, paused: false, live2: true, recordedAsks: [],
     };
     const landed: Landed = opts.landed ?? { base: "h1", head: "h1", mine: ["a.ts"], landed: [] };
     const deps: WorkEndDeps = {
@@ -74,6 +76,7 @@ for (const backend of backends) {
       paused: async () => state.paused,
       landing: async () => { const ls = opts.landings; const i = state.landingCalls++; return ls ? ls[Math.min(i, ls.length - 1)]! : landed; },
       ...(opts.noSubmit ? {} : { submit: async (_a: EndingAttempt, _b: string, key: string) => { state.keys.push(key); await opts.onSubmit?.(); state.submits++; if (opts.submitFails) throw new Error("git said no"); if (opts.submitRefuses !== undefined) throw opts.submitRefuses; return { submissionId: "sub-1" }; } }),
+      ...(opts.recorded === undefined ? {} : { recorded: async (_a: EndingAttempt, key: string) => { state.recordedAsks.push(key); if (opts.recorded === "throws") throw new Error("store hiccup"); const id = (opts.recorded as Map<string, string>).get(key); return id === undefined ? undefined : { submissionId: id }; } }),
       blockers: { openBlocker: async (c) => { state.blockerIds.push(c.commandId ?? ""); return w.blockers.openBlocker(c); } },
       tell: async (_a, m, key) => { state.keys.push(key); state.told.push(m); },
     };
@@ -187,6 +190,38 @@ for (const backend of backends) {
       assert.equal(r.state.finished.length, 1); assert.deepEqual(r.state.told, ["see you"]);
       const again = await r.service.complete("att-1");
       assert.equal(again.replayed, true); assert.equal(r.state.submits, 1); assert.equal(r.state.finished.length, 1);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a restart between the submission record and the 'submitted' step takes the recorded submission, even when the landing branch moved onto the agent's files or cannot be read since; nothing is staged or refused (H12n second slice, second review)`, async () => {
+    const fresh: Landed = { base: "h1", head: "h1", mine: ["a.ts"], landed: [] };
+    for (const later of [{ base: "h1", head: "h2", mine: ["a.ts"], landed: ["a.ts"] }, undefined]) {
+      // The state such a stop leaves: the ending settled, the submission recorded under the step key, no 'submitted' step.
+      const r = await rig({ landings: [fresh, later as Landed], recorded: new Map([["workend:att-1:submitted", "sub-0"]]) });
+      try {
+        await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+        const done = await r.service.complete("att-1");
+        assert.deepEqual([done.outcome, done.typed, done.blocker, done.submissionId], ["submitted", undefined, undefined, "sub-0"], JSON.stringify(done));
+        assert.deepEqual(r.state.recordedAsks, ["workend:att-1:submitted"]);
+        assert.equal(r.state.submits, 0); assert.equal(r.state.landingCalls, 1, "the landing branch is not read again");
+        assert.deepEqual(r.state.blockerIds, []);
+        assert.equal((r.state.finished[0] as { submissionId?: string }).submissionId, "sub-0");
+      } finally { await r.store.close(); }
+    }
+    // Nothing recorded under the key, or a lookup that fails: judged as before (the overlap refuses, nothing submitted).
+    for (const recorded of [new Map([["workend:att-1:other", "sub-x"]]), "throws" as const]) {
+      const r = await rig({ landings: [fresh, { base: "h1", head: "h2", mine: ["a.ts"], landed: ["a.ts"] }], recorded });
+      try {
+        await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+        const done = await r.service.complete("att-1");
+        assert.deepEqual([done.typed, done.submissionId, r.state.submits], ["submit_refused", undefined, 0]);
+      } finally { await r.store.close(); }
+    }
+    // Without a submit port the lookup is not asked (submit_unavailable as before).
+    const r = await rig({ noSubmit: true, recorded: new Map([["workend:att-1:submitted", "sub-0"]]) });
+    try {
+      await r.service.request(r.ann, { report: "the report", commandId: "e1", attemptId: "att-1", submit: true, result: "done" });
+      assert.deepEqual([(await r.service.complete("att-1")).typed, r.state.recordedAsks], ["submit_unavailable", []]);
     } finally { await r.store.close(); }
   });
 
