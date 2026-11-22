@@ -288,6 +288,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked only when a landing of a submission queued behind it is asked for, not on a clock; approved work coming back stops the count)" },
   landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off, no unfinished defects; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
+  submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
@@ -406,6 +407,7 @@ export type StatusRequest =
   | { readonly kind: "qa"; readonly taskId: string }
   | { readonly kind: "task_docs"; readonly taskId: string }
   | { readonly kind: "submissions"; readonly taskId: string }
+  | { readonly kind: "submissions_project"; readonly projectId: string }
   | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
   | { readonly kind: "docs"; readonly projectId: string }
@@ -763,7 +765,7 @@ export interface StatusDeps {
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
   /** The submissions of a task (card Q01b), read with the submission service's own rule (`list`, `approvalOf` of what it listed). Absent: the `submissions` view says submissions are not kept here. */
-  readonly submissions?: Pick<SubmissionService, "list" | "approvalOf">;
+  readonly submissions?: Pick<SubmissionService, "list" | "approvalOf"> & Partial<Pick<SubmissionService, "waiting">>;
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
@@ -997,6 +999,7 @@ export class StatusService {
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
       case "task_docs": { onlyKnown(request, ["kind", "taskId"]); return this.taskDocLines(by, request.taskId); }
       case "submissions": { onlyKnown(request, ["kind", "taskId"]); return this.submissionLines(by, request.taskId); }
+      case "submissions_project": { onlyKnown(request, ["kind", "projectId"]); return this.submissionsProjectLines(by, request.projectId); }
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
@@ -2506,6 +2509,28 @@ export class StatusService {
       lines.push(line(`${what}. ${o.id} by ${shown(o.submittedBy, 80)} at ${o.submittedAt}.`, cite("submission", o.id, o.revision), cite("task", taskId)));
     }
     if (others.length > 10) lines.push(line(`${others.length - 10} older review, QA, document or sign-off submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
+    return { observedAt: at, lines };
+  }
+
+  /** The code waiting across a project (card Q01b fifth slice): what the submission service's `waiting` reads, told plainly. A partial scan is said, never silent; nothing is created. */
+  async submissionsProjectLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    const waiting = this.#deps.submissions?.waiting;
+    if (this.#deps.submissions === undefined || waiting === undefined) return { observedAt: at, lines: [line("Submissions are not kept on this controller.", cite("project", projectId))] };
+    let view: Awaited<ReturnType<SubmissionService["waiting"]>>;
+    try { view = await waiting.call(this.#deps.submissions, by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const partial = `${view.scanLimited ? (view.items.length === 0 ? " Only part of the submissions stored on this controller (for every project) was looked at, so code of other tasks may exist." : " Only part of the submissions stored on this controller (for every project) was looked at, so other tasks, or newer code of a listed task, may exist.") : ""}${view.truncated ? " Only the tasks with the newest code were read; more tasks with code may exist." : ""}`;
+    const own = view.ownOnly ? " Only the code you submitted yourself is shown; the review and sign-off state of other agents' code is the owner's to read." : "";
+    if (view.items.length === 0) {
+      const text = partial === "" ? `No unfinished task of this project has code you may read that is waiting: nothing is waiting for a reviewer or a director.${own}` : `No code submission of an unfinished task you may read was found in what was looked at, but this view is incomplete, so code may still be waiting.${partial}${own}`;
+      return { observedAt: at, lines: [line(text, cite("project", projectId))] };
+    }
+    const c = view.counts;
+    const lines: Line[] = [line(`${c.needs_review} task(s) wait for a reviewer, ${c.changes_asked} wait for their author (changes were asked for), ${c.signoff_declined} were approved but the director declined, ${c.needs_signoff} are approved with no director sign-off yet, ${c.ready} are approved and signed off; each is ${view.ownOnly ? "the newest code you submitted on the task" : "the task's newest code submission"}, and tasks that are done or cancelled are left out.${partial}${own}`, cite("project", projectId))];
+    const words = { needs_review: "waits for a reviewer", changes_asked: "waits for its author (changes were asked for)", signoff_declined: "was approved but the director declined", needs_signoff: "is approved, with no director sign-off yet", ready: "is approved and signed off" } as const;
+    for (const i of view.items.slice(0, 50)) lines.push(line(`Task ${quoted(i.title, 80)} (${i.taskId}) ${words[i.state]}: submission ${i.submissionId} by ${shown(i.submittedBy, 80)}, tree ${i.tree.slice(0, 12)}, submitted ${i.submittedAt}${i.approvedBy === undefined ? "" : i.approvedBy === "review_disabled_single_agent" ? ", review not required (no other agent of the project could review it)" : `, approved by ${shown(i.approvedBy, 80)}`}.`, cite("task", i.taskId), cite("submission", i.submissionId)));
+    if (view.items.length > 50) lines.push(line(`${view.items.length - 50} more task(s) are not shown here (ask the submissions view with a task).`, cite("project", projectId)));
     return { observedAt: at, lines };
   }
 
