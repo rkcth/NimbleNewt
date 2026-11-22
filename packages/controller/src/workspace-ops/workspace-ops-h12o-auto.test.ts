@@ -61,14 +61,28 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
-  test(`${backend.name}: the one-agent approval is released without the permit (card H12o, automatic release)`, async () => {
+  test(`${backend.name}: the one-agent approval and an approval naming the author are never released automatically; the owner's own release still makes the plain commit (card H12o, automatic release)`, async () => {
     const r = await rig();
     try {
       r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "review_disabled_single_agent", submittedBy: "agent:ann" });
-      const out = await r.service.releaseApproved(S1, S1);
-      assert.equal(out?.state, "done", out?.summary);
-      assert.equal(r.calls[0]!.permit, undefined);
+      assert.equal(await r.service.releaseApproved(S1, S1), undefined);
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:ann", submittedBy: "agent:ann" });
+      assert.equal(await r.service.releaseApproved(S1, "sbm-self"), undefined);
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, submittedBy: "agent:ann" });
+      assert.equal(await r.service.releaseApproved(S1, "sbm-nobody"), undefined);
+      assert.deepEqual([r.calls.length, r.state.quiesced], [0, 0]);
+      for (const c of [S1, "sbm-self", "sbm-nobody"]) assert.equal(await r.recorded(`rel-auto:${c}`, SERVICE), undefined, c);
+      assert.equal(await r.service.submissionCommit(S1), undefined);
+      // The owner may still ask: a plain platform commit, never a permit commit.
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "review_disabled_single_agent", submittedBy: "agent:ann" });
+      const manual = await r.service.request(r.owner, { commandId: "m1", operation: "release", taskId: r.task, reason: "one agent", submissionId: S1 });
+      assert.equal(manual.state, "done", manual.summary);
+      assert.deepEqual([r.calls.length, r.calls[0]!.permit], [1, undefined]);
       assert.equal((await r.service.submissionCommit(S1))?.permitted, undefined);
+      // A reviewer's later approval finds the commit made and asks nothing.
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" });
+      assert.equal(await r.service.releaseApproved(S1, "sbm-review9"), undefined);
+      assert.equal(r.calls.length, 1);
     } finally { await r.store.close(); }
   });
 

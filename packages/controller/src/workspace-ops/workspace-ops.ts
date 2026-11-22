@@ -262,8 +262,8 @@ export class WorkspaceOpService {
   }
 
   /**
-   * The controller's own release of a submission that has just been approved (card H12o, automatic release): the platform commit (a review-gate permit commit when a reviewer approved it) is made
-   * without anybody asking, so reviewed work is committed and can land. Best effort and never an error: it answers `undefined` when it did nothing (not approved, no submissions known, the task has a
+   * The controller's own release of a submission that a reviewer has just approved (card H12o, automatic release): the platform's review-gate permit commit is made without anybody asking, so reviewed
+   * work is committed and can land. Best effort and never an error: it answers `undefined` when it did nothing (not approved by a reviewer other than the author, no submissions known, the task has a
    * live attempt, is paused, already committed, or anything threw); a refusal or failure of the host is the recorded answer. It is the same `release` request the owner may make (the same checks, the
    * quiesce, the exactly-once record), under the controller's own service identity and the command ID `rel-auto:<cause>`, where `cause` names the approval (so a later approval after a `changes` tries
    * again, and a repeat of the same approval does nothing more). A task with a live attempt is left alone: the release would freeze it.
@@ -272,7 +272,9 @@ export class WorkspaceOpService {
     try {
       if (this.#deps.approvalOf === undefined || typeof submissionId !== "string" || !SUBMISSION_ID.test(submissionId) || typeof cause !== "string" || !/^[A-Za-z0-9_.:-]{1,120}$/.test(cause)) return undefined;
       const a = await this.#deps.approvalOf(submissionId);
-      if (a === undefined || !a.approved) return undefined;
+      // Only a reviewer's approval (never the one-agent approval, which no reviewer judged): its commit is a review-gate permit commit. A plain commit would not land under the default permit rule and
+      // would stay in the checkout as an unpermitted commit in front of later reviewed work, so it is made only when the owner asks for it.
+      if (a === undefined || !a.approved || a.approvedBy === undefined || !reviewerApproved(a.approvedBy) || a.approvedBy === a.submittedBy) return undefined;
       const taskId = checkTaskId(a.taskId);
       const projectId = ((await this.#runner.get("task", taskId))?.body as unknown as TaskBody | undefined)?.projectId;
       if (projectId === undefined) return undefined;

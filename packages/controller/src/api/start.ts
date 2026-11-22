@@ -1132,11 +1132,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           if (typeof subject === "string") { if (e.verdict === "approve") await landingQueueOps.queueApproved(subject, e.submissionId); else await landingQueueOps.withdrawUnapproved(subject, e.submissionId); }
         }
       } catch { /* best effort: the queue is still reachable through landing.queue.add */ }
-      // Card H12o: an approved submission is committed by the platform in the task's own checkout at once (a review-gate permit commit when a reviewer approved it), so reviewed work can land. Best effort:
-      // a task with a live attempt, a remote host or a refusal leaves it to the owner's own `workspace.request` release.
+      // Card H12o: a reviewer's approval of a code submission is committed by the platform in the task's own checkout at once as a review-gate permit commit, so reviewed work can land. Only a reviewer's
+      // approval: a code submission that needs no review (one-agent project) is never committed automatically (its plain commit could not land under the default permit rule and would stay in the checkout as an
+      // unpermitted commit in front of later reviewed work); the owner's own release still does it. Best effort: a task with a live attempt, a remote host or a refusal leaves it to the owner's `workspace.request` release.
       try {
-        if (e.kind === "code") await workspaceOps.releaseApproved(e.submissionId, e.submissionId);
-        else if (e.kind === "review" && e.verdict === "approve") {
+        if (e.kind === "review" && e.verdict === "approve") {
           const subject = ((await storage.getAggregate({ kind: "submission", id: e.submissionId }))?.body as { subject?: unknown } | undefined)?.subject;
           if (typeof subject === "string") await workspaceOps.releaseApproved(subject, e.submissionId);
         }
