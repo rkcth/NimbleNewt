@@ -5,6 +5,7 @@ import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
+import { scopedCommandId } from "../security/credentials.js";
 import type { JsonObject } from "../storage/types.js";
 import { NotificationService } from "../notifications/index.js";
 import { QaEvidenceService } from "./index.js";
@@ -89,6 +90,14 @@ for (const backend of backends) {
       await svc.check(qa, { commandId: id, taskId: task });
       assert.equal(delivered.size, 2);
 
+      // A command ID the caller first used for another kind of command is not read as a check's entry, even when that entry's detail names the task and the records.
+      const other = cid("k");
+      await runner.command("test.other", { commandId: scopedCommandId(qa.id, other), actor: qa.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "test-other", id: other }, creates: true, changes: [{ type: "create" as const, ref: { kind: "test-other", id: other }, body: {} }], detail: { taskId: task, invalidated: [first.id, second.id] } }) }));
+      delivered.clear();
+      const before = hookCalls.length;
+      await svc.check(qa, { commandId: other, taskId: task });
+      assert.deepEqual([delivered.size, hookCalls.length], [0, before], "only a qa.evidence.check entry is made up");
+
       // The same command sent again after other evidence went stale meanwhile is a replay of the write (it is not written twice) and still makes up what the first run owed (here the new independent evidence settled the re-checks, so only the hook).
       await svc.record(eve, { commandId: cid("r"), ...ev, criteriaRevision: 2, environment: "windows" });
       await plant("task-contract", task, contract(3, ["works", "is fast", "is small"]), true);
@@ -172,6 +181,7 @@ for (const backend of backends) {
       assert.deepEqual(await notifications.settleFromController({ commandId: cid("settle"), kind: "maintenance", ref: { kind: "qa-recheck", id: recheck }, projectId: project }), { closed: true });
       await svc.contractChanged(task);
       assert.deepEqual(await items(recheck), ["settled"], "a cleared notice is not raised again");
+      assert.equal(hookCalls.length, 3, "a notice the store refuses does not stop the rest of the make-up (the documentation check still runs)");
 
       // A record added since moves the index on: the next automatic call owes nothing for the old check (only a repeat of its own command ID does).
       await svc.record(qa, { commandId: cid("r"), ...ev, criteriaRevision: 2, environment: "macos" });
