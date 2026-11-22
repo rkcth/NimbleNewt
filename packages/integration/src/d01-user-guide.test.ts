@@ -416,7 +416,7 @@ test("with every model server down, each typed recovery order in the guide runs 
 // The views the guide's "Checking on finished work" section describes. Each is one status kind; the section's block lists the kind and a sentence to say. The test below asks every sentence of the block through the
 // real chat (a scripted stand-in plays the model, so the table below is only its "understanding") and fails when a listed kind is not a real status kind, when the chat does not answer it, or when a kind that
 // section has to cover is missing from the guide.
-const FINISHED_WORK_KINDS = ["submissions", "qa", "qa_project", "defects", "defect_risks", "task_docs", "landing_queue"];
+const FINISHED_WORK_KINDS = ["submissions", "qa", "qa_project", "defects", "defect_risks", "task_docs", "landing_queue", "landing_settings"];
 const statusKindsInSource = (): Set<string> => {
   const source = readFileSync(join(repository, "packages", "controller", "src", "status", "status.ts"), "utf8");
   const union = /export type StatusRequest =([\s\S]*?)\n\nexport|export type StatusRequest =([\s\S]*?);\n/.exec(source)?.[0] ?? "";
@@ -441,7 +441,7 @@ test("every status view the guide's finished-work section lists is a real status
   const next = whole.indexOf("\n## ", from + 1);
   const text = whole.slice(from, next < 0 ? undefined : next);
   // The views and controls are the section's bold terms (a plain word such as "withdraw" would still be found inside "withdrawn" after the control itself was dropped).
-  for (const word of ["**Submissions**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**release**", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
+  for (const word of ["**Submissions**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**Landing settings**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**release**", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
 
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
   // The stand-in reads the owner's words the way the interpreter prompt asks a model to: a task view names the task by its title (the chat finds it in the project in focus), and a project view
@@ -480,7 +480,7 @@ test("every status view the guide's finished-work section lists is a real status
       // The chat's answer is the view's own text (the first line, whitespace folded), not only some reply of the stand-in.
       assert.ok(printed.includes(viewLines[0]!.replace(/\s+/g, " ")), `${row.kind}: the chat did not print the view's answer "${viewLines[0]}":\n${printed}`);
     }
-    // The seven views answer differently on this project (so a sentence routed to the wrong kind could not pass by printing another view's words).
+    // The eight views answer differently on this project (so a sentence routed to the wrong kind could not pass by printing another view's words).
     assert.equal(new Set(firstLines.values()).size, FINISHED_WORK_KINDS.length, `the views' answers are told apart: ${JSON.stringify([...firstLines])}`);
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

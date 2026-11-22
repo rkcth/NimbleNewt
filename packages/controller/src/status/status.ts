@@ -42,6 +42,7 @@ import { isFinished as isDefectFinished, type DefectService } from "../submissio
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
+import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
@@ -285,6 +286,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked only when a landing of a submission queued behind it is asked for, not on a clock; approved work coming back stops the count)" },
+  landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
@@ -408,6 +410,7 @@ export type StatusRequest =
   | { readonly kind: "qa_project"; readonly projectId: string }
   | { readonly kind: "docs"; readonly projectId: string }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
+  | { readonly kind: "landing_settings"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
@@ -763,6 +766,8 @@ export interface StatusDeps {
   readonly submissions?: Pick<SubmissionService, "list" | "approvalOf">;
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
+  /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
+  readonly integration?: Pick<IntegrationPolicyService, "get">;
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list">;
   /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
@@ -995,6 +1000,7 @@ export class StatusService {
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
+      case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
@@ -2213,6 +2219,32 @@ export class StatusService {
   }
 
   /**
+   * How a project's finished work lands (card P09/P10): the settings reader's own answer (`IntegrationPolicyService.get`, owner only), in plain words. Anyone but the owner is answered nothing, as the reader refuses them;
+   * a project that does not exist is answered nothing too.
+   */
+  async landingSettingsLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    if (by.kind !== "owner") return undefined;
+    const at = this.#runner.now();
+    const c = cite("project", projectId);
+    if (this.#deps.integration === undefined) return { observedAt: at, lines: [line("Landing settings are not kept on this controller.", c)] };
+    let s: Awaited<ReturnType<IntegrationPolicyService["get"]>>;
+    try { s = await this.#deps.integration.get(by, projectId); } catch (error) { if (error instanceof DomainError && (error.code === "not_found" || error.code === "forbidden")) return undefined; throw error; }
+    const record = await this.#runner.get("project", projectId);
+    const who = record === undefined ? "the project" : `project ${shown((record.body as unknown as { name: string }).name, 80)}`;
+    const means: Record<string, string> = { "integration-branch": "it is merged onto a separate integration branch and nothing reaches main until you or an integrator promotes it", "human-promotes": "it waits for a person to promote it", "main-automatic": "it goes to main by itself once its required checks pass, with no human step" };
+    const names: Record<string, string> = { tests: "tests (the project's automated tests pass)", review: "review (an independent reviewer approved the change)", qa: "QA (independent QA evidence passes)", docs: "documents (every document describing the task is verified)", director: "director (the newest sign-off of a director agent approves the same change)" };
+    const source: Record<string, string> = { owner: "set for this project by you", "installation-default": "taken from the installation default for new projects", profile: "taken from the approval profile" };
+    return { observedAt: at, lines: [
+      line(`How finished work lands in ${who}: ${shown(s.landing, 40)}: ${means[s.landing] ?? "a landing this view has no words for"}${s.heldFrom === undefined ? "" : ` (the setting says ${shown(s.heldFrom, 40)}, but the installation's lock holds main-automatic back)`}.`, c),
+      line(`Who integrates: ${s.integrator === "human" ? "a person" : s.integrator === "agent" ? "an agent that holds the integrator lease" : shown(s.integrator, 40)}.`, c),
+      line(s.requiredChecks.length === 0 ? `Checks required before work lands: none.` : `Checks required before work lands: ${s.requiredChecks.map((k) => names[k] ?? shown(k, 40)).join("; ")}.`, c),
+      line(`An author refreshes work onto a moved landing branch up to ${s.refreshRounds} time(s) before its place in the landing queue is reserved.`, c),
+      line(`These settings are ${source[s.source] ?? shown(s.source, 40)} (revision ${s.revision}); the installation ${s.lockedMainAutomatic ? "forbids" : "allows"} landing on main by itself.`, c),
+    ] };
+  }
+
+  /**
    * The landing queue of a project (card P10, polish): the landing branch's queue (or `branch`'s), oldest first, and the other branches whose queues still hold work. Read with the queue door's own rule (the
    * owner or an integrator of the project); anyone else is answered nothing, as for a project they may not read.
    */
@@ -3093,7 +3125,8 @@ export class StatusService {
       const esc = await this.#deps.defects.unresolved(by, { cap: 51, escalatedOnly: true });
       if (esc.counts.escalated > 50 || esc.scanLimited) truncated.push("escalated defects");
       for (const x of esc.items.slice(0, 50)) {
-        all.push({ text: `Defect ${x.id} (${x.severity}) failed ${x.cycles} repair check(s), the limit of ${x.limit}: ${quoted(x.finding.text, 120)} (accept it as is, or repair again)`, cites: [cite("defect", x.id, x.revision), cite("deliverable", x.deliverableId), cite("task", x.taskId)], taskId: x.taskId, projectId: x.projectId, since: x.reportedAt, id: x.id, rank: 5, kind: "defect", answer: { kind: "choice", choices: ["accept-as-is", "repair-again"] }, revision: x.revision });
+        const inTask = ((await this.#runner.get("task", x.taskId))?.body as unknown as { title?: string } | undefined)?.title;
+        all.push({ text: `Defect ${x.id} (${x.severity}${inTask === undefined ? "" : `, in task ${quoted(inTask, 80)}`}) failed ${x.cycles} repair check(s), the limit of ${x.limit}: ${quoted(x.finding.text, 120)} (accept it as is, or repair again)`, cites: [cite("defect", x.id, x.revision), cite("deliverable", x.deliverableId), cite("task", x.taskId)], taskId: x.taskId, projectId: x.projectId, since: x.reportedAt, id: x.id, rank: 5, kind: "defect", answer: { kind: "choice", choices: ["accept-as-is", "repair-again"] }, revision: x.revision });
       }
     }
     // The owner's blockers are looked for through all the open ones (the others are the agents' to resolve), up to 50 found.

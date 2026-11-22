@@ -198,3 +198,20 @@ test("the prompt tells the model how the owner lets resume checks re-read web pa
   assert.match(system, /the task's own network grant for that address, or an approved remote MCP server that lists the resource/);
   assert.match(system, /at most 3,000 characters, so a short file or page can appear in it whole/, "the owner is not told a whole file never goes to the route");
 });
+
+test("the prompt tells the model how to read a project's required landing checks and to name another project when changing them, in any words (chat gaps); the intents it describes pass the checks", async () => {
+  let system = "";
+  const intents = [
+    { kind: "switch_focus", projectName: "Orchard", evidence: "what checks does Orchard need", basis: "owner" },
+    { kind: "status", request: { kind: "landing_settings" }, evidence: "what checks does Orchard need", basis: "owner" },
+    { kind: "command", op: "integration.set", args: { projectName: "Orchard", requiredChecks: ["review", "qa"] }, evidence: "Orchard should require review and QA", basis: "owner" },
+  ];
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return JSON.stringify(intents); } }, () => ["a/primary"]);
+  const out = await m.interpret({ ...input, text: "what checks does Orchard need before work lands? Orchard should require review and QA", quoted: [] }) as unknown[];
+  assert.equal(out.length, 3, JSON.stringify(out));
+  assert.match(system, /status kind landing_settings/);
+  assert.match(system, /what checks does Garden need before its work lands/);
+  assert.match(system, /integration\.set with requiredChecks and, only when the owner names a project other than the one in focus, projectName/);
+  assert.match(system, /\blanding_settings\b[^"]*only the owner can read it/);
+  assert.ok(system.includes("landing_settings"), "the status kind is listed with its keys");
+});

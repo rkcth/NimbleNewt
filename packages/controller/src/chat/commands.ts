@@ -19,7 +19,7 @@ export interface ChatOp {
 }
 
 /** Operations whose project argument is named `project`, not `projectId`. */
-export const PROJECT_AS_PROJECT: ReadonlySet<string> = new Set(["project.branches.set", "project.branches.change", "wip.backup.set", "wip.backup.restore"]);
+export const PROJECT_AS_PROJECT: ReadonlySet<string> = new Set(["integration.set", "project.branches.set", "project.branches.change", "wip.backup.set", "wip.backup.restore"]);
 
 export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "project.create": { verb: "Create project", mode: "propose" },
@@ -232,7 +232,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Taking a task's approved submission out of the landing queue (card P10): it changes what lands next, so it is shown first.
   "landing.queue.remove": { verb: "Take a task's approved work out of the landing queue so it does not land next (reason: the owner's words)", mode: "propose" },
   "integrator.lease.release": { verb: "End the integrator lease of a landing branch by force (the holder's landing stops; branch: the branch's name)", mode: "propose", needsProject: true },
-  "integration.set": { verb: "Change how finished work lands", mode: "propose" },
+  "integration.set": { verb: "Change how finished work lands", mode: "propose", needsProject: true },
   "integration.default.set": { verb: "Change how new projects land finished work", mode: "propose" },
   // Project resources, plan and responsibilities (card P01). A read-only bind of a location the owner typed in their own words follows the profile like other explicit orders; write access, an acknowledged overlap and anything quoted are shown first.
   "resource.bind": { verb: "Bind resource", mode: "profile", needsProject: true },

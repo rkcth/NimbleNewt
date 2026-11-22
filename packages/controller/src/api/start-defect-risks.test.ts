@@ -85,7 +85,7 @@ test("through the running controller the team-wide defect risks are answered in 
     const needs = (await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item;
     assert.equal(needs.count, 1, JSON.stringify(needs));
     assert.deepEqual([needs.items[0].kind, needs.items[0].id, needs.items[0].taskId, needs.items[0].projectId, needs.items[0].answer.choices], ["defect", major, task, project, ["accept-as-is", "repair-again"]]);
-    assert.match(needs.lines[0].text, /failed 1 repair check\(s\), the limit of 1: "The guide skips the backup step\." \(accept it as is, or repair again\)/);
+    assert.match(needs.lines[0].text, /in task "Write the guide"\) failed 1 repair check\(s\), the limit of 1: "The guide skips the backup step\." \(accept it as is, or repair again\)/);
     // An agent has no Needs-you list, and may not answer an item of it.
     assert.equal((await call(rev.token, "needs-you.answer", { kind: "defect", id: major, answer: "accept-as-is" }, "na0")).error.code, "forbidden");
     assert.equal((await call(boot.token, "defect.get", { id: major })).result.item.state, "escalated", "nothing was decided by the agent");
@@ -95,6 +95,11 @@ test("through the running controller the team-wide defect risks are answered in 
     const proposed = await turn("m-a", words, [{ kind: "command", op: "needs-you.answer", args: { itemTopic: "backup step", answer: "repair-again" }, evidence: words, basis: "owner" }]);
     assert.equal(proposed[0].status, "proposed", JSON.stringify(proposed));
     assert.equal((await call(boot.token, "defect.get", { id: major })).result.item.state, "escalated", "nothing changed yet");
+    // The item names its task, so the owner can pick it by the task's title as well as by the finding's words.
+    const byTask = "go on with the Write the guide defect, one more repair";
+    const viaTask = await turn("m-t", byTask, [{ kind: "command", op: "needs-you.answer", args: { itemTopic: "Write the guide", answer: "repair-again" }, evidence: byTask, basis: "owner" }]);
+    assert.equal(viaTask[0].status, "proposed", `the task's title picks the escalated defect: ${JSON.stringify(viaTask)}`);
+    assert.match(JSON.stringify(viaTask), new RegExp(major), "and it is the defect of that task");
     const applied = await turn("m-b", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: "do that", basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     const item = (await call(boot.token, "defect.get", { id: major })).result.item;
