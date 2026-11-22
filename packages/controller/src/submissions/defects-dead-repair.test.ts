@@ -79,15 +79,27 @@ for (const backend of backends) {
       // The repair names a newer version in its place (never one that is not newer, never a draft); no cycle is counted.
       await refuses("invalid_command", () => svc.repair(ann, { commandId: cid("rp"), id: d1, version: v2 }), /newer than 2/);
       const v3 = await submitNew();
-      await svc.repair(ann, { commandId: cid("rp"), id: d1, version: v3 });
+      // Only the responsible agent or the owner names the replacement.
+      await refuses("forbidden", () => svc.repair(rev, { commandId: cid("rp"), id: d1, version: v3 }), /responsible agent or the owner/);
+      const replace = { commandId: cid("rp"), id: d1, version: v3 };
+      assert.equal((await svc.repair(ann, replace)).replayed, false);
       let got = (await svc.get(owner, d1))!;
       assert.deepEqual([got["state"], got["cycles"], got["repairVersion"]], ["repair-submitted", 0, v3]);
+      // A repeat of the replacement records nothing more.
+      const again = await svc.repair(ann, replace);
+      assert.deepEqual([again.replayed, again.revision], [true, got["revision"]]);
       // A version replaced by a newer one is no longer found fixed either: the newer version is the repair to check.
+      const seen = got["revision"] as number;
       const v4 = await submitNew();
       await refuses("invalid_transition", () => svc.review(rev, { commandId: cid("rv"), id: d1, verdict: "fixed" }), /superseded: it cannot be found fixed/);
-      await svc.repair(ann, { commandId: cid("rp"), id: d1, version: v4 });
-      const done = await svc.review(rev, { commandId: cid("rv"), id: d1, verdict: "fixed" });
+      await svc.repair(owner, { commandId: cid("rp"), id: d1, version: v4 });
+      // A check written for the repair the reviewer examined (version 3) does not apply to its replacement.
+      await refuses("stale_revision", () => svc.review(rev, { commandId: cid("rv"), id: d1, verdict: "fixed", expectedRevision: seen }));
+      got = (await svc.get(owner, d1))!;
+      assert.deepEqual([got["state"], got["repairVersion"], (got["checks"] as JsonObject[]).length], ["repair-submitted", v4, 0]);
+      const done = await svc.review(rev, { commandId: cid("rv"), id: d1, verdict: "fixed", expectedRevision: got["revision"] as number });
       assert.deepEqual([done.state, done.cycles], ["resolved", 0]);
+      assert.deepEqual(((await svc.get(owner, d1))!["checks"] as JsonObject[]).map((c) => [c["version"], c["verdict"]]), [[v4, "fixed"]], "the one check names the version it judged");
 
       // A repair in a dead version may still be found not fixed: that counts one cycle as before.
       const d2 = (await report("Second finding.")).id;
@@ -96,11 +108,31 @@ for (const backend of backends) {
       await submitNew();
       const nf = await svc.review(rev, { commandId: cid("rv"), id: d2, verdict: "not-fixed", reason: "still wrong" });
       assert.deepEqual([nf.state, nf.cycles], ["open", 1]);
-      // A live repair is unaffected: an open or live repair behaves as before (a second repair is refused while one waits).
+      // A live repair is unaffected: a second repair is refused while one waits.
       const v7 = (await acc.get(owner, id))!["currentVersion"] as number;
       await svc.repair(ann, { commandId: cid("rp"), id: d2, version: v7 });
       await refuses("invalid_transition", () => svc.repair(ann, { commandId: cid("rp"), id: d2, version: v7 + 1 }), /repair-submitted/);
-      assert.equal((await svc.review(rev, { commandId: cid("rv"), id: d2, verdict: "fixed" })).state, "resolved");
+      // A replacement keeps the cycles already counted (never resets them).
+      const v8 = await submitNew();
+      await svc.repair(ann, { commandId: cid("rp"), id: d2, version: v8 });
+      got = (await svc.get(owner, d2))!;
+      assert.deepEqual([got["state"], got["cycles"], got["repairVersion"]], ["repair-submitted", 1, v8]);
+      // Two replacements at once: exactly one lands; the other is refused (the defect changed meanwhile, or now holds a live repair).
+      const v9 = await submitNew();
+      const raced = await Promise.allSettled([svc.repair(ann, { commandId: cid("rp"), id: d2, version: v9 }), svc.repair(owner, { commandId: cid("rp"), id: d2, version: v9 })]);
+      assert.equal(raced.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(raced.map((r) => r.status)));
+      const lost = raced.find((r) => r.status === "rejected") as PromiseRejectedResult;
+      assert.ok(lost.reason instanceof DomainError && ["invalid_transition", "stale_revision"].includes(lost.reason.code), String(lost.reason));
+      got = (await svc.get(owner, d2))!;
+      assert.deepEqual([got["state"], got["cycles"], got["repairVersion"]], ["repair-submitted", 1, v9]);
+      // Failed checks of dead versions count toward the limit: the third escalates to the owner.
+      assert.equal((await svc.review(rev, { commandId: cid("rv"), id: d2, verdict: "not-fixed", reason: "still wrong" })).cycles, 2);
+      const v10 = await submitNew();
+      await svc.repair(ann, { commandId: cid("rp"), id: d2, version: v10 });
+      await submitNew();
+      const last = await svc.review(rev, { commandId: cid("rv"), id: d2, verdict: "not-fixed", reason: "still wrong" });
+      assert.deepEqual([last.state, last.cycles, last.limit], ["escalated", 3, 3]);
+      await refuses("invalid_transition", () => svc.repair(ann, { commandId: cid("rp"), id: d2, version: v10 + 1 }), /escalated to the owner/);
     } finally { await world.close(); }
   });
 }
