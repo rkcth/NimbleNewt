@@ -17,6 +17,7 @@ import type { JsonObject } from "../storage/types.js";
 import { derivedId } from "../domain/ids.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { DecisionService, startupItems, type DecisionDeps, type RecordDecision } from "./index.js";
+import { propagationIdOf } from "./records.js";
 
 after(stopServer);
 
@@ -910,5 +911,33 @@ for (const backend of backends) {
     const finished = await r.decisions.resume(r.host, { projectId: r.a });
     assert.deepEqual([finished.done, finished.pending], [1, 0]);
     assert.equal(told.length, 4, "nor when it is finished");
+  });
+
+  // A step stored before the `qa` marker existed (or by a process without the hook) has no `qa`: it is read as "not looked at yet", and a process without the hook still finishes the propagation.
+  suite("a propagation step stored without the QA marker is read as not yet looked at, and a process without the QA hook finishes the propagation (card Q02)", async (r) => {
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    await link(r, r.t2, { kind: "task", id: r.t2 }, [old.id], r.ben);
+    const saved = r.deps.generation;
+    delete r.deps.generation;
+    delete r.deps.taskReached;
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "pending");
+    const stored = await r.decisions.propagation(r.w.owner, propagationIdOf(fix.id));
+    assert.ok(stored !== undefined);
+    assert.deepEqual(Object.keys(stored.steps).sort(), [r.t1, r.t2].sort());
+    for (const s of Object.values(stored.steps)) { assert.equal(s.links, true); assert.equal("qa" in s, false, "the old shape: no marker"); }
+    const told: string[] = [];
+    r.deps.taskReached = async (taskId) => { told.push(taskId); };
+    await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([...told].sort(), [r.t1, r.t2].sort(), "a step without the marker is looked at");
+    const marked = await r.decisions.propagation(r.w.owner, propagationIdOf(fix.id));
+    for (const s of Object.values(marked!.steps)) { assert.equal(s.qa, true); assert.equal(s.links, true, "the marker is merged into the stored step"); }
+    // Without the hook (a process that has none) the propagation finishes; the marker never holds it back.
+    delete r.deps.taskReached;
+    if (saved !== undefined) r.deps.generation = saved;
+    const finished = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([finished.done, finished.pending], [1, 0]);
+    assert.equal(told.length, 2);
   });
 }
