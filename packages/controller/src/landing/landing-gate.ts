@@ -88,6 +88,8 @@ export interface QaGateView { readonly taskId: string; readonly submissionId: st
 export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
 /** The director sign-off of a code submission as the landing gate needs it (`landingDirectorGate`): the newest sign-off on that submission, when there is one. */
 export interface DirectorGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string } }
+/** The defects reported against a task's deliverables as the landing gate needs them (`landingDefectsGate`): how many in all, how many are not finished, and the first few of those. */
+export interface DefectsGateView { readonly taskId: string; readonly checked: number; readonly unresolved: number; readonly items: readonly { readonly id: string; readonly severity: string; readonly state: string; readonly finding: string; readonly deliverableTitle: string }[] }
 export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
 export interface LandingGateDeps {
   /** The project's required checks (`IntegrationPolicyService.effective`). */
@@ -102,6 +104,8 @@ export interface LandingGateDeps {
   readonly docsGate?: (taskId: string, submissionId: string) => Promise<DocsGateView | undefined>;
   /** The newest director sign-off of a code submission (`landingDirectorGate`); absent: the `director` check is not collected (`not_run`). */
   readonly directorGate?: (submissionId: string) => Promise<DirectorGateView | undefined>;
+  /** The defects of a task (`landingDefectsGate`); absent: the `defects` check is not collected (`not_run`). */
+  readonly defectsGate?: (taskId: string) => Promise<DefectsGateView | undefined>;
   readonly now: () => string;
 }
 
@@ -112,6 +116,8 @@ const PATCH = /^[0-9a-f]{40,64}$/;
 const clipEnd = (text: string, max: number): string => { const clean = clip(text, Number.MAX_SAFE_INTEGER); if (clean.length <= max) return clean; let from = clean.length - (max - 3); const c = clean.charCodeAt(from); if (c >= 0xdc00 && c <= 0xdfff) from += 1; return `...${clean.slice(from)}`; };
 // Half a surrogate pair is ill-formed text (refused or mangled by readers and stores): one in the input becomes a space, and no cut ends between the two halves of a pair.
 const clip = (text: string, max: number): string => { const clean = redactText(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu, " ").replace(/\s+/g, " ").trim(); return clean.length <= max ? clean : `${wholeCut(clean, max - 3)}...`; };
+/** An error as text for a check's summary: never throws, whatever was thrown (a value with no `toString`, or a `message` that throws, becomes a fixed phrase), so a failed read still ends as `not_run`. */
+const errorText = (error: unknown): string => { try { return String((error as Error)?.message ?? error); } catch { return "an error that cannot be shown"; } };
 /** At most `max` UTF-16 units of `text`, never ending between the two halves of a surrogate pair. */
 const wholeCut = (text: string, max: number): string => { if (text.length <= max) return text; let end = Math.max(0, max); const c = text.charCodeAt(end - 1); if (end > 0 && c >= 0xd800 && c <= 0xdbff) end -= 1; return text.slice(0, end); };
 
@@ -130,7 +136,7 @@ export class LandingGate {
     // The reviewed submission is read first: the host computes the patch ID of its base and tree, and its submitter is an author whose own contract versions are not used.
     let reviewed: ReviewedSubmission | undefined;
     let reviewProblem: string | undefined;
-    if (call.submissionId !== undefined) { try { reviewed = await this.#deps.approvalOf(call.submissionId); } catch (error) { reviewProblem = String((error as Error)?.message ?? error); } }
+    if (call.submissionId !== undefined) { try { reviewed = await this.#deps.approvalOf(call.submissionId); } catch (error) { reviewProblem = errorText(error); } }
     if (reviewed !== undefined && reviewed.taskId !== call.taskId) reviewed = undefined;
     const authors = [...new Set([call.author, reviewed?.submittedBy].filter((a): a is string => typeof a === "string" && a !== ""))];
     const contract = required.includes("tests") ? await this.#deps.tests(call.taskId, authors) : undefined;
@@ -149,7 +155,7 @@ export class LandingGate {
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the host did not answer within ${Math.round(limit / 1000)} s`)), limit); timer.unref?.(); }),
         ]);
       } finally { if (timer !== undefined) clearTimeout(timer); }
-    } catch (error) { stop.abort(error); /* gave up waiting, or the call failed: the host stops what it still runs */ return none(`the host could not run the landing checks: ${String((error as Error)?.message ?? error)}`); }
+    } catch (error) { stop.abort(error); /* gave up waiting, or the call failed: the host stops what it still runs */ return none(`the host could not run the landing checks: ${errorText(error)}`); }
     if (report === null || typeof report !== "object" || report.checkout !== true) return none("the host holds no checkout for the task");
     const change = report.change;
     if (change === undefined || typeof change !== "object" || !OID.test(String(change.tree)) || !OID.test(String(change.base))) return none(`the change the landing would carry could not be read${typeof report.problem === "string" ? `: ${report.problem}` : ""}`);
@@ -164,6 +170,7 @@ export class LandingGate {
       else if (check === "qa") results.push(await this.#qa(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "docs") results.push(await this.#docs(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "director") results.push(await this.#director(call, tree, patchId, bound, reviewed, reviewProblem, report));
+      else if (check === "defects") results.push(await this.#defects(call, bound));
       else results.push({ check, result: "not_run", ...bound, summary: `the ${check} check is not collected at landing yet, so it has not run for this tree` });
     }
     const compared = this.#claims(results, reviewed, tree);
@@ -205,7 +212,7 @@ export class LandingGate {
     // Read again after the host's run: evidence can be invalidated while the tests ran; the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
     let g: QaGateView | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.qaGate(call.submissionId); } catch (error) { return no("not_run", `the QA gate could not be read: ${String((error as Error)?.message ?? error)}`); }
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.qaGate(call.submissionId); } catch (error) { return no("not_run", `the QA gate could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the QA gate of ${call.submissionId} could not be read for the tree it names`);
     if (g.verdict !== "passed") {
@@ -230,7 +237,7 @@ export class LandingGate {
     // Read again after the host's run (a director may have declined while the tests ran); the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
     let g: DirectorGateView | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.directorGate(call.submissionId); } catch (error) { return no("not_run", `the director sign-off could not be read: ${String((error as Error)?.message ?? error)}`); }
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.directorGate(call.submissionId); } catch (error) { return no("not_run", `the director sign-off could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the director sign-off of ${call.submissionId} could not be read for the tree it names`);
     if (g.signoff === undefined) return no("not_run", `no director has signed off on ${call.submissionId} yet`);
@@ -242,6 +249,35 @@ export class LandingGate {
     return no("pass", `signed off by ${String(g.signoff.by)} for ${a.tree !== tree ? `tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : "this tree"}`);
   }
 
+  /**
+   * `defects` (card Q04 fifth slice): no defect reported against the task's deliverables may be unfinished (`open`, `repair-submitted` or `escalated`). Resolved, withdrawn and owner-accepted (`overridden`) defects do not
+   * block: the owner's own decision stands. Defects belong to versions of deliverables, not to a code tree, so this check is not bound to the patch; it is read after the host's run, as the others are.
+   */
+  async #defects(call: { readonly taskId: string }, bound: { boundTo: string }): Promise<LandingCheckEntry> {
+    const no = (result: LandingCheckResult, why: string): LandingCheckEntry => ({ check: "defects", result, ...bound, summary: clip(why, LANDING_GATE_LIMITS.summary) });
+    if (this.#deps.defectsGate === undefined) return no("not_run", "the defects check is not collected at landing yet, so it has not run for this tree");
+    let g: DefectsGateView | undefined;
+    try { g = await this.#deps.defectsGate(call.taskId); } catch (error) { return no("not_run", `the defects of the task could not be read: ${errorText(error)}`); }
+    // Counts are whole numbers, unresolved within checked, and no more listed than unresolved (a NaN or negative count would otherwise pass).
+    if (g === undefined || g.taskId !== call.taskId || !Array.isArray(g.items) || !Number.isSafeInteger(g.unresolved) || !Number.isSafeInteger(g.checked) || g.unresolved < 0 || g.checked < g.unresolved || g.items.length > g.unresolved) return no("not_run", "the defects of the task could not be read");
+    if (g.unresolved > 0) {
+      const head = `${g.unresolved} of ${g.checked} defect(s) of this task are not finished: `;
+      const room = LANDING_GATE_LIMITS.summary - 20;
+      let names = "";
+      let shown = 0;
+      for (const p of g.items.slice(0, 5)) {
+        const part = `${String(p.id)} (${String(p.severity)}, ${String(p.state)})`;
+        const next = shown === 0 ? part : `${names}; ${part}`;
+        if (head.length + next.length > room) break;
+        names = next;
+        shown += 1;
+      }
+      const more = g.unresolved - shown;
+      return no("fail", `${head}${names}${more > 0 ? `; and ${more} more` : ""}`);
+    }
+    return no("pass", g.checked === 0 ? "no defect was reported against this task's deliverables" : `all ${g.checked} defect(s) of this task are resolved, withdrawn or accepted as they are by the owner`);
+  }
+
   async #docs(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport): Promise<LandingCheckEntry> {
     const no = (result: LandingCheckResult, why: string): LandingCheckEntry => ({ check: "docs", result, ...bound, summary: clip(why, LANDING_GATE_LIMITS.summary) });
     if (call.submissionId === undefined) return no("not_run", "the landing names no code submission (submissionId), so no documentation applies to it");
@@ -250,7 +286,7 @@ export class LandingGate {
     // Read again after the host's run (a document can be flagged while the tests ran); the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
     let g: DocsGateView | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.docsGate(call.taskId, call.submissionId); } catch (error) { return no("not_run", `the documentation could not be read: ${String((error as Error)?.message ?? error)}`); }
+    try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.docsGate(call.taskId, call.submissionId); } catch (error) { return no("not_run", `the documentation could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree || !Array.isArray(g.pending) || typeof g.checked !== "number" || g.checked < g.pending.length) return no("not_run", `the documentation of ${call.submissionId} could not be read for the tree it names`);
     if (g.pending.length > 0) {
@@ -285,7 +321,7 @@ export class LandingGate {
     if (problem !== undefined) return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${problem}`, LANDING_GATE_LIMITS.summary) };
     // Read again after the host's run (a review may have asked for changes while the tests ran); the submission's base and tree never change.
     let a: ReviewedSubmission | undefined;
-    try { a = await this.#deps.approvalOf(call.submissionId); } catch (error) { return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${String((error as Error)?.message ?? error)}`, LANDING_GATE_LIMITS.summary) }; }
+    try { a = await this.#deps.approvalOf(call.submissionId); } catch (error) { return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${errorText(error)}`, LANDING_GATE_LIMITS.summary) }; }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return { check: "review", result: "not_run", ...bound, summary: `${call.submissionId} is not a code submission of this task` };
     if (!a.approved) return { check: "review", result: a.newest === undefined ? "not_run" : "fail", ...bound, summary: clip(`${call.submissionId} is not approved (${a.reason ?? "no approval"})`, LANDING_GATE_LIMITS.summary) };
     // The patch ID compared is the one the host computed from the reviewed base and tree, never only the submitter's word for it.

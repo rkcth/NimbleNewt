@@ -5,7 +5,7 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { AdmissionService, HostService, LocalWorker, startController, type WorkerHost } from "@nimblenewt/controller";
+import { AdmissionService, ArtifactService, FileBlobStore, HostService, LocalWorker, startController, type WorkerHost } from "@nimblenewt/controller";
 import { PI, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, SandboxLauncher } from "@nimblenewt/worker";
 
@@ -14,7 +14,8 @@ import { GitBridge, LocalWorkspaces, SandboxLauncher } from "@nimblenewt/worker"
 // results are on the request bound to that tree and the author gets them in its inbox. Once it passes (the owner's contract change), the landing lands exactly that tree and the review is the one given for that patch.
 // The approval queues the submission in the landing queue (card P10): the refused landing leaves it there and the landing that lands takes it out. When the project also requires `qa`, the controller's gate reads the
 // submission's QA gate (third slice): refused without independent evidence, landed once the owner recorded a pass. It also requires `docs` (fourth slice): refused for a document never verified, landed once it is retired.
-// It finally requires `director` (sixth slice): refused with no sign-off and with a declining one, landed once a director approved.
+// It requires `director` (sixth slice): refused with no sign-off and with a declining one, landed once a director approved. It finally requires `defects` (Q04 fifth slice): refused while a defect reported against a
+// deliverable of the task is open, landed once the reporter withdrew it.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -48,7 +49,7 @@ test("a landing is made only when the project's required checks pass on the inte
   let local: LocalWorker | undefined;
   let landingCheckCalls = 0;
   const c = await startController({
-    storage: { kind: "sqlite", path: join(dir, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts, filesystem: ext4, features: [], harnesses: [PI],
+    storage: { kind: "sqlite", path: join(dir, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts, filesystem: ext4, features: [], harnesses: [PI], artifacts: { directory: join(dir, "blobs") },
     dispatch: {
       manual: true,
       route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
@@ -86,6 +87,7 @@ test("a landing is made only when the project's required checks pass on the inte
     const reviewer = ((await s.agents.create(owner, { commandId: "mk-2", friendlyName: "Rev", roles: ["reviewer"] })) as { id: string }).id;
     const director = ((await s.agents.create(owner, { commandId: "mk-3", friendlyName: "Dee", roles: ["director"] })) as { id: string }).id;
     for (const who of [agent, reviewer, director]) for (const g of workGrants(project, ["read-file"])) await s.grants.grant(owner, { commandId: `g-${who}-${g.action}`, grantee: `agent:${who}`, action: g.action, project, source: "direct", basis: "test" } as never);
+    await s.grants.grant(owner, { commandId: "g-rev-decide", grantee: `agent:${reviewer}`, action: "review.decide", project, source: "direct", basis: "test" } as never);
     const rev = (await s.principals.issueCredential(owner, `agent:${reviewer}`)).token;
     const dee = (await s.principals.issueCredential(owner, `agent:${director}`)).token;
     // The project's required checks are the profile's (strict: tests and review), read through the policy service.
@@ -183,6 +185,26 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.equal(byCheck((await land("land-dir-1")).result)["director"]!.result, "fail");
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
     assert.equal((await api(c, dee, "submission.record", { taskId: task, kind: "signoff", role: "director", subject: submissionId, decision: "approve" }, "so-2")).ok, true);
+    // The project now also requires `defects` (Q04 fifth slice): a defect a reviewer reported against a deliverable of the task refuses the landing, named to the author; once its reporter withdraws it the landing is made.
+    // The controller's landing gate reads the defect records (a gate left unwired here would answer "not collected").
+    assert.equal((await api(c, boot.token, "integration.set", { project, requiredChecks: ["tests", "review", "qa", "docs", "director", "defects"] }, "req-def")).ok, true);
+    const authorToken = (await s.principals.issueCredential(owner, `agent:${agent}`)).token;
+    const blobs = ArtifactService.withEpoch(c.storage, c.epoch, await FileBlobStore.open({ directory: join(dir, "blobs") }));
+    const art = (await blobs.publish({ commandId: "art-1", actor: owner.id, name: "guide", projectId: project, taskId: task, files: [{ path: "guide.txt", content: Buffer.from("step 1") }] })).id;
+    const made = await api(c, authorToken, "deliverable.draft", { taskId: task, type: "document", title: "Install guide", artifacts: [{ artifactId: art }] }, "dl-1");
+    assert.equal(made.ok, true, JSON.stringify(made));
+    const dlv = made.result.id as string;
+    assert.equal((await api(c, authorToken, "deliverable.submit", { id: dlv, expectedRevision: made.result.revision, contractVersion: 2 }, "dl-2")).ok, true);
+    assert.equal((await api(c, rev, "deliverable.review.start", { id: dlv, version: 1 }, "dl-3")).ok, true);
+    assert.equal((await api(c, rev, "deliverable.reject", { id: dlv, version: 1, reason: "the backup step is missing" }, "dl-4")).ok, true);
+    const found = await api(c, rev, "defect.report", { deliverableId: dlv, version: 1, finding: "The guide skips the backup step.", severity: "major" }, "df-1");
+    assert.equal(found.ok, true, JSON.stringify(found));
+    const blocked = await land("land-def-1");
+    assert.equal(blocked.result?.state, "refused", JSON.stringify(blocked));
+    assert.deepEqual([byCheck(blocked.result)["defects"]!.result, byCheck(blocked.result)["director"]!.result], ["fail", "pass"]);
+    assert.equal(byCheck(blocked.result)["defects"]!.summary, `1 of 1 defect(s) of this task are not finished: ${found.result.id} (major, open)`, "the defect records were read (not 'not collected')");
+    assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
+    assert.equal((await api(c, rev, "defect.withdraw", { id: found.result.id, reason: "I misread the guide; the backup step is there" }, "df-2")).ok, true);
     const landed = await land("land-2");
     assert.equal(landed.result.state, "done", JSON.stringify(landed.result));
     assert.equal(landed.result.detail.landed, true, landed.result.summary);
@@ -192,7 +214,8 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
     assert.equal(byCheck(landed.result)["docs"]!.result, "pass");
     assert.deepEqual([byCheck(landed.result)["director"]!.result, /^signed off by agent:/.test(byCheck(landed.result)["director"]!.summary)], ["pass", true]);
-    assert.equal(landingCheckCalls, 6, "the checks ran again for the second landing: an earlier result is never reused");
+    assert.equal(byCheck(landed.result)["defects"]!.result, "pass");
+    assert.equal(landingCheckCalls, 7, "the checks ran again for the second landing: an earlier result is never reused");
     assert.deepEqual([landed.result.queued?.submissionId, await queuedNow()], [submissionId, []], "the landing took exactly its submission out of the queue");
     for (const f of finishes) f();
     await c.dispatch.dispatcher.idle();
