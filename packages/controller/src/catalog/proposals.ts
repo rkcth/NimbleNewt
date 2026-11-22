@@ -32,7 +32,7 @@ export const PROPOSAL_DECISIONS: readonly ProposalDecision[] = ["accept", "reque
 const PENDING: readonly ProposalState[] = ["open", "changes_requested", "deferred"];
 /** What a default listing shows: proposals that are available to work on. Deferred ones are set aside and are listed only when asked for by state. */
 const AVAILABLE: readonly ProposalState[] = ["open", "changes_requested"];
-export const PROPOSAL_LIMITS = { rationale: 2000, tests: 2000, reason: 500, pendingPerAuthor: 20, settledPerAuthor: 50, removedPerWrite: 5, history: 50, page: 100, scan: 5000 } as const;
+export const PROPOSAL_LIMITS = { rationale: 2000, tests: 2000, reason: 500, pendingPerAuthor: 20, settledPerAuthor: 50, removedPerWrite: 5, resends: 5, history: 50, page: 100, scan: 5000 } as const;
 const PROPOSAL_ID = /^tpp-[a-z2-7]{20}$/;
 const VERSION = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -313,7 +313,7 @@ export class ToolboxProposalService {
         ...(p.proposed.executable === undefined ? {} : { executable: { ref: p.proposed.executable, ...(p.changes.executable || p.kind === "promotion" ? {} : { base: versionIdOf(p.target, p.base!.version) }) } }),
       };
       const version = command.version;
-      const made = await this.#catalog.releaseProposal(by, {
+      const made = await this.#resendOnSharedRace(found.id, (built) => this.#catalog.releaseProposal(by, {
         commandId: command.commandId, name: p.target, kind: p.proposed.kind, version, manifest: p.proposed.manifest, parts, ...(audience === undefined ? {} : { audience }),
         expect: p.kind === "promotion" ? "absent" : { chosen: p.base!.version }, payload: { proposalId: found.id, decision, ...(reason === undefined ? {} : { reason }), expectedRevision: command.expectedRevision ?? null }, proposalId: found.id,
       }, async (_prior, made) => {
@@ -326,8 +326,11 @@ export class ToolboxProposalService {
         const out = await apply(cur, fresh.revision, { version, digest: made.digest, versionId: made.versionId });
         // The released version keeps its own snapshot of the text; the proposal's goes in the same write.
         const unindex = await this.#unindex(cur.author, found.id, true);
-        return { changes: [{ type: "update", ref: { kind: PROPOSAL_KIND, id: found.id }, expectedRevision: fresh.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex.changes, ...(await this.#replaceText(found.id, undefined))], audit: unindex.audit };
-      });
+        const changes: Change[] = [{ type: "update", ref: { kind: PROPOSAL_KIND, id: found.id }, expectedRevision: fresh.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex.changes, ...(await this.#replaceText(found.id, undefined))];
+        // The catalogue's write is built once this returns (nothing after it refuses), so a `stale_revision` from here on is a race at the commit.
+        built(fresh.revision);
+        return { changes, audit: unindex.audit };
+      }));
       released = { name: made.name, version, digest: made.digest, versionId: made.versionId };
       await this.#tellOnTask(p, found.id, decision, noticeText(version));
       return { proposalId: found.id, state: "accepted", released, authorizes: ACCEPTANCE_LIMIT };
@@ -692,7 +695,7 @@ export class ToolboxProposalService {
     if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) invalid("expectedRevision", "must be a whole number from 1");
     const ref: AggregateRef = { kind: PROPOSAL_KIND, id };
     let round = 0;
-    await this.#runner.command(op, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
+    await this.#resendOnSharedRace(id, (built) => this.#runner.command(op, { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
       payload: { proposalId: id, expectedRevision: expectedRevision ?? null, ...payload },
       build: async () => {
         const found = await this.#runner.get(ref.kind, ref.id);
@@ -702,10 +705,32 @@ export class ToolboxProposalService {
         round = out.body.round;
         const unindex = out.final === true ? await this.#unindex(out.body.author, id, out.body.state !== "accepted" || out.body.released !== undefined) : { changes: [], audit: [] };
         const audit = [...proposalTextAudit(out.changes, out.body.state), ...unindex.audit];
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex.changes], ...(audit.length === 0 ? {} : { audit }), detail: { proposalId: id, state: out.body.state }, contention: async () => new DomainError("stale_revision", "the proposal changed at the same moment; read it again") };
+        built(found.revision);
+        const contention = async (): Promise<DomainError> => (await this.#runner.get(ref.kind, ref.id))?.revision === found.revision
+          ? new DomainError("stale_revision", "another change for the same author (its list of proposals or its notices) was written at the same moment; send it again")
+          : new DomainError("stale_revision", "the proposal changed at the same moment; read it again");
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex.changes], ...(audit.length === 0 ? {} : { audit }), detail: { proposalId: id, state: out.body.state }, contention };
       },
-    }));
+    })));
     return { round };
+  }
+
+  /**
+   * Runs a proposal's write again, from the state as it is then, when it lost a race only to a write of a record it shares with other commands (the author's list of proposals, the author's notices, the tool's
+   * catalogue entry) and the proposal itself is unchanged since the write was built. Two maintainers deciding two proposals of one author at the same moment both write that author's list; the one that lost would
+   * otherwise be refused for a change it did not make. The second build reads everything again and judges the command as if it had arrived a moment later (a release still finds its version and base, an expected
+   * revision is still checked). A write that lost to a change of the proposal is refused as before. At most `PROPOSAL_LIMITS.resends` tries in all.
+   */
+  async #resendOnSharedRace<T>(id: string, run: (built: (revision: number) => void) => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt += 1) {
+      let at: number | undefined;
+      try {
+        return await run((revision) => { at = revision; });
+      } catch (error) {
+        if (attempt >= PROPOSAL_LIMITS.resends || at === undefined || !(error instanceof DomainError) || error.code !== "stale_revision") throw error;
+        if ((await this.#runner.get(PROPOSAL_KIND, id))?.revision !== at) throw error;
+      }
+    }
   }
 }
 

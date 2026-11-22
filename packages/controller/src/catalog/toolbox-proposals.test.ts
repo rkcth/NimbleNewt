@@ -549,8 +549,8 @@ for (const backend of backends) {
     // A repeat of the ending of a removed proposal is refused as not found and recreates nothing.
     await refuses("not_found", () => c.props.withdraw(cody.p, { commandId: withdrawn[0]!.commandId, proposalId: e1 }), /no such proposal/);
     assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: e1 }), undefined);
-    // Three endings at the same moment, one a release by the owner of the proposal accepted earlier without a version. They all write the author's list, so one goes through and one that lost is refused as
-    // changed meanwhile (nothing of it applied) and is sent again, as a caller does: one list, each ending on it once, five removals per ending, none twice.
+    // Three endings at the same moment, one a release by the owner of the proposal accepted earlier without a version. They all write the author's list; one that lost only that race (its proposal unchanged) is
+    // built again by the service, so all three go through without the caller sending anything again: one list, each ending on it once, five removals per ending, none twice.
     const x = await propose(); const y = await propose();
     const was = (await removedIds()).length;
     const endings = [
@@ -559,12 +559,7 @@ for (const backend of backends) {
       () => c.props.decide(c.owner, { commandId: cid("d"), proposalId: accepted, decision: "accept", version: "1.1.0" }),
     ];
     const first = await Promise.allSettled(endings.map((run) => run()));
-    assert.ok(first.some((r) => r.status === "fulfilled"), "one of them went through");
-    for (const [i, r] of first.entries()) {
-      if (r.status === "fulfilled") continue;
-      assert.ok(r.reason instanceof DomainError && r.reason.code === "stale_revision", String(r.reason));
-      await endings[i]!();
-    }
+    for (const r of first) assert.equal(r.status, "fulfilled", r.status === "rejected" ? String(r.reason) : "");
     assert.equal((await c.props.get(cody.p, accepted)).released?.version, "1.1.0");
     const after = (await index()).body.settled as string[];
     assert.equal(new Set(after).size, after.length, "no ID twice");
@@ -575,6 +570,59 @@ for (const backend of backends) {
     assert.deepEqual(now.slice(was), [e3], "only e3 among the fifteen taken off was a record");
     assert.equal(new Set(now).size, now.length, "no proposal removed twice");
     assert.equal((await c.props.get(cody.p, waiting)).state, "open");
+  });
+
+  suite("slice 6 second review: an ending that lost a race only on the author's list is built again and goes through (a rejection, a withdrawal, a later release); one that lost to a change of the proposal is refused; a race every time is refused after the bound with nothing applied", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "faster", tests: "ran it" })).proposalId;
+    const r1 = await propose();
+    const indexId = (await c.storage.listAggregates("toolbox-proposer", { limit: 5 }))[0]!.id;
+    // The same store, except that before the next `left` writes touching the record `kind`/`id`, another write moves that record on (what a second maintainer's decision at the same moment does).
+    const race = { kind: "toolbox-proposer", id: indexId, left: 0, writes: 0 };
+    const store = new Proxy(c.storage, {
+      get(target, key) {
+        if (key === "applyOperation") {
+          return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => {
+            if (input.changes.some((ch) => ch.ref.kind === race.kind && ch.ref.id === race.id)) { race.writes += 1; if (race.left > 0) { race.left -= 1; await c.poke(race.kind, race.id, (b) => b); } }
+            return target.applyOperation(input);
+          };
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const cat = CatalogService.withEpoch(store, c.epoch, c.desks, options);
+    const props = ToolboxProposalService.withEpoch(store, c.epoch, cat, c.desks, options, async () => undefined);
+    // A rejection and a withdrawal that lose on the author's list go through on a later build.
+    Object.assign(race, { left: 1, writes: 0 });
+    assert.equal((await props.decide(maya.p, { commandId: cid("d"), proposalId: r1, decision: "reject", reason: "no" })).state, "rejected");
+    assert.equal(race.writes, 2, "built and sent twice");
+    const w1 = await propose();
+    Object.assign(race, { left: 2, writes: 0 });
+    assert.equal((await props.withdraw(cody.p, { commandId: cid("wd"), proposalId: w1 })).state, "withdrawn");
+    assert.equal(race.writes, 3);
+    // A release of a proposal accepted earlier writes the author's list too (it ends there), and is built again the same way.
+    const a1 = await propose();
+    await props.decide(maya.p, { commandId: cid("d"), proposalId: a1, decision: "accept" });
+    Object.assign(race, { left: 1, writes: 0 });
+    assert.equal((await props.decide(c.owner, { commandId: cid("d"), proposalId: a1, decision: "accept", version: "1.1.0" })).released?.version, "1.1.0");
+    assert.equal(race.writes, 2);
+    assert.equal((await props.get(c.owner, a1)).released?.version, "1.1.0");
+    assert.deepEqual(((await c.storage.getAggregate({ kind: "toolbox-proposer", id: indexId }))!.body as { settled: string[] }).settled, [r1, w1, a1], "each on the list once");
+    // A race every time: refused after the bound, saying what changed, with nothing applied.
+    const better2 = await c.note(cody.p, "console.log('lint, faster still')");
+    const r2 = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better2, rationale: "faster", tests: "ran it" })).proposalId;
+    const at = (await props.get(c.owner, r2)).revision;
+    Object.assign(race, { left: PROPOSAL_LIMITS.resends, writes: 0 });
+    await refuses("stale_revision", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /another change for the same author .* send it again/);
+    assert.equal(race.writes, PROPOSAL_LIMITS.resends);
+    assert.equal((await props.get(c.owner, r2)).revision, at, "nothing of it applied");
+    // A write that lost to a change of the proposal itself is refused as before (sent once): the decider reads it again.
+    Object.assign(race, { kind: PROPOSAL_KIND, id: r2, left: 1, writes: 0 });
+    await refuses("stale_revision", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /the proposal changed at the same moment; read it again/);
+    assert.equal(race.writes, 1, "not built again");
+    assert.equal((await props.get(c.owner, r2)).state, "open");
   });
 
   suite("a maintainer revokes a shared version its grant covers (finish or cancel only); the fork owners are sent a notice once; other maintainers get not_found", async (c) => {
