@@ -69,8 +69,11 @@ for (const backend of backends) {
       assert.equal(r.calls.runs, 0, "nothing was landed");
       assert.equal(r.told.length, 1);
       assert.match(r.told[0]!.text, /tests: failed\. the author's own evidence for tests on this tree says fail, but the gate found it passing/);
-      // A replay of the same landing answers the stored outcome.
-      assert.equal((await r.land("c1", bad)).state, "refused");
+      // A replay of the same landing answers the stored outcome, the disagreement included (it survives the backend's storage).
+      const again = await r.land("c1", bad);
+      assert.equal(again.state, "refused");
+      assert.deepEqual(again.checks, refused.checks);
+      assert.equal(r.calls.runs, 0);
       assert.equal(r.told.length, 1);
       // The author's way out: the very same tree submitted again (a new submission) with evidence that matches what the gate finds lands; the stale claim does not block it.
       const same = await r.submit(T1, P1, [{ check: "tests", result: "pass", boundTo: T1 }]);
