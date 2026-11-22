@@ -16,6 +16,10 @@ import { redactText } from "../security/redact.js";
  * - `docs` (P09 fourth slice): the landing names the code submission; every documentation obligation (Q03) still kept that describes the task must be verified against that code (its tree) with the QA gate of that code still
  *   passing. Pending documents fail the check and are named; a task no document describes has nothing pending. Read again after the host's run and bound to the landed patch exactly as `qa` is (the evidence is for the
  *   submission's tree). No submission, no reader wired, or an unreadable answer is `not_run`.
+ * - The author's own evidence (P09 fifth slice): the evidence a code submission carries (Q01b, bound to its tree) is the author's word. Where it names a required check and is bound to the very tree the gate judged, it is compared
+ *   with the gate's own result. An author that recorded `fail` for a check the gate found passing is refused (`claimed_fail_passed`: the work and its evidence disagree, so it is sent back to be resubmitted with matching
+ *   evidence); an author that recorded `pass` for a check the gate found failing is told so (`claimed_pass_failed`, the check was already failed). A claim of `not_run`, for another tree, or for a check that is not required is
+ *   not compared; the author's word never makes a check pass.
  * - `director`: not collected at landing yet, so it is `not_run` (counted as failed) when required.
  * `not_run` counts as failed: the landing passes only when every required check is `pass`. A host that cannot run the checks or read the change makes every required check `not_run`. A project that requires no check is not gated
  * and the host is not asked. When `tests` had no commands to run (none set, or only by the task's authors), the record says so (`testsNeedOwner`) so the owner can be told. When the gate stops waiting for the host, it aborts
@@ -29,6 +33,9 @@ export interface LandingCheckEntry {
   /** The tree the result is about (the integrated tree); absent when the change could not be read. */
   readonly boundTo?: string;
   readonly summary: string;
+  /** The author's own evidence for this check on this tree when it disagrees with the gate's result (P09 fifth slice): what the author recorded and which way it disagrees. */
+  readonly claimed?: "pass" | "fail";
+  readonly disagreement?: "claimed_pass_failed" | "claimed_fail_passed";
   /** `tests` only: each command as it ran. */
   readonly runs?: readonly LandingCheckRunShown[];
 }
@@ -77,7 +84,7 @@ export interface ContractTests {
 export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
 /** The documents gate of a code submission as the landing gate needs it (`DocObligationService.landing`): the documents describing the task that are not verified against that code. */
 export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
-export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
+export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
 export interface LandingGateDeps {
   /** The project's required checks (`IntegrationPolicyService.effective`). */
   readonly requiredChecks: (projectId: string) => Promise<readonly Check[]>;
@@ -152,8 +159,20 @@ export class LandingGate {
       else if (check === "docs") results.push(await this.#docs(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else results.push({ check, result: "not_run", ...bound, summary: `the ${check} check is not collected at landing yet, so it has not run for this tree` });
     }
+    const compared = this.#claims(results, reviewed, tree);
     const needOwner = patchId !== undefined && required.includes("tests") && commands.length === 0 ? { testsNeedOwner: contract?.onlyAuthors === true ? ("authors-only" as const) : ("no-commands" as const) } : {};
-    return { required, passed: results.every((r) => r.result === "pass"), base: change.base, tree, ...(patchId === undefined ? {} : { patchId }), ...sub, ...(contract === undefined ? {} : { contractVersion: contract.version }), results, at, ...needOwner };
+    return { required, passed: compared.every((r) => r.result === "pass"), base: change.base, tree, ...(patchId === undefined ? {} : { patchId }), ...sub, ...(contract === undefined ? {} : { contractVersion: contract.version }), results: compared, at, ...needOwner };
+  }
+
+  /** The author's recorded evidence for this very tree against the gate's own results (see the header). Pure; the results of checks nobody claimed are returned as they are. */
+  #claims(results: readonly LandingCheckEntry[], sub: ReviewedSubmission | undefined, tree: string): LandingCheckEntry[] {
+    const claims = Array.isArray(sub?.evidence) ? sub!.evidence! : [];
+    return results.map((e) => {
+      const mine = claims.filter((c) => c !== null && typeof c === "object" && c.boundTo === tree && typeof c.check === "string" && c.check.trim().toLowerCase() === e.check);
+      if (e.result === "pass" && mine.some((c) => c.result === "fail")) return { ...e, result: "fail" as const, claimed: "fail" as const, disagreement: "claimed_fail_passed" as const, summary: clip(`the author's own evidence for ${e.check} on this tree says fail, but the gate found it passing, so the work and its evidence disagree; submit again with evidence that matches (${e.summary})`, LANDING_GATE_LIMITS.summary) };
+      if (e.result === "fail" && mine.some((c) => c.result === "pass")) return { ...e, claimed: "pass" as const, disagreement: "claimed_pass_failed" as const, summary: clip(`the author's own evidence for ${e.check} on this tree says pass, but the gate found it failing: ${e.summary}`, LANDING_GATE_LIMITS.summary) };
+      return e;
+    });
   }
 
   #tests(contract: ContractTests | undefined, commands: readonly { name: string }[], report: LandingCheckHostReport, bound: { boundTo: string }): LandingCheckEntry {

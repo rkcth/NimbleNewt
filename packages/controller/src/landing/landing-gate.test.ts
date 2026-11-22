@@ -269,3 +269,59 @@ test("docs: without a documents gate wired the check is not collected, as before
   assert.deepEqual([r.passed, r.results[0]!.result], [false, "not_run"]);
   assert.match(r.results[0]!.summary, /not collected/);
 });
+
+// P09 fifth slice: the author's own evidence on the submission is compared with the gate's own result for the same tree.
+const claimRun = async (evidence: ReviewedSubmission["evidence"], o: { required?: readonly Check[]; failTests?: boolean; tree?: string } = {}) => {
+  const { g } = gate({ required: o.required ?? ["tests", "review"], tests: unit, approval: { ...approved, ...(evidence === undefined ? {} : { evidence }) } });
+  const failing = (call: Parameters<NonNullable<LandingCheckHost["landingChecks"]>>[0]): LandingCheckHostReport => ({ checkout: true, change: { base: BASE, head: "f".repeat(40), tree: o.tree ?? TREE, patchId: PATCH }, checks: call.checks.map((c, i) => ({ name: c.name, state: o.failTests === true && i === 0 ? ("failed" as const) : ("passed" as const), exitCode: o.failTests === true && i === 0 ? 1 : 0 })), reviewedPatchId: PATCH });
+  return g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host(failing).h });
+};
+const by = (r: { results: readonly { check: string }[] }, check: string) => r.results.find((x) => x.check === check)! as import("./landing-gate.js").LandingCheckEntry;
+
+test("the author's evidence that says fail for a check the gate found passing is refused with a plain reason; matching evidence changes nothing (P09 fifth slice)", async () => {
+  const clean = await claimRun(undefined);
+  assert.equal(clean.passed, true);
+  const agree = await claimRun([{ check: "tests", result: "pass", boundTo: TREE }, { check: "review", result: "pass", boundTo: TREE }]);
+  assert.deepEqual([agree.passed, by(agree, "tests").disagreement, by(agree, "tests").claimed], [true, undefined, undefined]);
+  const bad = await claimRun([{ check: "tests", result: "fail", boundTo: TREE }]);
+  assert.equal(bad.passed, false);
+  assert.deepEqual([by(bad, "tests").result, by(bad, "tests").disagreement, by(bad, "tests").claimed], ["fail", "claimed_fail_passed", "fail"]);
+  assert.equal(by(bad, "review").result, "pass", "the other check is left as it is");
+  assert.match(by(bad, "tests").summary, /author's own evidence for tests on this tree says fail, but the gate found it passing/);
+  assert.match(landingChecksText(TASK, "req-1", bad), /- tests: failed\. the author's own evidence for tests/);
+  // The name is matched without regard to case or edge spaces.
+  assert.equal((await claimRun([{ check: " Tests ", result: "fail", boundTo: TREE }])).passed, false);
+});
+
+test("the author's evidence that says pass for a check the gate found failing is flagged, and never makes the check pass (P09 fifth slice)", async () => {
+  const r = await claimRun([{ check: "tests", result: "pass", boundTo: TREE }], { failTests: true });
+  assert.equal(r.passed, false);
+  assert.deepEqual([by(r, "tests").result, by(r, "tests").disagreement, by(r, "tests").claimed], ["fail", "claimed_pass_failed", "pass"]);
+  assert.match(by(r, "tests").summary, /says pass, but the gate found it failing: 1 of 2 test command\(s\) failed/);
+  // Without any claim the failure reads as before.
+  const plain = await claimRun(undefined, { failTests: true });
+  assert.deepEqual([by(plain, "tests").disagreement, /author's own/.test(by(plain, "tests").summary)], [undefined, false]);
+});
+
+test("evidence that is not about this tree and check is not compared: another tree, not_run, a check not required, a result the gate could not judge (P09 fifth slice)", async () => {
+  const other = await claimRun([{ check: "tests", result: "fail", boundTo: OLD_TREE }]);
+  assert.deepEqual([other.passed, by(other, "tests").disagreement], [true, undefined], "a claim for another tree says nothing about the integrated tree");
+  assert.equal((await claimRun([{ check: "tests", result: "not_run", boundTo: TREE }])).passed, true, "not run is not a claim");
+  assert.equal((await claimRun([{ check: "lint", result: "fail", boundTo: TREE }])).passed, true, "a check the project does not require");
+  assert.equal((await claimRun([{ check: "qa", result: "fail", boundTo: TREE }])).passed, true, "a check the project does not require");
+  // The gate itself had no result for the check (not run): a claim of pass changes nothing and is not called a contradiction.
+  const { g } = gate({ required: ["tests"], tests: { version: 1, checks: [] }, approval: { ...approved, evidence: [{ check: "tests", result: "pass", boundTo: TREE }] } });
+  const nr = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
+  assert.deepEqual([nr.results[0]!.result, nr.results[0]!.disagreement], ["not_run", undefined]);
+  // Malformed claims in a stored record are ignored.
+  const junk = await claimRun([null, { check: 7, result: "fail", boundTo: TREE }] as never);
+  assert.equal(junk.passed, true);
+});
+
+test("the claim comparison covers qa and docs as well as tests and review (P09 fifth slice)", async () => {
+  const q: QaGateView = { taskId: TASK, submissionId: SUB, tree: TREE, verdict: "passed", reasons: [] };
+  const d: DocsGateView = { taskId: TASK, submissionId: SUB, tree: TREE, checked: 0, pending: [] };
+  const g = new LandingGate({ requiredChecks: async () => ["qa", "docs"], tests: async () => undefined, approvalOf: async () => ({ ...approved, evidence: [{ check: "qa", result: "fail", boundTo: TREE }, { check: "docs", result: "fail", boundTo: TREE }] }), qaGate: async () => q, docsGate: async () => d, now: () => "2026-11-18T10:00:00.000Z" });
+  const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
+  assert.deepEqual(r.results.map((x) => [x.check, x.result, x.disagreement]), [["qa", "fail", "claimed_fail_passed"], ["docs", "fail", "claimed_fail_passed"]]);
+});
