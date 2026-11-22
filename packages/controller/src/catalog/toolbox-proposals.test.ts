@@ -579,13 +579,21 @@ for (const backend of backends) {
     const r1 = await propose();
     const indexId = (await c.storage.listAggregates("toolbox-proposer", { limit: 5 }))[0]!.id;
     // The same store, except that before the next `left` writes touching the record `kind`/`id`, another write moves that record on (what a second maintainer's decision at the same moment does).
-    const race = { kind: "toolbox-proposer", id: indexId, left: 0, writes: 0 };
+    // `between`, when set, runs once just before the rebuild starts (the second look for the command's record after a lost write: the first is the runner's own check before it refuses), so a change there lands after
+    // the service has seen the proposal unchanged and before the rebuild reads anything.
+    const race: { kind: string; id: string; left: number; writes: number; between?: (() => Promise<void>) | undefined; looks: number } = { kind: "toolbox-proposer", id: indexId, left: 0, writes: 0, looks: -1 };
     const store = new Proxy(c.storage, {
       get(target, key) {
         if (key === "applyOperation") {
           return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => {
-            if (input.changes.some((ch) => ch.ref.kind === race.kind && ch.ref.id === race.id)) { race.writes += 1; if (race.left > 0) { race.left -= 1; await c.poke(race.kind, race.id, (b) => b); } }
+            if (input.changes.some((ch) => ch.ref.kind === race.kind && ch.ref.id === race.id)) { race.writes += 1; if (race.left > 0) { race.left -= 1; await c.poke(race.kind, race.id, (b) => b); if (race.between !== undefined) race.looks = 2; } }
             return target.applyOperation(input);
+          };
+        }
+        if (key === "getOperation") {
+          return async (operationId: string) => {
+            if (race.looks > 0 && --race.looks === 0 && race.between !== undefined) { const run = race.between; race.between = undefined; await run(); }
+            return target.getOperation(operationId);
           };
         }
         const value = Reflect.get(target, key, target) as unknown;
@@ -623,6 +631,26 @@ for (const backend of backends) {
     await refuses("stale_revision", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /the proposal changed at the same moment; read it again/);
     assert.equal(race.writes, 1, "not built again");
     assert.equal((await props.get(c.owner, r2)).state, "open");
+    // A rebuild judges the command again from the state it reads: the author withdraws between the lost write and the rebuild, so the rejection is refused, not applied over the withdrawal.
+    Object.assign(race, { kind: "toolbox-proposer", id: indexId, left: 1, writes: 0, between: async () => { await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: r2 }); } });
+    await refuses("invalid_command", () => props.decide(maya.p, { commandId: cid("d"), proposalId: r2, decision: "reject", reason: "no" }), /the proposal is withdrawn; it cannot be given reject/);
+    assert.equal(race.between, undefined, "the withdrawal ran between the two builds");
+    assert.equal(race.writes, 1, "the rebuild was refused before it wrote");
+    const withdrawn = await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: r2 });
+    assert.equal((withdrawn!.body as { state: string }).state, "withdrawn");
+    assert.ok(!((withdrawn!.body as { history: { event: string }[] }).history.some((h) => h.event === "reject")), "no rejection recorded");
+    // The same for a release: the owner publishes a newer version between the lost write and the rebuild, so the proposal's base is no longer the version in use and the release is refused (rebase first), with nothing released.
+    const better3 = await c.note(cody.p, "console.log('lint, fastest')");
+    const a2 = (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better3, rationale: "fastest", tests: "ran it" })).proposalId;
+    await props.decide(maya.p, { commandId: cid("d"), proposalId: a2, decision: "accept" });
+    const newer = await c.note(cody.p, "console.log('lint 1.2')");
+    Object.assign(race, { left: 1, writes: 0, between: async () => { await c.cat.register(c.owner, { commandId: cid("pub"), name: "toolbox.lint", kind: "tool", version: "1.2.0", manifest, instructionsRecordId: better3, executableRecordId: newer } as never); } });
+    await refuses("stale_revision", () => props.decide(c.owner, { commandId: cid("d"), proposalId: a2, decision: "accept", version: "1.3.0" }), /is at 1\.2\.0, not 1\.1\.0.*rebase it first/);
+    assert.equal(race.between, undefined, "the release ran between the two builds");
+    assert.equal(race.writes, 1, "the rebuild was refused before it wrote");
+    assert.equal((await props.get(c.owner, a2)).state, "accepted");
+    assert.equal((await props.get(c.owner, a2)).released, undefined, "nothing released");
+    assert.equal(await c.cat.get(c.owner, "toolbox.lint", "1.3.0"), undefined);
   });
 
   suite("a maintainer revokes a shared version its grant covers (finish or cancel only); the fork owners are sent a notice once; other maintainers get not_found", async (c) => {
