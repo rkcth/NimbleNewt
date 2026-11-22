@@ -969,10 +969,13 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       landingGate: (call) => landingGate.evaluate(call),
       tellAuthor: async (n) => { await messages.noticeFromController({ commandId: n.commandId, taskId: n.taskId, to: n.to.startsWith("agent:") ? n.to : `agent:${n.to}`, purpose: "your landing was refused by the required checks", text: n.text }); },
     });
+    const landingQaReader = { id: "service:landing-gate", kind: "owner", name: "landing-gate", grants: [] } as unknown as Principal;
     const landingGate = new LandingGate({
       requiredChecks: async (projectId) => (await integration.effective(projectId)).requiredChecks,
       tests: (taskId, authors) => contracts.landingTests(taskId, authors),
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      // Card P09: the `qa` check reads the submission's QA gate (independent evidence, as the owner would).
+      qaGate: async (submissionId) => qaEvidence.gate(landingQaReader, submissionId),
       now: () => new Date().toISOString(),
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });
