@@ -32,7 +32,7 @@ export const PROPOSAL_DECISIONS: readonly ProposalDecision[] = ["accept", "reque
 const PENDING: readonly ProposalState[] = ["open", "changes_requested", "deferred"];
 /** What a default listing shows: proposals that are available to work on. Deferred ones are set aside and are listed only when asked for by state. */
 const AVAILABLE: readonly ProposalState[] = ["open", "changes_requested"];
-export const PROPOSAL_LIMITS = { rationale: 2000, tests: 2000, reason: 500, pendingPerAuthor: 20, settledPerAuthor: 50, removedPerWrite: 5, resends: 5, history: 50, page: 100, scan: 5000 } as const;
+export const PROPOSAL_LIMITS = { rationale: 2000, tests: 2000, reason: 500, pendingPerAuthor: 20, settledPerAuthor: 50, acceptedPerAuthor: 20, removedPerWrite: 5, resends: 5, history: 50, page: 100, scan: 5000 } as const;
 const PROPOSAL_ID = /^tpp-[a-z2-7]{20}$/;
 const VERSION = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -71,8 +71,8 @@ export interface ToolboxProposalBody {
   readonly submittedAt: string;
   readonly updatedAt: string;
 }
-/** `settled`: the author's proposals that reached an end (rejected, withdrawn, accepted and released), oldest first, at most `settledPerAuthor`; the oldest beyond that are removed with their record. Absent in indexes written before this bound. */
-interface AuthorIndex { readonly author: string; readonly pending: readonly string[]; readonly settled?: readonly string[] }
+/** `accepted`: the author's proposals accepted without a release and not yet released, at most `acceptedPerAuthor` (a further acceptance without a release is refused until one is released); absent in indexes written before this bound. `settled`: the author's proposals that reached an end (rejected, withdrawn, accepted and released), oldest first, at most `settledPerAuthor`; the oldest beyond that are removed with their record. Absent in indexes written before this bound. */
+interface AuthorIndex { readonly author: string; readonly pending: readonly string[]; readonly settled?: readonly string[]; readonly accepted?: readonly string[] }
 
 export interface ProposalSummary {
   readonly id: string; readonly revision: number; readonly kind: ProposalKind; readonly target: string; readonly author: string; readonly state: ProposalState; readonly round: number;
@@ -645,7 +645,8 @@ export class ToolboxProposalService {
         const pending = (index?.body as unknown as AuthorIndex | undefined)?.pending ?? [];
         const settled = (index?.body as unknown as AuthorIndex | undefined)?.settled;
         if (pending.length >= PROPOSAL_LIMITS.pendingPerAuthor) throw new DomainError("unavailable", `you already have ${pending.length} proposals waiting for a decision; withdraw one or wait for decisions`);
-        const nextIndex: AuthorIndex = { author: by.id, pending: [...pending, id], ...(settled === undefined ? {} : { settled }) };
+        const accepted = (index?.body as unknown as AuthorIndex | undefined)?.accepted;
+        const nextIndex: AuthorIndex = { author: by.id, pending: [...pending, id], ...(settled === undefined ? {} : { settled }), ...(accepted === undefined ? {} : { accepted }) };
         return {
           ref, creates: true,
           changes: [{ type: "create", ref, body: body as unknown as JsonObject }, ...(kept === undefined ? [] : [{ type: "create" as const, ref: proposalTextRef(id), body: kept.body as unknown as JsonObject }, ...kept.checks]), index === undefined ? { type: "create", ref: iref, body: nextIndex as unknown as JsonObject } : { type: "update", ref: iref, expectedRevision: index.revision, body: nextIndex as unknown as JsonObject }],
@@ -658,9 +659,9 @@ export class ToolboxProposalService {
   /**
    * The changes that take a proposal off its author's list of proposals waiting (when it reached a final state). With `settle` (rejected, withdrawn, or accepted and released: nothing more can be decided on it) it also goes on
    * the author's list of ended proposals, and the oldest beyond `settledPerAuthor` are deleted in the same write, so a propose-and-withdraw loop cannot store records without bound. An accepted proposal not yet released stays
-   * (a later accept with a version still releases it) and is not counted.
+   * (a later accept with a version still releases it) and is not counted among the ended ones; it is held on the author's `accepted` list instead, at most `acceptedPerAuthor` (`accepting`: refused beyond that).
    */
-  async #unindex(author: string, id: string, settle: boolean): Promise<{ changes: Change[]; audit: AuditEntry[] }> {
+  async #unindex(author: string, id: string, settle: boolean, accepting = false): Promise<{ changes: Change[]; audit: AuditEntry[] }> {
     const iref: AggregateRef = { kind: INDEX_KIND, id: derivedId("tpa", author) };
     const index = await this.#runner.get(iref.kind, iref.id);
     const body = index?.body as unknown as AuthorIndex | undefined;
@@ -688,7 +689,20 @@ export class ToolboxProposalService {
       changes.push(...text);
       audit.push(...proposalTextAudit(text, "removed with the proposal"));
     }
-    return { changes: [{ type: "update", ref: iref, expectedRevision: index.revision, body: { author, pending: pending.filter((x) => x !== id), ...(kept === undefined ? {} : { settled: kept }) } as unknown as JsonObject }, ...changes], audit };
+    // Accepted without a release and not yet released: counted against `acceptedPerAuthor`. An entry whose record is gone or no longer such a proposal only leaves the list. A release (or any ending) takes the proposal off it.
+    let accepted: string[] | undefined;
+    if (body?.accepted !== undefined || accepting) {
+      accepted = [];
+      for (const x of new Set((body?.accepted ?? []).filter((v): v is string => typeof v === "string" && PROPOSAL_ID.test(v) && v !== id))) {
+        const q = (await this.#runner.get(PROPOSAL_KIND, x))?.body as unknown as ToolboxProposalBody | undefined;
+        if (q !== undefined && q.author === author && q.state === "accepted" && q.released === undefined) accepted.push(x);
+      }
+      if (accepting) {
+        if (accepted.length >= PROPOSAL_LIMITS.acceptedPerAuthor) throw new DomainError("unavailable", `${accepted.length} proposals of this author are accepted and still waiting for a release (the most kept); release one (accept it again with a version) before accepting another without one`);
+        accepted.push(id);
+      }
+    }
+    return { changes: [{ type: "update", ref: iref, expectedRevision: index.revision, body: { author, pending: pending.filter((x) => x !== id), ...(kept === undefined ? {} : { settled: kept }), ...(accepted === undefined ? {} : { accepted }) } as unknown as JsonObject }, ...changes], audit };
   }
 
   async #update(by: Principal, op: string, commandId: string, id: string, expectedRevision: number | undefined, payload: JsonObject, mutate: (cur: ToolboxProposalBody, revision: number) => Promise<{ body: ToolboxProposalBody; changes: Change[]; final?: boolean }>): Promise<{ round: number }> {
@@ -703,7 +717,7 @@ export class ToolboxProposalService {
         if (expectedRevision !== undefined && found.revision !== expectedRevision) throw new DomainError("stale_revision", `the proposal is at revision ${found.revision}, not ${expectedRevision}`, { currentRevision: found.revision });
         const out = await mutate(found.body as unknown as ToolboxProposalBody, found.revision);
         round = out.body.round;
-        const unindex = out.final === true ? await this.#unindex(out.body.author, id, out.body.state !== "accepted" || out.body.released !== undefined) : { changes: [], audit: [] };
+        const unindex = out.final === true ? await this.#unindex(out.body.author, id, out.body.state !== "accepted" || out.body.released !== undefined, out.body.state === "accepted" && out.body.released === undefined) : { changes: [], audit: [] };
         const audit = [...proposalTextAudit(out.changes, out.body.state), ...unindex.audit];
         built(found.revision);
         const contention = async (): Promise<DomainError> => (await this.#runner.get(ref.kind, ref.id))?.revision === found.revision

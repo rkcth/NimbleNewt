@@ -678,4 +678,68 @@ for (const backend of backends) {
     assert.equal(inbox.items.length, 1);
     assert.equal((await c.cat.copies(cody.p)).items[0]!.baseRevoked?.reason, "it deletes files");
   });
+
+  suite("slice 7: proposals accepted without a release are bounded per author; a release or a stale or missing entry frees a place; an index without the list reads as empty", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    let n = 0;
+    const propose = async (own?: string) => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: own ?? better, rationale: "faster", tests: "ran it" })).proposalId;
+    const newer = async () => propose(await c.note(cody.p, `console.log('lint, again ${n += 1}')`));
+    const accept = (id: string, version?: string) => c.props.decide(maya.p, { commandId: cid("d"), proposalId: id, decision: "accept", ...(version === undefined ? {} : { version }) });
+    const limit = PROPOSAL_LIMITS.acceptedPerAuthor;
+    const index = async () => { const rows = await c.storage.listAggregates("toolbox-proposer", { limit: 5 }); assert.equal(rows.length, 1); return rows[0]!; };
+    const held = async () => ((await index()).body.accepted ?? []) as string[];
+    const first: string[] = [];
+    for (let i = 0; i < limit; i += 1) { const id = await propose(); await accept(id); first.push(id); }
+    assert.deepEqual(await held(), first);
+    const noticesBefore = (await c.cat.notices(cody.p, { limit: 100 })).items.length;
+    const extra = await propose();
+    await refuses("unavailable", () => accept(extra), /accepted and still waiting for a release/);
+    // Nothing was applied: still open and waiting, no notice sent, the list unchanged.
+    assert.equal((await c.props.get(cody.p, extra)).state, "open");
+    assert.equal((await c.cat.notices(cody.p, { limit: 100 })).items.length, noticesBefore);
+    assert.deepEqual(await held(), first);
+    // Other decisions on the waiting one are not held back by the bound.
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: extra, decision: "defer", reason: "later" });
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: extra, decision: "reopen" });
+    // A release frees a place (and the release itself is never refused by the bound).
+    assert.equal((await accept(first[0]!, "1.1.0")).released?.version, "1.1.0");
+    assert.deepEqual(await held(), first.slice(1));
+    await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: extra });
+    const fresh = await newer();
+    assert.equal((await accept(fresh)).state, "accepted");
+    assert.deepEqual(await held(), [...first.slice(1), fresh]);
+    // At the bound again; an entry that is not an accepted-unreleased proposal of this author (a withdrawn one, an unknown ID, a value that is not an ID) does not count and leaves the list on the next write.
+    const waiting = await newer();
+    await refuses("unavailable", () => accept(waiting), /still waiting for a release/);
+    await c.poke("toolbox-proposer", (await index()).id, (b) => ({ ...b, accepted: [...(b.accepted as string[]), NO_ID, 7, waiting, first[0]!] }));
+    await refuses("unavailable", () => accept(waiting), /still waiting for a release/);
+    await c.poke("toolbox-proposer", (await index()).id, (b) => ({ ...b, accepted: (b.accepted as string[]).slice(1) }));
+    assert.equal((await accept(waiting)).state, "accepted");
+    assert.deepEqual(await held(), [...first.slice(2), fresh, waiting].filter((x, i, all) => all.indexOf(x) === i), "the entries that were not accepted ones are gone");
+    // An index written before the bound has no list: it reads as empty, and the next acceptance starts it.
+    await c.poke("toolbox-proposer", (await index()).id, (b) => { const { accepted: _drop, ...rest } = b; return rest; });
+    const late = await newer();
+    assert.equal((await accept(late)).state, "accepted");
+    assert.deepEqual(await held(), [late]);
+    // The author's own proposing keeps the list, and a rejection or a new proposal never drops it.
+    const another = await newer();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: another, decision: "reject", reason: "no" });
+    assert.deepEqual(await held(), [late]);
+  });
+
+  suite("slice 7: two acceptances without a release at the same moment cannot both take the last place", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "faster", tests: "ran it" })).proposalId;
+    const limit = PROPOSAL_LIMITS.acceptedPerAuthor;
+    for (let i = 0; i < limit - 1; i += 1) await c.props.decide(maya.p, { commandId: cid("d"), proposalId: await propose(), decision: "accept" });
+    const [x, y] = [await propose(), await propose()];
+    const results = await Promise.allSettled([x, y].map((id) => c.props.decide(maya.p, { commandId: cid("d"), proposalId: id, decision: "accept" })));
+    assert.equal(results.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(results.map((r) => r.status)));
+    const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    assert.ok(lost.reason instanceof DomainError && lost.reason.code === "unavailable", String(lost.reason));
+    const rows = await c.storage.listAggregates("toolbox-proposer", { limit: 5 });
+    assert.equal((rows[0]!.body.accepted as string[]).length, limit);
+  });
 }
