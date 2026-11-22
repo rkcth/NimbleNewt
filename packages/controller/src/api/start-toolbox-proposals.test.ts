@@ -72,8 +72,11 @@ test("toolbox proposals (card T08): an agent proposes, a maintainer asks for cha
     const status = (await say("m1", ask, [{ kind: "status", request: { kind: "toolbox_proposals" }, evidence: ask, basis: "owner" }]))[0];
     assert.equal(status.status, "answered", JSON.stringify(status));
     const text = status.lines.map((l: any) => l.text).join("\n");
-    assert.match(text, new RegExp(`Proposal ${p2.proposalId}: ${cody.pid} proposes changing the instructions of toolbox\\.lint 1\\.1\\.0; it is open\\.`));
+    assert.match(text, new RegExp(`Proposal ${p2.proposalId}: "Cody" \\(${cody.pid}\\) proposes changing the instructions of toolbox\\.lint 1\\.1\\.0; it is open\\.`));
     assert.doesNotMatch(text, new RegExp(prop.proposalId), "an accepted proposal is not waiting");
+    const viaApi = await ok(boot.token, "status.ask", { request: { kind: "toolbox_proposals" } });
+    assert.deepEqual(viaApi.item.lines.map((l: any) => l.text), status.lines.map((l: any) => l.text), "the chat answer is the state API's answer");
+    assert.equal((await call(maya.token, "status.ask", { request: { kind: "toolbox_proposals" } })).error?.code, "not_found", "a maintainer is not given the owner's view (nor the names in it)");
     const park = "park Cody's lint docs idea until next month";
     const proposed = (await say("m2", park, [{ kind: "command", op: "toolbox.proposal.decide", args: { proposalId: p2.proposalId, decision: "defer", reason: "until next month" }, evidence: park, basis: "owner" }]))[0];
     assert.equal(proposed.status, "proposed", JSON.stringify(proposed));
@@ -85,6 +88,12 @@ test("toolbox proposals (card T08): an agent proposes, a maintainer asks for cha
     const after = (await say("m4", ask + "?", [{ kind: "status", request: { kind: "toolbox_proposals" }, evidence: ask, basis: "owner" }]))[0];
     assert.match(after.lines.map((l: any) => l.text).join("\n"), /1 deferred proposal is set aside and not listed/);
     assert.equal((await call(cody.token, "status.ask", { request: { kind: "toolbox_proposals" } })).error?.code, "not_found", "an agent is not given the owner's view");
+    const job = (await s.projects.createTask({ commandId: "t-tc", actor: rob.id, projectId: project, title: "lint the garden" })).id;
+    const taskToken = (await s.taskCredentials.issue(rob, { commandId: "tc-1", taskId: job, agentId: cody.pid })).token;
+    // A task credential is refused at the door (status.ask is not among what it may do for its task), so nothing of the view, and none of the names, reaches it.
+    const byTask = await call(taskToken, "status.ask", { request: { kind: "toolbox_proposals" } });
+    assert.equal(byTask.error?.code, "forbidden", JSON.stringify(byTask));
+    assert.doesNotMatch(JSON.stringify(byTask), /Cody|Proposal /, "nor the names in it");
 
     // A promotion with Cody's own tool, accepted by the maintainer for coders.
     const fmtDocs = await note(cody, "Format the code."); const fmtCode = await note(cody, "console.log('fmt')");

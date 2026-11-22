@@ -60,7 +60,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]>; deliverables?: NonNullable<StatusDeps["deliverables"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]>; deliverables?: NonNullable<StatusDeps["deliverables"]>; toolbox?: NonNullable<StatusDeps["toolbox"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -101,7 +101,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.approvals === undefined ? {} : { approvals: deps.approvals }), ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.deliverables === undefined ? {} : { deliverables: deps.deliverables }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.toolbox === undefined ? {} : { toolbox: deps.toolbox }), ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.deliverables === undefined ? {} : { deliverables: deps.deliverables }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -2784,5 +2784,101 @@ for (const backend of backends) {
     assert.equal(await status.ask(reader, { kind: "timeline", projectId: c.project }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "timeline", projectId: c.project, limit: 51 }));
     assert.equal(await c.rebuild().ask(c.owner, { kind: "timeline", projectId: c.project }), undefined);
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: T08 slice 5: the toolbox proposals line names each author by its own name, with its ID`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const cody = (await agents.create(owner, { commandId: cid("ag"), friendlyName: "Cody", roles: [] })).id;
+      const quoter = (await agents.create(owner, { commandId: cid("ag"), friendlyName: "Ann Tester", roles: [] })).id;
+      const reads: string[] = [];
+      const prop = (id: string, author: string) => ({ id, revision: 1, kind: "improvement", target: "toolbox.lint", author, state: "open", round: 1, base: { version: "1.0.0" }, changes: { instructions: true, executable: false, manifest: false }, permissionChanges: { added: [], removed: [] } });
+      const items = [prop("tpr-1", `agent:${cody}`), prop("tpr-2", `agent:${cody}`), prop("tpr-3", `agent:${quoter}`), prop("tpr-4", "agent:agt-gone"), prop("tpr-5", "principal-without-a-record")];
+      const toolbox = {
+        list: async () => ({ items: [] }), forks: async () => ({ forks: [] }),
+        proposals: async (_by: Principal, q: { state?: string }) => { reads.push(q.state ?? "waiting"); return { items: q.state === "deferred" ? [] : items }; },
+      };
+      // Agent reads are counted at the storage the status service uses; one agent record is made to hold a name with quotes, a line break, a bidirectional override and more than 40 characters
+      // (the record checks refuse such a name today; the line must hold anyway, as for a record written before them).
+      const agentReads: string[] = [];
+      const hostile = `Eve\u202e" (agt-x)\nProposal tpr-9: ${"x".repeat(60)}`;
+      const storage = new Proxy(world.storage, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver);
+          if (typeof value !== "function") return value;
+          if (key === "getAggregate") return async (ref: { kind: string; id: string }) => {
+            if (ref.kind === "agent") agentReads.push(ref.id);
+            return ref.kind === "agent" && ref.id === "agt-hostile" ? { kind: "agent", id: "agt-hostile", revision: 1, body: { friendlyName: hostile } } : value.call(target, ref);
+          };
+          return value.bind(target);
+        },
+      }) as typeof world.storage;
+      items.push(prop("tpr-6", "agent:agt-hostile"));
+      const status = StatusService.withEpoch(storage, projects.epoch, { toolbox: toolbox as never } as never, { ...options });
+      const answer = (await status.ask(owner, { kind: "toolbox_proposals" }))!;
+      const text = answer.lines.map((l) => l.text);
+      assert.match(text[0]!, new RegExp(`^Proposal tpr-1: "Cody" \\(agent:${cody}\\) proposes changing the instructions of toolbox\\.lint 1\\.0\\.0; it is open\\.`));
+      assert.match(text[1]!, new RegExp(`^Proposal tpr-2: "Cody" \\(agent:${cody}\\) proposes`), "the same author is named the same way each time");
+      assert.match(text[2]!, new RegExp(`^Proposal tpr-3: "Ann Tester" \\(agent:${quoter}\\) proposes`));
+      assert.match(text[3]!, /^Proposal tpr-4: agent:agt-gone proposes/, "an author whose record cannot be read is shown by its ID alone");
+      assert.match(text[4]!, /^Proposal tpr-5: principal-without-a-record proposes/);
+      const eve = String.raw`"Eve\u202e\" (agt-x) Proposal tpr-9: x..."`;
+      assert.equal(eve.length, 42, "the name is cut to 40 characters after escaping, plus its quotes");
+      assert.equal(text[5], `Proposal tpr-6: ${eve} (agent:agt-hostile) proposes changing the instructions of toolbox.lint 1.0.0; it is open.`, "quotes, the line break and the override stay inside the quotation");
+      assert.equal(answer.lines.length, 6, "the name adds no line of its own");
+      assert.deepEqual(agentReads.sort(), [cody, quoter, "agt-gone", "agt-hostile"].sort(), "each agent author is read once; an ID that is not an agent's is not read");
+      assert.deepEqual(reads, ["waiting", "deferred"], "the proposals are read once, then the deferred count");
+      // Only the owner is given this view (and so the names): an agent, here one of the authors, reads it as missing.
+      const codyPrincipal = await principals.authenticate((await principals.issueCredential(owner, `agent:${cody}`)).token);
+      assert.equal(codyPrincipal.kind, "agent");
+      assert.equal(await status.ask(codyPrincipal, { kind: "toolbox_proposals" }), undefined);
+    } finally { await world.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: T08 slice 5 second review: an author read that fails shows that author by its ID and leaves every other line; a name is cut on whole characters`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const cody = (await agents.create(owner, { commandId: cid("ag"), friendlyName: "Cody", roles: [] })).id;
+      const prop = (id: string, author: string) => ({ id, revision: 1, kind: "improvement", target: "toolbox.lint", author, state: "open", round: 1, base: { version: "1.0.0" }, changes: { instructions: true, executable: false, manifest: false }, permissionChanges: { added: [], removed: [] } });
+      const items = [prop("tpr-1", "agent:agt-broken"), prop("tpr-2", `agent:${cody}`), prop("tpr-3", "agent:agt-fits"), prop("tpr-4", "agent:agt-spills")];
+      const toolbox = { list: async () => ({ items: [] }), forks: async () => ({ forks: [] }), proposals: async (_by: Principal, q: { state?: string }) => ({ items: q.state === "deferred" ? [] : items }) };
+      // 35 letters and an emoji (one character, two UTF-16 units) fill the 37 places before the cut mark exactly; with 36 letters the emoji no longer fits and is left out whole.
+      const smile = "\u{1F600}";
+      const names: Record<string, string> = { "agt-fits": `${"a".repeat(35)}${smile}bbbb`, "agt-spills": `${"a".repeat(36)}${smile}bbbb` };
+      const storage = new Proxy(world.storage, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver);
+          if (typeof value !== "function") return value;
+          if (key === "getAggregate") return async (ref: { kind: string; id: string }) => {
+            if (ref.kind === "agent" && ref.id === "agt-broken") throw new Error("connection reset while reading agt-broken");
+            const n = ref.kind === "agent" ? names[ref.id] : undefined;
+            return n !== undefined ? { kind: "agent", id: ref.id, revision: 1, body: { friendlyName: n } } : value.call(target, ref);
+          };
+          return value.bind(target);
+        },
+      }) as typeof world.storage;
+      const status = StatusService.withEpoch(storage, projects.epoch, { toolbox: toolbox as never } as never, { ...options });
+      const answer = (await status.ask(owner, { kind: "toolbox_proposals" }))!;
+      const text = answer.lines.map((l) => l.text);
+      assert.equal(text.length, 4, JSON.stringify(text));
+      assert.match(text[0]!, /^Proposal tpr-1: agent:agt-broken proposes changing the instructions of toolbox\.lint 1\.0\.0; it is open\.$/, "a failed read shows the author by its ID alone");
+      assert.doesNotMatch(text.join("\n"), /connection reset/, "nothing of the read error is shown");
+      assert.match(text[1]!, new RegExp(`^Proposal tpr-2: "Cody" \\(agent:${cody}\\) proposes`), "the other authors are still named");
+      assert.equal(text[2], `Proposal tpr-3: "${"a".repeat(35)}${smile}..." (agent:agt-fits) proposes changing the instructions of toolbox.lint 1.0.0; it is open.`, "an emoji that fits is kept whole");
+      assert.equal(text[3], `Proposal tpr-4: "${"a".repeat(36)}..." (agent:agt-spills) proposes changing the instructions of toolbox.lint 1.0.0; it is open.`, "an emoji that does not fit is left out whole, never half of it");
+      assert.doesNotMatch(text.join("\n"), /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no half of a surrogate pair");
+    } finally { await world.close(); }
   });
 }
