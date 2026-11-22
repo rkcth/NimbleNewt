@@ -23,6 +23,9 @@ export type DefectState = (typeof DEFECT_STATES)[number];
 export const OVERRIDE_OUTCOMES = ["accept-as-is", "repair-again"] as const;
 export type OverrideOutcome = (typeof OVERRIDE_OUTCOMES)[number];
 
+/** Versions that were rejected or replaced: a repair in one of them cannot be found fixed. */
+const DEAD_VERSION: ReadonlySet<string> = new Set(["rejected", "superseded"]);
+
 /** The setting that bounds the repair and review cycles of one defect (card Q04): after this many failed checks of a repair, the defect escalates to the owner. */
 export const DEFECT_CYCLE_SETTING = "review.repairCycles";
 export const DEFECT_CYCLE_DEFAULT = 3;
@@ -255,7 +258,9 @@ export class DefectService {
         const { agg, body } = await this.#load(by, command.id);
         if (by.kind !== "owner" && !(by.kind === "agent" && by.id === body.responsibleAgent)) throw new DomainError("forbidden", "only the responsible agent or the owner may submit a repair");
         if (expected !== undefined && agg.revision !== expected) throw new DomainError("stale_revision", `the defect is at revision ${agg.revision}, not ${expected}`, { currentRevision: agg.revision });
-        if (body.state !== "open") throw new DomainError("invalid_transition", body.state === "escalated" ? "the defect escalated to the owner, who decides whether the repair goes on" : `the defect is ${body.state}, not open`);
+        // A repair whose version was rejected or replaced can no longer be checked as fixed: the responsible agent names a newer one in its place (no cycle is counted, nothing was checked).
+        const stuck = body.state === "repair-submitted" && body.repairVersion !== undefined && DEAD_VERSION.has((await this.#version(body.deliverableId, body.repairVersion)).state);
+        if (body.state !== "open" && !stuck) throw new DomainError("invalid_transition", body.state === "escalated" ? "the defect escalated to the owner, who decides whether the repair goes on" : `the defect is ${body.state}, not open`);
         const floor = Math.max(body.version, body.repairVersion ?? 0);
         if (command.version <= floor) bad("version", `a repair names a version newer than ${floor}`);
         const dAgg = await this.#runner.get("deliverable", body.deliverableId);
@@ -301,6 +306,8 @@ export class DefectService {
         const vAgg = await this.#runner.get("deliverable-version", `${body.deliverableId}.${body.repairVersion}`);
         if (vAgg === undefined) throw new DomainError("integrity", `the record of version ${body.repairVersion} of ${body.deliverableId} is missing`);
         await this.#checker(by, d, vAgg.body as unknown as VersionBody, "check this repair");
+        // A version that was rejected or replaced by a newer one is not found fixed (the newer version is the repair to check); it may still be found not fixed.
+        if (command.verdict === "fixed" && DEAD_VERSION.has((vAgg.body as unknown as VersionBody).state)) throw new DomainError("invalid_transition", `the repair, version ${body.repairVersion}, is ${(vAgg.body as unknown as VersionBody).state}: it cannot be found fixed; the responsible agent names a newer version as the repair`);
         const limit = await this.#limit(body.projectId);
         const at = this.#runner.now();
         const fixed = command.verdict === "fixed";
