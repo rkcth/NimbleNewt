@@ -50,6 +50,7 @@ for (const backend of backends) {
       await w.assignments.transferTask({ commandId: `tr-${taskId}-${++n}`, actor: w.owner.id, taskId, expectedRevision: a.revision, to: { kind: "agent", id: to }, reason: "hand-off" });
     };
     const approve = (k: number, t: string, author = "agent:ann"): string => { approvals.set(sbm(k), { taskId: t, projectId: w.project, base: BASE, tree: tree(k), submittedBy: author, approved: true }); return sbm(k); };
+    const takeBack = (id: string): void => { approvals.set(id, { ...approvals.get(id)!, approved: false }); };
     const queued = async () => (await ops.list(w.owner, { projectId: w.project })).items.map((e) => e.submissionId);
     /** A take-out through the service itself with a judgment that does `during` once (after reading the record, before the commit) and then judges as the door does. */
     const removeWith = (taskId: string, by: Principal, during: () => Promise<void>, commandId: string) => {
@@ -68,7 +69,7 @@ for (const backend of backends) {
         },
       }).then((r) => ({ r, calls }), (error: unknown) => { throw Object.assign(error as Error, { calls }); });
     };
-    return { store, w, ops, service, person, task, handOff, approve, queued, removeWith, close: () => store.close() };
+    return { store, w, ops, service, person, task, handOff, approve, takeBack, queued, removeWith, close: () => store.close() };
   };
 
   test(`${backend.name}: a hand-off between the holder being read and the take-out's commit makes the take-out judge again: the old holder is refused and the entry stays (card P10, ninth slice)`, async () => {
@@ -153,6 +154,28 @@ for (const backend of backends) {
     } finally { await bad.close(); }
   });
 
+  test(`${backend.name}: a reserved place with no entry is not ended by the task's holder judged on the record; the owner ends it (card P10, ninth slice)`, async () => {
+    const r = await rig();
+    try {
+      const ann = await r.person("ann");
+      const t1 = await r.task("one", "ann");
+      const s1 = r.approve(1, t1);
+      await r.ops.add(ann, { commandId: "a1", submissionId: s1 });
+      assert.equal(await r.ops.afterRound({ taskId: t1, projectId: r.w.project, round: 3 }), "reserved");
+      // Its approval is taken back: the entry leaves, the reserved place stays.
+      r.takeBack(s1);
+      assert.equal(await r.ops.withdrawUnapproved(s1, "rv1"), true);
+      const reserved = async () => (await r.ops.list(r.w.owner, { projectId: r.w.project })).reservations.map((x) => x.taskId);
+      assert.deepEqual([await r.queued(), await reserved()], [[], [t1]]);
+      // ann holds the task and wrote the entry, but only the owner, an integrator or a director ends a reservation.
+      await refuses("not_found", () => r.ops.remove(ann, { commandId: "a2", taskId: t1, reason: "let the others land" }));
+      assert.deepEqual(await reserved(), [t1], "the reservation stays");
+      const ended = await r.ops.remove(r.w.owner, { commandId: "o1", taskId: t1, reason: "let the others land" });
+      assert.equal(ended.reservationEnded, true);
+      assert.deepEqual(await reserved(), []);
+    } finally { await r.close(); }
+  });
+
   test(`${backend.name}: a take-out and a hand-off sent together end in one consistent state, with no waiting (card P10, ninth slice)`, async () => {
     const r = await rig();
     try {
@@ -170,14 +193,14 @@ for (const backend of backends) {
         const entry = (await r.queued()).includes(s);
         if (out.status === "fulfilled") {
           assert.equal(entry, false, "a take-out that answered removed the entry");
-          // The take-out committed while the record still said ann (a hand-off committed before it would have made it judge again and refuse); the hand-off, if it went through, came after.
-          if (moved.status === "rejected") assert.equal(held, "ann");
+          // The take-out committed while the record still said ann (a hand-off committed before it would have made it judge again and refuse); the hand-off came after.
         } else {
           assert.ok(out.reason instanceof DomainError && out.reason.code === "not_found", String(out.reason));
           assert.equal(entry, true, "a refused take-out left the entry");
-          assert.equal(moved.status, "fulfilled");
-          assert.equal(held, "bob");
         }
+        // Either way the hand-off applies: a take-out only checks the assignment's revision, so a hand-off prepared on it is never refused because of the take-out.
+        assert.equal(moved.status, "fulfilled", moved.status === "rejected" ? String(moved.reason) : "");
+        assert.equal(held, "bob");
       }
     } finally { await r.close(); }
   });
