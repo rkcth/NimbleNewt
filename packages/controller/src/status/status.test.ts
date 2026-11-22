@@ -2841,3 +2841,44 @@ for (const backend of backends) {
     } finally { await world.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: T08 slice 5 second review: an author read that fails shows that author by its ID and leaves every other line; a name is cut on whole characters`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const cody = (await agents.create(owner, { commandId: cid("ag"), friendlyName: "Cody", roles: [] })).id;
+      const prop = (id: string, author: string) => ({ id, revision: 1, kind: "improvement", target: "toolbox.lint", author, state: "open", round: 1, base: { version: "1.0.0" }, changes: { instructions: true, executable: false, manifest: false }, permissionChanges: { added: [], removed: [] } });
+      const items = [prop("tpr-1", "agent:agt-broken"), prop("tpr-2", `agent:${cody}`), prop("tpr-3", "agent:agt-fits"), prop("tpr-4", "agent:agt-spills")];
+      const toolbox = { list: async () => ({ items: [] }), forks: async () => ({ forks: [] }), proposals: async (_by: Principal, q: { state?: string }) => ({ items: q.state === "deferred" ? [] : items }) };
+      // 35 letters and an emoji (one character, two UTF-16 units) fill the 37 places before the cut mark exactly; with 36 letters the emoji no longer fits and is left out whole.
+      const smile = "\u{1F600}";
+      const names: Record<string, string> = { "agt-fits": `${"a".repeat(35)}${smile}bbbb`, "agt-spills": `${"a".repeat(36)}${smile}bbbb` };
+      const storage = new Proxy(world.storage, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver);
+          if (typeof value !== "function") return value;
+          if (key === "getAggregate") return async (ref: { kind: string; id: string }) => {
+            if (ref.kind === "agent" && ref.id === "agt-broken") throw new Error("connection reset while reading agt-broken");
+            const n = ref.kind === "agent" ? names[ref.id] : undefined;
+            return n !== undefined ? { kind: "agent", id: ref.id, revision: 1, body: { friendlyName: n } } : value.call(target, ref);
+          };
+          return value.bind(target);
+        },
+      }) as typeof world.storage;
+      const status = StatusService.withEpoch(storage, projects.epoch, { toolbox: toolbox as never } as never, { ...options });
+      const answer = (await status.ask(owner, { kind: "toolbox_proposals" }))!;
+      const text = answer.lines.map((l) => l.text);
+      assert.equal(text.length, 4, JSON.stringify(text));
+      assert.match(text[0]!, /^Proposal tpr-1: agent:agt-broken proposes changing the instructions of toolbox\.lint 1\.0\.0; it is open\.$/, "a failed read shows the author by its ID alone");
+      assert.doesNotMatch(text.join("\n"), /connection reset/, "nothing of the read error is shown");
+      assert.match(text[1]!, new RegExp(`^Proposal tpr-2: "Cody" \\(agent:${cody}\\) proposes`), "the other authors are still named");
+      assert.equal(text[2], `Proposal tpr-3: "${"a".repeat(35)}${smile}..." (agent:agt-fits) proposes changing the instructions of toolbox.lint 1.0.0; it is open.`, "an emoji that fits is kept whole");
+      assert.equal(text[3], `Proposal tpr-4: "${"a".repeat(36)}..." (agent:agt-spills) proposes changing the instructions of toolbox.lint 1.0.0; it is open.`, "an emoji that does not fit is left out whole, never half of it");
+      assert.doesNotMatch(text.join("\n"), /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/, "no half of a surrogate pair");
+    } finally { await world.close(); }
+  });
+}
