@@ -301,6 +301,15 @@ test("the author's evidence that says pass for a check the gate found failing is
   // Without any claim the failure reads as before.
   const plain = await claimRun(undefined, { failTests: true });
   assert.deepEqual([by(plain, "tests").disagreement, /author's own/.test(by(plain, "tests").summary)], [undefined, false]);
+  // Evidence that agrees with a failure (fail, or not_run) is no disagreement: the failure reads exactly as without a claim.
+  for (const result of ["fail", "not_run"]) {
+    const same = await claimRun([{ check: "tests", result, boundTo: TREE }], { failTests: true });
+    assert.deepEqual(by(same, "tests"), by(plain, "tests"), result);
+  }
+  // Self-contradicting evidence (both pass and fail for one check on this tree) never passes: refused when the gate passes, flagged when it fails.
+  const both = [{ check: "tests", result: "pass", boundTo: TREE }, { check: "tests", result: "fail", boundTo: TREE }];
+  assert.deepEqual([(await claimRun(both)).passed, by(await claimRun(both), "tests").disagreement], [false, "claimed_fail_passed"]);
+  assert.deepEqual([(await claimRun(both, { failTests: true })).passed, by(await claimRun(both, { failTests: true }), "tests").disagreement], [false, "claimed_pass_failed"]);
 });
 
 test("evidence that is not about this tree and check is not compared: another tree, not_run, a check not required, a result the gate could not judge (P09 fifth slice)", async () => {
@@ -324,4 +333,17 @@ test("the claim comparison covers qa and docs as well as tests and review (P09 f
   const g = new LandingGate({ requiredChecks: async () => ["qa", "docs"], tests: async () => undefined, approvalOf: async () => ({ ...approved, evidence: [{ check: "qa", result: "fail", boundTo: TREE }, { check: "docs", result: "fail", boundTo: TREE }] }), qaGate: async () => q, docsGate: async () => d, now: () => "2026-11-18T10:00:00.000Z" });
   const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
   assert.deepEqual(r.results.map((x) => [x.check, x.result, x.disagreement]), [["qa", "fail", "claimed_fail_passed"], ["docs", "fail", "claimed_fail_passed"]]);
+});
+
+test("a disagreement's summary stays within the bound, its reason first, and never cuts a character in half, in both parities (P09 fifth slice)", async () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  for (const lead of ["", "x"]) {
+    const d: DocsGateView = { taskId: TASK, submissionId: SUB, tree: TREE, checked: 1, pending: [{ obligationId: "dob-aaaaaaaaaaaaaaaaaaaa", title: `${lead}${"\u{1F600}".repeat(200)}`, reason: "never verified" }] };
+    const g = new LandingGate({ requiredChecks: async () => ["docs"], tests: async () => undefined, approvalOf: async () => ({ ...approved, evidence: [{ check: "docs", result: "pass", boundTo: TREE }] }), docsGate: async () => d, now: () => "2026-11-18T10:00:00.000Z" });
+    const e = (await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h })).results[0]!;
+    assert.deepEqual([e.result, e.disagreement], ["fail", "claimed_pass_failed"]);
+    assert.ok(e.summary.length <= 300 && e.summary.endsWith("..."), String(e.summary.length));
+    assert.match(e.summary, /^the author's own evidence for docs on this tree says pass, but the gate found it failing: /);
+    assert.doesNotMatch(e.summary, lone, JSON.stringify(e.summary));
+  }
 });

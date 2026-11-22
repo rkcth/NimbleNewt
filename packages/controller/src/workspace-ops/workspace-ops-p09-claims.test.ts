@@ -72,13 +72,19 @@ for (const backend of backends) {
       // A replay of the same landing answers the stored outcome.
       assert.equal((await r.land("c1", bad)).state, "refused");
       assert.equal(r.told.length, 1);
-      // The author submits again with evidence that matches what the gate finds.
-      r.host.change = { base: BASE, head: HEAD, tree: T2, patchId: P2 }; r.host.reviewedPatch = P2;
-      const good = await r.submit(T2, P2, [{ check: "tests", result: "pass", boundTo: T2 }]);
-      const ok = await r.land("c2", good);
+      // The author's way out: the very same tree submitted again (a new submission) with evidence that matches what the gate finds lands; the stale claim does not block it.
+      const same = await r.submit(T1, P1, [{ check: "tests", result: "pass", boundTo: T1 }]);
+      assert.notEqual(same, bad);
+      const ok = await r.land("c2", same);
       assert.equal(ok.state, "done", ok.summary);
       assert.equal(ok.checks!.passed, true);
       assert.equal(r.calls.runs, 1);
+      // So does newer work with matching evidence.
+      r.host.change = { base: BASE, head: HEAD, tree: T2, patchId: P2 }; r.host.reviewedPatch = P2;
+      const good = await r.submit(T2, P2, [{ check: "tests", result: "pass", boundTo: T2 }]);
+      assert.equal((await r.land("c3", good)).state, "done");
+      assert.equal(r.calls.runs, 2);
+      assert.equal(r.told.length, 1, "nothing more was told");
     } finally { await r.store.close(); }
   });
 
