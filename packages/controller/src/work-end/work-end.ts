@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { BlockerService } from "../domain/blockers.js";
 import { onlyKnown, text } from "../domain/model.js";
+import { safeSlice } from "../lifecycle/handoff-cut.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -463,7 +464,7 @@ export class WorkEndService {
         try { value = { submissionId: (await this.#deps.submit(attempt, body.base!, stepKey(attemptId, "submitted"))).submissionId }; } catch (error) {
           if (error instanceof SubmitRefused) {
             // The check made after the staging (stagedSubmit's `landing`): typed like the one made before it, never as a staging failure.
-            const summary = `submit_refused: ${redactText(error.message.replace(/^submit refused: /, "")).slice(0, 400)}; the attempt ended without a submission`;
+            const summary = `submit_refused: ${safeSlice(redactText(error.message.replace(/^submit refused: /, "")), 400)}; the attempt ended without a submission`;
             value = clean({ typed: "submit_refused" as const, summary, blocker: await this.#blocker(body, `${attemptId}:submit_refused`, summary) });
           } else {
           const summary = `release_failed: staging or opening the submission failed (${redactText(String((error as Error)?.message ?? error)).slice(0, 300)}); the attempt ended without one`;

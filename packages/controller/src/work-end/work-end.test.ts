@@ -601,4 +601,18 @@ test("stagedSubmit with a landing read: the staged files are judged again after 
   assert.deepEqual(await mk(["a.ts"], async () => ({ base: "h1", head: "h1", mine: [], landed: ["a.ts"] }))(attempt, "h1", "k3"), { submissionId: "sub-1" });
   assert.deepEqual(await mk(["a.ts"])(attempt, "h1", "k4"), { submissionId: "sub-1" });
   assert.equal(recorded.length, 3);
+  // A checkout that reports another base after the staging is not judged against the staged one: refused, the head named.
+  await assert.rejects(mk(["a.ts"], async () => ({ base: "h0", head: "h2", mine: [], landed: [] }))(attempt, "h1", "k5"), (e: unknown) => {
+    assert.ok(e instanceof SubmitRefused); assert.equal(e.head, "h2"); assert.match(e.message, /the checkout moved after the work was staged \(its base is now h0, the staged work's h1\)/); return true;
+  });
+  assert.equal(recorded.length, 3);
+  // A submission already recorded under the key (a replay) is returned before anything is staged or read; one of another task or kind is not.
+  let stages = 0; let reads = 0;
+  const withGet = (found: unknown) => stagedSubmit({ stage: async () => { stages++; return { base: "h1", tree: "t".repeat(40), patchId: "p".repeat(40), files: ["a.ts"] }; }, submissions: { record: async () => ({ id: "sub-new" }), get: async () => found } as never, principalOf: async () => ann, landing: async () => { reads++; return undefined; } });
+  assert.deepEqual(await withGet({ id: "sub-old", taskId: "t1", kind: "code", submittedBy: "agent:ann" })(attempt, "h1", "k1"), { submissionId: "sub-old" });
+  assert.deepEqual([stages, reads], [0, 0]);
+  for (const other of [{ id: "x", taskId: "t2", kind: "code", submittedBy: "agent:ann" }, { id: "x", taskId: "t1", kind: "review", submittedBy: "agent:ann" }, { id: "x", taskId: "t1", kind: "code", submittedBy: "agent:bob" }, undefined]) {
+    await rejected(withGet(other)(attempt, "h1", "k1"));
+  }
+  assert.deepEqual([stages, reads], [4, 4]);
 });
