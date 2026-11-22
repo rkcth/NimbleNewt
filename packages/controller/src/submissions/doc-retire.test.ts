@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { AssignmentService } from "../domain/assignments.js";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
-import { derivedId } from "../domain/ids.js";
+import { derivedId, operationIdOf } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { scopedCommandId } from "../security/credentials.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { DOC_AUTO_PRINCIPAL, DocObligationService, type DocObligationBody } from "./index.js";
@@ -17,6 +18,14 @@ let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match?: RegExp): Promise<void> => {
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); if (match) assert.match(error.message, match); return true; });
+};
+/** The audit detail of the command `commandId` sent by `actor` (its own entry). */
+const entryOf = async (storage: { getOperation(id: string): Promise<{ result: { auditSeqs: readonly number[] } } | undefined>; listAudit(input: { afterSeq: number; limit: number }): Promise<readonly { seq: number; operationId: string; detail: Record<string, unknown> }[]> }, actor: string, commandId: string): Promise<Record<string, unknown>> => {
+  const operationId = operationIdOf(scopedCommandId(actor, commandId));
+  const seq = (await storage.getOperation(operationId))!.result.auditSeqs[0]!;
+  const entry = (await storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0]!;
+  assert.equal(entry.operationId, operationId);
+  return entry.detail;
 };
 const treeA = "a".repeat(40);
 const treeB = "b".repeat(40);
@@ -127,8 +136,18 @@ for (const backend of backends) {
       await docs.record(owner, { commandId: cid("r"), projectId: project, obligationId: faq, expectedRevision: (await read(faq)).revision, title: `Frequently asked questions ${"x".repeat(80)}`, location: "docs/faq.md", audience: "support", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login] });
       assert.equal((await read(faq)).state, "verified");
       // The controller's automatic check after independent QA evidence: the owner is told.
+      // Its first send is lost; the same evidence record checked again (a crash after the record) makes it up from the check's audit entry.
       const l4 = code(login, treeB);
-      await docs.afterQaEvidence({ evidenceId: derivedId("qae", cid("qa")), taskId: login, submissionId: l4, source: "independent" });
+      const qaEvidence = derivedId("qae", cid("qa"));
+      lose = true;
+      await docs.afterQaEvidence({ evidenceId: qaEvidence, taskId: login, submissionId: l4, source: "independent" });
+      assert.equal(notices.length, 1, "the automatic check's first send was lost");
+      const recorded = await entryOf(world.storage as never, DOC_AUTO_PRINCIPAL.id, `doc-impact:${qaEvidence}`);
+      assert.deepEqual((recorded["staled"] as { id: string }[]).map((d) => d.id).sort(), [guide, faq].sort());
+      assert.ok((recorded["staled"] as Record<string, unknown>[]).every((d) => Object.keys(d).sort().join() === "id,projectId,title" && d["projectId"] === project), JSON.stringify(recorded));
+      assert.ok((recorded["staled"] as { title: string }[]).some((d) => d.title === `a${"\u{1F4D8}".repeat(29)}`), "the recorded title is cut to 60 units on a whole character");
+      assert.equal(recorded["staledTotal"], undefined, "the count is kept only when more than 20 went stale");
+      await docs.afterQaEvidence({ evidenceId: qaEvidence, taskId: login, submissionId: l4, source: "independent" });
       assert.equal(notices.length, 2);
       assert.match(notices[1]!.text, /2 verified documents went stale/);
       assert.ok(notices[1]!.text.includes(`"a${"\u{1F4D8}".repeat(29)}"`), notices[1]!.text);
@@ -245,6 +264,64 @@ for (const backend of backends) {
       // The same command ID with other arguments is still a conflict (the repeat check comes before the retired check), not answered and not refused as retired.
       await refuses("command_conflict", () => docs.verify(dora, { ...tipsVerify, expectedRevision: verified.revision }));
       await refuses("invalid_command", () => docs.verify(dora, { ...tipsVerify, commandId: cid("v"), expectedRevision: verified.revision + 1 }), /was retired/);
+    } finally {
+      await world.close();
+    }
+  });
+
+  test(`${backend.name}: more than 20 documents gone stale, and the same check sent twice at the same moment with its first send lost: one notice, with the whole count, made up by the other copy (card Q03)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const login = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Login" })).id;
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "dora", grants: [{ action: "task.read", project }] });
+      const dora = await principals.authenticate((await principals.issueCredential(owner, "agent:dora")).token);
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const gates = new Map<string, { verdict: "passed" | "failed"; tree: string; taskId: string }>();
+      const attempts: string[] = [];
+      let lose = false;
+      const notices: { commandId: string; projectId: string; obligationId: string; text: string }[] = [];
+      const assignments = AssignmentService.withEpoch(world.storage, projects.epoch, projects, options);
+      const docs = DocObligationService.withEpoch(world.storage, projects.epoch, {
+        rolesOf: async (id) => (id === dora.id ? ["docs"] : []),
+        gate: async (_by, x) => gates.get(x) ?? ((): never => { throw new DomainError("not_found", "no such submission"); })(),
+        projects: { createTask: (c: Parameters<ProjectService["createTask"]>[0]) => projects.createTask(c), transitionTask: (c: Parameters<ProjectService["transitionTask"]>[0]) => projects.transitionTask(c) } as never, assignments,
+        notify: async (x) => { attempts.push(x.commandId); if (lose) { lose = false; throw new DomainError("unavailable", "no channel"); } if (!notices.some((y) => y.commandId === x.commandId)) notices.push(x); },
+      }, options);
+      const code = (tree: string): string => { const id = derivedId("sbm", cid("code")); gates.set(id, { verdict: "passed", tree, taskId: login }); return id; };
+      const l1 = code(treeA);
+      const ids: string[] = [];
+      for (let i = 0; i < 21; i++) {
+        const id = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: `D${i}`, location: `docs/d${i}.md`, audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login] })).id;
+        const sub = derivedId("sbm", cid("doc"));
+        const found = await runner.get("submission", sub);
+        assert.equal(found, undefined);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { sub }, build: async () => ({ ref: { kind: "submission", id: sub }, creates: true, changes: [{ type: "create" as const, ref: { kind: "submission", id: sub }, body: { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-21T10:00:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] } as JsonObject }], detail: {} }) }));
+        await docs.verify(dora, { commandId: cid("v"), obligationId: id, expectedRevision: ((await docs.get(owner, id)) as unknown as { revision: number }).revision, documentSubmissionId: sub, evidence: [l1] });
+        ids.push(id);
+      }
+      // The same check twice at once; whichever copy sends first loses its send.
+      const check = { commandId: cid("i"), taskId: login, submissionId: code(treeB) };
+      lose = true;
+      const both = await Promise.all([docs.impact(dora, check), docs.impact(dora, check)]);
+      assert.deepEqual(both.map((b) => b.replayed).sort(), [false, true], "one copy wrote, the other was answered with its record");
+      assert.deepEqual([...both.find((b) => !b.replayed)!.flagged].sort(), [...ids].sort());
+      assert.equal(attempts.length, 2, "both copies sent the notice");
+      assert.equal(attempts[0], attempts[1], "under the same notice ID");
+      assert.equal(notices.length, 1, "the copy that sent second made up the lost notice");
+      assert.match(notices[0]!.text, /^21 verified documents went stale: "D/);
+      assert.ok(notices[0]!.text.length <= 200);
+      const recorded = await entryOf(world.storage as never, dora.id, check.commandId);
+      assert.equal((recorded["staled"] as unknown[]).length, 20, "the audit entry keeps at most 20 documents");
+      assert.equal(recorded["staledTotal"], 21, "and the whole count");
+      // A later repeat sends the same text under the same ID (the count read from the entry, not from the 20 it keeps).
+      const sent: string[] = [];
+      const watching = DocObligationService.withEpoch(world.storage, projects.epoch, { rolesOf: async (id) => (id === dora.id ? ["docs"] : []), gate: async (_by, x) => gates.get(x)!, projects: { createTask: (c: Parameters<ProjectService["createTask"]>[0]) => projects.createTask(c), transitionTask: (c: Parameters<ProjectService["transitionTask"]>[0]) => projects.transitionTask(c) } as never, assignments, notify: async (x) => { sent.push(`${x.commandId}|${x.projectId}|${x.obligationId}|${x.text}`); } }, options);
+      assert.equal((await watching.impact(dora, check)).replayed, true);
+      assert.deepEqual(sent, [`${notices[0]!.commandId}|${notices[0]!.projectId}|${notices[0]!.obligationId}|${notices[0]!.text}`]);
     } finally {
       await world.close();
     }

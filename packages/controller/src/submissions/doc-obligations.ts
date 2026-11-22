@@ -610,6 +610,8 @@ export class DocObligationService {
     let made: { obligationId: string; taskId: string; create: string; projectId: string; title: string; description: string; owner: string }[] = [];
     let flagged: string[] = [];
     let staled: { id: string; projectId: string; title: string }[] = [];
+    // How many verified documents went stale: the stored entry keeps at most 20 of them, so a repeat reads the count from it (and the notice it sends again says the same).
+    let staledTotal = 0;
     let replayed = false;
     let wrote = false;
     // The command always goes through the runner, so a command ID used before is answered with its result, or refused as `command_conflict` when it was used with other arguments, even when there is
@@ -646,13 +648,14 @@ export class DocObligationService {
           }
           flagged = found.map((f) => f.id);
           // The stale documents are kept in the audit detail (at most 20, titles cut whole) so a repeat of this check can send the notice a stop after the write lost (card Q03).
-          return { ref: { kind: "doc-obligation", id: found[0]!.id }, creates: false, changes, detail: { flagged, ...(staled.length === 0 ? {} : { staled: staled.slice(0, 20).map((d) => ({ id: d.id, projectId: d.projectId, title: wholeCut(d.title, 60) })) }) } };
+          return { ref: { kind: "doc-obligation", id: found[0]!.id }, creates: false, changes, detail: { flagged, ...(staled.length === 0 ? {} : { staled: staled.slice(0, 20).map((d) => ({ id: d.id, projectId: d.projectId, title: wholeCut(d.title, 60) })) }), ...(staled.length > 20 ? { staledTotal: staled.length } : {}) } };
         },
       }));
       replayed = result.replayed;
       wrote = !result.replayed;
+      staledTotal = staled.length;
       // A repeat sends the notice again under the same notice ID (the controller keeps one notice per ID), so a stop between the write and the notice, or a notice that could not be sent, is made up.
-      if (replayed) staled = await this.#recordedStaled(scoped);
+      if (replayed) ({ docs: staled, total: staledTotal } = await this.#recordedStaled(scoped));
     } catch (error) {
       if (error !== nothing) throw error;
     }
@@ -673,27 +676,34 @@ export class DocObligationService {
     if (staled.length > 0 && this.#ports.notify !== undefined && (by.kind !== "owner" || by.id === DOC_AUTO_PRINCIPAL.id)) {
       // Cut on whole characters (first review): a cut through a character written as two UTF-16 units would leave half of it, which the notice's text check refuses, and the notice would be lost.
       const cut = wholeCut;
-      const names = staled.map((d) => `"${cut(d.title, 60)}"`).join(", ");
-      const text = `${staled.length === 1 ? "A verified document went" : `${staled.length} verified documents went`} stale: ${names}. Update tasks went to their keepers; the docs view shows why.`;
+      // At most the 20 names the audit entry keeps, so the notice a repeat sends again reads the same.
+      const names = staled.slice(0, 20).map((d) => `"${cut(d.title, 60)}"`).join(", ");
+      const text = `${staledTotal === 1 ? "A verified document went" : `${staledTotal} verified documents went`} stale: ${names}. Update tasks went to their keepers; the docs view shows why.`;
       const noticeId = `doc-stale:${createHash("sha256").update(scoped).digest("hex").slice(0, 40)}`;
       await this.#ports.notify({ commandId: noticeId, projectId: staled[0]!.projectId, obligationId: staled[0]!.id, text: text.length <= 200 ? text : `${cut(text, 196)}...` }).catch(() => undefined);
     }
     return { flagged, tasks, replayed };
   }
 
-  /** The documents the check recorded as gone stale (from its audit entry), for a repeat that must send the notice again. Nothing when the entry cannot be read. */
-  async #recordedStaled(scopedId: string): Promise<{ id: string; projectId: string; title: string }[]> {
+  /**
+   * The documents the check recorded as gone stale (from its own audit entry: the entry of this operation), and how many went stale in all, for a repeat that must send the notice again. Nothing when
+   * the entry cannot be read or was written before it kept them.
+   */
+  async #recordedStaled(scopedId: string): Promise<{ docs: { id: string; projectId: string; title: string }[]; total: number }> {
+    const none = { docs: [], total: 0 };
     try {
-      const stored = await this.#runner.storage.getOperation(operationIdOf(scopedId));
+      const operationId = operationIdOf(scopedId);
+      const stored = await this.#runner.storage.getOperation(operationId);
       const seq = stored?.result.auditSeqs[0];
-      if (seq === undefined) return [];
+      if (seq === undefined) return none;
       const entry = (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
-      const list = entry?.seq === seq ? entry.detail["staled"] : undefined;
-      if (!Array.isArray(list)) return [];
-      const out: { id: string; projectId: string; title: string }[] = [];
-      for (const d of list) { const o = d as Record<string, unknown>; if (typeof o["id"] === "string" && typeof o["projectId"] === "string" && typeof o["title"] === "string") out.push({ id: o["id"], projectId: o["projectId"], title: o["title"] }); }
-      return out;
-    } catch { return []; }
+      const list = entry?.seq === seq && entry.operationId === operationId ? entry.detail["staled"] : undefined;
+      if (entry === undefined || !Array.isArray(list)) return none;
+      const docs: { id: string; projectId: string; title: string }[] = [];
+      for (const d of list.slice(0, 20)) { const o = d as Record<string, unknown>; if (typeof o["id"] === "string" && typeof o["projectId"] === "string" && typeof o["title"] === "string") docs.push({ id: o["id"], projectId: o["projectId"], title: o["title"] }); }
+      const total = entry.detail["staledTotal"];
+      return { docs, total: typeof total === "number" && Number.isSafeInteger(total) && total > docs.length ? total : docs.length };
+    } catch { return none; }
   }
 
   /** An update task some step of opening has not reached: not created, still proposed, or ready without an assignment. */
