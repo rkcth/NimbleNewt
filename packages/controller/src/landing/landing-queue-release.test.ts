@@ -295,6 +295,22 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
+  test(`${backend.name}: a first place with an approved entry has no idle clock, and starting one writes nothing (card P10, eighth slice)`, async () => {
+    const r = await rig({ cap: 2, releaseMs: 12 * HOUR });
+    try {
+      const t1 = await r.task("one");
+      await r.ops.queueApproved(r.submit(t1, r.head()), "rv1");
+      const front = (await r.list()).front!;
+      assert.deepEqual([front.taskId, front.idleSince], [t1, undefined]);
+      assert.equal(await r.queue.startIdleClock({ projectId: r.w.project, branch: "main", taskId: t1, since: front.since }), false);
+      assert.equal((await r.list()).front!.idleSince, undefined);
+      // Reserved as well: still an approved entry, still no clock.
+      assert.equal(await r.ops.afterRound({ taskId: t1, projectId: r.w.project, round: 2 }), "reserved");
+      assert.equal(await r.queue.startIdleClock({ projectId: r.w.project, branch: "main", taskId: t1, since: front.since }), false);
+      assert.equal((await r.list()).front!.idleSince, undefined);
+    } finally { await r.close(); }
+  });
+
   for (const mode of ["another write", "a refused landing alone"] as const) test(`${backend.name}: a queue record written before the idle time existed is not ended on its first-place time; ${mode} starts the clock (card P10, eighth slice)`, async () => {
     const r = await rig({ cap: 2, releaseMs: 12 * HOUR, holdMs: 100 * HOUR });
     try {
@@ -325,7 +341,14 @@ for (const backend of backends) {
         const t3 = await r.task("three");
         await r.ops.queueApproved(r.submit(t3, oid(2)), "rv9");
         assert.equal((await r.list()).front!.idleSince, started);
+        // The clock a write started is not started again (a command ID not used before, judged on the stored record).
+        assert.equal(await r.queue.startIdleClock({ projectId: r.w.project, branch: "main", taskId: t1, since }), false, "a clock another write started is not started again");
+        assert.equal((await r.list()).front!.idleSince, started);
       } else {
+        // Another task, or another first-place time, starts nothing.
+        assert.equal(await r.queue.startIdleClock({ projectId: r.w.project, branch: "main", taskId: t2, since }), false, "not the first place");
+        assert.equal(await r.queue.startIdleClock({ projectId: r.w.project, branch: "main", taskId: t1, since: new Date(Date.parse(since) - MIN).toISOString() }), false, "another first-place time");
+        assert.equal((await r.list()).front!.idleSince, undefined);
         // Nothing else writes the queue: the refused landing itself starts the clock (it ends nothing on that call), and a later refusal does not move it.
         await refuses("invalid_transition", () => land(t2), /holds the first place/);
         assert.equal((await r.list()).front!.idleSince, started);
