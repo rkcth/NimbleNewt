@@ -7983,7 +7983,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `defect.repair`
 
-The responsible agent (or the owner) names the newer version of the deliverable that repairs an open defect (open to repair-submitted). The version must be submitted (or under review or accepted) and newer than the defect's version and than any earlier repair. An escalated defect waits for the owner's decision instead.
+The responsible agent (or the owner) names the newer version of the deliverable that repairs an open defect (open to repair-submitted). The version must be submitted (or under review or accepted) and newer than the defect's version and than any earlier repair. When the waiting repair's version was rejected or replaced by a newer one, a newer submitted version takes its place (repair-submitted stays; no cycle is counted); a repair in a live version is not replaced. An escalated defect waits for the owner's decision instead.
 
 Arguments:
 
@@ -7998,7 +7998,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `defect.review`
 
-Checks a submitted repair: `fixed` resolves the defect; `not-fixed` (with the reason) counts one repair and review cycle and returns the defect to `open`, or, once the cycles reach the limit in force (setting `review.repairCycles`, default 3, per project), escalates it to the owner, who is told. Each check is its own record and is never rewritten. The owner, or a reviewer, qa or director agent that did none of the repair version's work (a QA agent that made the repair is a contributor and cannot pass it).
+Checks a submitted repair: `fixed` resolves the defect; `not-fixed` (with the reason) counts one repair and review cycle and returns the defect to `open`, or, once the cycles reach the limit in force (setting `review.repairCycles`, default 3, per project), escalates it to the owner, who is told. Each check is its own record and is never rewritten. The owner, or a reviewer, qa or director agent that did none of the repair version's work (a QA agent that made the repair is a contributor and cannot pass it). A repair whose version was rejected or replaced cannot be found `fixed` (`invalid_transition`; it can be found `not-fixed`, which counts a cycle). The repair can be replaced while the defect stays repair-submitted, so send `version` (the repair version you checked) or `expectedRevision` to have the check apply only to the repair you examined; a check naming a version that is no longer the repair is refused (`stale_revision`), and once a repair was replaced (`replacedRepair` on the defect) a `fixed` check that names neither is refused.
 
 Arguments:
 
@@ -8006,6 +8006,7 @@ Arguments:
 - `id`: the defect
 - `verdict`: `fixed` or `not-fixed`
 - `reason` (optional): what is still wrong (required for not-fixed)
+- `version` (optional): the repair version you checked
 - `expectedRevision` (optional): the defect's revision you read
 
 Result: `{ id, revision, replayed, state, cycles, limit }`.
