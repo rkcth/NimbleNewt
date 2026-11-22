@@ -1,4 +1,4 @@
-export { KIND_ROLES, SUBMISSION_KINDS, REVIEW_DISABLED_SINGLE_AGENT, DOC_INDEX_KEPT, SubmissionService, type CheckResult, type Evidence, type RecordSubmission, attemptOfAssignments, attemptOfAgents, type AttemptOf, type AttemptGuard, type RolesOf, type SubmissionOptions, type SubmissionBody, type SubmissionKind, type SubmissionApproval } from "./submissions.js";
+export { KIND_ROLES, SUBMISSION_KINDS, REVIEW_DISABLED_SINGLE_AGENT, DOC_INDEX_KEPT, SubmissionService, landingDirectorGate, type DirectorSignoffView, type CheckResult, type Evidence, type RecordSubmission, attemptOfAssignments, attemptOfAgents, type AttemptOf, type AttemptGuard, type RolesOf, type SubmissionOptions, type SubmissionBody, type SubmissionKind, type SubmissionApproval } from "./submissions.js";
 
 export { AcceptanceService, CONTRACT_WORK_FIELDS, ACCESS_SCOPES, AUDIENCES, DELIVERABLE_STATES, DELIVERABLE_TYPES, type AcceptancePorts, type DeliverableBody, type DeliverableState, type DeliverableType, type EventBody, type StaleDeliverable, type VersionBody, type ArtifactReplacement, type ReplacedDeliverable } from "./acceptance.js";
 

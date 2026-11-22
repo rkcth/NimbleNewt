@@ -14,6 +14,7 @@ import { GitBridge, LocalWorkspaces, SandboxLauncher } from "@nimblenewt/worker"
 // results are on the request bound to that tree and the author gets them in its inbox. Once it passes (the owner's contract change), the landing lands exactly that tree and the review is the one given for that patch.
 // The approval queues the submission in the landing queue (card P10): the refused landing leaves it there and the landing that lands takes it out. When the project also requires `qa`, the controller's gate reads the
 // submission's QA gate (third slice): refused without independent evidence, landed once the owner recorded a pass. It also requires `docs` (fourth slice): refused for a document never verified, landed once it is retired.
+// It finally requires `director` (sixth slice): refused with no sign-off and with a declining one, landed once a director approved.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
@@ -83,8 +84,10 @@ test("a landing is made only when the project's required checks pass on the inte
     await local!.register(HostService.withEpoch(c.storage, c.epoch, s.assignments), self);
     const agent = ((await s.agents.create(owner, { commandId: "mk-1", friendlyName: "Ann", roles: ["author"] })) as { id: string }).id;
     const reviewer = ((await s.agents.create(owner, { commandId: "mk-2", friendlyName: "Rev", roles: ["reviewer"] })) as { id: string }).id;
-    for (const who of [agent, reviewer]) for (const g of workGrants(project, ["read-file"])) await s.grants.grant(owner, { commandId: `g-${who}-${g.action}`, grantee: `agent:${who}`, action: g.action, project, source: "direct", basis: "test" } as never);
+    const director = ((await s.agents.create(owner, { commandId: "mk-3", friendlyName: "Dee", roles: ["director"] })) as { id: string }).id;
+    for (const who of [agent, reviewer, director]) for (const g of workGrants(project, ["read-file"])) await s.grants.grant(owner, { commandId: `g-${who}-${g.action}`, grantee: `agent:${who}`, action: g.action, project, source: "direct", basis: "test" } as never);
     const rev = (await s.principals.issueCredential(owner, `agent:${reviewer}`)).token;
+    const dee = (await s.principals.issueCredential(owner, `agent:${director}`)).token;
     // The project's required checks are the profile's (strict: tests and review), read through the policy service.
     const policy = await api(c, boot.token, "integration.get", { project });
     assert.deepEqual(policy.result?.item?.requiredChecks, ["tests", "review"], JSON.stringify(policy));
@@ -169,6 +172,17 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
     const retired = await api(c, boot.token, "doc.obligation.retire", { obligationId: doc.result.id, expectedRevision: doc.result.revision }, "doc-ret");
     assert.equal(retired.ok, true, JSON.stringify(retired));
+    // The project now also requires a `director` sign-off (sixth slice): the controller's landing gate reads the sign-offs recorded on the submission. None is refused (not run), a decline fails, an approval lands.
+    assert.equal((await api(c, boot.token, "integration.set", { project, requiredChecks: ["tests", "review", "qa", "docs", "director"] }, "req-dir")).ok, true);
+    const noDirector = await land("land-dir-0");
+    assert.equal(noDirector.result?.state, "refused", JSON.stringify(noDirector));
+    assert.deepEqual([byCheck(noDirector.result)["director"]!.result, byCheck(noDirector.result)["docs"]!.result], ["not_run", "pass"]);
+    assert.match(byCheck(noDirector.result)["director"]!.summary, /no director has signed off/, "the sign-offs were read (not 'not collected')");
+    const declined = await api(c, dee, "submission.record", { taskId: task, kind: "signoff", role: "director", subject: submissionId, decision: "decline" }, "so-1");
+    assert.equal(declined.ok, true, JSON.stringify(declined));
+    assert.equal(byCheck((await land("land-dir-1")).result)["director"]!.result, "fail");
+    assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
+    assert.equal((await api(c, dee, "submission.record", { taskId: task, kind: "signoff", role: "director", subject: submissionId, decision: "approve" }, "so-2")).ok, true);
     const landed = await land("land-2");
     assert.equal(landed.result.state, "done", JSON.stringify(landed.result));
     assert.equal(landed.result.detail.landed, true, landed.result.summary);
@@ -177,7 +191,8 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.deepEqual([byCheck(landed.result)["qa"]!.result, byCheck(landed.result)["qa"]!.summary], ["pass", "independent QA evidence passed for this tree"]);
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
     assert.equal(byCheck(landed.result)["docs"]!.result, "pass");
-    assert.equal(landingCheckCalls, 4, "the checks ran again for the second landing: an earlier result is never reused");
+    assert.deepEqual([byCheck(landed.result)["director"]!.result, /^signed off by agent:/.test(byCheck(landed.result)["director"]!.summary)], ["pass", true]);
+    assert.equal(landingCheckCalls, 6, "the checks ran again for the second landing: an earlier result is never reused");
     assert.deepEqual([landed.result.queued?.submissionId, await queuedNow()], [submissionId, []], "the landing took exactly its submission out of the queue");
     for (const f of finishes) f();
     await c.dispatch.dispatcher.idle();

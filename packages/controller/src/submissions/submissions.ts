@@ -82,10 +82,15 @@ export interface SubmissionApproval {
   readonly reason?: string;
   /** The check evidence the author recorded on the submission (Q01b), each bound to its tree; present only when there is some (P09 fifth slice compares it with the landing gate's own results). */
   readonly evidence?: readonly Evidence[];
+  /** What the newest director sign-off of it says (card P09 sixth slice, the `director` required check); present only when a director has signed off on it (either way). */
+  readonly director?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string };
 }
 /** The reviews recorded about one submission, oldest first (record kind `submission-verdicts`, keyed by the subject's ID). */
 interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string }[] }
 const VERDICTS = "submission-verdicts";
+/** The director sign-offs recorded about one submission, oldest first (record kind `submission-signoffs`, keyed by the subject's ID; written in the same write as the sign-off, like the reviews). */
+interface SignoffsBody { readonly signoffs: readonly { readonly id: string; readonly decision: "approve" | "decline"; readonly by: string; readonly at: string }[] }
+const SIGNOFFS = "submission-signoffs";
 const MAX_VERDICTS = 50;
 /**
  * The newest document submissions of each project (card Q03b; record kind `document-submission-index`, keyed by the project ID), newest last. Submissions sit in one table in hash order of their IDs,
@@ -347,7 +352,7 @@ export class SubmissionService {
           guards = attempt.guards ?? [];
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -408,8 +413,19 @@ export class SubmissionService {
   }
 
   /** Why a submission's write lost to another write (the runner asks): its command ID was used by something else, unless the submission is not there and it is a review whose verdict list moved. */
+  /** A director sign-off is kept in its subject's own list (the landing's `director` check reads it by the subject, never by scanning the table); at most `MAX_VERDICTS` per submission. */
+  async #signoffChange(id: string, body: SubmissionBody): Promise<Change[]> {
+    if (body.kind !== "signoff" || body.subject === undefined || body.decision === undefined) return [];
+    const ref = { kind: SIGNOFFS, id: body.subject };
+    const current = await this.#runner.get(SIGNOFFS, body.subject);
+    const list = ((current?.body as unknown as SignoffsBody | undefined)?.signoffs ?? []);
+    if (list.some((r) => r.id === id)) return [];
+    if (list.length >= MAX_VERDICTS) throw new DomainError("unavailable", `submission ${body.subject} already has ${MAX_VERDICTS} director sign-offs; submit the work again for a new sign-off`);
+    const next: SignoffsBody = { signoffs: [...list, { id, decision: body.decision, by: body.submittedBy, at: body.submittedAt }] };
+    return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
+  }
   async #contention(id: string, body: SubmissionBody): Promise<DomainError> {
-    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "review") return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
+    if ((await this.#runner.get("submission", id)) === undefined && (body.kind === "review" || body.kind === "signoff")) return new VerdictRace("unavailable", `another review of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
     // Two document changes of one project at the same moment both add to the project's index (card Q03b): the one that lost is built again from the index as it now is.
     if ((await this.#runner.get("submission", id)) === undefined && body.kind === "document") return new DocIndexRace("unavailable", `another document change of this project was recorded at the same moment; send this one again`);
     return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
@@ -494,7 +510,9 @@ export class SubmissionService {
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
     const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
     const newest = reviews[reviews.length - 1];
-    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}) };
+    const signoffs = ((await this.#runner.get(SIGNOFFS, submissionId))?.body as unknown as SignoffsBody | undefined)?.signoffs ?? [];
+    const lastSignoff = signoffs[signoffs.length - 1];
+    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve" } : { ...base, approved: false, newest: newest.verdict, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };
@@ -560,4 +578,16 @@ export class SubmissionService {
     if (s.submittedBy === by.id) throw new DomainError("forbidden", "a director sign-off cannot be given on the director's own work");
     return { ...bound, decision: c.decision as "approve" | "decline" };
   }
+}
+
+/**
+ * The director sign-off of a code submission as the landing gate reads it (card P09 sixth slice, the `director` required check): the newest sign-off of a director other than the submitter (the service refuses a sign-off
+ * on the signer's own work and by anyone not holding the director role) on that very submission. One function, used by `start.ts` and by the tests, so the controller's composition is the one tested.
+ */
+export interface DirectorSignoffView { readonly submissionId: string; readonly taskId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string } }
+export function landingDirectorGate(service: SubmissionService): (submissionId: string) => Promise<DirectorSignoffView | undefined> {
+  return async (submissionId) => {
+    const a = await service.approvalOf(submissionId);
+    return a === undefined ? undefined : { submissionId: a.submissionId, taskId: a.taskId, tree: a.tree, ...(a.director === undefined ? {} : { signoff: a.director }) };
+  };
 }
