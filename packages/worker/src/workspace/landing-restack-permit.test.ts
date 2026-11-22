@@ -166,6 +166,41 @@ test("the re-apply is listed in the permit ledger before the head moves: when th
   } finally { await r.done(); }
 });
 
+test("an earlier re-apply answered again reports whether it is a permit commit: yes for a permitted one, no for an agent's own work or when no permit is named", { skip }, async () => {
+  for (const kind of ["permit", "plain"] as const) {
+    const r = await rig();
+    try {
+      await r.edit({ "src/a.ts": "export const a = 2;\n" });
+      const tree = kind === "permit" ? await r.permitCommit() : r.plainCommit();
+      const onto = await r.moveShared({ "docs/c.md": "# c\n" });
+      const permit = { taskId: "tsk-one", requestId: rid() };
+      const first = await r.git.restack({ shared: r.shared, onto, gitDir: r.made.gitDir, checkout: r.made.checkout, submission: sub(r.base, tree), permit });
+      assert.equal(first.state === "reapplied" && first.permitted, kind === "permit", kind);
+      const again = await r.git.restack({ shared: r.shared, onto, gitDir: r.made.gitDir, checkout: r.made.checkout, submission: sub(r.base, tree), permit });
+      assert.equal(again.state === "reapplied" && again.recovered, true, kind);
+      assert.equal(again.state === "reapplied" && again.permitted, kind === "permit", kind);
+      const bare = await r.git.restack({ shared: r.shared, onto, gitDir: r.made.gitDir, checkout: r.made.checkout, submission: sub(r.base, tree) });
+      assert.equal(bare.state === "reapplied" && bare.permitted, false, `${kind}: no permit named`);
+    } finally { await r.done(); }
+  }
+});
+
+test("a task or request ID that is not a plain trailer value gives no permit: no marks are written and nothing is listed", { skip }, async () => {
+  for (const permit of [{ taskId: "tsk-one", requestId: "wsr-x\nNimbleNewt-Task: tsk-two" }, { taskId: "tsk-one", requestId: "has space" }, { taskId: "tsk-one", requestId: "" }]) {
+    const r = await rig();
+    try {
+      await r.edit({ "src/a.ts": "export const a = 2;\n" });
+      const tree = await r.permitCommit();
+      const onto = await r.moveShared({ "docs/c.md": "# c\n" });
+      const ledger = await readFile(permitLedgerPath(r.made.gitDir), "utf8");
+      const out = await r.git.restack({ shared: r.shared, onto, gitDir: r.made.gitDir, checkout: r.made.checkout, submission: sub(r.base, tree), permit });
+      assert.equal(out.state === "reapplied" && out.permitted, false, JSON.stringify(permit));
+      assert.doesNotMatch(sh(r.made.checkout, ...r.g, "log", "-1", "--format=%B"), /NimbleNewt-(Request|Task)/, JSON.stringify(permit));
+      assert.equal(await readFile(permitLedgerPath(r.made.gitDir), "utf8"), ledger, "nothing was listed");
+    } finally { await r.done(); }
+  }
+});
+
 test("the permit check of a re-apply reads exactly the commits it replaces (a range), not whatever the head is by then", { skip }, async () => {
   const r = await rig();
   try {

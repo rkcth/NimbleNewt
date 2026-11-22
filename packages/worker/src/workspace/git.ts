@@ -929,7 +929,7 @@ export class GitBridge {
       // Re-applied before (by an earlier landing that did not finish): it counts only as exactly the approved change on a later commit of the approved base's history.
       const proven = (await this.isAncestor({ gitDir: options.gitDir, older: sub.base, newer: base })) && (await this.sameChange({ gitDir: options.gitDir, a: { base: sub.base, tree: sub.tree }, b: { base, tree } }));
       if (!proven) throw new WorkspaceError("stale", `the checkout is based on ${base.slice(0, 12)}, not on submission ${sub.id}'s approved base ${sub.base.slice(0, 12)}, and its committed change is not exactly the approved one; nothing was re-applied`);
-      if (base === options.onto) return { state: "reapplied", base, tree, commit: head, previous: sub.base, recovered: true, taken: 0, permitted: options.permit !== undefined && (await this.unpermitted({ gitDir: options.gitDir, taskId: options.permit.taskId })).length === 0 };
+      if (base === options.onto) return { state: "reapplied", base, tree, commit: head, previous: sub.base, recovered: true, taken: 0, permitted: options.permit !== undefined && (await this.unpermitted({ gitDir: options.gitDir, taskId: options.permit.taskId, range: { base, head } })).length === 0 };
     }
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.onto], { gitDir: options.gitDir, allowFile: true });
