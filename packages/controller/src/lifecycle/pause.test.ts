@@ -11,6 +11,7 @@ import { EffectService, type EffectBridge, type EffectRequest } from "../domain/
 import { InboxService } from "../domain/inbox.js";
 import { Reconciler } from "../domain/reconcile.js";
 import { ProjectService } from "../domain/service.js";
+import { CommandRunner } from "../domain/runner.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { WaitService } from "../domain/waits.js";
 import { GenerationRefused, GenerationService, type RefusalReason } from "../generation/index.js";
@@ -250,6 +251,31 @@ for (const backend of backends) {
     assert.equal(await c.pauses.isPaused(c.t2), false);
     assert.equal(await c.pauses.isPaused(c.t1), true, "the failing gate stays paused");
     await c.pauses.resume(c.mgr, { commandId: cid("rs"), scope: task, reason: "done" });
+  });
+
+  suite("a generation left streaming by a controller that died (an older primary epoch) does not keep a paused task pausing; one without an epoch still does (G04 slice 7)", async (c) => {
+    const run = await begin(c.gen, c.ann, c.t1);
+    const old = await begin(c.gen, c.ann, c.t2);
+    await c.pauseTask(c.t1);
+    await c.pauseTask(c.t2);
+    const obs = (p: PauseService, taskId: string) => p.observe(c.mgr, { commandId: cid("ob"), scope: { kind: "task", id: taskId }, state: "paused", boundary: "finished" });
+    // The same controller: the stream may still end, so the task is pausing.
+    await refuses("invalid_command", () => obs(c.pauses, c.t1), (e) => assert.match(e.message, /streaming/));
+    // A new process takes the next primary epoch (the earlier one is fenced out).
+    const next = await ProjectService.open(c.storage, { holder: "c2", ...options });
+    // t2's record is one from before the epoch field: the epoch is removed from it.
+    const runner = new CommandRunner(c.storage, next.epoch, options);
+    const ref = { kind: "generation-run" as const, id: old };
+    await runner.command("test.strip-epoch", { commandId: cid("strip"), actor: "system" }, async () => {
+      const found = (await runner.get(ref.kind, ref.id))!;
+      const { epoch: _epoch, ...rest } = found.body as Record<string, unknown>;
+      return { payload: { runId: old }, build: async () => ({ ref, creates: false, changes: [{ type: "update" as const, ref, expectedRevision: found.revision, body: rest as never }], detail: {} }) };
+    });
+    const later = PauseService.withEpoch(c.storage, next.epoch, {}, options);
+    await obs(later, c.t1);
+    assert.equal((await later.gate(c.mgr, { kind: "task", id: c.t1 }))!.observed?.state, "paused");
+    assert.equal((await c.storage.getAggregate({ kind: "generation-run", id: run }))!.body["state"], "streaming", "only read: the generation is not changed");
+    await refuses("invalid_command", () => obs(later, c.t2), (e) => assert.match(e.message, /streaming/));
   });
 
   suite("the policy revision in force is recorded with the request", async (c) => {
