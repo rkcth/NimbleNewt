@@ -142,6 +142,8 @@ const TREE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const CHECKERS = ["qa", "reviewer"] as const;
 /** The notification store keeps at most this much detail text. */
 const NOTICE_CHARS = 200;
+/** The QA service as the actor of a check it starts itself (`contractChanged`). It holds no grants and is never a caller of any operation. */
+const QA_SERVICE = { id: "service:qa-evidence", kind: "service", name: "qa-evidence", grants: [] } as unknown as Principal;
 export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, projectScanReads: 20 } as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -392,6 +394,26 @@ export class QaEvidenceService {
     for (const k of Object.keys(command)) if (!["commandId", "taskId"].includes(k)) bad(k, "is not a field of this command");
     const commandId = checkCommandId(command.commandId);
     const { taskId } = await this.#readable(by, command.taskId);
+    return this.#checkTask(by, commandId, taskId);
+  }
+
+  /**
+   * Card Q02 (fourth slice): told by the controller, best effort, after a task's contract is changed through `contract.set`. The task's QA evidence is looked at at once, as `check` would, by the
+   * QA service itself (no caller's rights are involved: what changed decides, not who changed it), so a changed acceptance criterion, check or required evidence item invalidates the evidence and
+   * schedules its re-check without anyone having to ask. The command ID names the contract version and the state of the task's evidence index, so each change is looked at once, a repeat of
+   * the same notice writes nothing, and a record added after a check is looked at by the next one. Nothing stale: nothing is written.
+   */
+  async contractChanged(taskIdValue: string): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[] }> {
+    const taskId = checkTaskId(taskIdValue);
+    if (await this.#task(taskId) === undefined) return { taskId, invalidated: [], rechecks: [] };
+    const contract = await this.#contract(taskId);
+    const index = await this.#index(taskId);
+    if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
+    const r = await this.#checkTask(QA_SERVICE, `qa-auto-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId);
+    return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
+  }
+
+  async #checkTask(by: Principal, commandId: string, taskId: string): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
     let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
     const stale = async (): Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]> => {
       const index = await this.#index(taskId);

@@ -142,12 +142,12 @@ test("documentation obligations through the running controller and the owner's c
     for (const op of ["doc.obligation.record", "doc.obligation.verify", "doc.impact.check", "doc.release.check"]) assert.ok(CHAT_OPS[op], op);
     assert.deepEqual(STATUS_KINDS["docs"]?.keys, ["projectId"]);
 
-    // The task's acceptance criteria change: the QA check invalidates the evidence, and the verified page is flagged by itself as having lost it (Q03 next slice), with an update task for Dora.
+    // The task's acceptance criteria change: the contract change itself invalidates the QA evidence, and the verified page is flagged by itself as having lost it (Q03 next slice), with an update task for Dora.
     const set = await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in with a passkey"] }, "c1");
     assert.equal(set.ok, true, JSON.stringify(set));
     const inval = await call(quinn.token, "qa.evidence.check", { taskId: task }, "k1");
     assert.equal(inval.ok, true, JSON.stringify(inval));
-    assert.ok(inval.result.invalidated.length >= 1);
+    assert.deepEqual(inval.result.invalidated, [], "the contract change already invalidated the evidence by itself (Q02 fourth slice); nothing is left for the check");
     const lost = (await call(boot.token, "doc.obligation.get", { id: obligation })).result.item;
     assert.deepEqual([lost.state, lost.reasons.map((r: any) => [r.kind, r.submissionId])], ["stale", [["evidence_lost", sub2]]]);
     const lostTask = lost.updates.find((u: any) => u.state === "open");

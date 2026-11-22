@@ -158,7 +158,7 @@ export interface StateApiDeps {
   /** Defects, repair and review cycles and owner overrides (card Q04). */
   readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "get" | "list">;
   /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
-  readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate">;
+  readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate"> & { contractChanged?: QaEvidenceService["contractChanged"] };
   /** Documentation obligations and their impact (card Q03). */
   readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "retire" | "impact" | "release" | "list" | "get">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */

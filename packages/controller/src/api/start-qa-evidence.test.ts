@@ -148,17 +148,15 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
 
     // The acceptance criteria change, and the contract now requires only "login works": the evidence no longer holds, even before anyone asks.
     await call(boot.token, "contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["a user can log in", "a user can log out"], checks: [{ name: "login works", run: ["true"] }] }, "c3");
-    const before = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
-    assert.deepEqual([before.verdict, before.reasons, before.stale[0].reasons[0].kind, before.stale[0].reasons[0].fields], ["failed", ["stale_evidence", "check_missing"], "criteria_changed", ["acceptanceCriteria", "checks"]], "stale evidence never passes, and its checks are owed again");
+    // The contract change itself looked at the evidence (card Q02 fourth slice): it is invalidated and its re-check scheduled without anyone asking.
     const listed = (await call(qa.token, "qa.evidence.list", { taskId: task })).result;
-    assert.equal(listed.items[0].staleNow[0].kind, "criteria_changed");
-
+    assert.equal(listed.items[0].state, "invalidated");
+    assert.equal(listed.rechecks.length, 1);
+    const recheckId = listed.rechecks[0].id as string;
+    const before = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
+    assert.deepEqual([before.verdict, before.reasons, before.stale[0].reasons[0].kind, before.stale[0].reasons[0].fields, before.pendingRechecks], ["failed", ["stale_evidence", "check_missing"], "criteria_changed", ["acceptanceCriteria", "checks"], [recheckId]], "invalidated evidence never passes, and its checks are owed again");
     const checked = await call(rev.token, "qa.evidence.check", { taskId: task }, "k1");
-    assert.equal(checked.ok, true, JSON.stringify(checked));
-    assert.deepEqual(checked.result.invalidated, [first.result.id]);
-    assert.equal(checked.result.rechecks.length, 1);
-    const recheckId = checked.result.rechecks[0] as string;
-    assert.equal((await call(rev.token, "qa.evidence.check", { taskId: task }, "k1")).result.replayed, false, "nothing stale is left, so nothing is written again");
+    assert.deepEqual([checked.ok, checked.result.invalidated], [true, []], "nothing stale is left for a later check to do");
     const inv = (await call(boot.token, "qa.evidence.get", { id: first.result.id })).result.item;
     assert.deepEqual([inv.state, inv.recheckId, inv.reasons[0].kind, inv.checks[0].result], ["invalidated", recheckId, "criteria_changed", "passed"], "the record is kept with its results and the reasons");
     const rc = (await call(qa.token, "qa.evidence.get", { id: recheckId })).result.item;
@@ -234,5 +232,35 @@ test("the owner asks what waits for QA across the project: the qa_project status
     assert.match((await ask(boot.token, project)).result.item.lines.map((l: { text: string }) => l.text).join("\n"), /, 1 pass;/);
     // Another project's agent cannot see this project's QA picture.
     assert.equal((await ask(far.token, project)).ok, false);
+  } finally { await w.done(); }
+});
+
+test("changing the contract through contract.set looks at the QA evidence by itself, whoever changes it; a change that does not touch the work leaves it (card Q02 fourth slice)", async () => {
+  const w = await world("qa-auto");
+  try {
+    const { call, boot, task, project, s, rob } = w;
+    const qa = await w.hire("Quinn", ["qa"], project);
+    // Mia is no QA agent: what changed decides, not who changed it.
+    const mia = await w.hire("Mia", ["author"], project);
+    await s.grants.grant(rob, { commandId: "g-mia", grantee: mia.id, action: "task.contract.write", project, source: "direct", basis: "test" } as never);
+    const sub = await w.code(tree, "s1");
+    assert.equal((await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in"] }, "c1")).ok, true);
+    const rec = await call(qa.token, "qa.evidence.record", { submissionId: sub, criteriaRevision: 1, environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }] }, "q1");
+    assert.equal(rec.ok, true, JSON.stringify(rec));
+
+    const quiet = await call(boot.token, "contract.set", { taskId: task, expectedVersion: 1, priority: 7 }, "c2");
+    assert.equal(quiet.ok, true, JSON.stringify(quiet));
+    assert.equal((await call(boot.token, "qa.evidence.get", { id: rec.result.id })).result.item.state, "current", "a priority change leaves the evidence");
+
+    const edit = await call(mia.token, "contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["a user can log in", "a user can log out"] }, "c3");
+    assert.equal(edit.ok, true, JSON.stringify(edit));
+    const inv = (await call(boot.token, "qa.evidence.get", { id: rec.result.id })).result.item;
+    assert.deepEqual([inv.state, inv.reasons[0].kind, inv.invalidatedBy], ["invalidated", "criteria_changed", "service:qa-evidence"]);
+    const gate = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
+    assert.equal(gate.verdict, "failed");
+    assert.deepEqual(gate.pendingRechecks, [inv.recheckId]);
+    // Sending the same change again (a replay) does nothing more.
+    assert.equal((await call(mia.token, "contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["a user can log in", "a user can log out"] }, "c3")).result.replayed, true);
+    assert.equal((await call(boot.token, "qa.evidence.list", { taskId: task })).result.rechecks.length, 1);
   } finally { await w.done(); }
 });

@@ -6999,7 +6999,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `contract.set`
 
-Changes fields of a task's contract; each change stores a new version. Priority, difficulty and the P or PC class each need their own authority.
+Changes fields of a task's contract; each change stores a new version. Priority, difficulty and the P or PC class each need their own authority. A change of the acceptance criteria, expected result, required evidence or checks also looks at the task's QA evidence at once (card Q02): evidence bound to the old contract is invalidated and a re-check is scheduled, as `qa.evidence.check` does.
 
 Arguments:
 
