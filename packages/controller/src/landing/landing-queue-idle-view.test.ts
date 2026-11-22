@@ -15,7 +15,7 @@ import { IntegratorLeaseOps, IntegratorLeaseService, LANDING_QUEUE_LIMITS, Landi
 
 after(stopServer);
 // Card P10, tenth slice: the bounds that end a stuck first place are visible to the owner (status view `landing_queue` and `landing.queue.list`): since when a reserved place has had no approved submission, when the
-// controller ends it by itself (only when a landing is refused behind it), and a first place held longer than the director's bound. The rig is the eighth slice's.
+// controller ends it by itself (on its regular rounds and when a landing is asked for behind it, only while work waits behind it), and a first place held longer than the director's bound. The rig is the eighth slice's.
 
 const MIN = 60_000;
 const oid = (n: number): string => n.toString(16).padStart(40, "0");
@@ -132,14 +132,14 @@ for (const backend of backends) {
       const early = stuck(await view(r, r.w.owner));
       assert.equal(early.length, 1, early.join("|"));
       assert.match(early[0]!, new RegExp(`Task ${t1}'s reserved place has had no approved submission since ${idle.replace(/[.]/g, "\\.")}; once that has lasted 12 h \\(at ${new Date(Date.parse(idle) + 12 * HOUR).toISOString().replace(/[.]/g, "\\.")}\\)`));
-      assert.match(early[0]!, /checked only when a landing of a submission queued behind it is asked for \(the place is ended first and that landing is then judged on the queue without it\), not on a clock; approved work coming back first stops the count/);
+      assert.match(early[0]!, /checked on the controller's regular rounds, and when a landing is asked for behind it, only while approved work waits behind it \(a landing asked for is then judged on the queue without the place\); with nothing waiting behind it nothing ends it; approved work coming back first stops the count/);
       r.w.clock.advance(12 * HOUR - MIN);
       assert.match(stuck(await view(r, r.w.owner)).join("|"), /; once that has lasted 12 h \(at /, "a minute under the bound");
       r.w.clock.advance(MIN);
       const late = stuck(await view(r, r.w.owner));
       assert.equal(late.length, 1);
-      assert.match(late[0]!, /longer than the 12 h bound: the next landing asked for a submission queued behind it ends the reservation first and is then judged on the queue without it \(it goes ahead when its submission is then first; nothing ends it on a clock; taking the task out with landing\.queue\.remove lets others land at once\)/);
-      // Nothing ended it on a clock: the view only reads.
+      assert.match(late[0]!, /longer than the 12 h bound: while approved work waits behind it the controller ends the reservation at its next regular round, or at the next landing asked for behind it, which is then judged on the queue without the place \(it goes ahead when its submission is then first\); with nothing waiting behind it nothing ends it; taking the task out with landing\.queue\.remove lets others land at once\./);
+      // The view only reads (no controller round runs in this rig): the place is still there.
       assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [t1]);
       const out = await (await r.lander(ivy, t2))(t2);
       assert.equal(out.state, "done", out.summary);
@@ -202,7 +202,7 @@ for (const backend of backends) {
       r.w.clock.advance(MIN);
       const said = stuck(await view(r, r.w.owner));
       assert.equal(said.length, 1);
-      assert.match(said[0]!, new RegExp(`Task ${t1} has been first since .*longer than the 4 h bound, and has not landed; when a landing is refused behind it the director is told and the owner gets a notice \\(one that needs the owner when no director can be told\\); nothing tells on a clock\\. Land it, or take it out`));
+      assert.match(said[0]!, new RegExp(`Task ${t1} has been first since .*longer than the 4 h bound, and has not landed; while approved work waits behind it the director is told at the controller's next regular round, or when a landing is refused behind it, and the owner gets a notice \\(one that needs the owner when no director can be told\\); with nothing waiting behind it nothing tells\\. Land it, or take it out`));
       // A landing refused behind it tells the director; the plain "told" line replaces the warning.
       await refuses("invalid_transition", async () => (await r.lander(ivy, t2))(t2), /lands first/);
       assert.equal(r.told.filter((t) => t.why === "front").length, 1);
@@ -294,7 +294,7 @@ for (const backend of backends) {
       const t3 = await r.task("three");
       await r.ops.queueApproved(r.submit(t3, r.head()), "q3");
       r.w.clock.advance(12 * HOUR);
-      assert.match(stuck(await view(r, r.w.owner)).join("|"), /is then judged on the queue without it \(it goes ahead when its submission is then first;/);
+      assert.match(stuck(await view(r, r.w.owner)).join("|"), /is then judged on the queue without the place \(it goes ahead when its submission is then first\)/);
       await refuses("invalid_transition", async () => (await r.lander(ivy, t3))(t3), new RegExp(`task ${t2}.*lands first`));
       assert.deepEqual((await r.list()).reservations.map((x) => x.taskId), [], `the place of ${t1} was ended by that landing`);
       assert.deepEqual(await r.queued(), [[1, t2], [2, t3]]);

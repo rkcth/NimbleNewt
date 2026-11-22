@@ -181,6 +181,25 @@ export class LandingQueueService {
   }
 
   /**
+   * Every queue, of every project, that holds at least one entry (card P10, eleventh slice: the controller's own rounds look at them; no caller names a project). Reads the queue records in pages like `queuesOf`; at most
+   * `pages` pages of 200 are read (a queue past that is not seen by this round) and `partial` says when the walk stopped before the end. Read only.
+   */
+  async queuesWithEntries(pages: number = QUEUE_SCAN_PAGES): Promise<{ queues: LandingQueue[]; partial: boolean }> {
+    const queues: LandingQueue[] = [];
+    let afterId: string | undefined;
+    for (let page = 0; page < pages; page++) {
+      const batch = await this.#runner.list(KIND, { ...(afterId === undefined ? {} : { afterId }), limit: 200 });
+      for (const a of batch) {
+        const q = a.body as unknown as LandingQueueBody;
+        if (typeof q.projectId === "string" && typeof q.branch === "string" && Array.isArray(q.entries) && q.entries.length > 0) queues.push({ ...q, queueId: a.id, revision: a.revision });
+      }
+      if (batch.length < 200) return { queues, partial: false };
+      afterId = batch[batch.length - 1]!.id;
+    }
+    return { queues, partial: true };
+  }
+
+  /**
    * Puts an approved submission in the queue. A submission already queued is left where it is (`already`); a task already queued has its entry's submission replaced in place (it keeps its turn); anything else goes to the
    * back. At most `entries` entries; one more is refused `unavailable`, except a task's re-approval into its reserved place (reservations are bounded on their own, so at most `entries` + `reservations`).
    */

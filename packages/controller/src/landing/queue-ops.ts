@@ -29,6 +29,13 @@ export const LANDING_HOLD_MS = 4 * 60 * 60 * 1000;
  * waits behind it (card P10, eighth slice). ASSUMPTION: twelve hours, three times the time the director is given to decide (`LANDING_HOLD_MS`); reversible as the `releaseMs` option.
  */
 export const LANDING_RESERVATION_RELEASE_MS = 12 * 60 * 60 * 1000;
+/** The dispatcher's bounds round (`sweepBounds` with `throttled`) walks the queues at most this often (card P10, eleventh slice review). */
+export const BOUNDS_SWEEP_EVERY_MS = 60_000;
+/**
+ * At most this many landing-branch reads (each a few settings reads) per bounds round (card P10, eleventh slice second review): only a first place past a bound is looked at further, but a queue left on an old
+ * branch reads a policy for every waiting task each round. A round that reaches it stops and answers `partial`.
+ */
+export const BOUNDS_SWEEP_POLICY_READS = 1_000;
 /** The refresh-round cap when the project's settings cannot be read (the profiles' default). */
 export const REFRESH_CAP_DEFAULT = 3;
 /** The repair-cycle limit (card Q04, `review.repairCycles`) when the project's settings cannot be read (the setting's default). */
@@ -75,6 +82,8 @@ export interface LandingQueueOpsOptions {
   readonly holdMs?: number;
   /** See `LANDING_RESERVATION_RELEASE_MS`. */
   readonly releaseMs?: number;
+  /** See `BOUNDS_SWEEP_POLICY_READS`. */
+  readonly sweepPolicyReads?: number;
   /**
    * The owner of the task's current assignment as the assignment records it (`{ kind, id }`), or undefined when nobody holds it. Only an agent owner is an agent that holds the task (`isAgentOwner`: the bare or
    * the prefixed ID, and only for an agent principal); a person, role or team owner with the same name holds it for nobody here. Absent: the author rule alone (the submitter adds and takes out its task's work).
@@ -93,6 +102,13 @@ export interface QueuedLanding { readonly submissionId: string; readonly base: s
 export class LandingQueueOps {
   readonly #queue: LandingQueueService;
   readonly #options: LandingQueueOpsOptions;
+  /** When the throttled bounds round last walked the queues (the queue's clock, in ms); in memory only, so a restart walks at its first round. */
+  #lastSweepAt: number | undefined;
+  /**
+   * The queue at which the last bounds round stopped at its read budget (in memory only): the next round starts there and goes round the list, so queues late in the scan are reached even while queues before them
+   * stay past a bound with nothing judged behind them and spend the budget each round (card P10, eleventh slice re-check).
+   */
+  #sweepResumeAt: string | undefined;
   constructor(queue: LandingQueueService, options: LandingQueueOpsOptions) { this.#queue = queue; this.#options = options; }
 
   /** The owner, or an integrator of the project (exact right, no task credential). */
@@ -289,8 +305,71 @@ export class LandingQueueOps {
   }
 
   /**
+   * The controller's own round over the bounds that end a stuck first place (card P10, eleventh slice). Until now both bounds were looked at only when a landing was asked for behind the place, so a place nobody
+   * worked on, with approved work waiting behind it and nobody asking to land that work, stayed until somebody did. This round looks, on the controller's regular rounds, at every project's landing branch queue that
+   * has approved work waiting BEHIND the first place (an entry of another task) and does exactly what a refused landing behind it does: ends a reserved first place that has had no approved submission for `releaseMs`
+   * (`#releaseIdle`: the same write, the same notices), and otherwise tells the director once when the first place has held the branch for `holdMs` (`#heldTooLong`). It lands nothing, queues nothing and removes
+   * no approved submission; with nothing waiting behind the place nothing is ended or told (an owner's unqueued landing, or an empty rest of the queue, ends nothing, as before). Only the branch the owner's policy names
+   * now is looked at (an old branch's queue is not landed from): as at a refused landing, the branch is the one a task WAITING behind the place is judged on (a landing is asked for that task, and a task's own
+   * setting can name another branch than its project's), so the round acts only when at least one waiting entry of another task is judged on this queue's branch now; a branch that cannot be read, or names
+   * none, does not count (fail closed). One queue's failure does not stop the others. With `throttled` (the dispatcher's call, every tick) the walk runs at most once per `BOUNDS_SWEEP_EVERY_MS` of the queue's
+   * clock (the bounds are hours; the walk reads up to 50 pages of queue records). The waiting tasks' landing branches are read only for a first place past one of the bounds (or a reserved place whose idle count
+   * has not started), at most `BOUNDS_SWEEP_POLICY_READS` per walk (then the walk stops, `partial`, and the next walk starts at the queue where it stopped). Answers how many places it ended and how many queues past a bound with work waiting behind it it looked at;
+   * never throws for a queue.
+   */
+  async sweepBounds(options: { readonly throttled?: boolean } = {}): Promise<{ checked: number; released: number; partial: boolean; skipped?: true }> {
+    if (options.throttled === true) {
+      const now = Date.parse(this.#queue.now());
+      // A clock set back below the last walk does not stop the round for good: only a walk less than the interval ago, measured forwards, is skipped.
+      if (Number.isFinite(now) && this.#lastSweepAt !== undefined && now >= this.#lastSweepAt && now - this.#lastSweepAt < BOUNDS_SWEEP_EVERY_MS) return { checked: 0, released: 0, partial: false, skipped: true };
+      this.#lastSweepAt = Number.isFinite(now) ? now : undefined;
+    }
+    const walk = await this.#queue.queuesWithEntries();
+    let partial = walk.partial, checked = 0, released = 0, reads = 0;
+    const holdMs = this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS, budget = this.#options.sweepPolicyReads ?? BOUNDS_SWEEP_POLICY_READS;
+    const now = Date.parse(this.#queue.now());
+    // Start where the last round stopped at its budget (that queue, or the first one after it when it is gone), then go round.
+    const resumeAt = this.#sweepResumeAt;
+    const exact = resumeAt === undefined ? -1 : walk.queues.findIndex((q) => q.queueId === resumeAt);
+    const start = resumeAt === undefined ? 0 : exact >= 0 ? exact : Math.max(0, walk.queues.findIndex((q) => q.queueId > resumeAt));
+    const order = [...walk.queues.slice(start), ...walk.queues.slice(0, start)];
+    this.#sweepResumeAt = undefined;
+    walking: for (const [i, q] of order.entries()) {
+      try {
+        const head = frontOf(q);
+        const front = q.front;
+        if (head === undefined || front === undefined) continue;
+        // Nothing would be done (the same conditions `#releaseIdle` and `#heldTooLong` judge first): no policy is read for a place within its bounds. The clock only moves on, so a place due now is due at those checks too.
+        const idle = front.idleSince === undefined ? NaN : Date.parse(front.idleSince), since = Date.parse(front.since);
+        const releaseDue = head.entry === undefined && front.taskId === head.taskId && (front.idleSince === undefined || (Number.isFinite(idle) && Number.isFinite(now) && now - idle >= releaseMs));
+        const holdDue = front.escalated !== true && this.#options.escalate !== undefined && Number.isFinite(since) && Number.isFinite(now) && now - since >= holdMs;
+        if (!releaseDue && !holdDue) continue;
+        let behind = false;
+        for (const e of q.entries) {
+          if (e.taskId === head.taskId) continue;
+          // The next round starts at this queue; when it was this round's first queue (more reads than the budget), at the next one, so each round moves on.
+          if (reads >= budget) { partial = true; this.#sweepResumeAt = (i === 0 ? order[1]?.queueId : undefined) ?? q.queueId; break walking; }
+          reads++;
+          let landing: string | undefined;
+          try { landing = await this.#options.landingBranch({ taskId: e.taskId, projectId: q.projectId }); } catch { continue; }
+          if (landing !== undefined && landing === q.branch) { behind = true; break; }
+        }
+        if (!behind) continue;
+        checked++;
+        if (head.entry === undefined && await this.#releaseIdle(q.projectId, q.branch, q.front, head.taskId)) {
+          // Counted when the place is no longer that reserved place (this round ended it, or another call just did).
+          released++;
+          continue;
+        }
+        await this.#heldTooLong(q.projectId, q.branch, q.front, head.entry === undefined);
+      } catch { /* this queue is looked at again at the next round */ }
+    }
+    return { checked, released, partial };
+  }
+
+  /**
    * A landing waits behind the first place (card P10). When that place has been first for `holdMs` or longer, the director is told, once per first place: it holds the branch, and someone decides whether it goes on
-   * (its author is approved and it lands) or is taken out. The notice goes first and the mark after it: a notice that could not be given is given at the next refused landing (the notices are named by command ID,
+   * (its author is approved and it lands) or is taken out. The notice goes first and the mark after it: a notice that could not be given is given at the next refused landing or bounds round (the notices are named by command ID,
    * and their text depends only on the first place, so two refusals at the same moment tell once). Best effort: a failure to mark or tell never changes the landing's own answer.
    */
   async #heldTooLong(projectId: string, branch: string, front: LandingQueueFront | undefined, waitingForApproval: boolean): Promise<void> {
@@ -303,7 +382,7 @@ export class LandingQueueOps {
       const text = `Task ${front.taskId} has been first in the landing queue of branch ${branch} since ${front.since} (at least ${hold}) and has not landed${waitingForApproval ? ": its place is reserved and it waits for an approved submission" : ""}; other work waits behind it. Decide whether it goes on, or take it out with landing.queue.remove.`;
       await this.#options.escalate({ commandId: `lq-held:${LandingQueueService.queueIdOf(projectId, branch)}:${front.taskId}:${front.since}${waitingForApproval ? ":waiting" : ""}`.slice(0, 120), projectId, taskId: front.taskId, branch, why: "front", text });
       await this.#queue.markEscalated({ kind: "front", projectId, branch, taskId: front.taskId, since: front.since });
-    } catch { /* best effort: unmarked, so the next refused landing tells again */ }
+    } catch { /* best effort: unmarked, so the next refused landing or round tells again */ }
   }
 
   /**
@@ -313,8 +392,8 @@ export class LandingQueueOps {
    */
   async #releaseIdle(projectId: string, branch: string, front: LandingQueueFront | undefined, taskId: string): Promise<boolean> {
     if (front === undefined || front.taskId !== taskId) return false;
-    // A record written before the idle time existed: its clock starts now (best effort; the next refused landing tries again), and nothing is ended on this call.
-    if (front.idleSince === undefined) { try { await this.#queue.startIdleClock({ projectId, branch, taskId, since: front.since }); } catch { /* the next refused landing starts it */ } return false; }
+    // A record written before the idle time existed: its clock starts now (best effort; the next refused landing or round tries again), and nothing is ended on this call.
+    if (front.idleSince === undefined) { try { await this.#queue.startIdleClock({ projectId, branch, taskId, since: front.since }); } catch { /* the next refused landing or round starts it */ } return false; }
     const releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS;
     const idle = Date.parse(front.idleSince), now = Date.parse(this.#queue.now());
     if (!Number.isFinite(idle) || !Number.isFinite(now) || now - idle < releaseMs) return false;
