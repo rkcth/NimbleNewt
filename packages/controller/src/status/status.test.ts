@@ -60,7 +60,7 @@ for (const backend of backends) {
     status: StatusService; owner: Principal; project: string; other: string; storage: ControllerStorage; epoch: number;
     projects: ProjectService; assignments: AssignmentService; waits: WaitService; blockers: BlockerService; contracts: ContractService; stall: StallService; pauses: PauseService;
     desks: DeskService; mcp: McpService; artifacts: ArtifactService; blobs: FileBlobStore; watches: WatchService; events: EventService; hosts: HostService; principals: PrincipalService; agents: AgentService;
-    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]>; deliverables?: NonNullable<StatusDeps["deliverables"]> }): StatusService;
+    rebuild(extra?: StatusOptions, deps?: { approvals?: NonNullable<StatusDeps["approvals"]>; watch?: boolean; verify?: boolean; ownerQuestions?: NonNullable<StatusDeps["ownerQuestions"]>; reviews?: NonNullable<StatusDeps["reviews"]>; activity?: NonNullable<StatusDeps["activity"]>; agenda?: NonNullable<StatusDeps["agenda"]>; meetings?: NonNullable<StatusDeps["meetings"]>; standups?: NonNullable<StatusDeps["standups"]>; handoffs?: NonNullable<StatusDeps["handoffs"]>; shutdown?: NonNullable<StatusDeps["shutdown"]>; catalogPolicy?: NonNullable<StatusDeps["catalogPolicy"]>; revocations?: NonNullable<StatusDeps["revocations"]>; retention?: NonNullable<StatusDeps["retention"]>; meetingDecisions?: NonNullable<StatusDeps["meetingDecisions"]>; stops?: NonNullable<StatusDeps["stops"]>; heldResumes?: NonNullable<StatusDeps["heldResumes"]>; critical?: NonNullable<StatusDeps["critical"]>; deliverables?: NonNullable<StatusDeps["deliverables"]>; toolbox?: NonNullable<StatusDeps["toolbox"]> }): StatusService;
     agent(name: string, grants?: AGrant[]): Promise<Principal>;
     host(name: string, project?: string): Promise<Principal>;
     /** A ready task in `project` (default: the main one), created by the owner. */
@@ -101,7 +101,7 @@ for (const backend of backends) {
         const rebuild: Ctx["rebuild"] = (extra = {}, deps = {}) => StatusService.withEpoch(world.storage, epoch, {
           assignments, waits, blockers, contracts, stall, pauses,
           ...(deps.approvals === undefined ? {} : { approvals: deps.approvals }), ...(deps.watch === false ? {} : { watch: watches }), ...(deps.ownerQuestions === undefined ? {} : { ownerQuestions: deps.ownerQuestions }), ...(deps.activity === undefined ? {} : { activity: deps.activity }), ...(deps.agenda === undefined ? {} : { agenda: deps.agenda }), ...(deps.meetings === undefined ? {} : { meetings: deps.meetings }), ...(deps.standups === undefined ? {} : { standups: deps.standups }), ...(deps.handoffs === undefined ? {} : { handoffs: deps.handoffs }),
-          ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.deliverables === undefined ? {} : { deliverables: deps.deliverables }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
+          ...(deps.toolbox === undefined ? {} : { toolbox: deps.toolbox }), ...(deps.reviews === undefined ? {} : { reviews: deps.reviews }), ...(deps.shutdown === undefined ? {} : { shutdown: deps.shutdown }), ...(deps.stops === undefined ? {} : { stops: deps.stops }), ...(deps.catalogPolicy === undefined ? {} : { catalogPolicy: deps.catalogPolicy }), ...(deps.revocations === undefined ? {} : { revocations: deps.revocations }), ...(deps.retention === undefined ? {} : { retention: deps.retention }), ...(deps.meetingDecisions === undefined ? {} : { meetingDecisions: deps.meetingDecisions }), ...(deps.heldResumes === undefined ? {} : { heldResumes: deps.heldResumes }), ...(deps.critical === undefined ? {} : { critical: deps.critical }), ...(deps.deliverables === undefined ? {} : { deliverables: deps.deliverables }), ...(deps.verify === false ? {} : { verifyArtifact: (id: string) => artifacts.verify(id) }),
         }, { ...options, ...extra });
         const status = rebuild();
         const grantService = GrantService.withEpoch(world.storage, epoch, options);
@@ -2784,5 +2784,34 @@ for (const backend of backends) {
     assert.equal(await status.ask(reader, { kind: "timeline", projectId: c.project }), undefined);
     await assert.rejects(status.ask(c.owner, { kind: "timeline", projectId: c.project, limit: 51 }));
     assert.equal(await c.rebuild().ask(c.owner, { kind: "timeline", projectId: c.project }), undefined);
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: T08 slice 5: the toolbox proposals line names each author by its own name, with its ID`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const agents = AgentService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const cody = (await agents.create(owner, { commandId: cid("ag"), friendlyName: "Cody", roles: [] })).id;
+      const quoter = (await agents.create(owner, { commandId: cid("ag"), friendlyName: "Ann Tester", roles: [] })).id;
+      const reads: string[] = [];
+      const prop = (id: string, author: string) => ({ id, revision: 1, kind: "improvement", target: "toolbox.lint", author, state: "open", round: 1, base: { version: "1.0.0" }, changes: { instructions: true, executable: false, manifest: false }, permissionChanges: { added: [], removed: [] } });
+      const items = [prop("tpr-1", `agent:${cody}`), prop("tpr-2", `agent:${cody}`), prop("tpr-3", `agent:${quoter}`), prop("tpr-4", "agent:agt-gone"), prop("tpr-5", "principal-without-a-record")];
+      const toolbox = {
+        list: async () => ({ items: [] }), forks: async () => ({ forks: [] }),
+        proposals: async (_by: Principal, q: { state?: string }) => { reads.push(q.state ?? "waiting"); return { items: q.state === "deferred" ? [] : items }; },
+      };
+      const status = StatusService.withEpoch(world.storage, projects.epoch, { toolbox: toolbox as never } as never, { ...options });
+      const text = (await status.ask(owner, { kind: "toolbox_proposals" }))!.lines.map((l) => l.text);
+      assert.match(text[0]!, new RegExp(`^Proposal tpr-1: "Cody" \\(agent:${cody}\\) proposes changing the instructions of toolbox\\.lint 1\\.0\\.0; it is open\\.`));
+      assert.match(text[1]!, new RegExp(`^Proposal tpr-2: "Cody" \\(agent:${cody}\\) proposes`), "the same author is named the same way each time");
+      assert.match(text[2]!, new RegExp(`^Proposal tpr-3: "Ann Tester" \\(agent:${quoter}\\) proposes`));
+      assert.match(text[3]!, /^Proposal tpr-4: agent:agt-gone proposes/, "an author whose record cannot be read is shown by its ID alone");
+      assert.match(text[4]!, /^Proposal tpr-5: principal-without-a-record proposes/);
+      assert.deepEqual(reads, ["waiting", "deferred"], "the proposals are read once, then the deferred count");
+    } finally { await world.close(); }
   });
 }

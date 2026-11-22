@@ -72,7 +72,7 @@ test("toolbox proposals (card T08): an agent proposes, a maintainer asks for cha
     const status = (await say("m1", ask, [{ kind: "status", request: { kind: "toolbox_proposals" }, evidence: ask, basis: "owner" }]))[0];
     assert.equal(status.status, "answered", JSON.stringify(status));
     const text = status.lines.map((l: any) => l.text).join("\n");
-    assert.match(text, new RegExp(`Proposal ${p2.proposalId}: ${cody.pid} proposes changing the instructions of toolbox\\.lint 1\\.1\\.0; it is open\\.`));
+    assert.match(text, new RegExp(`Proposal ${p2.proposalId}: "Cody" \\(${cody.pid}\\) proposes changing the instructions of toolbox\\.lint 1\\.1\\.0; it is open\\.`));
     assert.doesNotMatch(text, new RegExp(prop.proposalId), "an accepted proposal is not waiting");
     const park = "park Cody's lint docs idea until next month";
     const proposed = (await say("m2", park, [{ kind: "command", op: "toolbox.proposal.decide", args: { proposalId: p2.proposalId, decision: "defer", reason: "until next month" }, evidence: park, basis: "owner" }]))[0];
