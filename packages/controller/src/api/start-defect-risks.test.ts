@@ -86,7 +86,8 @@ test("through the running controller the team-wide defect risks are answered in 
     assert.deepEqual([needs.items[0].kind, needs.items[0].id, needs.items[0].taskId, needs.items[0].projectId, needs.items[0].answer.choices], ["defect", major, task, project, ["accept-as-is", "repair-again"]]);
     assert.match(needs.lines[0].text, /failed 1 repair check\(s\), the limit of 1: "The guide skips the backup step\." \(accept it as is, or repair again\)/);
     // An agent has no Needs-you list, and may not answer an item of it.
-    assert.notEqual((await call(rev.token, "needs-you.answer", { kind: "defect", id: major, answer: "accept-as-is" }, "na0")).ok, true);
+    assert.equal((await call(rev.token, "needs-you.answer", { kind: "defect", id: major, answer: "accept-as-is" }, "na0")).error.code, "forbidden");
+    assert.equal((await call(boot.token, "defect.get", { id: major })).result.item.state, "escalated", "nothing was decided by the agent");
 
     // The owner answers in their own words: shown first, applied on their word; the failed check is kept.
     const words = "let them try the backup step again, one more time";
@@ -98,7 +99,7 @@ test("through the running controller the team-wide defect risks are answered in 
     const item = (await call(boot.token, "defect.get", { id: major })).result.item;
     assert.deepEqual([item.state, item.cycles, item.checks.map((x: any) => x.verdict), item.overrideRecords.map((o: any) => [o.outcome, o.reason])], ["open", 1, ["not-fixed"], [["repair-again", "answered from the Needs-you list"]]]);
     assert.equal((await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.count, 0, "no longer waiting");
-    // The same answer again is refused: the item no longer waits.
+    // Another answer to an item that no longer waits is refused, and so is an answer the item does not offer.
     assert.equal((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "accept-as-is" }, "na2")).error.code, "invalid_transition");
     assert.equal((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "maybe" }, "na3")).error.code, "invalid_command");
   } finally {

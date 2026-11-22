@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { OPERATIONS } from "../api/operations.js";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { ProjectService } from "../domain/service.js";
@@ -86,6 +87,12 @@ for (const backend of backends) {
       await svc.override(owner, { commandId: cid("o"), id: accepted, outcome: "accept-as-is", reason: "ship it" });
       await svc.repair(ann, { commandId: cid("rp"), id: waiting, version: await newVersion(g2) });
 
+      // 600 finished defect records whose IDs sort before every real one: the unfinished ones are found only on the second page of the scan (500 per page).
+      for (let batch = 0; batch < 6; batch++) {
+        const ids = Array.from({ length: 100 }, (_, i) => `dft-0${String(batch * 100 + i).padStart(19, "0")}`);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { batch }, build: async () => ({ ref: { kind: "defect", id: ids[0]! }, creates: true, changes: ids.map((id) => ({ type: "create" as const, ref: { kind: "defect", id }, body: { state: "resolved", projectId: p1, deliverableId: g1.id } as unknown as JsonObject })), detail: {} }) }));
+      }
+
       // Project 1: the escalated one first, then the open ones by severity; the resolved and the accepted are not unfinished.
       const one = await svc.unresolved(owner, { projectId: p1 });
       assert.deepEqual(one.items.map((x) => [x.id, x.state, x.severity, x.cycles, x.limit]), [[failed, "escalated", "major", 1, 1], [critical, "open", "critical", 0, 1], [minor, "open", "minor", 0, 1]]);
@@ -106,8 +113,25 @@ for (const backend of backends) {
       const hidden = await svc.unresolved(far, { projectId: p1 });
       assert.deepEqual([hidden.items.length, hidden.counts], [0, { escalated: 0, awaitingCheck: 0, open: 0 }]);
       await assert.rejects(() => svc.unresolved(far), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
-      // Escalated state is read from the record: after the owner's repair-again it is open again, with the count kept.
-      await svc.override(owner, { commandId: cid("o"), id: failed, outcome: "repair-again", reason: "once more" });
+      // The escalated defect is answered from the Needs-you list (needs-you.answer, kind defect): only the owner, never an agent or a task credential.
+      const answer = OPERATIONS.find((o) => o.name === "needs-you.answer")!;
+      const answerAs = (principal: Principal, args: Record<string, unknown>, commandId: string) => answer.run({ principal, defects: svc } as never, args as never, commandId) as Promise<{ item: Record<string, unknown> }>;
+      const refusedWith = (code: string) => (e: unknown) => e instanceof DomainError && e.code === code;
+      await assert.rejects(() => answerAs(rev, { kind: "defect", id: failed, answer: "accept-as-is" }, cid("na")), refusedWith("forbidden"));
+      await assert.rejects(() => answerAs({ ...owner, taskScope: { taskId: t1, projectId: p1 } } as Principal, { kind: "defect", id: failed, answer: "accept-as-is" }, cid("na")), refusedWith("forbidden"));
+      assert.equal(((await svc.get(owner, failed))!)["state"], "escalated", "nothing was decided by them");
+      // Escalated state is read from the record: after the owner's repair-again it is open again, with the count kept; the default reason is recorded.
+      const once = cid("na");
+      const first = (await answerAs(owner, { kind: "defect", id: failed, answer: "repair-again" }, once)).item;
+      assert.deepEqual([first["kind"], first["answer"], first["replayed"]], ["defect", "repair-again", false]);
+      // The same command again (its reply lost) is answered from what it recorded; the same command ID with the other answer is refused, and so is a new answer to an item that no longer waits.
+      const again = (await answerAs(owner, { kind: "defect", id: failed, answer: "repair-again" }, once)).item;
+      assert.deepEqual([again["replayed"], again["overrideId"]], [true, first["overrideId"]]);
+      await assert.rejects(() => answerAs(owner, { kind: "defect", id: failed, answer: "accept-as-is" }, once), refusedWith("command_conflict"));
+      await assert.rejects(() => answerAs(owner, { kind: "defect", id: failed, answer: "accept-as-is" }, cid("na")), refusedWith("invalid_transition"));
+      await assert.rejects(() => answerAs(owner, { kind: "defect", id: failed, answer: "maybe" }, cid("na")), refusedWith("invalid_command"));
+      const decided = (await svc.get(owner, failed))!;
+      assert.deepEqual([decided["state"], (decided["overrideRecords"] as { outcome: string; reason: string }[]).map((o) => [o.outcome, o.reason])], ["open", [["repair-again", "answered from the Needs-you list"]]]);
       const after2 = await svc.unresolved(owner, { projectId: p1 });
       assert.deepEqual(after2.counts, { escalated: 0, awaitingCheck: 0, open: 3 });
       assert.equal(after2.items.find((x) => x.id === failed)!.cycles, 1);

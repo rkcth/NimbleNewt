@@ -2319,7 +2319,7 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
-  /** The project's QA picture (card Q02): what waits for QA, what no longer holds, what fails and what passes, per task's newest code submission. The QA service's read rules apply. */
+  /** The unfinished defects of a project (card Q04): counts, then each defect, escalated first. The defect service's read rules apply (only defects whose deliverable the caller may read). */
   async defectRiskLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
     const at = this.#runner.now();
@@ -2339,6 +2339,7 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
+  /** The project's QA picture (card Q02): what waits for QA, what no longer holds, what fails and what passes, per task's newest code submission. The QA service's read rules apply. */
   async qaProjectLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
     const at = this.#runner.now();
