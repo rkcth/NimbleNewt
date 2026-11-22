@@ -139,6 +139,13 @@ export const attemptOfAssignments = (assignments: AssignmentService): AttemptOf 
   return attempt === undefined ? undefined : { ownerId: attempt.owner.id, state: attempt.state, attemptId: asg.activeAttemptId, guards: [{ kind: "assignment", id: assignmentIdOf(taskId), revision: asg.revision }, { kind: "attempt", id: asg.activeAttemptId, revision: attempt.revision }] };
 };
 
+/** The port the controller uses (`start.ts`): as `attemptOfAssignments`, with the owner named as a principal. The dispatcher names an attempt's owner by its bare agent ID, the principals by
+ * `agent:<id>`: the same identity either way. Everything else, the guards included, is passed on unchanged. */
+export const attemptOfAgents = (assignments: AssignmentService): AttemptOf => {
+  const of = attemptOfAssignments(assignments);
+  return async (taskId) => { const a = await of(taskId); return a === undefined ? undefined : { ...a, ownerId: a.ownerId.startsWith("agent:") ? a.ownerId : `agent:${a.ownerId}` }; };
+};
+
 export interface SubmissionOptions extends RunnerOptions {
   /** When given, a code submission must come from the owner of the task's current attempt. */
   readonly attemptOf?: AttemptOf;

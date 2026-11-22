@@ -6,7 +6,7 @@ import { DomainError } from "../domain/errors.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService } from "../security/index.js";
-import { attemptOfAssignments, SubmissionService, type AttemptOf } from "./index.js";
+import { attemptOfAgents, attemptOfAssignments, SubmissionService, type AttemptOf } from "./index.js";
 
 after(stopServer);
 
@@ -47,8 +47,8 @@ for (const backend of backends) {
       const r = await assign.admitAttempt({ commandId: cid("admit"), actor: owner.id, taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: who } });
       return { attemptId: r.id, generation: a.generation };
     };
-    // The port the controller builds (`start.ts` maps the assignment's bare agent ID to the principal's `agent:` form), with a hook that runs right after the attempt was read.
-    const port = (gap: () => Promise<void>): AttemptOf => { const of = attemptOfAssignments(assign); return async (taskId) => { const a = await of(taskId); await gap(); return a === undefined ? undefined : { ...a, ownerId: `agent:${a.ownerId}` }; }; };
+    // The port the controller uses (`attemptOfAgents`, as `start.ts` builds it), with a hook that runs right after the attempt was read.
+    const port = (gap: () => Promise<void>): AttemptOf => { const of = attemptOfAgents(assign); return async (taskId) => { const a = await of(taskId); await gap(); return a; }; };
     const svc = (attemptOf: AttemptOf, clock = options.clock) => SubmissionService.withEpoch(world.storage, projects.epoch, async () => ["author"], { ...options, clock, attemptOf });
     return { assign, agent, task, admit, port, svc, owner, world, projects, epoch: projects.epoch };
   };
@@ -191,5 +191,14 @@ for (const backend of backends) {
       await refused(() => s.record(ann, code(t)), /attempt changed while/);
     }
     assert.equal(await recorded(c.svc(async () => undefined), ann, t), 0);
+  });
+
+  suite("the controller's port names the owner as a principal and passes the guards on unchanged", async (c) => {
+    await c.agent("ann"); const t = await c.task();
+    await c.admit(t, "ann");
+    const plain = (await attemptOfAssignments(c.assign)(t))!, used = (await attemptOfAgents(c.assign)(t))!;
+    assert.equal(plain.ownerId, "ann");
+    assert.deepEqual(used, { ...plain, ownerId: "agent:ann" });
+    assert.equal(used.guards?.length, 2);
   });
 }
