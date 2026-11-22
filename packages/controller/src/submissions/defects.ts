@@ -56,6 +56,8 @@ export interface DefectBody {
   /** The version a repair was last submitted in (each repair names a newer version than the last). */
   readonly repairVersion?: number;
   readonly repairedBy?: string;
+  /** Set when the waiting repair took the place of one whose version was rejected or replaced (the earlier repair version); cleared by the next check or repair from open. A `fixed` check must then name the version it judged. */
+  readonly replacedRepair?: number;
   /** The number of checks recorded; check `n` is the record `<id>.<n>` of kind `defect-check`. */
   readonly checkSeq: number;
   /** The owner's decisions on it, oldest first (`defect-override` records). */
@@ -268,7 +270,8 @@ export class DefectService {
         if (dAgg === undefined || d === undefined || command.version > d.currentVersion) bad("version", `the deliverable has no version ${command.version}`);
         const v = await this.#version(body.deliverableId, command.version);
         if (v.state !== "submitted" && v.state !== "under-review" && v.state !== "accepted") throw new DomainError("invalid_transition", `version ${command.version} is ${v.state}: a repair is a submitted version`);
-        const next: DefectBody = { ...body, state: "repair-submitted", repairVersion: command.version, repairedBy: by.id };
+        const { replacedRepair: _was, ...rest } = body;
+        const next: DefectBody = { ...rest, state: "repair-submitted", repairVersion: command.version, repairedBy: by.id, ...(stuck ? { replacedRepair: body.repairVersion! } : {}) };
         const ref = { kind: "defect", id: command.id };
         return { ref, creates: false, changes: [
           { type: "update", ref, expectedRevision: agg.revision, body: next as unknown as JsonObject },
@@ -283,19 +286,21 @@ export class DefectService {
    * Checks the submitted repair: `fixed` resolves the defect; `not-fixed` (with the reason) counts one repair and review cycle and sends the defect back to `open`, or, when the cycles reach the limit in force,
    * escalates it to the owner. The check is its own immutable record. The owner, or a reviewer, qa or director agent that did none of the repair version's work.
    */
-  async review(by: Principal, command: NoActor & { id: string; verdict: string; reason?: string; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean; state: DefectState; cycles: number; limit: number }> {
-    object(command, ["commandId", "id", "verdict", "reason", "expectedRevision"]);
+  async review(by: Principal, command: NoActor & { id: string; verdict: string; reason?: string; version?: number; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean; state: DefectState; cycles: number; limit: number }> {
+    object(command, ["commandId", "id", "verdict", "reason", "version", "expectedRevision"]);
     const commandId = checkCommandId(command.commandId);
     if (typeof command.id !== "string" || !ID.test(command.id)) bad("id", "is not a defect ID");
     if (command.verdict !== "fixed" && command.verdict !== "not-fixed") bad("verdict", "must be fixed or not-fixed");
     const reason = command.reason === undefined ? undefined : text(command.reason, "reason", { min: 1, max: MAX_REASON, multiline: true });
     if (command.verdict === "not-fixed" && reason === undefined) bad("reason", "say what is still wrong");
+    if (command.version !== undefined && (!Number.isSafeInteger(command.version) || command.version < 1)) bad("version", "must be the repair version that was checked");
+    const judged = command.version;
     const expected = revisionOf(command.expectedRevision);
     const scoped = scopedCommandId(by.id, commandId);
     let escalation: { projectId: string; text: string } | undefined;
     let outcome: { state: DefectState; cycles: number; limit: number } | undefined;
     const result = await this.#runner.command("defect.review", { commandId: scoped, actor: by.id }, async () => ({
-      payload: { id: command.id, verdict: command.verdict, reason: reason ?? null, expectedRevision: expected ?? null },
+      payload: { id: command.id, verdict: command.verdict, reason: reason ?? null, expectedRevision: expected ?? null, ...(judged === undefined ? {} : { version: judged }) },
       build: async () => {
         escalation = undefined;
         outcome = undefined;
@@ -306,8 +311,11 @@ export class DefectService {
         const vAgg = await this.#runner.get("deliverable-version", `${body.deliverableId}.${body.repairVersion}`);
         if (vAgg === undefined) throw new DomainError("integrity", `the record of version ${body.repairVersion} of ${body.deliverableId} is missing`);
         await this.#checker(by, d, vAgg.body as unknown as VersionBody, "check this repair");
+        // The check applies to the repair it judged: a named version that is no longer the repair is refused, and (below) once a repair was replaced a `fixed` check must name what it judged.
+        if (judged !== undefined && judged !== body.repairVersion) throw new DomainError("stale_revision", `the repair is now version ${body.repairVersion}, not ${judged}`, { currentRevision: agg.revision });
         // A version that was rejected or replaced by a newer one is not found fixed (the newer version is the repair to check); it may still be found not fixed.
         if (command.verdict === "fixed" && DEAD_VERSION.has((vAgg.body as unknown as VersionBody).state)) throw new DomainError("invalid_transition", `the repair, version ${body.repairVersion}, is ${(vAgg.body as unknown as VersionBody).state}: it cannot be found fixed; the responsible agent names a newer version as the repair`);
+        if (command.verdict === "fixed" && judged === undefined && expected === undefined && body.replacedRepair !== undefined) bad("version", `the repair, version ${body.replacedRepair}, was replaced by version ${body.repairVersion}: name the version you checked (or expectedRevision)`);
         const limit = await this.#limit(body.projectId);
         const at = this.#runner.now();
         const fixed = command.verdict === "fixed";
@@ -316,7 +324,8 @@ export class DefectService {
         const seq = body.checkSeq + 1;
         const check: DefectCheckBody = { defectId: command.id, seq, version: body.repairVersion, verdict: command.verdict as "fixed" | "not-fixed", ...(reason === undefined ? {} : { reason: redactText(reason) }), by: by.id, at, cycles, limit, escalated, defectRevision: agg.revision + 1 };
         const state: DefectState = fixed ? "resolved" : escalated ? "escalated" : "open";
-        const next: DefectBody = { ...body, state, cycles, checkSeq: seq, ...(fixed ? { resolution: { kind: "fixed" as const, by: by.id, at, ref: `${command.id}.${seq}` } } : {}) };
+        const { replacedRepair: _was, ...rest } = body;
+        const next: DefectBody = { ...rest, state, cycles, checkSeq: seq, ...(fixed ? { resolution: { kind: "fixed" as const, by: by.id, at, ref: `${command.id}.${seq}` } } : {}) };
         outcome = { state, cycles, limit };
         if (escalated) escalation = { projectId: body.projectId, text: escalationText(command.id, body.severity, body.deliverableId, cycles, limit) };
         const ref = { kind: "defect", id: command.id };
