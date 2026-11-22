@@ -59,7 +59,13 @@ export interface LandingReservation {
   readonly escalatedRound?: number;
 }
 /** The first task of the queue (an entry or a reserved place without one) and since when it has been first. `escalated`: the director was told it held the branch too long. */
-export interface LandingQueueFront { readonly taskId: string; readonly since: string; readonly escalated?: true }
+export interface LandingQueueFront {
+  readonly taskId: string;
+  readonly since: string;
+  readonly escalated?: true;
+  /** Since when the first place has had NO approved entry (a reserved place waiting for its task's refreshed work); absent while it has one. The bounded hold of a reserved place counts from here (card P10, eighth slice). */
+  readonly idleSince?: string;
+}
 /**
  * How often a task's queued work went back to its author because it overlapped files that landed since its base (card P10, "overlap returns the work to the author"): each return is one repair cycle of the task (card Q04),
  * counted here and never reset until the task lands. `last` is the last return: when, which submission, and the overlapping paths (at most `LANDING_QUEUE_LIMITS.paths`).
@@ -103,7 +109,10 @@ function settled(next: LandingQueueBody, now: string): LandingQueueBody {
   const { front: before, reservations, landed, away: wasAway, returned, returns, ...rest } = next;
   const away = (wasAway ?? []).filter((a) => !rest.entries.some((e) => e.taskId === a.taskId) && !(reservations ?? []).some((r) => r.taskId === a.taskId));
   const first = frontOf(next);
-  const front = first === undefined ? undefined : before !== undefined && before.taskId === first.taskId ? before : { taskId: first.taskId, since: now };
+  // `idleSince`: while the first place has no approved entry it is when that began; with an entry it is dropped (the clock of a reserved place's bounded hold restarts whenever approved work is back).
+  const same = before !== undefined && first !== undefined && before.taskId === first.taskId ? before : undefined;
+  const { idleSince: wasIdle, ...base } = same ?? { taskId: first?.taskId ?? "", since: now };
+  const front = first === undefined ? undefined : { ...base, ...(first.entry === undefined ? { idleSince: wasIdle ?? now } : {}) };
   const sorted = [...rest.entries].sort((a, b) => a.seq - b.seq);
   return { ...rest, entries: sorted, ...(landed === undefined || landed.length === 0 ? {} : { landed }), ...(reservations === undefined || reservations.length === 0 ? {} : { reservations }), ...(away.length === 0 ? {} : { away }), ...(returned === undefined || returned.length === 0 ? {} : { returned }), ...(returns === undefined || returns.length === 0 ? {} : { returns }), ...(front === undefined ? {} : { front }) };
 }
@@ -428,5 +437,34 @@ export class LandingQueueService {
       },
     })))).replayed; } catch (error) { if (!nothing(error)) throw error; }
     return marked;
+  }
+
+  /**
+   * Ends the reserved place of `taskId` when it has held the branch without an approved entry for `olderThanMs` or longer (card P10, eighth slice: no submission waits forever behind a place whose work was returned
+   * to its author). The judgment is made INSIDE the write, on the stored record: the task must still be the first place (the same `front.since`), have no entry, hold the reservation, and have been idle since
+   * `front.idleSince` (else `front.since`) for at least `olderThanMs`. Answers the reservation it ended, or undefined when the queue no longer shows that (another task is first, approved work came back, the
+   * place was taken out, the time is not yet up, or a repeat of the same release). A later reservation of the task is a new one.
+   */
+  async releaseIdle(command: { projectId: string; branch: string; taskId: string; since: string; olderThanMs: number }): Promise<LandingReservation | undefined> {
+    const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
+    let ended: LandingReservation | undefined;
+    try { if ((await retried(() => this.#runner.command("landing.queue.release", { commandId: `lq-release:${queueId}:${command.taskId}:${command.since}`.slice(0, 120), actor: "service:landing-queue" }, async () => ({
+      payload: { projectId: command.projectId, branch: command.branch, taskId: command.taskId, since: command.since },
+      build: async () => {
+        ended = undefined;
+        const current = await this.#runner.get(KIND, queueId);
+        const q = current?.body as unknown as LandingQueueBody | undefined;
+        const first = q === undefined ? undefined : frontOf(q);
+        const idle = q?.front === undefined ? NaN : Date.parse(q.front.idleSince ?? q.front.since), now = Date.parse(this.#runner.now());
+        const r = q?.reservations?.find((x) => x.taskId === command.taskId);
+        if (q === undefined || current === undefined || r === undefined || first === undefined || first.taskId !== command.taskId || first.entry !== undefined || q.front?.taskId !== command.taskId || q.front.since !== command.since
+          || !Number.isFinite(idle) || !Number.isFinite(now) || now - idle < command.olderThanMs) throw new DomainError("invalid_transition", NOTHING);
+        ended = r;
+        const ref: AggregateRef = { kind: KIND, id: queueId };
+        const away = (q.away ?? []).filter((a) => a.taskId !== command.taskId);
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, reservations: q.reservations!.filter((x) => x.taskId !== command.taskId), away }, this.#runner.now())) }], detail: { taskId: command.taskId, released: true, since: command.since }, contention: async () => new DomainError("stale_revision", RACE) };
+      },
+    })))).replayed) ended = undefined; } catch (error) { if (!nothing(error)) throw error; ended = undefined; }
+    return ended;
   }
 }
