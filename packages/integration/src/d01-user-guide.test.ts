@@ -439,13 +439,16 @@ test("every status view the guide's finished-work section lists is a real status
   for (const word of ["Submissions", "QA", "Defects", "unfinished defects", "Documents of a task", "landing queue", "reserved place", "escalated", "accept it as is", "let the repair go on", "withdraw", "director", "Release after a reviewer", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
 
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
-  let ids: { project: string; task: string } | undefined;
+  // The stand-in reads the owner's words the way the interpreter prompt asks a model to: a task view names the task by its title (the chat finds it in the project in focus), and a project view
+  // ("... in Garden") moves the focus to the project the owner named, then asks for the view of the project in focus. No ID is handed over: the chat resolves both from the owner's words.
+  const TASK_KINDS = new Set(["submissions", "qa", "defects", "task_docs"]);
   const fetch: typeof globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
     const said = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
     const row = rows.find((l) => l.say === said);
-    const request = row === undefined ? undefined : /^(submissions|qa|defects|task_docs)$/.test(row.kind) ? { kind: row.kind, taskId: ids!.task } : { kind: row.kind, projectId: ids!.project };
-    const intents = row === undefined ? [{ kind: "none", reason: "not in the guide" }] : [intent("status", { request }, row.say)];
+    const intents = row === undefined ? [{ kind: "none", reason: "not in the guide" }]
+      : TASK_KINDS.has(row.kind) ? [intent("status", { request: { kind: row.kind, taskTitle: TASK } }, row.say)]
+      : [{ kind: "switch_focus", projectName: "Garden", evidence: "in Garden", basis: "owner" }, intent("status", { request: { kind: row.kind } }, row.say)];
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
   };
   let l: Awaited<ReturnType<typeof launch>> | undefined;
@@ -453,14 +456,26 @@ test("every status view the guide's finished-work section lists is a real status
     l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
     const live = l;
     const project = (await call(live, "project.create", { name: "Garden" }, "p1")).result.id as string;
-    const task = (await call(live, "task.create", { projectId: project, title: "Add a greeting to the README" }, "t1")).result.id as string;
-    ids = { project, task };
-    for (const row of rows) {
+    const task = (await call(live, "task.create", { projectId: project, title: TASK }, "t1")).result.id as string;
+    // Every project sentence of the block names Garden, so the focus is on it once one of them was asked; the task sentences are asked after them (the owner's focus is kept between conversations).
+    const ordered = [...rows.filter((r) => !TASK_KINDS.has(r.kind)), ...rows.filter((r) => TASK_KINDS.has(r.kind))];
+    for (const r of ordered) if (!TASK_KINDS.has(r.kind)) assert.match(r.say, /\bGarden\b/, `${r.kind}: a project view's sentence names the project`);
+    const firstLines = new Map<string, string>();
+    for (const row of ordered) {
+      // What the view itself says, read through the state API with the IDs the chat should have found.
+      const view = await call(live, "status.ask", { request: TASK_KINDS.has(row.kind) ? { kind: row.kind, taskId: task } : { kind: row.kind, projectId: project } });
+      assert.equal(view.ok, true, `${row.kind}: the view answers through the state API: ${JSON.stringify(view)}`);
+      const viewLines = (view.result.item.lines as { text: string }[]).map((x) => x.text);
+      assert.ok(viewLines.length > 0, `${row.kind}: the view has lines`);
+      firstLines.set(row.kind, viewLines[0]!);
       const out: string[] = [];
       await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([row.say]), write: (t) => out.push(t) });
-      const printed = out.join("");
-      assert.ok(printed.trim().length > 0, `${row.kind}: the chat printed nothing`);
-      assert.ok(!/not in the guide|Which project do you mean|invalid_command|unknown/i.test(printed), `${row.kind}: the chat did not answer the guide's words:\n${printed}`);
+      const printed = out.join("").replace(/\s+/g, " ");
+      assert.ok(!/not in the guide|Which project do you mean|invalid_command|not_found/i.test(printed), `${row.kind}: the chat did not answer the guide's words:\n${printed}`);
+      // The chat's answer is the view's own text (the first line, whitespace folded), not only some reply of the stand-in.
+      assert.ok(printed.includes(viewLines[0]!.replace(/\s+/g, " ")), `${row.kind}: the chat did not print the view's answer "${viewLines[0]}":\n${printed}`);
     }
+    // The seven views answer differently on this project (so a sentence routed to the wrong kind could not pass by printing another view's words).
+    assert.equal(new Set(firstLines.values()).size, FINISHED_WORK_KINDS.length, `the views' answers are told apart: ${JSON.stringify([...firstLines])}`);
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
