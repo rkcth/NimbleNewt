@@ -8,6 +8,8 @@ import { PI } from "../dispatch/testing/world.js";
 import { CHAT_OPS, acceptedArgs } from "../chat/commands.js";
 import { STATUS_KINDS } from "../status/index.js";
 import { NotificationService } from "../notifications/index.js";
+import { DecisionService } from "../decisions/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -18,9 +20,9 @@ const tree2 = "d".repeat(40);
 const patch = "c".repeat(40);
 const ran = "2026-11-18T09:00:00.000Z";
 
-async function world(name: string) {
+async function world(name: string, extra: object = {}) {
   const d = mkdtempSync(join(tmpdir(), `nn-${name}-`));
-  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI] });
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], ...extra });
   const s = c.services;
   const boot = await s.principals.bootstrapOwner({ name: "rob" });
   const rob = await s.principals.authenticate(boot.token);
@@ -302,5 +304,30 @@ test("the owner's correction of a decision a task relies on invalidates its QA e
     assert.deepEqual((await call(boot.token, "qa.evidence.check", { taskId: task }, "k1")).result.invalidated, []);
     await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passwords", wording: "actually use passwords instead", basedOn: 1 }, "d2");
     assert.equal((await call(qa.token, "qa.evidence.list", { taskId: task })).result.rechecks.length, 1);
+  } finally { await w.done(); }
+});
+
+test("a correction whose propagation the dispatcher finishes (the API's pass left it pending) still invalidates the QA evidence: the dispatcher's decision service has the same hook (card Q02 fifth slice review)", async () => {
+  const w = await world("qa-decision-dispatch", { dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  try {
+    const { call, boot, task, project } = w;
+    assert.ok(w.c.dispatch !== undefined, "the dispatcher runs in this controller");
+    const qa = await w.hire("Quinn", ["qa"], project);
+    const sub = await w.code(tree, "s1");
+    await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in"] }, "c1");
+    const dec = await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passkeys", wording: "we use passkeys for login", basedOn: 0 }, "d1");
+    await call(boot.token, "decision.link", { taskId: task, subject: { kind: "task", id: task }, decisions: [dec.result.id] }, "l1");
+    const rec = await call(qa.token, "qa.evidence.record", { submissionId: sub, criteriaRevision: 1, decisions: [dec.result.id], environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }] }, "q1");
+    assert.equal(rec.ok, true, JSON.stringify(rec));
+    // The correction is recorded by a decision service with no QA hook and no generation service: its pass marks the links but stays pending, and the evidence is not looked at
+    // (as when the API's pass could not tell a task and left it to the dispatcher's loop).
+    const bare = DecisionService.withEpoch(w.c.storage, w.c.epoch, {});
+    const fix = await bare.record(w.rob, { commandId: "d2", projectId: project, category: "decision", topic: "auth", statement: "Use passwords", wording: "actually use passwords instead", source: { channel: "direct" }, basedOn: 1 });
+    assert.deepEqual([fix.recorded, fix.recorded && fix.propagation], [true, "pending"], JSON.stringify(fix));
+    assert.equal((await call(qa.token, "qa.evidence.list", { taskId: task })).result.items[0].state, "current");
+    // The dispatcher's tick finishes the propagation, and its pass looks at the task's QA evidence.
+    await w.c.dispatch!.driver.runOnce();
+    const listed = (await call(qa.token, "qa.evidence.list", { taskId: task })).result;
+    assert.deepEqual([listed.items[0].state, listed.items[0].invalidatedBy, listed.rechecks.length, listed.rechecks[0]?.assignee], ["invalidated", "service:qa-evidence", 1, qa.id], JSON.stringify(listed));
   } finally { await w.done(); }
 });

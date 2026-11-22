@@ -144,4 +144,12 @@ test("the decision hook is the one the controller uses: it tells the QA service 
   service = { decisionChanged: async (taskId: string) => { told.push(taskId); throw new Error("QA is down"); } };
   await hook("task-" + "b".repeat(20));
   assert.deepEqual(told, ["task-" + "b".repeat(20)]);
+  // With a sink, the failure is reported there (so a missed invalidation is visible), still never thrown, even when the sink itself throws.
+  const seen: unknown[] = [];
+  await decisionChangeHook(() => service as never, (e) => seen.push(e))("task-" + "c".repeat(20));
+  assert.deepEqual(seen.map((e) => (e as Error).message), ["QA is down"]);
+  await decisionChangeHook(() => service as never, () => { throw new Error("sink down"); })("task-" + "d".repeat(20));
+  service = { decisionChanged: async () => undefined as never };
+  await decisionChangeHook(() => service as never, (e) => seen.push(e))("task-" + "e".repeat(20));
+  assert.equal(seen.length, 1, "a check that works reports nothing");
 });

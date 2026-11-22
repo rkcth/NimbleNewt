@@ -730,8 +730,9 @@ export function reasonText(r: QaStaleReason): string {
 
 /**
  * The hook the decision service calls for each task a decision change reaches (card Q02, fifth slice). `api/start.ts` and the tests build it from this one function, so what runs in the controller is what is tested.
- * The QA service is read when the hook runs (the decision service is made before it). A failure is swallowed: a QA fault never fails or holds back a decision; `qa.evidence.check` and the gate still catch it.
+ * The QA service is read when the hook runs (the decision service is made before it). A failure never fails or holds back a decision: it goes to `onError` (the controller's internal-fault sink, so a
+ * missed invalidation is visible to the operator) and is otherwise swallowed; `qa.evidence.check` and the gate still catch it.
  */
-export function decisionChangeHook(qa: () => Pick<QaEvidenceService, "decisionChanged"> | undefined): (taskId: string) => Promise<void> {
-  return async (taskId) => { try { await qa()?.decisionChanged(taskId); } catch { /* best effort */ } };
+export function decisionChangeHook(qa: () => Pick<QaEvidenceService, "decisionChanged"> | undefined, onError?: (error: unknown) => void): (taskId: string) => Promise<void> {
+  return async (taskId) => { try { await qa()?.decisionChanged(taskId); } catch (error) { try { onError?.(error); } catch { /* best effort */ } } };
 }
