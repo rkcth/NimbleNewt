@@ -153,6 +153,8 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     assert.equal(listed.items[0].state, "invalidated");
     assert.equal(listed.rechecks.length, 1);
     const recheckId = listed.rechecks[0].id as string;
+    const before = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
+    assert.deepEqual([before.verdict, before.reasons, before.stale[0].reasons[0].kind, before.stale[0].reasons[0].fields, before.pendingRechecks], ["failed", ["stale_evidence", "check_missing"], "criteria_changed", ["acceptanceCriteria", "checks"], [recheckId]], "invalidated evidence never passes, and its checks are owed again");
     const checked = await call(rev.token, "qa.evidence.check", { taskId: task }, "k1");
     assert.deepEqual([checked.ok, checked.result.invalidated], [true, []], "nothing stale is left for a later check to do");
     const inv = (await call(boot.token, "qa.evidence.get", { id: first.result.id })).result.item;
