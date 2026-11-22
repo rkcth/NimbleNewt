@@ -146,7 +146,8 @@ export interface FollowUpBody {
 }
 
 export type PropagationReason = "superseded" | "disputed" | "resolved";
-export interface PropagationStep { readonly links?: true; readonly generation?: true; readonly notified?: number; readonly skipped?: string }
+/** `qa`: the `taskReached` hook ran for the task (its QA evidence was looked at); a later pass of a still-pending propagation does not run it again (card Q02). */
+export interface PropagationStep { readonly links?: true; readonly generation?: true; readonly notified?: number; readonly skipped?: string; readonly qa?: true }
 export interface PropagationBody {
   readonly projectId: string;
   readonly reason: PropagationReason;

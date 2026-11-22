@@ -74,6 +74,12 @@ export interface DecisionDeps {
   readonly generation?: GenerationService;
   /** Reads the effect ledger, to record effects that already happened. */
   readonly effects?: EffectService;
+  /**
+   * Told, best effort, for each task a superseded, disputed or resolved decision reaches (card Q02: the task's QA evidence is looked at). A failure is not the decision's error. Once it resolves for a
+   * task, the task's step records it (`qa`) and later passes of the same propagation (the dispatcher's `resume` on each tick while another task is still pending) do not call it again; a rejection
+   * leaves the step open, so the next pass calls it again.
+   */
+  readonly taskReached?: (taskId: string) => Promise<void>;
 }
 
 /** The newest live entry that applies to a task (or to the project when none is named): a task-level decision made after the project-wide one overrides it for that task, and never the other way round. */
@@ -627,6 +633,9 @@ export class DecisionService implements DecisionGuard {
           if (!published.accepted) { failures.push({ taskId, step: step_, code: "backpressure", message: published.reason }); pendingTasks.push(taskId); steps[taskId] = step; continue; }
           step = { ...step, notified: published.seq };
         }
+        // The links are marked (or, for a dispute, the decision's state is what counts): other records bound to the decision are looked at, once per task and propagation (a repeat would be
+        // harmless, since nothing stale writes nothing, but a pending propagation is passed again on every dispatcher tick and up to 200 tasks would be read again each time).
+        if (this.#deps.taskReached !== undefined && step.qa === undefined) { try { await this.#deps.taskReached(taskId); step = { ...step, qa: true }; } catch { /* best effort: looked at again by the next pass */ } }
       } catch (error) {
         if (error instanceof DomainError && error.code === "stale_epoch") throw error;
         failures.push({ taskId, step: step_, code: error instanceof DomainError ? error.code : "error", message: error instanceof Error ? error.message : String(error) });

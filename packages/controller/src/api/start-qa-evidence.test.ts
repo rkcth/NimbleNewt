@@ -8,6 +8,8 @@ import { PI } from "../dispatch/testing/world.js";
 import { CHAT_OPS, acceptedArgs } from "../chat/commands.js";
 import { STATUS_KINDS } from "../status/index.js";
 import { NotificationService } from "../notifications/index.js";
+import { DecisionService } from "../decisions/index.js";
+import { ManualTimer } from "../dispatch/testing/timer.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -18,9 +20,9 @@ const tree2 = "d".repeat(40);
 const patch = "c".repeat(40);
 const ran = "2026-11-18T09:00:00.000Z";
 
-async function world(name: string) {
+async function world(name: string, extra: object = {}) {
   const d = mkdtempSync(join(tmpdir(), `nn-${name}-`));
-  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI] });
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], ...extra });
   const s = c.services;
   const boot = await s.principals.bootstrapOwner({ name: "rob" });
   const rob = await s.principals.authenticate(boot.token);
@@ -185,8 +187,14 @@ test("a changed dependency invalidates QA evidence and schedules a re-check; new
     assert.ok(g.reasons.includes("decision_superseded") && g.reasons.includes("stale_evidence"), JSON.stringify(g.reasons));
     const refused = await call(qa.token, "qa.evidence.record", { ...ev, criteriaRevision: 3, decisions: [dec.result.id] }, "q3");
     assert.equal(refused.error.code, "invalid_command", "evidence is never judged against a superseded decision");
+    // The correction itself looked at the evidence (card Q02 fifth slice): invalidated and re-check scheduled without anyone asking, so a later check has nothing left to do.
     const k2 = await call(boot.token, "qa.evidence.check", { taskId: task }, "k2");
-    assert.deepEqual(k2.result.invalidated, [again.result.id]);
+    assert.deepEqual([k2.ok, k2.result.invalidated, k2.result.rechecks], [true, [], []], JSON.stringify(k2));
+    const afterFix = (await call(boot.token, "qa.evidence.list", { taskId: task })).result;
+    assert.equal(afterFix.items.find((i: { id: string }) => i.id === again.result.id).state, "invalidated");
+    const autoRecheck = afterFix.rechecks.find((r: { evidenceId: string }) => r.evidenceId === again.result.id);
+    assert.deepEqual([autoRecheck.state, autoRecheck.assignee, autoRecheck.requestedBy], ["pending", qa.id, "service:qa-evidence"]);
+    k2.result.rechecks = [autoRecheck.id];
     const r2 = (await call(boot.token, "qa.evidence.get", { id: k2.result.rechecks[0] })).result.item;
     assert.equal(r2.reasons[0].kind, "decision_superseded");
     const owed = await call(boot.token, "status.ask", { request: { kind: "qa", taskId: task } });
@@ -262,5 +270,64 @@ test("changing the contract through contract.set looks at the QA evidence by its
     // Sending the same change again (a replay) does nothing more.
     assert.equal((await call(mia.token, "contract.set", { taskId: task, expectedVersion: 2, acceptanceCriteria: ["a user can log in", "a user can log out"] }, "c3")).result.replayed, true);
     assert.equal((await call(boot.token, "qa.evidence.list", { taskId: task })).result.rechecks.length, 1);
+  } finally { await w.done(); }
+});
+
+test("the owner's correction of a decision a task relies on invalidates its QA evidence by itself through the controller's wiring; an unrelated topic leaves it (card Q02 fifth slice)", async () => {
+  const w = await world("qa-decision-auto");
+  try {
+    const { call, boot, task, project } = w;
+    const qa = await w.hire("Quinn", ["qa"], project);
+    const sub = await w.code(tree, "s1");
+    await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in"] }, "c1");
+    const dec = await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passkeys", wording: "we use passkeys for login", basedOn: 0 }, "d1");
+    await call(boot.token, "decision.link", { taskId: task, subject: { kind: "task", id: task }, decisions: [dec.result.id] }, "l1");
+    const ev = { submissionId: sub, criteriaRevision: 1, decisions: [dec.result.id], environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }] };
+    const rec = await call(qa.token, "qa.evidence.record", ev, "q1");
+    assert.equal(rec.ok, true, JSON.stringify(rec));
+    // A decision on another topic reaches no one relying on this one: the evidence stays.
+    await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "colour", statement: "Blue", wording: "we use blue", basedOn: 0 }, "d-other");
+    await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "colour", statement: "Red", wording: "we use red instead", basedOn: 1 }, "d-other2");
+    assert.equal((await call(qa.token, "qa.evidence.list", { taskId: task })).result.items[0].state, "current");
+    // The correction: invalidated and re-check scheduled at once, the owner told, the gate fails and names the pending re-check.
+    const fix = await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passwords", wording: "actually use passwords instead", basedOn: 1 }, "d2");
+    assert.equal(fix.result.recorded, true, JSON.stringify(fix));
+    const listed = (await call(qa.token, "qa.evidence.list", { taskId: task })).result;
+    assert.deepEqual([listed.items[0].state, listed.items[0].reasons[0].kind, listed.items[0].invalidatedBy, listed.rechecks.length], ["invalidated", "decision_superseded", "service:qa-evidence", 1]);
+    const recheckId = listed.rechecks[0].id as string;
+    const inbox = (await NotificationService.withEpoch(w.c.storage, w.c.epoch).inbox(w.rob)).items.filter((i) => i.ref.kind === "qa-recheck");
+    assert.deepEqual(inbox.map((i) => i.ref.id), [recheckId]);
+    const gate = (await call(boot.token, "qa.evidence.gate", { submissionId: sub })).result.item;
+    assert.equal(gate.verdict, "failed");
+    assert.deepEqual(gate.pendingRechecks, [recheckId]);
+    // Asking afterwards finds nothing left to do, and a replay of the decision adds no second re-check.
+    assert.deepEqual((await call(boot.token, "qa.evidence.check", { taskId: task }, "k1")).result.invalidated, []);
+    await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passwords", wording: "actually use passwords instead", basedOn: 1 }, "d2");
+    assert.equal((await call(qa.token, "qa.evidence.list", { taskId: task })).result.rechecks.length, 1);
+  } finally { await w.done(); }
+});
+
+test("a correction whose propagation the dispatcher finishes (the API's pass left it pending) still invalidates the QA evidence: the dispatcher's decision service has the same hook (card Q02 fifth slice review)", async () => {
+  const w = await world("qa-decision-dispatch", { dispatch: { timer: new ManualTimer(), intervalMs: 1000 } });
+  try {
+    const { call, boot, task, project } = w;
+    assert.ok(w.c.dispatch !== undefined, "the dispatcher runs in this controller");
+    const qa = await w.hire("Quinn", ["qa"], project);
+    const sub = await w.code(tree, "s1");
+    await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in"] }, "c1");
+    const dec = await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "auth", statement: "Use passkeys", wording: "we use passkeys for login", basedOn: 0 }, "d1");
+    await call(boot.token, "decision.link", { taskId: task, subject: { kind: "task", id: task }, decisions: [dec.result.id] }, "l1");
+    const rec = await call(qa.token, "qa.evidence.record", { submissionId: sub, criteriaRevision: 1, decisions: [dec.result.id], environment: "Linux", observedAt: ran, checks: [{ name: "login works", result: "passed" }] }, "q1");
+    assert.equal(rec.ok, true, JSON.stringify(rec));
+    // The correction is recorded by a decision service with no QA hook and no generation service: its pass marks the links but stays pending, and the evidence is not looked at
+    // (as when the API's pass could not tell a task and left it to the dispatcher's loop).
+    const bare = DecisionService.withEpoch(w.c.storage, w.c.epoch, {});
+    const fix = await bare.record(w.rob, { commandId: "d2", projectId: project, category: "decision", topic: "auth", statement: "Use passwords", wording: "actually use passwords instead", source: { channel: "direct" }, basedOn: 1 });
+    assert.deepEqual([fix.recorded, fix.recorded && fix.propagation], [true, "pending"], JSON.stringify(fix));
+    assert.equal((await call(qa.token, "qa.evidence.list", { taskId: task })).result.items[0].state, "current");
+    // The dispatcher's tick finishes the propagation, and its pass looks at the task's QA evidence.
+    await w.c.dispatch!.driver.runOnce();
+    const listed = (await call(qa.token, "qa.evidence.list", { taskId: task })).result;
+    assert.deepEqual([listed.items[0].state, listed.items[0].invalidatedBy, listed.rechecks.length, listed.rechecks[0]?.assignee], ["invalidated", "service:qa-evidence", 1, qa.id], JSON.stringify(listed));
   } finally { await w.done(); }
 });

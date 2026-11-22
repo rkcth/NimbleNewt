@@ -17,6 +17,7 @@ import type { JsonObject } from "../storage/types.js";
 import { derivedId } from "../domain/ids.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { DecisionService, startupItems, type DecisionDeps, type RecordDecision } from "./index.js";
+import { propagationIdOf } from "./records.js";
 
 after(stopServer);
 
@@ -858,5 +859,85 @@ for (const backend of backends) {
     assert.ok(await r.decisions.get(r.rev, first.id));
     // Propagation records are the owner's, a host's or a service's to read.
     assert.equal(await r.decisions.propagation(r.ann, "dpr-x"), undefined);
+  });
+  // Card Q02 (fifth slice): each task a superseded decision reaches is handed to the QA hook, once per pass, and a failing hook never fails or holds back the decision.
+  suite("a superseded decision tells the QA hook about each task that relies on it, and a failing hook changes nothing about the decision", async (r) => {
+    const told: string[] = [];
+    r.deps.taskReached = async (taskId) => { told.push(taskId); };
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    await link(r, r.t2, { kind: "task", id: r.t2 }, [old.id], r.ben);
+    assert.equal(told.length, 0, "linking tells nothing");
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "done");
+    assert.deepEqual([...told].sort(), [r.t1, r.t2].sort(), "each reached task, once");
+    // A hook that fails (or throws before it returns a promise) leaves the decision recorded and its propagation done.
+    r.deps.taskReached = (): Promise<void> => { throw new Error("QA is down"); };
+    const second = await r.recorded({ statement: "Use SQLite", wording: "use SQLite, not MySQL", basedOn: 2 });
+    assert.equal(second.propagation, "done");
+    r.deps.taskReached = async () => { throw new Error("QA is down"); };
+    const third = await r.recorded({ statement: "Use Oracle", wording: "use Oracle, not SQLite", basedOn: 3 });
+    assert.equal(third.propagation, "done");
+    // A decision no task relies on tells nothing.
+    told.length = 0;
+    r.deps.taskReached = async (taskId) => { told.push(taskId); };
+    await r.recorded({ topic: "colour", statement: "Use blue", wording: "we use blue", basedOn: 0 });
+    await r.recorded({ topic: "colour", statement: "Use red", wording: "we use red", basedOn: 1 });
+    assert.equal(told.length, 0);
+  });
+
+  // A propagation that stays pending is passed again on every dispatcher tick: the QA hook runs once per task (the step remembers it), and a hook that rejects is called again by the next pass.
+  suite("a correction that stays pending tells the QA hook once per task across passes, and a task whose hook rejected is told again by the next pass (card Q02)", async (r) => {
+    const told: string[] = [];
+    let refuse = true;
+    r.deps.taskReached = async (taskId) => { told.push(taskId); if (refuse && taskId === r.t2) throw new Error("not attached yet"); };
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    await link(r, r.t2, { kind: "task", id: r.t2 }, [old.id], r.ben);
+    const saved = r.deps.generation;
+    delete r.deps.generation;
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "pending", "the generation step waits for the dispatcher");
+    assert.deepEqual([...told].sort(), [r.t1, r.t2].sort());
+    const again = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([again.done, again.pending], [0, 1], "still pending");
+    assert.deepEqual([...told].sort(), [r.t1, r.t2, r.t2].sort(), "only the task whose hook rejected is told again");
+    refuse = false;
+    await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([...told].sort(), [r.t1, r.t2, r.t2, r.t2].sort());
+    await r.decisions.resume(r.host, { projectId: r.a });
+    assert.equal(told.length, 4, "a task whose hook ran is not told again while the propagation stays pending");
+    if (saved !== undefined) r.deps.generation = saved;
+    const finished = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([finished.done, finished.pending], [1, 0]);
+    assert.equal(told.length, 4, "nor when it is finished");
+  });
+
+  // A step stored before the `qa` marker existed (or by a process without the hook) has no `qa`: it is read as "not looked at yet", and a process without the hook still finishes the propagation.
+  suite("a propagation step stored without the QA marker is read as not yet looked at, and a process without the QA hook finishes the propagation (card Q02)", async (r) => {
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    await link(r, r.t2, { kind: "task", id: r.t2 }, [old.id], r.ben);
+    const saved = r.deps.generation;
+    delete r.deps.generation;
+    delete r.deps.taskReached;
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "pending");
+    const stored = await r.decisions.propagation(r.w.owner, propagationIdOf(fix.id));
+    assert.ok(stored !== undefined);
+    assert.deepEqual(Object.keys(stored.steps).sort(), [r.t1, r.t2].sort());
+    for (const s of Object.values(stored.steps)) { assert.equal(s.links, true); assert.equal("qa" in s, false, "the old shape: no marker"); }
+    const told: string[] = [];
+    r.deps.taskReached = async (taskId) => { told.push(taskId); };
+    await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([...told].sort(), [r.t1, r.t2].sort(), "a step without the marker is looked at");
+    const marked = await r.decisions.propagation(r.w.owner, propagationIdOf(fix.id));
+    for (const s of Object.values(marked!.steps)) { assert.equal(s.qa, true); assert.equal(s.links, true, "the marker is merged into the stored step"); }
+    // Without the hook (a process that has none) the propagation finishes; the marker never holds it back.
+    delete r.deps.taskReached;
+    if (saved !== undefined) r.deps.generation = saved;
+    const finished = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([finished.done, finished.pending], [1, 0]);
+    assert.equal(told.length, 2);
   });
 }

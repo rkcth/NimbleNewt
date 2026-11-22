@@ -366,6 +366,8 @@ export interface ComposeInput {
   /** The owner's quiet-host figures (grace hours, automatic moves): given, the dispatcher's tick warns the owner about a host that stopped reporting and re-places its work as the figures say (needs remote hosts). */
   readonly quietHosts?: { readonly settings: Pick<QuietHostSettingsService, "effective">; /** The pass's own timing (tests, operators): see `QuietHostOptions`. */ readonly options?: Pick<QuietHostOptions, "quietAfterMs" | "maxGapMs"> };
   readonly onError?: (error: unknown) => void;
+  /** Told for each task a correction of an owner decision reaches when the dispatcher's own decision service passes it on (card Q02 fifth slice: the task's QA evidence is looked at); the same hook as the API's decision service. */
+  readonly decisionTaskReached?: (taskId: string) => Promise<void>;
   /** True while the maintenance barrier is up (card K01h): the driver skips its ticks. */
   readonly hold?: () => boolean;
   /** Whether a restore left an attempt's conversation store for a remote host and it waits for delivery (card K01i review): the host is not offered the attempt meanwhile. */
@@ -453,7 +455,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
   // A subscription made before idle expiry existed is counted idle from now, not from the day it was made (card H06c).
   await events.stampIdle(principal).catch((error: unknown) => i.onError?.(error));
   // The generation service is built from the decisions, and the decisions interrupt a running generation: the dependency is filled in once both exist.
-  const decisionDeps: { -readonly [K in keyof DecisionDeps]: DecisionDeps[K] } = { events, effects };
+  const decisionDeps: { -readonly [K in keyof DecisionDeps]: DecisionDeps[K] } = { events, effects, ...(i.decisionTaskReached === undefined ? {} : { taskReached: i.decisionTaskReached }) };
   const decisions = DecisionService.withEpoch(storage, epoch, decisionDeps, ro);
   const generation = GenerationService.withEpoch(storage, epoch, { assignments: i.assignments, effects, pauses, decisions }, ro);
   decisionDeps.generation = generation;
