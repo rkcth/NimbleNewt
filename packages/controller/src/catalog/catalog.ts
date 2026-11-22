@@ -160,7 +160,7 @@ export const PROPOSAL_TEXT_KIND = "toolbox-proposal-text";
 export const proposalTextRef = (proposalId: string): AggregateRef => ({ kind: PROPOSAL_TEXT_KIND, id: proposalId });
 /** The audit entries a write that removes kept proposal text carries (storage requires one per removed record). */
 export const proposalTextAudit = (changes: readonly { readonly type: string; readonly ref: AggregateRef }[], why: string): { type: string; subject: AggregateRef; detail: JsonObject }[] =>
-  changes.filter((c) => c.type === "delete" && c.ref.kind === PROPOSAL_TEXT_KIND).map((c) => ({ type: "toolbox.proposal.text.remove", subject: c.ref, detail: { proposalId: c.ref.id, why } }));
+  changes.filter((c) => c.type === "delete" && (c.ref.kind === PROPOSAL_TEXT_KIND || c.ref.kind === "toolbox-proposal")).map((c) => ({ type: c.ref.kind === PROPOSAL_TEXT_KIND ? "toolbox.proposal.text.remove" : "toolbox.proposal.remove", subject: c.ref, detail: { proposalId: c.ref.id, why: c.ref.kind === PROPOSAL_TEXT_KIND ? why : "the author's oldest ended proposal beyond the kept number" } }));
 function snapshotOf(v: VersionBody, texts: { instructions: string; executable?: string }, at: string): SnapshotBody {
   return { versionId: versionIdOf(v.name, v.version), name: v.name, version: v.version, digest: v.digest, sources: [...new Set([v.instructional.recordId, ...(v.executable === undefined ? [] : [v.executable.recordId])])], instructions: texts.instructions, ...(texts.executable === undefined ? {} : { executable: texts.executable }), at };
 }

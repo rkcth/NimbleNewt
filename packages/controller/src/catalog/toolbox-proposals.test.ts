@@ -8,7 +8,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { RETENTION_DEFAULTS, RetentionService } from "../retention/index.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage, JsonObject } from "../storage/types.js";
-import { ACCEPTANCE_LIMIT, CatalogService, PROPOSAL_TEXT_KIND, SNAPSHOT_KIND, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace, versionIdOf } from "./index.js";
+import { ACCEPTANCE_LIMIT, CatalogService, PROPOSAL_KIND, PROPOSAL_LIMITS, PROPOSAL_TEXT_KIND, SNAPSHOT_KIND, TOOLBOX_MANAGE, ToolboxProposalService, personalNamespace, versionIdOf } from "./index.js";
 
 // Card T08 (second slice): improvement and promotion proposals with maintainer decisions, rebase and recheck, snapshots of released text, maintainer revocation and the notices pushed to authors and fork owners.
 after(stopServer);
@@ -471,6 +471,44 @@ for (const backend of backends) {
     assert.deepEqual(await c.cat.dropVersion(c.owner, { name: "toolbox.lint", version: "1.0.0", revision: old.revision, keep: 1 }), { dropped: true });
     assert.equal(await c.storage.getAggregate({ kind: SNAPSHOT_KIND, id: versionIdOf("toolbox.lint", "1.0.0") }), undefined);
     for (const v of ["1.1.0", "1.2.0"]) assert.notEqual(await c.storage.getAggregate({ kind: SNAPSHOT_KIND, id: versionIdOf("toolbox.lint", v) }), undefined, v);
+  });
+
+  suite("slice 6: an author's ended proposals are kept only up to a bound (the oldest are removed with their record); one accepted and not yet released is never removed and counts as ended when released", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "faster", tests: "ran it" })).proposalId;
+    const limit = PROPOSAL_LIMITS.settledPerAuthor;
+    const keep = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: keep, decision: "accept" });
+    const gone: string[] = [];
+    const ended: string[] = [];
+    for (let i = 0; i < limit + 2; i += 1) {
+      const id = await propose();
+      if (i % 2 === 0) await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: id });
+      else await c.props.decide(maya.p, { commandId: cid("d"), proposalId: id, decision: "reject", reason: "no" });
+      ended.push(id);
+    }
+    gone.push(...ended.slice(0, 2));
+    for (const id of gone) { await refuses("not_found", () => c.props.get(cody.p, id), /no such proposal/); await refuses("not_found", () => c.props.get(c.owner, id), /no such proposal/); }
+    for (const id of ended.slice(2)) assert.notEqual(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id }), undefined, id);
+    assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit + 1, "the bound and the accepted one");
+    assert.equal((await c.props.get(cody.p, keep)).state, "accepted", "an accepted proposal not yet released is not counted and not removed");
+    // Releasing the kept one now ends it: it joins the ended list and pushes the oldest out.
+    const released = await c.props.decide(maya.p, { commandId: cid("d"), proposalId: keep, decision: "accept", version: "1.1.0" });
+    assert.equal(released.released?.version, "1.1.0");
+    await refuses("not_found", () => c.props.get(cody.p, ended[2]!), /no such proposal/);
+    assert.equal((await c.props.get(cody.p, keep)).released?.version, "1.1.0");
+    assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit, "the released one counts among the ended ones now");
+    // A proposal waiting is never removed, and an index written before the bound (no list of ended ones) starts the list with the next ended proposal.
+    const better3 = await c.note(cody.p, "console.log('lint, faster still')");
+    const propose3 = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better3, rationale: "faster", tests: "ran it" })).proposalId;
+    const waiting = await propose3();
+    await c.poke("toolbox-proposer", (await c.storage.listAggregates("toolbox-proposer", { limit: 5 }))[0]!.id, (b) => { const { settled: _drop, ...rest } = b; return rest; });
+    const last = await propose3();
+    await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: last });
+    assert.equal((await c.props.get(cody.p, waiting)).state, "open");
+    assert.equal((await c.props.get(cody.p, last)).state, "withdrawn", "the only ended proposal on the new list");
+    assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit + 2, "nothing older was removed: the list began again");
   });
 
   suite("a maintainer revokes a shared version its grant covers (finish or cancel only); the fork owners are sent a notice once; other maintainers get not_found", async (c) => {
