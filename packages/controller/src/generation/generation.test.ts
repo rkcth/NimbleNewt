@@ -433,6 +433,21 @@ for (const backend of backends) {
     assert.equal((await next.view(ann, run))!.run.state, "streaming");
   });
 
+  suite("two complete calls of a gone generation admitted at once both become effects, and the generation ends once; the earlier controller can no longer admit (G04 slice 7)", async ({ gen, restart, ann, task }) => {
+    const run = await begin(gen, ann, task);
+    await call(gen, ann, run, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });
+    await call(gen, ann, run, 2, "c2", { name: "push", argumentsDelta: '{"ref":"dev"}', done: true });
+    const next = await restart();
+    // The earlier controller (still running, but fenced out) sees the generation under its own epoch, so it is still streaming there: its admission is refused and changes nothing.
+    await refusedFor("streaming", () => admit(gen, ann, run));
+    assert.equal((await next.view(ann, run))!.run.state, "streaming");
+    const [one, two] = await Promise.all([admit(next, ann, run), admit(next, ann, run, { toolCallId: "c2" })]);
+    assert.notEqual(one.effectId, two.effectId);
+    const seen = (await next.view(ann, run))!.run;
+    assert.deepEqual([seen.state, seen.toolCalls.map((c) => [c.state, c.effectId])], ["finished", [["admitted", one.effectId], ["admitted", two.effectId]]]);
+    assert.ok(seen.finishedAt !== undefined);
+  });
+
   suite("effects are admitted atomically with their checks, once, and only from a finished current generation", async ({ gen, effects, ann, ben, task }) => {
     const run = await begin(gen, ann, task);
     await call(gen, ann, run, 1, "c1", { name: "push", argumentsDelta: '{"ref":"main"}', done: true });

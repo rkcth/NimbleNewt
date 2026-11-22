@@ -519,7 +519,7 @@ export class GenerationService {
           if (call!.state !== "complete" && call!.state !== "held") throw new GenerationRefused("incomplete", `tool call ${call!.id} is ${call!.state}: only a complete call becomes an effect`);
           // G04 slice 7: a generation still streaming under an older primary epoch has lost its controller, so nothing will ever complete it. A call whose arguments were recorded complete is admitted, and the generation is
           // ended in the same commit (partial calls dropped, as `complete` does); the worker only runs a tool once it has read the whole reply. Records without an epoch are refused as before.
-          const gone = run.state === "streaming" && run.epoch !== undefined && run.epoch < this.#runner.epoch;
+          const gone = run.state === "streaming" && typeof run.epoch === "number" && run.epoch < this.#runner.epoch;
           if (run.state === "streaming" && !gone) throw new GenerationRefused("streaming", `generation ${found.id} is still streaming`);
           const input = JSON.parse(call!.args) as JsonObject;
           const guard = run.fence === undefined ? undefined : await this.#assignments!.guardFor(run.fence).check(run.taskId);
