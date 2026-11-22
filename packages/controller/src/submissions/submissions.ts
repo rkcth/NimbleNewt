@@ -80,6 +80,8 @@ export interface SubmissionApproval {
   readonly reviewId?: string;
   /** Why it is not approved. */
   readonly reason?: string;
+  /** The check evidence the author recorded on the submission (Q01b), each bound to its tree; present only when there is some (P09 fifth slice compares it with the landing gate's own results). */
+  readonly evidence?: readonly Evidence[];
 }
 /** The reviews recorded about one submission, oldest first (record kind `submission-verdicts`, keyed by the subject's ID). */
 interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string }[] }
@@ -490,7 +492,7 @@ export class SubmissionService {
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
     const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
     const newest = reviews[reviews.length - 1];
-    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt };
+    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}) };
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve" } : { ...base, approved: false, newest: newest.verdict, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };
