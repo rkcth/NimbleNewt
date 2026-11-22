@@ -1146,18 +1146,20 @@ for (const backend of backendsNamed(backendName)) {
     c.dispatcher.onEnd(async () => { calls++; return gate.promise; });
     // Handlers are attached at once: a stop that rejects before the suite looks at it must never be an unhandled rejection, and nothing may still run when the storage closes.
     const first = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "first" }).then(() => undefined, (e: unknown) => e);
+    let second: Promise<unknown> = Promise.resolve(undefined);
+    // Every check while the hook is held is inside the `try`: a failed one (also the wait for the hook, or a read) must not leave the end waiting for the long limit, which would keep the test process alive for it.
+    try {
     // The hook is reached after a few storage round trips; wait for it instead of a fixed time (a slow server needs more than 10 ms).
     for (let i = 0; i < 500 && calls === 0; i++) await new Promise((r) => setTimeout(r, 10));
     assert.equal(calls, 1, "the first end reached the hook");
     const revisionOf = async () => (await c.storage.listAggregates("dispatch", { limit: 100 })).find((x) => (x.body as unknown as { attemptId: string }).attemptId === a.attemptId)!.revision;
     const before = await revisionOf();
-    const second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" }).then(() => undefined, (e: unknown) => e);
-    try {
+    second = c.dispatcher.stop(c.owner, a.attemptId, { emergency: true, reason: "second" }).then(() => undefined, (e: unknown) => e);
     // The second stop cannot answer before the first end does (it joins it), so a pause here only gives it time to go wrong; nothing else writes to the attempt while the hook is held.
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(calls, 1, "the second end joined the first while the hook was still awaited");
     assert.equal(await revisionOf(), before, "a joined stop writes nothing to the attempt");
-    } finally { gate.resolve(undefined); } // a failed check must not leave the end waiting for the long limit
+    } finally { gate.resolve(undefined); }
     assert.deepEqual(await Promise.all([first, second]), [undefined, undefined], "neither stop rejects");
     assert.equal((await c.assignments.getAttempt(a.attemptId))!.state, "abandoned");
     assert.equal(calls, 1, "the joined stop did not run the hook again");
