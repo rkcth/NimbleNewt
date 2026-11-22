@@ -38,7 +38,8 @@ for (const backend of backends) {
       };
       const notices: string[] = [];
       const invalidatedPort: string[][] = [];
-      const svc = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf: async () => ["qa"], notify: async (x) => { notices.push(x.recheckId); }, invalidated: async (e) => { invalidatedPort.push(e.evidence.map((x) => x.evidenceId)); } }, options);
+      const svc = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf: async () => ["qa"], // Like the controller: one notice per notice ID, and a documentation check keyed by evidence (a repeat of a check sends its follow-ups again, card Q03 slice 8).
+        notify: async (x) => { if (!notices.includes(x.recheckId)) notices.push(x.recheckId); }, invalidated: async (e) => { const key = e.evidence.map((x) => x.evidenceId); if (!invalidatedPort.some((k) => k.join() === key.join())) invalidatedPort.push(key); } }, options);
       const sub = derivedId("sbm", cid("sub"));
       await plant("submission", sub, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-22T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
       const contract = (v: number, criteria: string[], priority = 5, checks = ["unit"]) => ({ taskId: task, projectId: project, version: v, changedBy: owner.id, acceptanceCriteria: criteria, priority, budget: {}, workClass: "P", requiredEvidence: [], checks: checks.map((name) => ({ name, run: ["true"] })), permissions: [], recovery: "native-continuation" });

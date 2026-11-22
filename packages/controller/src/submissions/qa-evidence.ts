@@ -1,5 +1,5 @@
 import { DomainError } from "../domain/errors.js";
-import { derivedId } from "../domain/ids.js";
+import { derivedId, operationIdOf } from "../domain/ids.js";
 import { commandId as checkCommandId, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import { relianceIdOf, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
@@ -167,6 +167,10 @@ const work = (c: Record<string, unknown> | undefined): Record<string, unknown> =
  *   for the same submission that names its checks again settles the re-check; so does a newer code submission of the task (`submitted`). A check that loses a race with another answers with
  *   what the other invalidated.
  */
+/** The notice text of a scheduled re-check (also rebuilt when a repeat makes up a lost notice, so it reads the same). */
+const recheckText = (evidenceId: string, taskId: string, reasons: readonly QaStaleReason[], recordedBy: string): string =>
+  `QA evidence ${evidenceId} of task ${taskId} no longer holds (${[...new Set(reasons.map((r) => r.kind.replace(/_/g, " ")))].join(", ")}): re-check for ${recordedBy}`.slice(0, NOTICE_CHARS);
+
 export class QaEvidenceService {
   readonly #runner: CommandRunner;
   readonly #ports: QaEvidencePorts;
@@ -444,9 +448,13 @@ export class QaEvidenceService {
       }
       return out;
     };
-    const seen = await stale();
-    if (seen.length === 0) return { taskId, invalidated: [], rechecks: [], replayed: false };
     const scoped = scopedCommandId(by.id, commandId);
+    const seen = await stale();
+    if (seen.length === 0) {
+      // Nothing stale now. If this same command (same caller, same ID) already invalidated evidence, a stop between its write and its notices lost them: make them up (same notice and command IDs, so nothing is doubled).
+      await this.#makeUp(scoped, taskId);
+      return { taskId, invalidated: [], rechecks: [], replayed: false };
+    }
     // Another check of the same task at the same moment can do the work first: this one then answers with what that one invalidated (of what this one found stale), not "ask again".
     // Something else that went stale meanwhile is looked at again, a few times at most.
     const lostRace = async (): Promise<{ taskId: string; invalidated: string[]; rechecks: string[]; replayed: false; concurrent: true } | undefined> => {
@@ -469,12 +477,45 @@ export class QaEvidenceService {
         if (answer !== undefined) return answer;
       }
     }
-    if (result.replayed) return { taskId, invalidated: [], rechecks: [], replayed: true };
+    if (result.replayed) {
+      await this.#makeUp(scoped, taskId);
+      return { taskId, invalidated: [], rechecks: [], replayed: true };
+    }
     if (this.#ports.notify !== undefined) {
       for (const r of made.rechecks) await this.#ports.notify({ commandId: `qa-recheck:${r.id}`, taskId, projectId: r.projectId, recheckId: r.id, text: r.text }).catch(() => undefined);
     }
     if (this.#ports.invalidated !== undefined && made.evidence.length > 0) await this.#ports.invalidated({ taskId, projectId: made.evidence[0]!.projectId, evidence: made.evidence.map((e) => ({ evidenceId: e.evidenceId, submissionId: e.submissionId })) }).catch(() => undefined);
     return { taskId, invalidated: made.invalidated, rechecks: made.rechecks.map((r) => r.id), replayed: false };
+  }
+
+  /**
+   * Card Q03 (eighth slice): a repeat of a `check` that already wrote (same caller, same command ID) sends again what the first run owed after its write, the re-check notices and the `invalidated` port, which a
+   * stop between the write and those calls would otherwise lose for good (nothing is stale any more, so no later check would call them). Both are keyed by the record (`qa-recheck:<id>`, `doc-evidence-lost:<id>`), so a
+   * delivered one is not doubled. What to send is read from the command's own audit entry (`invalidated`, at most 50 records) and the stored records, never from the caller's words. Best effort, writes nothing,
+   * and an entry written by older code, or one that cannot be read, sends nothing.
+   */
+  async #makeUp(scoped: string, taskId: string): Promise<void> {
+    if (this.#ports.notify === undefined && this.#ports.invalidated === undefined) return;
+    try {
+      const operationId = operationIdOf(scoped);
+      const seq = (await this.#runner.storage.getOperation(operationId))?.result.auditSeqs[0];
+      if (seq === undefined) return;
+      const entry = (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
+      const ids = entry?.seq === seq && entry.operationId === operationId && entry.detail["taskId"] === taskId ? entry.detail["invalidated"] : undefined;
+      if (!Array.isArray(ids)) return;
+      const evidence: { evidenceId: string; submissionId: string; projectId: string }[] = [];
+      for (const id of ids.slice(0, 50)) {
+        if (typeof id !== "string") continue;
+        const e = (await this.#runner.get("qa-evidence", id))?.body as unknown as QaEvidenceBody | undefined;
+        if (e === undefined || e.state !== "invalidated") continue;
+        evidence.push({ evidenceId: id, submissionId: e.submissionId, projectId: e.projectId });
+        const recheckId = e.recheckId;
+        if (this.#ports.notify !== undefined && recheckId !== undefined && ((await this.#runner.get("qa-recheck", recheckId))?.body as unknown as QaRecheckBody | undefined)?.state === "pending") {
+          await this.#ports.notify({ commandId: `qa-recheck:${recheckId}`, taskId, projectId: e.projectId, recheckId, text: recheckText(id, taskId, e.reasons ?? [], e.recordedBy) }).catch(() => undefined);
+        }
+      }
+      if (this.#ports.invalidated !== undefined && evidence.length > 0) await this.#ports.invalidated({ taskId, projectId: evidence[0]!.projectId, evidence }).catch(() => undefined);
+    } catch { /* best effort */ }
   }
 
   /** One attempt at the write of `check`: invalidates what is stale now and schedules its re-checks. */
@@ -501,7 +542,7 @@ export class QaEvidenceService {
           }
           made.invalidated.push(f.id);
           made.evidence.push({ evidenceId: f.id, submissionId: f.body.submissionId, projectId: f.body.projectId });
-          made.rechecks.push({ id: recheckId, projectId: f.body.projectId, text: `QA evidence ${f.id} of task ${taskId} no longer holds (${[...new Set(f.reasons.map((r) => r.kind.replace(/_/g, " ")))].join(", ")}): re-check for ${f.body.recordedBy}`.slice(0, NOTICE_CHARS) });
+          made.rechecks.push({ id: recheckId, projectId: f.body.projectId, text: recheckText(f.id, taskId, f.reasons, f.body.recordedBy) });
         }
         if (index.revision === undefined) throw new DomainError("integrity", `the QA evidence index of ${taskId} is missing`);
         changes.push({ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks }) });
