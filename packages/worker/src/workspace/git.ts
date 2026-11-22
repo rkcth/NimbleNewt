@@ -902,12 +902,14 @@ export class GitBridge {
    * - a path the submission changes was changed on the landing branch since the checkout's base (the same path, or a folder of one and a file inside it): `overlap`, with those paths, nothing written;
    * - otherwise the files are disjoint: a new commit is made whose parent is `onto` and whose tree is `onto`'s tree with exactly the submission's entries put in (same modes, same objects), and it is proven to be the same
    *   change as the approved one (`sameChange`) before anything moves. The checkout's files that the landing branch changed are brought up to date (a two-way read-tree of a clean checkout touches only those), and the
-   *   base and head move together in one ref transaction. The commit is the platform's (the release identity), not a review-gate permit commit.
+   *   base and head move together in one ref transaction. The commit is made by the platform (the release identity). With `permit` (the task and request IDs) it is a review-gate permit commit when, and only when, every commit
+   *   it replaces (base..HEAD, read before anything moves) is itself a permit commit for the task: it carries the permit's `NimbleNewt-Request:` and `NimbleNewt-Task:` marks and is listed in the host-side permit ledger
+   *   (before the head moves to it), so the permit passes on from the reviewed work to its proven-identical re-apply and never from anything the gate did not permit (a release commit, a commit the agent made).
    * Nothing is merged line by line: content of a file both sides changed is never combined here.
    */
-  async restack(options: { shared: string; onto: string; gitDir: string; checkout: string; submission: ApprovedSubmission }): Promise<
+  async restack(options: { shared: string; onto: string; gitDir: string; checkout: string; submission: ApprovedSubmission; permit?: { taskId: string; requestId: string } }): Promise<
     | { state: "current" }
-    | { state: "reapplied"; base: string; tree: string; commit: string; previous: string; recovered: boolean; taken: number }
+    | { state: "reapplied"; base: string; tree: string; commit: string; previous: string; recovered: boolean; taken: number; permitted: boolean }
     | { state: "overlap"; paths: string[]; head: string }
   > {
     const sub = options.submission;
@@ -925,7 +927,7 @@ export class GitBridge {
       // Re-applied before (by an earlier landing that did not finish): it counts only as exactly the approved change on a later commit of the approved base's history.
       const proven = (await this.isAncestor({ gitDir: options.gitDir, older: sub.base, newer: base })) && (await this.sameChange({ gitDir: options.gitDir, a: { base: sub.base, tree: sub.tree }, b: { base, tree } }));
       if (!proven) throw new WorkspaceError("stale", `the checkout is based on ${base.slice(0, 12)}, not on submission ${sub.id}'s approved base ${sub.base.slice(0, 12)}, and its committed change is not exactly the approved one; nothing was re-applied`);
-      if (base === options.onto) return { state: "reapplied", base, tree, commit: head, previous: sub.base, recovered: true, taken: 0 };
+      if (base === options.onto) return { state: "reapplied", base, tree, commit: head, previous: sub.base, recovered: true, taken: 0, permitted: options.permit !== undefined && (await this.unpermitted({ gitDir: options.gitDir, taskId: options.permit.taskId })).length === 0 };
     }
     const sharedGit = await this.#sharedGitDir(options.shared);
     await this.#run(["fetch", "--no-tags", "--no-recurse-submodules", sharedGit, options.onto], { gitDir: options.gitDir, allowFile: true });
@@ -972,10 +974,15 @@ export class GitBridge {
     if (!OBJECT.test(built)) throw new WorkspaceError("unavailable", "git did not return a tree ID");
     // The proof, before anything moves: the change from the head to the new tree is exactly the approved change.
     if (!(await this.sameChange({ gitDir: options.gitDir, a: { base: sub.base, tree: sub.tree }, b: { base: options.onto, tree: built } }))) throw new WorkspaceError("stale", `submission ${sub.id} could not be re-applied as exactly the approved change; nothing was re-applied`);
-    const message = `Re-applied submission ${sub.id}\n\nRe-applied by NimbleNewt onto ${options.onto} (the landing branch's head), unchanged: exactly the approved change, whose files the landing branch did not change since ${base}. Not a review-gate permit commit.\n\nNimbleNewt-Submission: ${sub.id}\nNimbleNewt-Reapplied-From: ${base}\n`;
+    // The permit passes on only from permitted work: every commit being replaced must itself be a permit commit of this task.
+    const permitted = options.permit !== undefined && TRAILER_VALUE.test(options.permit.taskId) && TRAILER_VALUE.test(options.permit.requestId) && (await this.unpermitted({ gitDir: options.gitDir, taskId: options.permit.taskId })).length === 0;
+    const marks = permitted ? `NimbleNewt-Request: ${options.permit!.requestId}\nNimbleNewt-Task: ${options.permit!.taskId}\n` : "";
+    const message = `Re-applied submission ${sub.id}\n\nRe-applied by NimbleNewt onto ${options.onto} (the landing branch's head), unchanged: exactly the approved change, whose files the landing branch did not change since ${base}. ${permitted ? "A permit commit: the work it carries was committed through the review gate's permit and the change is proven identical." : "Not a review-gate permit commit."}\n\nNimbleNewt-Submission: ${sub.id}\nNimbleNewt-Reapplied-From: ${base}\n${marks}`;
     const env = { GIT_AUTHOR_NAME: RELEASE_IDENTITY.name, GIT_AUTHOR_EMAIL: RELEASE_IDENTITY.email, GIT_COMMITTER_NAME: RELEASE_IDENTITY.name, GIT_COMMITTER_EMAIL: RELEASE_IDENTITY.email };
     const commit = (await this.#run(["commit-tree", built, "-p", options.onto, "-F", "-"], { gitDir: options.gitDir, input: message, env })).stdout.trim();
     if (!COMMIT.test(commit)) throw new WorkspaceError("unavailable", "git did not return a commit ID");
+    // Listed before the head moves to it (as `commit()` does): a commit on the branch is always listed; one only listed (a crash between the two) is not reachable and counts for nothing.
+    if (permitted) await appendFile(permitLedgerPath(options.gitDir), `${commit} ${options.permit!.requestId}\n`, { mode: 0o600 });
     // The checkout is clean, so a two-way read-tree from the head to the new commit writes only the files the landing branch changed (none of them is one of the submission's).
     await this.#run(["update-index", "-q", "--really-refresh"], { gitDir: options.gitDir, workTree: options.checkout });
     await this.#run(["read-tree", "-m", "-u", head, commit], { gitDir: options.gitDir, workTree: options.checkout });
@@ -987,7 +994,7 @@ export class GitBridge {
       await this.#run(["read-tree", "-m", "-u", commit, head], { gitDir: options.gitDir, workTree: options.checkout }).catch(() => undefined);
       throw error;
     }
-    return { state: "reapplied", base: options.onto, tree: built, commit, previous: base, recovered: false, taken: theirs.length };
+    return { state: "reapplied", base: options.onto, tree: built, commit, previous: base, recovered: false, taken: theirs.length, permitted };
   }
 
   /**
