@@ -207,7 +207,7 @@ Run `ask("setup.readiness")` again. Every required item should be `done` and `re
 | The worker host on macOS and Windows, and for a project with no local git folder (the Linux host and credentials by operation are built, U14b) | U14 follow-up, H12r, H12t | on Linux: tell the chat to run agents on this computer |
 | Settings views | U08, U09 | HTTP conversation routes |
 | Notification levels, Needs you view | U11b | the inbox |
-| Landing gated on required checks for the exact tree | P09 | checks recorded only |
+| Landing gated on required checks for the exact tree on a remote host (a local host runs or reads them) | P09 | a gated landing there is refused (a project that requires no check is not gated) |
 | Windows sandbox launcher | A03b | Linux and macOS only |
 | Installing and enabling the release launcher as a service on a real macOS, Linux or Windows machine (the unit text and install steps are printed by `scripts/nimblenewt-service.mjs`, and `scripts/nimblenewt-updater.mjs` stages and announces a release; see [maintenance-and-updates](maintenance-and-updates.md)); exit-code-aware restarts on macOS and Windows; the full maintenance sequence | K02 follow-up | run the printed steps yourself | Also: the controller entry the launcher runs is `scripts/nimblenewt-controller.mjs` (run by hand: `node scripts/nimblenewt-controller.mjs --data DIR`); see maintenance-and-updates.
 | Real-hardware QA of the whole path | D04 | run it yourself and report |
