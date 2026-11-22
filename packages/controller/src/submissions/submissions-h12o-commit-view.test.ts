@@ -1,0 +1,130 @@
+// Card H12o (sixth slice): the submissions view tells the owner and the author whether the platform has committed an approved code submission (the commit, permit or plain, or not yet). Read-only. Real services on every backend.
+import assert from "node:assert/strict";
+import { after, test } from "node:test";
+import { AssignmentService } from "../domain/assignments.js";
+import { BlockerService } from "../domain/blockers.js";
+import { ProjectService } from "../domain/service.js";
+import { WaitService } from "../domain/waits.js";
+import { backends, stopServer } from "../domain/testing/backends.js";
+import { ContractService } from "../planning/contracts.js";
+import { PrincipalService, type Principal } from "../security/index.js";
+import { StatusService } from "../status/index.js";
+import { SubmissionService } from "./index.js";
+
+after(stopServer);
+
+let now = Date.parse("2026-11-22T10:00:00.000Z");
+const tick = (): void => { now += 60_000; };
+const options = { clock: () => new Date(now).toISOString(), pause: async () => undefined };
+let n = 0;
+const cid = (label: string): string => `${label}-${n++}`;
+const T = (c: string): string => c.repeat(40);
+
+type Commit = { commitId: string; at: string; permitted?: boolean };
+for (const backend of backends) {
+  const suite = (name: string, body: (c: {
+    ask(by: Principal): Promise<string>; owner: Principal; task: string; svc: SubmissionService; calls: string[];
+    agent(name: string, roles: string[]): Promise<Principal>; commits: Map<string, Commit>; opens: Map<string, { operation: string; at: string }>; failing: { on: boolean }; asked: Map<string, string[]>;
+    plain(): Promise<string>;
+  }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const epoch = projects.epoch;
+      const principals = PrincipalService.withEpoch(world.storage, epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const roles = new Map<string, string[]>();
+      const agent = async (nm: string, held: string[]): Promise<Principal> => {
+        await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }] });
+        const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
+        roles.set(p.id, held);
+        return p;
+      };
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Fix the parser" })).id;
+      const asked = new Map<string, string[]>();
+      const svc = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...options, reviewAssignments: async (principalId: string) => asked.get(principalId) ?? [] });
+      const assignments = AssignmentService.withEpoch(world.storage, epoch, projects, options);
+      const base = { assignments, waits: WaitService.withEpoch(world.storage, epoch, assignments, options), blockers: BlockerService.withEpoch(world.storage, epoch, options), contracts: ContractService.withEpoch(world.storage, epoch, options) };
+      const commits = new Map<string, Commit>();
+      const opens = new Map<string, { operation: string; at: string }>();
+      const calls: string[] = [];
+      const failing = { on: false };
+      const submissionRelease = { commit: async (id: string) => { calls.push(`commit:${id}`); if (failing.on) throw new Error("storage went away"); return commits.get(id); }, open: async (t: string) => { calls.push(`open:${t}`); return opens.get(t); } };
+      const view = (extra: object) => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) }, ...extra }, options);
+      const status = view({ submissionRelease });
+      const text = async (s: StatusService, by: Principal): Promise<string> => ((await s.ask(by, { kind: "submissions", taskId: task }))?.lines ?? []).map((l) => l.text).join("\n");
+      await body({ ask: (by) => text(status, by), owner, task, svc, calls, agent, commits, opens, failing, asked, plain: () => text(view({}), owner) });
+    } finally { await world.close(); }
+  });
+
+  const code = (c: { svc: SubmissionService; task: string }, by: Principal, tree: string) => c.svc.record(by, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: T("c"), tree, patchId: T("d") });
+
+  suite("an approved submission is told committed (permit or plain), not committed, or release open; unapproved code and other agents' code say nothing of commits", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const stranger = await c.agent("stranger", []);
+    const sub = await code(c, ann, T("a"));
+    // Not approved: no commit sentence, and the commit record is not even read.
+    assert.doesNotMatch(await c.ask(c.owner), /Commit:/);
+    assert.deepEqual(c.calls, []);
+    tick();
+    await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: sub.id, verdict: "approve" });
+    // Nothing open: no later automatic commit is promised, and nothing is said of what the checkout holds now.
+    const none = await c.ask(c.owner);
+    assert.match(none, /Commit: not made yet; it is committed only when a release request commits it\. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again\./);
+    assert.doesNotMatch(none, /stays uncommitted in the task's checkout/);
+    c.opens.set(c.task, { operation: "release", at: "2026-11-22T10:05:00.000Z" });
+    assert.match(await c.ask(ann), /Commit: not made yet; a release request has been open on the task's checkout since 2026-11-22T10:05:00\.000Z\./);
+    c.opens.set(c.task, { operation: "integration", at: "2026-11-22T10:05:30.000Z" });
+    assert.match(await c.ask(ann), /Commit: not made yet; an integration request has been open on the task's checkout since 2026-11-22T10:05:30\.000Z\./);
+    c.opens.clear();
+    c.commits.set(sub.id, { commitId: "ab".repeat(20), at: "2026-11-22T10:06:00.000Z", permitted: true });
+    assert.match(await c.ask(c.owner), /Commit: made in the task's checkout \(abababababab\) at 2026-11-22T10:06:00\.000Z, as a review-gate permit commit\./);
+    c.commits.set(sub.id, { commitId: "cd".repeat(20), at: "2026-11-22T10:06:00.000Z" });
+    assert.match(await c.ask(c.owner), /\(cdcdcdcdcdcd\) .* as a plain platform commit \(not a permit commit, so a landing that requires the permit does not take it\)\./);
+    // Someone who may read the task but did not write the code is told nothing about its commit or review, and nothing is read for it.
+    c.calls.length = 0;
+    assert.doesNotMatch(await c.ask(stranger), /Commit:/);
+    assert.deepEqual(c.calls, []);
+    // A reviewer asked to review this code reads it but did not write it: the line is shown without review or commit state, and nothing is read for it.
+    c.asked.set(rev.id, [sub.id]);
+    const seen = await c.ask(rev);
+    assert.match(seen, new RegExp(`code submission ${sub.id} .*shown to the owner and its author only`));
+    assert.doesNotMatch(seen, /Commit:/);
+    assert.deepEqual(c.calls, []);
+  });
+
+  suite("a commit that cannot be read is said so, never 'not made'; a controller without the release reads says nothing; the view creates no records", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const sub = await code(c, ann, T("a"));
+    await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: sub.id, verdict: "approve" });
+    c.failing.on = true;
+    const failed = await c.ask(c.owner);
+    assert.match(failed, /Commit: could not be read just now\./);
+    assert.doesNotMatch(failed, /not made yet/);
+    c.failing.on = false;
+    assert.doesNotMatch(await c.plain(), /Commit:/);
+    const before = JSON.stringify(await c.svc.list(c.owner, c.task, { limit: 100 }));
+    await c.ask(c.owner); await c.ask(ann);
+    assert.equal(JSON.stringify(await c.svc.list(c.owner, c.task, { limit: 100 })), before);
+  });
+
+  suite("only the newest code's approval counts: a later submission is not told committed from an older one's record, and code with changes asked for says nothing", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const first = await code(c, ann, T("a"));
+    await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: first.id, verdict: "approve" });
+    c.commits.set(first.id, { commitId: "ef".repeat(20), at: "2026-11-22T10:06:00.000Z", permitted: true });
+    tick();
+    const second = await code(c, ann, T("b"));
+    tick();
+    await c.svc.record(rev, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: second.id, verdict: "changes" });
+    const lines = (await c.ask(c.owner)).split("\n");
+    const newest = lines.find((l) => l.startsWith(`Newest code submission ${second.id}`))!;
+    const older = lines.find((l) => l.startsWith(`Older code submission ${first.id}`))!;
+    assert.doesNotMatch(newest, /Commit:/);
+    assert.match(older, /Commit: made in the task's checkout \(efefefefefef\)/);
+  });
+}

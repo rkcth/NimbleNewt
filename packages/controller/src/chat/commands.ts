@@ -871,8 +871,12 @@ export const RECOVERY_STEP_EXEMPT: ReadonlySet<string> = new Set(["action"]);
  * and the action type and injected failure are fixed choices. Texts the owner gives as state (a field's value) must still be the owner's own words.
  */
 export const SIMULATION_EXEMPT: ReadonlySet<string> = new Set(["scopeId", "service", "resource", "type", "inject"]);
-/** A workspace request's `operation` is one of five fixed choices (and the request is always shown first); its `reason` must still be the owner's own words (card H12m). */
-export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation"]);
+/**
+ * A workspace request's `operation` is one of five fixed choices (and the request is always shown first); its `reason` must still be the owner's own words (card H12m). Its `submissionId` is a record the
+ * service checks (a code submission of that very task; for a release, approved by a reviewer other than its author) and the proposal shows it, so the owner may ask "commit the approved parser fix" without
+ * typing the ID the submissions view showed (card H12o sixth slice second review).
+ */
+export const WORKSPACE_REQUEST_EXEMPT: ReadonlySet<string> = new Set(["operation", "submissionId"]);
 
 /** A defined event source (card H13f): its kind is a fixed choice, its name one the assistant may choose (or the one it names), and a single time is worked out from the owner's words (like a hand-off's return time); the definition is always shown first. What it looks at (`path`) or asks (`url`) must still be the owner's own words. */
 export const EVENT_SOURCE_EXEMPT: ReadonlySet<string> = new Set(["type", "sourceId", "at"]);

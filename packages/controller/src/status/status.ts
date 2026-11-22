@@ -287,7 +287,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked only when a landing of a submission queued behind it is asked for, not on a clock; approved work coming back stops the count)" },
   landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off, no unfinished defects; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
-  submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
+  submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet; a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
@@ -766,6 +766,8 @@ export interface StatusDeps {
   readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
   /** The submissions of a task (card Q01b), read with the submission service's own rule (`list`, `approvalOf` of what it listed). Absent: the `submissions` view says submissions are not kept here. */
   readonly submissions?: Pick<SubmissionService, "list" | "approvalOf"> & Partial<Pick<SubmissionService, "waiting">>;
+  /** The commit made for an approved submission and the release open on a task's checkout (card H12o sixth slice), read-only and taking no caller; absent: the submissions view says nothing about commits. */
+  readonly submissionRelease?: { commit(submissionId: string): Promise<{ readonly commitId: string; readonly at: string; readonly permitted?: boolean } | undefined>; open(taskId: string): Promise<{ readonly operation: string; readonly at: string } | undefined> };
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
@@ -2499,7 +2501,8 @@ export class StatusService {
       const ev = c.evidence.length === 0 ? "" : ` Its author's own check evidence: ${c.evidence.filter((e) => e.result === "pass").length} pass, ${c.evidence.filter((e) => e.result === "fail").length} fail, ${c.evidence.filter((e) => e.result === "not_run").length} not run.`;
       // The landing gate counts an approval or a sign-off only for the patch it was given on (a landing whose change differs needs a new one), so an approval is not shown as more than that.
       const bound = a !== undefined && (a.approved || d?.newest === "approve") ? " An approval counts at landing only while the change's patch stays the one approved." : "";
-      lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Review: ${review}. Director sign-off: ${director}.${bound}${ev}${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
+      const commit = a?.approved === true ? await this.#commitWords(c.id, taskId) : "";
+      lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Review: ${review}. Director sign-off: ${director}.${bound}${commit}${ev}${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
     }
     if (codes.length > 5) lines.push(line(`${codes.length - 5} older code submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
     const others = newestFirst.filter((i) => i.kind !== "code");
@@ -2510,6 +2513,25 @@ export class StatusService {
     }
     if (others.length > 10) lines.push(line(`${others.length - 10} older review, QA, document or sign-off submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
     return { observedAt: at, lines };
+  }
+
+  /**
+   * Whether the platform has committed an approved code submission in its task's checkout (card H12o sixth slice): the recorded commit (short ID, time, permit or plain), else "not committed yet" (with the request open on the
+   * checkout named). A record without `permitted` is a plain commit: the field came with the first permit commits (H12o permit slice), so no older record is a permit commit. Read-only; a failed read says it could not be read, never "not committed". Empty without the dependency.
+   */
+  async #commitWords(submissionId: string, taskId: string): Promise<string> {
+    const r = this.#deps.submissionRelease;
+    if (r === undefined) return "";
+    try {
+      const made = await r.commit(submissionId);
+      if (made !== undefined) return ` Commit: made in the task's checkout (${shown(made.commitId, 40).slice(0, 12)}) at ${made.at}, ${made.permitted === true ? "as a review-gate permit commit" : "as a plain platform commit (not a permit commit, so a landing that requires the permit does not take it)"}.`;
+      const open = await r.open(taskId);
+      // No open request: nothing is about to commit it. A reviewer's approval asks for a release only when it is given (`releaseApproved`, never retried), and a checkout that moved on since may no longer hold it,
+      // so the words neither promise a later automatic commit nor say what the checkout holds now.
+      if (open === undefined) return " Commit: not made yet; it is committed only when a release request commits it. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again.";
+      const operation = shown(open.operation, 40);
+      return ` Commit: not made yet; ${/^[aeiou]/i.test(operation) ? "an" : "a"} ${operation} request has been open on the task's checkout since ${open.at}.`;
+    } catch { return " Commit: could not be read just now."; }
   }
 
   /** The code waiting across a project (card Q01b fifth slice): what the submission service's `waiting` reads, told plainly. A partial scan is said, never silent; nothing is created. */

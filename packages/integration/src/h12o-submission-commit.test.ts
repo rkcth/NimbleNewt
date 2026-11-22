@@ -13,7 +13,9 @@ import { GitBridge, LocalWorkspaces } from "@nimblenewt/worker";
 // commits exactly the approved tree in the task's own checkout, behind the quiesce, on the host that holds it (the local worker over a real git repository). Before the approval it is refused; asking again answers the
 // recorded commit; a host answer lost after the commit is followed by a retry that finds the commit and records it, with one commit made; work changed after the approval is refused.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
+// It needs git only (no sandbox), so it runs on every platform that has git. Under NIMBLENEWT_REQUIRE_SANDBOX=1 on Linux (CI), a missing git fails instead of passing nothing.
 const skip = hasGit ? false : "git is not installed";
+if (!hasGit && process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1" && process.platform === "linux") test("git is installed where the sandbox is required (card H12o)", () => assert.fail("NIMBLENEWT_REQUIRE_SANDBOX=1 on Linux but git is not installed, so the H12o release test would pass nothing"));
 const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 const CAPS = { os: "linux", arch: "x64", harnesses: [{ name: "pi", version: "1.3.0" }], isolation: ["bubblewrap"], tools: [], workspaces: [] };
 const ext4 = async () => ({ type: "ext4", network: false });
@@ -128,6 +130,13 @@ test("an approved submission is committed once through the release operation on 
     assert.ok(autoRecord?.commitId !== undefined, "the approval was followed by the release");
     assert.equal(git1("rev-parse", "HEAD"), autoRecord.commitId);
     assert.equal(((await c.storage.getAggregate({ kind: "workspace-request", id: autoRecord.requestId! }))?.body as { requestedBy?: string } | undefined)?.requestedBy, "service:workspace-release");
+    // The submissions view (sixth slice) says so: the owner is told the commit and that it is a permit commit; the author, who made the code, also reads it.
+    const viewOf = async (token: string, taskId: string): Promise<string> => { const v = (await api(c, token, "status.ask", { request: { kind: "submissions", taskId } })) as { ok: boolean; result: { item: { lines: { text: string }[] } } }; assert.equal(v.ok, true, JSON.stringify(v)); return v.result.item.lines.map((l) => l.text).join("\n"); };
+    assert.match(await viewOf(boot.token, one.task), new RegExp(`Commit: made in the task's checkout \\(${autoRecord.commitId.slice(0, 12)}\\) at \\S+, as a review-gate permit commit\\.`));
+    const madeWords = new RegExp(`Commit: made in the task's checkout \\(${autoRecord.commitId.slice(0, 12)}\\)`);
+    assert.match(await viewOf((await s.principals.issueCredential(owner, `agent:${agent}`)).token, one.task), madeWords);
+    // The reviewer did not write the code (and holds no review request naming it here, so it reads only its own review): it is not told the commit. The unit test covers a reviewer that does read the code.
+    assert.doesNotMatch(await viewOf(rev, one.task), /Commit:/);
     const hostCallsAfterApproval = hostCalls;
     const done = await release(one.task, sub1, "rel-1");
     assert.equal(done.ok, true, JSON.stringify(done));
@@ -161,6 +170,7 @@ test("an approved submission is committed once through the release operation on 
     // The automatic release met the changed checkout: refused, nothing committed, no record of a commit; the request is kept.
     assert.equal(git2("rev-parse", "HEAD"), base2);
     assert.equal(await c.storage.getAggregate({ kind: "submission-commit", id: sub2 }), undefined);
+    assert.match(await viewOf(boot.token, two.task), /Commit: not made yet; it is committed only when a release request commits it\. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again\./);
     const stale = await release(two.task, sub2, "rel-3");
     assert.equal(stale.result.state, "refused");
     assert.match(stale.result.summary, /no longer holds the approved work of submission .*its files changed/);
