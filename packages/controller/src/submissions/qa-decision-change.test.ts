@@ -136,11 +136,14 @@ for (const backend of backends) {
   });
 }
 
-test("the decision hook is the one the controller uses: it tells the QA service the task, reads the service when it runs, and a failing or missing service never throws (card Q02)", async () => {
+test("the decision hook is the one the controller uses: it tells the QA service the task, reads the service when it runs, rejects while there is none (the step stays open) and a failing check never throws (card Q02)", async () => {
   const told: string[] = [];
   let service: { decisionChanged: (taskId: string) => Promise<never> } | undefined;
   const hook = decisionChangeHook(() => service as never);
-  await hook("task-" + "a".repeat(20)); // no service yet: nothing happens, nothing thrown
+  // No service yet: the hook rejects (the decision service then leaves the task's step open and looks again on its next pass), reporting nothing.
+  const early: unknown[] = [];
+  await assert.rejects(decisionChangeHook(() => service as never, (e) => early.push(e))("task-" + "a".repeat(20)), (e: unknown) => e instanceof DomainError && e.code === "unavailable");
+  assert.equal(early.length, 0, "a service not attached yet is not a fault");
   service = { decisionChanged: async (taskId: string) => { told.push(taskId); throw new Error("QA is down"); } };
   await hook("task-" + "b".repeat(20));
   assert.deepEqual(told, ["task-" + "b".repeat(20)]);

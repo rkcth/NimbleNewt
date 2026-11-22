@@ -884,4 +884,31 @@ for (const backend of backends) {
     await r.recorded({ topic: "colour", statement: "Use red", wording: "we use red", basedOn: 1 });
     assert.equal(told.length, 0);
   });
+
+  // A propagation that stays pending is passed again on every dispatcher tick: the QA hook runs once per task (the step remembers it), and a hook that rejects is called again by the next pass.
+  suite("a correction that stays pending tells the QA hook once per task across passes, and a task whose hook rejected is told again by the next pass (card Q02)", async (r) => {
+    const told: string[] = [];
+    let refuse = true;
+    r.deps.taskReached = async (taskId) => { told.push(taskId); if (refuse && taskId === r.t2) throw new Error("not attached yet"); };
+    const old = await r.recorded({});
+    await link(r, r.t1, { kind: "task", id: r.t1 }, [old.id]);
+    await link(r, r.t2, { kind: "task", id: r.t2 }, [old.id], r.ben);
+    const saved = r.deps.generation;
+    delete r.deps.generation;
+    const fix = await r.recorded({ statement: "Use MySQL", wording: "use MySQL, not PostgreSQL", basedOn: 1 });
+    assert.equal(fix.propagation, "pending", "the generation step waits for the dispatcher");
+    assert.deepEqual([...told].sort(), [r.t1, r.t2].sort());
+    const again = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([again.done, again.pending], [0, 1], "still pending");
+    assert.deepEqual([...told].sort(), [r.t1, r.t2, r.t2].sort(), "only the task whose hook rejected is told again");
+    refuse = false;
+    await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([...told].sort(), [r.t1, r.t2, r.t2, r.t2].sort());
+    await r.decisions.resume(r.host, { projectId: r.a });
+    assert.equal(told.length, 4, "a task whose hook ran is not told again while the propagation stays pending");
+    if (saved !== undefined) r.deps.generation = saved;
+    const finished = await r.decisions.resume(r.host, { projectId: r.a });
+    assert.deepEqual([finished.done, finished.pending], [1, 0]);
+    assert.equal(told.length, 4, "nor when it is finished");
+  });
 }
