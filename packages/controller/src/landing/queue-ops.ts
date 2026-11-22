@@ -221,7 +221,7 @@ export class LandingQueueOps {
    * `others` lists the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another, or a task's own landing branch): nothing there lands
    * on the landing branch, and `branch` reads one of them in full. `partial` says the walk over the queues stopped before the end.
    */
-  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
+  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean; holdMs: number; releaseMs: number }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
     onlyKnown(query, ["projectId", "branch"]);
     if (typeof query.projectId !== "string" || !this.#integrator(by, query.projectId)) throw refused("that project");
     const named = query.branch === undefined ? undefined : branchName(query.branch);
@@ -232,7 +232,7 @@ export class LandingQueueOps {
     const reservations = [...(q?.reservations ?? [])];
     const items = (q?.entries ?? []).map((e, i) => ({ ...e, position: i + 1, ...(reservations.some((r) => r.taskId === e.taskId) ? { reserved: true as const } : {}) }));
     const first = q === undefined ? undefined : frontOf(q);
-    const front = q?.front !== undefined && first !== undefined && q.front.taskId === first.taskId ? { ...q.front, waitingForApproval: first.entry === undefined } : undefined;
+    const front = q?.front !== undefined && first !== undefined && q.front.taskId === first.taskId ? { ...q.front, waitingForApproval: first.entry === undefined, holdMs: this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs: this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS } : undefined;
     const all = await this.#queue.queuesOf(query.projectId);
     return { branch: branch ?? "", landingBranch: landing ?? "", items, reservations, ...(front === undefined ? {} : { front }), returns: [...(q?.returns ?? [])], others: all.queues.filter((x) => x.branch !== branch), ...(all.partial ? { partial: true as const } : {}) };
   }
