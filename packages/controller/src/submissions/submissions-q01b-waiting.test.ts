@@ -26,7 +26,7 @@ for (const backend of backends) {
   const suite = (name: string, body: (c: {
     ask(by: Principal, projectId?: string): Promise<string[] | undefined>; owner: Principal; project: string; elsewhere: string; svc: SubmissionService;
     agent(name: string, roles: string[], project?: string): Promise<Principal>; mkTask(title: string): Promise<string>; finish(taskId: string, to: "done" | "cancelled"): Promise<void>;
-    lone(reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService }; bare(): StatusService; withoutWaiting(): StatusService; scanned(pageSize: number, reads: number): StatusService; capped(tasks: number): StatusService; count(): Promise<number>;
+    lone(reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService }; bare(): StatusService; withoutWaiting(): StatusService; scanned(pageSize: number, reads: number): StatusService; listScanned(pageSize: number, reads: number): StatusService; capped(tasks: number): StatusService; count(): Promise<number>; mkTaskIn(projectId: string, title: string): Promise<string>;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -55,7 +55,8 @@ for (const backend of backends) {
       const withService = (s: SubmissionService): StatusService => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => s.list(by, t, q), approvalOf: (id) => s.approvalOf(id), waiting: (by, p) => s.waiting(by, p) } }, options);
       const status = withService(svc);
       const ask = async (by: Principal, projectId = project): Promise<string[] | undefined> => (await status.ask(by, { kind: "submissions_project", projectId }))?.lines.map((l) => l.text);
-      const scanned = (pageSize: number, reads: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, listScan: { pageSize, reads } }));
+      const scanned = (pageSize: number, reads: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, waitingScan: { pageSize, reads } }));
+      const listScanned = (pageSize: number, reads: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, listScan: { pageSize, reads } }));
       const capped = (tasks: number): StatusService => withService(SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, waitingTasks: tasks }));
       const withoutWaiting = (): StatusService => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) } }, options);
       const lone = (reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService } => { const l = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, reviewersAvailableIn: async () => reviewersAvailable() }); return { svc: l, status: withService(l) }; };
@@ -65,7 +66,7 @@ for (const backend of backends) {
         for (const t of (await projects.listTasks({ projectId: project, limit: 100 })).items) { const l = await svc.list(owner, t.id, { limit: 100 }); total += l.items.length; }
         return total;
       };
-      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, capped, count });
+      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, listScanned, capped, count, mkTaskIn: async (projectId: string, title: string) => (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId, title })).id });
     } finally { await world.close(); }
   });
 
@@ -159,14 +160,14 @@ for (const backend of backends) {
     for (const title of ["A1", "A2", "A3"]) await code(c, ann, await c.mkTask(title), "a");
     const small = c.scanned(1, 1);
     const text = (await small.ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
-    assert.match(text.join("\n"), /Only part of the stored submissions was looked at, so other tasks, or newer code of a listed task, may exist\./);
+    assert.match(text.join("\n"), /Only part of the submissions stored on this controller \(for every project\) was looked at, so other tasks, or newer code of a listed task, may exist\./);
     // Nothing found in a short look is not "nothing is waiting".
     const empty = (await small.ask(bob, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
     assert.equal(empty.length, 1);
-    assert.match(empty[0]!, /^No code submission of an unfinished task you may read was found in what was looked at, but this view is incomplete, so code may still be waiting\. Only part of the stored submissions was looked at, so code of other tasks may exist\./);
+    assert.match(empty[0]!, /^No code submission of an unfinished task you may read was found in what was looked at, but this view is incomplete, so code may still be waiting\. Only part of the submissions stored on this controller \(for every project\) was looked at, so code of other tasks may exist\./);
     assert.doesNotMatch(empty[0]!, /listed task/, "nothing is listed, so the empty answer names no listed task");
     const whole = (await c.ask(c.owner))!;
-    assert.doesNotMatch(whole.join("\n"), /Only part of the stored/);
+    assert.doesNotMatch(whole.join("\n"), /Only part of the submissions/);
     assert.match(whole[0]!, /^3 task\(s\) wait for a reviewer/);
     assert.match((await c.ask(bob))![0]!, /^No unfinished task of this project has code you may read that is waiting/);
   });
@@ -221,5 +222,37 @@ for (const backend of backends) {
     const x = await code(c, ann, t2, "c"), y = await code(c, ann, t2, "d");
     const winner = x.id > y.id ? x.id : y.id;
     for (let i = 0; i < 2; i++) assert.match((await c.ask(c.owner))!.find((l) => l.includes("Lexer"))!, new RegExp(`submission ${winner} `));
+  });
+
+  suite("the scan covers every project's submissions, so another project's volume can make a small project's view partial, and that is said; the waiting view's scan bound is its own, not the task list's", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const other = await c.agent("olly", ["author"], c.elsewhere);
+    const mine = await c.mkTask("Small one");
+    await code(c, ann, mine, "a");
+    // Six code submissions in the other project: with a scan of 2 rows x 2 reads the table cannot be read to its end.
+    for (let i = 0; i < 6; i++) await code(c, other, await c.mkTaskIn(c.elsewhere, `Busy ${i}`), "b");
+    const lines = (await c.scanned(2, 2).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
+    assert.match(lines.join("\n"), /Only part of the submissions stored on this controller \(for every project\) was looked at/);
+    assert.doesNotMatch(lines.join("\n"), /Busy/, "the other project's tasks are never listed");
+    // A small task-list scan does not shrink the waiting view's own bound: the whole table is read.
+    const whole = (await c.listScanned(1, 1).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
+    assert.doesNotMatch(whole.join("\n"), /Only part of/);
+    assert.match(whole[0]!, /^1 task\(s\) wait for a reviewer/);
+    assert.match(whole[1]!, /"Small one"/);
+  });
+
+  suite("tasks read in batches keep the newest-code-first limit and the order by state", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const rev = await c.agent("rev", ["reviewer"]);
+    const made: { task: string; sub: string }[] = [];
+    for (let i = 0; i < 20; i++) { const t = await c.mkTask(`Job ${String(i).padStart(2, "0")}`); made.push({ task: t, sub: (await code(c, ann, t, "a")).id }); tick(); }
+    // Every third task is approved; two of the newest are finished (read, not listed, still within the limit).
+    for (let i = 0; i < 20; i += 3) await c.svc.record(rev, { commandId: cid("r"), taskId: made[i]!.task, kind: "review", role: "reviewer", subject: made[i]!.sub, verdict: "approve" });
+    await c.finish(made[19]!.task, "done"); await c.finish(made[17]!.task, "cancelled");
+    const text = (await c.capped(13).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
+    // The 13 newest are Job 07..19; 17 and 19 are finished; of 07..18 the approved ones are 09, 12, 15, 18.
+    assert.match(text[0]!, /^7 task\(s\) wait for a reviewer, 0 wait for their author \(changes were asked for\), 0 were approved but the director declined, 4 are approved with no director sign-off yet, 0 are approved and signed off;.* Only the tasks with the newest code were read; more tasks with code may exist\.$/);
+    const listed = text.slice(1).map((l) => /"Job (\d\d)"/.exec(l)![1]);
+    assert.deepEqual(listed, ["07", "08", "10", "11", "13", "14", "16", "09", "12", "15", "18"]);
   });
 }

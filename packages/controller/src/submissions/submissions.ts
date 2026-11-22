@@ -173,6 +173,8 @@ export interface SubmissionOptions extends RunnerOptions {
   readonly docIndexKept?: number;
   /** How many tasks one project-wide waiting view reads (card Q01b fifth slice), injectable so a test can shrink it. Default `WAITING_TASKS`. */
   readonly waitingTasks?: number;
+  /** How many submission rows one project-wide waiting view scans (card Q01b fifth slice review), injectable so a test can shrink it. Default `WAITING_SCAN`. */
+  readonly waitingScan?: { readonly pageSize: number; readonly reads: number };
   /**
    * How many refresh rounds the task's author has made, as the controller counted them (card H12p, `WorkspaceOpService.refreshRounds`). When given, a code submission carries THAT number: the agent cannot state its own,
    * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
@@ -232,6 +234,13 @@ export interface WaitingView {
 }
 /** The most tasks one waiting view reads (newest code first). */
 export const WAITING_TASKS = 200;
+/**
+ * The most submission rows one waiting view scans: as many as the project's QA view (`QA_LIMITS.projectScanReads` reads of 500), more than a task's `list` scans, because the submissions of every project share one table in hash order
+ * of IDs (there is no index by project or task), so a project with little code is only seen in full when the whole table fits this bound.
+ */
+export const WAITING_SCAN = { pageSize: 500, reads: 20 } as const;
+/** How many tasks' records the waiting view reads at once. */
+const WAITING_AT_ONCE = 8;
 const MAX_EVIDENCE = 50;
 const MAX_REPORT = 8000;
 
@@ -252,6 +261,7 @@ export class SubmissionService {
   readonly #scan: { readonly pageSize: number; readonly reads: number };
   readonly #docKept: number;
   readonly #waitingTasks: number;
+  readonly #waitingScan: { readonly pageSize: number; readonly reads: number };
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
@@ -259,6 +269,7 @@ export class SubmissionService {
     this.#scan = { pageSize: options.listScan?.pageSize ?? LIST_PAGE, reads: options.listScan?.reads ?? LIST_READS };
     this.#docKept = options.docIndexKept ?? DOC_INDEX_KEPT;
     this.#waitingTasks = options.waitingTasks ?? WAITING_TASKS;
+    this.#waitingScan = options.waitingScan ?? WAITING_SCAN;
   }
 
   /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
@@ -526,8 +537,9 @@ export class SubmissionService {
   /**
    * The code waiting across a project (card Q01b fifth slice): for each task of the project that is not done or cancelled, its newest code submission and where review and the director's sign-off stand on it. Read only; it writes nothing.
    * Who sees what: the owner sees every task; an agent with `task.read` in the project (never a task credential, which is scoped to one task) sees only the code it submitted itself, because the review and sign-off state
-   * of someone else's code is not its to read (the same rule as the task's `submissions` view). A caller that may not read the project gets `not_found`. Bounded as `list` is (`pageSize` rows a read, `reads` reads): the table is in hash
-   * order of IDs, not time order, so `scanLimited` says it stopped before the end and the counts then cover only what was read; at most `WAITING_TASKS` tasks are read, newest code first (`truncated` when more were left).
+   * of someone else's code is not its to read (the same rule as the task's `submissions` view). A caller that may not read the project gets `not_found`. Bounded by `WAITING_SCAN` rows: the table holds every project's submissions in hash
+   * order of IDs, not time order, so `scanLimited` says it stopped before the end and the counts then cover only what was read; at most `WAITING_TASKS` tasks are read, newest code first (`truncated` when more were left),
+   * `WAITING_AT_ONCE` of them at a time.
    * States, in this order: `needs_review` (no review yet), `changes_asked` (the newest review asks for changes or rejects: waits for its author), `signoff_declined` (reviewed and approved, the director declined), `needs_signoff`
    * (approved, no director sign-off yet; whether it is needed to land is the project's `director` landing check), `ready` (approved and signed off). Fails closed: a task that cannot be read is not listed or counted.
    */
@@ -540,7 +552,7 @@ export class SubmissionService {
     const newest = new Map<string, { id: string; at: string }>();
     let after: string | undefined;
     let scanLimited = true;
-    const { pageSize, reads } = this.#scan;
+    const { pageSize, reads } = this.#waitingScan;
     for (let read = 0; read < reads; read++) {
       const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
       for (const row of chunk) {
@@ -554,19 +566,18 @@ export class SubmissionService {
       if (chunk.length < pageSize) { scanLimited = false; break; }
     }
     const candidates = [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
-    const items: WaitingItem[] = [];
-    let looked = 0;
-    for (const [taskId, sub] of candidates) {
-      if (looked >= this.#waitingTasks) break;
-      looked++;
+    const looked = candidates.slice(0, this.#waitingTasks);
+    const one = async ([taskId, sub]: [string, { id: string; at: string }]): Promise<WaitingItem | undefined> => {
       const task = await this.#readableTask(by, taskId);
-      if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") continue;
+      if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") return undefined;
       const a = await this.approvalOf(sub.id);
-      if (a === undefined) continue;
+      if (a === undefined) return undefined;
       const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
-      items.push({ taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) });
-    }
-    const truncated = looked < candidates.length;
+      return { taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) };
+    };
+    const items: WaitingItem[] = [];
+    for (let k = 0; k < looked.length; k += WAITING_AT_ONCE) for (const i of await Promise.all(looked.slice(k, k + WAITING_AT_ONCE).map(one))) if (i !== undefined) items.push(i);
+    const truncated = looked.length < candidates.length;
     const counts = { needs_review: 0, changes_asked: 0, signoff_declined: 0, needs_signoff: 0, ready: 0 };
     for (const i of items) counts[i.state]++;
     const order = { needs_review: 0, changes_asked: 1, signoff_declined: 2, needs_signoff: 3, ready: 4 } as const;
