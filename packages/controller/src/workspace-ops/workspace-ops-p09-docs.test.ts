@@ -19,6 +19,7 @@ after(stopServer);
 // integrated tree only while the host-computed patch ID is unchanged. Reading is read only: nothing is flagged and no update task is opened by a landing.
 const options = { clock: () => "2026-11-18T10:00:00.000Z", pause: async () => undefined };
 const BASE = "b".repeat(40), HEAD = "c".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), NEW_PATCH = "f".repeat(40);
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 
@@ -234,6 +235,23 @@ for (const backend of backends) {
       r.host.reviewedPatch = undefined;
       const unknown = await r.land("c4");
       assert.deepEqual([unknown.state, unknown.checks!.results[0]!.result], ["refused", "not_run"]);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a long title of emoji shortened in the summary never leaves half a character, so the refusal is recorded in every store (card P09)`, async () => {
+    const r = await rig();
+    try {
+      // Both parities: wherever the cut falls, one of the two titles is cut where a surrogate pair would be split.
+      for (const [i, title] of ["\u{1F600}".repeat(100), `x${"\u{1F600}".repeat(99)}`].entries()) {
+        const ob = await r.record(title);
+        const refused = await r.land(`u${i}`);
+        assert.deepEqual([refused.state, refused.checks!.results[0]!.result], ["refused", "fail"], refused.summary);
+        const summary = refused.checks!.results[0]!.summary;
+        assert.doesNotMatch(summary, LONE_SURROGATE, `well-formed: ${JSON.stringify(summary)}`);
+        assert.match(summary, /\u{1F600}\.\.\.$/u);
+        assert.match(r.told[r.told.length - 1]!.text, /docs: failed/);
+        await r.docService.retire(r.owner, { commandId: cid("ret"), obligationId: ob.id, expectedRevision: (await r.docService.get(r.owner, ob.id) as unknown as { revision: number }).revision });
+      }
     } finally { await r.store.close(); }
   });
 

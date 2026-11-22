@@ -96,8 +96,11 @@ export const LANDING_GATE_LIMITS = { summary: 300, note: 300, checkOutputBytes: 
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PATCH = /^[0-9a-f]{40,64}$/;
 /** The end of a check's output (where a failure is told), cleaned and cut like `clip`. */
-const clipEnd = (text: string, max: number): string => { const clean = clip(text, Number.MAX_SAFE_INTEGER); return clean.length <= max ? clean : `...${clean.slice(-(max - 3))}`; };
-const clip = (text: string, max: number): string => { const clean = redactText(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim(); return clean.length <= max ? clean : `${clean.slice(0, max - 3)}...`; };
+const clipEnd = (text: string, max: number): string => { const clean = clip(text, Number.MAX_SAFE_INTEGER); if (clean.length <= max) return clean; let from = clean.length - (max - 3); const c = clean.charCodeAt(from); if (c >= 0xdc00 && c <= 0xdfff) from += 1; return `...${clean.slice(from)}`; };
+// Half a surrogate pair is ill-formed text (refused or mangled by readers and stores): one in the input becomes a space, and no cut ends between the two halves of a pair.
+const clip = (text: string, max: number): string => { const clean = redactText(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\p{Cf}]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu, " ").replace(/\s+/g, " ").trim(); return clean.length <= max ? clean : `${wholeCut(clean, max - 3)}...`; };
+/** At most `max` UTF-16 units of `text`, never ending between the two halves of a surrogate pair. */
+const wholeCut = (text: string, max: number): string => { if (text.length <= max) return text; let end = Math.max(0, max); const c = text.charCodeAt(end - 1); if (end > 0 && c >= 0xd800 && c <= 0xdbff) end -= 1; return text.slice(0, end); };
 
 export class LandingGate {
   readonly #deps: LandingGateDeps;
@@ -214,7 +217,7 @@ export class LandingGate {
         const part = `${String(p.title)} (${String(p.reason)})`;
         const next = shown === 0 ? part : `${names}; ${part}`;
         if (head.length + next.length > room) {
-          if (shown === 0) { names = `${part.slice(0, Math.max(0, room - head.length - 3))}...`; shown = 1; }
+          if (shown === 0) { names = `${wholeCut(part, room - head.length - 3)}...`; shown = 1; }
           break;
         }
         names = next;

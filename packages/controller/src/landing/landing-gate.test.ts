@@ -246,6 +246,23 @@ test("docs: many pending documents: at most five are named whole within the summ
   assert.equal((await docsRun({ checked: 0, pending: many(1, () => "G") })).results[0]!.result, "not_run", "a count below the pending documents is an unreadable answer");
 });
 
+test("a cut never leaves half a character: document names, a long summary and a failing command's output tail of emoji, in both parities, and a lone surrogate in the input (card P09)", async () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  const smile = "\u{1F600}";
+  for (const lead of ["", "x"]) {
+    const named = (await docsRun({ checked: 1, pending: [{ obligationId: "dob-aaaaaaaaaaaaaaaaaaaa", title: `${lead}${smile.repeat(100)}`, reason: "never verified" }] })).results[0]!.summary;
+    assert.doesNotMatch(named, lone, JSON.stringify(named));
+    assert.match(named, new RegExp(`${smile}\\.\\.\\.$`, "u"));
+    const thrown = (await docsRun(async () => { throw new Error(`\uD800${lead}${smile.repeat(200)}`); })).results[0]!.summary;
+    assert.ok(thrown.length <= 300, String(thrown.length));
+    assert.doesNotMatch(thrown, lone, JSON.stringify(thrown));
+    const { h } = host((call) => ({ checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [{ name: call.checks[0]!.name, state: "failed", exitCode: 1, output: `${lead}${smile.repeat(600)}\uDC00` }, { name: "lint", state: "passed", exitCode: 0 }] }));
+    const note = (await gate({ tests: unit, approval: approved }).g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: h })).results[0]!.runs![0]!.note!;
+    assert.ok(note.startsWith("...") && note.length <= 300, note);
+    assert.doesNotMatch(note, lone, JSON.stringify(note));
+  }
+});
+
 test("docs: without a documents gate wired the check is not collected, as before (card P09)", async () => {
   const g = new LandingGate({ requiredChecks: async () => ["docs"], tests: async () => undefined, approvalOf: async () => approved, now: () => "2026-11-18T10:00:00.000Z" });
   const r = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: host({}).h });
