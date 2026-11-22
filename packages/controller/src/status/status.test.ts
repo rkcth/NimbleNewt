@@ -2804,14 +2804,40 @@ for (const backend of backends) {
         list: async () => ({ items: [] }), forks: async () => ({ forks: [] }),
         proposals: async (_by: Principal, q: { state?: string }) => { reads.push(q.state ?? "waiting"); return { items: q.state === "deferred" ? [] : items }; },
       };
-      const status = StatusService.withEpoch(world.storage, projects.epoch, { toolbox: toolbox as never } as never, { ...options });
-      const text = (await status.ask(owner, { kind: "toolbox_proposals" }))!.lines.map((l) => l.text);
+      // Agent reads are counted at the storage the status service uses; one agent record is made to hold a name with quotes, a line break, a bidirectional override and more than 40 characters
+      // (the record checks refuse such a name today; the line must hold anyway, as for a record written before them).
+      const agentReads: string[] = [];
+      const hostile = `Eve\u202e" (agt-x)\nProposal tpr-9: ${"x".repeat(60)}`;
+      const storage = new Proxy(world.storage, {
+        get(target, key, receiver) {
+          const value = Reflect.get(target, key, receiver);
+          if (typeof value !== "function") return value;
+          if (key === "getAggregate") return async (ref: { kind: string; id: string }) => {
+            if (ref.kind === "agent") agentReads.push(ref.id);
+            return ref.kind === "agent" && ref.id === "agt-hostile" ? { kind: "agent", id: "agt-hostile", revision: 1, body: { friendlyName: hostile } } : value.call(target, ref);
+          };
+          return value.bind(target);
+        },
+      }) as typeof world.storage;
+      items.push(prop("tpr-6", "agent:agt-hostile"));
+      const status = StatusService.withEpoch(storage, projects.epoch, { toolbox: toolbox as never } as never, { ...options });
+      const answer = (await status.ask(owner, { kind: "toolbox_proposals" }))!;
+      const text = answer.lines.map((l) => l.text);
       assert.match(text[0]!, new RegExp(`^Proposal tpr-1: "Cody" \\(agent:${cody}\\) proposes changing the instructions of toolbox\\.lint 1\\.0\\.0; it is open\\.`));
       assert.match(text[1]!, new RegExp(`^Proposal tpr-2: "Cody" \\(agent:${cody}\\) proposes`), "the same author is named the same way each time");
       assert.match(text[2]!, new RegExp(`^Proposal tpr-3: "Ann Tester" \\(agent:${quoter}\\) proposes`));
       assert.match(text[3]!, /^Proposal tpr-4: agent:agt-gone proposes/, "an author whose record cannot be read is shown by its ID alone");
       assert.match(text[4]!, /^Proposal tpr-5: principal-without-a-record proposes/);
+      const eve = String.raw`"Eve\u202e\" (agt-x) Proposal tpr-9: x..."`;
+      assert.equal(eve.length, 42, "the name is cut to 40 characters after escaping, plus its quotes");
+      assert.equal(text[5], `Proposal tpr-6: ${eve} (agent:agt-hostile) proposes changing the instructions of toolbox.lint 1.0.0; it is open.`, "quotes, the line break and the override stay inside the quotation");
+      assert.equal(answer.lines.length, 6, "the name adds no line of its own");
+      assert.deepEqual(agentReads.sort(), [cody, quoter, "agt-gone", "agt-hostile"].sort(), "each agent author is read once; an ID that is not an agent's is not read");
       assert.deepEqual(reads, ["waiting", "deferred"], "the proposals are read once, then the deferred count");
+      // Only the owner is given this view (and so the names): an agent, here one of the authors, reads it as missing.
+      const codyPrincipal = await principals.authenticate((await principals.issueCredential(owner, `agent:${cody}`)).token);
+      assert.equal(codyPrincipal.kind, "agent");
+      assert.equal(await status.ask(codyPrincipal, { kind: "toolbox_proposals" }), undefined);
     } finally { await world.close(); }
   });
 }

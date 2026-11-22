@@ -1958,15 +1958,16 @@ export class StatusService {
   }
 
   /**
-   * An agent shown by its own name (quoted: words someone else wrote) with its ID; an agent record that cannot be read, or has no name, shows the ID alone. The closure reads each agent once per answer (card T08: the
-   * toolbox lines and the proposals line name agents this way).
+   * An agent shown by its own name (quoted: words someone else wrote) with its ID; an agent record that cannot be read, or has no name, shows the ID alone, and an ID that is not an agent's (no `agent:` prefix) is shown
+   * as it is without a read. The closure reads each agent once per answer (card T08: the toolbox lines and the proposals line name agents this way).
    */
   #agentLabeller(): (agent: string) => Promise<string> {
     const names = new Map<string, Promise<string>>();
     return (agent: string): Promise<string> => {
+      if (!agent.startsWith("agent:")) return Promise.resolve(shown(agent, 60));
       let n = names.get(agent);
       if (n === undefined) {
-        n = this.#runner.get("agent", agent.replace(/^agent:/, "")).catch(() => undefined).then((r) => {
+        n = this.#runner.get("agent", agent.slice("agent:".length)).catch(() => undefined).then((r) => {
           const friendly = (r?.body as unknown as { friendlyName?: unknown } | undefined)?.friendlyName;
           return typeof friendly === "string" && friendly.trim() !== "" ? `${quoted(friendly, 40)} (${shown(agent, 60)})` : shown(agent, 60);
         });
@@ -1988,12 +1989,14 @@ export class StatusService {
     const found = await proposals.call(this.#deps.toolbox, by, { ...(state === undefined ? {} : { state }), limit: 50 });
     const lines: Line[] = [];
     const named = this.#agentLabeller();
-    for (const p of found.items) {
+    // The authors are read together (once each, at most 50 proposals are listed), not one after another.
+    const authors = await Promise.all(found.items.map((p) => named(p.author)));
+    for (const [i, p] of found.items.entries()) {
       const parts = [p.changes.instructions ? "instructions" : "", p.changes.executable ? "executable" : "", p.changes.manifest ? "manifest" : ""].filter((x) => x !== "");
       const what = p.kind === "promotion" ? `offers ${shown(p.from?.name ?? "a personal tool", 80)} ${shown(p.from?.version ?? "", 20)} to become the shared tool ${shown(p.target, 80)}` : `proposes changing the ${parts.join(", ")} of ${shown(p.target, 80)} ${shown(p.base?.version ?? "", 20)}${p.stale === true ? ` (no longer the version in use, which is ${shown(p.current ?? "none", 20)}; it needs a rebase before it can be accepted)` : ""}`;
       const access = p.permissionChanges.added.length === 0 && p.permissionChanges.removed.length === 0 ? "" : ` It ${p.permissionChanges.added.length === 0 ? "" : `asks for ${p.permissionChanges.added.map((x) => shown(x, 60)).join(", ")}`}${p.permissionChanges.added.length > 0 && p.permissionChanges.removed.length > 0 ? " and " : ""}${p.permissionChanges.removed.length === 0 ? "" : `drops ${p.permissionChanges.removed.map((x) => shown(x, 60)).join(", ")}`} (asking grants nothing).`;
       const where = p.state === "open" ? "is open" : p.state === "changes_requested" ? "waits for the author's changes" : p.state === "deferred" ? "is deferred" : p.state === "accepted" ? (p.released === undefined ? "was accepted (not released yet)" : `was accepted and released as ${shown(p.released.version, 20)}`) : `was ${shown(p.state, 20)}`;
-      lines.push(line(`Proposal ${shown(p.id, 40)}: ${await named(p.author)} ${what}; it ${where}${p.round > 1 ? ` (revision ${p.round})` : ""}.${access}`, cite("toolbox-proposal", p.id, p.revision)));
+      lines.push(line(`Proposal ${shown(p.id, 40)}: ${authors[i]} ${what}; it ${where}${p.round > 1 ? ` (revision ${p.round})` : ""}.${access}`, cite("toolbox-proposal", p.id, p.revision)));
     }
     if (state === undefined) {
       const deferred = await proposals.call(this.#deps.toolbox, by, { state: "deferred", limit: 100 });

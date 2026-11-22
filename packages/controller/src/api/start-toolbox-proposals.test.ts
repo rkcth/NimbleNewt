@@ -74,6 +74,9 @@ test("toolbox proposals (card T08): an agent proposes, a maintainer asks for cha
     const text = status.lines.map((l: any) => l.text).join("\n");
     assert.match(text, new RegExp(`Proposal ${p2.proposalId}: "Cody" \\(${cody.pid}\\) proposes changing the instructions of toolbox\\.lint 1\\.1\\.0; it is open\\.`));
     assert.doesNotMatch(text, new RegExp(prop.proposalId), "an accepted proposal is not waiting");
+    const viaApi = await ok(boot.token, "status.ask", { request: { kind: "toolbox_proposals" } });
+    assert.deepEqual(viaApi.item.lines.map((l: any) => l.text), status.lines.map((l: any) => l.text), "the chat answer is the state API's answer");
+    assert.equal((await call(maya.token, "status.ask", { request: { kind: "toolbox_proposals" } })).error?.code, "not_found", "a maintainer is not given the owner's view (nor the names in it)");
     const park = "park Cody's lint docs idea until next month";
     const proposed = (await say("m2", park, [{ kind: "command", op: "toolbox.proposal.decide", args: { proposalId: p2.proposalId, decision: "defer", reason: "until next month" }, evidence: park, basis: "owner" }]))[0];
     assert.equal(proposed.status, "proposed", JSON.stringify(proposed));
