@@ -69,6 +69,7 @@ import type { BackupConfigService, BackupEncryption, BackupEncryptionSettingServ
 import type { ImprovementService } from "../standups/improvements.js";
 import type { ObservationService } from "../observations/observations.js";
 import type { LessonService } from "../lessons/lessons.js";
+import type { ExperimentService } from "../experiments/experiments.js";
 import type { MeetingRecordService } from "../meetings/record.js";
 import type { MeetingFloorService } from "../meetings/floor.js";
 import type { MeetingDeskReadService } from "../meetings/desk-reads.js";
@@ -294,6 +295,7 @@ export interface StateApiDeps {
   readonly improvements?: Pick<ImprovementService, "propose" | "group" | "decide" | "bringToStandup" | "get" | "open">;
   readonly observations?: Pick<ObservationService, "submit" | "dispose" | "get" | "open">;
   readonly lessons?: Pick<LessonService, "propose" | "addEvidence" | "decide" | "get" | "current">;
+  readonly experiments?: Pick<ExperimentService, "propose" | "pin" | "recordRun" | "raiseBudget" | "conclude" | "withdraw" | "get" | "list">;
   readonly stops?: Pick<StopService, "request" | "force" | "choose" | "advance" | "get" | "sweep" | "readiness">;
   /** Durable job records and their control (cards T07, T07b). */
   readonly jobs?: Context["jobs"];
@@ -496,6 +498,7 @@ export class StateApi {
         ...(this.#deps.improvements === undefined ? {} : { improvements: this.#deps.improvements }),
         ...(this.#deps.observations === undefined ? {} : { observations: this.#deps.observations }),
         ...(this.#deps.lessons === undefined ? {} : { lessons: this.#deps.lessons }),
+        ...(this.#deps.experiments === undefined ? {} : { experiments: this.#deps.experiments }),
         ...(this.#deps.watchControl === undefined ? {} : { watchControl: this.#deps.watchControl }),
         ...(this.#deps.standups === undefined ? {} : { standups: this.#deps.standups }),
         ...(this.#deps.attendance === undefined ? {} : { attendance: this.#deps.attendance }),

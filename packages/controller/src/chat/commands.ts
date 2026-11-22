@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect" | "observation" | "lesson";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "defect" | "observation" | "lesson" | "experiment";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -251,6 +251,12 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "observation.dispose": { verb: "Settle an observation (observationId from the observations status; to promoted with improvementId, dismissed or resolved with the owner's reason, or open; owner optional)", mode: "apply", revision: "observation" },
   // Card B03: the owner proposes a lesson (it is only a candidate until evaluated) and evaluates one; neither changes work or grants anything, and a decision can be reviewed again, so both apply at once. The revision is read for the owner.
   "lesson.propose": { verb: "Propose a lesson (title, statement and applicability in the owner's words; evidence from the observations status or other records; dependsOn, revises, supersedes, contradicts only when the owner names lessons)", mode: "apply", needsProject: true },
+  // Card B04: the owner proposes a bounded experiment and pins its criteria, concludes it or withdraws it; none of these spends or launches anything (the runs are reported by the proposer), so they apply at once. A budget raise allows more spending later, so it is always a proposal the owner confirms.
+  "experiment.propose": { verb: "Propose an experiment (title, the proposal's problem, affectedWork, change, effort, runningCost, benefit, evaluation and stoppingCondition, and a short affectedKey, all in the owner's words)", mode: "apply", needsProject: true },
+  "experiment.pin": { verb: "Pin an experiment's criteria and start it (experimentId from the experiments status; baseline and evaluator label, ref and SHA-256 digest, the separate evaluation cases, the baseline's numbers, the budget; only values the owner gave)", mode: "apply", revision: "experiment" },
+  "experiment.budget": { verb: "Raise an experiment's budget (experimentId; maxRuns, maxCost and the reason in the owner's words)", mode: "propose", revision: "experiment" },
+  "experiment.conclude": { verb: "Conclude an experiment with the owner's finding (experimentId from the experiments status; the controller decides the verdict from the runs)", mode: "apply", revision: "experiment" },
+  "experiment.withdraw": { verb: "Withdraw an experiment that has not started (experimentId, with the owner's reason)", mode: "apply", revision: "experiment" },
   "lesson.decide": { verb: "Evaluate or review a lesson (lessonId from the lessons status; to evaluating, accepted, rejected, inconclusive or needs-review, with the owner's finding)", mode: "apply", revision: "lesson" },
   // Stand-ups (card M03g). Pausing or renaming one follows the profile like other explicit orders; ending (cannot be undone) and resuming are always shown first; a change of who attends or when it is held is shown first (see `proposalReason`). Setting one up wakes agents on a schedule, so it is always shown first. Delivering outcomes only puts decisions back where they came from.
   "standup.update": { verb: "Change stand-up", mode: "profile", revision: "standup", needsProject: true },

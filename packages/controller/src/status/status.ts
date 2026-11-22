@@ -59,6 +59,7 @@ import { SWARM_LIMIT_BOUNDS, type SwarmLimitsService } from "../swarm/limits.js"
 import { keptSecretUseText, type KeptSecretUse } from "../setup/kept-secret-uses.js";
 import type { ObservationService } from "../observations/observations.js";
 import type { LessonService } from "../lessons/lessons.js";
+import type { ExperimentService } from "../experiments/experiments.js";
 import {
   BASIS_WORDS, EXECUTION_STATES, executionOf, isOwnerOf, plainDuration, quoted, routeFor, shown, whoText,
   type Cite, type ExecutionFacts, type ExecutionState, type Line, type WorkObservation,
@@ -309,6 +310,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   jobs: { keys: ["limit"], about: "the long-running jobs that have not ended (tools agents started, remote jobs, MCP operations): each one's state, task, kind and since when, which are outcome-unknown and wait for you to reconcile them, and which a stop could not end; and the jobs that ended most recently, how each ended and whether its task was woken for it (owner only)" },
   web_access: { keys: [], about: "the web chat in the owner's phone browser (owner only): the address it listens on and the network it may be reached from, whether a TLS proxy is trusted for client addresses, and which browsers are signed in (a short name such as Safari on iPhone, when it signed in and was last used); the owner signs one or all of them out in chat" },
   observations: { keys: ["projectId", "observationKind"], about: "what went wrong or was put right in a project's work (card B02): the open observations of corrections, failures, recoveries, friction, approval stalls, redundant prompts and failed reviews, oldest first, each with how many reports joined it (a retelling of the same event counts once), its disposition, ID and revision, and this hour's storm count (observations the controller could not record because a limit was reached); observationKind keeps one kind. An observation is settled with observation.dispose" },
+  experiments: { keys: ["projectId", "experimentStatus"], about: "a project's bounded baseline experiments (card B04): each with its status, what it tests, the pinned baseline and evaluator, the runs and cost used against the budget (a paused one says its budget is used up), the verdict the controller reached (improved, no-change, worse or inconclusive, a negative result kept like any other), how much each metric changed against the baseline, savings counted once, its ID and revision; experimentStatus keeps one status. The owner pins, raises the budget of and concludes one with experiment.pin, experiment.budget and experiment.conclude" },
   lessons: { keys: ["projectId", "lessonStatus"], about: "what a project's team learnt (card B03): the current lessons, oldest first, each with its status, version, when it applies, how much of its evidence is independent and how much derived (the same event told again, the same author's own word again, or another lesson's conclusion), the lessons it rests on, a premise that stopped holding (superseded, contradicted, rejected or inconclusive: the lesson then needs review), its finding, whether its proposer was told, its ID and revision; lessonStatus keeps one status. A lesson is evaluated with lesson.decide and proposed with lesson.propose" },
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
@@ -433,6 +435,7 @@ export type StatusRequest =
   | { readonly kind: "wip_backup"; readonly projectId: string }
   | { readonly kind: "observations"; readonly projectId: string; readonly observationKind?: string }
   | { readonly kind: "lessons"; readonly projectId: string; readonly lessonStatus?: string }
+  | { readonly kind: "experiments"; readonly projectId: string; readonly experimentStatus?: string }
   | { readonly kind: "web_access" }
   | { readonly kind: "capacity" }
   | { readonly kind: "environment"; readonly agent: string }
@@ -585,6 +588,8 @@ export interface StatusDeps {
   readonly observations?: Pick<ObservationService, "open">;
   /** Versioned lessons of the project (card B03). Absent: the view is not offered. */
   readonly lessons?: Pick<LessonService, "current">;
+  /** Bounded baseline experiments of the project (card B04). Absent: the view is not offered. */
+  readonly experiments?: Pick<ExperimentService, "list">;
   /** What retention holds back and why, and its values (card T02c). Absent: the views are not offered. */
   readonly retention?: {
     check(by: Principal, ref: { kind: string; id: string }): Promise<{ readonly retained: boolean; readonly reasons: readonly string[] }>;
@@ -1012,6 +1017,7 @@ export class StatusService {
       case "web_access": { onlyKnown(request, ["kind"]); return this.webAccessLines(by); }
       case "wip_backup": { onlyKnown(request, ["kind", "projectId"]); return this.wipBackupLines(by, request.projectId); }
       case "observations": { onlyKnown(request, ["kind", "projectId", "observationKind"]); return this.observationLines(by, request.projectId, request.observationKind); }
+      case "experiments": { onlyKnown(request, ["kind", "projectId", "experimentStatus"]); return this.experimentLines(by, request.projectId, request.experimentStatus); }
       case "lessons": { onlyKnown(request, ["kind", "projectId", "lessonStatus"]); return this.lessonLines(by, request.projectId, request.lessonStatus); }
       case "event_sources": { onlyKnown(request, ["kind"]); return this.eventSourceLines(by); }
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
@@ -1191,6 +1197,23 @@ export class StatusService {
       line(`${recent.length} job(s) ended most recently:`, cite("jobs", "ended")),
       ...recent.map(({ job, wake }) => line(`${job.id} ${JSON.stringify(shown(job.label, 80))} (${job.kind}) of task ${job.taskId}: ${wake.state.replaceAll("_", " ")} at ${shown(wake.at, 30)}${job.exit?.reason === undefined ? "" : ` (${shown(job.exit.reason, 120)})`}; ${woke(wake)}${wake.notice === undefined ? "" : wake.notice.sent ? "; you were told" : `; you were not told (${shown(wake.notice.why ?? "", 120)})`}.`, cite("job", job.id), cite("task", job.taskId))),
     ];
+  }
+
+  /** The experiments of a project (card B04), 25 at most; for whoever may read them (the service decides). */
+  async experimentLines(by: Principal, projectId: string, experimentStatus: string | undefined): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (this.#deps.experiments === undefined) return undefined;
+    const got = await this.#deps.experiments.list(by, checkProjectId(projectId), { limit: 25, ...(experimentStatus === undefined ? {} : { status: experimentStatus }) });
+    if (got === undefined) return undefined;
+    const which = experimentStatus === undefined ? "" : `${shown(experimentStatus, 20)} `;
+    const out: Line[] = [line(got.items.length === 0 ? `No ${which}experiment in this project.` : `${got.items.length}${got.next === undefined ? "" : " (and more)"} ${which}experiment(s), oldest first; the verdict is the controller's, from the pinned criteria.`, cite("experiment-index", projectId))];
+    for (const e of got.items) {
+      const c = e.criteria;
+      const budget = c === undefined ? "criteria not pinned yet" : `${e.spent.runs} of ${c.budget.maxRuns} runs, cost ${e.spent.cost} of ${c.budget.maxCost}${e.status === "paused" ? "; the budget is used up, so it waits for the budget to be raised or the experiment to be concluded" : ""}`;
+      const r = e.result;
+      const verdict = r === undefined ? "" : ` Verdict: ${r.verdict} (${Object.entries(r.betterPct).sort(([x], [y]) => (x < y ? -1 : 1)).map(([m, v]) => `${shown(m, 30)} ${Math.abs(v as number)}% ${(v as number) < 0 ? "worse" : "better"}`).join(", ") || "no metric"}${r.failedCases.length > 0 ? `; failed cases ${r.failedCases.slice(0, 5).map((x) => shown(x, 40)).join(", ")}` : ""}${r.savings.length === 0 ? "" : `; savings ${r.savings.map((x) => `${shown(x.metric, 30)} ${x.amount}${x.counted ? "" : ` not counted again (${x.duplicateOf})`}`).join(", ")}`}). Finding: ${shown(r.finding, 200)}`;
+      out.push(line(`${shown(e.status, 20)}: "${shown(e.title, 120)}": ${shown(e.proposal.change, 200)} Stops: ${shown(e.proposal.stoppingCondition, 120)}. ${budget}.${verdict} [${e.id}, revision ${e.revision}]`, cite("experiment", e.id, e.revision)));
+    }
+    return { observedAt: this.#runner.now(), lines: out };
   }
 
   /** The current lessons of a project (card B03), 25 at most; for whoever may read them (the service decides). */
