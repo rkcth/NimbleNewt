@@ -251,6 +251,23 @@ for (const backend of backends) {
       assert.deepEqual(await svc.decisionChanged(task), { taskId: task, invalidated: [], rechecks: [] });
       assert.deepEqual([...hooked.keys()].sort(), [...first].sort(), "the documentation hook for the automatic check's records (the caller's own check is made up by its own repeat)");
       for (const r of lost.rechecks) assert.deepEqual(await queued(r), ["queued"], "the owner is told about each re-check");
+
+      // Third review: the marker was carried over by the record and the caller's check; the make-up above, complete and with nothing to write, removed it, so the next automatic call does not repeat it.
+      const marker = async (): Promise<unknown> => ((await runner.get("qa-evidence-index", task))?.body as { auto?: unknown }).auto;
+      assert.equal(await marker(), undefined, "a marker made up in full is removed");
+      await svc.decisionChanged(task);
+      await svc.contractChanged(task);
+      assert.deepEqual([...hooked.values()], first.map(() => 1), "no make-up runs again once the marker is removed");
+      // The next automatic check that writes leaves its own marker, which replaces nothing older (there is none) and is removed after the next automatic call made it up.
+      const fresh = await add(3);
+      await setContract(4);
+      const wrote = await svc.contractChanged(task);
+      assert.deepEqual(wrote.invalidated, [fresh]);
+      assert.deepEqual(await marker(), { id: `qa-auto-4-${(await runner.get("qa-evidence-index", task))!.revision - 1}-${task}`, version: 4, chunks: 1 });
+      await svc.decisionChanged(task);
+      assert.deepEqual([await marker(), hooked.get(fresh)], [undefined, 2], "made up once (its own follow-up, then the make-up), then removed");
+      await svc.decisionChanged(task);
+      assert.equal(hooked.get(fresh), 2);
     } finally { await world.close(); }
   });
 

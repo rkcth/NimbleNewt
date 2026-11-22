@@ -77,7 +77,7 @@ export interface QaRecheckBody {
 /**
  * `auto` (absent until an automatic check of the task wrote): the base command ID, the contract version and the number of chunks of the last automatic check that wrote, so a later automatic call can make up
  * what a stop lost between its writes and its follow-ups. Every other write of the index (new evidence, a check by a caller) carries it over unchanged, so such a write between a stopped automatic check and
- * the next automatic call does not lose that check's notices and documentation hook; only the next automatic check that writes replaces it (after making it up). Absent reads as "nothing owed".
+ * the next automatic call does not lose that check's notices and documentation hook; only the next automatic check that writes replaces it (after making it up), and an automatic call that made it up in full and has nothing to write removes it. Absent reads as "nothing owed".
  */
 interface IndexBody { readonly ids: readonly string[]; readonly rechecks: readonly string[]; readonly auto?: { readonly id: string; readonly version: number; readonly chunks: number } }
 
@@ -157,6 +157,8 @@ export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 200
 
 /** Prefix of the hashed text of a later chunk's command ID: 121 characters, so the text is longer than any command ID `scopedCommandId` takes (at most 120). */
 const CHUNK_SEED = "qa.evidence.check/chunk/".padEnd(121, "/");
+/** Prefix of the hashed text of the command that clears a made-up marker: also longer than any scoped command ID, and unlike `CHUNK_SEED`. */
+const MARKER_SEED = "qa.evidence.marker/done/".padEnd(121, "/");
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hidden = (what: string): never => { throw new DomainError("not_found", `no such ${what}`); };
 const json = (v: object): JsonObject => JSON.parse(JSON.stringify(v)) as JsonObject;
@@ -476,13 +478,20 @@ export class QaEvidenceService {
     };
     // What an earlier automatic check wrote and may not have followed up (a stop between its write and its notices): made up first, from the marker it left in the index. Whatever contract version it ran
     // under: the make-up reads only that check's own audit entries, sends notices only for re-checks still pending and flags documents only when their gate fails now, so an older marker is as safe to make up.
+    // A make-up that read every chunk of the marker's check clears the marker (below, when this call writes nothing itself), so later automatic calls do not repeat it.
+    let madeUp: { readonly id: string; readonly chunks: number; readonly revision: number } | undefined;
     if (auto !== undefined) {
-      const marker = (await this.#index(taskId)).body.auto;
-      if (marker !== undefined && marker.id !== commandId && typeof marker.id === "string" && marker.id.length <= 120 && Number.isInteger(marker.chunks)) {
-        for (let n = 0; n < Math.min(marker.chunks, QA_LIMITS.maxChunks); n++) if (await this.#makeUp(this.#chunkId(QA_SERVICE.id, marker.id, n), taskId) === undefined) break;
+      const at = await this.#index(taskId);
+      const marker = at.body.auto;
+      if (marker !== undefined && at.revision !== undefined && marker.id !== commandId && typeof marker.id === "string" && marker.id.length <= 120 && Number.isInteger(marker.chunks)) {
+        const last = Math.min(marker.chunks, QA_LIMITS.maxChunks);
+        let n = 0;
+        while (n < last && await this.#makeUp(this.#chunkId(QA_SERVICE.id, marker.id, n), taskId) !== undefined) n++;
+        if (n === last && last > 0) madeUp = { id: marker.id, chunks: marker.chunks, revision: at.revision };
       }
     }
     let seen = await stale();
+    if (seen.length === 0 && madeUp !== undefined) await this.#clearMarker(taskId, madeUp);
     if (seen.length === 0) {
       // Nothing stale now. If this same command (same caller, same ID) already invalidated evidence, a stop between its write and its notices lost them: make them up (same notice and command IDs, so nothing is doubled).
       for (let n = 0; n < QA_LIMITS.maxChunks; n++) if (await this.#makeUp(this.#chunkId(by.id, commandId, n), taskId) === undefined) break;
@@ -543,6 +552,26 @@ export class QaEvidenceService {
     // A pure repeat answers as before (nothing new written); a call that carried on after a stop reports the whole run.
     if (!wrote) return { taskId, invalidated: [], rechecks: [], replayed: true };
     return { taskId, invalidated: [...earlier.invalidated, ...fresh.invalidated], rechecks: [...earlier.rechecks, ...fresh.rechecks], replayed: false };
+  }
+
+  /**
+   * Card Q02 (batch fix, third review): removes the marker of an automatic check from the index once a later automatic call made it up in full, so the make-up runs once per marker instead of on every later
+   * automatic call. Only that very marker is removed (same base ID and chunk count): a marker written meanwhile by another automatic check is kept. Best effort: a refusal or a lost race leaves the marker,
+   * and the next automatic call makes it up again (nothing is doubled: notices and documentation flags are keyed by the record). The command ID is derived from the marker and the index revision it was read at, under a seed of its own, so each state of the index is cleared at most once and a later state is never answered as a repeat.
+   */
+  async #clearMarker(taskId: string, marker: { readonly id: string; readonly chunks: number; readonly revision: number }): Promise<void> {
+    const scoped = `${QA_SERVICE.id}:${createHash("sha256").update(`${MARKER_SEED}${marker.revision}/${marker.chunks}/${marker.id}/${taskId}`).digest("hex").slice(0, 32)}`;
+    try {
+      await this.#runner.command("qa.evidence.marker", { commandId: scoped, actor: QA_SERVICE.id }, async () => ({
+        payload: { taskId, marker: marker.id, chunks: marker.chunks, revision: marker.revision },
+        build: async () => {
+          const index = await this.#index(taskId);
+          const now = index.body.auto;
+          if (index.revision === undefined || now === undefined || now.id !== marker.id || now.chunks !== marker.chunks) throw new DomainError("stale_revision", "the marker changed meanwhile");
+          return { ref: { kind: "qa-evidence-index", id: taskId }, creates: false, changes: [{ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks: index.body.rechecks }) }], detail: { taskId } };
+        },
+      }));
+    } catch { /* best effort */ }
   }
 
   /**
