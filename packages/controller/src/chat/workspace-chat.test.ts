@@ -51,8 +51,8 @@ for (const backend of backends) {
       assert.match(String(refused.outcomes[0]!.message), /reason/);
       assert.equal(asked.length, 1);
 
-      // Card H12o sixth slice: the submissions view tells the owner approved code is not committed yet; the owner asks in plain words and the interpreter supplies the submission ID from that view.
-      // The ID is a record the service checks (a submission of that task, approved by another reviewer), so it need not be typed; the proposal shows it before anything runs.
+      // Card H12o sixth slice: the submissions view tells the owner approved code is not committed yet, with its ID. The scripted stand-in model hands the ID (a real model copies it from the owner's
+      // message, card D01 fifth slice). The ID is a record the service checks (a submission of that task, approved), so the chat does not check it against the owner's words; the proposal shows it before anything runs.
       const commitText = "commit the approved weed code";
       const sub = "sbm-abcdefghijklmnopqrst";
       script[commitText] = [cmd("workspace.request", { operation: "release", taskId: t, submissionId: sub, reason: "commit the approved weed code" }, commitText)];

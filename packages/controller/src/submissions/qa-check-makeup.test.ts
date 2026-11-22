@@ -170,25 +170,31 @@ for (const backend of backends) {
       assert.deepEqual([await items(recheck), hookCalls.length], [[], 0], "the follow-ups were lost");
 
       // The next automatic call (here the decision pass, then a replay of contract.set) has a new command ID, finds nothing stale, and makes up the follow-ups of the check that wrote the index.
+      type Index = { ids: string[]; rechecks: string[]; auto?: { id: string; version: number; chunks: number } };
+      const indexBody = async (): Promise<Index> => (await runner.get("qa-evidence-index", task))!.body as unknown as Index;
+      const left = (await indexBody()).auto;
+      assert.deepEqual(left?.chunks, 1);
       down = false;
       assert.deepEqual(await svc.decisionChanged(task), { taskId: task, invalidated: [], rechecks: [] });
       assert.deepEqual([await items(recheck), hookCalls], [["queued"], [[rec.id]]]);
+      // Q02 batch fix, third review: a make-up in full removes the marker, so a later automatic call does not run it again.
+      assert.equal((await indexBody()).auto, undefined, "the marker is removed once made up");
       assert.deepEqual(await svc.contractChanged(task), { taskId: task, invalidated: [], rechecks: [] });
-      assert.deepEqual(await items(recheck), ["queued"], "one notice per re-check, however often it is made up");
-      assert.equal(hookCalls.length, 2);
+      assert.deepEqual(await items(recheck), ["queued"], "one notice per re-check");
+      assert.equal(hookCalls.length, 1, "no make-up once the marker is removed");
 
-      // The owner's notice is cleared (the re-check is still pending): a further make-up does not bring it back.
+      // A stop between a make-up and the removal leaves the marker (put back here): the next make-up doubles nothing, and a notice the owner cleared (the re-check still pending) is not raised again.
       assert.deepEqual(await notifications.settleFromController({ commandId: cid("settle"), kind: "maintenance", ref: { kind: "qa-recheck", id: recheck }, projectId: project }), { closed: true });
+      await plant("qa-evidence-index", task, { ...(await indexBody()), auto: left }, true);
+      // A record added since carries the marker over (Q02 batch fix, second review).
+      await svc.record(qa, { commandId: cid("r"), ...ev, criteriaRevision: 2, environment: "macos" });
+      assert.deepEqual((await indexBody()).auto, left, "a new record keeps the marker");
       await svc.contractChanged(task);
       assert.deepEqual(await items(recheck), ["settled"], "a cleared notice is not raised again");
-      assert.equal(hookCalls.length, 3, "a notice the store refuses does not stop the rest of the make-up (the documentation check still runs)");
-
-      // A record added since moves the index on: the next automatic call owes nothing for the old check (only a repeat of its own command ID does).
-      await svc.record(qa, { commandId: cid("r"), ...ev, criteriaRevision: 2, environment: "macos" });
-      const calls = hookCalls.length;
-      await svc.contractChanged(task);
+      assert.deepEqual(hookCalls, [[rec.id], [rec.id]], "a notice the store refuses does not stop the rest of the make-up (the documentation check still runs)");
+      assert.equal((await indexBody()).auto, undefined);
       await svc.decisionChanged(task);
-      assert.equal(hookCalls.length, calls);
+      assert.equal(hookCalls.length, 2);
 
       // The same for a check the decision pass started: lost after its write, made up by the next pass.
       await setContract(3, ["works", "is fast", "is small"]);

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId, operationIdOf } from "../domain/ids.js";
 import { commandId as checkCommandId, projectId as checkProjectId, taskId as checkTaskId, text, type TaskBody } from "../domain/model.js";
@@ -73,7 +74,12 @@ export interface QaRecheckBody {
   readonly supersededBy?: string;
 }
 
-interface IndexBody { readonly ids: readonly string[]; readonly rechecks: readonly string[] }
+/**
+ * `auto` (absent until an automatic check of the task wrote): the base command ID, the contract version and the number of chunks of the last automatic check that wrote, so a later automatic call can make up
+ * what a stop lost between its writes and its follow-ups. Every other write of the index (new evidence, a check by a caller) carries it over unchanged, so such a write between a stopped automatic check and
+ * the next automatic call does not lose that check's notices and documentation hook; only the next automatic check that writes replaces it (after making it up), and an automatic call that made it up in full and has nothing to write removes it. Absent reads as "nothing owed".
+ */
+interface IndexBody { readonly ids: readonly string[]; readonly rechecks: readonly string[]; readonly auto?: { readonly id: string; readonly version: number; readonly chunks: number } }
 
 export interface QaGateCheck { readonly name: string; readonly result: QaResult | "missing"; readonly evidenceId?: string }
 export interface QaGate {
@@ -147,8 +153,12 @@ const CHECKERS = ["qa", "reviewer"] as const;
 const NOTICE_CHARS = 200;
 /** The QA service as the actor of a check it starts itself (`contractChanged`). It holds no grants and is never a caller of any operation. */
 const QA_SERVICE = { id: "service:qa-evidence", kind: "service", name: "qa-evidence", grants: [] } as unknown as Principal;
-export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, projectScanReads: 20 } as const;
+export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, projectScanReads: 20, chunk: 40, supersedeChunk: 80, maxChunks: 12 } as const;
 
+/** Prefix of the hashed text of a later chunk's command ID: 121 characters, so the text is longer than any command ID `scopedCommandId` takes (at most 120). */
+const CHUNK_SEED = "qa.evidence.check/chunk/".padEnd(121, "/");
+/** Prefix of the hashed text of the command that clears a made-up marker: also longer than any scoped command ID, and unlike `CHUNK_SEED`. */
+const MARKER_SEED = "qa.evidence.marker/done/".padEnd(121, "/");
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hidden = (what: string): never => { throw new DomainError("not_found", `no such ${what}`); };
 const json = (v: object): JsonObject => JSON.parse(JSON.stringify(v)) as JsonObject;
@@ -369,7 +379,7 @@ export class QaEvidenceService {
           changes.push({ type: "update", ref: { kind: "qa-recheck", id: r }, expectedRevision: found.revision, body: json({ ...rb, state: "done", doneBy: id, doneAt: now }) });
         }
         if (contract.revision !== undefined) changes.push({ type: "check", ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision });
-        const nextIndex = json({ ids: [...index.body.ids, id], rechecks });
+        const nextIndex = json({ ids: [...index.body.ids, id], rechecks, ...(index.body.auto === undefined ? {} : { auto: index.body.auto }) });
         changes.push(index.revision === undefined ? { type: "create", ref: { kind: "qa-evidence-index", id: taskId }, body: nextIndex } : { type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: nextIndex });
         outcome = { source, settled, open };
         return {
@@ -416,7 +426,7 @@ export class QaEvidenceService {
     const contract = await this.#contract(taskId);
     const index = await this.#index(taskId);
     if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
-    const r = await this.#checkTask(QA_SERVICE, `qa-auto-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, this.#lastAutomatic(contract.version, index.revision, taskId));
+    const r = await this.#checkTask(QA_SERVICE, `qa-auto-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, { version: contract.version });
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
@@ -431,23 +441,27 @@ export class QaEvidenceService {
     const contract = await this.#contract(taskId);
     const index = await this.#index(taskId);
     if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
-    const r = await this.#checkTask(QA_SERVICE, `qa-dec-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, this.#lastAutomatic(contract.version, index.revision, taskId));
+    const r = await this.#checkTask(QA_SERVICE, `qa-dec-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, { version: contract.version });
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
   /**
-   * The automatic checks (`contractChanged`, `decisionChanged`) name the evidence index revision in their command ID, and a committed check rewrites the index, so after a stop between its write and its
-   * follow-ups the next automatic call (a replay of `contract.set`, the next propagation pass) has a new command ID. The check that could have written the index revision read now is the automatic one at the
-   * revision before it, with the same contract version: its command IDs (both kinds), whose lost follow-ups a call that finds nothing stale makes up. A record added since moved the index on, and then
-   * nothing is looked up (that check's follow-ups are owed only to a repeat of its own ID).
+   * The stored command ID of chunk `n` of a check: the first chunk is the command itself, later ones are derived from it (and the chunk number), so a repeat finds each one where it was. The hashed text is
+   * longer than 120 characters, which `scopedCommandId` refuses, so a derived ID never equals the scoped ID of any command of the same caller (with `<id>:chunk:<n>`, the command `x:chunk:1` would have been
+   * chunk 1 of `x`; with `/` it could still be met through a service that does not apply the command-ID grammar before scoping, such as `summary.create`).
    */
-  #lastAutomatic(version: number, revision: number | undefined, taskId: string): readonly string[] {
-    if (revision === undefined || revision < 2) return [];
-    return [`qa-auto-${version}-${revision - 1}-${taskId}`, `qa-dec-${version}-${revision - 1}-${taskId}`].map((id) => scopedCommandId(QA_SERVICE.id, id));
+  #chunkId(principalId: string, commandId: string, n: number): string {
+    return n === 0 ? scopedCommandId(principalId, commandId) : `${principalId}:${createHash("sha256").update(`${CHUNK_SEED}${n}/${commandId}`).digest("hex").slice(0, 32)}`;
   }
 
-  async #checkTask(by: Principal, commandId: string, taskId: string, previous: readonly string[] = []): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
-    let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
+  /**
+   * Card Q02 (batch fix): a check writes at most `QA_LIMITS.chunk` (40) stale records per operation (two changes each, plus one for the index: storage takes at most 100 changes per operation), so a task whose
+   * 50 or more records went stale at once is no longer refused. Each chunk is its own command: the first has the command ID itself, the later ones an ID derived from it and the chunk number, so a repeat of the
+   * same command after a stop finds the chunks already written (they answer as a repeat, their follow-ups are made up) and carries on with the next. The answer reports every record of the call. The notice of
+   * each re-check and the documentation hook go once per record, right after the chunk that wrote it. An automatic check (`auto`) also leaves a marker in the index (its base ID, the contract version, the chunks
+   * written), so a later automatic call, whose own command ID is new because the index moved, can make up the follow-ups of the chunks a stop lost.
+   */
+  async #checkTask(by: Principal, commandId: string, taskId: string, auto?: { readonly version: number }): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[]; replayed: boolean; concurrent?: true }> {
     const stale = async (): Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]> => {
       const index = await this.#index(taskId);
       const contract = await this.#contract(taskId);
@@ -462,65 +476,125 @@ export class QaEvidenceService {
       }
       return out;
     };
-    const scoped = scopedCommandId(by.id, commandId);
-    const seen = await stale();
+    // What an earlier automatic check wrote and may not have followed up (a stop between its write and its notices): made up first, from the marker it left in the index. Whatever contract version it ran
+    // under: the make-up reads only that check's own audit entries, sends notices only for re-checks still pending and flags documents only when their gate fails now, so an older marker is as safe to make up.
+    // A make-up that read every chunk of the marker's check clears the marker (below, when this call writes nothing itself), so later automatic calls do not repeat it.
+    let madeUp: { readonly id: string; readonly chunks: number; readonly revision: number } | undefined;
+    if (auto !== undefined) {
+      const at = await this.#index(taskId);
+      const marker = at.body.auto;
+      if (marker !== undefined && at.revision !== undefined && marker.id !== commandId && typeof marker.id === "string" && marker.id.length <= 120 && Number.isInteger(marker.chunks)) {
+        const last = Math.min(marker.chunks, QA_LIMITS.maxChunks);
+        let n = 0;
+        while (n < last && await this.#makeUp(this.#chunkId(QA_SERVICE.id, marker.id, n), taskId) !== undefined) n++;
+        if (n === last && last > 0) madeUp = { id: marker.id, chunks: marker.chunks, revision: at.revision };
+      }
+    }
+    let seen = await stale();
+    if (seen.length === 0 && madeUp !== undefined) await this.#clearMarker(taskId, madeUp);
     if (seen.length === 0) {
       // Nothing stale now. If this same command (same caller, same ID) already invalidated evidence, a stop between its write and its notices lost them: make them up (same notice and command IDs, so nothing is doubled).
-      await this.#makeUp(scoped, taskId);
-      for (const p of previous) await this.#makeUp(p, taskId);
+      for (let n = 0; n < QA_LIMITS.maxChunks; n++) if (await this.#makeUp(this.#chunkId(by.id, commandId, n), taskId) === undefined) break;
       return { taskId, invalidated: [], rechecks: [], replayed: false };
     }
     // Another check of the same task at the same moment can do the work first: this one then answers with what that one invalidated (of what this one found stale), not "ask again".
     // Something else that went stale meanwhile is looked at again, a few times at most.
-    const lostRace = async (): Promise<{ taskId: string; invalidated: string[]; rechecks: string[]; replayed: false; concurrent: true } | undefined> => {
+    const lostRace = async (chunk: readonly { id: string }[]): Promise<{ invalidated: string[]; rechecks: string[] } | undefined> => {
       if ((await stale()).length > 0) return undefined;
       const invalidated: string[] = [];
       const rechecks: string[] = [];
-      for (const f of seen) {
+      for (const f of chunk) {
         const now = (await this.#runner.get("qa-evidence", f.id))?.body as unknown as QaEvidenceBody | undefined;
         if (now?.state !== "invalidated") continue;
         invalidated.push(f.id);
         if (now.recheckId !== undefined) rechecks.push(now.recheckId);
       }
-      return { taskId, invalidated, rechecks, replayed: false, concurrent: true };
+      return { invalidated, rechecks };
     };
-    let result: Awaited<ReturnType<CommandRunner["command"]>> | undefined;
-    for (let round = 0; result === undefined; round++) {
-      try { result = await this.#runCheck(by, scoped, taskId, stale, (m) => { made = m; }); } catch (error) {
-        if (!(error instanceof DomainError) || error.code !== "stale_revision" || round >= 2) throw error;
-        const answer = await lostRace();
-        if (answer !== undefined) return answer;
+    const fresh = { invalidated: [] as string[], rechecks: [] as string[] };
+    const earlier = { invalidated: [] as string[], rechecks: [] as string[] };
+    let wrote = false;
+    let concurrent = false;
+    for (let n = 0; n < QA_LIMITS.maxChunks; n++) {
+      if (n > 0) seen = await stale();
+      if (seen.length === 0) break;
+      const scoped = this.#chunkId(by.id, commandId, n);
+      const chunk = seen.slice(0, QA_LIMITS.chunk);
+      let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
+      let result: Awaited<ReturnType<CommandRunner["command"]>> | undefined;
+      for (let round = 0; result === undefined; round++) {
+        try { result = await this.#runCheck(by, scoped, taskId, stale, auto === undefined ? undefined : { id: commandId, version: auto.version, chunks: n + 1 }, (m) => { made = m; }); } catch (error) {
+          if (!(error instanceof DomainError) || error.code !== "stale_revision" || round >= 2) throw error;
+          const answer = await lostRace(chunk);
+          if (answer !== undefined) { fresh.invalidated.push(...answer.invalidated); fresh.rechecks.push(...answer.rechecks); concurrent = true; break; }
+        }
       }
+      if (result === undefined) break;
+      if (result.replayed) {
+        // This chunk was written by an earlier run of this command: its follow-ups are made up, and the next chunk is looked at.
+        const ids = await this.#makeUp(scoped, taskId);
+        for (const id of ids ?? []) { earlier.invalidated.push(id); earlier.rechecks.push(derivedId("qrc", id)); }
+        // Only a full chunk means the first run had more to do; a shorter one finished its work, and a repeat then writes nothing more (it answers as a repeat).
+        if (ids === undefined || ids.length < QA_LIMITS.chunk) break;
+        continue;
+      }
+      wrote = true;
+      if (this.#ports.notify !== undefined) {
+        for (const r of made.rechecks) await this.#ports.notify({ commandId: `qa-recheck:${r.id}`, taskId, projectId: r.projectId, recheckId: r.id, text: r.text }).catch(() => undefined);
+      }
+      if (this.#ports.invalidated !== undefined && made.evidence.length > 0) await this.#ports.invalidated({ taskId, projectId: made.evidence[0]!.projectId, evidence: made.evidence.map((e) => ({ evidenceId: e.evidenceId, submissionId: e.submissionId })) }).catch(() => undefined);
+      fresh.invalidated.push(...made.invalidated);
+      fresh.rechecks.push(...made.rechecks.map((r) => r.id));
+      if (made.invalidated.length < QA_LIMITS.chunk) break;
     }
-    if (result.replayed) {
-      await this.#makeUp(scoped, taskId);
-      return { taskId, invalidated: [], rechecks: [], replayed: true };
-    }
-    if (this.#ports.notify !== undefined) {
-      for (const r of made.rechecks) await this.#ports.notify({ commandId: `qa-recheck:${r.id}`, taskId, projectId: r.projectId, recheckId: r.id, text: r.text }).catch(() => undefined);
-    }
-    if (this.#ports.invalidated !== undefined && made.evidence.length > 0) await this.#ports.invalidated({ taskId, projectId: made.evidence[0]!.projectId, evidence: made.evidence.map((e) => ({ evidenceId: e.evidenceId, submissionId: e.submissionId })) }).catch(() => undefined);
-    return { taskId, invalidated: made.invalidated, rechecks: made.rechecks.map((r) => r.id), replayed: false };
+    // The answer of a call that lost a race still names the chunks an earlier run of this command wrote (a resumed call), like the answer of one that did not.
+    if (concurrent) return { taskId, invalidated: [...earlier.invalidated, ...fresh.invalidated], rechecks: [...earlier.rechecks, ...fresh.rechecks], replayed: false, concurrent: true };
+    // A pure repeat answers as before (nothing new written); a call that carried on after a stop reports the whole run.
+    if (!wrote) return { taskId, invalidated: [], rechecks: [], replayed: true };
+    return { taskId, invalidated: [...earlier.invalidated, ...fresh.invalidated], rechecks: [...earlier.rechecks, ...fresh.rechecks], replayed: false };
+  }
+
+  /**
+   * Card Q02 (batch fix, third review): removes the marker of an automatic check from the index once a later automatic call made it up in full, so the make-up runs once per marker instead of on every later
+   * automatic call. Only that very marker is removed (same base ID and chunk count): a marker written meanwhile by another automatic check is kept. Best effort: a refusal or a lost race leaves the marker,
+   * and the next automatic call makes it up again (nothing is doubled: notices and documentation flags are keyed by the record). The command ID is derived from the marker and the index revision it was read at, under a seed of its own, so each state of the index is cleared at most once and a later state is never answered as a repeat.
+   */
+  async #clearMarker(taskId: string, marker: { readonly id: string; readonly chunks: number; readonly revision: number }): Promise<void> {
+    const scoped = `${QA_SERVICE.id}:${createHash("sha256").update(`${MARKER_SEED}${marker.revision}/${marker.chunks}/${marker.id}/${taskId}`).digest("hex").slice(0, 32)}`;
+    try {
+      await this.#runner.command("qa.evidence.marker", { commandId: scoped, actor: QA_SERVICE.id }, async () => ({
+        payload: { taskId, marker: marker.id, chunks: marker.chunks, revision: marker.revision },
+        build: async () => {
+          const index = await this.#index(taskId);
+          const now = index.body.auto;
+          if (index.revision === undefined || now === undefined || now.id !== marker.id || now.chunks !== marker.chunks) throw new DomainError("stale_revision", "the marker changed meanwhile");
+          return { ref: { kind: "qa-evidence-index", id: taskId }, creates: false, changes: [{ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks: index.body.rechecks }) }], detail: { taskId } };
+        },
+      }));
+    } catch { /* best effort */ }
   }
 
   /**
    * Card Q03 (eighth slice): a repeat of a `check` that already wrote (same caller, same command ID) sends again what the first run owed after its write, the re-check notices and the `invalidated` port, which a
    * stop between the write and those calls would otherwise lose for good (nothing is stale any more, so no later check would call them). Both are keyed by the record (`qa-recheck:<id>`, `doc-evidence-lost:<id>`), so a
    * delivered one is not doubled. What to send is read from the command's own audit entry (`invalidated`, at most 50 records) and the stored records, never from the caller's words. Best effort, writes nothing,
-   * and an entry written by older code, or one that cannot be read, sends nothing.
+   * and an entry written by older code, or one that cannot be read, sends nothing. Answers the records that command invalidated, or undefined when it wrote nothing (no such entry).
    */
-  async #makeUp(scoped: string, taskId: string): Promise<void> {
-    if (this.#ports.notify === undefined && this.#ports.invalidated === undefined) return;
+  async #makeUp(scoped: string, taskId: string): Promise<string[] | undefined> {
+    let ids: string[];
     try {
       const operationId = operationIdOf(scoped);
       const seq = (await this.#runner.storage.getOperation(operationId))?.result.auditSeqs[0];
-      if (seq === undefined) return;
+      if (seq === undefined) return undefined;
       const entry = (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
-      const ids = entry?.seq === seq && entry.operationId === operationId && entry.type === "qa.evidence.check" && entry.detail["taskId"] === taskId ? entry.detail["invalidated"] : undefined;
-      if (!Array.isArray(ids)) return;
+      const found = entry?.seq === seq && entry.operationId === operationId && entry.type === "qa.evidence.check" && entry.detail["taskId"] === taskId ? entry.detail["invalidated"] : undefined;
+      if (!Array.isArray(found)) return undefined;
+      ids = found.filter((id): id is string => typeof id === "string").slice(0, 50);
+    } catch { return undefined; }
+    if (this.#ports.notify === undefined && this.#ports.invalidated === undefined) return ids;
+    try {
       const evidence: { evidenceId: string; submissionId: string; projectId: string }[] = [];
-      for (const id of ids.slice(0, 50)) {
-        if (typeof id !== "string") continue;
+      for (const id of ids) {
         const e = (await this.#runner.get("qa-evidence", id))?.body as unknown as QaEvidenceBody | undefined;
         if (e === undefined || e.state !== "invalidated") continue;
         evidence.push({ evidenceId: id, submissionId: e.submissionId, projectId: e.projectId });
@@ -531,15 +605,16 @@ export class QaEvidenceService {
       }
       if (this.#ports.invalidated !== undefined && evidence.length > 0) await this.#ports.invalidated({ taskId, projectId: evidence[0]!.projectId, evidence }).catch(() => undefined);
     } catch { /* best effort */ }
+    return ids;
   }
 
-  /** One attempt at the write of `check`: invalidates what is stale now and schedules its re-checks. */
-  async #runCheck(by: Principal, scoped: string, taskId: string, stale: () => Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]>, report: (made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] }) => void): Promise<Awaited<ReturnType<CommandRunner["command"]>>> {
+  /** One attempt at the write of one chunk of `check`: invalidates the first stale records (at most `QA_LIMITS.chunk`) and schedules their re-checks. */
+  async #runCheck(by: Principal, scoped: string, taskId: string, stale: () => Promise<{ id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[]>, auto: { id: string; version: number; chunks: number } | undefined, report: (made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] }) => void): Promise<Awaited<ReturnType<CommandRunner["command"]>>> {
     let made: { invalidated: string[]; rechecks: { id: string; projectId: string; text: string }[]; evidence: { evidenceId: string; submissionId: string; projectId: string }[] } = { invalidated: [], rechecks: [], evidence: [] };
     return this.#runner.command("qa.evidence.check", { commandId: scoped, actor: by.id }, async () => ({
       payload: { taskId },
       build: async () => {
-        const found = await stale();
+        const found = (await stale()).slice(0, QA_LIMITS.chunk);
         if (found.length === 0) throw new DomainError("stale_revision", "the evidence changed meanwhile; ask again");
         const index = await this.#index(taskId);
         const now = this.#runner.now();
@@ -560,7 +635,7 @@ export class QaEvidenceService {
           made.rechecks.push({ id: recheckId, projectId: f.body.projectId, text: recheckText(f.id, taskId, f.reasons, f.body.recordedBy) });
         }
         if (index.revision === undefined) throw new DomainError("integrity", `the QA evidence index of ${taskId} is missing`);
-        changes.push({ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks }) });
+        changes.push({ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks, ...(auto !== undefined ? { auto } : index.body.auto !== undefined ? { auto: index.body.auto } : {}) }) });
         report(made);
         return { ref: { kind: "qa-evidence-index", id: taskId }, creates: false, changes, detail: { taskId, invalidated: made.invalidated } };
       },
@@ -588,23 +663,40 @@ export class QaEvidenceService {
       }
       return { sub, index, due };
     };
-    const first = await looks();
-    if (first === undefined || first.due.length === 0) return { settled: [] };
-    let settled: string[] = [];
-    const result = await this.#runner.command("qa.recheck.supersede", { commandId: `qa-sup:${submissionId}`, actor: "controller" }, async () => ({
-      payload: { submissionId },
-      build: async () => {
-        const seen = await looks();
-        if (seen === undefined || seen.due.length === 0) throw new DomainError("stale_revision", "the re-checks were settled meanwhile");
-        const now = this.#runner.now();
-        settled = seen.due.map((d) => d.id);
-        return {
-          ref: { kind: "qa-recheck", id: seen.due[0]!.id }, creates: false, detail: { taskId: seen.sub.taskId, submissionId, settled },
-          changes: seen.due.map((d) => ({ type: "update" as const, ref: { kind: "qa-recheck", id: d.id }, expectedRevision: d.revision, body: json({ ...d.body, state: "done", doneAt: now, supersededBy: submissionId }) })),
-        };
-      },
-    }));
-    return { settled: result.replayed ? [] : settled };
+    // Card Q02 (batch fix): at most `QA_LIMITS.supersedeChunk` re-checks per operation (one change each; storage takes at most 100), so more than that many pending re-checks no longer fail. Chunk 0 keeps the
+    // command ID `qa-sup:<submission>`; later chunks have `qa-sup:<submission>:<n>`. A repeat finds the written chunks (they answer as a repeat) and carries on with the next.
+    const all: string[] = [];
+    for (let n = 0; n < QA_LIMITS.maxChunks * 2; n++) {
+      const first = await looks();
+      if (first === undefined || first.due.length === 0) break;
+      let settled: string[] = [];
+      let result: Awaited<ReturnType<CommandRunner["command"]>> | undefined;
+      for (let round = 0; result === undefined; round++) {
+        try {
+          result = await this.#runner.command("qa.recheck.supersede", { commandId: n === 0 ? `qa-sup:${submissionId}` : `qa-sup:${submissionId}:${n}`, actor: "controller" }, async () => ({
+            payload: { submissionId },
+            build: async () => {
+              const seen = await looks();
+              if (seen === undefined || seen.due.length === 0) throw new DomainError("stale_revision", "the re-checks were settled meanwhile");
+              const now = this.#runner.now();
+              const due = seen.due.slice(0, QA_LIMITS.supersedeChunk);
+              settled = due.map((d) => d.id);
+              return {
+                ref: { kind: "qa-recheck", id: due[0]!.id }, creates: false, detail: { taskId: seen.sub.taskId, submissionId, settled },
+                changes: due.map((d) => ({ type: "update" as const, ref: { kind: "qa-recheck", id: d.id }, expectedRevision: d.revision, body: json({ ...d.body, state: "done", doneAt: now, supersededBy: submissionId }) })),
+              };
+            },
+          }));
+        } catch (error) {
+          if (!(error instanceof DomainError) || error.code !== "stale_revision" || round >= 2) throw error;
+          const again = await looks();
+          if (again === undefined || again.due.length === 0) break;
+        }
+      }
+      if (result === undefined) break;
+      if (!result.replayed) all.push(...settled);
+    }
+    return { settled: all };
   }
 
   // ---- reading ---------------------------------------------------------------------------------------------------------------
