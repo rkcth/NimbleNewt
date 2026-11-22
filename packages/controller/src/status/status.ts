@@ -285,6 +285,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them)" },
+  qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
@@ -398,6 +399,7 @@ export type StatusRequest =
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
+  | { readonly kind: "qa_project"; readonly projectId: string }
   | { readonly kind: "docs"; readonly projectId: string }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
@@ -750,7 +752,7 @@ export interface StatusDeps {
   /** The defects of a task's deliverables (card Q04), for the `defects` request. Absent: that request says defects are not tracked here. */
   readonly defects?: Pick<DefectService, "forTask">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
-  readonly qa?: Pick<QaEvidenceService, "list" | "gate">;
+  readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
@@ -978,6 +980,7 @@ export class StatusService {
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
+      case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
@@ -2310,6 +2313,31 @@ export class StatusService {
       const owed = [...new Set((before?.checks ?? []).map((c) => c.name))].filter((name) => (required.length === 0 || required.includes(name)) && !named.has(name)).slice(0, 10).map((name) => quoted(name, 80));
       lines.push(line(`Re-check ${r.id} of ${r.evidenceId} is scheduled for ${shown(r.assignee, 80)} since ${r.requestedAt}: ${r.reasons.map(qaReasonText).join("; ")}.${owed.length === 0 ? "" : ` It must name again: ${owed.join(", ")}.`}`, cite("qa-recheck", r.id), cite("task", taskId)));
     }
+    return { observedAt: at, lines };
+  }
+
+  /** The project's QA picture (card Q02): what waits for QA, what no longer holds, what fails and what passes, per task's newest code submission. The QA service's read rules apply. */
+  async qaProjectLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.qa === undefined) return { observedAt: at, lines: [line("QA evidence is not kept on this controller.", cite("project", projectId))] };
+    let view: Awaited<ReturnType<QaEvidenceService["project"]>>;
+    try { view = await this.#deps.qa.project(by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    // A partial view never reads as "nothing waits": it says what was left out (card Q02 review).
+    const partial = `${view.scanLimited ? " Only part of the stored submissions was looked at, so other tasks, or newer code of a listed task, may exist." : ""}${view.truncated ? " Only the tasks with the newest code submissions were read; more tasks with code may exist." : ""}`;
+    if (view.items.length === 0) {
+      const text = partial === "" ? "No task of this project that you may read has a code submission yet: nothing waits for QA." : `No code submission of a task you may read was found in what was looked at, but this view is incomplete, so tasks may still wait for QA.${partial}`;
+      return { observedAt: at, lines: [line(text, cite("project", projectId))] };
+    }
+    const c = view.counts;
+    const lines: Line[] = [line(`${c.waiting} task(s) wait for QA (no independent check yet), ${c.stale} have QA evidence that no longer holds or a re-check pending, ${c.failing} fail QA, ${c.passes} pass; each is its newest code submission.${partial}`, cite("project", projectId))];
+    const words = { waiting: "waits for QA", stale: "has QA evidence that no longer holds", failing: "fails QA", passes: "passes QA" } as const;
+    for (const i of view.items.slice(0, 50)) {
+      const k = i.counts;
+      const detail = i.state === "passes" ? "" : ` (${i.reasons.join(", ").replace(/_/g, " ")}; passed ${k.passed}, failed ${k.failed}, blocked ${k.blocked}, not run ${k.notRun}, missing ${k.missing}${i.pendingRechecks.length === 0 ? "" : `; ${i.pendingRechecks.length} re-check(s) pending`})`;
+      lines.push(line(`Task ${quoted(i.title, 80)} (${i.taskId}) ${words[i.state]}: submission ${i.submissionId}, tree ${i.tree.slice(0, 12)}, submitted ${i.submittedAt}${detail}.`, cite("task", i.taskId), cite("submission", i.submissionId)));
+    }
+    if (view.items.length > 50) lines.push(line(`${view.items.length - 50} more task(s) are not shown here (qa.evidence.gate answers for one submission).`, cite("project", projectId)));
     return { observedAt: at, lines };
   }
 
