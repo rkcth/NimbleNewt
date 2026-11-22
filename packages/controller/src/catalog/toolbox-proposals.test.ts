@@ -511,6 +511,72 @@ for (const backend of backends) {
     assert.equal((await c.props.list(cody.p, { mine: true, state: "all", limit: 100 })).items.length, limit + 2, "nothing older was removed: the list began again");
   });
 
+  suite("slice 6 review: a removal is audited with who, what and how it ended (no proposal text); only the author's ended proposals are removed, a few per write; a repeat of a removed ending is refused and recreates nothing; endings at the same moment keep one list", async (c) => {
+    const { cody, maya } = await cast(c);
+    const better = await c.note(cody.p, "console.log('lint, faster')");
+    const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "a private rationale", tests: "a private test note" })).proposalId;
+    const audits = async () => { const all: { type: string; subject?: { kind: string; id: string }; detail: Record<string, unknown> }[] = []; for (let after = 0; ;) { const page = await c.storage.listAudit({ afterSeq: after, limit: 500 }); all.push(...page); if (page.length < 500) return all; after = page.at(-1)!.seq; } };
+    const removedIds = async () => (await audits()).filter((a) => a.type === "toolbox.proposal.remove").map((a) => a.subject!.id);
+    const index = async () => { const rows = await c.storage.listAggregates("toolbox-proposer", { limit: 5 }); assert.equal(rows.length, 1); return rows[0]!; };
+    const waiting = await propose();
+    const accepted = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: accepted, decision: "accept" });
+    const withdrawn: { id: string; commandId: string }[] = [];
+    for (let i = 0; i < 3; i += 1) { const id = await propose(); const commandId = cid("wd"); await c.props.withdraw(cody.p, { commandId, proposalId: id }); withdrawn.push({ id, commandId }); }
+    const [e1, e2, e3] = withdrawn.map((w) => w.id) as [string, string, string];
+    // A kept text left behind by an ended proposal (none is, normally) goes with its record.
+    await c.storage.applyOperation({ operationId: cid("put"), epoch: c.epoch, actor: "test", correlationId: "put", at: new Date().toISOString(), changes: [{ type: "create", ref: { kind: PROPOSAL_TEXT_KIND, id: e1 }, body: { proposalId: e1, digest: "x", sources: [], executable: "left behind", at: "2026-11-18T12:00:00.000Z" } }], audit: [{ type: "test.put", detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] });
+    // The list as stored is not as this service writes it: a waiting and an accepted-unreleased proposal, an unknown ID, a value that is not an ID, and more IDs than the bound.
+    const filler = Array.from({ length: 60 }, (_, i) => `tpp-${"c".repeat(18)}${"abcdefghijklmnopqrstuvwxyz"[Math.floor(i / 26)]}${"abcdefghijklmnopqrstuvwxyz"[i % 26]}`);
+    await c.poke("toolbox-proposer", (await index()).id, (b) => ({ ...b, settled: [waiting, accepted, NO_ID, 42, e1, e2, e3, ...filler] }));
+    const before = (await removedIds()).length;
+    const e4 = await propose();
+    await c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: e4 });
+    // Five entries leave the list in this write (waiting, accepted, NO_ID, e1, e2); only e1 and e2 are records this author ended, so only they are removed.
+    assert.deepEqual((await removedIds()).slice(before), [e1, e2]);
+    for (const id of [e1, e2]) assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id }), undefined, id);
+    assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id: e1 }), undefined, "the left-behind text went with its proposal");
+    assert.equal((await c.props.get(cody.p, waiting)).state, "open", "a waiting proposal named on the list is never removed");
+    assert.equal((await c.props.get(cody.p, accepted)).state, "accepted", "an accepted proposal not yet released named on the list is never removed");
+    assert.equal((await c.props.get(cody.p, e3)).state, "withdrawn", "at most five entries leave in one write");
+    const settled = (await index()).body.settled as string[];
+    assert.deepEqual(settled, [e3, ...filler, e4], "the oldest left; the newest ending is last; the value that is not an ID is gone");
+    const all = await audits();
+    const gone = all.find((a) => a.type === "toolbox.proposal.remove" && a.subject?.id === e1)!;
+    assert.deepEqual(gone.detail, { proposalId: e1, author: cody.p.id, target: "toolbox.lint", state: "withdrawn", why: `the author's oldest ended proposal beyond the ${PROPOSAL_LIMITS.settledPerAuthor} kept` });
+    assert.ok(all.some((a) => a.type === "toolbox.proposal.text.remove" && a.subject?.id === e1), "the text's removal is audited too");
+    assert.doesNotMatch(JSON.stringify(all), /a private rationale|a private test note|left behind/, "no proposal text in the audit log");
+    // A repeat of the ending of a removed proposal is refused as not found and recreates nothing.
+    await refuses("not_found", () => c.props.withdraw(cody.p, { commandId: withdrawn[0]!.commandId, proposalId: e1 }), /no such proposal/);
+    assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: e1 }), undefined);
+    // Three endings at the same moment, one a release by the owner of the proposal accepted earlier without a version. They all write the author's list, so one goes through and one that lost is refused as
+    // changed meanwhile (nothing of it applied) and is sent again, as a caller does: one list, each ending on it once, five removals per ending, none twice.
+    const x = await propose(); const y = await propose();
+    const was = (await removedIds()).length;
+    const endings = [
+      () => c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: x }),
+      () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: y, decision: "reject", reason: "no" }),
+      () => c.props.decide(c.owner, { commandId: cid("d"), proposalId: accepted, decision: "accept", version: "1.1.0" }),
+    ];
+    const first = await Promise.allSettled(endings.map((run) => run()));
+    assert.ok(first.some((r) => r.status === "fulfilled"), "one of them went through");
+    for (const [i, r] of first.entries()) {
+      if (r.status === "fulfilled") continue;
+      assert.ok(r.reason instanceof DomainError && r.reason.code === "stale_revision", String(r.reason));
+      await endings[i]!();
+    }
+    assert.equal((await c.props.get(cody.p, accepted)).released?.version, "1.1.0");
+    const after = (await index()).body.settled as string[];
+    assert.equal(new Set(after).size, after.length, "no ID twice");
+    assert.deepEqual([...after].slice(-3).sort(), [accepted, x, y].sort(), "the three endings are the newest");
+    assert.equal(after.length, settled.length + 3 - 15, "each of the three writes took five off the front");
+    assert.deepEqual(after.slice(0, -3), settled.slice(15), "taken off in order, none lost");
+    const now = await removedIds();
+    assert.deepEqual(now.slice(was), [e3], "only e3 among the fifteen taken off was a record");
+    assert.equal(new Set(now).size, now.length, "no proposal removed twice");
+    assert.equal((await c.props.get(cody.p, waiting)).state, "open");
+  });
+
   suite("a maintainer revokes a shared version its grant covers (finish or cancel only); the fork owners are sent a notice once; other maintainers get not_found", async (c) => {
     const { cody, maya, pat } = await cast(c);
     await c.cat.copy(cody.p, { commandId: cid("cp"), name: "lint", as: "my-lint" });

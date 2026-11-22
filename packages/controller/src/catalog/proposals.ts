@@ -9,7 +9,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { canonicalJson } from "../storage/json.js";
-import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import type { AggregateRef, AuditEntry, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { checkManifest, chosenVersion, compareVersions, maintainsAnywhere, mayManage, mayReadCatalogEntry, personalNamespace, PROPOSAL_TEXT_KIND, proposalTextAudit, proposalTextRef, toolboxName, versionIdOf, type ArtifactKind, type Audience, type CatalogService, type EntryBody, type Manifest, type ProposalTextBody, type SourceRef, type VersionBody } from "./catalog.js";
 import { noticeChange } from "./notices.js";
 
@@ -32,7 +32,7 @@ export const PROPOSAL_DECISIONS: readonly ProposalDecision[] = ["accept", "reque
 const PENDING: readonly ProposalState[] = ["open", "changes_requested", "deferred"];
 /** What a default listing shows: proposals that are available to work on. Deferred ones are set aside and are listed only when asked for by state. */
 const AVAILABLE: readonly ProposalState[] = ["open", "changes_requested"];
-export const PROPOSAL_LIMITS = { rationale: 2000, tests: 2000, reason: 500, pendingPerAuthor: 20, settledPerAuthor: 50, history: 50, page: 100, scan: 5000 } as const;
+export const PROPOSAL_LIMITS = { rationale: 2000, tests: 2000, reason: 500, pendingPerAuthor: 20, settledPerAuthor: 50, removedPerWrite: 5, history: 50, page: 100, scan: 5000 } as const;
 const PROPOSAL_ID = /^tpp-[a-z2-7]{20}$/;
 const VERSION = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const sha = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -325,7 +325,8 @@ export class ToolboxProposalService {
         if (cur.proposed.digest !== p.proposed.digest || cur.round !== p.round) throw new DomainError("stale_revision", "the proposal was revised meanwhile; read it again before deciding");
         const out = await apply(cur, fresh.revision, { version, digest: made.digest, versionId: made.versionId });
         // The released version keeps its own snapshot of the text; the proposal's goes in the same write.
-        return [{ type: "update", ref: { kind: PROPOSAL_KIND, id: found.id }, expectedRevision: fresh.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...(await this.#unindex(cur.author, found.id, true)), ...(await this.#replaceText(found.id, undefined))];
+        const unindex = await this.#unindex(cur.author, found.id, true);
+        return { changes: [{ type: "update", ref: { kind: PROPOSAL_KIND, id: found.id }, expectedRevision: fresh.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex.changes, ...(await this.#replaceText(found.id, undefined))], audit: unindex.audit };
       });
       released = { name: made.name, version, digest: made.digest, versionId: made.versionId };
       await this.#tellOnTask(p, found.id, decision, noticeText(version));
@@ -656,22 +657,35 @@ export class ToolboxProposalService {
    * the author's list of ended proposals, and the oldest beyond `settledPerAuthor` are deleted in the same write, so a propose-and-withdraw loop cannot store records without bound. An accepted proposal not yet released stays
    * (a later accept with a version still releases it) and is not counted.
    */
-  async #unindex(author: string, id: string, settle: boolean): Promise<Change[]> {
+  async #unindex(author: string, id: string, settle: boolean): Promise<{ changes: Change[]; audit: AuditEntry[] }> {
     const iref: AggregateRef = { kind: INDEX_KIND, id: derivedId("tpa", author) };
     const index = await this.#runner.get(iref.kind, iref.id);
     const body = index?.body as unknown as AuthorIndex | undefined;
     const pending = body?.pending ?? [];
     // An accepted proposal not yet released has left `pending` already; its release still settles it.
-    if (index === undefined || (!pending.includes(id) && !settle)) return [];
-    const ended = settle ? [...(body?.settled ?? []).filter((x) => x !== id), id] : body?.settled;
-    const drop = ended === undefined ? [] : ended.slice(0, Math.max(0, ended.length - PROPOSAL_LIMITS.settledPerAuthor));
+    if (index === undefined || (!pending.includes(id) && !settle)) return { changes: [], audit: [] };
+    // Ordered by when each ended (this list's own order); an entry that is not a proposal ID is dropped.
+    const listed = body?.settled === undefined ? undefined : body.settled.filter((x) => typeof x === "string" && PROPOSAL_ID.test(x) && x !== id);
+    const ended = settle ? [...(listed ?? []), id] : listed;
+    // At most `removedPerWrite` go in one write, so an ending stays a small write even if the list was ever longer than the bound.
+    const drop = ended === undefined ? [] : ended.slice(0, Math.min(PROPOSAL_LIMITS.removedPerWrite, Math.max(0, ended.length - PROPOSAL_LIMITS.settledPerAuthor)));
     const kept = ended === undefined ? undefined : ended.slice(drop.length);
-    const removals: Change[] = [];
+    const changes: Change[] = [];
+    const audit: AuditEntry[] = [];
     for (const old of drop) {
       const rec = await this.#runner.get(PROPOSAL_KIND, old);
-      if (rec !== undefined) removals.push({ type: "delete", ref: { kind: PROPOSAL_KIND, id: old }, expectedRevision: rec.revision });
+      const p = rec?.body as unknown as ToolboxProposalBody | undefined;
+      // Only this author's proposal that has ended is removed; anything else named here (never expected) only leaves the list.
+      if (rec === undefined || p === undefined || p.author !== author || !(p.state === "rejected" || p.state === "withdrawn" || (p.state === "accepted" && p.released !== undefined))) continue;
+      const ref: AggregateRef = { kind: PROPOSAL_KIND, id: old };
+      changes.push({ type: "delete", ref, expectedRevision: rec.revision });
+      audit.push({ type: "toolbox.proposal.remove", subject: ref, detail: { proposalId: old, author, target: p.target, state: p.state, ...(p.released === undefined ? {} : { released: p.released.version }), why: `the author's oldest ended proposal beyond the ${PROPOSAL_LIMITS.settledPerAuthor} kept` } });
+      // Its kept text is gone already when it ended; one left behind goes with it.
+      const text = await this.#replaceText(old, undefined);
+      changes.push(...text);
+      audit.push(...proposalTextAudit(text, "removed with the proposal"));
     }
-    return [{ type: "update", ref: iref, expectedRevision: index.revision, body: { author, pending: pending.filter((x) => x !== id), ...(kept === undefined ? {} : { settled: kept }) } as unknown as JsonObject }, ...removals];
+    return { changes: [{ type: "update", ref: iref, expectedRevision: index.revision, body: { author, pending: pending.filter((x) => x !== id), ...(kept === undefined ? {} : { settled: kept }) } as unknown as JsonObject }, ...changes], audit };
   }
 
   async #update(by: Principal, op: string, commandId: string, id: string, expectedRevision: number | undefined, payload: JsonObject, mutate: (cur: ToolboxProposalBody, revision: number) => Promise<{ body: ToolboxProposalBody; changes: Change[]; final?: boolean }>): Promise<{ round: number }> {
@@ -686,9 +700,9 @@ export class ToolboxProposalService {
         if (expectedRevision !== undefined && found.revision !== expectedRevision) throw new DomainError("stale_revision", `the proposal is at revision ${found.revision}, not ${expectedRevision}`, { currentRevision: found.revision });
         const out = await mutate(found.body as unknown as ToolboxProposalBody, found.revision);
         round = out.body.round;
-        const unindex = out.final === true ? await this.#unindex(out.body.author, id, out.body.state !== "accepted" || out.body.released !== undefined) : [];
-        const audit = proposalTextAudit([...out.changes, ...unindex], out.body.state);
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex], ...(audit.length === 0 ? {} : { audit }), detail: { proposalId: id, state: out.body.state }, contention: async () => new DomainError("stale_revision", "the proposal changed at the same moment; read it again") };
+        const unindex = out.final === true ? await this.#unindex(out.body.author, id, out.body.state !== "accepted" || out.body.released !== undefined) : { changes: [], audit: [] };
+        const audit = [...proposalTextAudit(out.changes, out.body.state), ...unindex.audit];
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: out.body as unknown as JsonObject }, ...out.changes, ...unindex.changes], ...(audit.length === 0 ? {} : { audit }), detail: { proposalId: id, state: out.body.state }, contention: async () => new DomainError("stale_revision", "the proposal changed at the same moment; read it again") };
       },
     }));
     return { round };
