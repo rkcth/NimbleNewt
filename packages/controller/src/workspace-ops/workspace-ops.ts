@@ -147,7 +147,7 @@ export interface WorkspaceRecordBody {
   readonly returned?: { readonly paths: readonly string[]; readonly to?: string; readonly cycles?: number; readonly limit?: number; readonly escalated?: boolean };
 }
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
-export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean; /** Whether the host made or found the commit as a review-gate permit commit (a reviewer's approval). Absent on records made before this was kept. */ readonly permitted?: boolean }
+export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean; /** True only when the controller asked for the permit (a reviewer's approval) and the host made or found the commit as a review-gate permit commit; absent otherwise and on records made before this was kept. */ readonly permitted?: boolean }
 export interface WorkspaceAnswer extends WorkspaceRecordBody { readonly id: string; readonly replayed: boolean }
 
 export interface WorkspaceDeps {
@@ -395,6 +395,8 @@ export class WorkspaceOpService {
     const a = await this.#deps.approvalOf(value);
     if (a === undefined || a.taskId !== taskId) throw new DomainError("not_found", `submission ${value} is not a code submission of task ${taskId}`);
     if (!a.approved || a.approvedBy === undefined) throw new DomainError("review_invalid", `submission ${value} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); it is committed only once a reviewer approves it`, { field: "submissionId" });
+    // The submission service refuses a review of one's own submission when it is recorded (card Q01b); an approval that still names the author is not an approval (card H12o, permit slice: it would open the review gate).
+    if (a.submittedBy !== undefined && a.approvedBy === a.submittedBy) throw new DomainError("review_invalid", `submission ${value} is approved only by its own author; it is committed only once another reviewer approves it`, { field: "submissionId" });
     if (!OID.test(a.base) || !OID.test(a.tree)) throw new DomainError("invalid_command", `submission ${value} does not name a base commit and a tree`, { field: "submissionId" });
     return { id: value, base: a.base, tree: a.tree, approvedBy: a.approvedBy.slice(0, 200) };
   }
@@ -558,7 +560,7 @@ export class WorkspaceOpService {
     // An approved submission already committed (card H12o) is answered from its record: the host is not asked and nothing is made quiet, so asking again never makes a second commit.
     if (body.operation === "release" && body.submission !== undefined) {
       const made = await this.submissionCommit(body.submission.id);
-      if (made !== undefined) return done("done", { summary: `submission ${body.submission.id} was already committed as ${made.commitId.slice(0, 12)} (request ${made.requestId}); nothing was done`, detail: json({ committed: true, alreadyRecorded: true, commit: made.commitId, parent: made.parent, tree: made.tree, submission: made.submissionId, changed: false }) });
+      if (made !== undefined) return done("done", { summary: `submission ${body.submission.id} was already committed as ${made.commitId.slice(0, 12)} (request ${made.requestId})${made.permitted === true ? " as a review-gate permit commit" : ""}; nothing was done`, detail: json({ committed: true, alreadyRecorded: true, commit: made.commitId, parent: made.parent, tree: made.tree, submission: made.submissionId, permitted: made.permitted === true, changed: false }) });
     }
     let port: WorkspacePort | undefined;
     try { port = await this.#deps.portOf(body.taskId); } catch (error) { return done("failed", { summary: `no host could be found: ${safe(error, WORKSPACE_LIMITS.summary)}` }); }
@@ -734,7 +736,7 @@ export class WorkspaceOpService {
     const d = (final.detail ?? {}) as { committed?: unknown; alreadyRecorded?: unknown; commit?: unknown; parent?: unknown; tree?: unknown; submission?: unknown; recovered?: unknown; permitted?: unknown };
     if (d.committed !== true || d.alreadyRecorded === true || d.submission !== s.id || typeof d.commit !== "string" || !OID.test(d.commit) || d.parent !== s.base || d.tree !== s.tree) return [];
     if ((await this.#runner.get(SUBMISSION_COMMIT, s.id)) !== undefined) return [];
-    const body: SubmissionCommitBody = { submissionId: s.id, taskId: final.taskId, commitId: d.commit, parent: s.base, tree: s.tree, requestId, at: this.#runner.now(), recovered: d.recovered === true, ...(d.permitted === true ? { permitted: true } : {}) };
+    const body: SubmissionCommitBody = { submissionId: s.id, taskId: final.taskId, commitId: d.commit, parent: s.base, tree: s.tree, requestId, at: this.#runner.now(), recovered: d.recovered === true, ...(d.permitted === true && reviewerApproved(s.approvedBy) ? { permitted: true } : {}) };
     return [{ type: "create", ref: { kind: SUBMISSION_COMMIT, id: s.id }, body: json(body) }];
   }
 

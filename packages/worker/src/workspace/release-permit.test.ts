@@ -147,3 +147,24 @@ test("a permit commit is permitted only for its own task: the same commit checke
     assert.equal((await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-other", range: { base: s.base, head: r.head() } })).length, 1);
   } finally { await r.done(); }
 });
+
+test("an agent's own commit never gets the permit: a moved base refuses a permit release, and an agent commit with typed permit marks still refuses the landing", { skip }, async () => {
+  const r = await rig(true);
+  try {
+    await r.edit({ "src/a.ts": "export const a = 2;\n" });
+    const s = await staged(r);
+    // The agent commits exactly the approved tree itself, typing the permit's marks: the head moved off the approved base, so the release refuses and nothing is listed.
+    sh(r.made.checkout, ...r.g, "add", "-A");
+    sh(r.made.checkout, ...r.g, "commit", "-q", "-m", `agent's own\n\nNimbleNewt-Request: wsr-forgedforgedforgedfo\nNimbleNewt-Task: tsk-one\nNimbleNewt-Submission: ${S}`);
+    const head = r.head();
+    assert.equal(sh(r.made.checkout, ...r.g, "rev-parse", "HEAD^{tree}"), s.tree);
+    const out = await r.ws.port.run(releaseCall(s, true));
+    assert.equal(out.ok, false, JSON.stringify(out));
+    assert.equal(r.head(), head);
+    assert.equal(await ledger(r), "");
+    assert.deepEqual(await r.git.unpermitted({ gitDir: r.made.gitDir, taskId: "tsk-one" }), [head]);
+    const landed = await r.ws.port.run(call("landing", { submission: sub(r.base, s.tree) }));
+    assert.equal(landed.ok, false, JSON.stringify(landed));
+    assert.equal(await readFile(join(r.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+  } finally { await r.done(); }
+});

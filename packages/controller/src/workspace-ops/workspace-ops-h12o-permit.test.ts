@@ -32,7 +32,7 @@ for (const backend of backends) {
     const task = (await projects.createTask({ commandId: "t", actor: owner.id, projectId: project, title: "T" })).id;
     const other = (await projects.createTask({ commandId: "t2", actor: owner.id, projectId: project, title: "T2" })).id;
     // The submissions as `SubmissionService.approvalOf` would answer: S1 of `task`, S2 of `other`.
-    const approvals = new Map<string, { taskId: string; base: string; tree: string; approved: boolean; approvedBy?: string; reason?: string }>([
+    const approvals = new Map<string, { taskId: string; base: string; tree: string; approved: boolean; approvedBy?: string; reason?: string; submittedBy?: string }>([
       [S1, { taskId: task, base: BASE, tree: TREE, approved: false, reason: "no reviewer has approved it yet" }],
       [S2, { taskId: other, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev" }],
     ]);
@@ -61,16 +61,21 @@ for (const backend of backends) {
       assert.equal(first.state, "done", first.summary);
       assert.equal(r.calls[0]!.permit, true);
       assert.equal((await svc.submissionCommit(S1))?.permitted, true);
-      // Asking again is answered from the record and does not ask the host.
-      await svc.request(r.owner, { commandId: "p2", operation: "release", taskId: r.task, reason: "again", submissionId: S1 });
+      // Asking again is answered from the record and does not ask the host; the answer says it is a permit commit.
+      const again = await svc.request(r.owner, { commandId: "p2", operation: "release", taskId: r.task, reason: "again", submissionId: S1 });
       assert.equal(r.calls.length, 1);
-      // The one-agent approval (no reviewer judged it): no permit asked, whatever the host answers; a host that answers `permitted` for it is recorded as the host said only if it did.
+      assert.deepEqual([(again.detail as Record<string, unknown>)["alreadyRecorded"], (again.detail as Record<string, unknown>)["permitted"]], [true, true]);
+      assert.match(again.summary ?? "", /permit commit/);
+      // The one-agent approval (no reviewer judged it): no permit asked, and a host that answers `permitted` anyway is never recorded as having made a permit commit (the controller did not ask for one).
       r.approvals.set(S2, { taskId: r.other, base: BASE, tree: TREE, approved: true, approvedBy: "review_disabled_single_agent" });
-      r.setAnswer(async (call) => committed(call));
+      r.setAnswer(async (call) => { const o = committed(call); return { ...o, detail: { ...(o as { detail: object }).detail, permitted: true } } as WorkspaceOutcome; });
       const single = await svc.request(r.owner, { commandId: "p3", operation: "release", taskId: r.other, reason: "commit", submissionId: S2 });
       assert.equal(single.state, "done", single.summary);
       assert.equal(r.calls[1]!.permit, undefined, "no permit is asked for a one-agent approval");
       assert.equal((await svc.submissionCommit(S2))?.permitted, undefined);
+      const singleAgain = await svc.request(r.owner, { commandId: "p3b", operation: "release", taskId: r.other, reason: "again", submissionId: S2 });
+      assert.deepEqual([r.calls.length, (singleAgain.detail as Record<string, unknown>)["permitted"]], [2, false]);
+      assert.doesNotMatch(singleAgain.summary ?? "", /permit commit/);
       // A plain release never carries it.
       r.setAnswer(async () => ({ ok: true, summary: "plain", detail: { committed: true, commit: OTHER, parent: BASE, tree: TREE, files: 1, changed: true } }));
       const plain = await svc.request(r.owner, { commandId: "p4", operation: "release", taskId: r.other, reason: "plain" });
@@ -89,6 +94,22 @@ for (const backend of backends) {
       assert.equal(out.state, "done");
       assert.equal(r.calls[0]!.permit, true);
       assert.equal((await svc.submissionCommit(S1))?.permitted, undefined, "the record never claims a permit the host did not confirm");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: an approval that names the submission's own author is refused before anything is recorded or asked (card H12o, permit slice)`, async () => {
+    const r = await rig();
+    try {
+      r.approvals.set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:ann", submittedBy: "agent:ann" });
+      const svc = r.service();
+      await refuses("review_invalid", () => svc.request(r.owner, { commandId: "o1", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 }), /own author/);
+      assert.equal(r.calls.length, 0);
+      assert.equal(await r.recorded("o1"), undefined);
+      // Another reviewer's approval of the same submission is a permit.
+      r.approvals.set(S1, { ...r.approvals.get(S1)!, approvedBy: "agent:rev", submittedBy: "agent:ann" });
+      const ok = await svc.request(r.owner, { commandId: "o2", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 });
+      assert.equal(ok.state, "done", ok.summary);
+      assert.equal(r.calls[0]!.permit, true);
     } finally { await r.store.close(); }
   });
 }
