@@ -88,6 +88,8 @@ export interface QaGateView { readonly taskId: string; readonly submissionId: st
 export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
 /** The director sign-off of a code submission as the landing gate needs it (`landingDirectorGate`): the newest sign-off on that submission, when there is one. */
 export interface DirectorGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string } }
+/** The defects reported against a task's deliverables as the landing gate needs them (`landingDefectsGate`): how many in all, how many are not finished, and the first few of those. */
+export interface DefectsGateView { readonly taskId: string; readonly checked: number; readonly unresolved: number; readonly items: readonly { readonly id: string; readonly severity: string; readonly state: string; readonly finding: string; readonly deliverableTitle: string }[] }
 export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
 export interface LandingGateDeps {
   /** The project's required checks (`IntegrationPolicyService.effective`). */
@@ -102,6 +104,8 @@ export interface LandingGateDeps {
   readonly docsGate?: (taskId: string, submissionId: string) => Promise<DocsGateView | undefined>;
   /** The newest director sign-off of a code submission (`landingDirectorGate`); absent: the `director` check is not collected (`not_run`). */
   readonly directorGate?: (submissionId: string) => Promise<DirectorGateView | undefined>;
+  /** The defects of a task (`landingDefectsGate`); absent: the `defects` check is not collected (`not_run`). */
+  readonly defectsGate?: (taskId: string) => Promise<DefectsGateView | undefined>;
   readonly now: () => string;
 }
 
@@ -164,6 +168,7 @@ export class LandingGate {
       else if (check === "qa") results.push(await this.#qa(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "docs") results.push(await this.#docs(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "director") results.push(await this.#director(call, tree, patchId, bound, reviewed, reviewProblem, report));
+      else if (check === "defects") results.push(await this.#defects(call, bound));
       else results.push({ check, result: "not_run", ...bound, summary: `the ${check} check is not collected at landing yet, so it has not run for this tree` });
     }
     const compared = this.#claims(results, reviewed, tree);
@@ -240,6 +245,34 @@ export class LandingGate {
     if (a.patchId !== computed) return no("fail", `${call.submissionId} names patch ${String(a.patchId ?? "none").slice(0, 12)}, but its base and tree make patch ${computed.slice(0, 12)}; a new submission and a new director sign-off are needed`);
     if (computed !== patchId) return no("fail", `the change differs from what the director signed off: that is patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; a new director sign-off is needed`);
     return no("pass", `signed off by ${String(g.signoff.by)} for ${a.tree !== tree ? `tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : "this tree"}`);
+  }
+
+  /**
+   * `defects` (card Q04 fifth slice): no defect reported against the task's deliverables may be unfinished (`open`, `repair-submitted` or `escalated`). Resolved, withdrawn and owner-accepted (`overridden`) defects do not
+   * block: the owner's own decision stands. Defects belong to versions of deliverables, not to a code tree, so this check is not bound to the patch; it is read after the host's run, as the others are.
+   */
+  async #defects(call: { readonly taskId: string }, bound: { boundTo: string }): Promise<LandingCheckEntry> {
+    const no = (result: LandingCheckResult, why: string): LandingCheckEntry => ({ check: "defects", result, ...bound, summary: clip(why, LANDING_GATE_LIMITS.summary) });
+    if (this.#deps.defectsGate === undefined) return no("not_run", "the defects check is not collected at landing yet, so it has not run for this tree");
+    let g: DefectsGateView | undefined;
+    try { g = await this.#deps.defectsGate(call.taskId); } catch (error) { return no("not_run", `the defects of the task could not be read: ${String((error as Error)?.message ?? error)}`); }
+    if (g === undefined || g.taskId !== call.taskId || !Array.isArray(g.items) || typeof g.unresolved !== "number" || typeof g.checked !== "number" || g.checked < g.unresolved) return no("not_run", "the defects of the task could not be read");
+    if (g.unresolved > 0) {
+      const head = `${g.unresolved} of ${g.checked} defect(s) of this task are not finished: `;
+      const room = LANDING_GATE_LIMITS.summary - 20;
+      let names = "";
+      let shown = 0;
+      for (const p of g.items.slice(0, 5)) {
+        const part = `${String(p.id)} (${String(p.severity)}, ${String(p.state)})`;
+        const next = shown === 0 ? part : `${names}; ${part}`;
+        if (head.length + next.length > room) break;
+        names = next;
+        shown += 1;
+      }
+      const more = g.unresolved - shown;
+      return no("fail", `${head}${names}${more > 0 ? `; and ${more} more` : ""}`);
+    }
+    return no("pass", g.checked === 0 ? "no defect was reported against this task's deliverables" : `all ${g.checked} defect(s) of this task are resolved, withdrawn or accepted as they are by the owner`);
   }
 
   async #docs(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport): Promise<LandingCheckEntry> {

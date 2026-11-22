@@ -4021,7 +4021,7 @@ Arguments:
 - `project`: the project ID
 - `landing` (optional): `integration-branch`, `main-automatic` or `human-promotes`
 - `integrator` (optional): `agent` or `human`
-- `requiredChecks` (optional): list of `tests`, `review`, `qa`, `docs`, `director`
+- `requiredChecks` (optional): list of `tests`, `review`, `qa`, `docs`, `director`, `defects`
 - `refreshRounds` (optional): 0 to 10: how often an author refreshes onto a moved landing branch before its place in the landing queue is reserved (card P10)
 - `expectedRevision` (optional): the revision you read
 

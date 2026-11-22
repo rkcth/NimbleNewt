@@ -10,7 +10,7 @@ export type Landing = (typeof LANDINGS)[number];
 export const INTEGRATORS = ["agent", "human"] as const;
 export type Integrator = (typeof INTEGRATORS)[number];
 /** The checks a landing may require; each is run or collected by a later card (P09). */
-export const CHECKS = ["tests", "review", "qa", "docs", "director"] as const;
+export const CHECKS = ["tests", "review", "qa", "docs", "director", "defects"] as const;
 export type Check = (typeof CHECKS)[number];
 
 export interface IntegrationSettings {

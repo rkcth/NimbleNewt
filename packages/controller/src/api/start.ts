@@ -95,7 +95,7 @@ import { ActivityService, ReplayLimitsService, ReplayService, ReplaySimulationSe
 import { replayResolvers } from "../activity/replay-resolvers.js";
 import { BoundedReviewerModel, RESUME_REVIEWER_ROUTE_SETTING, REVIEWER_ROUTE_SETTING, ReportInterrogator, WorkEndService, reviewerRoute, checkpointVerdict, dispatcherEndingPorts, dispatcherLanding, dispatcherStage, recordedSubmission, stagedSubmit, type EndingAttempt, type Landed, type StagedWork } from "../work-end/index.js";
 import { HandoffService, PauseService, StopService, agentsUnder, controllerHandoffSources, dispatchStopPorts, responsibilityHandover, describeReassigned, hostLocalWork, swarmDescendantsInfo, swarmDescendantsOf, type LocalWork } from "../lifecycle/index.js";
-import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, SubmissionService, attemptOfAgents, landingDirectorGate, landingDocsGate, landingQaGate } from "../submissions/index.js";
+import { AcceptanceService, DEFECT_CYCLE_DEFAULT, DEFECT_CYCLE_SETTING, DefectService, DocObligationService, QaEvidenceService, SubmissionService, attemptOfAgents, landingDefectsGate, landingDirectorGate, landingDocsGate, landingQaGate } from "../submissions/index.js";
 import { ReviewService } from "../review/index.js";
 import { CutoverService, DifficultyService, FallbackService, RoutingService, selectRoute, targetOf } from "../routing/index.js";
 import { LANDING_SETTING_KEYS, landingPolicyFrom } from "./landing-policy.js";
@@ -982,6 +982,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       docsGate: async (taskId, submissionId) => landingDocsGate(docObligations)(taskId, submissionId),
       // Card P09 (sixth slice): the `director` check reads the newest director sign-off recorded on the submission (the existing signoff submissions; no new approval path).
       directorGate: async (submissionId) => landingDirectorGate(submissions)(submissionId),
+      // Card Q04 (fifth slice): the `defects` check reads the defects reported against the task's deliverables (finished ones do not block; an owner-accepted one stands as the owner decided).
+      defectsGate: async (taskId) => landingDefectsGate(defects)(taskId),
       now: () => new Date().toISOString(),
     });
     const blobStore = options.artifacts === undefined ? undefined : await FileBlobStore.open({ directory: options.artifacts.directory });

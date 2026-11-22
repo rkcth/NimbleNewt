@@ -34,10 +34,11 @@ for (const backend of backends) {
 
       // A change by the owner is what the view says next, in plain words (the list replaces the old one).
       const was = await integration.get(w.owner, w.project);
-      await integration.set(w.owner, { commandId: "is-1", projectId: w.project, requiredChecks: ["review", "director"], integrator: "human", refreshRounds: 5, expectedRevision: was.revision } as never);
+      await integration.set(w.owner, { commandId: "is-1", projectId: w.project, requiredChecks: ["review", "director", "defects"], integrator: "human", refreshRounds: 5, expectedRevision: was.revision } as never);
       const now = (await status.landingSettingsLines(w.owner, w.project))!.lines.map((l) => l.text).join("\n");
       assert.match(now, /Checks required before work lands: review \(an independent reviewer approved the change\); director \(/, now);
       assert.doesNotMatch(now, /tests \(/, now);
+      assert.match(now, /; defects \(no defect reported against the task's deliverables is still open, awaiting a check or escalated; owner-accepted and withdrawn ones do not count\)\./, now);
       assert.match(now, /Who integrates: a person\./, now);
       assert.match(now, /up to 5 time\(s\)/, now);
       assert.match(now, /set for this project by you/, now);

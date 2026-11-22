@@ -214,6 +214,8 @@ test("the prompt tells the model how to read a project's required landing checks
   assert.match(system, /integration\.set with requiredChecks and, only when the owner names a project other than the one in focus, projectName/);
   assert.match(system, /\blanding_settings\b[^"]*only the owner can read it/);
   assert.ok(system.includes("landing_settings"), "the status kind is listed with its keys");
+  // The defects check (card Q04 fifth slice) is one of the checks the model may list, with what it means and what does not block.
+  assert.match(system, /defects \(no defect reported against the task's deliverables is still open, awaiting a check or escalated; one the owner accepted as it is, a resolved one and a withdrawn one do not block\)/);
   // A focus switch's evidence is the owner's phrase naming the project: a bare name is one word, which the chat refuses as evidence, and the view would then be read for the old focus.
   assert.match(system, /"switch_focus"[^\n]*"evidence":<the owner's phrase that names the project, two words or more, copied exactly>/);
 });
