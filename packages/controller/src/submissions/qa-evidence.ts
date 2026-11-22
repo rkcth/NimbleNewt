@@ -75,8 +75,9 @@ export interface QaRecheckBody {
 }
 
 /**
- * `auto` (absent unless the QA service's own check wrote last): the base command ID, the contract version and the number of chunks of the last automatic check, so a later automatic call can make up what a stop
- * lost between its writes and its follow-ups. Any other write of the index (new evidence, a check by a caller) leaves it out, which also means "nothing is owed any more".
+ * `auto` (absent until an automatic check of the task wrote): the base command ID, the contract version and the number of chunks of the last automatic check that wrote, so a later automatic call can make up
+ * what a stop lost between its writes and its follow-ups. Every other write of the index (new evidence, a check by a caller) carries it over unchanged, so such a write between a stopped automatic check and
+ * the next automatic call does not lose that check's notices and documentation hook; only the next automatic check that writes replaces it (after making it up). Absent reads as "nothing owed".
  */
 interface IndexBody { readonly ids: readonly string[]; readonly rechecks: readonly string[]; readonly auto?: { readonly id: string; readonly version: number; readonly chunks: number } }
 
@@ -154,6 +155,8 @@ const NOTICE_CHARS = 200;
 const QA_SERVICE = { id: "service:qa-evidence", kind: "service", name: "qa-evidence", grants: [] } as unknown as Principal;
 export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, projectScanReads: 20, chunk: 40, supersedeChunk: 80, maxChunks: 12 } as const;
 
+/** Prefix of the hashed text of a later chunk's command ID: 121 characters, so the text is longer than any command ID `scopedCommandId` takes (at most 120). */
+const CHUNK_SEED = "qa.evidence.check/chunk/".padEnd(121, "/");
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hidden = (what: string): never => { throw new DomainError("not_found", `no such ${what}`); };
 const json = (v: object): JsonObject => JSON.parse(JSON.stringify(v)) as JsonObject;
@@ -374,7 +377,7 @@ export class QaEvidenceService {
           changes.push({ type: "update", ref: { kind: "qa-recheck", id: r }, expectedRevision: found.revision, body: json({ ...rb, state: "done", doneBy: id, doneAt: now }) });
         }
         if (contract.revision !== undefined) changes.push({ type: "check", ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision });
-        const nextIndex = json({ ids: [...index.body.ids, id], rechecks });
+        const nextIndex = json({ ids: [...index.body.ids, id], rechecks, ...(index.body.auto === undefined ? {} : { auto: index.body.auto }) });
         changes.push(index.revision === undefined ? { type: "create", ref: { kind: "qa-evidence-index", id: taskId }, body: nextIndex } : { type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: nextIndex });
         outcome = { source, settled, open };
         return {
@@ -441,11 +444,12 @@ export class QaEvidenceService {
   }
 
   /**
-   * The stored command ID of chunk `n` of a check: the first chunk is the command itself, later ones are derived from it (and the chunk number), so a repeat finds each one where it was. The separator is `/`,
-   * which a command ID cannot hold, so a derived ID never equals the scoped ID of another command of the same caller (with `:`, the command `x:chunk:1` would have been chunk 1 of `x`).
+   * The stored command ID of chunk `n` of a check: the first chunk is the command itself, later ones are derived from it (and the chunk number), so a repeat finds each one where it was. The hashed text is
+   * longer than 120 characters, which `scopedCommandId` refuses, so a derived ID never equals the scoped ID of any command of the same caller (with `<id>:chunk:<n>`, the command `x:chunk:1` would have been
+   * chunk 1 of `x`; with `/` it could still be met through a service that does not apply the command-ID grammar before scoping, such as `summary.create`).
    */
   #chunkId(principalId: string, commandId: string, n: number): string {
-    return n === 0 ? scopedCommandId(principalId, commandId) : `${principalId}:${createHash("sha256").update(`${commandId}/chunk/${n}`).digest("hex").slice(0, 32)}`;
+    return n === 0 ? scopedCommandId(principalId, commandId) : `${principalId}:${createHash("sha256").update(`${CHUNK_SEED}${n}/${commandId}`).digest("hex").slice(0, 32)}`;
   }
 
   /**
@@ -470,10 +474,11 @@ export class QaEvidenceService {
       }
       return out;
     };
-    // What an earlier automatic check wrote and may not have followed up (a stop between its write and its notices): made up first, from the marker it left in the index.
+    // What an earlier automatic check wrote and may not have followed up (a stop between its write and its notices): made up first, from the marker it left in the index. Whatever contract version it ran
+    // under: the make-up reads only that check's own audit entries, sends notices only for re-checks still pending and flags documents only when their gate fails now, so an older marker is as safe to make up.
     if (auto !== undefined) {
       const marker = (await this.#index(taskId)).body.auto;
-      if (marker !== undefined && marker.version === auto.version && marker.id !== commandId && typeof marker.id === "string" && marker.id.length <= 120 && Number.isInteger(marker.chunks)) {
+      if (marker !== undefined && marker.id !== commandId && typeof marker.id === "string" && marker.id.length <= 120 && Number.isInteger(marker.chunks)) {
         for (let n = 0; n < Math.min(marker.chunks, QA_LIMITS.maxChunks); n++) if (await this.#makeUp(this.#chunkId(QA_SERVICE.id, marker.id, n), taskId) === undefined) break;
       }
     }
@@ -601,7 +606,7 @@ export class QaEvidenceService {
           made.rechecks.push({ id: recheckId, projectId: f.body.projectId, text: recheckText(f.id, taskId, f.reasons, f.body.recordedBy) });
         }
         if (index.revision === undefined) throw new DomainError("integrity", `the QA evidence index of ${taskId} is missing`);
-        changes.push({ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks, ...(auto === undefined ? {} : { auto }) }) });
+        changes.push({ type: "update", ref: { kind: "qa-evidence-index", id: taskId }, expectedRevision: index.revision, body: json({ ids: index.body.ids, rechecks, ...(auto !== undefined ? { auto } : index.body.auto !== undefined ? { auto: index.body.auto } : {}) }) });
         report(made);
         return { ref: { kind: "qa-evidence-index", id: taskId }, creates: false, changes, detail: { taskId, invalidated: made.invalidated } };
       },

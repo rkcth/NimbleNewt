@@ -4,7 +4,7 @@ import { derivedId } from "../domain/ids.js";
 import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { PrincipalService, type Principal } from "../security/index.js";
+import { PrincipalService, scopedCommandId, type Principal } from "../security/index.js";
 import type { ControllerStorage, JsonObject, OperationInput } from "../storage/types.js";
 import { NotificationService } from "../notifications/index.js";
 import { QaEvidenceService } from "./index.js";
@@ -194,7 +194,67 @@ for (const backend of backends) {
     } finally { await world.close(); }
   });
 
-  test(`${backend.name}: the evidence changes between a stopped check and its repeat: the repeat invalidates what is stale now, claims only records that are invalidated, and a caller's own command ID ending in ':chunk:1' is not mistaken for a chunk (card Q02, batch fix)`, async () => {
+  test(`${backend.name}: a record, a caller's check and a contract change between a stopped automatic check and the next automatic call do not lose that check's notices and documentation hook (card Q02, batch fix second review)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      const roles = new Map<string, string[]>();
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "qa", grants: [{ action: "task.read", project }] });
+      const qa: Principal = await principals.authenticate((await principals.issueCredential(owner, "agent:qa")).token);
+      roles.set(qa.id, ["qa"]);
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const plant = async (kind: string, id: string, body: object, update = false): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id, update }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
+      };
+      const notifications = NotificationService.withEpoch(world.storage, projects.epoch, options);
+      const hooked = new Map<string, number>();
+      let down = true;
+      const svc = QaEvidenceService.withEpoch(world.storage, projects.epoch, {
+        rolesOf: async (id) => roles.get(id) ?? [],
+        notify: async (x) => { if (down) throw new Error("not delivered"); await notifications.emitFromController({ commandId: x.commandId, kind: "maintenance", level: "notice", ref: { kind: "qa-recheck", id: x.recheckId }, detail: x.text, projectId: x.projectId }); },
+        invalidated: async (e) => { if (down) throw new Error("not run"); for (const v of e.evidence) hooked.set(v.evidenceId, (hooked.get(v.evidenceId) ?? 0) + 1); },
+      }, options);
+      const sub = derivedId("sbm", cid("sub"));
+      await plant("submission", sub, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-18T09:00:00.000Z", makesCommit: true, base: "a".repeat(40), tree, patchId: "c".repeat(40), evidence: [] });
+      const contract = (v: number, criteria: string[]) => ({ taskId: task, projectId: project, version: v, changedBy: owner.id, acceptanceCriteria: criteria, priority: 5, budget: {}, workClass: "P", requiredEvidence: [], checks: [{ name: "unit", run: ["true"] }], permissions: [], recovery: "native-continuation" });
+      const setContract = async (v: number): Promise<void> => {
+        const criteria = ["works", ...Array.from({ length: v - 1 }, (_, i) => `c${i}`)];
+        await plant("task-contract", task, contract(v, criteria), v > 1);
+        await plant("task-contract-version", `${task}.${v}`, { ...contract(v, criteria), changedAt: `2026-11-18T08:0${v}:00.000Z` });
+      };
+      // Older code of the task: evidence recorded on it does not settle the re-checks of the newer submission (independent evidence on the same code would, and then no notice is owed).
+      const old = derivedId("sbm", cid("sub"));
+      await plant("submission", old, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: "agent:ann", submittedAt: "2026-11-18T08:30:00.000Z", makesCommit: true, base: "a".repeat(40), tree: "f".repeat(64), patchId: "d".repeat(40), evidence: [] });
+      const add = async (v: number, on = sub): Promise<string> => (await svc.record(qa, { commandId: cid("r"), submissionId: on, criteriaRevision: v, decisions: [], environment: `env-${n}`, observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] })).id;
+      const queued = async (recheckId: string): Promise<string[]> => (await world.storage.listAggregates("notification-item", { limit: 1000 }))
+        .filter((a) => (a.body as { ref?: { id?: string } }).ref?.id === recheckId).map((a) => (a.body as { state: string }).state);
+      await setContract(1);
+      const first = [await add(1), await add(1), await add(1)];
+
+      // The automatic check after a contract change writes; its notices and documentation hook are lost.
+      await setContract(2);
+      const lost = await svc.contractChanged(task);
+      assert.deepEqual([...lost.invalidated].sort(), [...first].sort());
+      // Before the next automatic call: a new record, then (after a further contract change) a caller's check that invalidates it. Both write the evidence index.
+      const later = await add(2, old);
+      await setContract(3);
+      assert.deepEqual((await svc.check(qa, { commandId: cid("k"), taskId: task })).invalidated, [later]);
+      assert.deepEqual([hooked.size, (await world.storage.listAggregates("notification-item", { limit: 1000 })).length], [0, 0], "nothing was delivered yet");
+
+      // The next automatic call (the decision pass, under the newer contract version) still makes up the stopped automatic check.
+      down = false;
+      assert.deepEqual(await svc.decisionChanged(task), { taskId: task, invalidated: [], rechecks: [] });
+      assert.deepEqual([...hooked.keys()].sort(), [...first].sort(), "the documentation hook for the automatic check's records (the caller's own check is made up by its own repeat)");
+      for (const r of lost.rechecks) assert.deepEqual(await queued(r), ["queued"], "the owner is told about each re-check");
+    } finally { await world.close(); }
+  });
+
+  test(`${backend.name}: the evidence changes between a stopped check and its repeat: the repeat invalidates what is stale now, claims only records that are invalidated, and a caller's own command ID ending in ':chunk:1' (or an operation stored under the scoped ID of '<id>/chunk/1') is not mistaken for a chunk (card Q02, batch fix)`, async () => {
     const world = await backend.open();
     try {
       const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
@@ -227,6 +287,8 @@ for (const backend of backends) {
       const k = cid("k");
       // The caller's own earlier command whose ID is the check's ID followed by ':chunk:1'.
       const ids = [await add(1, `${k}:chunk:1`)];
+      // And an operation of the same caller stored under the scoped ID of '<k>/chunk/1' and '<k>/chunk/2', as a service that scopes the caller's command ID without the command-ID grammar would store it.
+      for (const suffix of ["/chunk/1", "/chunk/2"]) await runner.command("test.other", { commandId: scopedCommandId(qa.id, `${k}${suffix}`), actor: qa.id }, async () => ({ payload: { suffix }, build: async () => ({ ref: { kind: "test-other", id: `x${suffix.length}${suffix.at(-1)}` }, creates: true, changes: [{ type: "create" as const, ref: { kind: "test-other", id: `x${suffix.length}${suffix.at(-1)}` }, body: {} }], detail: {} }) }));
       for (let i = 0; i < MANY; i++) ids.push(await add(1));
 
       // Grows: the check stops after its first chunk; then one more record is added and the contract changes again, so it is stale too.

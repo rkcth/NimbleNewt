@@ -183,12 +183,12 @@ for (const backend of backends) {
       assert.deepEqual(await items(recheck), ["settled"], "a cleared notice is not raised again");
       assert.equal(hookCalls.length, 3, "a notice the store refuses does not stop the rest of the make-up (the documentation check still runs)");
 
-      // A record added since moves the index on: the next automatic call owes nothing for the old check (only a repeat of its own command ID does).
+      // A record added since keeps the marker of the last automatic check (Q02 batch fix, second review): the next automatic call still makes it up, which re-sends nothing the owner cleared.
       await svc.record(qa, { commandId: cid("r"), ...ev, criteriaRevision: 2, environment: "macos" });
       const calls = hookCalls.length;
       await svc.contractChanged(task);
-      await svc.decisionChanged(task);
-      assert.equal(hookCalls.length, calls);
+      assert.deepEqual([hookCalls.length, hookCalls.at(-1)], [calls + 1, [rec.id]]);
+      assert.deepEqual(await items(recheck), ["settled"]);
 
       // The same for a check the decision pass started: lost after its write, made up by the next pass.
       await setContract(3, ["works", "is fast", "is small"]);
