@@ -212,6 +212,24 @@ const ALLOWED: Readonly<Record<SubmissionKind, readonly string[]>> = {
 const LIST_PAGE = 200;
 const LIST_READS = 10;
 type Item = SubmissionBody & { id: string; revision: number };
+
+/** One task's newest code submission in the project-wide waiting view (`SubmissionService.waiting`). */
+export interface WaitingItem {
+  readonly taskId: string; readonly title: string; readonly submissionId: string; readonly submittedBy: string; readonly submittedAt: string; readonly tree: string;
+  readonly state: "needs_review" | "changes_asked" | "signoff_declined" | "needs_signoff" | "ready";
+  readonly approvedBy?: string;
+}
+export interface WaitingView {
+  readonly projectId: string;
+  /** True when the caller is an agent: only the code it submitted itself is read. */
+  readonly ownOnly: boolean;
+  readonly counts: { readonly needs_review: number; readonly changes_asked: number; readonly signoff_declined: number; readonly needs_signoff: number; readonly ready: number };
+  readonly items: readonly WaitingItem[];
+  readonly truncated: boolean;
+  readonly scanLimited: boolean;
+}
+/** The most tasks one waiting view reads (newest code first). */
+export const WAITING_TASKS = 200;
 const MAX_EVIDENCE = 50;
 const MAX_REPORT = 8000;
 
@@ -499,6 +517,57 @@ export class SubmissionService {
       items.push({ ...body, ...(body.report === undefined ? {} : { report: redactText(body.report) }), id: found.id, revision: found.revision, createdAt: found.createdAt });
     }
     return { items };
+  }
+
+  /**
+   * The code waiting across a project (card Q01b fifth slice): for each task of the project that is not done or cancelled, its newest code submission and where review and the director's sign-off stand on it. Read only; it writes nothing.
+   * Who sees what: the owner sees every task; an agent with `task.read` in the project (never a task credential, which is scoped to one task) sees only the code it submitted itself, because the review and sign-off state
+   * of someone else's code is not its to read (the same rule as the task's `submissions` view). A caller that may not read the project gets `not_found`. Bounded as `list` is (`pageSize` rows a read, `reads` reads): the table is in hash
+   * order of IDs, not time order, so `scanLimited` says it stopped before the end and the counts then cover only what was read; at most `WAITING_TASKS` tasks are read, newest code first (`truncated` when more were left).
+   * States, in this order: `needs_review` (no review yet), `changes_asked` (the newest review asks for changes or rejects: waits for its author), `signoff_declined` (reviewed and approved, the director declined), `needs_signoff`
+   * (approved, no director sign-off yet; whether it is needed to land is the project's `director` landing check), `ready` (approved and signed off). Fails closed: a task that cannot be read is not listed or counted.
+   */
+  async waiting(by: Principal, projectIdValue: string): Promise<WaitingView> {
+    const projectId = checkProjectId(projectIdValue);
+    const proj = await this.#runner.get("project", projectId);
+    const mayRead = by.kind === "owner" || (by.kind === "agent" && by.taskScope === undefined && allows(by, "task.read", projectId));
+    if (proj === undefined || !mayRead) throw new DomainError("not_found", "no such project");
+    const ownOnly = by.kind !== "owner";
+    const newest = new Map<string, { id: string; at: string }>();
+    let after: string | undefined;
+    let scanLimited = true;
+    const { pageSize, reads } = this.#scan;
+    for (let read = 0; read < reads; read++) {
+      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
+      for (const row of chunk) {
+        after = row.id;
+        const b = row.body as unknown as SubmissionBody;
+        if (b.projectId !== projectId || b.kind !== "code" || b.tree === undefined || b.base === undefined) continue;
+        if (ownOnly && b.submittedBy !== by.id) continue;
+        const had = newest.get(b.taskId);
+        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt });
+      }
+      if (chunk.length < pageSize) { scanLimited = false; break; }
+    }
+    const candidates = [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+    const items: WaitingItem[] = [];
+    let looked = 0;
+    for (const [taskId, sub] of candidates) {
+      if (looked >= WAITING_TASKS) break;
+      looked++;
+      const task = await this.#readableTask(by, taskId);
+      if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") continue;
+      const a = await this.approvalOf(sub.id);
+      if (a === undefined) continue;
+      const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
+      items.push({ taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) });
+    }
+    const truncated = looked < candidates.length;
+    const counts = { needs_review: 0, changes_asked: 0, signoff_declined: 0, needs_signoff: 0, ready: 0 };
+    for (const i of items) counts[i.state]++;
+    const order = { needs_review: 0, changes_asked: 1, signoff_declined: 2, needs_signoff: 3, ready: 4 } as const;
+    items.sort((x, y) => order[x.state] - order[y.state] || (x.submittedAt < y.submittedAt ? -1 : x.submittedAt > y.submittedAt ? 1 : x.taskId < y.taskId ? -1 : 1));
+    return { projectId, ownOnly, counts, items, truncated, scanLimited };
   }
 
   /**
