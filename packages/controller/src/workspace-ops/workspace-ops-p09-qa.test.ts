@@ -81,7 +81,7 @@ for (const backend of backends) {
     });
     const service = WorkspaceOpService.withEpoch(store.storage, projects.epoch, deps(), options);
     const land = (commandId: string, submissionId: string | undefined = sub) => service.request(owner, { commandId, operation: "landing", taskId: task, reason: "ready", ...(submissionId === undefined ? {} : { submissionId }) });
-    const evidence = (by: Principal, result: string, extra: { submissionId?: string } = {}) => qaService.record(by, { commandId: cid("ev"), submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "smoke", result }], ...extra });
+    const evidence = (by: Principal, result: string, extra: { submissionId?: string; criteriaRevision?: number } = {}) => qaService.record(by, { commandId: cid("ev"), submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-18T09:30:00.000Z", checks: [{ name: "smoke", result }], ...extra });
     // A second code submission of the same task (another tree), and one of another task.
     const sub2 = derivedId("sbm", cid("sub2"));
     await plant("submission", sub2, { ...code, tree: OLD_TREE, patchId: NEW_PATCH, submittedAt: "2026-11-18T09:10:00.000Z" });
@@ -125,6 +125,20 @@ for (const backend of backends) {
       assert.deepEqual([ok.checks!.passed, ok.checks!.results[0]!.result, ok.checks!.results[0]!.boundTo], [true, "pass", TREE]);
       assert.equal(r.calls.runs.length, 1);
       assert.deepEqual(r.calls.checks[0]!.reviewed, { base: BASE, tree: TREE }, "the host computes the patch ID even when only qa is required");
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: with a contract that names the checks, no evidence is not run and a pass against that contract version lands (card P09)`, async () => {
+    const r = await rig();
+    try {
+      await r.plant("task-contract", r.task, { taskId: r.task, version: 1, acceptanceCriteria: ["the page loads"], requiredEvidence: [], checks: [{ name: "smoke", run: ["true"] }] });
+      const none = await r.land("k1");
+      assert.deepEqual([none.state, none.checks!.results[0]!.result], ["refused", "not_run"], none.summary);
+      assert.match(none.checks!.results[0]!.summary, /no_evidence, check_missing/);
+      await r.evidence(r.qa, "passed", { criteriaRevision: 1 });
+      const ok = await r.land("k2");
+      assert.equal(ok.state, "done", ok.summary);
+      assert.equal(r.calls.runs.length, 1);
     } finally { await r.store.close(); }
   });
 

@@ -189,6 +189,9 @@ test("qa: a passed gate passes; a gate for another tree or task, a missing gate 
   assert.deepEqual([bad.passed, bad.results[0]!.result], [false, "fail"]);
   assert.match(bad.results[0]!.summary, /check_failed, stale_evidence/);
   assert.equal((await qaRun({ verdict: "failed", reasons: ["no_evidence"] })).results[0]!.result, "not_run");
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["no_evidence", "check_missing"] })).results[0]!.result, "not_run", "no evidence against required checks is not run too");
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["decision_superseded", "no_evidence", "check_missing"] })).results[0]!.result, "fail");
+  assert.equal((await qaRun({ verdict: "failed", reasons: ["check_missing"] })).results[0]!.result, "fail", "evidence that leaves a required check out failed");
   assert.equal((await qaRun({}, { submissionId: undefined })).results[0]!.result, "not_run");
 });
 

@@ -173,7 +173,9 @@ export class LandingGate {
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the QA gate of ${call.submissionId} could not be read for the tree it names`);
     if (g.verdict !== "passed") {
       const reasons = g.reasons.join(", ") || "no reason given";
-      return no(g.reasons.length === 1 && g.reasons[0] === "no_evidence" ? "not_run" : "fail", `the QA gate of ${call.submissionId} (tree ${g.tree.slice(0, 12)}) did not pass: ${reasons}`);
+      // No independent evidence at all is not run; the contract's required checks are then each `missing` too (`check_missing`), which says the same. Anything else failed.
+      const none = g.reasons.includes("no_evidence") && g.reasons.every((r) => r === "no_evidence" || r === "check_missing");
+      return no(none ? "not_run" : "fail",`the QA gate of ${call.submissionId} (tree ${g.tree.slice(0, 12)}) did not pass: ${reasons}`);
     }
     // Evidence is bound to the submission's tree; it counts for the integrated tree only while the patch is the one the host computes from that base and tree.
     const computed = typeof report.reviewedPatchId === "string" && PATCH.test(report.reviewedPatchId) && a.base === before.base && a.tree === before.tree ? report.reviewedPatchId : undefined;
