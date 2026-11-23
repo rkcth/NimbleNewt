@@ -80,7 +80,7 @@ import { BUILTIN_COMMANDS, backupItem } from "./operations.js";
 
 import { wideningDecision } from "./widening.js";
 import { WipBackupService, wipBackupRouter, wipTasksSource, type WipBackupPort, type WipSweepOptions } from "../wip-backup/index.js";
-import { ApprovalLoadService, IntegrationPolicyService, PolicyService, ProfileSuggestionService, ProtectedBranchService, type ApprovalsFacade } from "../policy/index.js";
+import { ApprovalLoadService, IntegrationPolicyService, PolicyService, type Check as LandingCheck, ProfileSuggestionService, ProtectedBranchService, type ApprovalsFacade } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
 import { ChatService, ChatSpendService, approvedCodeLookup, CoordinatorService, GuardedModelCall, agentLifecycle, chatRoutes, type ChatInterpreter, type CoordinatorModel, type ModelCall } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
@@ -913,8 +913,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     });
     // The landing queue of each project's landing branch (card P10): approved code submissions wait there oldest first, and a landing lands only the oldest, exactly its approved base and tree.
     const landingQueue = LandingQueueService.withEpoch(storage, epoch, { ...(options.dispatch?.clock === undefined ? {} : { clock: options.dispatch.clock }) });
+    // The landing gate's required checks (card P09), with those the project's review policy adds for the task (card Q02). One function for the gate and the queue, so they cannot disagree.
+    const landingRequiredChecks = async (projectId: string, taskId?: string): Promise<readonly LandingCheck[]> => { const base = (await integration.effective(projectId)).requiredChecks; const extra = qaReview === undefined ? [] : await qaReview.landingChecks(projectId, taskId); return withPolicyChecks(base, extra); };
     const landingQueueOps = new LandingQueueOps(landingQueue, {
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      // Card Q02 (second review): a carried approval is queued only where the landing gate's review check proves it (the host computes the reviewed earlier submission's own patch).
+      reviewChecked: async (projectId, taskId) => (await landingRequiredChecks(projectId, taskId)).includes("review"),
       landingBranch: async (call) => (await landingBranchOf(call)).branch,
       projectOfTask: (taskId) => integratorLeases.projectOfTask(taskId),
       // Reservations and escalation (card P10): the project's refresh-round cap; the director (each director of the project, in its inbox) and the owner are told, the owner as needs-you when the project has no director.
@@ -982,7 +986,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     });
     const landingGate = new LandingGate({
       // Card Q02 (review policy): a project whose policy says independent review gates completion also requires `review` and `qa` of the tasks in its scope.
-      requiredChecks: async (projectId, taskId) => { const base = (await integration.effective(projectId)).requiredChecks; const extra = qaReview === undefined ? [] : await qaReview.landingChecks(projectId, taskId); return withPolicyChecks(base, extra); },
+      requiredChecks: landingRequiredChecks,
       tests: (taskId, authors) => contracts.landingTests(taskId, authors),
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
       // Card Q02 (review): the earlier submissions of the same claimed patch, so the host computes the real patch of each before a carried verdict or QA evidence counts.

@@ -61,10 +61,18 @@ export interface QueueApproval {
   readonly submittedAt?: string;
   readonly approved: boolean;
   readonly reason?: string;
+  /** Set when the approval is an earlier submission's of the same claimed patch (card Q02 carry-over): only the landing gate's `review` check proves it applies to this submission's code. */
+  readonly carriedFrom?: string;
 }
 export interface LandingQueueOpsOptions {
   /** Whether a code submission is approved (`SubmissionService.approvalOf`). */
   readonly approvalOf: (submissionId: string) => Promise<QueueApproval | undefined>;
+  /**
+   * Whether the landing gate checks the review of this task's landing (its required checks include `review`), so a carried approval is proved there (card Q02 second review: the host computes the patch of the
+   * reviewed earlier submission's own base and tree). Absent, false or throwing: a carried approval does not count as an approval in the queue (a project that lands without the `review` check would otherwise
+   * land code nobody reviewed on the submitter's word that its patch is unchanged).
+   */
+  readonly reviewChecked?: (projectId: string, taskId: string) => Promise<boolean>;
   /** The landing branch the owner's policy names for the project; `undefined` when it names none. Throws when the settings cannot be read. */
   readonly landingBranch: (call: { taskId: string; projectId: string }) => Promise<string | undefined>;
   /** The project a task belongs to, or undefined when there is no such task. */
@@ -119,6 +127,15 @@ export class LandingQueueOps {
   #sweepResumeAt: string | undefined;
   constructor(queue: LandingQueueService, options: LandingQueueOpsOptions) { this.#queue = queue; this.#options = options; }
 
+  /** `approvalOf`, with a carried approval counted only where the landing gate will prove it (see `reviewChecked`); read at every use, so a policy change before the landing is seen. */
+  async #approvalOf(submissionId: string): Promise<QueueApproval | undefined> {
+    const a = await this.#options.approvalOf(submissionId);
+    if (a === undefined || !a.approved || a.carriedFrom === undefined) return a;
+    let checked = false;
+    try { checked = this.#options.reviewChecked !== undefined && (await this.#options.reviewChecked(a.projectId, a.taskId)) === true; } catch { checked = false; }
+    return checked ? a : { ...a, approved: false, reason: `it has no review of its own (the approval of ${String(a.carriedFrom).slice(0, 40)} was carried over by an unchanged patch ID, which only the landing gate's review check confirms, and this project's landing does not require that check); a reviewer has to approve it` };
+  }
+
   /** The owner, or an integrator of the project (exact right, no task credential). */
   #integrator(by: Principal, projectId: string): boolean {
     return by.kind === "owner" ? by.taskScope === undefined : by.taskScope === undefined && inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
@@ -155,7 +172,7 @@ export class LandingQueueOps {
   async add(by: Principal, command: NoActor & { submissionId: string }): Promise<{ entry: LandingQueueEntry; position: number; branch: string; already: boolean; replaced?: string }> {
     onlyKnown(command, ["commandId", "submissionId"]);
     if (typeof command.submissionId !== "string" || !SUBMISSION.test(command.submissionId)) throw new DomainError("invalid_command", "submissionId: is not a submission ID", { field: "submissionId" });
-    const a = await this.#options.approvalOf(command.submissionId);
+    const a = await this.#approvalOf(command.submissionId);
     if (a === undefined) throw refused(`submission ${command.submissionId}`);
     if (!this.#integrator(by, a.projectId) && !(await this.#ownAgent(by, a.taskId))(a.submittedBy)) throw refused(`submission ${command.submissionId}`);
     if (!a.approved) throw new DomainError("review_invalid", `submission ${command.submissionId} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); only approved work is queued to land`, { field: "submissionId" });
@@ -171,7 +188,7 @@ export class LandingQueueOps {
    */
   async queueApproved(submissionId: string, cause: string): Promise<boolean> {
     try {
-      const a = await this.#options.approvalOf(submissionId);
+      const a = await this.#approvalOf(submissionId);
       if (a === undefined || !a.approved) return false;
       const branch = await this.#options.landingBranch({ taskId: a.taskId, projectId: a.projectId });
       if (branch === undefined) return false;
@@ -183,7 +200,7 @@ export class LandingQueueOps {
   /** The controller's own: a queued submission whose approval was taken back (a newer review says `changes` or `reject`) leaves the queue, so it does not hold the queue up. Best effort. */
   async withdrawUnapproved(submissionId: string, cause: string): Promise<boolean> {
     try {
-      const a = await this.#options.approvalOf(submissionId);
+      const a = await this.#approvalOf(submissionId);
       if (a === undefined || a.approved) return false;
       const branch = await this.#options.landingBranch({ taskId: a.taskId, projectId: a.projectId });
       if (branch === undefined) return false;
@@ -295,7 +312,7 @@ export class LandingQueueOps {
     // A reserved place can come ahead of an entry whose landing already passed its own checks (card P10): this one waits until that landing ends, so two landings never reach the host together.
     const underway = await this.#queue.landingUnderway(call.projectId, branch, call.taskId);
     if (underway !== undefined) throw new DomainError("invalid_transition", `task ${underway}'s landing on branch ${branch} is in progress; task ${call.taskId} lands after that landing ends (ask again then)`);
-    const a = await this.#options.approvalOf(mine.submissionId);
+    const a = await this.#approvalOf(mine.submissionId);
     if (a === undefined || !a.approved || a.base !== mine.base || a.tree !== mine.tree) throw new DomainError("review_invalid", `submission ${mine.submissionId} is no longer approved as queued (${redactText(a?.reason ?? "its base or tree changed").slice(0, 200)}); take it out of the queue (landing.queue.remove) or have it approved again`, { field: "submissionId" });
     return { submissionId: mine.submissionId, base: mine.base, tree: mine.tree, branch };
   }
@@ -447,7 +464,7 @@ export class LandingQueueOps {
   async #waitsForDefer(first: LandingQueueEntry, waiting: LandingQueueEntry): Promise<boolean> {
     if (!queuedAfter(waiting, first)) return false;
     try {
-      const a = await this.#options.approvalOf(waiting.submissionId);
+      const a = await this.#approvalOf(waiting.submissionId);
       return a !== undefined && a.approved && a.base === waiting.base && a.tree === waiting.tree;
     } catch { return false; }
   }
