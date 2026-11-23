@@ -601,6 +601,12 @@ export class ChatService {
       if (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") {
         // A message that is only "yes" or "no" names no proposal: it counts only while exactly one is open. With several open the model's pick would be a guess, so the owner is asked which.
         if (!trusted) {
+          // A message that is only a word of refusal ("no") never agrees to a proposal, and one that is only a word of agreement ("yes") never drops one, whatever the model made of it: the chat reads that one word itself.
+          const sole = evidenceStrong(intent.evidence) ? "" : tidyWords(words);
+          if ((intent.kind === "apply_proposal" ? REFUSAL : ASSENT).has(sole)) {
+            push({ i, kind: "asked", question: `Your message was only ${quotedText(sole, 20)}, which does not ${intent.kind === "apply_proposal" ? "agree to the proposal, so it was not applied" : "drop the proposal, so it was kept"}. Nothing was done. What would you like: go ahead with it, or drop it?`, options: [] });
+            continue;
+          }
           // A list of policy edits that cannot be read is not taken as none open: the owner is asked (fail closed).
           if (openForAnswer === undefined) { const edits = await this.#openEdits(owner, true); editsUnread = edits === undefined; openForAnswer = [...(await this.#openProposals(owner.id, OPEN_SCAN)), ...(edits ?? [])]; }
           if (editsUnread && !intent.evidence.toLowerCase().includes(intent.proposalId.toLowerCase())) {
@@ -3247,8 +3253,12 @@ const OPEN_SCAN = 100;
 /** Lower case, white space collapsed, punctuation at either end dropped. */
 const tidyWords = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").replace(/^[\p{P}\s]+|[\p{P}\s]+$/gu, "");
 
+/** One-word replies that agree. */
+const ASSENT = new Set(["yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", "fine", "right", "correct", "agreed"]);
+/** One-word replies that refuse. Used only to refuse: a message that is only one of these never applies a proposal (and one of ASSENT never drops one); neither list makes the chat do anything. */
+const REFUSAL = new Set(["no", "n", "nope", "nah", "cancel", "stop", "never", "dont", "don't", "don\u2019t"]);
 /** One-word replies that agree or refuse: they answer a question only when they are one of its recorded choices, never through an option's label. */
-const AGREEMENT = new Set(["yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", "fine", "right", "correct", "agreed", "no", "n", "nope", "nah", "cancel", "stop"]);
+const AGREEMENT = new Set([...ASSENT, ...REFUSAL]);
 
 /** Small words that say nothing about which proposal is meant: they neither name one nor point away from one. */
 const PLAIN_WORDS = new Set(["the", "and", "for", "that", "this", "these", "those", "with", "from", "into", "onto", "one", "ones", "yes", "yeah", "yep", "please", "okay", "sure", "its", "not", "but", "you", "your", "our", "all", "any", "are", "was", "were", "has", "have", "had", "will", "would", "should", "can", "could", "just", "now", "then", "there", "here", "what", "which", "too", "also", "thanks", "thank", "ahead", "them", "they", "their", "let", "lets", "out", "off", "about", "only"]);

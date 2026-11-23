@@ -346,6 +346,33 @@ for (const backend of backends) {
     assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Oak"]);
   });
 
+  suite("a message that is only a word of refusal never applies the open proposal, and one that is only a word of agreement never drops it, whatever the model made of it", async (w, script) => {
+    script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
+    const chat = w.chat();
+    const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
+    for (const text of ["no", "No!", "nope", "Nah.", "cancel", "don't"]) {
+      script[text] = [{ kind: "apply_proposal", proposalId: oak, evidence: text, basis: "owner" }];
+      const o = only((await say(w, chat, text)).outcomes);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not agree to the proposal/);
+      assert.equal((await list(w, "project.list")).length, 0, `${text}: nothing applied`);
+    }
+    for (const text of ["yes", "OK.", "sure"]) {
+      script[text] = [{ kind: "discard_proposal", proposalId: oak, evidence: text, basis: "owner" }];
+      const o = only((await say(w, chat, text)).outcomes);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not drop the proposal/);
+    }
+    // the plain readings still work: a bare "no" drops it, a bare "yes" applies a new one
+    script["no"] = [{ kind: "discard_proposal", proposalId: oak, evidence: "no", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "no", cid("m"))).outcomes).status, "discarded");
+    script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    script["yes"] = [{ kind: "apply_proposal", proposalId: elm, evidence: "yes", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes", cid("m"))).outcomes).status, "applied");
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Elm"]);
+  });
+
   suite("an agreement that names nothing the owner said singles out no proposal: with several open it asks which, however many words it has; words only one proposal has pick it (no word list)", async (w, script) => {
     script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
     script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];

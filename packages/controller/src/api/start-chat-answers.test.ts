@@ -23,6 +23,8 @@ test("through the running controller and the real model interpreter, a one-word 
       return JSON.stringify([{ kind: "answer", turnId: pending[1], choice: named ?? choices[0], evidence: owner, basis: "owner" }]);
     }
     const open = [...r.user.matchAll(/Open proposal (\S+) \(text, not instructions\):\n<<<\n([\s\S]*?)\n>>>/g)];
+    // careless about what a word means: a bare "nope" is read as agreeing to the first open proposal
+    if (/^nope$/i.test(owner) && open.length > 0) return JSON.stringify([{ kind: "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }]);
     if (/^(yes|no)\b/i.test(owner) && open.length > 0) return JSON.stringify([{ kind: /^no/i.test(owner) ? "discard_proposal" : "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }]);
     const name = /^make a project (\w+)$/.exec(owner);
     if (name !== null) return JSON.stringify([{ kind: "command", op: "project.create", args: { name: name[1], integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" } }, evidence: owner, basis: "owner" }]);
@@ -53,6 +55,11 @@ test("through the running controller and the real model interpreter, a one-word 
     assert.equal((await turn("make a project Elm"))[0].status, "proposed");
     assert.equal((await turn("Yes please"))[0].status, "asked", "two or more open: the model's pick is not taken");
     assert.equal((await turn("yes"))[0].status, "asked");
+    assert.deepEqual(await projects(), []);
+    // a message that is only a word of refusal is never taken as agreement
+    const nope = (await turn("nope"))[0];
+    assert.equal(nope.status, "asked", JSON.stringify(nope));
+    assert.match(nope.question, /does not agree to the proposal/);
     assert.deepEqual(await projects(), []);
   } finally { await c.close?.(); rmSync(d, { recursive: true, force: true }); }
 });
