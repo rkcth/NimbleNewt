@@ -111,6 +111,28 @@ test("toolbox proposals (card T08): an agent proposes, a maintainer asks for cha
     assert.equal(notices.items.at(-1).kind, "revocation");
     assert.match(notices.items.at(-1).text, /toolbox\.lint 1\.0\.0 was revoked: it deletes files/);
 
+    // Slice 7: a maintainer may accept only so many of one author's proposals without releasing them; the refusal comes back through the state API and the owner's chat, and nothing is applied.
+    let lastAccepted = "";
+    for (let i = 0; i < 20; i += 1) {
+      const made = await ok(cody.token, "toolbox.propose", { name: "lint", executableRecordId: await note(cody, `console.log('lint, variant ${i}')`), rationale: "r", tests: "t" }, `pp-v${i}`);
+      assert.equal((await ok(maya.token, "toolbox.proposal.decide", { proposalId: made.proposalId, decision: "accept" }, `d-v${i}`)).state, "accepted");
+      lastAccepted = made.proposalId;
+    }
+    const over = await ok(cody.token, "toolbox.propose", { name: "lint", executableRecordId: await note(cody, "console.log('lint, one too many')"), rationale: "r", tests: "t" }, "pp-over");
+    const refused = await call(maya.token, "toolbox.proposal.decide", { proposalId: over.proposalId, decision: "accept" }, "d-over");
+    assert.equal(refused.error?.code, "unavailable", JSON.stringify(refused));
+    assert.match(String(refused.error?.message), /accepted and still waiting for a release/);
+    const bySay = "accept Cody's last lint proposal";
+    const proposedAccept = (await say("m5", bySay, [{ kind: "command", op: "toolbox.proposal.decide", args: { proposalId: over.proposalId, decision: "accept" }, evidence: bySay, basis: "owner" }]))[0];
+    const appliedAccept = (await say("m6", "yes, go ahead with that", [{ kind: "apply_proposal", proposalId: proposedAccept.proposalId, evidence: "go ahead with that", basis: "owner" }]))[0];
+    assert.notEqual(appliedAccept.status, "applied", JSON.stringify(appliedAccept));
+    assert.equal(appliedAccept.code, "unavailable", JSON.stringify(appliedAccept));
+    assert.match(String(appliedAccept.message), /accepted and still waiting for a release/, "the owner reads why in the chat");
+    assert.equal((await ok(maya.token, "toolbox.proposal.get", { proposalId: over.proposalId })).state, "open", "nothing was applied");
+    // Rejecting one of the accepted ones frees a place.
+    assert.equal((await ok(maya.token, "toolbox.proposal.decide", { proposalId: lastAccepted, decision: "reject", reason: "superseded" }, "d-rej")).state, "rejected");
+    assert.equal((await ok(maya.token, "toolbox.proposal.decide", { proposalId: over.proposalId, decision: "accept" }, "d-over-2")).state, "accepted");
+
     // The owner deletes the record the fmt release's executable came from: its snapshot goes too, and the text is reported removed.
     const del = await call(boot.token, "retention.delete", { recordId: fmtCode, reason: "the owner asked" }, "del-1");
     assert.ok(del.ok, JSON.stringify(del));
