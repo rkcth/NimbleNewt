@@ -342,8 +342,7 @@ for (const backend of backends) {
       const garden = await w.project("Garden"), shed = await w.project("Shed");
       const ann = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Ann" })).id;
       const bob = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Bob" })).id;
-      await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Cat" });
-      await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Cat" });
+      const catIds = [(await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Cat" })).id, (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Cat" })).id];
       const give = async (name: string, grantee: string, action: string, project: string, extra: Record<string, unknown> = {}) => { ids[name] = (await holder.grants!.grant(w.owner, { commandId: cid("g"), grantee: `agent:${grantee}`, action, project, source: "direct", basis: `the owner said ${name}`, ...extra } as never)).id; };
       await give("ann-update-garden", ann, "task.update", garden);
       await give("ann-read-everywhere", ann, "task.read", "*");
@@ -403,6 +402,17 @@ for (const backend of backends) {
       assert.equal(options.length, 2);
       assert.equal(new Set(options).size, 2, "each option can be told apart");
       for (const o of options) assert.match(o, /^Cat \([^)]+\)$/);
+      assert.deepEqual(options.map((o) => /\(([^)]+)\)$/.exec(o)![1]).sort(), [...catIds].sort(), "each option names one of the two agents by its ID");
+      // The owner answers with an option: the ID in their words decides which Cat, beside the name.
+      for (const o of options) {
+        const pickText = `what rights does ${o} have?`;
+        const pickedId = /\(([^)]+)\)$/.exec(o)![1]!;
+        table[pickText] = () => [status({ kind: "grants", agentName: "Cat", agentId: pickedId }, pickText)];
+        const picked = await run(pickText);
+        assert.equal(picked.o.status, "answered", JSON.stringify(picked.o));
+        assert.equal(seen.at(-1)!["agentId" as never], pickedId, "the picked option's agent is read");
+        assert.match(picked.t, new RegExp(`^No active right for agent:${pickedId} is on record\\.`));
+      }
       assert.equal((await run("what rights are there in the Nowhere project?")).o.code, "not_found");
       assert.equal((await run("what is Zed doing?")).o.code, "not_found");
       assert.equal((await run("which rights are sleeping?")).o.status, "refused");
