@@ -338,6 +338,43 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: a landing found left running is recorded as of unknown result even when the project's landing index is changed by others on every try, and an index entry written on its own reaches the view (card P09 re-check)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      let refusals = Infinity, refused = 0;
+      const touches = (input: { changes: readonly { ref: { kind: string } }[] }) => input.changes.some((c) => c.ref.kind === "workspace-landings-project");
+      const busy = new Proxy(r.store.storage, { get: (target, prop, recv) => {
+        if (prop === "applyOperation") return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => { if (touches(input) && refused < refusals) { refused++; throw new StorageError("revision_conflict", "the landing index changed meanwhile"); } return target.applyOperation(input); };
+        const v = Reflect.get(target, prop, recv) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as ControllerStorage;
+      // Another controller, on a busy project's records, finds the request left running and records it as uncertain.
+      const other = WorkspaceOpService.withEpoch(busy, r.projects.epoch, r.deps(), options);
+      const leave = async (commandId: string) => {
+        let release!: () => void;
+        r.host.block = new Promise<void>((res) => { release = res; });
+        const entered = new Promise<void>((res) => { r.host.entered = res; });
+        const pending = r.land(commandId);
+        await entered;
+        const resolved = await other.recover(r.owner);
+        assert.equal(resolved.length, 1);
+        return { id: resolved[0]!, finish: async () => { r.host.block = undefined; release(); await pending; } };
+      };
+      const first = await leave("v13a");
+      assert.equal((await other.get(r.owner, first.id))?.state, "uncertain");
+      assert.ok(refused >= 2, `the index was refused ${refused} times`);
+      assert.match((await r.ask(r.owner, { taskId: r.task }))!, /No landing attempt is on record/);
+      await first.finish();
+      // Refused only for the tries that carry the index with the outcome: the outcome is written without it, then the index on its own.
+      refused = 0; refusals = 2;
+      const second = await leave("v13b");
+      assert.equal(refused, 2);
+      assert.equal((await other.get(r.owner, second.id))?.state, "uncertain");
+      assert.ok((await r.ask(r.owner, { projectId: r.project }))!.includes(second.id));
+      await second.finish();
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: host paths written URL-encoded, with look-alike slashes or led by a home or environment name are hidden, and a credential in a command is cut (card P09 second review)`, async () => {
     const r = await rig(["tests"]);
     try {
@@ -358,11 +395,13 @@ for (const backend of backends) {
       assert.match(newest, /\[redacted\] npm test failed/, newest);
       // The record is already cut when the gate writes it; the view cuts again whatever a record holds (one written before that rule, or by another writer): a stand-in record holds the raw text here.
       const got = (await r.service.landings({ taskId: r.task }, 0, 1)).items[0]!;
-      const raw = { ...got, summary: `refused near %2Fhome%2Fr9b with ${secret}`, checks: { ...got.checks!, results: got.checks!.results.map((e) => ({ ...e, summary: `see ${secret}`, runs: [{ name: `${secret} /home/r9b/t`, state: "failed" as const, exitCode: 1 }] })) } };
+      const raw = { ...got, summary: `refused near %2Fhome%2Fr9b with ${secret}; 50%2Fmonth, 1\u22152 and pass/fail at C:\\\\Users\\\\r9b\\\\x`, checks: { ...got.checks!, results: got.checks!.results.map((e) => ({ ...e, summary: `see ${secret}`, runs: [{ name: `${secret} /home/r9b/t`, state: "failed" as const, exitCode: 1 }] })) } };
       const view = StatusService.withEpoch(r.store.storage, r.projects.epoch, { ...r.base, landingChecks: { landings: async () => ({ items: [{ ...raw, position: 1 }], total: 1, next: 1, unreadable: 0, cap: 20, full: false }) } }, options);
       const shownText = (await view.ask(r.owner, { kind: "landing_checks", taskId: r.task } as never))!.lines.map((l) => l.text).join("\n");
       assert.ok(!shownText.includes("abcd1234") && !shownText.includes("r9b"), shownText);
       assert.match(shownText, /Commands: \[redacted\] \[a path\] failed \(exit 1\)/, shownText);
+      // Encoded and look-alike separators are read where they stand, never decoded into the text: words outside a path read as written, and a JSON-escaped drive path goes whole (its drive letter too).
+      assert.ok(shownText.includes("50%2Fmonth, 1∕2 and pass/fail at [a path]"), shownText);
     } finally { await r.store.close(); }
   });
 }

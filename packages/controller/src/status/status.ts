@@ -829,16 +829,24 @@ const LANDING_CHECKS_PAGE = 5;
 /** Host paths replaced by a mark in the `landing_checks` view: a gate text or a test command may quote a path of the machine that ran the checks. */
 // In order: `file:` URLs; network and `\\?\` paths; drive paths; then absolute or `~` or `..`-led paths of two or more parts with either separator (a part runs to a space, quote, bracket or separator). A URL such as
 // `https://host/a/b` is left as it is: its parts follow `//` or a word, never a free-standing separator.
-// Before them, URL-encoded separators (`%2F`, `%5C`) and look-alike slashes (division, fraction and full-width slashes, reverse solidus forms) are read as plain separators, and paths led by a home or environment
-// name (`~`, `~user`, `$HOME`, `${HOME}`, `%USERPROFILE%`) are marked even with one part.
+// URL-encoded separators (`%2F`, `%5C`) and look-alike slashes (division, fraction and full-width slashes, reverse solidus forms) count as separators where they stand (the text is never decoded, so `50%2Fmonth` or
+// `1\u22152` outside a path reads as written), and paths led by a home or environment name (`~`, `~user`, `$HOME`, `${HOME}`, `%USERPROFILE%`) are marked even with one part. A drive letter before a doubled
+// backslash (a JSON-escaped `C:\\Users\\\u2026`) goes with the path.
+const PATH_SLASHES = String.raw`/\u2044\u2215\u29f8\uff0f`;
+const PATH_BACKSLASHES = String.raw`\\\u29f5\u29f9\ufe68\uff3c`;
+const PATH_SEP = String.raw`(?:[${PATH_SLASHES}${PATH_BACKSLASHES}]|%2[fF]|%5[cC])`;
+const PATH_PART = String.raw`(?:(?!%2[fF]|%5[cC])[^\s"'\`<>()[\]{},;|${PATH_SLASHES}${PATH_BACKSLASHES}])+`;
+const PATH_START = String.raw`(?<![\w.${PATH_SLASHES}${PATH_BACKSLASHES}-]|%2[fF]|%5[cC])`;
+const HOME_PATH = new RegExp(String.raw`${PATH_START}(?:~[\w.-]*|\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)(?:${PATH_SEP}${PATH_PART})+${PATH_SEP}?`, "g");
+const NETWORK_PATH = new RegExp(String.raw`(?:(?<!\w)[A-Za-z]:)?(?:[${PATH_BACKSLASHES}]|%5[cC]){2}[^\s"'\`<>]+`, "g");
+const DRIVE_PATH = new RegExp(String.raw`(?<!\w)[A-Za-z]:${PATH_SEP}[^\s"'\`<>]*`, "g");
+const OTHER_PATH = new RegExp(String.raw`${PATH_START}(?:~|\.\.?)?(?:${PATH_SEP}${PATH_PART}){2,}${PATH_SEP}?`, "g");
 const hidePaths = (text: string): string => text
-  .replace(/%2f/gi, "/").replace(/%5c/gi, "\\")
-  .replace(/[\u2044\u2215\u29f8\uff0f]/g, "/").replace(/[\u29f5\u29f9\ufe68\uff3c]/g, "\\")
   .replace(/\bfile:[^\s"'`<>]*/gi, "[a path]")
-  .replace(/(?<![\w.\/\\-])(?:~[\w.-]*|\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)(?:[\/\\][^\s"'`<>()[\]{},;|\/\\]+)+[\/\\]?/g, "[a path]")
-  .replace(/\\\\[^\s"'`<>]+/g, "[a path]")
-  .replace(/(?<![\w])[A-Za-z]:[\\/][^\s"'`<>]*/g, "[a path]")
-  .replace(/(?<![\w.\/\\-])(?:~|\.\.?)?(?:[\/\\][^\s"'`<>()[\]{},;|\/\\]+){2,}[\/\\]?/g, "[a path]");
+  .replace(HOME_PATH, "[a path]")
+  .replace(NETWORK_PATH, "[a path]")
+  .replace(DRIVE_PATH, "[a path]")
+  .replace(OTHER_PATH, "[a path]");
 /** How many `submission.list` pages (of 100) the `submissions` view follows (card Q01b): each page scans at most the service's bounded number of rows, so the view's cost is bounded and a scan that stops early says so. */
 const SUBMISSION_VIEW_PAGES = 5;
 /** How many document changes the `docs` view lists for one flagged document (card Q03b); it says when there are more. */
@@ -2529,7 +2537,7 @@ export class StatusService {
     if (next <= after) return { observedAt: at, lines: [line(`${what}: ${page.total} landing attempt(s) are on record${kept}, none after number ${after}.`, c)] };
     const lines: Line[] = [line(`${what}: ${page.total} landing attempt(s) on record${kept}, newest first; showing ${after + 1} to ${next}.`, c)];
     if ((page.unreadable ?? 0) > 0) lines.push(line(`${page.unreadable} of these could not be read as a landing of this ${hasTask ? "task" : "project"} (the record is gone or is not one) and are left out.`, c));
-    // Credentials are cut before the paths are read (reading `%2F` as a separator could otherwise split a credential the redaction would have found), and again by `shown`.
+    // Credentials are cut before the paths are read (a path mark could otherwise split a credential the redaction would have found), and again by `shown`.
     const plain = (text: unknown, max: number): string => shown(hidePaths(redactText(typeof text === "string" ? text : "")), max);
     const short = (oid: unknown): string => (typeof oid === "string" ? oid.slice(0, 12) : "unknown");
     const outcome: Record<string, string> = { done: "was carried out by the host", refused: "was refused, so nothing was landed", failed: "failed at the host and may have changed the checkout", uncertain: "ended with an unknown result (the host may have acted)", started: "has not finished" };
