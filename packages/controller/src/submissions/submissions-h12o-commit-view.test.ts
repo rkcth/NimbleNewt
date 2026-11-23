@@ -25,7 +25,7 @@ for (const backend of backends) {
   const suite = (name: string, body: (c: {
     ask(by: Principal): Promise<string>; owner: Principal; task: string; svc: SubmissionService; calls: string[];
     agent(name: string, roles: string[]): Promise<Principal>; commits: Map<string, Commit>; opens: Map<string, { operation: string; at: string }>; failing: { on: boolean }; asked: Map<string, string[]>;
-    plain(): Promise<string>; autos: Map<string, { state: string; at: string; finishedAt?: string; summary?: string }>; solo(): SubmissionService;
+    plain(): Promise<string>; autos: Map<string, { state: string; at: string; finishedAt?: string; summary?: string }>; solo(): SubmissionService; older(): Promise<string>;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -55,7 +55,7 @@ for (const backend of backends) {
       const view = (extra: object) => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) }, ...extra }, options);
       const status = view({ submissionRelease });
       const text = async (s: StatusService, by: Principal): Promise<string> => ((await s.ask(by, { kind: "submissions", taskId: task }))?.lines ?? []).map((l) => l.text).join("\n");
-      await body({ ask: (by) => text(status, by), owner, task, svc, calls, agent, commits, opens, failing, asked, autos, solo: () => SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...options, reviewersAvailableIn: async () => [] }), plain: () => text(view({}), owner) });
+      await body({ ask: (by) => text(status, by), owner, task, svc, calls, agent, commits, opens, failing, asked, autos, solo: () => SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...options, reviewersAvailableIn: async () => [] }), plain: () => text(view({}), owner), older: () => text(view({ submissionRelease: { commit: submissionRelease.commit, open: submissionRelease.open } }), owner) });
     } finally { await world.close(); }
   });
 
@@ -128,6 +128,14 @@ for (const backend of backends) {
     assert.match(await c.ask(ann), /the release that this approval asked for was refused/);
     c.autos.set(`${sub.id}:${review.id}`, { state: "failed", at: "2026-11-22T10:02:00.000Z", summary: "the host is down" });
     assert.match(await c.ask(c.owner), /the release that this approval asked for failed at 2026-11-22T10:02:00\.000Z\. It said: "the host is down"\./);
+    // A failure's words may be a raw error of the host (its folders, git's own message): the author is told that it failed and when, not the words.
+    c.autos.set(`${sub.id}:${review.id}`, { state: "failed", at: "2026-11-22T10:02:00.000Z", summary: "git add failed: cannot open /srv/host/checkouts/t1/x" });
+    const authorFailed = await c.ask(ann);
+    assert.match(authorFailed, /the release that this approval asked for failed at 2026-11-22T10:02:00\.000Z\. What the host said is shown to the owner\./);
+    assert.doesNotMatch(authorFailed, /\/srv\/host|git add failed/);
+    assert.match(await c.ask(c.owner), /It said: "git add failed: cannot open \/srv\/host\/checkouts\/t1\/x"/);
+    c.autos.set(`${sub.id}:${review.id}`, { state: "uncertain", at: "2026-11-22T10:02:00.000Z", summary: "lost the answer at /srv/host/checkouts/t1" });
+    assert.doesNotMatch(await c.ask(ann), /\/srv\/host|lost the answer/);
     c.autos.set(`${sub.id}:${review.id}`, { state: "uncertain", at: "2026-11-22T10:02:00.000Z" });
     const unsure = await c.ask(c.owner);
     assert.match(unsure, /was left unsure \(the checkout may have changed; check it before asking again\) at 2026-11-22T10:02:00\.000Z\. It is committed only/);
@@ -154,10 +162,24 @@ for (const backend of backends) {
     c.calls.length = 0;
     assert.doesNotMatch(await c.ask(stranger), /Commit:|asked for/);
     assert.deepEqual(c.calls, []);
+    // The reviewer who approved it is not the code's author: it is not told the host's words either, and nothing is read for it.
+    c.autos.set(`${sub.id}:${review.id}`, { state: "refused", at: "2026-11-22T10:02:00.000Z", summary: "words only the owner and the author see" });
+    c.asked.set(rev.id, [sub.id]);
+    const toReviewer = await c.ask(rev);
+    assert.match(toReviewer, new RegExp(`submission ${sub.id} by`), "the reviewer asked to review it reads the code line");
+    assert.doesNotMatch(toReviewer, /Commit:|asked for|words only the owner/);
+    assert.deepEqual(c.calls, []);
+    assert.match(await c.ask(ann), /It said: "words only the owner and the author see"/);
+    c.calls.length = 0;
     c.failing.on = true;
     assert.match(await c.ask(c.owner), /Commit: could not be read just now\./);
     c.failing.on = false;
     // Without the optional read (an older composition) the generic words stand; a view creates no record.
+    c.calls.length = 0;
+    const older = await c.older();
+    assert.match(older, /Commit: not made yet; it is committed only when a release request commits it\./);
+    assert.doesNotMatch(older, /asked for was|words only the owner/);
+    assert.equal((c.calls as string[]).some((x) => x.startsWith("auto:")), false);
     const before = JSON.stringify(await c.svc.list(c.owner, c.task, { limit: 100 }));
     await c.ask(c.owner); await c.ask(ann);
     assert.equal(JSON.stringify(await c.svc.list(c.owner, c.task, { limit: 100 })), before);

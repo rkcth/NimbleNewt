@@ -2529,7 +2529,7 @@ export class StatusService {
       const ev = c.evidence.length === 0 ? "" : ` Its author's own check evidence: ${c.evidence.filter((e) => e.result === "pass").length} pass, ${c.evidence.filter((e) => e.result === "fail").length} fail, ${c.evidence.filter((e) => e.result === "not_run").length} not run.`;
       // The landing gate counts an approval or a sign-off only for the patch it was given on (a landing whose change differs needs a new one), so an approval is not shown as more than that.
       const bound = a !== undefined && (a.approved || d?.newest === "approve") ? " An approval counts at landing only while the change's patch stays the one approved." : "";
-      const commit = a?.approved === true ? await this.#commitWords(c.id, taskId, a.approvedBy === c.submittedBy ? undefined : a.reviewId) : "";
+      const commit = a?.approved === true ? await this.#commitWords(c.id, taskId, a.approvedBy === c.submittedBy ? undefined : a.reviewId, by.kind === "owner") : "";
       lines.push(line(`${index === 0 ? "Newest code" : "Older code"} submission ${c.id} by ${shown(c.submittedBy, 80)} at ${c.submittedAt}: tree ${String(c.tree ?? "?").slice(0, 12)}, base ${String(c.base ?? "?").slice(0, 12)}, refresh round ${c.refreshRound ?? 0}. Review: ${review}. Director sign-off: ${director}.${bound}${commit}${ev}${index === 0 ? "" : " A newer code submission exists."}`, cite("submission", c.id, c.revision), cite("task", taskId)));
     }
     if (codes.length > 5) lines.push(line(`${codes.length - 5} older code submission(s) are not shown here (submission.list has them all).`, cite("task", taskId)));
@@ -2547,7 +2547,7 @@ export class StatusService {
    * Whether the platform has committed an approved code submission in its task's checkout (card H12o sixth slice): the recorded commit (short ID, time, permit or plain), else "not committed yet" (with the request open on the
    * checkout named). A record without `permitted` is a plain commit: the field came with the first permit commits (H12o permit slice), so no older record is a permit commit. Read-only; a failed read says it could not be read, never "not committed". Empty without the dependency.
    */
-  async #commitWords(submissionId: string, taskId: string, reviewId?: string): Promise<string> {
+  async #commitWords(submissionId: string, taskId: string, reviewId?: string, owner = false): Promise<string> {
     const r = this.#deps.submissionRelease;
     if (r === undefined) return "";
     try {
@@ -2556,12 +2556,15 @@ export class StatusService {
       const open = await r.open(taskId);
       // No open request: nothing is about to commit it. A reviewer's approval asks for a release only when it is given (`releaseApproved`, never retried), and a checkout that moved on since may no longer hold it,
       // so the words neither promise a later automatic commit nor say what the checkout holds now.
-      // A reviewer's approval asked for the commit itself (card H12o, seventh slice): when that request was recorded and the host refused it, it failed or was left unsure, the owner and the author are told so and what it said.
+      // A reviewer's approval asked for the commit itself (card H12o, seventh slice): when that request was recorded and the host refused it, it failed or was left unsure, the owner and the author are told so and when (and what the host said: see below).
       // Not read for the one-agent approval (nothing asks then) nor with a request still open; a request that ended well but left no commit is not explained (the generic words follow).
       if (open === undefined && reviewId !== undefined && r.automatic !== undefined) {
         const auto = await r.automatic(submissionId, reviewId);
         if (auto !== undefined && (auto.state === "refused" || auto.state === "failed" || auto.state === "uncertain")) {
-          const why = typeof auto.summary === "string" && auto.summary.length > 0 ? ` It said: ${quoted(auto.summary, 300)}.` : "";
+          // The host's words of a refusal are its deliberate answer (no host path; at most a file name of the task's own checkout), told to the owner and the author. A failure or an unsure end may carry a
+          // raw error of the host (git's own message, a file system error naming the host's folders), so its words are told to the owner only; the author is told what happened and when.
+          const said = owner || auto.state === "refused";
+          const why = said && typeof auto.summary === "string" && auto.summary.length > 0 ? ` It said: ${quoted(auto.summary, 300)}.` : !said && typeof auto.summary === "string" && auto.summary.length > 0 ? " What the host said is shown to the owner." : "";
           const what = auto.state === "refused" ? "was refused" : auto.state === "failed" ? "failed" : "was left unsure (the checkout may have changed; check it before asking again)";
           return ` Commit: not made yet; the release that this approval asked for ${what} at ${auto.finishedAt ?? auto.at}.${why} It is committed only when a release request commits it; the owner may ask for one.`;
         }
