@@ -335,6 +335,15 @@ On the phone web chat ([private web chat](private-web-chat.md)) the **Recovery**
 
 Other things that keep working without a model: `node scripts/nimblenewt.mjs status` (the setup list), and every proposal you already have (you can still apply or discard it from the phone page).
 
+## Meetings
+
+You can schedule meetings, change them and call one right now in your own words. Name the agents by their names ("Ann and Bob"), say the time of day as you would to a person, and name your time zone ("Eastern time") unless you have set your meeting time zone in the settings. Every one of these is shown to you first and happens only when you agree, even if the team's approval profile would let other things go ahead.
+
+- **Schedule a meeting.** "Set up a planning meeting with Ann and Bob every Monday at 9:30 Eastern time." The proposal shows the title, how often, the time and zone (for a one-off meeting also that moment in UTC), the agents by name and how long it lasts (30 minutes unless you said a length). If your message leaves out the time of day, how often, who attends or the time zone (when none is set), NimbleNewt asks instead of choosing for you. A name that fits several agents asks which one; a name that fits none is refused. Agents on its roster are invited to every meeting it makes.
+- **Change a schedule.** "Move the planning meeting to 10am", "pause the planning meeting", "end the planning meeting." The schedule is found by words from its title (several fit: you are asked which), and what changes is shown first. A change applies to the meetings it makes later, not to ones already made; ending a schedule cannot be undone.
+- **Call a meeting now.** "Call Ann and Bob into a meeting now, the build is red" or "pull everyone on this project into a meeting now, the release is blocked." The agents named, or every active agent of the project, are asked to stop at a safe point and join; paused or unavailable ones are not woken. You give the reason in your own words (it asks if you do not), and a length only if you say one.
+- **See the meetings.** "What meetings are scheduled?" lists the meetings planned in the project, its meeting schedules (how often, time, zone, length, roster) and its stand-ups. Asking changes nothing. Stand-ups have their own controls; this section is about the other meetings.
+
 ## Backups
 
 NimbleNewt makes backups on a schedule. Ask in your own words how they are set and what exists ("how are my backups?", "which backups do I have?"): the answer gives the schedule, what is kept and for how long, each place copies go to and whether it can be reached, the last test restore, what backups leave out, and then the backups themselves, newest first, ten at a time. For more, say "show me the next backups" or "the backups after 20" (the chat does not remember which page you saw last, so a page is named by how many backups came before it). Asking changes nothing. Ask in the same way for a backup now ("back up now") or to change them ("back up every six hours", "also copy my backups to /mnt/usb"); each of these is shown to you first and happens only when you agree.

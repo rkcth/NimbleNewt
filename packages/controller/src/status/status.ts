@@ -721,7 +721,7 @@ export interface StatusDeps {
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   /** What a meeting's chair read from absent members' desks (card M05b): the `meeting_desk_reads` view. Absent: the view is not offered. */
   readonly deskReads?: { reads(by: Principal, query: { occurrenceId: string; deskRecordId?: string; limit?: number }): Promise<{ reads: readonly { id: string; revision: number; deskRecordId: string; deskOwner: string; deskRevision: number; bytes: number; visibility: string; source?: string; reader: string; at: string; meetingRecordId: string }[]; next?: string }>; attempts(by: Principal, query: { occurrenceId: string; limit?: number }): Promise<{ attempts: readonly { id: string; revision: number; targetId: string; operation: string; count: number; last: string; lastBy: string }[]; next?: string }> };
-  readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
+  readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined>; schedules?(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; state: string; time: string; timeZone: string; recurrence: { kind: string; date?: string; days?: readonly number[] }; durationMinutes: number; roster: readonly string[]; endDate?: string }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer, and the stand-ups themselves (card M03h): the `standups` view. Absent: they are not listed. */
   readonly standups?: {
     recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>;
@@ -3097,8 +3097,16 @@ export class StatusService {
       const roster = m.participants.map((p) => `${shown(p.id)}${[p.status, p.availability].filter((x) => x !== undefined && x !== "").length === 0 ? "" : ` (${[p.status, p.availability].filter((x) => x !== undefined && x !== "").join(", ")})`}`);
       return line(`${shown(m.title)}: ${m.kind}, ${m.startsAt} to ${m.endsAt}, ${m.mode}, ${m.state}. ${roster.length === 0 ? "No roster." : `On the roster: ${roster.join(", ")}.`}`, cite("meeting", m.id, m.revision), cite("project", projectId));
     });
+    // The recurring and one-off schedules the planned meetings come from: a meeting is only planned shortly before it is held, so a schedule is what says that one is coming (stand-ups are listed below, by their own service).
+    const schedules = await this.#deps.meetings.schedules?.(by, projectId, { limit });
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const scheduleLines: Line[] = (schedules?.items ?? []).filter((m) => m.state !== "ended").map((m) => {
+      const when = m.recurrence.kind === "once" ? `once on ${shown(m.recurrence.date ?? "")}` : m.recurrence.kind === "weekly" ? `every ${(m.recurrence.days ?? []).map((d) => days[d] ?? `day ${d}`).join(", ")}` : "daily";
+      return line(`${shown(m.title)}: schedule, ${when} at ${shown(m.time)} ${shown(m.timeZone)}, ${m.durationMinutes} minutes, ${m.state}. ${m.roster.length === 0 ? "No roster." : `On the roster: ${m.roster.map((r) => shown(r)).join(", ")}.`}`, cite("meeting-schedule", m.id, m.revision), cite("project", projectId));
+    });
+    lines.push(...scheduleLines);
     if (lines.length === 0) lines.push(line("No meeting is planned in this project.", cite("project", projectId)));
-    else if (planned.next !== undefined) lines.push(line("There are more meetings than shown.", cite("project", projectId)));
+    else if (planned.next !== undefined || schedules?.next !== undefined) lines.push(line("There are more meetings than shown.", cite("project", projectId)));
     if (this.#deps.standups !== undefined) {
       const recent = await this.#deps.standups.recent(by, projectId, { limit });
       if (recent !== undefined) {
