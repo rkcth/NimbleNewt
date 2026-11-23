@@ -25,7 +25,7 @@ const listed = (system: string, op: string): string[] => {
 };
 
 // Pin: the prompt is about this long. The ceiling is 2,000 characters above what is now (a card that adds a control fits); the floor is 4,000 below it, so a large cut that dropped controls is seen too. Moving either is a decision.
-const SIZE = 150_868;
+const SIZE = 150_887;
 const CEILING = SIZE + 2_000;
 const FLOOR = SIZE - 4_000;
 
@@ -37,7 +37,7 @@ test("the prompt size is pinned: not above the ceiling (growth is a decision) an
 
 test("the title keys are one sentence, not on every line, and only the operations that take that ID can use them", async () => {
   const system = await promptText();
-  assert.match(system, /Where an argument takes a task ID \(taskId\) or a prerequisite ID \(prerequisiteId\), give the task or prerequisite as taskTitle or prerequisiteTitle instead, in the owner's own words and with no ID/);
+  assert.match(system, /Where an operation lists taskId or prerequisiteId, give the task or prerequisite as taskTitle or prerequisiteTitle instead, in the owner's own words and with no ID \(said here once, not on each line\); an operation that lists neither takes no task title\./);
   let withTask = 0, withPrerequisite = 0;
   for (const op of Object.keys(CHAT_OPS)) {
     const keys = listed(system, op);
@@ -53,6 +53,18 @@ test("the title keys are one sentence, not on every line, and only the operation
     if (keys.includes("prerequisiteId")) withPrerequisite++;
   }
   assert.ok(withTask > 20 && withPrerequisite === 2, `${withTask} operations take a task ID, ${withPrerequisite} a prerequisite ID`);
+});
+
+test("the operation lines read as expected, written out by hand (not rebuilt with promptArgs): an ID where the operation takes one, no title keys, no projectName", async () => {
+  const system = await promptText();
+  for (const line of [
+    "; task.transition(taskId, expectedRevision, to) - Move task;",
+    "; dependency.add(taskId, prerequisiteId, responsible) - Add dependency;",
+    "; project.update(projectId, expectedRevision, name, goal, state, addRepositories, versionControl) - Change project;",
+  ]) assert.ok(system.includes(line), line);
+  assert.ok(!/\btaskTitle, prerequisiteTitle\b/.test(system), "the old pair is on no line");
+  // The task IDs of a document obligation (implementationRefs, claims) are not taskId: a title never resolved into them, and the line does not invite one.
+  assert.ok(!listed(system, "doc.obligation.record").some((k) => k === "taskId" || k === "prerequisiteId"));
 });
 
 for (const backend of backends) {
@@ -72,6 +84,7 @@ for (const backend of backends) {
       if (owner === "Dig the bed only after Buy seeds is done") { const t = take("dependency.add", ["taskId", "prerequisiteId"]); if (t !== undefined) intents = [intent("dependency.add", { taskTitle: "Dig the bed", prerequisiteTitle: "Buy seeds" })]; }
       if (owner === "Plant the pea shoots is ready") intents = [intent("task.transition", { taskTitle: "Water beans", to: "ready" })];
       if (owner === "rename the garden project") intents = [intent("project.update", { taskTitle: "Water beans", name: "Yard" })];
+      if (owner === "rename the Garden project to Yard, as in Water beans") intents = [intent("project.update", { projectName: "Garden", taskTitle: "Water beans", name: "Yard" })];
       for (const it of intents as { args: Record<string, unknown> }[]) for (const v of Object.values(it.args)) if (typeof v === "string" && !owner.toLowerCase().includes(v.toLowerCase())) violations.push(`${v} is not in "${owner}"`);
       return JSON.stringify(intents.length === 0 ? [{ kind: "none", reason: "the prompt describes no way to do this" }] : intents);
     },
@@ -104,7 +117,7 @@ for (const backend of backends) {
   });
 
   test(`${backend.name}: the title keys are refused as before when the title is not the owner's, and on an operation that takes no task`, async () => {
-    const { w, say, beans, state, violations } = await open();
+    const { w, say, project, beans, state, violations } = await open();
     try {
       const before = await state(beans);
       const a = (await say("Plant the pea shoots is ready")).outcomes[0]!;
@@ -114,6 +127,14 @@ for (const backend of backends) {
       assert.notEqual(b.status, "applied", "a task title on an operation that takes no task is not carried out");
       assert.equal(await state(beans), before);
       assert.ok(violations.length >= 1, "the stand-in's invented title was seen by the guard of this test");
+      // Every value in the owner's words, so only the operation decides: project.update takes no task, and the title is not carried out.
+      const seen = violations.length;
+      const c = (await say("rename the Garden project to Yard, as in Water beans")).outcomes[0]!;
+      assert.equal(violations.length, seen, "every value was the owner's");
+      assert.equal(c.status, "refused", JSON.stringify(c));
+      assert.match((c as { message?: string }).message ?? "", /^taskId: is not a field of this command$/, "refused because the operation has no task argument");
+      const p = (await w.api.handle(w.ownerToken, { v: 1, op: "project.get", args: { projectId: project } } as never)) as unknown as { result: { item: { name: string } } };
+      assert.equal(p.result.item.name, "Garden", "the project keeps its name");
     } finally { await w.close(); }
   });
 }
