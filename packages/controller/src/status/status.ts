@@ -44,6 +44,7 @@ import { reasonText as qaReasonText, type QaEvidenceService } from "../submissio
 import type { QaReviewService } from "../submissions/qa-review-policy.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
+import type { WorkspaceAnswer as LandingAttempt } from "../workspace-ops/workspace-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -289,6 +290,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why; a corrected finding or severity says how many times it was edited and by whom last, and what the severity was), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author; and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked on the controller's regular rounds and when a landing is asked for behind it, only while approved work waits behind it; approved work coming back stops the count); an approved first place that has held the branch for twenty-four hours while newer approved work waits behind it is shown with when the controller moves it to the back (nothing is removed)" },
+  landing_checks: { keys: ["taskId|taskTitle", "projectId", "after"], about: "owner only: each required check's result at the newest landing attempts of a task or project (after: how many shown), the tree judged, what the last re-read changed" },
   landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off, no unfinished defects; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
@@ -420,6 +422,7 @@ export type StatusRequest =
   | { readonly kind: "qa_policy"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "docs"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
+  | { readonly kind: "landing_checks"; readonly taskId?: string; readonly projectId?: string; readonly after?: number }
   | { readonly kind: "landing_settings"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
@@ -793,6 +796,8 @@ export interface StatusDeps {
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
   readonly integration?: Pick<IntegrationPolicyService, "get">;
+  /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
+  readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<{ readonly items: readonly LandingAttempt[]; readonly total: number }> };
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list">;
   /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
@@ -816,6 +821,10 @@ export interface StatusOptions extends RunnerOptions {
 export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, since: 40 } as const;
 /** How many references or links one replay chat line names before it counts the rest (card U09): a step may cite up to 100, which would make one line many kilobytes once quoted. */
 const REPLAY_LINE_ITEMS = 12;
+/** How many landing attempts the `landing_checks` view shows at a time (card P09). */
+const LANDING_CHECKS_PAGE = 5;
+/** Absolute host paths (POSIX folders of two or more parts, `~/` paths, Windows drive and network paths) replaced by a mark in the `landing_checks` view: a gate text may quote a path of the machine that ran the checks. */
+const hidePaths = (text: string): string => text.replace(/(?<![\w.:\/-])~?(?:\/[\w.@+~-]+){2,}\/?/g, "[a path]").replace(/(?<![\w])[A-Za-z]:[\\/][^\s"'`]*/g, "[a path]").replace(/\\\\[^\s"'`]+/g, "[a path]");
 /** How many `submission.list` pages (of 100) the `submissions` view follows (card Q01b): each page scans at most the service's bounded number of rows, so the view's cost is bounded and a scan that stops early says so. */
 const SUBMISSION_VIEW_PAGES = 5;
 /** How many document changes the `docs` view lists for one flagged document (card Q03b); it says when there are more. */
@@ -1032,6 +1041,7 @@ export class StatusService {
       case "qa_policy": { onlyKnown(request, ["kind", "projectId", "after"]); return this.qaPolicyLines(by, request.projectId, request.after); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId", "after"]); return this.docLines(by, request.projectId, undefined, request.after); }
+      case "landing_checks": { onlyKnown(request, ["kind", "taskId", "projectId", "after"]); return this.landingChecksLines(by, request); }
       case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
@@ -2476,6 +2486,63 @@ export class StatusService {
    * How a project's finished work lands (card P09/P10): the settings reader's own answer (`IntegrationPolicyService.get`, owner only), in plain words. Anyone but the owner is answered nothing, as the reader refuses them;
    * a project that does not exist is answered nothing too.
    */
+  /**
+   * What the required checks said at the newest landing attempts (card P09): owner only, every line citing its request record. A task needs the right to be read (it must exist); a project must exist. Nothing the host
+   * ran is shown beyond each command's name, state, exit code, time-out and length: not its output. Texts the gate wrote are cut, credentials are removed and absolute host paths are replaced by a mark.
+   */
+  async landingChecksLines(by: Principal, request: { readonly taskId?: string; readonly projectId?: string; readonly after?: unknown }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner") return undefined;
+    const hasTask = request.taskId !== undefined, hasProject = request.projectId !== undefined;
+    if (hasTask === hasProject) return invalid(hasTask ? "projectId" : "taskId", "name a task (taskId), or a project (projectId) for its landings, not both");
+    const after = request.after === undefined ? 0 : typeof request.after === "number" && Number.isSafeInteger(request.after) && request.after >= 0 ? request.after : invalid("after", "must be a whole number, 0 or more");
+    const at = this.#runner.now();
+    let scope: { readonly taskId: string } | { readonly projectId: string };
+    let c: Cite;
+    let what: string;
+    if (hasTask) {
+      const taskId = checkTaskId(request.taskId as string);
+      const task = await this.#runner.get("task", taskId);
+      if (task === undefined) return undefined;
+      scope = { taskId }; c = cite("task", taskId); what = `task ${shown((task.body as unknown as TaskBody).title, 120)}`;
+    } else {
+      const projectId = checkProjectId(request.projectId as string);
+      const project = await this.#runner.get("project", projectId);
+      if (project === undefined) return undefined;
+      scope = { projectId }; c = cite("project", projectId); what = `project ${shown((project.body as unknown as { name: string }).name, 120)}`;
+    }
+    if (this.#deps.landingChecks === undefined) return { observedAt: at, lines: [line("Landing attempts are not kept on this controller.", c)] };
+    const page = await this.#deps.landingChecks.landings(scope, after, LANDING_CHECKS_PAGE);
+    if (page.total === 0) return { observedAt: at, lines: [line(`No landing attempt is on record for ${what} (a landing made before this view existed is not listed).`, c)] };
+    if (page.items.length === 0) return { observedAt: at, lines: [line(`${what}: ${page.total} landing attempt(s) are on record, none after number ${after}.`, c)] };
+    const lines: Line[] = [line(`${what}: ${page.total} landing attempt(s) on record, newest first; showing ${after + 1} to ${after + page.items.length}.`, c)];
+    const plain = (text: unknown, max: number): string => shown(hidePaths(typeof text === "string" ? text : ""), max);
+    const short = (oid: unknown): string => (typeof oid === "string" ? oid.slice(0, 12) : "unknown");
+    const outcome: Record<string, string> = { done: "was carried out by the host", refused: "was refused, so nothing was landed", failed: "failed at the host and may have changed the checkout", uncertain: "ended with an unknown result (the host may have acted)", started: "has not finished" };
+    page.items.forEach((a, n) => {
+      const r = cite("workspace-request", a.id);
+      const checks = a.checks;
+      const who = a.queued !== undefined ? `submission ${a.queued.submissionId} (the head of the landing queue${a.reapplied === undefined ? "" : ", moved unchanged onto the branch's newer head"})` : a.landedSubmission !== undefined ? `submission ${a.landedSubmission} (named by the request)` : "no submission";
+      lines.push(line(`Attempt ${after + n + 1}${hasTask ? "" : ` (task ${a.taskId})`}: request ${a.id} made ${a.at}${a.finishedAt === undefined ? "" : `, finished ${a.finishedAt}`} ${outcome[a.state] ?? shown(a.state, 20)}; it judged ${who}. ${plain(a.summary, 300)}`, r, cite("task", a.taskId)));
+      if (checks === undefined) { lines.push(line("No check was judged for this attempt: the project required none, or the landing was refused before the checks were asked (the sentence above says why).", r)); return; }
+      lines.push(line(`Required then: ${checks.required.length === 0 ? "no checks" : checks.required.map((k) => shown(k, 40)).join(", ")}. Judged on integrated tree ${short(checks.tree)} (base ${short(checks.base)}${checks.patchId === undefined ? "" : `, patch ${short(checks.patchId)}`}${checks.contractVersion === undefined ? "" : `, test commands from contract version ${checks.contractVersion}`}). Overall: ${checks.passed ? "every required check passed" : "not every required check passed (a check that did not run counts as failed)"}.`, r));
+      for (const e of checks.results.slice(0, 12)) {
+        const word = e.result === "pass" ? "passed" : e.result === "fail" ? "failed" : "did not run";
+        const other = e.boundTo !== undefined && e.boundTo !== checks.tree ? ` (judged on tree ${short(e.boundTo)}, not the integrated one)` : "";
+        const runs = (e.runs ?? []).slice(0, 8).map((x) => `${plain(x.name, 60)} ${x.state === "not-run" ? "did not run" : x.state}${typeof x.exitCode === "number" ? ` (exit ${x.exitCode})` : ""}${x.timedOut === true ? " (timed out)" : ""}`);
+        const claim = e.disagreement === undefined ? "" : e.disagreement === "claimed_fail_passed" ? " The author's own evidence said fail, the gate found it passing." : " The author's own evidence said pass, the gate found it failing.";
+        lines.push(line(`${plain(e.check, 40)} ${word}${other}: ${plain(e.summary, 300)}${runs.length === 0 ? "" : ` Commands: ${runs.join("; ")}.`}${claim}`, r));
+      }
+      if (checks.results.length > 12) lines.push(line(`${checks.results.length - 12} more result(s) of this attempt are not shown.`, r));
+      const re = a.rechecked;
+      const names = re?.checks === undefined || re.checks.length === 0 ? "" : ` (${re.checks.map((k) => shown(k, 40)).join(", ")})`;
+      lines.push(line(re === undefined ? "The final re-read of the records right before the host was asked was not made for this attempt (it was refused or ended before that step, or no check was required)." : re.outcome === "unchanged" ? "The final re-read of the records right before the host was asked found every check still passing: it changed and refused nothing." : re.outcome === "changed" ? `The final re-read right before the host was asked found check(s)${names} no longer passing, so the landing was refused; the results above are as that re-read found them.` : re.outcome === "added" ? `While this landing was judged the project began to require check(s)${names} that were not judged for it, so the final re-read refused it; ask again to judge it under the checks now required.` : "The final re-read of the records could not be made, so the landing was refused.", r));
+      if (checks.testsNeedOwner !== undefined) lines.push(line(checks.testsNeedOwner === "authors-only" ? "The task's test commands were set only by its own agents, which a landing does not run: you are asked to set or accept them (contract.set checks)." : "The task has no test commands though the project requires tests: you are asked to set them or change the required checks.", r));
+      if (a.toldAuthor !== undefined) lines.push(line(`The author ${plain(a.toldAuthor, 80)} was sent these results.`, r));
+    });
+    if (after + page.items.length < page.total) lines.push(line(`Older attempts follow: ask again with after ${after + page.items.length}.`, c));
+    return { observedAt: at, lines };
+  }
+
   async landingSettingsLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
     if (by.kind !== "owner") return undefined;

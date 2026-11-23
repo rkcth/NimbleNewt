@@ -33,6 +33,10 @@ const RECORD = "workspace-request";
 const OPEN = "workspace-open";
 /** One record per task: how many refresh rounds the author has made (card H12p), counted in the same write that records the finished request. */
 const ROUNDS = "workspace-rounds";
+/** Card P09 (owner view of the checks): per task and per project, the newest landing requests (their IDs, newest first), written in the same command that finishes the request. */
+const LANDINGS = "workspace-landings";
+const LANDINGS_PROJECT = "workspace-landings-project";
+const LANDING_INDEX_CAP = { task: 20, project: 40 } as const;
 /** The approval a one-agent project records instead of a review (`REVIEW_DISABLED_SINGLE_AGENT` of the submission service): no reviewer judged the work, so it is never a permit. */
 const NO_REVIEWER = "review_disabled_single_agent";
 /** Whether a submission's recorded approval is a reviewer's (card H12o, permit slice): the only approval that makes its commit a review-gate permit commit. */
@@ -139,6 +143,12 @@ export interface WorkspaceRecordBody {
   readonly landedSubmission?: string;
   /** A `landing` of a project that requires checks (card P09): what each required check came to on the integrated tree, bound to that tree's ID. Absent when the gate was not reached (a refusal before the host was asked). */
   readonly checks?: LandingChecksRecord;
+  /**
+   * Card P09 (owner view): what the final re-read of the records (`LandingGate.recheck`, the very last step before the host is asked) found: `unchanged` (every check still passed), `changed` (the named checks no longer
+   * passed, so `checks` holds the results as they then read and the landing was refused), `added` (the project began to require the named checks while this landing was judged; refused), or `unreadable` (the re-read threw;
+   * refused). Absent when the landing never reached that step (a refusal earlier, no check required, no re-read wired).
+   */
+  readonly rechecked?: { readonly outcome: "unchanged" | "changed" | "added" | "unreadable"; readonly checks?: readonly string[] };
   /** Card P09: the agent told (in its inbox) that its landing was refused by the checks, with the results. */
   readonly toldAuthor?: string;
   /** Card P09 follow-up: the owner was sent a needs-you notice because the required tests had no test commands a landing can use (`checks.testsNeedOwner`), which the author cannot fix itself. */
@@ -644,6 +654,7 @@ export class WorkspaceOpService {
     // The landing gate's answer (card P09), kept on the record whatever the outcome.
     let gated: LandingChecksRecord | undefined;
     let gateRefused = false;
+    let rechecked: WorkspaceRecordBody["rechecked"];
     // Card P10: what the mechanical re-apply came to (the base and tree the landing carries instead of the approved ones), or the paths that overlapped.
     let reapplied: { base: string; tree: string } | undefined;
     let overlap: string[] | undefined;
@@ -686,14 +697,16 @@ export class WorkspaceOpService {
           // review taken back, a defect reported, a document flagged or a sign-off declined in the meantime still lands nothing. The refusal keeps the queue place and reservation as every refusal of the gate does.
           if (gated.required.length > 0 && this.#deps.landingRecheck !== undefined) {
             let again: Awaited<ReturnType<NonNullable<WorkspaceDeps["landingRecheck"]>>>;
-            try { again = await this.#deps.landingRecheck(gated); } catch (error) { return { ok: false as const, reason: `the required checks could not be read again right before the landing, so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}: ${safe(error, 300)}` }; }
-            if (again.added !== undefined && again.added.length > 0) return { ok: false as const, reason: `the project's required checks changed while this landing was judged (it now also requires ${safe(again.added.join(", "), 120)}, which was not judged for it), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; ask for the landing again to judge it under the checks now required` };
+            try { again = await this.#deps.landingRecheck(gated); } catch (error) { rechecked = { outcome: "unreadable" }; return { ok: false as const, reason: `the required checks could not be read again right before the landing, so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}: ${safe(error, 300)}` }; }
+            if (again.added !== undefined && again.added.length > 0) { rechecked = { outcome: "added", checks: again.added.slice(0, 10).map((c) => String(c).slice(0, 40)) }; return { ok: false as const, reason: `the project's required checks changed while this landing was judged (it now also requires ${safe(again.added.join(", "), 120)}, which was not judged for it), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; ask for the landing again to judge it under the checks now required` }; }
             if (again.changed.length > 0) {
               gated = again.record;
               gateRefused = true;
+              rechecked = { outcome: "changed", checks: again.changed.slice(0, 10).map((r) => r.check) };
               const now = again.changed.map((r) => `${r.check} ${r.result === "fail" ? "failed" : "not run"}: ${safe(r.summary, 160)}`);
               return { ok: false as const, reason: `a required check that had passed changed before the landing was made (${now.join("; ")}), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; the author was sent the results` };
             }
+            rechecked = { outcome: "unchanged" };
           }
         }
         // The host is told both what the queue says lands (card P10: base == head, exactly that tree) and the tree the checks ran on (card P09); it lands only when both hold.
@@ -756,7 +769,7 @@ export class WorkspaceOpService {
         try { r = await this.#deps.landingQueue?.returned?.({ requestId: id, taskId: body.taskId, projectId: body.projectId, branch: body.queued.branch, submissionId: body.queued.submissionId, paths: overlap, ...(body.assignee === undefined ? {} : { assignee: body.assignee }) }); } catch { r = undefined; }
         returned = { paths: overlap, ...(r === undefined ? {} : { ...(r.to === undefined ? {} : { to: r.to }), cycles: r.cycles, limit: r.limit, escalated: r.escalated }) };
       }
-      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(reapplied === undefined ? {} : { reapplied }), ...(returned === undefined ? {} : { returned }), ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}) };
+      const more: Partial<WorkspaceRecordBody> = { quietAttempts, ...(reapplied === undefined ? {} : { reapplied }), ...(returned === undefined ? {} : { returned }), ...(told.length === 0 ? {} : { told }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(rechecked === undefined ? {} : { rechecked }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}) };
       if (outcome !== null && typeof outcome === "object" && outcome.ok === true) {
         const detail = boundedDetail(outcome.detail);
         // A queued submission leaves the queue only when the host confirms it landed exactly that submission (card P10); a landing it does not confirm is said so, and the entry stays.
@@ -766,11 +779,11 @@ export class WorkspaceOpService {
         const summary = `${safe(outcome.summary, unconfirmed ? WORKSPACE_LIMITS.summary - 220 : WORKSPACE_LIMITS.summary)}${unconfirmed ? `; the host did not confirm that exactly submission ${body.queued!.submissionId} landed, so it stays in the landing queue (landing.queue.remove takes it out)` : ""}`;
         return done("done", { summary, ...(detail === undefined ? {} : { detail }), ...more });
       }
-      return done("refused", { summary: `${gateRefused || returned !== undefined ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(reapplied === undefined ? {} : { reapplied }), ...(returned === undefined ? {} : { returned }), ...(gated === undefined ? {} : { checks: gated }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}), ...(told.length === 0 ? {} : { told }) });
+      return done("refused", { summary: `${gateRefused || returned !== undefined ? "" : "the host did not do it: "}${safe((outcome as { reason?: unknown } | undefined)?.reason ?? "no reason given", WORKSPACE_LIMITS.summary)}`, quietAttempts, ...(reapplied === undefined ? {} : { reapplied }), ...(returned === undefined ? {} : { returned }), ...(gated === undefined ? {} : { checks: gated }), ...(rechecked === undefined ? {} : { rechecked }), ...(toldAuthor === undefined ? {} : { toldAuthor }), ...(toldOwner ? { toldOwner } : {}), ...(told.length === 0 ? {} : { told }) });
     } catch (error) {
       if (error instanceof QuiesceRefused) return done("refused", { summary: safe(error.message, WORKSPACE_LIMITS.summary), ...(error.blockerId === undefined ? {} : { blocker: error.blockerId }) });
       // The host was asked and failed, or the answer was lost: it may have changed the checkout, so this is not a clean failure.
-      return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary), ...(quietAttempts.length === 0 ? {} : { quietAttempts }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }) });
+      return done("failed", { summary: safe(error, WORKSPACE_LIMITS.summary), ...(quietAttempts.length === 0 ? {} : { quietAttempts }), ...(stopped.length === 0 ? {} : { stopped }), ...(gated === undefined ? {} : { checks: gated }), ...(rechecked === undefined ? {} : { rechecked }) });
     }
   }
 
@@ -787,7 +800,7 @@ export class WorkspaceOpService {
       const round = counts ? ((counter?.body as unknown as { rounds?: number } | undefined)?.rounds ?? 0) + 1 : undefined;
       const final: WorkspaceRecordBody = round === undefined ? outcome : { ...outcome, round };
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(await this.#dequeueChange(final)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(await this.#dequeueChange(final)), ...(await this.#landingIndexChange(id, final)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
         return { ...final, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
@@ -826,6 +839,41 @@ export class WorkspaceOpService {
     const q = final.queued;
     if (final.operation !== "landing" || q === undefined || final.state !== "done" || this.#deps.landingQueue === undefined || !this.#landedExactly(q, final.detail, final.reapplied)) return [];
     return this.#deps.landingQueue.landedChanges(final.projectId, q.branch, q.submissionId);
+  }
+
+  /**
+   * The newest landing requests of the task and of its project (card P09, owner view of the checks), in the same write as the request's outcome: the request's ID goes to the front of each list (once), which is cut to a
+   * fixed length. A landing recorded before this index existed is not in it (the view says so); a request that never finished is not listed (it holds no judgement).
+   */
+  async #landingIndexChange(requestId: string, final: WorkspaceRecordBody): Promise<Change[]> {
+    if (final.operation !== "landing") return [];
+    const out: Change[] = [];
+    for (const [kind, key, cap] of [[LANDINGS, final.taskId, LANDING_INDEX_CAP.task], [LANDINGS_PROJECT, final.projectId, LANDING_INDEX_CAP.project]] as const) {
+      const current = await this.#runner.get(kind, key);
+      const had = (current?.body as unknown as { ids?: unknown } | undefined)?.ids;
+      const ids = [requestId, ...(Array.isArray(had) ? had.filter((x): x is string => typeof x === "string" && x !== requestId) : [])].slice(0, cap);
+      const ref: AggregateRef = { kind, id: key };
+      out.push(current === undefined ? { type: "create", ref, body: json({ ids }) } : { type: "update", ref, expectedRevision: current.revision, body: json({ ids }) });
+    }
+    return out;
+  }
+
+  /**
+   * The newest landing requests of a task or a project, newest first, `after` of them skipped (card P09, owner view of the checks). Takes no caller: the status view allows only the owner. Records the index names that
+   * cannot be read, or are not landings of that scope, are left out.
+   */
+  async landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<{ readonly items: readonly WorkspaceAnswer[]; readonly total: number }> {
+    const task = "taskId" in scope;
+    const current = await this.#runner.get(task ? LANDINGS : LANDINGS_PROJECT, task ? checkTaskId(scope.taskId) : scope.projectId);
+    const had = (current?.body as unknown as { ids?: unknown } | undefined)?.ids;
+    const ids = Array.isArray(had) ? had.filter((x): x is string => typeof x === "string" && WORKSPACE_ID.test(x)) : [];
+    const items: WorkspaceAnswer[] = [];
+    for (const id of ids.slice(after, after + limit)) {
+      const rec = await this.#get(id);
+      if (rec === undefined || rec.body.operation !== "landing" || (task ? rec.body.taskId !== scope.taskId : rec.body.projectId !== scope.projectId)) continue;
+      items.push({ ...rec.body, id, replayed: false });
+    }
+    return { items, total: ids.length };
   }
 
   /** The write of a task's refresh-round count: created at the first round, then updated against the revision that was read. */
