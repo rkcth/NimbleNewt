@@ -633,6 +633,30 @@ export function leadInWords(minutes: number, text: string): boolean {
   return durationInWords(minutes * 60, numbersOf(text).replace(/\b(?:\d+(?:\.\d+)?|[a-z-]+)\s*(?:minutes?|mins?|m|hours?|hrs?|h)\s+ago\b/g, " "));
 }
 
+/**
+ * The model-supplied values of `qa.review.policy.set` that the general words check lets through (card Q02 review): each extra check name must stand as a whole word (or words) in the owner's message, the review
+ * interval must be a length the owner said ("every 30 minutes", "every two hours", "hourly", "daily"), and the number of independent sources a number the owner said. Work classes, task IDs and the switches are
+ * fixed choices or records, shown on the proposal for the owner's yes. Answers the first field not in the owner's words, or `undefined`.
+ */
+export function reviewPolicyForeign(args: Readonly<Record<string, unknown>>, text: string): string | undefined {
+  const own = text.toLowerCase().replace(/\s+/g, " ").trim();
+  const checks = args["requiredChecks"];
+  if (Array.isArray(checks)) for (const [i, c] of checks.entries()) if (typeof c === "string" && c.trim() !== "" && !wholeWord(own, c.toLowerCase().replace(/\s+/g, " ").trim())) return `requiredChecks[${i}]`;
+  const m = args["periodicMinutes"];
+  if (typeof m === "number") {
+    const t = numbersOf(text);
+    const said = durationInWords(m * 60, t) || (m === 60 && /\b(?:hourly|(?:every|each|per|once an?) hour)\b/.test(t)) || (m === 1440 && /\b(?:daily|(?:every|each|per|once an?) day)\b/.test(t)) || (m === 10_080 && /\b(?:weekly|(?:every|each|per|once an?) week)\b/.test(t));
+    if (!said) return "periodicMinutes";
+  }
+  const n = args["independentSources"];
+  if (typeof n === "number") {
+    const t = numbersOf(text);
+    const word = ["zero", "one", "two", "three", "four", "five"][n];
+    if (!new RegExp(`(?:^|[^0-9.])${n}(?![0-9.])`).test(t) && !(word !== undefined && new RegExp(`\\b${word}\\b`).test(t)) && !(n === 2 && /\b(?:two|second|double|twice)\b/.test(t))) return "independentSources";
+  }
+  return undefined;
+}
+
 const SIZE_UNITS: Readonly<Record<string, readonly number[]>> = {
   b: [1], byte: [1], bytes: [1],
   kb: [1e3, 1024], kilobyte: [1e3, 1024], kilobytes: [1e3, 1024], kib: [1024],

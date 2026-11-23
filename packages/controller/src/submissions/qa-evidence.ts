@@ -105,6 +105,9 @@ export interface QaGate {
   readonly shortfalls?: readonly { readonly check: string; readonly sources: number }[];
 }
 
+/** Each task's newest code submission in a project, newest first, with everyone that submitted code on the task (`QaEvidenceService.newestCode`). */
+export interface NewestCode { readonly tasks: readonly { readonly taskId: string; readonly submissionId: string; readonly at: string; readonly tree: string; readonly submittedBy: string; readonly contributors: readonly string[] }[]; readonly scanLimited: boolean }
+
 /** One task's newest code submission and where it stands with QA (the project QA view). */
 export interface QaProjectItem {
   readonly taskId: string;
@@ -789,27 +792,40 @@ export class QaEvidenceService {
    * share this scan). Reads no gate and no evidence. Bounded: at most `reads` pages of `pageSize` submissions (`scanLimited` when more exist; the table is in hash order of IDs, not time order). Controller-internal: no
    * caller's rights are checked, so the callers that show it to someone check them.
    */
-  async newestCode(projectIdValue: string, limits: { readonly pageSize: number; readonly reads: number } = { pageSize: 500, reads: QA_LIMITS.projectScanReads }): Promise<{ readonly tasks: readonly { readonly taskId: string; readonly submissionId: string; readonly at: string; readonly tree: string; readonly submittedBy: string; readonly contributors: readonly string[] }[]; readonly scanLimited: boolean }> {
+  async newestCode(projectIdValue: string, limits: { readonly pageSize: number; readonly reads: number } = { pageSize: 500, reads: QA_LIMITS.projectScanReads }): Promise<NewestCode> {
     const projectId = checkProjectId(projectIdValue);
-    const newest = new Map<string, { id: string; at: string; tree: string; by: string }>();
+    const found = await this.newestCodeIn(new Set([projectId]), limits);
+    return { tasks: found.byProject.get(projectId) ?? [], scanLimited: found.scanLimited };
+  }
+
+  /**
+   * `newestCode` for several projects with ONE bounded scan of the submissions (card Q02 review: the review scheduler's round reads the table once, not once per project with a policy). The same bound and order.
+   */
+  async newestCodeIn(projectIds: ReadonlySet<string>, limits: { readonly pageSize: number; readonly reads: number } = { pageSize: 500, reads: QA_LIMITS.projectScanReads }): Promise<{ readonly byProject: ReadonlyMap<string, NewestCode["tasks"]>; readonly scanLimited: boolean }> {
+    const newest = new Map<string, { id: string; at: string; tree: string; by: string; projectId: string }>();
     const who = new Map<string, Set<string>>();
     let after: string | undefined;
     let scanLimited = true;
+    if (projectIds.size === 0) return { byProject: new Map(), scanLimited: false };
     for (let read = 0; read < limits.reads; read++) {
       const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: limits.pageSize });
       for (const row of chunk) {
         after = row.id;
         const b = row.body as unknown as SubmissionBody;
-        if (b.projectId !== projectId || b.kind !== "code" || b.tree === undefined || !TREE.test(b.tree)) continue;
+        if (!projectIds.has(b.projectId) || b.kind !== "code" || b.tree === undefined || !TREE.test(b.tree)) continue;
         who.set(b.taskId, (who.get(b.taskId) ?? new Set()).add(b.submittedBy));
         const had = newest.get(b.taskId);
-        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt, tree: b.tree, by: b.submittedBy });
+        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt, tree: b.tree, by: b.submittedBy, projectId: b.projectId });
       }
       if (chunk.length < limits.pageSize) { scanLimited = false; break; }
     }
-    const tasks = [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
-      .map(([taskId, n]) => ({ taskId, submissionId: n.id, at: n.at, tree: n.tree, submittedBy: n.by, contributors: [...(who.get(taskId) ?? [])].sort() }));
-    return { tasks, scanLimited };
+    const byProject = new Map<string, NewestCode["tasks"][number][]>();
+    for (const [taskId, n] of [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) {
+      const list = byProject.get(n.projectId) ?? [];
+      list.push({ taskId, submissionId: n.id, at: n.at, tree: n.tree, submittedBy: n.by, contributors: [...(who.get(taskId) ?? [])].sort() });
+      byProject.set(n.projectId, list);
+    }
+    return { byProject, scanLimited };
   }
 
   /**

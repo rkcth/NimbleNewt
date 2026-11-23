@@ -422,3 +422,92 @@ for (const backend of backends) {
     } finally { await t.w.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: review of the review policy: the dispatcher's round is throttled, one sweep serves several projects, a contributor's own evidence does not close the review, a cancelled task's review is closed, a cited record outside the recorder's reach is refused, and a check the policy adds mid-landing refuses it (card Q02)`, async () => {
+    const t = await world(backend.open);
+    try {
+      const { owner, project, other, review, runner, agent, mkTask, submit, evidence, plant } = t;
+      const ann = await agent("ann", ["author"]);
+      const ben = await agent("ben", ["author", "qa"]);
+      const bob = await agent("bob", ["reviewer"]);
+      const cat = await agent("cat", ["reviewer"], other);
+      t.setPool([bob.id, cat.id]);
+      await review.set(owner, { commandId: cid("s"), projectId: project, onSubmission: true } as never);
+      await review.set(owner, { commandId: cid("s"), projectId: other, onSubmission: true } as never);
+      t.advance(1000);
+      // Two projects with policies: one round makes the review of each.
+      const shared = await mkTask("Shared");
+      const s1 = await submit(shared, ben, "1");
+      t.advance(1000);
+      const s2 = await submit(shared, ann, "2");
+      const foreignTask = await mkTask("Elsewhere", "P", other);
+      await plant("submission", derivedId("sbm", cid("sub")), { taskId: foreignTask, projectId: other, kind: "code", role: "author", submittedBy: ann.id, submittedAt: t.clock(), makesCommit: true, base: "a".repeat(40), tree: "9".repeat(40), patchId: "c".repeat(40), evidence: [] });
+      const both = await review.sweep({ throttled: true });
+      assert.deepEqual([both.projects, both.created, both.errors], [2, 2, 0]);
+      assert.equal((await review.requests(owner, other)).total, 1, "the other project's review was made in the same round");
+      // The dispatcher's round runs at most once a minute; the owner's own sweep always runs.
+      assert.equal((await review.sweep({ throttled: true })).skipped, true);
+      t.advance(59_000);
+      assert.equal((await review.sweep({ throttled: true })).skipped, true);
+      t.advance(1000);
+      assert.equal((await review.sweep({ throttled: true })).skipped, undefined);
+      assert.equal((await review.sweep()).skipped, undefined);
+      // Ben submitted earlier code of the task: his evidence on ann's code counts for the QA gate but is not the independent review the policy asked for.
+      void s1;
+      await evidence(ben, s2, [{ name: "unit", result: "passed" }]);
+      assert.equal((await review.sweep()).settled, 0, "a contributor's evidence leaves the review open");
+      const holder = await agent("hal", ["qa"]);
+      await plant("assignment", assignmentIdOf(shared), { taskId: shared, generation: 1, state: "active", owner: { kind: "agent", id: holder.id }, attempts: 1 });
+      await evidence(holder, s2, [{ name: "unit", result: "passed" }]);
+      assert.equal((await review.sweep()).settled, 0, "the agent that holds the task cannot close it either");
+      await evidence(bob, s2, [{ name: "unit", result: "passed" }]);
+      assert.equal((await review.sweep()).settled, 1, "the reviewer's evidence closes it");
+      // A cancelled task's open review is closed and nobody is asked again.
+      t.advance(1000);
+      const doomed = await mkTask("Doomed");
+      await submit(doomed, ann, "3");
+      await review.sweep();
+      const open = (await review.requests(owner, project)).items.find((r) => r.taskId === doomed)!;
+      assert.ok(open !== undefined);
+      const found = await runner.get("task", doomed);
+      await runner.command("test.cancel", { commandId: cid("cancel"), actor: owner.id }, async () => ({ payload: { doomed }, build: async () => ({ ref: { kind: "task", id: doomed }, creates: false, changes: [{ type: "update" as const, ref: { kind: "task", id: doomed }, expectedRevision: found!.revision, body: { ...(found!.body as object), state: "cancelled" } as JsonObject }], detail: {} }) }));
+      const closed = await review.sweep();
+      assert.equal(closed.superseded, 1);
+      assert.equal(closed.created, 0, "a cancelled task gets no new review");
+      assert.deepEqual([((await runner.get("qa-review-request", open.id))?.body as { state: string; settledBy: string }).state, ((await runner.get("qa-review-request", open.id))?.body as { settledBy: string }).settledBy], ["superseded", "cancelled"]);
+      // A cited desk record in a project the recorder cannot read is refused, whatever it holds.
+      const outside = "dsk-" + "d".repeat(20);
+      await plant("desk-record", outside, { owner: cat.id, projectId: other, kind: "note", title: "x", body: "y", status: "accepted", visibility: "shared" });
+      await assert.rejects(() => evidence(bob, s2, [{ name: "unit", result: "passed" }], { sources: [outside] }), (e) => code(e, "invalid_command"), "a record of another project is not one bob can read");
+    } finally { await t.w.close(); }
+  });
+
+  test(`${backend.name}: the landing's recheck refuses a landing when the review policy started gating the task after the first judgement, and skips the checks it dropped (card Q02, P09)`, async () => {
+    const t = await world(backend.open);
+    try {
+      const { owner, project, review, qa, agent, mkTask, submit } = t;
+      const ann = await agent("ann", ["author"]);
+      const task = await mkTask("Production change", "PC");
+      const sub = await submit(task, ann, "1");
+      const gate = new LandingGate({
+        requiredChecks: async (projectId, taskId) => withPolicyChecks(["tests"], taskId === undefined ? [] : await review.landingChecks(projectId, taskId)),
+        tests: async () => undefined,
+        approvalOf: async () => ({ taskId: task, base: "a".repeat(40), tree: "1".repeat(40), patchId: "c".repeat(40), approved: true, approvedBy: "agent:rev", newest: "approve" as const, submittedBy: ann.id }),
+        qaGate: async (id) => landingQaGate(qa)(id),
+        now: () => t.clock(),
+      });
+      const host = { landingChecks: async () => ({ checkout: true, change: { base: "a".repeat(40), head: "f".repeat(40), tree: "1".repeat(40), patchId: "c".repeat(40) }, checks: [], reviewedPatchId: "c".repeat(40) }) } as never;
+      const first = await gate.evaluate({ taskId: task, projectId: project, submissionId: sub, host });
+      assert.deepEqual(first.required, ["tests"]);
+      await review.set(owner, { commandId: cid("s"), projectId: project, gatesCompletion: true } as never);
+      const again = await gate.recheck(first);
+      assert.deepEqual(again.added, ["review", "qa"], "a check the policy added since the first judgement refuses the landing");
+      const gated = await gate.evaluate({ taskId: task, projectId: project, submissionId: sub, host });
+      assert.deepEqual(gated.required, ["tests", "review", "qa"]);
+      await review.set(owner, { commandId: cid("s"), projectId: project, gatesCompletion: false } as never);
+      const dropped = await gate.recheck(gated);
+      assert.equal(dropped.added, undefined, "a check the policy no longer adds is not read again");
+    } finally { await t.w.close(); }
+  });
+}

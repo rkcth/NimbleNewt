@@ -11,7 +11,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import type { QaEvidenceBody, QaEvidenceService } from "./qa-evidence.js";
+import type { NewestCode, QaEvidenceBody, QaEvidenceService } from "./qa-evidence.js";
 
 /**
  * The review policy of a project (card Q02): which tasks need independent QA, when a review starts by itself, which checks it must cover beyond the task contract's, whether passing independent review gates
@@ -35,7 +35,7 @@ export interface QaReviewPolicyBody {
   readonly updatedAt: string;
 }
 
-export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 10, page: 20 } as const;
+export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 100, incidentPageSize: 500, page: 20, sweepEveryMs: 60_000 } as const;
 
 const KIND = "qa-review-policy";
 const REQUEST = "qa-review-request";
@@ -66,7 +66,7 @@ export interface QaReviewRequestBody {
   readonly noticeAt?: string;
   readonly ownerNoticeAt?: string;
   readonly settledAt?: string;
-  /** The independent QA evidence that settled it, or the newer code submission that replaced it. */
+  /** The independent QA evidence that settled it, the newer code submission that replaced it, or `cancelled` when its task was cancelled. */
   readonly settledBy?: string;
 }
 interface IndexBody { readonly open: readonly string[] }
@@ -131,15 +131,18 @@ export function checkPolicyChange(command: Record<string, unknown>): {
  * - **Scheduler.** `sweep` (the dispatcher's regular round) creates a review request for each code submission that a trigger names and gives it to an agent that holds the reviewer role in the project and did not work on the
  *   task (never the submitters of its code, never the agent that holds the task now). It writes the request, its index and one notice to the assignee, and nothing else: it never pauses, stops, messages or takes
  *   work from the agents working on the task, and a running attempt of a contributor is not looked at beyond reading who holds the task.
- * - **Settling.** A request is done when independent QA evidence is recorded on its submission after it was made, and superseded when the task's code moved on to a newer submission.
+ * - **Settling.** A request is done when independent QA evidence is recorded on its submission after it was made by someone who did not work on the task, and superseded when the task's code moved on to a newer
+ *   submission or the task was cancelled.
  */
 export class QaReviewService {
   readonly #runner: CommandRunner;
-  readonly #qa: Pick<QaEvidenceService, "newestCode">;
+  readonly #qa: Pick<QaEvidenceService, "newestCodeIn">;
   readonly #ports: QaReviewPorts;
-  private constructor(runner: CommandRunner, qa: Pick<QaEvidenceService, "newestCode">, ports: QaReviewPorts) { this.#runner = runner; this.#qa = qa; this.#ports = ports; }
+  /** When this controller's throttled round last ran (the dispatcher's call, every tick): at most once per `sweepEveryMs`. */
+  #lastSweepAt: number | undefined;
+  private constructor(runner: CommandRunner, qa: Pick<QaEvidenceService, "newestCodeIn">, ports: QaReviewPorts) { this.#runner = runner; this.#qa = qa; this.#ports = ports; }
 
-  static withEpoch(storage: ControllerStorage, epoch: number, qa: Pick<QaEvidenceService, "newestCode">, ports: QaReviewPorts, options: RunnerOptions = {}): QaReviewService {
+  static withEpoch(storage: ControllerStorage, epoch: number, qa: Pick<QaEvidenceService, "newestCodeIn">, ports: QaReviewPorts, options: RunnerOptions = {}): QaReviewService {
     return new QaReviewService(new CommandRunner(storage, epoch, options), qa, ports);
   }
 
@@ -177,12 +180,20 @@ export class QaReviewService {
     return by.kind === "owner" || (by.kind === "agent" && by.taskScope === undefined && allows(by, "task.read", projectId));
   }
 
+  #mayReadTask(by: Principal, projectId: string, taskId: string): boolean {
+    return by.kind === "owner" || allows(by, "task.read", projectId, { resource: { kind: "task", id: taskId } });
+  }
+
   /** The project's review policy, or what a project with none has. The owner, or an agent that may read the project's tasks. */
   async get(by: Principal, projectIdValue: string): Promise<{ readonly revision: number; readonly item: QaReviewPolicyBody | (Omit<QaReviewPolicyBody, "updatedBy" | "updatedAt"> & { updatedBy?: undefined; updatedAt?: undefined }); readonly isDefault: boolean }> {
     const projectId = checkProjectId(projectIdValue);
     if ((await this.#runner.get("project", projectId)) === undefined || !this.#mayRead(by, projectId)) throw new DomainError("not_found", "no such project");
     const found = await this.#runner.get(KIND, projectId);
-    return found === undefined ? { revision: 0, item: NO_POLICY(projectId), isDefault: true } : { revision: found.revision, item: found.body as unknown as QaReviewPolicyBody, isDefault: false };
+    if (found === undefined) return { revision: 0, item: NO_POLICY(projectId), isDefault: true };
+    const item = found.body as unknown as QaReviewPolicyBody;
+    // A named task the reader may not read (a restriction on that task) is not shown: the scope lists only the tasks the reader can see.
+    const taskIds = by.kind === "owner" ? item.scope.taskIds : item.scope.taskIds.filter((t) => this.#mayReadTask(by, projectId, t));
+    return { revision: found.revision, item: taskIds.length === item.scope.taskIds.length ? item : { ...item, scope: { ...item.scope, taskIds } }, isDefault: false };
   }
 
   /** The owner sets the project's review policy; fields left out stay as they were. Switching a trigger on records when, so work before it is not reviewed backwards. */
@@ -241,7 +252,7 @@ export class QaReviewService {
     for (const id of (await this.#index(projectId)).open) {
       const b = (await this.#runner.get(REQUEST, id))?.body as unknown as QaReviewRequestBody | undefined;
       if (b === undefined || b.state !== "open") continue;
-      if (by.kind !== "owner" && b.assignee !== by.id) continue;
+      if (by.kind !== "owner" && (b.assignee !== by.id || !this.#mayReadTask(by, projectId, b.taskId))) continue;
       all.push({ ...b, id });
     }
     const items = all.slice(after, after + limit);
@@ -255,32 +266,53 @@ export class QaReviewService {
    * Controller-internal (the dispatcher's loop and the owner's `qa.review.sweep`). A project that fails is counted and the others go on; the next round looks again. Idempotent: a request has a stable ID made from
    * its task, submission, trigger and cause, so two controllers or a repeated round make it once.
    */
-  async sweep(): Promise<QaReviewSweepResult> {
+  async sweep(options: { readonly throttled?: boolean } = {}): Promise<QaReviewSweepResult & { readonly skipped?: true }> {
     const total = { projects: 0, created: 0, assigned: 0, settled: 0, superseded: 0, unassigned: 0, errors: 0 };
+    if (options.throttled === true) {
+      // The dispatcher calls this every tick; a round reads the submissions (and incidents) of the whole installation, so it runs at most once a minute of the controller's clock (the shortest period is 15 minutes).
+      // A clock set back below the last round does not stop the rounds for good: only a round less than the interval ago, measured forwards, is skipped.
+      const at = Date.parse(this.#runner.now());
+      if (Number.isFinite(at) && this.#lastSweepAt !== undefined && at >= this.#lastSweepAt && at - this.#lastSweepAt < QA_REVIEW_LIMITS.sweepEveryMs) return { ...total, skipped: true };
+      this.#lastSweepAt = Number.isFinite(at) ? at : undefined;
+    }
+    const policies: QaReviewPolicyBody[] = [];
     let after: string | undefined;
-    for (let read = 0; read < 100; read++) {
+    for (let read = 0; read < 100 && policies.length < QA_REVIEW_LIMITS.policies; read++) {
       const chunk = await this.#runner.list(KIND, { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
-      for (const row of chunk) {
-        after = row.id;
-        if (total.projects >= QA_REVIEW_LIMITS.policies) break;
-        total.projects++;
-        try {
-          const r = await this.#project(row.body as unknown as QaReviewPolicyBody);
-          total.created += r.created; total.assigned += r.assigned; total.settled += r.settled; total.superseded += r.superseded; total.unassigned += r.unassigned;
-        } catch { total.errors++; }
-      }
-      if (chunk.length < 100 || total.projects >= QA_REVIEW_LIMITS.policies) break;
+      for (const row of chunk) { after = row.id; if (policies.length < QA_REVIEW_LIMITS.policies) policies.push(row.body as unknown as QaReviewPolicyBody); }
+      if (chunk.length < 100) break;
+    }
+    // A policy with no trigger on and no open request has nothing to do; the others share one scan of the submissions and, when any has the incident trigger on, one of the incidents.
+    const active: { policy: QaReviewPolicyBody; open: string[]; revision?: number }[] = [];
+    for (const policy of policies) {
+      total.projects++;
+      try {
+        const index = await this.#index(policy.projectId);
+        const t = policy.triggers;
+        if (index.open.length > 0 || t.onSubmission || t.periodicMinutes !== null || t.onIncident) active.push({ policy, ...index });
+      } catch { total.errors++; }
+    }
+    if (active.length === 0) return total;
+    let scan: ReadonlyMap<string, NewestCode["tasks"]>;
+    let incidents: ReadonlyMap<string, readonly { id: string; at: string }[]>;
+    try {
+      scan = (await this.#qa.newestCodeIn(new Set(active.map((a) => a.policy.projectId)))).byProject;
+      incidents = await this.#openIncidents(new Set(active.filter((a) => a.policy.triggers.onIncident).map((a) => a.policy.projectId)));
+    } catch { total.errors += active.length; return total; }
+    for (const a of active) {
+      try {
+        const r = await this.#project(a.policy, a, scan.get(a.policy.projectId) ?? [], incidents.get(a.policy.projectId) ?? []);
+        total.created += r.created; total.assigned += r.assigned; total.settled += r.settled; total.superseded += r.superseded; total.unassigned += r.unassigned;
+      } catch { total.errors++; }
     }
     return total;
   }
 
-  async #project(policy: QaReviewPolicyBody): Promise<{ created: number; assigned: number; settled: number; superseded: number; unassigned: number }> {
+  async #project(policy: QaReviewPolicyBody, index: { readonly open: readonly string[] }, tasks: NewestCode["tasks"], incidents: readonly { id: string; at: string }[]): Promise<{ created: number; assigned: number; settled: number; superseded: number; unassigned: number }> {
     const out = { created: 0, assigned: 0, settled: 0, superseded: 0, unassigned: 0 };
     const projectId = policy.projectId;
-    const index = await this.#index(projectId);
     const t = policy.triggers;
-    if (index.open.length === 0 && !t.onSubmission && t.periodicMinutes === null && !t.onIncident) return out;
-    const scan = await this.#qa.newestCode(projectId);
+    const scan = { tasks };
     const newest = new Map(scan.tasks.map((x) => [x.taskId, x] as const));
     const now = this.#runner.now();
     // Load: how many open requests each agent already has, so the work is spread evenly.
@@ -300,9 +332,11 @@ export class QaReviewService {
       if (latest !== undefined && latest.submissionId !== r.submissionId && askedAt !== undefined && latest.at > askedAt) {
         await this.#settle(r, "superseded", latest.submissionId); open.delete(r.id); out.superseded++; continue;
       }
-      const done = await this.#independentEvidence(r);
-      if (done !== undefined) { await this.#settle(r, "done", done); open.delete(r.id); out.settled++; continue; }
+      // A cancelled task needs no review any more: the request is closed as superseded by the cancellation (nothing is asked of anyone).
+      if (((await this.#runner.get("task", r.taskId))?.body as unknown as TaskBody | undefined)?.state === "cancelled") { await this.#settle(r, "superseded", "cancelled"); open.delete(r.id); out.superseded++; continue; }
       const info = newest.get(r.taskId);
+      const done = await this.#independentEvidence(r, info);
+      if (done !== undefined) { await this.#settle(r, "done", done); open.delete(r.id); out.settled++; continue; }
       if (info === undefined) continue;
       let current = r;
       if (r.assignee === undefined || !(await this.#stillEligible(r, info))) {
@@ -332,7 +366,8 @@ export class QaReviewService {
       }
     }
     if (t.onIncident && policy.since.incident !== undefined) {
-      for (const incident of await this.#openIncidents(projectId, policy.since.incident)) for (const x of eligible.slice(0, QA_REVIEW_LIMITS.tasksPerIncident)) wanted.push({ taskId: x.taskId, trigger: "incident", cause: incident });
+      const since = policy.since.incident;
+      for (const incident of incidents.filter((x) => x.at >= since).slice(0, QA_REVIEW_LIMITS.incidents)) for (const x of eligible.slice(0, QA_REVIEW_LIMITS.tasksPerIncident)) wanted.push({ taskId: x.taskId, trigger: "incident", cause: incident.id });
     }
     const owed = new Set([...open.values()].map((r) => r.submissionId));
     let made = 0;
@@ -353,20 +388,25 @@ export class QaReviewService {
     return out;
   }
 
-  /** The open incidents of the project that started after `since`, newest first, at most `QA_REVIEW_LIMITS.incidents`. */
-  async #openIncidents(projectId: string, since: string): Promise<string[]> {
-    const found: { id: string; at: string }[] = [];
+  /**
+   * The open incidents of these projects, newest first, with one bounded scan of the incident records (they are kept, resolved ones too, until purged, and their IDs are hashes, so the scan reads as far as the incident
+   * service's own list does rather than stopping at a page count that would leave newer incidents unseen on a large installation).
+   */
+  async #openIncidents(projectIds: ReadonlySet<string>): Promise<ReadonlyMap<string, readonly { id: string; at: string }[]>> {
+    const found = new Map<string, { id: string; at: string }[]>();
+    if (projectIds.size === 0) return found;
     let after: string | undefined;
     for (let page = 0; page < QA_REVIEW_LIMITS.incidentPages; page++) {
-      const chunk = await this.#runner.list("responsibility-incident", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      const chunk = await this.#runner.list("responsibility-incident", { ...(after === undefined ? {} : { afterId: after }), limit: QA_REVIEW_LIMITS.incidentPageSize });
       for (const row of chunk) {
         after = row.id;
         const b = row.body as unknown as IncidentBody;
-        if (b.projectId === projectId && b.state === "open" && b.firstAt >= since) found.push({ id: row.id, at: b.firstAt });
+        if (projectIds.has(b.projectId) && b.state === "open") found.set(b.projectId, [...(found.get(b.projectId) ?? []), { id: row.id, at: b.firstAt }]);
       }
-      if (chunk.length < 200) break;
+      if (chunk.length < QA_REVIEW_LIMITS.incidentPageSize) break;
     }
-    return found.sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : a.id < b.id ? -1 : 1)).slice(0, QA_REVIEW_LIMITS.incidents).map((x) => x.id);
+    for (const list of found.values()) list.sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : a.id < b.id ? -1 : 1));
+    return found;
   }
 
   /** Eligible reviewers for a task, least loaded first: never the submitters of its code, never the agent that holds it now. */
@@ -386,12 +426,18 @@ export class QaReviewService {
     return pool.includes(r.assignee) && !excluded.has(principalOf(r.assignee));
   }
 
-  /** Independent QA evidence recorded on the request's submission after the request was made: its ID. */
-  async #independentEvidence(r: QaReviewRequestBody): Promise<string | undefined> {
+  /**
+   * Independent QA evidence recorded on the request's submission after the request was made, by someone who did not work on the task (not a submitter of its code, not the agent that holds it now): its ID. Evidence
+   * by another contributor counts for the QA gate as it always did, but it is not the independent review the policy asked for, so the request stays open for its reviewer.
+   */
+  async #independentEvidence(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] } | undefined): Promise<string | undefined> {
     const ids = ((await this.#runner.get("qa-evidence-index", r.taskId))?.body as unknown as { ids?: string[] } | undefined)?.ids ?? [];
+    const assignment = (await this.#runner.get("assignment", assignmentIdOf(r.taskId)))?.body as { owner?: { id?: string } } | undefined;
+    const submitter = ((await this.#runner.get("submission", r.submissionId))?.body as { submittedBy?: string } | undefined)?.submittedBy;
+    const excluded = new Set([...(info?.contributors ?? []), ...(info === undefined ? [] : [info.submittedBy]), ...(submitter === undefined ? [] : [submitter]), ...(assignment?.owner?.id === undefined ? [] : [assignment.owner.id])].map(principalOf));
     for (const id of [...ids].reverse().slice(0, 100)) {
       const e = (await this.#runner.get("qa-evidence", id))?.body as unknown as QaEvidenceBody | undefined;
-      if (e !== undefined && e.submissionId === r.submissionId && e.source === "independent" && e.recordedAt >= r.createdAt) return id;
+      if (e !== undefined && e.submissionId === r.submissionId && e.source === "independent" && e.recordedAt >= r.createdAt && !excluded.has(e.recordedBy)) return id;
     }
     return undefined;
   }
@@ -469,7 +515,7 @@ export class QaReviewService {
     const field = to === "owner" ? "ownerNoticeAt" : "noticeAt";
     if (r[field] !== undefined) return;
     const words = to === "owner"
-      ? `Nobody can review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review): the agents that could have worked on it. Add a reviewer agent to the project or review it yourself.`
+      ? `Nobody can review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review): every reviewer agent of the project worked on the task or holds it now. Add a reviewer agent to the project or review it yourself.`
       : `You are asked to review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review of tree ${r.tree.slice(0, 12)}): record QA evidence on it (qa.evidence.record).`;
     try {
       await this.#ports.notice({ commandId: `qrr-note:${r.id}:${to}`, to, projectId: r.projectId, taskId: r.taskId, requestId: r.id, text: words.slice(0, 600) });

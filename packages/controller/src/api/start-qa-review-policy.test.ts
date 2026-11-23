@@ -49,6 +49,20 @@ test("the owner sets the review policy by chat, reads it back, and the controlle
     assert.equal((await call(ann.token, "qa.review.policy.set", { projectId: project, onSubmission: true }, "x1")).error.code, "forbidden");
     assert.equal((await call(ann.token, "qa.review.policy.get", { projectId: project })).result.isDefault, true, "an agent that reads the project's tasks may read the policy");
 
+    // The model cannot add a check name, an interval or a source count the owner did not say (card Q02 review): each is refused and nothing is proposed.
+    const loose = "have QA look at the code regularly";
+    for (const [k, args] of [{ requiredChecks: ["security"] }, { periodicMinutes: 60 }, { independentSources: 2 }].entries()) {
+      const out = await turn(`m-loose-${k}`, loose, [{ kind: "command", op: "qa.review.policy.set", args, evidence: loose, basis: "owner" }]);
+      assert.equal(out[0].status, "refused", JSON.stringify(out));
+      assert.equal(out[0].code, "unsupported_value", JSON.stringify(out));
+    }
+    // Said in the owner's own words, each is proposed: "every two hours", "the security check", "two independent sources".
+    const own = "review the newest code every two hours, require the security check, and want two independent sources for each check";
+    const ownOut = await turn("m-own", own, [{ kind: "command", op: "qa.review.policy.set", args: { periodicMinutes: 120, requiredChecks: ["security"], independentSources: 2 }, evidence: own, basis: "owner" }]);
+    assert.equal(ownOut[0].status, "proposed", JSON.stringify(ownOut));
+    const hourly = "review the code hourly";
+    assert.equal((await turn("m-hourly", hourly, [{ kind: "command", op: "qa.review.policy.set", args: { periodicMinutes: 60 }, evidence: hourly, basis: "owner" }]))[0].status, "proposed");
+
     // The owner says it in plain words: the change is shown first and applied on the owner's yes.
     const words = "have independent QA review every code change here, and nothing lands without that review";
     const proposed = await turn("m-set", words, [{ kind: "command", op: "qa.review.policy.set", args: { onSubmission: true, gatesCompletion: true }, evidence: words, basis: "owner" }]);
