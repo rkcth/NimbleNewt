@@ -52,12 +52,12 @@
     },
     "C": {
       "prompt": "prompts/variant-b.md",
-      "needs": "W04",
-      "about": "B plus the bounded continuation hook of W04"
+      "continuation": true,
+      "about": "B plus the bounded continuation of W04 (at most 3 nudges, the worker's own words; Pi extension continuation-extension.mjs)"
     },
     "D": {
       "prompt": "prompts/variant-b.md",
-      "needs": "W04",
+      "needs": "W04 and a driver that relaunches Pi with the stored session",
       "about": "C plus a relaunch that reuses the stored session (pi --session-id)"
     }
   },

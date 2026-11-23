@@ -15,7 +15,7 @@ import { PRIVATE_DIRS, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credential
 import { withSlot } from "./slot.mjs";
 import { toolCallTexts } from "./tool-args.mjs";
 import { readCorpus, specFit } from "./specfit.mjs";
-import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, renderPrompt } from "./taskset.mjs";
+import { COMPLETION_RULES_PLACEHOLDER, expandArgv, loadCompletionRules, loadContinuationConfig, renderPrompt } from "./taskset.mjs";
 
 const IS_WIN = process.platform === "win32";
 
@@ -341,6 +341,17 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     const promptFile = join(artifacts, "prompt.md");
     await writeFile(promptFile, prompt);
     const logFile = join(artifacts, "agent.jsonl");
+    // Card W04 (variant C): the continuation's words and bound go to the agent in a file of the run's artifacts; the agent's
+    // extension writes its counts beside the log (continuation.json) and they come back into the record.
+    const continuationEnv = {};
+    if (variant.continuation === true) {
+      const config = ctx.continuation ?? await loadContinuationConfig();
+      const configFile = join(artifacts, "continuation-config.json");
+      await writeFile(configFile, `${JSON.stringify(config)}\n`);
+      continuationEnv.PI_EVAL_CONTINUATION_CONFIG = configFile;
+      continuationEnv.PI_EVAL_CONTINUATION_FILE = join(artifacts, "continuation.json");
+      record.continuation = { max: config.max, installed: false };
+    }
     // The shared-server gate, asked again right here: preparing, the setup build and a test-slot wait can take minutes,
     // so the reading taken before them is not the one the agent starts on. A refusal starts nothing (runBatch stops).
     if (beforeAgent) {
@@ -357,7 +368,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     const t0 = Date.now();
     const a = await runCommand([...iso.prefix, ...ctx.agent.map((x, i) => (i === 0 && x === "node" ? process.execPath : x)), dir, promptFile, logFile], {
       cwd: dir, timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, outFile: join(artifacts, "agent-stderr.log"),
-      env: { ...iso.env, PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...(ctx.agentEnv ?? {}), ...mark },
+      env: { ...iso.env, PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...continuationEnv, ...(ctx.agentEnv ?? {}), ...mark },
       inheritEnv: false,
       onSpawn: (child) => ctx.children?.add(child),
     });
@@ -371,6 +382,19 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     const summary = await summarizeLogFile(logFile);
     const argClean = readArgClean(join(artifacts, "arg-clean.json"));
     if (argClean) record.argClean = argClean;
+    // A variant with the continuation but an agent that never wrote its counts (another agent, or the extension not loaded),
+    // or whose extension could not read the config the runner wrote (or read another bound), keeps installed: false: the run
+    // is not a variant C measurement and says so. `logged` is what Pi's own log shows (its entry_appended events of the
+    // extension's nudge), a second count beside the extension's file; the two differ only if one of them was changed.
+    if (variant.continuation === true) {
+      const c = readContinuation(join(artifacts, "continuation.json"));
+      const logged = summary.continuationEntries ?? 0;
+      if (c) {
+        const { configured, max, ...counts } = c;
+        record.continuation = { ...record.continuation, installed: configured && max === record.continuation.max, ...counts, logged };
+        record.nudges = c.nudges;
+      } else record.continuation = { ...record.continuation, logged };
+    }
     const plan = existsSync(join(dir, "PLAN.md")) ? planProgress(readFileSync(join(dir, "PLAN.md"), "utf8")) : null;
     const ch = await changesOf(dir, task.base);
     await writeFile(join(artifacts, "diffstat.txt"), `${ch.fullStat}\n`);
@@ -429,6 +453,18 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
   }
   log(`=> ${record.outcome}: ${record.reason}`);
   return record;
+}
+
+/**
+ * Card W04: the counts the bench's continuation extension left beside the log (continuation-extension.mjs), or null when it
+ * wrote none. Only these fields are taken from the file, as numbers and two flags.
+ */
+export function readContinuation(file) {
+  let raw;
+  try { raw = JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
+  if (raw === null || typeof raw !== "object") return null;
+  const n = (k) => (Number.isSafeInteger(raw[k]) && raw[k] >= 0 ? raw[k] : 0);
+  return { configured: raw.configured === true, max: n("max"), nudges: n("nudges"), lengthNudges: n("lengthNudges"), endedByReport: raw.endedByReport === true, errors: n("errors") };
 }
 
 /**

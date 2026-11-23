@@ -25,6 +25,14 @@ export function wilson(k, n, z = 1.959963984540054) {
 const emptyCounts = () => Object.fromEntries(OUTCOMES.map((o) => [o, 0]));
 
 /**
+ * Card W04: whether a run of a continuation variant (C) ran without the continuation as configured: the extension was not
+ * installed (another agent, not loaded, or it could not read the runner's config), or its counts file and Pi's own log
+ * disagree. Such a run is not a measurement of that variant (it may be variant B under C's name), so it is left out of the
+ * variant's rates and fails its gate.
+ */
+export const continuationOff = (r) => r?.continuation !== undefined && r.continuation !== null && (typeof r.continuation !== "object" || r.continuation.installed !== true || (r.continuation.logged !== undefined && r.continuation.logged !== r.continuation.nudges));
+
+/**
  * Groups result records (results.jsonl rows) by variant and size, counting each outcome. Unknown outcomes count as
  * unclassified. A contaminated run (its agent named another checkout, tried to push or add a remote, or reached for the
  * owner's keys; or the git wrapper refused something) is left out: it is never a verified finish, nor any other reading.
@@ -36,8 +44,10 @@ export function aggregate(records) {
     const variant = String(r.variant ?? "?");
     const size = SIZES.includes(r.size) ? r.size : "?";
     const key = `${variant}\u0000${size}`;
-    if (!groups.has(key)) groups.set(key, { variant, size, n: 0, tasks: new Set(), counts: emptyCounts(), wallMs: [] });
+    if (!groups.has(key)) groups.set(key, { variant, size, n: 0, tasks: new Set(), counts: emptyCounts(), wallMs: [], continuationOff: 0 });
     const g = groups.get(key);
+    // Card W04: counted apart, never in the variant's rates (see continuationOff).
+    if (continuationOff(r)) { g.continuationOff++; continue; }
     g.n++;
     g.tasks.add(String(r.taskId ?? "?"));
     g.counts[OUTCOMES.includes(r.outcome) ? r.outcome : "unclassified"]++;
@@ -73,6 +83,11 @@ export function gatesFor(variant, groups) {
   }
   if (unclassified > GATES.unclassifiedMax) failures.push(`${unclassified} unclassified non-finish(es)`);
   lines.push(`unclassified non-finishes ${unclassified} gate = 0: ${unclassified === 0 ? "ok" : "FAIL"}`);
+  const off = mine.reduce((a, g) => a + (g.continuationOff ?? 0), 0);
+  if (off > 0) {
+    failures.push(`${off} run(s) without the continuation as configured`);
+    lines.push(`runs without the continuation as configured (not installed, or its counts differ from Pi's log; left out of the rates, not a measurement of this variant): ${off} gate = 0: FAIL`);
+  }
   return { variant, pass: failures.length === 0, failures, lines };
 }
 
