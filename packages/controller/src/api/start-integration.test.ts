@@ -81,7 +81,7 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     const shown = await turn("m1", text, [{ kind: "command", op: "integration.set", args: { project, landing: "integration-branch" }, evidence: text, basis: "owner" }]);
     assert.equal(shown[0].status, "proposed", JSON.stringify(shown));
     assert.equal(await landing(), "human-promotes");
-    const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await turn("m2", `yes, do that ${shown[0].proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0].proposalId, evidence: `do that ${shown[0].proposalId}`, basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     assert.equal(await landing(), "integration-branch");
     // Nothing about landing is read out of the owner's wording: any sentence yields the same shown proposal, and the confirmation of it is the consent.
@@ -115,7 +115,7 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     const make = "create a project Orchard where a human promotes finished work";
     const draft = await turn("m5", make, [{ kind: "command", op: "project.create", args: { name: "Orchard", integration: { landing: "human-promotes", integrator: "human", requiredChecks: ["tests"], refreshRounds: "default" } }, evidence: make, basis: "owner" }]);
     assert.equal(draft[0].status, "proposed", JSON.stringify(draft));
-    const made = await turn("m6", "yes, go ahead with that", [{ kind: "apply_proposal", proposalId: draft[0].proposalId, evidence: "go ahead with that", basis: "owner" }]);
+    const made = await turn("m6", `yes, go ahead with that ${draft[0].proposalId}`, [{ kind: "apply_proposal", proposalId: draft[0].proposalId, evidence: `go ahead with that ${draft[0].proposalId}`, basis: "owner" }]);
     assert.equal(made[0].status, "applied", JSON.stringify(made));
     const orchard = (await call("project.list", {})).result.items.find((p: { name: string }) => p.name === "Orchard").id as string;
     const section = (await call("integration.get", { project: orchard })).result.item;
@@ -138,8 +138,9 @@ test("in chat, how finished work lands is shown first and applies on the owner's
     }
     assert.equal(asked[0]!.endsWith("|true"), true, "main-automatic is offered while the lock is off");
     assert.equal((r.outcomes[0] as any).status, "proposed", JSON.stringify(r.outcomes));
-    const grove = "yes, go ahead with that";
-    say[grove] = [{ kind: "apply_proposal", proposalId: (r.outcomes[0] as any).proposalId, evidence: "go ahead with that", basis: "owner" }];
+    const groveProposal = (r.outcomes[0] as any).proposalId as string;
+    const grove = `yes, go ahead with that ${groveProposal}`;
+    say[grove] = [{ kind: "apply_proposal", proposalId: groveProposal, evidence: `go ahead with that ${groveProposal}`, basis: "owner" }];
     assert.equal(((await c.chat!.submit(boot.token, { messageId: "g9", text: grove })).outcomes[0] as any).status, "applied");
     const groveId = (await call("project.list", {})).result.items.find((p: { name: string }) => p.name === "Grove").id as string;
     const g = (await call("integration.get", { project: groveId })).result.item;

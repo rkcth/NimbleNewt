@@ -484,6 +484,16 @@ const finishedWorkLines = (): { kind: string; say: string }[] => blocksAfter(gui
   return { kind: m[1]!, say: m[2]! };
 });
 
+test("the guide's Meetings section describes each owner control of scheduling and calling meetings, and names a status kind that exists (card chat meetings)", () => {
+  const whole = guide();
+  const from = whole.indexOf("\n## Meetings");
+  assert.ok(from >= 0, "the guide has the Meetings section");
+  const next = whole.indexOf("\n## ", from + 1);
+  const text = whole.slice(from, next < 0 ? undefined : next);
+  for (const word of ["**Schedule a meeting.**", "**Change a schedule.**", "**Call a meeting now.**", "**See the meetings.**", "shown to you first and happens only when you agree", "ending a schedule cannot be undone", "asked to stop at a safe point and join", "paused or unavailable ones are not woken", "30 minutes unless you said a length", "a day that has already passed is refused", "Naming agents replaces who attends", "the meetings after 10"]) assert.ok(text.includes(word), `the Meetings section says: ${word}`);
+  assert.ok(statusKindsInSource().has("meetings"), "the meetings view the section tells about is a real status kind");
+});
+
 test("every status view the guide's finished-work section lists is a real status kind, is described in full, and is answered by the chat for the words the guide shows (card D01)", async () => {
   const rows = finishedWorkLines();
   const real = statusKindsInSource();

@@ -102,7 +102,7 @@ test("the API ops for budgets, the optional aggregate cap and the merging branch
     let m = 0;
     const turn = async (text: string, intents: unknown[]) => { say[text] = intents; return (await c.chat!.submit(O, { messageId: `m${m++}`, text })).outcomes; };
     const cmd = (op: string, args: Record<string, unknown>, evidence: string) => ({ kind: "command", op, args, evidence, basis: "owner" });
-    const accept = async (proposed: any) => { const out = await turn("yes, go ahead and do that", [{ kind: "apply_proposal", proposalId: proposed.proposalId, evidence: "yes, go ahead and do that", basis: "owner" }]); assert.equal(out[0]!.status, "applied", JSON.stringify(out)); return out; };
+    const accept = async (proposed: any) => { const yes = `yes, go ahead and do that ${proposed.proposalId}`; const out = await turn(yes, [{ kind: "apply_proposal", proposalId: proposed.proposalId, evidence: yes, basis: "owner" }]); assert.equal(out[0]!.status, "applied", JSON.stringify(out)); return out; };
 
     // Money: shown first, nothing happens until accepted.
     let text = "Add 700 millionths to the budget of Plant the garden.";

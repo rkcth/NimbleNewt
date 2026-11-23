@@ -254,6 +254,8 @@ export const MEETING_SETTINGS: readonly SettingDefinition[] = [
 ];
 
 const SCHEDULE_ID = /^msc-[a-z2-7]{20}$/;
+/** The most schedule records one listing of a project's schedules reads. */
+const SCHEDULE_SCAN = 1000;
 const OCCURRENCE_ID = /^mto-[a-z2-7]{20}$/;
 const AGENDA_ID = /^mag-[a-z2-7]{20}$/;
 const OWNER_QUESTION_ID = /^sqn-[a-z2-7]{20}$/;
@@ -1200,6 +1202,34 @@ export class MeetingService {
       if (found !== undefined && body !== undefined && body.projectId === project && body.state === "planned") items.push(view<OccurrenceBody>(found));
     }
     return { items, ...(pos < open.ids.length ? { next: open.ids[pos - 1]! } : {}) };
+  }
+
+  /**
+   * A project's meeting schedules that are not stand-ups (a stand-up keeps a daily window and is listed by the stand-up service), in ID order, a page at a time. There is no per-project index, so the list reads the
+   * schedule records in pages of 200 (at most 1,000 looked at); `scanLimited` says it stopped there before the page was full. A viewer who may not read the project's meetings gets `undefined`.
+   */
+  async schedules(viewer: Principal, projectId: string, page: { afterId?: string; limit?: number } = {}): Promise<{ items: View<ScheduleBody>[]; next?: string; scanLimited?: true } | undefined> {
+    onlyKnown(page, ["afterId", "limit"]);
+    const project = checkProjectId(projectId);
+    if (!this.#mayRead(viewer, project)) return undefined;
+    const limit = page.limit === undefined ? 20 : whole(page.limit, "limit", 1, MEETING_LIMITS.page);
+    if (page.afterId !== undefined && (typeof page.afterId !== "string" || !SCHEDULE_ID.test(page.afterId))) invalid("afterId", "is not a schedule ID");
+    const items: View<ScheduleBody>[] = [];
+    let after = page.afterId;
+    let scanned = 0;
+    for (;;) {
+      const chunk = await this.#runner.list("meeting-schedule", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+      for (const found of chunk) {
+        const body = found.body as unknown as ScheduleBody;
+        if (body.projectId === project && body.window === undefined) {
+          if (items.length >= limit) return { items, next: items[items.length - 1]!.id };
+          items.push(view<ScheduleBody>(found));
+        }
+        after = found.id;
+        if (++scanned >= SCHEDULE_SCAN) return { items, next: after, scanLimited: true };
+      }
+      if (chunk.length < 200) return { items };
+    }
   }
 
   // ---- internals ----------------------------------------------------------------------------------------------------------------------------

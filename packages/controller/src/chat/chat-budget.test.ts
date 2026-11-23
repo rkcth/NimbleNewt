@@ -5,7 +5,7 @@ import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import type { Principal } from "../security/principals.js";
-import { CHAT_OPS, acceptedArgs, describe } from "./index.js";
+import { CHAT_OPS, acceptedArgs, promptArgs, describe } from "./index.js";
 import { ModelInterpreter, type ModelCall, type ModelReply } from "./model-interpreter.js";
 import { CHAT_BUDGET_LIMITS, ChatSpendService, GuardedModelCall } from "./routed-model.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
@@ -30,7 +30,7 @@ test("the interpreter prompt describes both operations from the tables, and the 
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
   await m.interpret({ text: "hello", quoted: [], focus: {}, proposals: [] });
   assert.ok(acceptedArgs("chat.budget.set")!.includes("maxTokensPerDay") && !acceptedArgs("chat.budget.set")!.includes("commandId"));
-  assert.ok(system.includes(`chat.budget.set(${acceptedArgs("chat.budget.set")!.filter((k) => k !== "projectName").join(", ")}) - ${CHAT_OPS["chat.budget.set"]!.verb}`), "the operation line comes from the table");
+  assert.ok(system.includes(`chat.budget.set(${promptArgs("chat.budget.set").join(", ")}) - ${CHAT_OPS["chat.budget.set"]!.verb}`), "the operation line comes from the table");
   const kind = STATUS_KINDS["chat_budget"]!;
   assert.ok(system.includes(`chat_budget(${kind.keys.join(", ")}) - ${kind.about}`), "the status kind comes from the table");
   for (const words of ["two million", "take the daily token cap off", "how much of today's allowance", "null"]) assert.ok(system.includes(words), words);

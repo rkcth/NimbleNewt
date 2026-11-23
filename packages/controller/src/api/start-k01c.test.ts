@@ -105,7 +105,7 @@ test("the owner adds a backup target by free wording through the chat interprete
       return JSON.stringify(open.length === 1 ? [{ kind: "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }] : [{ kind: "none", reason: "no single open proposal" }]);
     }
     const described = /backup\.target\.add\(([^)]*)\) - /.exec(r.system);
-    if (described === null || !/backup\.target\.add with kind folder, disk or offsite/.test(r.system) || !/backup\.purge/.test(r.system) || !/backup\.config\.status/.test(r.system)) return JSON.stringify([{ kind: "none", reason: "the prompt describes no way to do this" }]);
+    if (described === null || !/backup\.target\.add with kind folder, disk or offsite/.test(r.system) || !/backup\.purge/.test(r.system) || !/status kind backups/.test(r.system)) return JSON.stringify([{ kind: "none", reason: "the prompt describes no way to do this" }]);
     const have = described[1]!.split(", ").map((x) => x.replace("?", ""));
     if (!["name", "kind", "location"].every((n) => have.includes(n))) return JSON.stringify([{ kind: "none", reason: "arguments missing" }]);
     if (/hunter2/.test(owner)) { secretTry = true; return JSON.stringify([{ kind: "command", op: "backup.target.add", args: { name: "Cloud", kind: "offsite", location: "https://rob:hunter2@backup.example.com/store" }, evidence: owner, basis: "owner" }]); }
