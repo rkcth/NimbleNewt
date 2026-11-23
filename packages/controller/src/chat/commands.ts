@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "backup-scope" | "defect" | "observation" | "lesson" | "experiment";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "meeting-schedule" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "backup-scope" | "defect" | "observation" | "lesson" | "experiment";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -329,6 +329,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   // Waking a stopped agent for one meeting and ending that wake (card M04h). Waking runs an agent the owner stopped, so it follows the profile like the invitation; ending it only returns the agent to rest, so it applies at once.
   "meeting.attend.wake": { verb: "Wake a stopped agent for a meeting", mode: "profile", needsProject: true },
   "meeting.attend.wake-stop": { verb: "Stop the wake of an agent for a meeting", mode: "apply", needsProject: true },
+  // Scheduling and calling meetings by words (card "chat meetings"): who attends is named by agents' names, the time is the owner's wall-clock time in their zone, and every one is shown first (a schedule invites agents over and over; a call takes agents away from their work).
+  "meeting.schedule": { verb: "Schedule a meeting", mode: "propose", needsProject: true },
+  "meeting.update-schedule": { verb: "Change a meeting's schedule", mode: "propose", revision: "meeting-schedule", needsProject: true },
+  "meeting.call-urgent": { verb: "Call agents to a meeting now", mode: "propose", needsProject: true },
+  "meeting.attend.call-now": { verb: "Call the whole project to a meeting now", mode: "propose", needsProject: true },
   // How notifications reach the owner (card U11b): digest times, quiet hours, the hours before an unanswered item is escalated, and the channel. It only changes how the owner is told, can be set back by saying so, and applies from the next notification, so an explicit order applies at once. The settings revision is read, not quoted.
   // The critical path (card U11d, "U11f"): what the owner marks decides what is listed first and what pages them, so marking or unmarking is always shown first. The task is named by its title (taskTitle) and the project by its name (projectName).
   "critical.mark": { verb: "Mark or unmark the critical path (kind task, goal or project; marked false takes the mark off)", mode: "propose" },
@@ -394,6 +399,16 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
 
 /** Names the owner may use in place of an ID; each is resolved from records and an unclear match asks. */
 export const TITLE_KEYS: Readonly<Record<string, string>> = { taskTitle: "taskId", prerequisiteTitle: "prerequisiteId" };
+
+/** What the chat accepts for the owner's meeting controls (and the prompt lists): see `acceptedArgs`. */
+export const MEETING_CHAT_ARGS: Readonly<Record<string, readonly string[]>> = {
+  "meeting.schedule": ["projectId", "title", "agentNames", "time", "recurrence", "timeZone", "durationMinutes"],
+  "meeting.update-schedule": ["meetingTopic", "state", "agentNames", "time", "recurrence", "timeZone"],
+  "meeting.call-urgent": ["projectId", "title", "reason", "agentNames", "durationMinutes"],
+  "meeting.attend.call-now": ["projectId", "title", "reason", "durationMinutes"],
+};
+/** What `foreignValue` leaves alone on those: the time of day, the zone and a one-off date are worked out from the owner's words (the time is checked by `clockTimeInWords`, all three are shown on the proposal). */
+export const MEETING_SCHEDULE_EXEMPT: ReadonlySet<string> = new Set(["time", "timeZone", "date"]);
 
 /** The argument names the operation takes (from the API's own table, so they cannot drift), plus the chat-only names and the revision the chat fills in. */
 
@@ -466,6 +481,88 @@ function clockTimes(written: string): number[] {
   else hours = h === 0 || h > 12 ? [h] : [h, (h + 12) % 24];
   const shift = m[1] === "half" ? 30 : m[1] === "quarter" ? (m[2] === "past" ? 15 : -15) : 0;
   return hours.map((hh) => (hh * 60 + mm + shift + 1440) % 1440);
+}
+
+/**
+ * Whether the owner's own words give this time of day ("HH:MM", 24-hour) for a meeting: "at 9", "9:30am", "half past two", "noon", "21:00". A bare number counts only after a word like "at", "from" or "around", so "3 agents" is not 03:00;
+ * a time without am or pm is read both ways round the clock. A time the model chose is not the owner's, so it is asked for instead of proposed.
+ */
+export function clockTimeInWords(time: unknown, text: string): boolean {
+  return clockTimeReading(time, text) !== undefined;
+}
+
+/**
+ * How the owner's words give this time of day: `said` when they fix it (am or pm, an hour past 12, `09:30` written with its leading zero, noon, midnight), `either` when they give it only
+ * without am or pm ("at 3", "9:30", "half past two", which could be 03:00 or 15:00), undefined when they do not give it at all (see `clockTimeInWords`). The chat says which reading was taken
+ * of an `either` time, and asks about one at night, so "at 3" can never quietly become 03:00.
+ */
+export function clockTimeReading(time: unknown, text: string): "said" | "either" | undefined {
+  const at = typeof time === "string" ? /^(\d{2}):(\d{2})$/.exec(time) : null;
+  if (at === null) return undefined;
+  const want = Number(at[1]) * 60 + Number(at[2]);
+  const t = numbersOf(text);
+  let either = false;
+  for (const m of t.matchAll(new RegExp(CLOCK, "g"))) {
+    const written = m[0].trim();
+    if (/^(?:\d{1,2}|[a-z]+)$/.test(written) && !/\b(?:at|from|around|about|by|for|until|till|after|before)\s+$|@\s*$/.test(t.slice(Math.max(0, m.index - 12), m.index))) continue;
+    const times = clockTimes(written);
+    if (!times.includes(want)) continue;
+    // `09:30` written with its leading zero is that hour only (the first reading), never 21:30: the other half of the day is not in the owner's words.
+    if (/^0\d[:.]\d{2}$/.test(written)) { if (times[0] === want) return "said"; continue; }
+    if (times.length === 1) return "said";
+    either = true;
+  }
+  return either ? "either" : undefined;
+}
+
+/** A recurrence in the owner's words, for the proposal line. */
+export function recurrenceWords(value: unknown): string {
+  const r = value as { kind?: unknown; date?: unknown; days?: unknown } | null;
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  // A one-off date is shown with its weekday and month in words too, so "Friday" read as next week's Friday, or "3/4/2027" read the other way round, is plain to see.
+  if (r?.kind === "once") {
+    const ymd = typeof r.date === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(r.date) : null;
+    const at = ymd === null ? undefined : new Date(Date.UTC(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])));
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    return `once on ${short(r.date)}${at === undefined || Number.isNaN(at.getTime()) || at.getUTCDate() !== Number(ymd![3]) ? "" : ` (${days[at.getUTCDay()]} ${at.getUTCDate()} ${months[at.getUTCMonth()]})`}`;
+  }
+  if (r?.kind === "weekly" && Array.isArray(r.days)) return `every ${r.days.map((d) => days[d as number] ?? `day ${short(d)}`).join(", ")}`;
+  if (r?.kind === "daily") return "every day";
+  return short(value);
+}
+
+/** The weekdays (0 Sunday to 6 Saturday) as people write them: the name, its short form, or the plural ("Mondays"). */
+const DAY_WORDS = ["sun(?:day)?", "mon(?:day)?", "tue(?:s(?:day)?)?", "wed(?:nesday)?|weds", "thu(?:r(?:s(?:day)?)?)?", "fri(?:day)?", "sat(?:urday)?"];
+/**
+ * Whether the owner's own words name every weekday of a weekly meeting: by its name ("Monday", "Mon", "Mondays"), Monday to Friday by "weekdays", "workdays" or "business days", Saturday and Sunday by "weekends".
+ * A day the model chose is not the owner's: a meeting on the wrong days invites agents on the wrong days, so it is asked about instead of proposed.
+ */
+export function weekdaysInWords(days: readonly number[], text: string): boolean {
+  const t = text.toLowerCase();
+  const working = /\b(?:week ?days?|work ?days?|working days?|business days?)\b/.test(t);
+  const weekend = /\bweek-?ends?\b/.test(t);
+  return days.every((d) => new RegExp(`\\b(?:${DAY_WORDS[d] ?? "(?!)"})s?\\b`).test(t) || (working && d >= 1 && d <= 5) || (weekend && (d === 0 || d === 6)));
+}
+
+/**
+ * Whether the owner's own words give the day of a one-off meeting, where `today` is the date on the meeting zone's calendar now: the day written out (as `grantDateInWords` reads it: `2026-11-24`, `24/11/2026`,
+ * `November 24th`), "today" or "tonight", "tomorrow", "the day after tomorrow", "in 3 days", or the weekday's name ("on Friday", "next Friday") within the next two weeks. "Soon" or "once" names no day: the day
+ * would be the model's, so it is asked for. The date and its moment in UTC are still shown on the proposal for the owner to confirm.
+ */
+export function oneOffDayInWords(date: string, text: string, today: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (m === null) return false;
+  const own = ` ${text.toLowerCase().replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim()} `;
+  if (dayInWords({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), text: date }, own)) return true;
+  const ahead = Math.round((Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+  if (!Number.isSafeInteger(ahead) || ahead < 0) return false;
+  const rest = own.replace(/\bday after tomorrow\b/g, " ");
+  if (ahead === 0 && /\b(?:today|tonight|this (?:morning|afternoon|evening))\b/.test(own)) return true;
+  if (ahead === 1 && /\btomorrow\b/.test(rest)) return true;
+  if (ahead === 2 && rest !== own) return true;
+  for (const n of own.matchAll(new RegExp(`\\bin (\\d{1,3}|${NUMBER_WORDS()}) days?\\b`, "g"))) if (numberOf(n[1]!) === ahead) return true;
+  const weekday = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay();
+  return ahead <= 13 && new RegExp(`\\b(?:${DAY_WORDS[weekday]!})s?\\b`).test(own);
 }
 
 /**
@@ -636,6 +733,9 @@ export function promptArgs(op: string): readonly string[] {
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
+  // The meeting controls name who attends by agents' names and a schedule by its words, never by principal or schedule IDs, scopes or revisions: the chat fills those in from the records.
+  const own = MEETING_CHAT_ARGS[op];
+  if (own !== undefined) return [...own, ...Object.keys(TITLE_KEYS), "projectName"];
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
   return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative") && !(op === "meeting.record.open-vote" && k === "limitMinutes")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" || op === "responsibility.probe.set" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "retirement.agent" ? ["agentName"] : []), ...(op === "owner.answer" || op === "standup.answer-question" ? ["questionTopic"] : []), ...(op === "needs-you.answer" ? ["itemTopic"] : []), ...(op === "meeting.invite-direct" || op === "meeting.attend.wake" || op === "meeting.attend.wake-stop" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(MOTION_CONTROLS.has(op) || op === "meeting.proc.rule" || op === "meeting.proc.untable" || op === "meeting.proc.begin" || op === "meeting.proc.advance" ? ["motionTopic"] : []), ...(FLOOR_CONTROLS.has(op) ? ["meetingTopic"] : []), ...(op === "meeting.floor.ask" || op === "meeting.floor.address" ? ["agentName"] : []), ...(op === "meeting.floor.priorities" ? ["agendaTopic", "urgency"] : []), ...(op === "meeting.proc.owner-message" ? ["meetingTopic"] : []), ...(op === "meeting.record.finish" || op === "meeting.record.outcomes" ? ["meetingTopic"] : []), ...(op === "meeting.record.apply" ? ["decisionTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "task.assign" || op === "task.transfer" || op === "grant.create" || op === "toolbox.optin" ? ["agentName"] : []), ...(op === "grant.create" ? ["bundle"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
 }
@@ -735,6 +835,9 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (op === "standup.update" && args["state"] === "active") return "resuming a stand-up wakes its agents again (and ends it instead if its end date has passed), so it is shown first";
   // Pausing, resuming, ending or renaming a stand-up is a plain edit; who attends and when it is held changes what agents are woken for, so it is shown first.
   if (op === "standup.update" && ["roster", "time", "timeZone", "recurrence", "durationMinutes", "prepareMinutes", "windowFrom", "windowTo", "coverageHours"].some((f) => args[f] !== undefined)) return "it changes who attends or when the stand-up is held, so it is shown first";
+  // A meeting called or scheduled by words invites agents (a call takes them from their work now, a schedule does it again and again): always shown first, whatever the profile.
+  if (op === "meeting.call-urgent" || op === "meeting.attend.call-now") return "a call takes agents away from their work, so it is shown first";
+  if (op === "meeting.schedule" || op === "meeting.update-schedule") return "a schedule decides when agents are invited to meetings, and ending one cannot be undone, so it is shown first";
   // Retention (card K06, T02c): what each command does to the owner's data, said as it is.
   if (spec.mode === "propose" && op === "retention.run") return args["dryRun"] === false ? "a real retention run deletes what the rules expire, so it is shown first, with the preview it will carry out" : "it only previews what retention would remove and deletes nothing; it is shown first like every retention command";
   if (spec.mode === "propose" && op === "retention.settings.set") return "retention settings decide what may be deleted and how much room is kept back, so they are shown first";
@@ -1046,18 +1149,28 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
     }
     // A probe's address is shown whole, never cut (second review): it is the reach the owner approves, and two addresses alike in their first 77 characters must not look the same.
     if (op === "responsibility.probe.set" && key === "url" && typeof value === "string") { parts.push(`url=${Array.from(value, (c) => (UNSHOWN.test(c) ? `\\u{${c.codePointAt(0)!.toString(16)}}` : c)).join("")}`); continue; }
+    // A meeting's roster is shown as the agents' names (the labels the chat made from the records) and its recurrence in words, never as IDs or an object.
+    if (op in MEETING_CHAT_ARGS && key === "roster" && Array.isArray(value)) { parts.push(`roster=${value.map((v) => quotedText(labels[String(v)] ?? String(v), NAME_LIMIT)).join(", ")}`); continue; }
+    if (op in MEETING_CHAT_ARGS && key === "recurrence") { parts.push(`recurrence=${recurrenceWords(value)}`); continue; }
     // A label is a record's own text (an agent wrote it when it made the record), so it is quoted the way a status answer quotes it; the argument's name is the interpreter's word and is escaped the same way.
     const label = typeof value === "string" ? labels[value] : undefined;
     parts.push(`${short(key)}=${label === undefined ? short(value) : quotedText(label, NAME_LIMIT)}`);
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "responsibility.probe.set" ? probeMeaning(args) : op === "chat.budget.set" ? chatBudgetMeaning(args) : op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.record.open-vote" ? " (members can vote from now on; the vote closes after its time, or when you count it)" : op === "meeting.record.close-vote" ? " (the ballots cast so far are counted; if it is adopted its changes are carried out or wait for your answer, as the policy says)" : op === "meeting.record.table" ? " (the motion ends with no vote and is not taken up again)" : op === "meeting.proc.begin" ? " (the comment rounds, the objection check and the vote follow; members are asked to speak)" : op === "meeting.proc.advance" ? " (one step: one member's turn, answer or ballot)" : op === "meeting.floor.cq-rule" ? " (dismissed lets the chair's question stand; upheld withdraws it)" : op === "meeting.proc.rule" ? " (a ruling on the objections that hold the vote: going ahead records them as dissent, tabling ends the motion with no vote and makes follow-up tasks, upholding asks for a clarification or an amendment and runs the objection check again)" : op === "meeting.proc.untable" ? " (the tabled motion stays on record; its wording is moved again and put to a vote after the objection check)" : op === "meeting.proc.owner-message" ? " (everyone who speaks in the meeting after it sees these words; nobody gets the floor by it)" : op === "meeting.record.finish" ? " (the meeting ends for good; motions not concluded are voided)" : op === "meeting.record.outcomes" ? (args["askOwner"] === true ? " (each outcome goes back to the conversation it came from, and every decision the meeting deferred also puts a question to you, which you answer in chat)" : " (each outcome goes back to the conversation it came from; nothing is asked of you)") : op === "meeting.record.apply" ? " (only changes already agreed that were not carried out; each is checked again against the rights and state it relies on)" : op === "meeting.invite-direct" || op === "meeting.attend.wake" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op === "grant.create" ? grantMeaning(args, labels) : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
+  const meaning = op === "responsibility.probe.set" ? probeMeaning(args) : op === "chat.budget.set" ? chatBudgetMeaning(args) : op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.record.open-vote" ? " (members can vote from now on; the vote closes after its time, or when you count it)" : op === "meeting.record.close-vote" ? " (the ballots cast so far are counted; if it is adopted its changes are carried out or wait for your answer, as the policy says)" : op === "meeting.record.table" ? " (the motion ends with no vote and is not taken up again)" : op === "meeting.proc.begin" ? " (the comment rounds, the objection check and the vote follow; members are asked to speak)" : op === "meeting.proc.advance" ? " (one step: one member's turn, answer or ballot)" : op === "meeting.floor.cq-rule" ? " (dismissed lets the chair's question stand; upheld withdraws it)" : op === "meeting.proc.rule" ? " (a ruling on the objections that hold the vote: going ahead records them as dissent, tabling ends the motion with no vote and makes follow-up tasks, upholding asks for a clarification or an amendment and runs the objection check again)" : op === "meeting.proc.untable" ? " (the tabled motion stays on record; its wording is moved again and put to a vote after the objection check)" : op === "meeting.proc.owner-message" ? " (everyone who speaks in the meeting after it sees these words; nobody gets the floor by it)" : op === "meeting.record.finish" ? " (the meeting ends for good; motions not concluded are voided)" : op === "meeting.record.outcomes" ? (args["askOwner"] === true ? " (each outcome goes back to the conversation it came from, and every decision the meeting deferred also puts a question to you, which you answer in chat)" : " (each outcome goes back to the conversation it came from; nothing is asked of you)") : op === "meeting.record.apply" ? " (only changes already agreed that were not carried out; each is checked again against the rights and state it relies on)" : op === "meeting.invite-direct" || op === "meeting.attend.wake" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op in MEETING_CHAT_ARGS ? meetingMeaning(op, args) : op === "grant.create" ? grantMeaning(args, labels) : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
   // The verb is this file's own wording; an operation the table does not know is whoever called this saying an operation name, so even that is escaped.
   const line = `${short(spec?.verb ?? op)}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
   const room = op === "meeting.record.owner-respond" ? 700 : op === "responsibility.probe.set" ? PROBE_LINE : CHAT_LIMITS.line;
   return line.length > room ? `${cutAt(line, room - 3)}...` : line;
+}
+
+/** What a meeting control does to the agents, said before the details so a long title can never push it off the line. */
+function meetingMeaning(op: string, args: Readonly<Record<string, unknown>>): string {
+  if (op === "meeting.schedule") return " (the agents on its roster are invited to every meeting it makes, at this time in this zone)";
+  if (op === "meeting.update-schedule") return args["state"] === "ended" ? " (the schedule ends for good and makes no more meetings)" : " (meetings it makes later change; ones already made are not touched)";
+  return op === "meeting.call-urgent" ? " (the agents named are asked to stop at a safe point and join a meeting that starts now; paused or unavailable ones are not woken)" : " (every agent of the project is asked to stop at a safe point and join a meeting that starts now; paused or unavailable ones are not woken)";
 }
 
 /** The room of a probe's line: what it means, the whole address (at most 500 characters; the chat refuses a longer one or one with characters that would be escaped before it is proposed) and the rest. */

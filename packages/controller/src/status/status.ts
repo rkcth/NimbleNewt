@@ -299,7 +299,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
   start_size: { keys: ["taskId|taskTitle"], about: "a task's starting sizes across its hand-offs (card C07i): how large each attempt's first call was, against its route's startup limit (unknown when the route's window is), the alerts open on it with the trend and the largest contributors, where the originals are kept, and the watch's thresholds (the owner changes them with the context.start-size.change command)" },
   handoff_archive: { keys: ["taskId|taskTitle", "section", "archiveId", "from"], about: "the whole text of a hand-off package section that was cut to fit, as the source gave it (credentials removed): name the task (its latest hand-off, going on or finished) and the section (brief, completedWork, drafts, ...), or the archive ID a cut marker names; from is the line to read on from, as the previous answer says" },
-  meetings: { keys: ["projectId", "limit"], about: "planned meetings and stand-ups of a project" },
+  meetings: { keys: ["projectId", "limit", "after"], about: "planned meetings, meeting schedules and stand-ups of a project; after: how many schedules were already shown, to see only the next ones" },
   decision_log: { keys: ["projectId", "changeKind", "outcome", "limit"], about: "what meeting decisions changed and what became of them" },
   decision_patterns: { keys: ["projectId"], about: "what the meeting decision log suggests: kinds of grant or budget raise the owner has always agreed to, so the owner could stop being asked" },
   agenda: { keys: ["projectId", "limit"], about: "topics waiting for the next stand-up" },
@@ -721,7 +721,7 @@ export interface StatusDeps {
   /** The planned meetings of a project (card M04f). Absent: the view is not offered. */
   /** What a meeting's chair read from absent members' desks (card M05b): the `meeting_desk_reads` view. Absent: the view is not offered. */
   readonly deskReads?: { reads(by: Principal, query: { occurrenceId: string; deskRecordId?: string; limit?: number }): Promise<{ reads: readonly { id: string; revision: number; deskRecordId: string; deskOwner: string; deskRevision: number; bytes: number; visibility: string; source?: string; reader: string; at: string; meetingRecordId: string }[]; next?: string }>; attempts(by: Principal, query: { occurrenceId: string; limit?: number }): Promise<{ attempts: readonly { id: string; revision: number; targetId: string; operation: string; count: number; last: string; lastBy: string }[]; next?: string }> };
-  readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined> };
+  readonly meetings?: { planned(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { id: string; revision: number; title: string; kind: string; startsAt: string; endsAt: string; mode: string; state: string; participants: readonly { id: string; status?: string; availability?: string }[] }[]; next?: string } | undefined>; schedules?(viewer: Principal, projectId: string, page?: { limit?: number; afterId?: string }): Promise<{ items: readonly { id: string; revision: number; title: string; state: string; time: string; timeZone: string; recurrence: { kind: string; date?: string; days?: readonly number[] }; durationMinutes: number; roster: readonly string[]; endDate?: string }[]; next?: string } | undefined> };
   /** The project's stand-ups by their latest occurrence (card M03h), shown in the meetings answer, and the stand-ups themselves (card M03h): the `standups` view. Absent: they are not listed. */
   readonly standups?: {
     recent(viewer: Principal, projectId: string, page?: { limit?: number }): Promise<{ items: readonly { occurrenceId: string; revision: number; title: string; startsAt: string; state: string }[]; more?: boolean } | undefined>;
@@ -949,6 +949,10 @@ interface Ctx {
  *   boundary: on an outcome the owner decided it is listed as advice, never as a blocker.
  * - **Nothing is cut silently.** Scans are bounded; when the budget runs out the answer says `partial` and gives a cursor.
  */
+/** How many schedules a `meetings` answer may say were already shown, and how many pages of the schedule list one answer reads (each page reads at most 1,000 schedule records). */
+const SCHEDULES_SHOWN_MAX = 10_000;
+const SCHEDULE_PAGES = 10;
+
 export class StatusService {
   readonly #runner: CommandRunner;
   readonly #storage: ControllerStorage;
@@ -1024,7 +1028,7 @@ export class StatusService {
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
       case "attempt_endings": { onlyKnown(request, ["kind", "taskId"]); return this.attemptEndingLines(by, request.taskId); }
       case "handoff_archive": { onlyKnown(request, ["kind", "taskId", "archiveId", "section", "from"]); return this.handoffArchiveLines(by, request); }
-      case "meetings": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.meetingLines(by, request); }
+      case "meetings": { onlyKnown(request, ["kind", "projectId", "limit", "after"]); return this.meetingLines(by, request); }
       case "decision_patterns": { onlyKnown(request, ["kind", "projectId"]); return this.decisionPatternLines(by, request); }
       case "decision_log": { onlyKnown(request, ["kind", "projectId", "changeKind", "outcome", "after", "limit"]); return this.decisionLogLines(by, request); }
       case "agenda": { onlyKnown(request, ["kind", "projectId", "limit"]); return this.agendaLines(by, request); }
@@ -3086,19 +3090,53 @@ export class StatusService {
     return { observedAt: this.#runner.now(), lines: [line(text, cite("meeting-record", recordId))] };
   }
 
-  async meetingLines(by: Principal, request: { projectId: string; limit?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async meetingLines(by: Principal, request: { projectId: string; limit?: number; after?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (this.#deps.meetings === undefined) return undefined;
     const projectId = checkProjectId(request.projectId);
     const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be 1 to 50");
+    const after = request.after === undefined ? undefined : Number.isSafeInteger(request.after) && request.after >= 0 && request.after <= SCHEDULES_SHOWN_MAX ? request.after : invalid("after", `must be how many schedules were already shown, 0 to ${SCHEDULES_SHOWN_MAX}`);
     if (by.kind === "owner" && (await this.#runner.get("project", projectId)) === undefined) return undefined;
     const planned = await this.#deps.meetings.planned(by, projectId, { limit });
     if (planned === undefined) return undefined;
-    const lines: Line[] = planned.items.map((m) => {
+    // With `after` only the schedules are listed, from the next one on: the planned meetings and stand-ups were in the first answer.
+    const lines: Line[] = after !== undefined ? [] : planned.items.map((m) => {
       const roster = m.participants.map((p) => `${shown(p.id)}${[p.status, p.availability].filter((x) => x !== undefined && x !== "").length === 0 ? "" : ` (${[p.status, p.availability].filter((x) => x !== undefined && x !== "").join(", ")})`}`);
       return line(`${shown(m.title)}: ${m.kind}, ${m.startsAt} to ${m.endsAt}, ${m.mode}, ${m.state}. ${roster.length === 0 ? "No roster." : `On the roster: ${roster.join(", ")}.`}`, cite("meeting", m.id, m.revision), cite("project", projectId));
     });
+    if (after === undefined && planned.next !== undefined) lines.push(line(`There are more planned meetings than shown${limit < 50 ? " (ask for up to 50)" : ""}.`, cite("project", projectId)));
+    // The recurring and one-off schedules the planned meetings come from: a meeting is only planned shortly before it is held, so a schedule is what says that one is coming (stand-ups are listed below, by their own service).
+    // Ended schedules are skipped while reading, so they never take the place of one that is still on; at most SCHEDULE_PAGES pages of the schedule list are read for one answer.
+    const open: { id: string; revision: number; title: string; state: string; time: string; timeZone: string; recurrence: { kind: string; date?: string; days?: readonly number[] }; durationMinutes: number; roster: readonly string[] }[] = [];
+    let skipped = 0;
+    let more = false;
+    let capped = false;
+    let cursor: string | undefined;
+    if (this.#deps.meetings.schedules !== undefined) {
+      for (let pages = 0; ; pages++) {
+        if (pages >= SCHEDULE_PAGES) { capped = true; break; }
+        const page = await this.#deps.meetings.schedules(by, projectId, { limit: 100, ...(cursor === undefined ? {} : { afterId: cursor }) });
+        for (const m of page?.items ?? []) {
+          if (m.state === "ended") continue;
+          if (skipped < (after ?? 0)) { skipped++; continue; }
+          if (open.length >= limit) { more = true; break; }
+          open.push(m);
+        }
+        if (more || page?.next === undefined) break;
+        cursor = page.next;
+      }
+    }
+    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    for (const m of open) {
+      const when = m.recurrence.kind === "once" ? `once on ${shown(m.recurrence.date ?? "")}` : m.recurrence.kind === "weekly" ? `every ${(m.recurrence.days ?? []).map((d) => days[d] ?? `day ${d}`).join(", ")}` : "daily";
+      lines.push(line(`${shown(m.title)}: schedule, ${when} at ${shown(m.time)} ${shown(m.timeZone)}, ${m.durationMinutes} minutes, ${m.state}. ${m.roster.length === 0 ? "No roster." : `On the roster: ${m.roster.map((r) => shown(r)).join(", ")}.`}`, cite("meeting-schedule", m.id, m.revision), cite("project", projectId)));
+    }
+    const shownSoFar = (after ?? 0) + open.length;
+    if (more) lines.push(line(`There are more meeting schedules than shown: ask for the meetings after ${shownSoFar} to see the next ones.`, cite("project", projectId)));
+    // The read stopped at its page cap: there may be more, but asking again from the same point cannot reach them, so the answer says so instead of naming a number that would show the same.
+    else if (capped) lines.push(line(`Not every meeting schedule of this project could be read for this answer (it reads at most ${(SCHEDULE_PAGES * 100).toLocaleString("en-US")} of them, ended ones included), so there may be more than shown.`, cite("project", projectId)));
+    else if (after !== undefined && open.length === 0) lines.push(line(`There are no more meeting schedules after the first ${skipped}.`, cite("project", projectId)));
+    if (after !== undefined) return { observedAt: this.#runner.now(), lines };
     if (lines.length === 0) lines.push(line("No meeting is planned in this project.", cite("project", projectId)));
-    else if (planned.next !== undefined) lines.push(line("There are more meetings than shown.", cite("project", projectId)));
     if (this.#deps.standups !== undefined) {
       const recent = await this.#deps.standups.recent(by, projectId, { limit });
       if (recent !== undefined) {

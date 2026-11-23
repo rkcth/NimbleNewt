@@ -16,7 +16,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 import { quoted as quotedText } from "../status/explain.js";
 import { docVerifyCode } from "../submissions/doc-obligations.js";
 import { probeUrl } from "../projects/probes.js";
-import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
+import { daysBetween, instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
 import type { ApprovedCodeLookup } from "./approved-code.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
 import { DEFAULT_REPLY_TOKENS, smallWindowWarning } from "../context/fixed-part.js";
@@ -26,7 +26,7 @@ import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -850,7 +850,7 @@ export class ChatService {
       if (hasRefMarker(intent.args)) { push({ i, kind: "refused", code: "invalid_command", message: "$ref is reserved for steps the controller builds" }); continue; }
       // The reason recorded with a right is the owner's message, set by the chat. A gate is always shown to the owner first, so its kind and its (fixed) topic need not be words of the message: the wording still must be.
       const unchecked = intent.op === "needs-you.answer" ? (typeof intent.args["answer"] === "string" && NEED_CHOICES.has(intent.args["answer"]) ? ["answer", "id"] : ["id"]) : intent.op === "release.activate" ? ["digest", "migrationPlan"] : intent.op === "release.window.set" ? ["digest", "date", "time", "timeZone"] : intent.op === "release.approve" ? ["expectedFailures", "acknowledgeFlaky"] : intent.op === "backup.restore.apply" || intent.op === "database.transfer.apply" || intent.op === "database.transfer.wipe" ? ["confirm"] : intent.op === "grant.create" ? ["basis"] : intent.op === "catalog.policy.change" ? ["runningCalls"] : intent.op === "catalog.revoke" ? ["runningCalls"] : intent.op === "retention.run" || intent.op === "retirement.agent" || intent.op === "retirement.project" ? ["confirm"] : intent.op === "decision.record" && intent.args["category"] === "gate" ? ["gate", "topic"] : [];
-      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op.startsWith("simulation.") ? SIMULATION_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_EXEMPT : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : intent.op.startsWith("defect.") ? DEFECT_EXEMPT : intent.op.startsWith("doc.") ? DOC_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
+      const foreign = foreignValue(unchecked.length === 0 ? intent.args : Object.fromEntries(Object.entries(intent.args).filter(([k]) => !unchecked.includes(k))), words, "", intent.op.startsWith("release.") ? RELEASE_ID_KEYS : intent.op.startsWith("maintenance.") ? MAINTENANCE_ID_KEYS : undefined, intent.op === "meeting.record.owner-respond" ? OWNER_RESPOND_EXEMPT : MEETING_CONTROLS.has(intent.op) ? MEETING_CONTROL_EXEMPT : intent.op === "recovery.step" ? RECOVERY_STEP_EXEMPT : intent.op === "workspace.request" ? WORKSPACE_REQUEST_EXEMPT : intent.op.startsWith("simulation.") ? SIMULATION_EXEMPT : intent.op === "events.sources.define" || intent.op === "events.sources.remove" ? EVENT_SOURCE_EXEMPT : intent.op === "grant.create" ? GRANT_EXEMPT : intent.op === "generation.stream.change" ? STREAM_SWITCH_EXEMPT : intent.op === "context.route.change" ? ROUTE_SETTING_EXEMPT : intent.op.startsWith("defect.") ? DEFECT_EXEMPT : intent.op.startsWith("doc.") ? DOC_EXEMPT : intent.op in MEETING_CHAT_ARGS ? MEETING_SCHEDULE_EXEMPT : Object.hasOwn(SETUP_EXEMPT, intent.op) ? SETUP_EXEMPT[intent.op] : undefined);
       if (foreign !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: foreign.startsWith("reassignResponsibilities") ? `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. A hand-off moves responsibilities only by the IDs the hand-off package lists (the rsp- IDs): which of those did you mean?` : `What was given for ${quotedText(foreign, 60)} is not in your message, so it was not done. What did you mean instead?` }); continue; }
       // A probe's address is the reach the owner approves (card P04i): it must be written out whole in the owner's message, exactly as given; a part of a longer address or one in other letter case is not theirs.
       // An address the probe would refuse is refused here, before it is shown: the proposal then always shows the whole address, as it would be asked (second review).
@@ -964,7 +964,7 @@ export class ChatService {
     args[asked.field] = choice;
     // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word, as is the platform (or chip) they name for a host: it counts as said, like the project-creation answers.
     // A motion or meeting picked from the question of a meeting control (card M02h) is likewise the owner's own choice, and so is the stand-up question picked for an answer (card M03h).
-    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "decisionId" || asked.field === "questionId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "meetingTopic" || asked.field === "decisionId" || asked.field === "questionId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -1062,6 +1062,145 @@ export class ChatService {
     if (op === "meeting.record.table" && (typeof args["reason"] !== "string" || args["reason"].trim() === "")) args["reason"] = words.trim().slice(0, 500);
     if (op === "meeting.proc.rule" && args["ruling"] === "table" && (typeof args["reason"] !== "string" || args["reason"].trim() === "")) args["reason"] = words.trim().slice(0, 500);
     if (op === "meeting.proc.owner-message" && (typeof args["text"] !== "string" || args["text"].trim() === "")) return refuse("invalid_command", "say what the message to the meeting is");
+    return undefined;
+  }
+
+  /**
+   * Scheduling and calling meetings by words. The model gives the agents' names (`agentNames`), the meeting's title and reason in the owner's words, and a time of day, a zone and a recurrence worked out from them; the chat
+   * finds the agents by name (an unclear name asks), checks that the time of day and any length are in the owner's words, finds a schedule to change by its words, and never takes a roster, scope or revision from the model.
+   * What would be held is said on the proposal (time, zone, who, how often), and every one of these is shown first. Returns a refusal or question, or nothing when `args` now holds what the operation takes.
+   */
+  async #resolveMeetingCall(token: string, op: string, args: Record<string, unknown>, labels: Record<string, string>, notes: string[], projectId: string | undefined, words: string): Promise<(Resolved & { ok: false }) | undefined> {
+    const isSchedule = op === "meeting.schedule";
+    const isUpdate = op === "meeting.update-schedule";
+    const isNow = op === "meeting.attend.call-now";
+    if (projectId === undefined) return refuse("invalid_command", "which project is the meeting in? Name it.");
+    if (args["title"] !== undefined && (typeof args["title"] !== "string" || args["title"].trim() === "")) return refuse("invalid_command", "title must be text");
+    if (!isUpdate && args["title"] === undefined) return refuse("invalid_command", isSchedule ? "What should the meeting be called? Say a title in your own words." : "What is the meeting about? Say a title in your own words.");
+    if (!isSchedule && !isUpdate && (typeof args["reason"] !== "string" || args["reason"].trim() === "")) return refuse("invalid_command", "Why can it not wait? A call needs your reason, in your own words.");
+    if (args["durationMinutes"] !== undefined) {
+      const minutes = args["durationMinutes"];
+      if (typeof minutes !== "number" || !Number.isSafeInteger(minutes) || minutes < 1 || minutes > 480) return refuse("invalid_command", "durationMinutes is a whole number of minutes, 1 to 480");
+      if (!durationInWords(minutes * 60, words)) return refuse("unsupported_value", "How long the meeting lasts is not in your message, so nothing was proposed; the chat does not choose a length for you. How long should it last? Leave it unsaid and 30 minutes applies.");
+    }
+    // Who attends: agents named by their names, one by one (exactly, else any part of the name); a name that fits none is refused and one that fits several asks.
+    const names = args["agentNames"];
+    delete args["agentNames"];
+    let active: Record<string, unknown>[] | undefined;
+    const activeAgents = async (): Promise<Record<string, unknown>[]> => (active ??= await this.#listAll(token, "agent.list", { state: "active" }));
+    if (names !== undefined) {
+      if (!Array.isArray(names) || names.length === 0 || names.length > 50 || names.some((n) => typeof n !== "string" || n.trim() === "")) return refuse("invalid_command", "agentNames is a list of the agents' names as you said them");
+      const agents = await activeAgents();
+      const roster: string[] = [];
+      for (const given of names as string[]) {
+        const wanted = given.trim().toLowerCase();
+        const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
+        const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
+        if (found.length === 0) return refuse("not_found", `no active agent is called ${quotedText(given.trim(), 80)}`);
+        if (found.length > 1) return { ok: false, kind: "ask", question: `More than one agent fits ${quotedText(given.trim(), 80)}. Which one do you mean?`, options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) };
+        const principal = `agent:${String(found[0]!["id"])}`;
+        if (!roster.includes(principal)) roster.push(principal);
+        labels[principal] = String(found[0]!["friendlyName"]).slice(0, 80);
+      }
+      args["roster"] = roster;
+    } else if (isSchedule || op === "meeting.call-urgent") return refuse("invalid_command", `Which agents should ${isSchedule ? "attend" : "be called in"}? Name them, in your own words.`);
+    // A schedule to change is found first, by its words among the project's schedules that have not ended (stand-ups have their own control), so what is checked and shown is measured against it.
+    let current: Record<string, unknown> | undefined;
+    if (isUpdate) {
+      const named = args["meetingTopic"];
+      delete args["meetingTopic"];
+      delete args["projectId"];
+      if (named !== undefined && typeof named !== "string") return refuse("invalid_command", "meetingTopic must be text");
+      if (args["state"] !== undefined && args["state"] !== "active" && args["state"] !== "paused" && args["state"] !== "ended") return refuse("invalid_command", "state is active, paused or ended");
+      if (!["state", "roster", "time", "recurrence", "timeZone"].some((k) => args[k] !== undefined)) return refuse("invalid_command", "What should change about the meeting: its time, how often, its time zone, who attends, or pausing or ending it?");
+      const listed = await this.#listPages(token, "meeting.schedule-list", { projectId });
+      const open = listed.items.filter((i) => i["state"] !== "ended");
+      const wanted = typeof named === "string" ? named.trim().toLowerCase() : "";
+      const exact = open.filter((i) => String(i["title"]).trim().toLowerCase() === wanted);
+      const matches = exact.length === 1 ? exact : open.filter((i) => wanted === "" || looseMatch(wanted, String(i["title"])));
+      if (matches.length === 0) return refuse("not_found", wanted === "" ? "there is no meeting schedule in that project that has not ended" : `no meeting schedule in that project is called ${quotedText(named as string, 80)}${listed.complete ? "" : " (only the first schedules were looked at)"}`);
+      if (matches.length > 1) return { ok: false, kind: "ask", question: "Which meeting do you mean?", options: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["title"]).slice(0, 60)), field: "meetingTopic", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => String(m["title"])) };
+      current = matches[0]!;
+      args["scheduleId"] = String(current["id"]);
+      labels[String(current["id"])] = String(current["title"]);
+    }
+    // The time of day, the zone and how often.
+    const time = args["time"];
+    if (isSchedule || time !== undefined) {
+      if (typeof time !== "string" || !isLocalTime(time)) return refuse("invalid_command", "What time of day should the meeting be held? Say it in your own words (for example \"at 9:30\").");
+      const reading = clockTimeReading(time, words);
+      if (reading === undefined) return refuse("unsupported_value", `The time ${quotedText(time, 10)} is not in your message as a time of day, so nothing was proposed; the chat will not pick one for you. What time should it be?`);
+      // A time said without am or pm ("at 3") could be either half of the day: one read as night-time (before 06:00) is asked about, since a meeting at 03:00 meant for 15:00 would be held at the wrong time; otherwise the reading taken is said.
+      if (reading === "either") {
+        const hour = Number(time.slice(0, 2));
+        const other = `${String((hour + 12) % 24).padStart(2, "0")}${time.slice(2)}`;
+        if (hour < 6) return refuse("unsupported_value", `Your message gives the time without am or pm, and it was read as ${time} at night, so nothing was proposed. Did you mean ${other}? Say the meeting again with am or pm (or a 24-hour time such as ${other}).`);
+        notes.push(`Your message gives the time without am or pm, so it is read as ${time} (${hour < 12 ? "in the morning" : hour < 18 ? "in the afternoon" : "in the evening"}), not ${other}.`);
+      }
+    }
+    const zone = args["timeZone"];
+    if (zone !== undefined && (typeof zone !== "string" || knownZone(zone) === undefined)) return refuse("invalid_command", `${quotedText(String(zone), 64)} is not a time zone the system knows (an IANA name such as America/New_York)`);
+    const recurrence = args["recurrence"];
+    if (isSchedule && recurrence === undefined) return refuse("invalid_command", "How often should it be held: once on a date, every day, or on certain weekdays?");
+    if (recurrence !== undefined) {
+      const r = recurrence as { kind?: unknown; date?: unknown; days?: unknown } | null;
+      const bad = r === null || typeof r !== "object" || Array.isArray(r) ? true : r.kind === "daily" ? Object.keys(r).length !== 1 : r.kind === "once" ? !isLocalDate(r.date) || Object.keys(r).length !== 2 : r.kind === "weekly" ? !Array.isArray(r.days) || r.days.length === 0 || r.days.length > 7 || r.days.some((d) => !Number.isInteger(d) || (d as number) < 0 || (d as number) > 6) || Object.keys(r).length !== 2 : true;
+      if (bad) return refuse("invalid_command", "recurrence is {\"kind\":\"daily\"}, {\"kind\":\"once\",\"date\":\"YYYY-MM-DD\"} or {\"kind\":\"weekly\",\"days\":[...]} with days 0 (Sunday) to 6");
+      // The weekdays are the owner's: each must be named in the message (or covered by "weekdays" or "weekends").
+      if (r!.kind === "weekly" && !weekdaysInWords(r!.days as number[], words)) return refuse("unsupported_value", `The days ${quotedText(recurrenceWords(recurrence), 80)} are not all named in your message, so nothing was proposed; the chat will not pick days for you. Which days should it be held?`);
+    }
+    if (isSchedule && zone === undefined) {
+      // No zone said: the owner's own meeting time zone setting applies; with none set the schedule would be refused when confirmed, so the owner is asked now.
+      const set = await this.#get(token, "settings.effective", { prefix: "meeting.timeZone" }).catch(() => undefined);
+      const value = ((set?.["items"] as { key?: string; value?: unknown }[] | undefined) ?? []).find((i) => i.key === "meeting.timeZone")?.value;
+      if (typeof value !== "string" || knownZone(value) === undefined) return refuse("invalid_command", "Which time zone is that time in? Your message names none and you have not set one for meetings (the meeting.timeZone setting).");
+      notes.push(`No time zone was named, so your meeting time zone setting applies: ${quotedText(value, 64)}.`);
+      args["timeZone"] = value;
+    }
+    if (isSchedule || (isUpdate && (time !== undefined || recurrence !== undefined || zone !== undefined))) {
+      // What the meeting would be once changed: what was said, else what the schedule has now.
+      const atZone = String(args["timeZone"] ?? current?.["timeZone"] ?? "");
+      const atTime = String(time ?? current?.["time"] ?? "");
+      const rule = (recurrence ?? current?.["recurrence"]) as { kind?: string; date?: string } | undefined;
+      let instant = "";
+      if (rule?.kind === "once" && knownZone(atZone) !== undefined && isLocalDate(rule.date) && isLocalTime(atTime)) {
+        const now = Date.parse(this.#runner.now());
+        // A one-off day the owner did not name (or one before today on the zone's calendar) is the model's, and a moment already past would end the schedule at once: both are asked about.
+        const today = wallClock(now, atZone).date;
+        if (recurrence !== undefined && !oneOffDayInWords(rule.date, words, today)) return refuse("unsupported_value", `The day ${quotedText(rule.date, 12)} is not in your message, so nothing was proposed; the chat will not pick a day for you. Which day should it be (a date, "tomorrow", or a weekday)?`);
+        const at = instantOf(rule.date, atTime, atZone);
+        if (at <= now) return refuse("invalid_command", `${rule.date} at ${atTime} in ${quotedText(atZone, 64)} has already passed, so nothing was proposed. Which day should it be?`);
+        const wall = wallClock(at, atZone);
+        const later = wallClock(at + 3_600_000, atZone);
+        const pad = (n: number): string => String(n).padStart(2, "0");
+        const shift = `${wall.date} ${pad(wall.hour)}:${pad(wall.minute)}` !== `${rule.date} ${atTime}` ? `; that time does not exist that day, because the clocks go forward, so it starts at ${pad(wall.hour)}:${pad(wall.minute)} local time` : later.date === wall.date && later.hour === wall.hour && later.minute === wall.minute ? "; that time happens twice that night, because the clocks go back, so it starts at the first" : "";
+        // How far ahead the day is on the zone's calendar, so "Friday" said on a Friday shows whether it is today or next week.
+        const ahead = daysBetween(today, rule.date);
+        instant = ` (${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC, ${ahead === 0 ? "today" : ahead === 1 ? "tomorrow" : `in ${ahead} days`} there${shift})`;
+      }
+      notes.push(`It is held ${recurrence === undefined ? (rule === undefined ? "as it is now" : `${recurrenceWords(rule)} as now`) : recurrenceWords(recurrence)}${atTime === "" ? "" : ` at ${quotedText(atTime, 10)}`} in ${atZone === "" ? "the schedule's own zone" : quotedText(atZone, 64)}${instant}, for ${typeof args["durationMinutes"] === "number" ? `${args["durationMinutes"]}` : isSchedule ? "30 (the default)" : typeof current?.["durationMinutes"] === "number" ? `${current["durationMinutes"]}` : "the same number of"} minutes. Check that this is when you meant.`);
+    }
+    // A roster named for a schedule replaces the one it has: who would be taken off is said, so "add Bob" cannot quietly drop everyone else.
+    if (isUpdate && Array.isArray(args["roster"])) {
+      const now = new Set(args["roster"] as string[]);
+      const off = ((current?.["roster"] as string[] | undefined) ?? []).filter((p) => !now.has(p));
+      // An agent taken off may have retired since it was put on the roster: it is still named, not shown by its ID.
+      let retired: Record<string, unknown>[] | undefined;
+      const nameIn = (list: Record<string, unknown>[], p: string): unknown => list.find((a) => `agent:${String(a["id"])}` === p)?.["friendlyName"];
+      const nameOf = async (p: string): Promise<string> => labels[p] ?? String(nameIn(await activeAgents(), p) ?? nameIn((retired ??= await this.#listAll(token, "agent.list", { state: "retired" }).catch(() => [])), p) ?? p);
+      const offNames = await Promise.all(off.map(nameOf));
+      notes.push(`Who attends becomes exactly the agents named (the roster is replaced, not added to)${offNames.length === 0 ? "; nobody is taken off" : `; taken off: ${offNames.slice(0, 8).map((n) => quotedText(n, 40)).join(", ")}${offNames.length > 8 ? `, and ${offNames.length - 8} more` : ""}`}.`);
+    }
+    // Everyone the project has: its participants that are active agents (the call itself decides who can be reached), never a scope or a team the model chose.
+    if (isNow) {
+      const project = await this.#get(token, "project.get", { projectId });
+      const participants = ((project?.["participants"] as { principalId?: string }[] | undefined) ?? []).map((x) => String(x.principalId));
+      const crew = (await activeAgents()).filter((a) => participants.includes(`agent:${String(a["id"])}`));
+      if (crew.length === 0) return refuse("not_found", "That project has no active agents to call in. Name the agents you want instead.");
+      args["scope"] = { kind: "project" };
+      notes.push(`This calls ${crew.length} agent${crew.length === 1 ? "" : "s"} away from what they are doing: ${crew.slice(0, 8).map((a) => quotedText(String(a["friendlyName"]), 40)).join(", ")}${crew.length > 8 ? `, and ${crew.length - 8} more` : ""}.`);
+    }
+    if (!isSchedule && !isUpdate) notes.push(`It lasts ${typeof args["durationMinutes"] === "number" ? `${args["durationMinutes"]} minutes` : "30 minutes (the default; say a length to change it)"}.`);
     return undefined;
   }
 
@@ -1576,6 +1715,11 @@ export class ChatService {
         args["scheduleId"] = String(matches[0]!["scheduleId"]);
         labels[String(args["scheduleId"])] = String(matches[0]!["title"]);
       }
+    }
+    // Scheduling and calling meetings by words: who attends is named by agents' names, the time of day is checked against the owner's words, and a schedule is found by its words.
+    if (intent.op in MEETING_CHAT_ARGS) {
+      const refused = await this.#resolveMeetingCall(token, intent.op, args, labels, fillNotes, projectId, words);
+      if (refused !== undefined) return refused;
     }
     // A question to the owner named by its words (or the only one waiting): the one open question whose words, task or asker contain them, else the owner is asked.
     if (intent.op === "owner.answer") {
@@ -2279,6 +2423,10 @@ export class ChatService {
         const item = typeof args["scheduleId"] === "string" ? await this.#get(token, "standup.get", { scheduleId: args["scheduleId"] }) : undefined;
         const revision = (item?.["schedule"] as { revision?: number } | undefined)?.revision;
         return revision === undefined ? refuse("not_found", "no such stand-up") : { ok: true, name: "expectedRevision", value: revision + ahead(`standup:${args["scheduleId"] as string}`) };
+      }
+      case "meeting-schedule": {
+        const item = typeof args["scheduleId"] === "string" ? await this.#get(token, "meeting.schedule-get", { scheduleId: args["scheduleId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such meeting schedule") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`meeting-schedule:${args["scheduleId"] as string}`) };
       }
       case "decision": {
         // The version of the topic the owner's session sees now (0 when nothing was decided): the newest live version that applies to the scope (task-level ones count for a project-wide decision), so a decision that moved meanwhile is never overwritten.
@@ -3095,6 +3243,7 @@ function recordOf(step: ChatStep): string | undefined {
     // A repair named in the same message comes before the owner's judgement of it, which then expects the defect's next revision.
     case "defect.repair": return `defect:${a["id"] as string}`;
     case "standup.update": return `standup:${a["scheduleId"] as string}`;
+    case "meeting.update-schedule": return `meeting-schedule:${a["scheduleId"] as string}`;
     case "notifications.configure": return "notifications";
     case "retention.settings.set": return "retention";
     case "catalog.policy.change": return "catalog-policy";
