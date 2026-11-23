@@ -57,7 +57,7 @@ test("the controller's regular round ends a reserved place idle past twelve hour
     const hold = (await call(O, "landing.queue.list", { projectId: project })).result;
     assert.deepEqual([hold.front.taskId, hold.items.map((e: any) => e.taskId)], [one.task, [two.task]]);
     const round = async (): Promise<void> => { const t = await c.dispatch!.dispatcher.tick(); const loop = t.loops.find((x: any) => x.name === "landing.queue.bounds"); assert.ok(loop !== undefined, "the round is one of the dispatcher's loops: " + t.loops.map((x: any) => x.name).join(",")); assert.equal(loop.ok, true, JSON.stringify(t.loops.filter((x: any) => !x.ok))); };
-    const told = async () => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "task" && i.ref.id === one.task && /reserved place was released/.test(i.detail ?? ""));
+    const told = async () => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "landing-release" && i.ref.id === one.task);
     // Just under the bound: nothing.
     now += 12 * 3_600_000 - 30_000;
     await round();
@@ -76,6 +76,11 @@ test("the controller's regular round ends a reserved place idle past twelve hour
     const items = await told();
     assert.equal(items.length, 1, JSON.stringify(items));
     assert.match(items[0]!.detail ?? "", /reserved place was released/);
+    assert.equal(items[0]!.level, "notice", "a notice: nothing is needed from the owner");
+    // The hold escalation of the same task (told at the round just under the bound; no director could be told, so it needs the owner) keeps its own text: the release is not merged into it (second review).
+    const same = (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "task" && i.ref.id === one.task);
+    assert.ok(same.length >= 1, "the hold escalation is open");
+    assert.ok(same.every((i) => !/reserved place was released|nothing is needed from you/i.test(i.detail ?? "")), JSON.stringify(same));
     await round(); await round();
     assert.equal((await told()).length, 1, "later rounds tell nobody again");
     assert.equal((await call(O, "landing.queue.list", { projectId: project })).result.items.length, 1, "the approved work was not removed");
