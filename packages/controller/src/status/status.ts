@@ -2512,6 +2512,8 @@ export class StatusService {
       else if (a.approved) review = a.approvedBy === "review_disabled_single_agent" ? "not required (no other agent of the project could review it)" : `approved by ${shown(a.approvedBy ?? "?", 80)}`;
       else if (a.newest !== undefined) review = `the newest review says ${a.newest}; it waits for a new submission from its author`;
       else review = "none yet; it waits for a reviewer";
+      // A verdict that cites what it judged against (card Q02, sixth slice) says so; one that cites nothing reads as before.
+      if (a?.cited !== undefined) review += ` (it cites criteria version ${a.cited.criteriaRevision}${a.cited.decisions.length === 0 ? "" : ` and decision${a.cited.decisions.length === 1 ? "" : "s"} ${a.cited.decisions.map((d) => `${d.id} v${d.version}`).join(", ")}`}${a.cited.unmet === undefined ? "" : `; unmet requirement: ${quoted(a.cited.unmet, 200)}`})`;
       const d = a?.director;
       const director = d === undefined ? "none" : d.newest === "approve" ? `approved by ${shown(d.by, 80)}` : `declined by ${shown(d.by, 80)} (a project that requires the director check does not land it)`;
       const ev = c.evidence.length === 0 ? "" : ` Its author's own check evidence: ${c.evidence.filter((e) => e.result === "pass").length} pass, ${c.evidence.filter((e) => e.result === "fail").length} fail, ${c.evidence.filter((e) => e.result === "not_run").length} not run.`;

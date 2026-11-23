@@ -95,6 +95,10 @@ async function reviewerThroughTheBridge(storage: Storage): Promise<void> {
       try {
         seen["review"] = good(await send("submission.record", { kind: "review", subject: codeId, verdict: "approve" }, "rv-1"));
         seen["review-again"] = good(await send("submission.record", { kind: "review", subject: codeId, verdict: "approve" }, "rv-1"));
+        // Card Q02 (sixth slice): a verdict may cite the criteria version it judged against; the bridge passes the citation to the same checks (a stale version, or a rejection that names no unmet requirement, is refused).
+        seen["cited"] = good(await send("submission.record", { kind: "review", subject: codeId, verdict: "approve", criteriaRevision: 0, decisions: [] }, "rv-c1"));
+        seen["stale"] = refused(await send("submission.record", { kind: "review", subject: codeId, verdict: "approve", criteriaRevision: 4 }, "rv-c2"), "stale_revision");
+        seen["no-unmet"] = refused(await send("submission.record", { kind: "review", subject: codeId, verdict: "reject", criteriaRevision: 0 }, "rv-c3"), "invalid_command");
         seen["qa"] = good(await send("submission.record", { kind: "qa", subject: codeId, report: "Every bed is watered." }, "qa-1"));
         const art = good(await send("artifact.publish", { name: "Watering guide", files: [{ path: "guide.md", text: "# Water each bed at dawn." }] }, "ap-1"));
         seen["art"] = art;
@@ -128,6 +132,10 @@ async function reviewerThroughTheBridge(storage: Storage): Promise<void> {
     const get = async (id: string): Promise<Reply> => { const r = await call(ownerToken, "submission.get", { submissionId: id }); assert.equal(r["ok"], true, JSON.stringify(r)); return r["result"]["item"]; };
     const review = await get(seen["review"]["id"]);
     assert.deepEqual([review["kind"], review["role"], review["submittedBy"], review["taskId"], review["subject"], review["verdict"], review["tree"], review["patchId"]], ["review", "reviewer", ben.id, taskId, codeId, "approve", TREE, PATCH], "bound to the tree and patch it was given");
+    const citing = await get(seen["cited"]["id"]);
+    assert.deepEqual([citing["criteriaRevision"], citing["decisions"], citing["decisionVersions"]], [0, [], {}], "the citation is kept with the verdict");
+    assert.match(seen["stale"], /version 0, not 4/);
+    assert.match(seen["no-unmet"], /names the owner requirement/);
     const qa = await get(seen["qa"]["id"]);
     assert.deepEqual([qa["kind"], qa["role"], qa["subject"], qa["tree"]], ["qa", "qa", codeId, TREE]);
     const doc = await get(seen["document"]["id"]);
@@ -135,7 +143,7 @@ async function reviewerThroughTheBridge(storage: Storage): Promise<void> {
     assert.deepEqual([doc["kind"], doc["role"], doc["artifactId"], doc["artifactDigest"], doc["makesCommit"]], ["document", "docs", seen["art"]["id"], `sha256:${(artifact!.body as { manifestDigest: string }).manifestDigest}`, false], "the digest the controller recorded at publication");
     for (const record of [review, qa, doc]) assert.equal(record["attemptId"], undefined, "only code names an attempt");
     const listed = await call(ownerToken, "submission.list", { taskId });
-    assert.deepEqual((listed["result"]["items"] as Reply[]).map((x) => x["kind"]).sort(), ["code", "document", "qa", "review"], "nothing else was recorded");
+    assert.deepEqual((listed["result"]["items"] as Reply[]).map((x) => x["kind"]).sort(), ["code", "document", "qa", "review", "review"], "nothing else was recorded");
     assert.match(seen["code"], /work-end submit true/);
     assert.match(seen["damaged"], /no longer matches its files/);
     assert.match(seen["unknown-subject"], /no such submission for this task/);

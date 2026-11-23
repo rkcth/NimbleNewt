@@ -8185,7 +8185,10 @@ Arguments:
 - `patchId` (optional): code: the patch ID
 - `refreshRound` (optional): code: leave it out: the controller counts the refresh rounds (card H12p) and records its own count; a different number is refused
 - `subject` (optional): review, qa, signoff: the submission it is about
-- `verdict` (optional): review: `approve`, `changes` or `reject`
+- `verdict` (optional): review: `approve`, `changes` or `reject`; an approval is refused while the task relies on an owner decision that was superseded or is disputed (revalidate the work first), cited or not
+- `criteriaRevision` (optional): review: the task contract version you judged against (a different current version is refused as stale; 0 when the task has none); leave out for a review that cites nothing
+- `decisions` (optional): review, with criteriaRevision: the IDs of the owner decisions in force you judged against; an approval that cites must name every decision the task relies on
+- `unmet` (optional): review, with criteriaRevision: a rejection names the owner requirement (a criterion or a decision) that is not met; required for a rejection that cites, refused on any other verdict
 - `decision` (optional): signoff: `approve` or `decline`
 - `report` (optional): qa or document: the report
 - `artifactDigest` (optional): document: `sha256:` and the digest

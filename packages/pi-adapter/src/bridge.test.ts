@@ -269,7 +269,7 @@ test("submission.record: sent as the call it is, with no way to name a task, a r
   assert.deepEqual(answered.map((r) => [r.op, r.callId, r.args]), [["submission.record", "call_1", { kind: "review", subject: "sbm-aaaaaaaaaaaaaaaaaaaa", verdict: "approve" }]]);
   assert.match(String(text), /"id":"sbm-bbbbbbbbbbbbbbbbbbbb"/);
   const params = tool(current).parameters as unknown as { properties: Record<string, unknown>; required: string[]; additionalProperties: boolean };
-  assert.deepEqual(Object.keys(params.properties), ["kind", "subject", "verdict", "decision", "report", "artifactId"], "no argument names a task, a role, a base, a tree, a patch ID or a digest");
+  assert.deepEqual(Object.keys(params.properties), ["kind", "subject", "verdict", "criteriaRevision", "decisions", "unmet", "decision", "report", "artifactId"], "no argument names a task, a role, a base, a tree, a patch ID or a digest");
   assert.deepEqual([params.required, params.additionalProperties], [["kind"], false]);
   assert.match(tool(current).description, /kind review \(verdict\), qa \(report\) or signoff \(decision\) on submission subject \(sbm-\.\.\.\), or document \(artifactId, report\)\. Code: work-end submit\./);
   const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
