@@ -53,9 +53,9 @@ for (const backend of backends) {
       defectsGate: async () => ({ taskId: task, checked: views.defects, unresolved: views.defects, items: Array.from({ length: views.defects }, (_, i) => ({ id: `dfc-${i}`, severity: "major", state: "open", finding: "x", deliverableTitle: "y" })) }),
       now: options.clock,
     });
-    const host = { during: undefined as undefined | (() => Promise<void>), none: false, fail: false };
+    const host = { during: undefined as undefined | (() => Promise<void>), none: false, fail: false, block: undefined as undefined | Promise<void>, entered: undefined as undefined | (() => void) };
     const port: WorkspacePort = {
-      run: async () => ({ ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1 } }),
+      run: async () => { host.entered?.(); if (host.block !== undefined) await host.block; return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1 } }; },
       landingChecks: async (call) => ({ checkout: true, change: { base: BASE, head: HEAD, tree: TREE, patchId: PATCH }, ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH }), checks: call.checks.map((c) => host.fail ? { name: c.name, state: "failed" as const, exitCode: 1, output: "FAIL in /home/rob/secret-place/src/a.ts with sk-live-0123456789abcdef0123456789abcdef" } : { name: c.name, state: "passed" as const, exitCode: 0, output: "all good" }) }),
     };
     const control = { afterGate: undefined as undefined | (() => Promise<void>), fault: false, noRecheck: false };
@@ -76,7 +76,14 @@ for (const backend of backends) {
     const bare = StatusService.withEpoch(store.storage, projects.epoch, base, options);
     const land = (commandId: string) => service.request(owner, { commandId, operation: "landing", taskId: task, reason: "ready", submissionId: sub });
     const ask = async (by: Principal, request: Record<string, unknown>) => (await status.ask(by, { kind: "landing_checks", ...request } as never))?.lines.map((l) => l.text).join("\n");
-    return { store, owner, ann, project, projects, integration, task, sub, review, views, host, control, land, ask, status, bare, service };
+    // A second task of the same project with its own approved submission (two landings of one project at once).
+    const another = async (title: string) => {
+      const t = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title })).id;
+      const s2 = (await svc.record(ann, { commandId: cid("code"), taskId: t, kind: "code", role: "author", base: BASE, tree: TREE, patchId: PATCH })).id;
+      await svc.record(rev, { commandId: cid("rv"), taskId: t, kind: "review", role: "reviewer", subject: s2, verdict: "approve" });
+      return { task: t, land: (commandId: string) => service.request(owner, { commandId, operation: "landing", taskId: t, reason: "ready", submissionId: s2 }) };
+    };
+    return { store, owner, ann, project, projects, integration, task, sub, review, views, host, control, land, ask, status, bare, service, deps, base, another };
   };
 
   test(`${backend.name}: the view shows each check's result, the tree and patch judged and a final re-read that found nothing changed, citing the request record (card P09)`, async () => {
@@ -148,7 +155,7 @@ for (const backend of backends) {
       const text = (await r.ask(r.owner, { taskId: r.task }))!;
       assert.match(text, /tests failed/);
       assert.match(text, /\(exit 1\)/);
-      assert.match(text, /was not made for this attempt/);
+      assert.match(text, /No final re-read of the records right before the host was asked is recorded for this attempt: the checks above had already refused it/);
       for (const leak of ["/home/rob", "secret-place", "sk-live-0123456789", "FAIL in"]) assert.ok(!text.includes(leak), `"${leak}" is not shown`);
       assert.match(text, /\[a path\]/);
     } finally { await r.store.close(); }
@@ -184,6 +191,116 @@ for (const backend of backends) {
       assert.equal(await r.ask(r.ann, { taskId: r.task }), undefined);
       assert.equal(await r.ask(r.ann, { projectId: r.project }), undefined);
       assert.match((await r.bare.ask(r.owner, { kind: "landing_checks", taskId: r.task } as never))!.lines[0]!.text, /Landing attempts are not kept on this controller/);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: a landing left running by a controller that stopped is listed as of unknown result with no check result recorded, and once its real outcome arrives it is listed once (card P09 review)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      let release!: () => void;
+      r.host.block = new Promise<void>((res) => { release = res; });
+      const entered = new Promise<void>((res) => { r.host.entered = res; });
+      const pending = r.land("v6");
+      await entered;
+      // Another controller on the same records finds the request left running and records it as uncertain.
+      const other = WorkspaceOpService.withEpoch(r.store.storage, r.projects.epoch, r.deps(), options);
+      const resolved = await other.recover(r.owner);
+      assert.equal(resolved.length, 1);
+      const text = (await r.ask(r.owner, { taskId: r.task }))!;
+      assert.match(text, /1 landing attempt\(s\) on record/);
+      assert.match(text, new RegExp(`request ${resolved[0]} made .* ended with an unknown result`));
+      assert.match(text, /No check result is recorded for this attempt/);
+      assert.ok(!/the project required none/.test(text), text);
+      r.host.block = undefined;
+      release();
+      await pending;
+      const after = (await r.ask(r.owner, { projectId: r.project }))!;
+      assert.match(after, /project Orchard: 1 landing attempt\(s\) on record/);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: two landings of one project that finish at the same moment are both recorded and both listed in the project's view (card P09 review)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      const b = await r.another("Signup");
+      let release!: () => void;
+      r.host.block = new Promise<void>((res) => { release = res; });
+      let inside = 0;
+      const both = new Promise<void>((res) => { r.host.entered = () => { if (++inside === 2) res(); }; });
+      const one = r.land("v7a"), two = b.land("v7b");
+      await both;
+      release();
+      const [x, y] = await Promise.all([one, two]);
+      assert.equal(x.state, "done", x.summary);
+      assert.equal(y.state, "done", y.summary);
+      const text = (await r.ask(r.owner, { projectId: r.project }))!;
+      assert.match(text, /project Orchard: 2 landing attempt\(s\) on record/);
+      assert.ok(text.includes(x.id) && text.includes(y.id), text);
+      assert.match((await r.ask(r.owner, { taskId: b.task }))!, new RegExp(`1 landing attempt\\(s\\) on record[^\\n]*\\n[^\\n]*request ${y.id}`));
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: the task's index keeps the newest 20 and the project's the newest 40, and the view says older ones are not listed (card P09 review)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      const ids: string[] = [];
+      for (let i = 0; i < 41; i++) ids.push((await r.land(`v8-${i}`)).id);
+      const task = (await r.ask(r.owner, { taskId: r.task }))!;
+      assert.match(task, /20 landing attempt\(s\) on record \(only the newest 20 are kept for this view, so any older attempt is not listed\), newest first; showing 1 to 5/);
+      assert.ok(task.includes(ids[40]!));
+      const lastTask = (await r.ask(r.owner, { taskId: r.task, after: 15 }))!;
+      assert.match(lastTask, /showing 16 to 20/);
+      assert.ok(lastTask.includes(ids[21]!) && !lastTask.includes(ids[20]!), lastTask);
+      assert.ok(!/Older attempts follow/.test(lastTask));
+      const project = (await r.ask(r.owner, { projectId: r.project, after: 35 }))!;
+      assert.match(project, /40 landing attempt\(s\) on record \(only the newest 40 are kept/);
+      assert.match(project, /showing 36 to 40/);
+      assert.ok(project.includes(ids[1]!) && !project.includes(ids[0]!), project);
+      assert.match(project, /Attempt 40 /);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: host paths in a test command are hidden in every form (file URL, Windows drive, network, relative above the checkout, mixed separators) while a web address stays (card P09 review)`, async () => {
+    const r = await rig(["tests"]);
+    try {
+      r.host.fail = true;
+      // One landing per form, each in a short command name, so the shown name's 60-character cut cannot hide a path that was not replaced.
+      const forms: [string, string][] = [["run file:///home/rob/a/b", "/home/rob"], ["run C:\\Users\\rob\\x", "Users"], ["run \\\\srv\\share\\y", "srv"], ["run \\\\?\\C:\\x", "C:"], ["run ../../etc/z", "etc/z"], ["run /home/rob\\q/w", "q/w"], ["run path:/srv/ai/x", "srv/ai"]];
+      for (const [k, [name, leak]] of forms.entries()) {
+        r.views.commandName = name;
+        await r.land(`v9-${k}`);
+        const text = (await r.ask(r.owner, { taskId: r.task }))!;
+        const newest = text.split("\n").find((l) => l.startsWith("tests failed"))!;
+        assert.ok(!newest.includes(leak), `"${leak}" is not shown: ${newest}`);
+        assert.match(newest, /Commands: run (?:path:)?\[a path\] failed \(exit 1\)/, newest);
+      }
+      r.views.commandName = "see https://example.com/doc/page";
+      await r.land("v9-url");
+      assert.match((await r.ask(r.owner, { taskId: r.task }))!, /Commands: see https:\/\/example\.com\/doc\/page failed/);
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: index entries whose record cannot be read are counted and left out without shifting the numbering or the next page (card P09 review)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      const real = [(await r.land("v10a")), (await r.land("v10b"))];
+      const view = StatusService.withEpoch(r.store.storage, r.projects.epoch, { ...r.base, landingChecks: { landings: async (scope, after, limit) => {
+        const got = await r.service.landings(scope, 0, 20);
+        // The stand-in index: one real attempt, one entry whose record is gone, the other real attempt, then two more gone; a page reports what the service would.
+        const index = [got.items[0]!, undefined, got.items[1]!, undefined, undefined, undefined];
+        const range = index.slice(after, after + limit);
+        const items = range.flatMap((a, i) => a === undefined ? [] : [{ ...a, position: after + i + 1 }]);
+        return { items, total: index.length, next: after + range.length, unreadable: range.length - items.length, cap: 20, full: false };
+      } } }, options);
+      const text = (await view.ask(r.owner, { kind: "landing_checks", taskId: r.task } as never))!.lines.map((l) => l.text).join("\n");
+      assert.match(text, /6 landing attempt\(s\) on record, newest first; showing 1 to 5/);
+      assert.match(text, /3 of these could not be read as a landing of this task/);
+      assert.match(text, new RegExp(`Attempt 1: request ${real[1]!.id}`));
+      assert.match(text, new RegExp(`Attempt 3: request ${real[0]!.id}`));
+      assert.match(text, /Older attempts follow: ask again with after 5/);
+      const tail = (await view.ask(r.owner, { kind: "landing_checks", taskId: r.task, after: 5 } as never))!.lines.map((l) => l.text).join("\n");
+      assert.match(tail, /showing 6 to 6/);
+      assert.match(tail, /1 of these could not be read/);
     } finally { await r.store.close(); }
   });
 }

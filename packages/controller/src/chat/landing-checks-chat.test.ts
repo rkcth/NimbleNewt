@@ -75,6 +75,12 @@ for (const backend of backends) {
       assert.equal(three.outcomes[0]!.status, "answered", JSON.stringify(three.outcomes));
       assert.deepEqual(asked[2], { scope: { taskId: task }, after: 5, limit: 5 });
 
+      // A project named beside the task's title gives way to the task: the view takes one or the other, and the owner asked about the task.
+      const q5 = "why did the importer not land in Orchard?";
+      const five = await w.chat({ interpreter: model([{ kind: "status", request: { kind: "landing_checks", taskTitle: "importer", projectId: project }, evidence: q5, basis: "owner" }]), status: statusSvc! }).submit(w.ownerToken, { messageId: cid("m"), text: q5 });
+      assert.equal(five.outcomes[0]!.status, "answered", JSON.stringify(five.outcomes));
+      assert.deepEqual(asked[3], { scope: { taskId: task }, after: 0, limit: 5 });
+
       // A title no task has is refused, and nothing is read.
       const before = asked.length;
       const q4 = "why did the exporter not land?";

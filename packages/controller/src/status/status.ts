@@ -44,7 +44,7 @@ import { reasonText as qaReasonText, type QaEvidenceService } from "../submissio
 import type { QaReviewService } from "../submissions/qa-review-policy.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
-import type { WorkspaceAnswer as LandingAttempt } from "../workspace-ops/workspace-ops.js";
+import type { LandingPage } from "../workspace-ops/workspace-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -797,7 +797,7 @@ export interface StatusDeps {
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
   readonly integration?: Pick<IntegrationPolicyService, "get">;
   /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
-  readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<{ readonly items: readonly LandingAttempt[]; readonly total: number }> };
+  readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<LandingPage> };
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list">;
   /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
@@ -823,8 +823,14 @@ export const STATUS_LIMITS = { page: 100, defaultPage: 20, id: 120, board: 10, s
 const REPLAY_LINE_ITEMS = 12;
 /** How many landing attempts the `landing_checks` view shows at a time (card P09). */
 const LANDING_CHECKS_PAGE = 5;
-/** Absolute host paths (POSIX folders of two or more parts, `~/` paths, Windows drive and network paths) replaced by a mark in the `landing_checks` view: a gate text may quote a path of the machine that ran the checks. */
-const hidePaths = (text: string): string => text.replace(/(?<![\w.:\/-])~?(?:\/[\w.@+~-]+){2,}\/?/g, "[a path]").replace(/(?<![\w])[A-Za-z]:[\\/][^\s"'`]*/g, "[a path]").replace(/\\\\[^\s"'`]+/g, "[a path]");
+/** Host paths replaced by a mark in the `landing_checks` view: a gate text or a test command may quote a path of the machine that ran the checks. */
+// In order: `file:` URLs; network and `\\?\` paths; drive paths; then absolute or `~` or `..`-led paths of two or more parts with either separator (a part runs to a space, quote, bracket or separator). A URL such as
+// `https://host/a/b` is left as it is: its parts follow `//` or a word, never a free-standing separator.
+const hidePaths = (text: string): string => text
+  .replace(/\bfile:[^\s"'`<>]*/gi, "[a path]")
+  .replace(/\\\\[^\s"'`<>]+/g, "[a path]")
+  .replace(/(?<![\w])[A-Za-z]:[\\/][^\s"'`<>]*/g, "[a path]")
+  .replace(/(?<![\w.\/\\-])(?:~|\.\.?)?(?:[\/\\][^\s"'`<>()[\]{},;|\/\\]+){2,}[\/\\]?/g, "[a path]");
 /** How many `submission.list` pages (of 100) the `submissions` view follows (card Q01b): each page scans at most the service's bounded number of rows, so the view's cost is bounded and a scan that stops early says so. */
 const SUBMISSION_VIEW_PAGES = 5;
 /** How many document changes the `docs` view lists for one flagged document (card Q03b); it says when there are more. */
@@ -2483,15 +2489,12 @@ export class StatusService {
   }
 
   /**
-   * How a project's finished work lands (card P09/P10): the settings reader's own answer (`IntegrationPolicyService.get`, owner only), in plain words. Anyone but the owner is answered nothing, as the reader refuses them;
-   * a project that does not exist is answered nothing too.
-   */
-  /**
-   * What the required checks said at the newest landing attempts (card P09): owner only, every line citing its request record. A task needs the right to be read (it must exist); a project must exist. Nothing the host
-   * ran is shown beyond each command's name, state, exit code, time-out and length: not its output. Texts the gate wrote are cut, credentials are removed and absolute host paths are replaced by a mark.
+   * What the required checks said at the newest landing attempts (card P09): owner only (a task-scoped principal is not the owner here), every line citing its request record. A task or project that does not exist is answered
+   * nothing, as anyone but the owner is. Nothing the host ran is shown beyond each command's name, state, exit code and time-out: not its output. Texts the gate wrote are cut, credentials are removed and host paths are
+   * replaced by a mark.
    */
   async landingChecksLines(by: Principal, request: { readonly taskId?: string; readonly projectId?: string; readonly after?: unknown }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if (by.kind !== "owner") return undefined;
+    if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const hasTask = request.taskId !== undefined, hasProject = request.projectId !== undefined;
     if (hasTask === hasProject) return invalid(hasTask ? "projectId" : "taskId", "name a task (taskId), or a project (projectId) for its landings, not both");
     const after = request.after === undefined ? 0 : typeof request.after === "number" && Number.isSafeInteger(request.after) && request.after >= 0 ? request.after : invalid("after", "must be a whole number, 0 or more");
@@ -2513,17 +2516,21 @@ export class StatusService {
     if (this.#deps.landingChecks === undefined) return { observedAt: at, lines: [line("Landing attempts are not kept on this controller.", c)] };
     const page = await this.#deps.landingChecks.landings(scope, after, LANDING_CHECKS_PAGE);
     if (page.total === 0) return { observedAt: at, lines: [line(`No landing attempt is on record for ${what} (a landing made before this view existed is not listed).`, c)] };
-    if (page.items.length === 0) return { observedAt: at, lines: [line(`${what}: ${page.total} landing attempt(s) are on record, none after number ${after}.`, c)] };
-    const lines: Line[] = [line(`${what}: ${page.total} landing attempt(s) on record, newest first; showing ${after + 1} to ${after + page.items.length}.`, c)];
+    const kept = page.full === true ? ` (only the newest ${page.total} are kept for this view, so any older attempt is not listed)` : "";
+    const next = page.next ?? after + page.items.length;
+    if (next <= after) return { observedAt: at, lines: [line(`${what}: ${page.total} landing attempt(s) are on record${kept}, none after number ${after}.`, c)] };
+    const lines: Line[] = [line(`${what}: ${page.total} landing attempt(s) on record${kept}, newest first; showing ${after + 1} to ${next}.`, c)];
+    if ((page.unreadable ?? 0) > 0) lines.push(line(`${page.unreadable} of these could not be read as a landing of this ${hasTask ? "task" : "project"} (the record is gone or is not one) and are left out.`, c));
     const plain = (text: unknown, max: number): string => shown(hidePaths(typeof text === "string" ? text : ""), max);
     const short = (oid: unknown): string => (typeof oid === "string" ? oid.slice(0, 12) : "unknown");
     const outcome: Record<string, string> = { done: "was carried out by the host", refused: "was refused, so nothing was landed", failed: "failed at the host and may have changed the checkout", uncertain: "ended with an unknown result (the host may have acted)", started: "has not finished" };
     page.items.forEach((a, n) => {
+      const number = a.position ?? after + n + 1;
       const r = cite("workspace-request", a.id);
       const checks = a.checks;
       const who = a.queued !== undefined ? `submission ${a.queued.submissionId} (the head of the landing queue${a.reapplied === undefined ? "" : ", moved unchanged onto the branch's newer head"})` : a.landedSubmission !== undefined ? `submission ${a.landedSubmission} (named by the request)` : "no submission";
-      lines.push(line(`Attempt ${after + n + 1}${hasTask ? "" : ` (task ${a.taskId})`}: request ${a.id} made ${a.at}${a.finishedAt === undefined ? "" : `, finished ${a.finishedAt}`} ${outcome[a.state] ?? shown(a.state, 20)}; it judged ${who}. ${plain(a.summary, 300)}`, r, cite("task", a.taskId)));
-      if (checks === undefined) { lines.push(line("No check was judged for this attempt: the project required none, or the landing was refused before the checks were asked (the sentence above says why).", r)); return; }
+      lines.push(line(`Attempt ${number}${hasTask ? "" : ` (task ${a.taskId})`}: request ${a.id} made ${a.at}${a.finishedAt === undefined ? "" : `, finished ${a.finishedAt}`} ${outcome[a.state] ?? shown(a.state, 20)}; it judged ${who}. ${plain(a.summary, 300)}`, r, cite("task", a.taskId)));
+      if (checks === undefined) { lines.push(line(a.state === "uncertain" || a.state === "started" ? "No check result is recorded for this attempt: it ended before its outcome, with whatever the checks found, could be recorded." : "No check was judged for this attempt: the project required none, or the landing was refused before the checks were asked (the sentence above says why).", r)); return; }
       lines.push(line(`Required then: ${checks.required.length === 0 ? "no checks" : checks.required.map((k) => shown(k, 40)).join(", ")}. Judged on integrated tree ${short(checks.tree)} (base ${short(checks.base)}${checks.patchId === undefined ? "" : `, patch ${short(checks.patchId)}`}${checks.contractVersion === undefined ? "" : `, test commands from contract version ${checks.contractVersion}`}). Overall: ${checks.passed ? "every required check passed" : "not every required check passed (a check that did not run counts as failed)"}.`, r));
       for (const e of checks.results.slice(0, 12)) {
         const word = e.result === "pass" ? "passed" : e.result === "fail" ? "failed" : "did not run";
@@ -2535,14 +2542,18 @@ export class StatusService {
       if (checks.results.length > 12) lines.push(line(`${checks.results.length - 12} more result(s) of this attempt are not shown.`, r));
       const re = a.rechecked;
       const names = re?.checks === undefined || re.checks.length === 0 ? "" : ` (${re.checks.map((k) => shown(k, 40)).join(", ")})`;
-      lines.push(line(re === undefined ? "The final re-read of the records right before the host was asked was not made for this attempt (it was refused or ended before that step, or no check was required)." : re.outcome === "unchanged" ? "The final re-read of the records right before the host was asked found every check still passing: it changed and refused nothing." : re.outcome === "changed" ? `The final re-read right before the host was asked found check(s)${names} no longer passing, so the landing was refused; the results above are as that re-read found them.` : re.outcome === "added" ? `While this landing was judged the project began to require check(s)${names} that were not judged for it, so the final re-read refused it; ask again to judge it under the checks now required.` : "The final re-read of the records could not be made, so the landing was refused.", r));
+      lines.push(line(re === undefined ? (checks.passed ? "No final re-read of the records right before the host was asked is recorded for this attempt." : "No final re-read of the records right before the host was asked is recorded for this attempt: the checks above had already refused it, so that step was not reached.") : re.outcome === "unchanged" ? "The final re-read of the records right before the host was asked found every check still passing: it changed and refused nothing." : re.outcome === "changed" ? `The final re-read right before the host was asked found check(s)${names} no longer passing, so the landing was refused; the results above are as that re-read found them.` : re.outcome === "added" ? `While this landing was judged the project began to require check(s)${names} that were not judged for it, so the final re-read refused it; ask again to judge it under the checks now required.` : "The final re-read of the records could not be made, so the landing was refused.", r));
       if (checks.testsNeedOwner !== undefined) lines.push(line(checks.testsNeedOwner === "authors-only" ? "The task's test commands were set only by its own agents, which a landing does not run: you are asked to set or accept them (contract.set checks)." : "The task has no test commands though the project requires tests: you are asked to set them or change the required checks.", r));
       if (a.toldAuthor !== undefined) lines.push(line(`The author ${plain(a.toldAuthor, 80)} was sent these results.`, r));
     });
-    if (after + page.items.length < page.total) lines.push(line(`Older attempts follow: ask again with after ${after + page.items.length}.`, c));
+    if (next < page.total) lines.push(line(`Older attempts follow: ask again with after ${next}.`, c));
     return { observedAt: at, lines };
   }
 
+  /**
+   * How a project's finished work lands (card P09/P10): the settings reader's own answer (`IntegrationPolicyService.get`, owner only), in plain words. Anyone but the owner is answered nothing, as the reader refuses them;
+   * a project that does not exist is answered nothing too.
+   */
   async landingSettingsLines(by: Principal, projectIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
     if (by.kind !== "owner") return undefined;

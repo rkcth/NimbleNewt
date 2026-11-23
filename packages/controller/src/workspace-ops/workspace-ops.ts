@@ -161,6 +161,18 @@ export interface WorkspaceRecordBody {
 /** The commit made for an approved submission (card H12o), one record per submission (record kind `submission-commit`, keyed by the submission's ID): written in the same write as the release that made or found it. */
 export interface SubmissionCommitBody { readonly submissionId: string; readonly taskId: string; readonly commitId: string; readonly parent: string; readonly tree: string; readonly requestId: string; readonly at: string; readonly recovered: boolean; /** True only when the controller asked for the permit (a reviewer's approval) and the host made or found the commit as a review-gate permit commit; absent otherwise and on records made before this was kept. */ readonly permitted?: boolean }
 export interface WorkspaceAnswer extends WorkspaceRecordBody { readonly id: string; readonly replayed: boolean }
+/**
+ * One page of a task's or a project's newest landing requests (card P09, owner view of the checks). `position` counts from 1 in the index, newest first; `next` is the `after` of the following page; `unreadable` counts the
+ * index entries of this page whose record is gone or is not a landing of that scope (they are left out); `full` says the index is at its cap (`cap`), so older attempts are no longer listed.
+ */
+export interface LandingPage {
+  readonly items: readonly (WorkspaceAnswer & { readonly position?: number })[];
+  readonly total: number;
+  readonly next?: number;
+  readonly unreadable?: number;
+  readonly cap?: number;
+  readonly full?: boolean;
+}
 
 export interface WorkspaceDeps {
   readonly quiesce: Pick<QuiesceCoordinator, "around">;
@@ -581,7 +593,7 @@ export class WorkspaceOpService {
     // A lost race on the open index alone (the landing queue's take-out rewrites it unchanged, card P10) is built again; one on the request itself means another writer settled it, and that is what is answered.
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: () => clearOpen ? this.#openChange(rec.body.taskId, null, id) : Promise.resolve([]) });
+        await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: async () => [...(await this.#landingIndexChange(id, body)), ...(clearOpen ? await this.#openChange(rec.body.taskId, null, id) : [])] });
         return body;
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
@@ -862,18 +874,22 @@ export class WorkspaceOpService {
    * The newest landing requests of a task or a project, newest first, `after` of them skipped (card P09, owner view of the checks). Takes no caller: the status view allows only the owner. Records the index names that
    * cannot be read, or are not landings of that scope, are left out.
    */
-  async landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<{ readonly items: readonly WorkspaceAnswer[]; readonly total: number }> {
+  async landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<LandingPage> {
     const task = "taskId" in scope;
     const current = await this.#runner.get(task ? LANDINGS : LANDINGS_PROJECT, task ? checkTaskId(scope.taskId) : scope.projectId);
     const had = (current?.body as unknown as { ids?: unknown } | undefined)?.ids;
     const ids = Array.isArray(had) ? had.filter((x): x is string => typeof x === "string" && WORKSPACE_ID.test(x)) : [];
-    const items: WorkspaceAnswer[] = [];
-    for (const id of ids.slice(after, after + limit)) {
+    const cap = task ? LANDING_INDEX_CAP.task : LANDING_INDEX_CAP.project;
+    const range = ids.slice(after, after + limit);
+    const items: (WorkspaceAnswer & { readonly position: number })[] = [];
+    let unreadable = 0;
+    for (const [i, id] of range.entries()) {
       const rec = await this.#get(id);
-      if (rec === undefined || rec.body.operation !== "landing" || (task ? rec.body.taskId !== scope.taskId : rec.body.projectId !== scope.projectId)) continue;
-      items.push({ ...rec.body, id, replayed: false });
+      if (rec === undefined || rec.body.operation !== "landing" || (task ? rec.body.taskId !== scope.taskId : rec.body.projectId !== scope.projectId)) { unreadable++; continue; }
+      items.push({ ...rec.body, id, replayed: false, position: after + i + 1 });
     }
-    return { items, total: ids.length };
+    // The next page starts after every index entry this one covered, read or not, so an entry left out never shifts the pages or the numbering.
+    return { items, total: ids.length, next: after + range.length, unreadable, cap, full: ids.length >= cap };
   }
 
   /** The write of a task's refresh-round count: created at the first round, then updated against the revision that was read. */
