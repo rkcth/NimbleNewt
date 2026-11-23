@@ -63,6 +63,24 @@ const RULES: Record<string, Rule> = {
   "Make the Docs resource read only and let nobody edit it": { op: "resource.scope", args: { resourceLabel: "Docs", access: "read" } },
   "Make the Docs resource read only, all of it": { op: "resource.scope", args: { resourceLabel: "Docs", access: "read", paths: [] } },
   "Make the Docs resource read only now": { op: "resource.scope", args: { resourceLabel: "Docs", access: "read", paths: [] } },
+  // Third check (2026-11-23): write access and the whole resource turned down in more sentence shapes, and a choice beside the other instruction's own words.
+  "Don't allow writes to the Docs resource": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "The Docs resource shouldn't be writable": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Revoke write access on the Docs resource": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Switch the Docs resource from write to read": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Change the Docs resource access to read": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "On the Docs resource, writes are not allowed": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Stop the project from writing to the Docs resource": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Don't give the Docs resource full access": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Make the Docs resource writable? No, don't allow writes": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Make the Docs resource writable, but not the whole thing": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write", paths: [] } },
+  "Make the Docs resource writable; don't open every path": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write", paths: [] } },
+  "Switch the Docs resource from read to write": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Settle the database conflict: replace SQLite with MySQL": { op: "decision.resolve-dispute", args: { disputeTopic: "database", choiceWords: "SQLite" } },
+  "Settle the database conflict: prefer MySQL to SQLite": { op: "decision.resolve-dispute", args: { disputeTopic: "database", choiceWords: "MySQL" } },
+  "Settle the database conflict: never SQLite": { op: "decision.resolve-dispute", args: { disputeTopic: "database", choiceWords: "SQLite" } },
+  "Settle the database conflict: SQLite is out": { op: "decision.resolve-dispute", args: { disputeTopic: "database", choiceWords: "SQLite" } },
+  "Settle the database conflict: SQLite stands": { op: "decision.resolve-dispute", args: { disputeTopic: "database", choiceWords: "SQLite" } },
 };
 const DERIVED = new Set(["access", "label"]);
 
@@ -402,6 +420,37 @@ for (const backend of backends) {
       const open2 = await say("The Docs resource should no longer be read only");
       assert.equal(open2.status, "proposed", JSON.stringify(open2));
       assert.ok(JSON.stringify(open2).includes("read and change"));
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: third check: write access and the whole resource are never read from words that turn them down, and a choice beside the other instruction's own words asks`, async () => {
+    const { w, project, say, apply, conflict } = await open();
+    try {
+      const docs = (await w.resources.bindResource(w.owner, { commandId: cid("b"), projectId: project, kind: "service", label: "Docs", locator: "https://docs.example.test", access: "read", paths: ["guides"] } as never)).id;
+      const state = async () => (await w.resources.get(w.owner, docs))! as unknown as { scope: { mode: string; paths: string[] } };
+      for (const text of ["Don't allow writes to the Docs resource", "The Docs resource shouldn't be writable", "Revoke write access on the Docs resource", "Switch the Docs resource from write to read", "Change the Docs resource access to read", "On the Docs resource, writes are not allowed", "Stop the project from writing to the Docs resource", "Don't give the Docs resource full access", "Make the Docs resource writable? No, don't allow writes"]) {
+        const o = await say(text);
+        assert.equal(o.status, "refused", `${text}: ${JSON.stringify(o)}`);
+        assert.match(JSON.stringify(o), /Write access is not what your message says/);
+      }
+      for (const text of ["Make the Docs resource writable, but not the whole thing", "Make the Docs resource writable; don't open every path"]) {
+        const o = await say(text);
+        assert.equal(o.status, "refused", `${text}: ${JSON.stringify(o)}`);
+        assert.match(JSON.stringify(o), /Opening the whole resource is not what your message says/);
+      }
+      assert.deepEqual((await state()).scope, { mode: "read", paths: ["guides"] }, "nothing changed");
+      const rw = await say("Switch the Docs resource from read to write");
+      assert.equal(rw.status, "proposed", JSON.stringify(rw));
+      { const r = await apply(rw); assert.equal(r.applied, true, JSON.stringify(r)); }
+      assert.deepEqual((await state()).scope, { mode: "write", paths: ["guides"] });
+      await conflict("database", "MySQL", "SQLite");
+      for (const text of ["Settle the database conflict: replace SQLite with MySQL", "Settle the database conflict: prefer MySQL to SQLite", "Settle the database conflict: never SQLite", "Settle the database conflict: SQLite is out"]) {
+        const o = await say(text);
+        assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      }
+      const stands = await say("Settle the database conflict: SQLite stands");
+      assert.equal(stands.status, "proposed", JSON.stringify(stands));
+      assert.equal((await w.decisions.authoritative(w.owner, { projectId: project, topic: "database" }))?.status, "disputed", "nothing before the owner agrees");
     } finally { await w.close(); }
   });
 

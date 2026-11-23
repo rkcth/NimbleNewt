@@ -1714,7 +1714,7 @@ export class ChatService {
       const nowPaths = Array.isArray(nowScope.paths) ? nowScope.paths : [];
       if (args["paths"] === undefined && nowPaths.length > 0) args["paths"] = [...nowPaths];
       else if (Array.isArray(args["paths"]) && args["paths"].length === 0) {
-        if (nowPaths.length > 0 && !/\b(whole|entire|all of it|everything|every path|all paths|any path|anywhere|no longer limited|not limited|unlimited|without a limit)\b/i.test(words)) return refuse("unsupported_value", "Opening the whole resource is not what your message says, so nothing was proposed. Which paths should the project reach?");
+        if (nowPaths.length > 0 && !wholeSaid(words, labels[resourceId] ?? "")) return refuse("unsupported_value", "Opening the whole resource is not what your message says, so nothing was proposed. Which paths should the project reach?");
         delete args["paths"];
       }
       const nextPaths = Array.isArray(args["paths"]) ? [...new Set(args["paths"] as string[])].sort() : [];
@@ -1759,7 +1759,10 @@ export class ChatService {
       // The words must be where the owner keeps that instruction, not where they turn it down ("not the Friday one", "never deploy over deploy on Friday", "instead of SQLite"): words said only inside a
       // longer instruction of the conflict, or only after a word that turns them down, ask which one stands.
       const turnedDown = args["chosen"] === undefined && said !== "" && choiceTurnedDown(plainWords(words), said, members.map((m) => plainWords(m.statement)));
-      const fits = turnedDown ? [] : whole.length === 1 ? whole : loose;
+      const picked = turnedDown ? [] : whole.length === 1 ? whole : loose;
+      // A message that also names another instruction of the conflict by its own words ("keep Postgres over SQLite", "replace SQLite with Postgres", "prefer Postgres to SQLite") asks which one stands:
+      // which of the two the owner keeps is then a matter of how the sentence is built, which the chat does not guess.
+      const fits = picked.length === 1 && args["chosen"] === undefined && otherInstructionNamed(plainWords(words), picked[0]!.statement, members.filter((m) => m.id !== picked[0]!.id).map((m) => m.statement), one.topic ?? "") ? [] : picked;
       if (fits.length !== 1) return { ok: false, kind: "ask", question: `Which of these stands on ${quotedText(one.text.slice(0, 80), 90)}? Two of your instructions conflict.`, options: members.slice(0, CHAT_LIMITS.options).map((m) => offered({ id: m.id, text: m.statement })), field: "chosen", choices: members.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args["chosen"] = fits[0]!.id;
       showFirst = "the conflict and the instruction you chose are shown to you first";
@@ -3626,28 +3629,53 @@ const BOTH_ACCESS = /\bread[\s-]*(?:and|&|\/|\+|-)?[\s-]*writ\w*|\bfull\s+access
 const NOT_READ_ONLY = /\b(?:not|no longer|never|n't)\s+(?:be\s+|just\s+|only\s+|stay\s+)*(?:read|look|view)[\s-]*only\b|\b(?:not|n't)\s+(?:just|only)\s+(?:read|look|view|see)\b/g;
 /** Words that ask for reading only ("read only", "only read it", "read access", "view access"). */
 const READ_ONLY = /\b(?:read|look|view)[\s-]*only\b|\bonly\s+(?:be\s+able\s+to\s+)?(?:read|look|view|see|inspect)\b|\b(?:read|view)(?:ing)?\s+access\b/;
-/** A change of content turned down just before it ("no writing", "can't edit", "without modifying", "do not let it change"). */
-const TURNED_DOWN_BEFORE = /(?:\bnot|n't|\bno|\bnobody|\bno one|\bnone|\bnever|\bwithout|\bnor|\bcannot|\bstop)\s+(?:\S+\s+){0,3}$/;
+/** A word that turns down what follows it in the same clause ("no writing", "can't edit", "without modifying", "don't allow writes", "revoke write access", "keep it from changing", "non-writable"). */
+const TURNED_DOWN_BEFORE = /(?:\bnot|n't|\bno|\bnobody|\bno one|\bnone|\bnever|\bwithout|\bnor|\bcannot|\bstop\w*|\bprevent\w*|\bblock\w*|\bdisallow\w*|\bforbid\w*|\bden(?:y|ies|ied|ying)|\bremov\w*|\brevok\w*|\bdrop\w*|\bwithdraw\w*|\btak\w*\s+away|\bkeep\w*\s+\S+\s+from|\bprohibit\w*|\bban\w*)\s+(?:\S+\s+){0,3}$|\bnon[\s-]*$/;
+/** A word that turns down what comes just before it in the same clause ("writes are not allowed", "writing is off", "write access is revoked"). */
+const TURNED_DOWN_AFTER = /\bnot\b|n't\b|\bnever\b|\boff\b|\bforbidden\b|\bdisallowed\b|\bdisabled\b|\bdenied\b|\bbanned\b|\bprohibited\b|\bremoved\b|\brevoked\b|\bblocked\b|\bwithdrawn\b|\btaken away\b|\bgone\b|\bno longer\b/;
+/** "Change" asks for changing content only where it says what the project may do ("let it change", "can change"); as the owner's own verb ("change it to read access") it asks nothing. */
+const PERMITS_BEFORE = /(?:\blet\s+(?:\S+\s+){0,3}|\b(?:can|could|may|might|allowed to|able to)\s+)$/;
+
+/** Whether a word at `at` is turned down in its own clause: by a word before it or by one of the next few words after it. */
+function turnedDownAt(text: string, at: number, length: number): boolean {
+  const before = text.slice(Math.max(0, at - 60), at).split(/[.,;:!?]/).pop() ?? "";
+  const after = (text.slice(at + length, at + length + 60).split(/[.,;:!?]/)[0] ?? "").trim().split(/\s+/).slice(0, 4).join(" ");
+  return TURNED_DOWN_BEFORE.test(before) || TURNED_DOWN_AFTER.test(after);
+}
 
 /**
  * Whether the owner's message asks for this access to a resource. A word that only turns access down never gives it, and a word that only agrees never takes it away: write needs a word for
- * changing and nothing asking for less (read only, only read, read access, a change turned down); read needs a word for reading and nothing asking for more (read and write, no longer read only, an
- * edit that is not turned down). The resource's label is taken out first, so a resource called "Read Replica" says nothing about access.
+ * changing that is not turned down, and nothing asking for less (read only, only read, read access, any change turned down); read needs a word for reading and nothing asking for more (read and
+ * write, no longer read only, a change that is not turned down). The resource's label is taken out first, so a resource called "Read Replica" says nothing about access, and so is the old setting
+ * of a "from ... to ..." ("from write to read" asks for read).
  */
 function accessSaid(message: string, label: string, access: "read" | "write"): boolean {
   let m = message.normalize("NFC").toLowerCase();
   if (label.trim() !== "") m = m.split(label.normalize("NFC").toLowerCase()).join(" ");
-  const both = BOTH_ACCESS.test(m);
-  const opened = new RegExp(NOT_READ_ONLY.source).test(m);
-  const rest = m.replace(NOT_READ_ONLY, " ");
-  if (access === "write") {
-    const asks = both || opened || /\b(?:writ|edit|modif|chang)/.test(m);
-    const less = !both && (READ_ONLY.test(rest) || /\b(?:no\s+writ|not\s+writ|without\s+writ|n[o']t\s+(?:let\s+\S+\s+|allow\s+\S+\s+to\s+)?(?:writ|edit|modif|chang))/.test(rest));
-    return asks && !less;
-  }
-  const asks = READ_ONLY.test(rest) || /\b(?:read|reads|reading|view|viewing|look|looking|see|inspect)\b/.test(rest);
-  const more = both || opened || [...rest.matchAll(/\b(?:writ|edit|modif)\w*/g)].some((x) => !TURNED_DOWN_BEFORE.test(rest.slice(Math.max(0, x.index - 40), x.index)));
-  return asks && !more;
+  m = m.replace(/\bfrom\s+(?:[\w-]+\s+){1,3}?to\b/g, " ");
+  // "No longer read only" is kept as one marker word, so its "no longer" turns nothing else down and its "read only" is not read as asking for less.
+  const rest = m.replace(NOT_READ_ONLY, " zzopened ");
+  const candidates = [...rest.matchAll(new RegExp(`\\bzzopened\\b|${BOTH_ACCESS.source}|\\b(?:writ|edit|modif|chang)\\w*`, "g"))].map((x) => ({ word: x[0], at: x.index, down: turnedDownAt(rest, x.index, x[0].length) }));
+  const counts = (c: { word: string; at: number }): boolean => !c.word.startsWith("chang") || PERMITS_BEFORE.test(rest.slice(Math.max(0, c.at - 60), c.at).split(/[.,;:!?]/).pop() ?? "");
+  const kept = candidates.filter((c) => !c.down && counts(c));
+  const both = kept.some((c) => new RegExp(`^(?:${BOTH_ACCESS.source})$`).test(c.word));
+  const readOnly = READ_ONLY.test(rest.replace(new RegExp(BOTH_ACCESS.source, "g"), " "));
+  if (access === "write") return kept.length > 0 && !candidates.some((c) => c.down) && !(readOnly && !both);
+  const asks = readOnly || /\b(?:read|reads|reading|view|viewing|look|looking|see|inspect)\b/.test(rest);
+  return asks && kept.length === 0;
+}
+
+/**
+ * Whether the owner's message opens the whole resource: a word for all of it ("the whole resource", "every path", "no longer limited") that is not turned down ("not everything, just guides",
+ * "don't open all paths"), and none that is. The resource's label is taken out first, so a resource called "Whole Archive" says nothing about its paths.
+ */
+function wholeSaid(message: string, label: string): boolean {
+  let m = message.normalize("NFC").toLowerCase();
+  if (label.trim() !== "") m = m.split(label.normalize("NFC").toLowerCase()).join(" ");
+  const found = [...m.matchAll(/\b(?:no longer limited|not limited|unlimited|without a limit|whole|entire|all of it|everything|every path|all paths|any path|anywhere)\b/g)];
+  // "Not limited" and "no longer limited" carry their own "not": only a word before them can turn them down.
+  const down = found.map((x) => (x[0].startsWith("no") ? TURNED_DOWN_BEFORE.test(m.slice(Math.max(0, x.index - 60), x.index).split(/[.,;:!?]/).pop() ?? "") : turnedDownAt(m, x.index, x[0].length)));
+  return found.length > 0 && !down.some(Boolean);
 }
 
 /** Text compared the way the owner sees it: one Unicode form, lower case, single spaces, without the quotes and closing punctuation around it. */
@@ -3656,7 +3684,7 @@ function plainWords(text: string): string {
 }
 
 /** A word that turns down what follows it ("not", "drop", "over", "instead of", ...), at the end of the text before the choice words (an article or "the one about" may stand between). */
-const TURNS_DOWN = /(?:\bnot|n't|\bno|\bdrop|\bdropping|\bover|\binstead of|\brather than|\bagainst|\breject|\brejecting|\bremove|\bforget|\bignore|\bdiscard|\bcancel|\bexcept|\bbut not|\bnor)\s+(?:(?:keep|keeping|use|using|want|choose|pick|go with|take)\s+)?(?:(?:the|that|this)\s+)?(?:one\s+(?:about|with|saying|that says)\s+)?["'\u201c\u2018]?$/u;
+const TURNS_DOWN = /(?:\bnot|n't|\bno|\bno to|\bnever|\banything but|\beverything but|\ball but|\breplace|\breplacing|\bswap|\bdrop|\bdropping|\bover|\binstead of|\brather than|\bagainst|\breject|\brejecting|\bremove|\bforget|\bignore|\bdiscard|\bcancel|\bexcept|\bbut not|\bnor)\s+(?:(?:keep|keeping|use|using|want|choose|pick|go with|take)\s+)?(?:(?:the|that|this)\s+)?(?:one\s+(?:about|with|saying|that says)\s+)?["'\u201c\u2018]?$/u;
 
 /**
  * Whether the owner's message turns down the choice words rather than keeping them: every place the words stand is either inside a longer instruction of the conflict (said as part of
@@ -3669,7 +3697,21 @@ function choiceTurnedDown(message: string, said: string, statements: readonly st
   for (let at = message.indexOf(said); at >= 0; at = message.indexOf(said, at + 1)) places.push(at);
   if (places.length === 0) return false;
   const own = places.filter((at) => !spans.some(([a, b]) => at >= a && at + said.length <= b));
-  return own.length === 0 || own.every((at) => TURNS_DOWN.test(message.slice(Math.max(0, at - 60), at)));
+  // Any place where the words are turned down, before them ("never SQLite") or just after them in the same clause ("SQLite is out", "SQLite should not stand"), asks: one sentence that both keeps
+  // and turns down the same words says nothing the chat can act on.
+  const after = (at: number): string => (message.slice(at + said.length, at + said.length + 60).split(/[.,;:!?]/)[0] ?? "").trim().split(/\s+/).slice(0, 4).join(" ");
+  return own.length === 0 || own.some((at) => TURNS_DOWN.test(message.slice(Math.max(0, at - 60), at)) || CHOICE_DOWN_AFTER.test(after(at)));
+}
+
+/** Words just after a choice that turn it down ("is out", "loses", "should not stand", "is wrong"). */
+const CHOICE_DOWN_AFTER = /\b(?:not|never|out|lose|loses|lost|wrong|rejected|dropped|no longer)\b|n't\b/;
+
+/** Whether the message names an instruction other than the chosen one by a word of its own: a word (three letters or more, not a plain small word) the other has and neither the chosen instruction nor the topic has. */
+function otherInstructionNamed(message: string, chosen: string, others: readonly string[], topic: string): boolean {
+  const tokens = (s: string): string[] => plainWords(s).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 3 && !PLAIN_WORDS.has(w));
+  const keep = new Set([...tokens(chosen), ...tokens(topic)]);
+  const said = new Set(tokens(message));
+  return others.some((o) => tokens(o).some((w) => !keep.has(w) && said.has(w)));
 }
 
 /**
