@@ -23,7 +23,7 @@ const sbm = (n: number): string => { const a = "abcdefghijklmnopqrstuvwxyz234567
 const refuses = async (code: DomainErrorCode, run: () => Promise<unknown>, match?: RegExp): Promise<void> => {
   await assert.rejects(run, (error: unknown) => { assert.ok(error instanceof DomainError, String(error)); assert.equal(error.code, code, error.message); if (match !== undefined) assert.match(error.message, match); return true; });
 };
-type Told = { commandId: string; taskId: string; branch: string; why: "front" | "round" | "returns" | "unassigned" | "released"; text: string };
+type Told = { commandId: string; taskId: string; branch: string; why: "front" | "round" | "returns" | "unassigned" | "released" | "deferred"; text: string };
 
 for (const backend of backends) {
   const rig = async (o: { cap?: number | (() => Promise<number>); holdMs?: number; releaseMs?: number; sweepPolicyReads?: number; gate?: (call: WorkspaceCall) => Promise<void> } = {}) => {

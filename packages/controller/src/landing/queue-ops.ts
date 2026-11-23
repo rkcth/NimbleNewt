@@ -6,7 +6,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, JsonObject } from "../storage/types.js";
-import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEntry, type LandingQueueFront, type LandingReservation, type LandingReturns } from "./landing-queue.js";
+import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, queuedAfter, type LandingQueueEntry, type LandingQueueFront, type LandingReservation, type LandingReturns } from "./landing-queue.js";
 
 /**
  * Who may put a submission in a branch's landing queue, take one out and read it, and what a landing must show about the queue before it writes (card P10). The queue service itself takes no caller; this is its door.
@@ -29,6 +29,12 @@ export const LANDING_HOLD_MS = 4 * 60 * 60 * 1000;
  * waits behind it (card P10, eighth slice). ASSUMPTION: twelve hours, three times the time the director is given to decide (`LANDING_HOLD_MS`); reversible as the `releaseMs` option.
  */
 export const LANDING_RESERVATION_RELEASE_MS = 12 * 60 * 60 * 1000;
+/**
+ * How long an APPROVED first place may hold the branch before the controller moves it to the back of the queue, when approved work of another task queued after it waits behind it (card P10, twelfth slice). Nothing is removed: the
+ * work stays approved and queued and takes its turn again behind the others. ASSUMPTION: twenty-four hours, six times the time the director is given to decide (`LANDING_HOLD_MS`) and twice the release bound of a
+ * reserved place with no approved work; reversible as the `deferMs` option.
+ */
+export const LANDING_DEFER_MS = 24 * 60 * 60 * 1000;
 /** The dispatcher's bounds round (`sweepBounds` with `throttled`) walks the queues at most this often (card P10, eleventh slice review). */
 export const BOUNDS_SWEEP_EVERY_MS = 60_000;
 /**
@@ -69,7 +75,7 @@ export interface LandingQueueOpsOptions {
    * Tells the project's director (and the owner) about a landing queue that needs a decision. It is asked before the queue marks the escalation, so a throw (the owner could not be told) leaves it unmarked and it is
    * asked again at the next refused landing or round; a repeat of the same `commandId` must tell nobody twice.
    */
-  readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round" | "returns" | "unassigned" | "released"; readonly text: string }) => Promise<void>;
+  readonly escalate?: (notice: { readonly commandId: string; readonly projectId: string; readonly taskId: string; readonly branch: string; readonly why: "front" | "round" | "returns" | "unassigned" | "released" | "deferred"; readonly text: string }) => Promise<void>;
   /** The repair-cycle limit of the project (card Q04, `review.repairCycles`): conflict returns count against it. Absent or throwing: `REPAIR_CYCLES_DEFAULT`. */
   readonly repairCycles?: (projectId: string) => Promise<number>;
   /** Tells an agent (a notice in its inbox) that its task's work came back to it. A repeat of the same `commandId` must tell nobody twice. */
@@ -82,6 +88,8 @@ export interface LandingQueueOpsOptions {
   readonly holdMs?: number;
   /** See `LANDING_RESERVATION_RELEASE_MS`. */
   readonly releaseMs?: number;
+  /** See `LANDING_DEFER_MS`. */
+  readonly deferMs?: number;
   /** See `BOUNDS_SWEEP_POLICY_READS`. */
   readonly sweepPolicyReads?: number;
   /**
@@ -237,7 +245,7 @@ export class LandingQueueOps {
    * `others` lists the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another, or a task's own landing branch): nothing there lands
    * on the landing branch, and `branch` reads one of them in full. `partial` says the walk over the queues stopped before the end.
    */
-  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean; holdMs: number; releaseMs: number }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
+  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean; holdMs: number; releaseMs: number; deferMs: number }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
     onlyKnown(query, ["projectId", "branch"]);
     if (typeof query.projectId !== "string" || !this.#integrator(by, query.projectId)) throw refused("that project");
     const named = query.branch === undefined ? undefined : branchName(query.branch);
@@ -248,7 +256,7 @@ export class LandingQueueOps {
     const reservations = [...(q?.reservations ?? [])];
     const items = (q?.entries ?? []).map((e, i) => ({ ...e, position: i + 1, ...(reservations.some((r) => r.taskId === e.taskId) ? { reserved: true as const } : {}) }));
     const first = q === undefined ? undefined : frontOf(q);
-    const front = q?.front !== undefined && first !== undefined && q.front.taskId === first.taskId ? { ...q.front, waitingForApproval: first.entry === undefined, holdMs: this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs: this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS } : undefined;
+    const front = q?.front !== undefined && first !== undefined && q.front.taskId === first.taskId ? { ...q.front, waitingForApproval: first.entry === undefined, holdMs: this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs: this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS, deferMs: this.#options.deferMs ?? LANDING_DEFER_MS } : undefined;
     const all = await this.#queue.queuesOf(query.projectId);
     return { branch: branch ?? "", landingBranch: landing ?? "", items, reservations, ...(front === undefined ? {} : { front }), returns: [...(q?.returns ?? [])], others: all.queues.filter((x) => x.branch !== branch), ...(all.partial ? { partial: true as const } : {}) };
   }
@@ -271,6 +279,9 @@ export class LandingQueueOps {
     // A reserved place whose work is away has held the branch too long: the controller ends it and this landing is judged again on the queue as it is then (the place is gone, so this cannot repeat).
     // Only a queued submission waiting behind the place asks for that: a landing of a task with nothing queued (the owner's unqueued landing included) is refused as before and ends nothing.
     if (mine !== undefined && head !== undefined && head.entry === undefined && head.taskId !== call.taskId && await this.#releaseIdle(call.projectId, branch, q.front, head.taskId)) return this.checkLanding(by, call);
+    // An approved first place that has held the branch for the defer bound while this task's work waits behind it is moved to the back (card P10, twelfth slice) and this landing is judged again on the queue as it is then.
+    // Only work queued after the first entry asks for that (an entry that was itself moved behind it does not move it back), and only while this task's work is still approved as queued.
+    if (mine !== undefined && head !== undefined && head.entry !== undefined && head.taskId !== call.taskId && await this.#deferFirst(call.projectId, branch, q.front, head.entry, mine)) return this.checkLanding(by, call);
     const behind = (message: string): Promise<never> => this.#heldTooLong(call.projectId, branch, q.front, head?.entry === undefined).then(() => { throw new DomainError("invalid_transition", message); });
     const firstIs = head === undefined ? "" : head.entry === undefined ? `task ${head.taskId} holds the first place (reserved after its author reached the refresh-round cap) and waits for its approved submission (the owner, an integrator or a director may take it out with landing.queue.remove, which lets the others land)` : `the oldest (${head.entry.submissionId}, task ${head.taskId}${head.reservation === undefined ? "" : ", a reserved place"})`;
     if (mine === undefined) {
@@ -317,7 +328,7 @@ export class LandingQueueOps {
    * has not started), at most `BOUNDS_SWEEP_POLICY_READS` per walk (then the walk stops, `partial`, and the next walk starts at the queue where it stopped). Answers how many places it ended and how many queues past a bound with work waiting behind it it looked at;
    * never throws for a queue.
    */
-  async sweepBounds(options: { readonly throttled?: boolean } = {}): Promise<{ checked: number; released: number; partial: boolean; skipped?: true }> {
+  async sweepBounds(options: { readonly throttled?: boolean } = {}): Promise<{ checked: number; released: number; partial: boolean; skipped?: true; deferred?: number }> {
     if (options.throttled === true) {
       const now = Date.parse(this.#queue.now());
       // A clock set back below the last walk does not stop the round for good: only a walk less than the interval ago, measured forwards, is skipped.
@@ -325,8 +336,8 @@ export class LandingQueueOps {
       this.#lastSweepAt = Number.isFinite(now) ? now : undefined;
     }
     const walk = await this.#queue.queuesWithEntries();
-    let partial = walk.partial, checked = 0, released = 0, reads = 0;
-    const holdMs = this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS, budget = this.#options.sweepPolicyReads ?? BOUNDS_SWEEP_POLICY_READS;
+    let partial = walk.partial, checked = 0, released = 0, deferred = 0, reads = 0;
+    const holdMs = this.#options.holdMs ?? LANDING_HOLD_MS, deferMs = this.#options.deferMs ?? LANDING_DEFER_MS, releaseMs = this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS, budget = this.#options.sweepPolicyReads ?? BOUNDS_SWEEP_POLICY_READS;
     const now = Date.parse(this.#queue.now());
     // Start where the last round stopped at its budget (that queue, or the first one after it when it is gone), then go round.
     const resumeAt = this.#sweepResumeAt;
@@ -343,16 +354,26 @@ export class LandingQueueOps {
         const idle = front.idleSince === undefined ? NaN : Date.parse(front.idleSince), since = Date.parse(front.since);
         const releaseDue = head.entry === undefined && front.taskId === head.taskId && (front.idleSince === undefined || (Number.isFinite(idle) && Number.isFinite(now) && now - idle >= releaseMs));
         const holdDue = front.escalated !== true && this.#options.escalate !== undefined && Number.isFinite(since) && Number.isFinite(now) && now - since >= holdMs;
-        if (!releaseDue && !holdDue) continue;
-        let behind = false;
+        // An approved first place past the defer bound (card P10, twelfth slice): moved to the back when approved work of another task waits behind it.
+        const deferDue = head.entry !== undefined && front.taskId === head.taskId && Number.isFinite(since) && Number.isFinite(now) && now - since >= deferMs;
+        if (!releaseDue && !holdDue && !deferDue) continue;
+        let behind = false, waiting: LandingQueueEntry | undefined;
+        // Only the defer bound is due: only approved work queued after the first entry can ask for the move (card P10, twelfth slice review), so other entries are not read.
+        const onlyDefer = deferDue && !releaseDue && !holdDue;
         for (const e of q.entries) {
           if (e.taskId === head.taskId) continue;
+          if (onlyDefer && !queuedAfter(e, head.entry!)) continue;
           // The next round starts at this queue; when it was this round's first queue (more reads than the budget), at the next one, so each round moves on.
           if (reads >= budget) { partial = true; this.#sweepResumeAt = (i === 0 ? order[1]?.queueId : undefined) ?? q.queueId; break walking; }
           reads++;
           let landing: string | undefined;
           try { landing = await this.#options.landingBranch({ taskId: e.taskId, projectId: q.projectId }); } catch { continue; }
-          if (landing !== undefined && landing === q.branch) { behind = true; break; }
+          if (landing === undefined || landing !== q.branch) continue;
+          behind = true;
+          // The release and the hold need only someone waiting; the move needs approved work of another task queued after the first entry (the next entries are looked at while this one does not count).
+          if (!deferDue || head.entry === undefined) break;
+          if (await this.#waitsForDefer(head.entry, e)) { waiting = e; break; }
+          if (!onlyDefer) break;
         }
         if (!behind) continue;
         checked++;
@@ -361,10 +382,14 @@ export class LandingQueueOps {
           released++;
           continue;
         }
+        if (head.entry !== undefined && waiting !== undefined && await this.#deferFirst(q.projectId, q.branch, q.front, head.entry, waiting)) {
+          deferred++;
+          continue;
+        }
         await this.#heldTooLong(q.projectId, q.branch, q.front, head.entry === undefined);
       } catch { /* this queue is looked at again at the next round */ }
     }
-    return { checked, released, partial };
+    return { checked, released, partial, ...(deferred === 0 ? {} : { deferred }) };
   }
 
   /**
@@ -383,6 +408,48 @@ export class LandingQueueOps {
       await this.#options.escalate({ commandId: `lq-held:${LandingQueueService.queueIdOf(projectId, branch)}:${front.taskId}:${front.since}${waitingForApproval ? ":waiting" : ""}`.slice(0, 120), projectId, taskId: front.taskId, branch, why: "front", text });
       await this.#queue.markEscalated({ kind: "front", projectId, branch, taskId: front.taskId, since: front.since });
     } catch { /* best effort: unmarked, so the next refused landing or round tells again */ }
+  }
+
+  /**
+   * The bounded hold of an APPROVED first place (card P10, twelfth slice). An entry that is first, approved and has not landed for `deferMs` while approved work of another task queued after it waits behind it (`#waitsForDefer`) is moved to the back of the
+   * queue (`LandingQueueService.deferFirst`, judged inside its own write: the same first place, the time, somebody waiting, no landing on its way to the host). Nothing is removed or changed in the work: it is still
+   * approved and queued, and lands when its turn comes again (the landing still shows the approved base and tree). The task's holder (while an active agent), the director and the owner are told once. Best effort:
+   * answers whether the place is no longer that first entry (this call moved it, or another call just did); a failure leaves the queue as it was.
+   */
+  async #deferFirst(projectId: string, branch: string, front: LandingQueueFront | undefined, entry: LandingQueueEntry, waiting: LandingQueueEntry): Promise<boolean> {
+    if (front === undefined || front.taskId !== entry.taskId) return false;
+    const deferMs = this.#options.deferMs ?? LANDING_DEFER_MS;
+    const since = Date.parse(front.since), now = Date.parse(this.#queue.now());
+    if (!Number.isFinite(since) || !Number.isFinite(now) || now - since < deferMs) return false;
+    if (waiting.taskId === entry.taskId || !(await this.#waitsForDefer(entry, waiting))) return false;
+    let moved: { entry: LandingQueueEntry; seq: number } | undefined;
+    try { moved = await this.#queue.deferFirst({ projectId, branch, taskId: entry.taskId, submissionId: entry.submissionId, since: front.since, olderThanMs: deferMs, waiting: waiting.submissionId }); } catch { return false; }
+    if (moved === undefined) {
+      // Not moved by this call: another call may have just moved it (or it landed, was taken out, a landing is on its way or nobody waits behind it); the landing is judged again only when it is no longer first.
+      try { const now2 = frontOf(await this.#queue.get(projectId, branch)); return now2 === undefined || now2.taskId !== entry.taskId || now2.entry?.submissionId !== entry.submissionId; } catch { return false; }
+    }
+    const hours = deferMs % 3_600_000 === 0 ? `${deferMs / 3_600_000} h` : `${Math.round(deferMs / 60_000)} min`;
+    const text = `Task ${entry.taskId}'s approved submission ${entry.submissionId} was first in the landing queue of branch ${branch} since ${front.since} and had not landed for at least ${hours} while other work waited behind it, so the controller moved it to the back of the queue. Nothing was removed and the work is still approved; it lands when its turn comes again.`;
+    const id = `lq-deferred:${LandingQueueService.queueIdOf(projectId, branch)}:${entry.submissionId}:${front.since}`.slice(0, 120);
+    try {
+      const holder = this.#options.holderOf === undefined ? undefined : await this.#options.holderOf(entry.taskId);
+      if (holder !== undefined && holder.kind === "agent" && this.#options.tell !== undefined && (this.#options.activeAgent === undefined || await this.#options.activeAgent(holder.id))) await this.#options.tell({ commandId: `${id}:holder`.slice(0, 120), taskId: entry.taskId, to: holder.id, text, purpose: "your task's approved work was moved to the back of the landing queue" });
+    } catch { /* the director and the owner are still told */ }
+    try { await this.#options.escalate?.({ commandId: id, projectId, taskId: entry.taskId, branch, why: "deferred", text }); } catch { /* the work is already moved; nobody could be told */ }
+    return true;
+  }
+
+  /**
+   * Whether `waiting` counts as approved work waiting behind the approved first entry `first` for the defer bound (card P10, twelfth slice review): it was queued after `first` (`queuedAfter`: an entry that was
+   * itself moved behind `first` does not move it back, so two entries that never land are swapped once and then the director's hold notice is what remains), and its submission is still approved for exactly the
+   * base and tree it was queued with. An approval that cannot be read counts as not approved (nothing is moved).
+   */
+  async #waitsForDefer(first: LandingQueueEntry, waiting: LandingQueueEntry): Promise<boolean> {
+    if (!queuedAfter(waiting, first)) return false;
+    try {
+      const a = await this.#options.approvalOf(waiting.submissionId);
+      return a !== undefined && a.approved && a.base === waiting.base && a.tree === waiting.tree;
+    } catch { return false; }
   }
 
   /**

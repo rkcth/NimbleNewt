@@ -116,6 +116,14 @@ function settled(next: LandingQueueBody, now: string): LandingQueueBody {
   const sorted = [...rest.entries].sort((a, b) => a.seq - b.seq);
   return { ...rest, entries: sorted, ...(landed === undefined || landed.length === 0 ? {} : { landed }), ...(reservations === undefined || reservations.length === 0 ? {} : { reservations }), ...(away.length === 0 ? {} : { away }), ...(returned === undefined || returned.length === 0 ? {} : { returned }), ...(returns === undefined || returns.length === 0 ? {} : { returns }), ...(front === undefined ? {} : { front }) };
 }
+/**
+ * Whether `entry` was queued after `first` (card P10, twelfth slice review): its `queuedAt` is a real time later than the first entry's. A move to the back keeps `queuedAt`, so an entry that was moved behind
+ * `first` is not queued after it. Unreadable times: no (nothing is moved).
+ */
+export function queuedAfter(entry: Pick<LandingQueueEntry, "queuedAt">, first: Pick<LandingQueueEntry, "queuedAt">): boolean {
+  const a = Date.parse(first.queuedAt), b = Date.parse(entry.queuedAt);
+  return Number.isFinite(a) && Number.isFinite(b) && b > a;
+}
 /** A lost race on the queue record, built again from what is stored now (never shown to a caller). */
 const RACE = "landing queue: lost a race, build again";
 /** A command that finds nothing to write (a reservation already held, an escalation already marked): refused inside, answered outside (never shown to a caller). */
@@ -506,6 +514,57 @@ export class LandingQueueService {
       },
     })))).replayed) ended = undefined; } catch (error) { if (!nothing(error)) throw error; ended = undefined; }
     return ended;
+  }
+
+  /**
+   * Moves the approved first entry to the back of the queue when it has held the branch for `olderThanMs` or longer while an entry of another task waits behind it (card P10, twelfth slice: an approved first place
+   * that is never landed must not keep the others waiting for good). Nothing is removed: the entry keeps its submission, base, tree, author and `queuedAt`; only its number becomes the next one (and its reservation's
+   * number with it), so the next task is first and the moved one takes its turn again behind the others. The judgment is made INSIDE the write, on the stored record: the first place must still be that task's entry
+   * (the same submission and the same `front.since`), have held the branch for `olderThanMs`, and another task's entry must wait behind it; and no landing may be on its way to the host or at it (any entry's open
+   * landing request `started` or `uncertain` refuses, as a take-out does). The first entry's open-request record is read and written back unchanged in the same write, so a landing that starts at the same moment
+   * loses the race or finds it moved. Answers the entry as it was and the number it now has, or undefined when the queue no longer shows that (another task is first, it landed or was taken out, the time is not up,
+   * nobody waits behind it, a landing is under way, or a repeat of the same move).
+   * `waiting` is the submission of another task that the caller judged to wait behind it (approved, and queued after the first entry: see `LandingQueueOps`); it must still be queued, of another task, queued after
+   * the first entry (by `queuedAt`, which a move leaves as it was, so an entry that was itself moved behind this one never moves it back: two entries that never land are swapped once, not every day).
+   */
+  async deferFirst(command: { projectId: string; branch: string; taskId: string; submissionId: string; since: string; olderThanMs: number; waiting: string }): Promise<{ readonly entry: LandingQueueEntry; readonly seq: number } | undefined> {
+    const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
+    let moved: { entry: LandingQueueEntry; seq: number } | undefined;
+    try { if ((await retried(() => this.#runner.command("landing.queue.defer", { commandId: `lq-defer:${queueId}:${command.submissionId}:${command.since}`.slice(0, 120), actor: "service:landing-queue" }, async () => ({
+      payload: { projectId: command.projectId, branch: command.branch, taskId: command.taskId, submissionId: command.submissionId, since: command.since },
+      build: async () => {
+        moved = undefined;
+        const current = await this.#runner.get(KIND, queueId);
+        const q = current?.body as unknown as LandingQueueBody | undefined;
+        const first = q === undefined ? undefined : frontOf(q);
+        const since = Date.parse(command.since), now = Date.parse(this.#runner.now());
+        if (q === undefined || current === undefined || first === undefined || first.entry === undefined || first.taskId !== command.taskId || first.entry.submissionId !== command.submissionId || q.front?.taskId !== command.taskId || q.front.since !== command.since
+          || !Number.isFinite(since) || !Number.isFinite(now) || now - since < command.olderThanMs || !q.entries.some((e) => e.taskId !== command.taskId && e.submissionId === command.waiting && queuedAfter(e, first.entry!))) throw new DomainError("invalid_transition", NOTHING);
+        // No landing may be on its way to the host: the open-request records of the entries are read here, and the first entry's is written back unchanged (a landing that starts now changes it and loses).
+        let open: { revision: number; body: JsonObject } | undefined;
+        for (const e of q.entries) {
+          const found = await this.#runner.get(OPEN, e.taskId);
+          if (e.taskId === command.taskId) open = found === undefined ? undefined : { revision: found.revision, body: found.body as JsonObject };
+          const openId = (found?.body as unknown as { requestId?: string } | undefined)?.requestId;
+          const request = typeof openId === "string" && openId !== "" ? await this.#runner.get(REQUEST, openId) : undefined;
+          const rb = request?.body as unknown as { operation?: string; state?: string } | undefined;
+          if (rb?.operation === "landing" && (rb.state === "started" || rb.state === "uncertain")) throw new DomainError("invalid_transition", NOTHING);
+        }
+        const seq = q.nextSeq;
+        const entries = q.entries.map((e) => (e.taskId === command.taskId ? { ...e, seq } : e));
+        const reservations = (q.reservations ?? []).map((r) => (r.taskId === command.taskId ? { ...r, seq } : r));
+        moved = { entry: first.entry, seq };
+        const ref: AggregateRef = { kind: KIND, id: queueId };
+        return {
+          ref, creates: false,
+          changes: [{ type: "update", ref, expectedRevision: current.revision, body: json(settled({ ...q, nextSeq: seq + 1, entries, reservations }, this.#runner.now())) },
+            open === undefined ? { type: "create" as const, ref: { kind: OPEN, id: command.taskId }, body: json({}) } : { type: "update" as const, ref: { kind: OPEN, id: command.taskId }, expectedRevision: open.revision, body: open.body }],
+          detail: { taskId: command.taskId, deferred: true, submissionId: command.submissionId, since: command.since, from: first.seq, to: seq },
+          contention: async () => new DomainError("stale_revision", RACE),
+        };
+      },
+    })))).replayed) moved = undefined; } catch (error) { if (!nothing(error)) throw error; moved = undefined; }
+    return moved;
   }
 
   /**
