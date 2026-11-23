@@ -767,7 +767,7 @@ export interface StatusDeps {
   /** The submissions of a task (card Q01b), read with the submission service's own rule (`list`, `approvalOf` of what it listed). Absent: the `submissions` view says submissions are not kept here. */
   readonly submissions?: Pick<SubmissionService, "list" | "approvalOf"> & Partial<Pick<SubmissionService, "waiting">>;
   /** The commit made for an approved submission and the release open on a task's checkout (card H12o sixth slice), read-only and taking no caller; absent: the submissions view says nothing about commits. */
-  readonly submissionRelease?: { commit(submissionId: string): Promise<{ readonly commitId: string; readonly at: string; readonly permitted?: boolean } | undefined>; open(taskId: string): Promise<{ readonly operation: string; readonly at: string } | undefined>; automatic?(submissionId: string, reviewId: string): Promise<{ readonly state: string; readonly at: string; readonly finishedAt?: string; readonly summary?: string } | undefined> };
+  readonly submissionRelease?: { commit(submissionId: string): Promise<{ readonly commitId: string; readonly at: string; readonly permitted?: boolean } | undefined>; open(taskId: string): Promise<{ readonly operation: string; readonly at: string } | undefined>; automatic?(submissionId: string, reviewId: string): Promise<{ readonly state: string; readonly at: string; readonly finishedAt?: string; readonly summary?: string; readonly hostAnswer?: boolean } | undefined> };
   /** The landing queues of a project's branches (card P10). Absent: the `landing_queue` view says landing queues are not kept here. */
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
@@ -2562,8 +2562,9 @@ export class StatusService {
         const auto = await r.automatic(submissionId, reviewId);
         if (auto !== undefined && (auto.state === "refused" || auto.state === "failed" || auto.state === "uncertain")) {
           // The host's words of a refusal are its deliberate answer (no host path; at most a file name of the task's own checkout), told to the owner and the author. A failure or an unsure end may carry a
-          // raw error of the host (git's own message, a file system error naming the host's folders), so its words are told to the owner only; the author is told what happened and when.
-          const said = owner || auto.state === "refused";
+          // raw error of the host (git's own message, a file system error naming the host's folders), and so may a refusal built from an error thrown on the controller's side (`hostAnswer` absent: an attempt
+          // that could not be made quiet, the approval re-checked), so those words are told to the owner only; the author is told what happened and when.
+          const said = owner || (auto.state === "refused" && auto.hostAnswer === true);
           const why = said && typeof auto.summary === "string" && auto.summary.length > 0 ? ` It said: ${quoted(auto.summary, 300)}.` : !said && typeof auto.summary === "string" && auto.summary.length > 0 ? " What the host said is shown to the owner." : "";
           const what = auto.state === "refused" ? "was refused" : auto.state === "failed" ? "failed" : "was left unsure (the checkout may have changed; check it before asking again)";
           return ` Commit: not made yet; the release that this approval asked for ${what} at ${auto.finishedAt ?? auto.at}.${why} It is committed only when a release request commits it; the owner may ask for one.`;

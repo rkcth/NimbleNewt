@@ -25,7 +25,7 @@ for (const backend of backends) {
   const suite = (name: string, body: (c: {
     ask(by: Principal): Promise<string>; owner: Principal; task: string; svc: SubmissionService; calls: string[];
     agent(name: string, roles: string[]): Promise<Principal>; commits: Map<string, Commit>; opens: Map<string, { operation: string; at: string }>; failing: { on: boolean }; asked: Map<string, string[]>;
-    plain(): Promise<string>; autos: Map<string, { state: string; at: string; finishedAt?: string; summary?: string }>; solo(): SubmissionService; older(): Promise<string>;
+    plain(): Promise<string>; autos: Map<string, { state: string; at: string; finishedAt?: string; summary?: string; hostAnswer?: boolean }>; solo(): SubmissionService; older(): Promise<string>;
   }) => Promise<void>) => test(`${backend.name}: ${name}`, async () => {
     const world = await backend.open();
     try {
@@ -50,7 +50,7 @@ for (const backend of backends) {
       const opens = new Map<string, { operation: string; at: string }>();
       const calls: string[] = [];
       const failing = { on: false };
-      const autos = new Map<string, { state: string; at: string; finishedAt?: string; summary?: string }>();
+      const autos = new Map<string, { state: string; at: string; finishedAt?: string; summary?: string; hostAnswer?: boolean }>();
       const submissionRelease = { commit: async (id: string) => { calls.push(`commit:${id}`); if (failing.on) throw new Error("storage went away"); return commits.get(id); }, open: async (t: string) => { calls.push(`open:${t}`); return opens.get(t); }, automatic: async (id: string, review: string) => { calls.push(`auto:${id}:${review}`); if (failing.on) throw new Error("storage went away"); return autos.get(`${id}:${review}`); } };
       const view = (extra: object) => StatusService.withEpoch(world.storage, epoch, { ...base, submissions: { list: (by, t, q) => svc.list(by, t, q), approvalOf: (id) => svc.approvalOf(id) }, ...extra }, options);
       const status = view({ submissionRelease });
@@ -122,10 +122,16 @@ for (const backend of backends) {
     // Nothing recorded: the generic words, and the automatic answer was asked about with this very review.
     assert.match(await c.ask(c.owner), /Commit: not made yet; it is committed only when a release request commits it\./);
     assert.ok(c.calls.includes(`auto:${sub.id}:${review.id}`));
-    c.autos.set(`${sub.id}:${review.id}`, { state: "refused", at: "2026-11-22T10:02:00.000Z", finishedAt: "2026-11-22T10:02:01.000Z", summary: "the checkout holds files that were not approved" });
+    c.autos.set(`${sub.id}:${review.id}`, { state: "refused", at: "2026-11-22T10:02:00.000Z", finishedAt: "2026-11-22T10:02:01.000Z", summary: "the checkout holds files that were not approved", hostAnswer: true });
     const refused = await c.ask(c.owner);
     assert.match(refused, /Commit: not made yet; the release that this approval asked for was refused at 2026-11-22T10:02:01\.000Z\. It said: "the checkout holds files that were not approved"\. It is committed only when a release request commits it; the owner may ask for one\./);
-    assert.match(await c.ask(ann), /the release that this approval asked for was refused/);
+    assert.match(await c.ask(ann), /the release that this approval asked for was refused at 2026-11-22T10:02:01\.000Z\. It said: "the checkout holds files that were not approved"\./);
+    // A refusal that is not the host's own answer (built from an error thrown on the controller's side, e.g. an attempt that could not be made quiet): its words go to the owner only.
+    c.autos.set(`${sub.id}:${review.id}`, { state: "refused", at: "2026-11-22T10:02:00.000Z", summary: "release did not run: attempt att-1 could not be made quiet (ENOENT: open '/srv/host/runs/att-1')" });
+    const authorRefused = await c.ask(ann);
+    assert.match(authorRefused, /the release that this approval asked for was refused at 2026-11-22T10:02:00\.000Z\. What the host said is shown to the owner\./);
+    assert.doesNotMatch(authorRefused, /\/srv\/host|ENOENT|made quiet/);
+    assert.match(await c.ask(c.owner), /It said: "release did not run: attempt att-1 could not be made quiet/);
     c.autos.set(`${sub.id}:${review.id}`, { state: "failed", at: "2026-11-22T10:02:00.000Z", summary: "the host is down" });
     assert.match(await c.ask(c.owner), /the release that this approval asked for failed at 2026-11-22T10:02:00\.000Z\. It said: "the host is down"\./);
     // A failure's words may be a raw error of the host (its folders, git's own message): the author is told that it failed and when, not the words.
@@ -163,7 +169,7 @@ for (const backend of backends) {
     assert.doesNotMatch(await c.ask(stranger), /Commit:|asked for/);
     assert.deepEqual(c.calls, []);
     // The reviewer who approved it is not the code's author: it is not told the host's words either, and nothing is read for it.
-    c.autos.set(`${sub.id}:${review.id}`, { state: "refused", at: "2026-11-22T10:02:00.000Z", summary: "words only the owner and the author see" });
+    c.autos.set(`${sub.id}:${review.id}`, { state: "refused", at: "2026-11-22T10:02:00.000Z", summary: "words only the owner and the author see", hostAnswer: true });
     c.asked.set(rev.id, [sub.id]);
     const toReviewer = await c.ask(rev);
     assert.match(toReviewer, new RegExp(`submission ${sub.id} by`), "the reviewer asked to review it reads the code line");

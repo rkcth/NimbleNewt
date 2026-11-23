@@ -175,6 +175,8 @@ test("an approved submission is committed once through the release operation on 
     assert.match(refusedView, /Commit: not made yet; the release that this approval asked for was refused at \S+\. It said: "[^"]*no longer holds the approved work[^"]*"\. It is committed only when a release request commits it; the owner may ask for one\./);
     assert.doesNotMatch(refusedView, /a reviewer's approval asks for one only at the moment/);
     assert.doesNotMatch(await viewOf(rev, two.task), /Commit:|asked for/);
+    // The host's own refusal (a fixed text naming the submission): the code's author is told it with the host's words too.
+    assert.match(await viewOf((await s.principals.issueCredential(owner, `agent:${agent}`)).token, two.task), /the release that this approval asked for was refused at \S+\. It said: "[^"]*no longer holds the approved work[^"]*"\./);
     const stale = await release(two.task, sub2, "rel-3");
     assert.equal(stale.result.state, "refused");
     assert.match(stale.result.summary, /no longer holds the approved work of submission .*its files changed/);
