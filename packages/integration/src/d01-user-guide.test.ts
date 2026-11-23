@@ -494,6 +494,15 @@ test("the guide's Meetings section describes each owner control of scheduling an
   assert.ok(statusKindsInSource().has("meetings"), "the meetings view the section tells about is a real status kind");
 });
 
+test("the guide's section on conflicting instructions, role labels and resources describes each control and where the conflict is listed (card chat gaps 2)", () => {
+  const whole = guide();
+  const from = whole.indexOf("\n## When two of your instructions disagree");
+  assert.ok(from >= 0, "the guide has the section");
+  const next = whole.indexOf("\n## ", from + 1);
+  const text = whole.slice(from, next < 0 ? undefined : next);
+  for (const word of ["**Needs-you** list", "settle the database conflict", "cannot be undone", "**A role's label.**", "**A bound resource.**", "shown to you first", "the access is held to what you said"]) assert.ok(text.includes(word), `the section says: ${word}`);
+});
+
 test("every status view the guide's finished-work section lists is a real status kind, is described in full, and is answered by the chat for the words the guide shows (card D01)", async () => {
   const rows = finishedWorkLines();
   const real = statusKindsInSource();

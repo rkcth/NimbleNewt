@@ -774,6 +774,32 @@ export class DecisionService implements DecisionGuard {
 
   // ---- reads --------------------------------------------------------------------------------------------------------------------
 
+  /**
+   * The conflicts between the owner's own instructions that still wait for their choice, across every project, oldest first (the Needs-you list and the chat read them), each with the decisions in conflict as the owner said them.
+   * Owner only. Reads at most 20 pages of 500 records; `truncated` says when there are more than `limit` or the scan stopped early.
+   */
+  async openDisputes(by: Principal, limit: number): Promise<{ items: { id: string; revision: number; projectId: string; taskId?: string; topic: string; openedAt: string; members: { id: string; statement: string; wording: string; version: number }[] }[]; truncated: boolean }> {
+    if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not list the conflicts between the owner's instructions`);
+    const cap = Number.isSafeInteger(limit) && limit >= 1 && limit <= 200 ? limit : invalid("limit", "must be 1 to 200");
+    const open: View<DisputeBody>[] = [];
+    let after: string | undefined; let truncated = false;
+    for (let reads = 0; ; reads++) {
+      if (reads >= 20) { truncated = true; break; }
+      const page = await this.#runner.list("decision-dispute", { ...(after === undefined ? {} : { afterId: after }), limit: 500 });
+      for (const a of page) { after = a.id; if ((a.body as unknown as DisputeBody).state === "open") open.push(view<DisputeBody>(a)); }
+      if (page.length < 500) break;
+    }
+    open.sort((x, y) => (x.openedAt < y.openedAt ? -1 : x.openedAt > y.openedAt ? 1 : x.id < y.id ? -1 : 1));
+    if (open.length > cap) truncated = true;
+    const items = [];
+    for (const d of open.slice(0, cap)) {
+      const members = [];
+      for (const m of d.members) { const got = body<OwnerDecisionBody>(await this.#runner.get("decision", m)); if (got !== undefined) members.push({ id: m, statement: got.statement, wording: got.wording, version: got.version }); }
+      items.push({ id: d.id, revision: d.revision, projectId: d.projectId, ...(d.taskId === undefined ? {} : { taskId: d.taskId }), topic: d.topic, openedAt: d.openedAt, members });
+    }
+    return { items, truncated };
+  }
+
   /** One decision, with its state. Superseded decisions are returned too, marked by their state. Unreadable reads like missing. */
   async get(by: Principal, id: string): Promise<View<OwnerDecisionBody> | undefined> {
     if (typeof id !== "string" || !DECISION_ID.test(id)) return undefined;
