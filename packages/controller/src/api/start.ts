@@ -82,7 +82,7 @@ import { wideningDecision } from "./widening.js";
 import { WipBackupService, wipBackupRouter, wipTasksSource, type WipBackupPort, type WipSweepOptions } from "../wip-backup/index.js";
 import { ApprovalLoadService, IntegrationPolicyService, PolicyService, ProfileSuggestionService, ProtectedBranchService, type ApprovalsFacade } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
-import { ChatService, ChatSpendService, CoordinatorService, GuardedModelCall, agentLifecycle, chatRoutes, type ChatInterpreter, type CoordinatorModel, type ModelCall } from "../chat/index.js";
+import { ChatService, ChatSpendService, approvedCodeLookup, CoordinatorService, GuardedModelCall, agentLifecycle, chatRoutes, type ChatInterpreter, type CoordinatorModel, type ModelCall } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
 import { createMeetingGate } from "../jobs/meeting-gate.js";
 import { JobService, LocalJobRuns, decideAtStart, type JobLauncher, type LocalJobRunsDeps } from "../jobs/index.js";
@@ -1792,7 +1792,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         return why === undefined ? [] : [`Heads up: this has no effect for now, because ${why}. Meeting decisions the approval policy leaves to you still come to you; the setting works once a model is available for the steward.`];
       } });
       policyEditsLive = policyEdits;
-      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, needing: (owner) => status.needsYouCount(owner), ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
+      chat = ChatService.withEpoch(storage, epoch, { principals, api, interpreter: o.interpreter, policy, status, policyEdits, coordinator: () => coordinator, waiting: async (owner) => (await messages.ownerQuestions(owner, { limit: 50 })).items.length, needing: (owner) => status.needsYouCount(owner), approvedCode: approvedCodeLookup({ submissions, commit: (id) => workspaceOps.submissionCommit(id) }), ...(o.coordinator === undefined ? {} : { coordinatorToken: o.coordinator.token }) });
       if (o.coordinator !== undefined) {
         const c = o.coordinator;
         coordinator = CoordinatorService.withEpoch(storage, epoch, {

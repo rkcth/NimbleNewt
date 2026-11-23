@@ -221,7 +221,7 @@ test("the prompt tells the model how to read a project's required landing checks
   assert.match(system, /"switch_focus"[^\n]*"evidence":<the owner's phrase that names the project, two words or more, copied exactly>/);
 });
 
-test("the prompt tells the model to commit approved code only with the submission ID the owner wrote, and to ask for it otherwise (card D01 fifth slice): the model sees no earlier answer, so it cannot look the ID up; the intents pass the checks", async () => {
+test("the prompt tells the model to name the task for a release and copy an ID only when the owner wrote one (the chat finds the approved code itself); the intents pass the checks", async () => {
   let system = "";
   const text = "commit submission sbm-abcdefghijklmnopqrst of the parser fix";
   const intents = [{ kind: "command", op: "workspace.request", args: { operation: "release", taskTitle: "parser fix", submissionId: "sbm-abcdefghijklmnopqrst", reason: "commit submission sbm-abcdefghijklmnopqrst of the parser fix" }, evidence: text, basis: "owner" }];
@@ -230,8 +230,9 @@ test("the prompt tells the model to commit approved code only with the submissio
   assert.equal(out.length, 1, JSON.stringify(out));
   assert.ok(acceptedArgs("workspace.request")?.includes("taskTitle"), "the chat finds the task by the owner's words");
   assert.ok(acceptedArgs("workspace.request")?.includes("submissionId"));
-  assert.match(system, /propose workspace\.request with operation release, taskTitle and submissionId copied exactly from the owner's message, an ID that starts with sbm- as this view shows it/);
-  assert.match(system, /without writing its ID, ask for it with a clarify intent and never propose the release without it/);
+  assert.match(system, /propose workspace\.request with operation release and taskTitle \(the owner's words for the task\); the assistant itself finds the task's approved code that is not committed yet/);
+  assert.match(system, /if the owner did write an ID that starts with sbm-, copy it exactly into submissionId, and never make one up; never propose a release for no task/);
+  assert.doesNotMatch(system, /ask for it with a clarify intent and never propose the release without it/);
   // The asking intent the prompt describes is one the checks accept.
   const asking = new ModelInterpreter({ complete: async () => JSON.stringify([{ kind: "clarify", question: "Which submission should be committed? The submissions view of the task shows its ID (sbm-...).", options: [] }]) }, () => ["a/primary"]);
   assert.equal(((await asking.interpret({ ...input, text: "commit the approved parser fix", quoted: [] })) as unknown[]).length, 1);

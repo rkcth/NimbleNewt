@@ -17,6 +17,7 @@ import { quoted as quotedText } from "../status/explain.js";
 import { docVerifyCode } from "../submissions/doc-obligations.js";
 import { probeUrl } from "../projects/probes.js";
 import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
+import type { ApprovedCodeLookup } from "./approved-code.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
 import { DEFAULT_REPLY_TOKENS, smallWindowWarning } from "../context/fixed-part.js";
 import { MIN_WORKABLE_CONTEXT_TOKENS, PROVIDER_NAME } from "../setup/providers.js";
@@ -198,6 +199,8 @@ export interface ChatDeps {
   readonly waiting?: (owner: Principal) => Promise<number>;
   /** Everything waiting for the owner's decision (card U11b); when given it is counted in place of the questions alone. */
   readonly needing?: (owner: Principal) => Promise<number>;
+  /** The approved code of a task that is not committed yet (card D01, release by words): a release request names the submission by it. Absent: a release that names no submission is not proposed. */
+  readonly approvedCode?: ApprovedCodeLookup;
 }
 
 /**
@@ -1386,6 +1389,47 @@ export class ChatService {
       if (matches.length === 0) return refuse("not_found", `no task called ${quotedText(title, 80)} in that project`);
       if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called ${quotedText(title, 80)}. Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: idKey, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args[idKey] = (matches[0] as { id: string }).id;
+    }
+    // A release commits approved code (card D01, release by words). The owner names the task, not the submission: the CHAT finds the task's approved code that is not committed yet, never the model. A release that names no
+    // submission would commit the whole folder as a plain commit, so one is never proposed without it, nor one for no task. An ID the model supplied counts only when it is one of the found submissions. With no ID,
+    // only the task's NEWEST code is filled in when it is approved and not committed, or else the newest approved, uncommitted submission with exactly the same base and tree (the same code submitted again and not
+    // reviewed yet; never when a reviewer asked for changes to that newest submission, which takes back exactly that code): each code submission is the checkout as it was submitted, and the host commits only when the checkout holds exactly the approved tree on the approved base, so older approved code that
+    // different newer code followed would be refused after the task was made quiet.
+    if (intent.op === "workspace.request" && args["operation"] === "release") {
+      if (typeof args["taskId"] !== "string") return refuse("invalid_command", "A release commits the approved code of one task, and no task was named, so nothing was proposed. Name the task (for example \"commit the approved parser fix\").");
+      const supplied = args["submissionId"];
+      if (supplied !== undefined && typeof supplied !== "string") return refuse("invalid_command", "submissionId must be text");
+      if (this.#deps.approvedCode === undefined) {
+        if (supplied === undefined) return refuse("unavailable", "Which approved code to commit cannot be looked up here, so nothing was proposed. Name its submission ID (it starts with sbm-).");
+      } else {
+        let found: Awaited<ReturnType<ApprovedCodeLookup>>;
+        let taskItem: Record<string, unknown> | undefined;
+        try { found = await this.#deps.approvedCode(await this.#owner(token), args["taskId"]); taskItem = await this.#get(token, "task.get", { taskId: args["taskId"] }); } catch { return refuse("unavailable", "The approved code of that task could not be checked just now, so nothing was proposed. Try again in a moment."); }
+        const taskLabel = quotedText(typeof taskItem?.["title"] === "string" ? taskItem["title"] : args["taskId"], 80);
+        if (supplied !== undefined) {
+          const named = found.items.find((i) => i.id === supplied);
+          if (named === undefined) return refuse("not_found", `${quotedText(supplied, 40)} is not approved code of ${taskLabel} that is waiting to be committed${found.truncated ? " (not every submission of the task could be read)" : ""}, so nothing was proposed.`);
+          fillNotes.push(`Commits ${supplied} of ${taskLabel}: approved code, not committed yet.`);
+          const n = found.newest;
+          if (n !== undefined && n.id !== supplied && n.committed !== true && n.changesAsked === true && n.base === named.base && n.tree === named.tree) fillNotes.push(`The same code was submitted again on ${taskLabel} after it (${n.id}, submitted ${n.submittedAt}), and a reviewer asked for changes to that submission.`);
+          if (n !== undefined && n.id !== supplied && (n.committed === true || n.base === undefined || n.base !== named.base || n.tree !== named.tree)) fillNotes.push(`Newer code (${n.id}, submitted ${n.submittedAt}) was submitted on ${taskLabel} after it${n.committed === true ? " and already committed" : ""}, so the working folder most likely no longer holds ${supplied}: a release commits only the exact approved code the folder holds, and otherwise it is refused and nothing is committed.`);
+        } else if (found.truncated) {
+          return refuse(found.items.length === 0 ? "not_found" : "unavailable", `Not every submission of ${taskLabel} could be read, so which code of it is the newest cannot be told and nothing was proposed. Name the submission ID (it starts with sbm-) if you know it.`);
+        } else if (found.newest === undefined) {
+          return refuse("not_found", `No code has been submitted on ${taskLabel}, so there is no approved code to commit and nothing was proposed.`);
+        } else {
+          const n = found.newest;
+          const same = n.committed === true || n.changesAsked === true || n.base === undefined || n.tree === undefined ? undefined : found.items.find((i) => i.base === n.base && i.tree === n.tree);
+          if (same === undefined) {
+            const older = found.items.length;
+            return refuse("not_found", `The newest code of ${taskLabel} (${n.id}, submitted ${n.submittedAt}) is not approved code waiting to be committed (${n.committed === true ? "it is already committed" : n.changesAsked === true ? "a reviewer asked for changes to it" : "it is not approved yet"}), so nothing was proposed.${older === 0 ? "" : ` ${older} older approved submission${older === 1 ? " is" : "s are"} not committed, but ${n.changesAsked === true ? "newer code followed" : "different newer code followed"} ${older === 1 ? "it" : "them"}, and a release commits only the exact approved code the task's working folder holds; name one by its ID only if you mean it.`}`);
+          }
+          args["submissionId"] = same.id;
+          fillNotes.push(same.id === n.id
+            ? `Commits ${n.id} of ${taskLabel}, submitted ${n.submittedAt}: the task's newest code, approved and not committed yet, found just now (you did not name it).`
+            : `Commits ${same.id} of ${taskLabel}, submitted ${same.submittedAt}: approved code, not committed yet, found just now (you did not name it). The task's newest code (${n.id}) is not approved yet, but it holds exactly the same code on the same starting point, so this approval covers what the working folder was last submitted with.`);
+        }
+      }
     }
     // An agenda item named by its words: exactly one open item of the project whose topic contains them, or the owner is asked.
     if (intent.op === "agenda.correct") {
