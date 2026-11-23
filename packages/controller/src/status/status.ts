@@ -2212,7 +2212,8 @@ export class StatusService {
     const words: Record<string, string> = { open: "open, waiting for a repair", "repair-submitted": "repaired, waiting for a check", resolved: "resolved", escalated: "escalated to you: it waits for your decision (accept it as is, or let the repair go on)", overridden: "overridden by you (accepted as is; its failed checks stay failed)", withdrawn: "withdrawn as mistaken (the report stays on the record)" };
     // A corrected finding or severity is said, so the owner reads text that was changed after it was reported as changed: how many times, who last, and the severity it replaced.
     const edited = (x: { readonly edits?: readonly { readonly by: string; readonly previousSeverity?: string }[]; readonly severity: string }): string => {
-      const list = Array.isArray(x.edits) ? x.edits : [];
+      // Entries that are not records (a hand edit of the stored defect) are not counted, so the view still answers.
+      const list = (Array.isArray(x.edits) ? x.edits as readonly unknown[] : []).filter((e): e is { readonly by: string; readonly previousSeverity?: string } => typeof e === "object" && e !== null && !Array.isArray(e));
       if (list.length === 0) return "";
       const last = list[list.length - 1]!;
       const was = list.find((e) => typeof e.previousSeverity === "string")?.previousSeverity;

@@ -125,6 +125,10 @@ for (const backend of backends) {
       const key = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
       await svc.edit(rev, { commandId: cid("e"), id: a.id, finding: `Fails with the key ${key} set`, reason: `see ${key}` });
       assert.ok(!JSON.stringify(await full(a.id)).includes(key));
+      // A lower severity changes nothing about the landing gate's `defects` check: an unfinished defect stops a landing whatever its severity.
+      await svc.edit(rev, { commandId: cid("e"), id: a.id, severity: "minor" });
+      const landing = (await svc.landing(owner, t1))!;
+      assert.ok(landing.unresolved >= 1 && landing.items.some((x) => x.id === a.id && x.severity === "minor" && x.state === "open"), JSON.stringify(landing));
 
       // A repair under check: the reporter may still correct it unless it did work of the repair; the owner may.
       const g2 = await deliverable(p1, t1, "Guide 2");

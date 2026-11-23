@@ -29,7 +29,7 @@ import type { Reliance } from "../security/reliance.js";
 import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
-import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
+import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
 // ---- records -------------------------------------------------------------------------------------------------------------------
 
@@ -582,7 +582,9 @@ export class ChatService {
       if (intent.kind === "clarify") { push({ i, kind: "asked", question: intent.question, options: intent.options ?? [] }); continue; }
       if (intent.kind === "none") { push({ i, kind: "ignored", reason: intent.reason }); continue; }
       if (intent.kind === "answer") { push({ i, kind: "refused", code: "not_resumable", message: "an answer cannot be held" }); continue; }
-      if (!trusted && (intent.basis === "quoted" || !evidenceInText(intent.evidence, words) || !evidenceStrong(intent.evidence))) {
+      // A message that is only "yes" (or only "no") agrees to (or drops) a proposal shown to the owner: the guide says to say yes in any words, and such a message is the owner's whole own text.
+      const wholeAnswer = (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") && evidenceWholeMessage(intent.evidence, words);
+      if (!trusted && (intent.basis === "quoted" || !evidenceInText(intent.evidence, words) || (!evidenceStrong(intent.evidence) && !wholeAnswer))) {
         push({ i, kind: "refused", code: "untrusted_authority", message: intent.basis === "quoted" ? "That instruction came from quoted text, which cannot ask for anything; only your own message can ask for something." : "The words this was based on are not a phrase of your own message, so it was not done." });
         continue;
       }

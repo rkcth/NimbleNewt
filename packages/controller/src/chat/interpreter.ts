@@ -166,6 +166,16 @@ export const evidenceInText = (evidence: string, text: string): boolean => {
 /** Evidence must be a phrase (at least two words and six characters), not a token that any message contains. */
 export const evidenceStrong = (evidence: string): boolean => evidence.trim().length >= 6 && evidence.trim().split(/\s+/).length >= 2;
 
+/**
+ * Whether `evidence` is the owner's whole own message (ignoring case, runs of white space and punctuation at either end), such as a message that is only "yes" or "no". Used only for agreeing to or dropping a
+ * proposal already shown to the owner: a one-word answer to "Proposed, nothing has happened yet" is the owner's own words, while the same word found inside a longer message is not taken as that answer.
+ */
+export const evidenceWholeMessage = (evidence: string, text: string): boolean => {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").replace(/^[\p{P}\s]+|[\p{P}\s]+$/gu, "");
+  const said = norm(text);
+  return said.length > 0 && norm(evidence) === said;
+};
+
 /** A credential-shaped text, or a key or password given in plain words ("my password is ..."), is never sent to a model or stored. The command named is the launcher's, as the launcher itself prints it. */
 export const refuseCredentials = (value: string, field: string): void => { if (redactText(value) !== value || labelledSecret(value)) invalid(field, field === "text" ? "looks like a credential or key; it was not read, sent to any model or recorded. Keep keys out of the chat: put one in the secret store with `node scripts/nimblenewt.mjs secret set NAME` (it does not show what you type) and give the chat only the NAME" : "looks like a credential or key; it was not read or recorded"); };
 

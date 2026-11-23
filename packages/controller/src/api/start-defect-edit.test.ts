@@ -7,6 +7,7 @@ import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { ScriptedInterpreter } from "../chat/index.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { PI } from "../dispatch/testing/world.js";
+import { CommandRunner } from "../domain/runner.js";
 import { startController } from "./index.js";
 
 const ext4: FilesystemDetector = async () => ({ type: "ext4", network: false });
@@ -118,7 +119,15 @@ test("through the running controller an unfinished defect's finding and severity
     const esc = "that backup defect is critical, make it critical";
     const escTurn = await turn("m-9", esc, [{ kind: "command", op: "defect.edit", args: { id: a, severity: "critical" }, evidence: esc, basis: "owner" }]);
     assert.equal(escTurn[0].status, "proposed", JSON.stringify(escTurn));
-    const escYes = await turn("m-10", "yes, do that", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "do that", basis: "owner" }]);
+    // A "yes" inside a longer message is not the owner's agreement; a message that is only "Yes." is (the guide: say yes in any words). A message that is only "no" drops a proposal.
+    const partial = await turn("m-9b", "yes, but first tell me who reported it", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "yes", basis: "owner" }]);
+    assert.deepEqual([partial[0].status, partial[0].code], ["refused", "untrusted_authority"], JSON.stringify(partial));
+    assert.equal((await state(a)).severity, "major", "nothing applied");
+    const minorTurn = await turn("m-9c", "make the backup defect minor", [{ kind: "command", op: "defect.edit", args: { id: a, severity: "minor" }, evidence: "make the backup defect minor", basis: "owner" }]);
+    assert.equal(minorTurn[0].status, "proposed", JSON.stringify(minorTurn));
+    const dropped = await turn("m-9d", "No", [{ kind: "discard_proposal", proposalId: minorTurn[0].proposalId, evidence: "no", basis: "owner" }]);
+    assert.equal(dropped[0].status, "discarded", JSON.stringify(dropped));
+    const escYes = await turn("m-10", "Yes.", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "yes", basis: "owner" }]);
     assert.equal(escYes[0].status, "applied", JSON.stringify(escYes));
     const escalated = await state(a);
     assert.deepEqual([escalated.state, escalated.severity, escalated.cycles, escalated.checks.map((x: any) => x.verdict), escalated.edits.length], ["escalated", "critical", 1, ["not-fixed"], 3]);
@@ -129,6 +138,13 @@ test("through the running controller an unfinished defect's finding and severity
     const finished = await turn("m-11", esc, [{ kind: "command", op: "defect.edit", args: { id: a, severity: "critical" }, evidence: esc, basis: "owner" }]);
     assert.notEqual(finished[0].status, "applied", JSON.stringify(finished));
     assert.equal((await state(a)).state, "withdrawn");
+    // A hand edit that puts entries other than records into the stored list: the defects view still answers and counts only the records.
+    const bRef = { kind: "defect", id: b };
+    const bAgg = (await c.storage.getAggregate(bRef))!;
+    const kept = (bAgg.body as any).edits as unknown[];
+    await new CommandRunner(c.storage, c.epoch, {}).command("test.plant", { commandId: "junk-edits", actor: "system" }, async () => ({ payload: { id: b }, build: async () => ({ ref: bRef, creates: false, changes: [{ type: "update", ref: bRef, expectedRevision: bAgg.revision, body: { ...bAgg.body, edits: [null, 7, "x", [], ...kept] } as never }], detail: {} }) }));
+    shown = await lines();
+    assert.ok(shown.includes(`Finding: "A typo in step 2.". Edited 2 time(s), last by ${rob.id}; reported as minor.`), shown);
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
