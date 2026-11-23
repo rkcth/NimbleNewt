@@ -88,7 +88,7 @@ for (const backend of backends) {
     } finally { await world.close(); }
   });
 
-  const code = (c: { svc: SubmissionService }, by: Principal, taskId: string, tree: string) => c.svc.record(by, { commandId: cid("s"), taskId, kind: "code", role: "author", base: BASE, tree: T(tree), patchId: PATCH });
+  const code = (c: { svc: SubmissionService }, by: Principal, taskId: string, tree: string) => c.svc.record(by, { commandId: cid("s"), taskId, kind: "code", role: "author", base: BASE, tree: T(tree), patchId: T(tree) });
 
   suite("nothing submitted says so; an unknown project is not found; a controller without the service, or without the project view, says it is not kept", async (c) => {
     assert.match((await c.ask(c.owner))![0]!, /^No unfinished task of this project has code you may read that is waiting: nothing is waiting for a reviewer or a director\.$/);

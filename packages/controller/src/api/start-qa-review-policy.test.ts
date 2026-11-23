@@ -75,10 +75,26 @@ test("the owner sets the review policy by chat, reads it back, and the controlle
     assert.deepEqual([got.item.triggers.onSubmission, got.item.gatesCompletion, got.item.updatedBy], [true, true, rob.id]);
     assert.match(await ask("what are the review rules now?"), /A review starts on each new code submission.*gates landing/s);
 
+    // Requiring citations (card Q02 leftovers): the model cannot add it unless the owner spoke of citing; in the owner's words it is shown first, applied on the yes, shown on the policy view and enforced on reviews.
+    assert.equal((await turn("m-cite-loose", loose, [{ kind: "command", op: "qa.review.policy.set", args: { requireVerdictCitations: true }, evidence: loose, basis: "owner" }]))[0].code, "unsupported_value");
+    const citeWords = "reviewers must cite the criteria version they judged against in every verdict";
+    const citeProposed = await turn("m-cite", citeWords, [{ kind: "command", op: "qa.review.policy.set", args: { requireVerdictCitations: true }, evidence: citeWords, basis: "owner" }]);
+    assert.equal(citeProposed[0].status, "proposed", JSON.stringify(citeProposed));
+    assert.equal((await call(O, "qa.review.policy.get", { projectId: project })).result.item.requireVerdictCitations, false, "nothing is applied before the owner agrees");
+    const citeYes = `yes ${citeProposed[0].proposalId}`;
+    assert.equal((await turn("m-cite-yes", citeYes, [{ kind: "apply_proposal", proposalId: citeProposed[0].proposalId, evidence: citeYes, basis: "owner" }]))[0].status, "applied");
+    assert.equal((await call(O, "qa.review.policy.get", { projectId: project })).result.item.requireVerdictCitations, true);
+    assert.match(await ask("what are the review rules now?"), /verdict must cite the criteria version/);
+
     // Ann's attempt is running and she submits code: the regular round makes the review for Rev, not for Ann.
     now += 60_000;
     const sub = await call(ann.token, "submission.record", { taskId: task, kind: "code", role: "author", base, tree: "b".repeat(40), patchId: patch }, "code-1");
     assert.equal(sub.ok, true, JSON.stringify(sub));
+    const uncited = await call(rev.token, "submission.record", { taskId: task, kind: "review", role: "reviewer", subject: sub.result.id, verdict: "approve" }, "rv-uncited");
+    assert.equal(uncited.error?.code, "invalid_command", JSON.stringify(uncited));
+    assert.match(uncited.error.message, /requires a verdict to cite/);
+    const cited = await call(rev.token, "submission.record", { taskId: task, kind: "review", role: "reviewer", subject: sub.result.id, verdict: "changes", criteriaRevision: 0 }, "rv-cited");
+    assert.equal(cited.ok, true, JSON.stringify(cited));
     const asgBefore = await s.assignments.getAssignment(task);
     const attemptBefore = await s.assignments.getAttempt(asgBefore!.activeAttemptId!);
     await round();

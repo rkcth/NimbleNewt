@@ -74,9 +74,11 @@ export interface LandingCheckHostReport {
   readonly reviewedPatchId?: string;
   /** Why `reviewedPatchId` could not be computed. */
   readonly reviewedProblem?: string;
+  /** When `carried` was asked: the patch ID the host computed for each earlier submission's base and tree, in the order asked (`null`: could not be computed). */
+  readonly carriedPatchIds?: readonly (string | null)[];
 }
 export interface LandingCheckHost {
-  landingChecks?(call: { readonly taskId: string; readonly projectId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly maxOutputBytes: number; /** The reviewed code submission's base commit and tree: the host computes their patch ID from its own objects. */ readonly reviewed?: { readonly base: string; readonly tree: string }; /** Aborted when the gate stops waiting for the answer: the host then stops the checks' processes and starts no more. */ readonly signal?: AbortSignal }): Promise<LandingCheckHostReport>;
+  landingChecks?(call: { readonly taskId: string; readonly projectId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly maxOutputBytes: number; /** The reviewed code submission's base commit and tree: the host computes their patch ID from its own objects. */ readonly reviewed?: { readonly base: string; readonly tree: string }; /** Earlier submissions of the same claimed patch (card Q02 carry-over): the host computes the patch ID of each (`carriedPatchIds`). */ readonly carried?: readonly { readonly base: string; readonly tree: string }[]; /** Aborted when the gate stops waiting for the answer: the host then stops the checks' processes and starts no more. */ readonly signal?: AbortSignal }): Promise<LandingCheckHostReport>;
 }
 
 export interface ContractTests {
@@ -86,14 +88,14 @@ export interface ContractTests {
   readonly onlyAuthors?: boolean;
 }
 /** The QA gate of a code submission as the landing gate needs it (`QaEvidenceService.gate`). */
-export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
+export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; /** Earlier same-patch submissions whose evidence counted (card Q02). */ readonly carriedFrom?: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
 /** The documents gate of a code submission as the landing gate needs it (`DocObligationService.landing`): the documents describing the task that are not verified against that code. */
 export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
 /** The director sign-off of a code submission as the landing gate needs it (`landingDirectorGate`): the newest sign-off on that submission, when there is one. */
 export interface DirectorGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string } }
 /** The defects reported against a task's deliverables as the landing gate needs them (`landingDefectsGate`): how many in all, how many are not finished, and the first few of those. */
 export interface DefectsGateView { readonly taskId: string; readonly checked: number; readonly unresolved: number; readonly items: readonly { readonly id: string; readonly severity: string; readonly state: string; readonly finding: string; readonly deliverableTitle: string }[] }
-export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
+export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string; /** The earlier same-patch submission whose verdict this answer carries (card Q02). */ readonly carriedFrom?: string }
 export interface LandingGateDeps {
   /** The project's required checks (`IntegrationPolicyService.effective`), and for the task named the checks its project's review policy adds (card Q02: independent review gates completion). */
   readonly requiredChecks: (projectId: string, taskId?: string) => Promise<readonly Check[]>;
@@ -101,6 +103,11 @@ export interface LandingGateDeps {
   readonly tests: (taskId: string, authors: readonly string[]) => Promise<ContractTests | undefined>;
   /** Whether a code submission is approved, and its patch ID (`SubmissionService.approvalOf`). */
   readonly approvalOf: (submissionId: string) => Promise<ReviewedSubmission | undefined>;
+  /**
+   * The earlier code submissions of the same task that claim the same patch ID (card Q02 carry-over, `SubmissionService.carriedSources`), with their base and tree. A verdict or QA evidence carried from one counts
+   * only when the host computes the same patch ID from that submission's own base and tree as from the landed submission's: the claimed patch ID is only its submitter's word. Absent: nothing carried counts.
+   */
+  readonly samePatch?: (submissionId: string) => Promise<readonly { readonly submissionId: string; readonly base: string; readonly tree: string }[]>;
   /** The QA gate of a code submission (`QaEvidenceService.gate`, read as the controller); absent: the `qa` check is not collected (`not_run`). */
   readonly qaGate?: (submissionId: string) => Promise<QaGateView | undefined>;
   /** The documentation obligations pending for a code submission (`DocObligationService.landing`, read as the controller); absent: the `docs` check is not collected (`not_run`). */
@@ -112,7 +119,7 @@ export interface LandingGateDeps {
   readonly now: () => string;
 }
 
-export const LANDING_GATE_LIMITS = { summary: 300, note: 300, checkOutputBytes: 64 * 1024, defaultCheckSeconds: 600, marginMs: 60_000 } as const;
+export const LANDING_GATE_LIMITS = { summary: 300, note: 300, checkOutputBytes: 64 * 1024, defaultCheckSeconds: 600, marginMs: 60_000, carried: 20 } as const;
 const OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PATCH = /^[0-9a-f]{40,64}$/;
 /** The end of a check's output (where a failure is told), cleaned and cut like `clip`. */
@@ -125,7 +132,7 @@ const errorText = (error: unknown): string => { try { return String((error as Er
 const wholeCut = (text: string, max: number): string => { if (text.length <= max) return text; let end = Math.max(0, max); const c = text.charCodeAt(end - 1); if (end > 0 && c >= 0xd800 && c <= 0xdbff) end -= 1; return text.slice(0, end); };
 
 /** What `recheck` needs of a judged landing: the host's one report and what was read before it (never stored; the record is what is kept). */
-interface JudgedContext { readonly call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string }; readonly tree: string; readonly patchId: string; readonly reviewed: ReviewedSubmission | undefined; readonly reviewProblem: string | undefined; readonly report: LandingCheckHostReport }
+interface JudgedContext { readonly call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string }; readonly tree: string; readonly patchId: string; readonly reviewed: ReviewedSubmission | undefined; readonly reviewProblem: string | undefined; readonly report: LandingCheckHostReport; readonly carried: ReadonlyMap<string, string> }
 /** The checks that are judged from the controller's records alone (not from a run on the host): the ones `recheck` reads again. */
 const RECORD_CHECKS: readonly string[] = ["review", "qa", "docs", "director", "defects"];
 
@@ -148,6 +155,11 @@ export class LandingGate {
     let reviewProblem: string | undefined;
     if (call.submissionId !== undefined) { try { reviewed = await this.#deps.approvalOf(call.submissionId); } catch (error) { reviewProblem = errorText(error); } }
     if (reviewed !== undefined && reviewed.taskId !== call.taskId) reviewed = undefined;
+    // Card Q02 (review): the earlier submissions of the same claimed patch, so the host computes each one's real patch ID; read only when a carried verdict or QA evidence could count.
+    let sources: readonly { readonly submissionId: string; readonly base: string; readonly tree: string }[] = [];
+    if (reviewed !== undefined && call.submissionId !== undefined && this.#deps.samePatch !== undefined && (required.includes("review") || required.includes("qa"))) {
+      try { sources = (await this.#deps.samePatch(call.submissionId)).filter((s) => s !== null && typeof s === "object" && OID.test(String(s.base)) && OID.test(String(s.tree))).slice(0, LANDING_GATE_LIMITS.carried); } catch { sources = []; }
+    }
     const authors = [...new Set([call.author, reviewed?.submittedBy].filter((a): a is string => typeof a === "string" && a !== ""))];
     const contract = required.includes("tests") ? await this.#deps.tests(call.taskId, authors) : undefined;
     const commands = (contract?.checks ?? []).slice(0, 10).map((c) => ({ name: c.name, run: [...c.run], timeoutMs: (c.timeoutSeconds ?? LANDING_GATE_LIMITS.defaultCheckSeconds) * 1000 }));
@@ -161,7 +173,7 @@ export class LandingGate {
       let timer: NodeJS.Timeout | undefined;
       try {
         report = await Promise.race([
-          call.host.landingChecks({ taskId: call.taskId, projectId: call.projectId, checks: commands, maxOutputBytes: LANDING_GATE_LIMITS.checkOutputBytes, ...(reviewed === undefined || !(required.includes("review") || required.includes("qa") || required.includes("docs") || required.includes("director")) ? {} : { reviewed: { base: reviewed.base, tree: reviewed.tree } }), signal: stop.signal }),
+          call.host.landingChecks({ taskId: call.taskId, projectId: call.projectId, checks: commands, maxOutputBytes: LANDING_GATE_LIMITS.checkOutputBytes, ...(reviewed === undefined || !(required.includes("review") || required.includes("qa") || required.includes("docs") || required.includes("director")) ? {} : { reviewed: { base: reviewed.base, tree: reviewed.tree } }), ...(sources.length === 0 ? {} : { carried: sources.map((s) => ({ base: s.base, tree: s.tree })) }), signal: stop.signal }),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`the host did not answer within ${Math.round(limit / 1000)} s`)), limit); timer.unref?.(); }),
         ]);
       } finally { if (timer !== undefined) clearTimeout(timer); }
@@ -172,12 +184,15 @@ export class LandingGate {
     const patchId = typeof change.patchId === "string" && PATCH.test(change.patchId) ? change.patchId : undefined;
     const tree = change.tree;
     const bound = { boundTo: tree };
+    const got = Array.isArray(report.carriedPatchIds) ? report.carriedPatchIds : [];
+    const carried = new Map<string, string>();
+    sources.forEach((s, i) => { const id = got[i]; if (typeof id === "string" && PATCH.test(id)) carried.set(s.submissionId, id); });
     const results: LandingCheckEntry[] = [];
     for (const check of required) {
       if (patchId === undefined) { results.push({ check, result: "not_run", ...bound, summary: "the checkout holds no committed change against its base, so there is nothing to land" }); continue; }
       if (check === "tests") results.push(this.#tests(contract, commands, report, bound));
-      else if (check === "review") results.push(await this.#review(call, tree, patchId, bound, reviewed, reviewProblem, report));
-      else if (check === "qa") results.push(await this.#qa(call, tree, patchId, bound, reviewed, reviewProblem, report));
+      else if (check === "review") results.push(await this.#review(call, tree, patchId, bound, reviewed, reviewProblem, report, carried));
+      else if (check === "qa") results.push(await this.#qa(call, tree, patchId, bound, reviewed, reviewProblem, report, carried));
       else if (check === "docs") results.push(await this.#docs(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "director") results.push(await this.#director(call, tree, patchId, bound, reviewed, reviewProblem, report));
       else if (check === "defects") results.push(await this.#defects(call, bound));
@@ -186,7 +201,7 @@ export class LandingGate {
     const compared = this.#claims(results, reviewed, tree);
     const needOwner = patchId !== undefined && required.includes("tests") && commands.length === 0 ? { testsNeedOwner: contract?.onlyAuthors === true ? ("authors-only" as const) : ("no-commands" as const) } : {};
     const record: LandingChecksRecord = { required, passed: compared.every((r) => r.result === "pass"), base: change.base, tree, ...(patchId === undefined ? {} : { patchId }), ...sub, ...(contract === undefined ? {} : { contractVersion: contract.version }), results: compared, at, ...needOwner };
-    if (patchId !== undefined) this.#judged.set(record, { call: { taskId: call.taskId, projectId: call.projectId, ...sub }, tree, patchId, reviewed, reviewProblem, report });
+    if (patchId !== undefined) this.#judged.set(record, { call: { taskId: call.taskId, projectId: call.projectId, ...sub }, tree, patchId, reviewed, reviewProblem, report, carried });
     return record;
   }
 
@@ -212,8 +227,8 @@ export class LandingGate {
     for (const e of record.results) {
       if (!RECORD_CHECKS.includes(e.check) || e.result !== "pass" || !now.has(e.check)) continue;
       const bound = { boundTo: ctx.tree };
-      if (e.check === "review") fresh.push(await this.#review(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report));
-      else if (e.check === "qa") fresh.push(await this.#qa(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report));
+      if (e.check === "review") fresh.push(await this.#review(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report, ctx.carried));
+      else if (e.check === "qa") fresh.push(await this.#qa(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report, ctx.carried));
       else if (e.check === "docs") fresh.push(await this.#docs(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report));
       else if (e.check === "director") fresh.push(await this.#director(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report));
       else fresh.push(await this.#defects(ctx.call, bound));
@@ -250,7 +265,7 @@ export class LandingGate {
     return { check: "tests", result, ...bound, summary: clip(summary, LANDING_GATE_LIMITS.summary), runs };
   }
 
-  async #qa(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport): Promise<LandingCheckEntry> {
+  async #qa(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport, carried: ReadonlyMap<string, string>): Promise<LandingCheckEntry> {
     const no = (result: LandingCheckResult, why: string): LandingCheckEntry => ({ check: "qa", result, ...bound, summary: clip(why, LANDING_GATE_LIMITS.summary) });
     if (call.submissionId === undefined) return no("not_run", "the landing names no code submission (submissionId), so no QA evidence applies to it");
     if (this.#deps.qaGate === undefined) return no("not_run", "the qa check is not collected at landing yet, so it has not run for this tree");
@@ -272,6 +287,9 @@ export class LandingGate {
     if (computed === undefined) return no("not_run", `the host could not compute the patch ID of what was checked in ${call.submissionId}${typeof report.reviewedProblem === "string" ? `: ${report.reviewedProblem}` : ""}`);
     if (a.patchId !== computed) return no("fail", `${call.submissionId} names patch ${String(a.patchId ?? "none").slice(0, 12)}, but its base and tree make patch ${computed.slice(0, 12)}; new QA evidence on a new submission is needed`);
     if (computed !== patchId) return no("fail", `the change differs from what QA checked: the evidence is for patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; new QA evidence is needed`);
+    // Evidence carried from an earlier submission (card Q02) was checked against that submission's own base and tree: it counts only when the host computes this same patch from them.
+    const unproven = (Array.isArray(g.carriedFrom) ? g.carriedFrom : []).filter((s) => carried.get(s) !== computed);
+    if (unproven.length > 0) return no("fail", `QA evidence of ${call.submissionId} was carried over from ${unproven.slice(0, 3).join(", ")}, whose own base and tree ${unproven.some((s) => carried.has(s)) ? "make a different patch" : "could not be checked for the same patch"}; new QA evidence on this submission is needed`);
     return no("pass", a.tree !== tree ? `independent QA evidence passed for tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : "independent QA evidence passed for this tree");
   }
 
@@ -362,7 +380,7 @@ export class LandingGate {
     return no("pass", g.checked === 0 ? "no documentation obligation describes this task" : `all ${g.checked} document(s) describing this task are verified against ${a.tree !== tree ? `tree ${a.tree.slice(0, 12)} (carried over to this tree because the patch is unchanged)` : "this tree"}`);
   }
 
-  async #review(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport): Promise<LandingCheckEntry> {
+  async #review(call: { readonly taskId: string; readonly submissionId?: string }, tree: string, patchId: string, bound: { boundTo: string }, before: ReviewedSubmission | undefined, problem: string | undefined, report: LandingCheckHostReport, carried: ReadonlyMap<string, string>): Promise<LandingCheckEntry> {
     if (call.submissionId === undefined) return { check: "review", result: "not_run", ...bound, summary: "the landing names no reviewed code submission (submissionId), so no review applies to it" };
     if (problem !== undefined) return { check: "review", result: "not_run", ...bound, summary: clip(`the review could not be read: ${problem}`, LANDING_GATE_LIMITS.summary) };
     // Read again after the host's run (a review may have asked for changes while the tests ran); the submission's base and tree never change.
@@ -375,8 +393,14 @@ export class LandingGate {
     if (computed === undefined) return { check: "review", result: "not_run", ...bound, summary: clip(`the host could not compute the patch ID of what was reviewed in ${call.submissionId}${typeof report.reviewedProblem === "string" ? `: ${report.reviewedProblem}` : ""}`, LANDING_GATE_LIMITS.summary) };
     if (a.patchId !== computed) return { check: "review", result: "fail", ...bound, summary: clip(`${call.submissionId} names patch ${String(a.patchId ?? "none").slice(0, 12)}, but its base and tree make patch ${computed.slice(0, 12)}; a new submission and review are needed`, LANDING_GATE_LIMITS.summary) };
     if (a.patchId !== patchId) return { check: "review", result: "fail", ...bound, summary: clip(`the change differs from what was reviewed: ${call.submissionId} was approved for patch ${String(a.patchId ?? "none").slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; a new review is needed`, LANDING_GATE_LIMITS.summary) };
-    const carried = a.tree !== tree;
-    return { check: "review", result: "pass", ...bound, summary: clip(carried ? `approved by ${a.approvedBy ?? "a reviewer"} for tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : `approved by ${a.approvedBy ?? "a reviewer"} for this tree`, LANDING_GATE_LIMITS.summary) };
+    // An approval carried from an earlier submission (card Q02) was given on that submission's own base and tree: it counts only when the host computes this same patch from them (the claimed patch ID is the submitter's word).
+    if (a.carriedFrom !== undefined) {
+      const theirs = carried.get(a.carriedFrom);
+      if (theirs !== computed) return { check: "review", result: "fail", ...bound, summary: clip(`${call.submissionId} has no review of its own; the approval of ${a.carriedFrom} ${theirs === undefined ? "could not be checked for the same patch" : `was given on patch ${theirs.slice(0, 12)}, not ${computed.slice(0, 12)}`}; a review of this submission is needed`, LANDING_GATE_LIMITS.summary) };
+      return { check: "review", result: "pass", ...bound, summary: clip(`approved by ${a.approvedBy ?? "a reviewer"} on ${a.carriedFrom}, carried over because the host found the same patch ${computed.slice(0, 12)}`, LANDING_GATE_LIMITS.summary) };
+    }
+    const moved = a.tree !== tree;
+    return { check: "review", result: "pass", ...bound, summary: clip(moved ? `approved by ${a.approvedBy ?? "a reviewer"} for tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : `approved by ${a.approvedBy ?? "a reviewer"} for this tree`, LANDING_GATE_LIMITS.summary) };
   }
 }
 

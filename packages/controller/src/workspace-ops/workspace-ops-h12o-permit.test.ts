@@ -97,6 +97,21 @@ for (const backend of backends) {
     } finally { await r.store.close(); }
   });
 
+  test(`${backend.name}: an approval carried over from an earlier submission of the same claimed patch is no release permit: refused before anything is recorded or asked, and never released by itself (card Q02 review)`, async () => {
+    const r = await rig();
+    try {
+      (r.approvals as Map<string, object>).set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann", carriedFrom: S2 });
+      const svc = r.service();
+      await refuses("review_invalid", () => svc.request(r.owner, { commandId: "c1", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 }), /no review of its own/);
+      assert.equal(await svc.releaseApproved(S1, "rvw-x"), undefined);
+      assert.equal(r.calls.length, 0);
+      assert.equal(await r.recorded("c1"), undefined);
+      // A review of its own makes it a permit as before.
+      r.approvals.set(S1, { taskId: r.task, base: BASE, tree: TREE, approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" });
+      assert.equal((await svc.request(r.owner, { commandId: "c2", operation: "release", taskId: r.task, reason: "commit", submissionId: S1 })).state, "done");
+    } finally { await r.store.close(); }
+  });
+
   test(`${backend.name}: an approval that names the submission's own author is refused before anything is recorded or asked (card H12o, permit slice)`, async () => {
     const r = await rig();
     try {

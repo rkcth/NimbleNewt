@@ -57,7 +57,8 @@ export function approvedCodeLookup(deps: { readonly submissions: Pick<Submission
         newest = (await deps.commit(c.id)) === undefined ? (asked ? { ...known, changesAsked: true } : known) : { ...known, committed: true };
         if (newest.committed === true) continue;
       }
-      if (a === undefined || a.taskId !== taskId || !a.approved || a.approvedBy === undefined || a.approvedBy === a.submittedBy) continue;
+      // An approval carried over from an earlier submission of the same patch (card Q02) is not a release permit (the release refuses it), so it is not offered.
+      if (a === undefined || a.taskId !== taskId || !a.approved || a.approvedBy === undefined || a.approvedBy === a.submittedBy || a.carriedFrom !== undefined) continue;
       if (c !== codes[0] && (await deps.commit(c.id)) !== undefined) continue;
       items.push(known);
     }

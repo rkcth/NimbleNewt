@@ -80,7 +80,7 @@ import { BUILTIN_COMMANDS, backupItem } from "./operations.js";
 
 import { wideningDecision } from "./widening.js";
 import { WipBackupService, wipBackupRouter, wipTasksSource, type WipBackupPort, type WipSweepOptions } from "../wip-backup/index.js";
-import { ApprovalLoadService, IntegrationPolicyService, PolicyService, ProfileSuggestionService, ProtectedBranchService, type ApprovalsFacade } from "../policy/index.js";
+import { ApprovalLoadService, IntegrationPolicyService, PolicyService, type Check as LandingCheck, ProfileSuggestionService, ProtectedBranchService, type ApprovalsFacade } from "../policy/index.js";
 import { StatusService } from "../status/index.js";
 import { ChatService, ChatSpendService, approvedCodeLookup, CoordinatorService, GuardedModelCall, agentLifecycle, chatRoutes, type ChatInterpreter, type CoordinatorModel, type ModelCall } from "../chat/index.js";
 import { ContextBranchService } from "../branches/index.js";
@@ -913,8 +913,12 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     });
     // The landing queue of each project's landing branch (card P10): approved code submissions wait there oldest first, and a landing lands only the oldest, exactly its approved base and tree.
     const landingQueue = LandingQueueService.withEpoch(storage, epoch, { ...(options.dispatch?.clock === undefined ? {} : { clock: options.dispatch.clock }) });
+    // The landing gate's required checks (card P09), with those the project's review policy adds for the task (card Q02). One function for the gate and the queue, so they cannot disagree.
+    const landingRequiredChecks = async (projectId: string, taskId?: string): Promise<readonly LandingCheck[]> => { const base = (await integration.effective(projectId)).requiredChecks; const extra = qaReview === undefined ? [] : await qaReview.landingChecks(projectId, taskId); return withPolicyChecks(base, extra); };
     const landingQueueOps = new LandingQueueOps(landingQueue, {
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      // Card Q02 (second review): a carried approval is queued only where the landing gate's review check proves it (the host computes the reviewed earlier submission's own patch).
+      reviewChecked: async (projectId, taskId) => (await landingRequiredChecks(projectId, taskId)).includes("review"),
       landingBranch: async (call) => (await landingBranchOf(call)).branch,
       projectOfTask: (taskId) => integratorLeases.projectOfTask(taskId),
       // Reservations and escalation (card P10): the project's refresh-round cap; the director (each director of the project, in its inbox) and the owner are told, the owner as needs-you when the project has no director.
@@ -982,9 +986,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     });
     const landingGate = new LandingGate({
       // Card Q02 (review policy): a project whose policy says independent review gates completion also requires `review` and `qa` of the tasks in its scope.
-      requiredChecks: async (projectId, taskId) => { const base = (await integration.effective(projectId)).requiredChecks; const extra = qaReview === undefined ? [] : await qaReview.landingChecks(projectId, taskId); return withPolicyChecks(base, extra); },
+      requiredChecks: landingRequiredChecks,
       tests: (taskId, authors) => contracts.landingTests(taskId, authors),
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      // Card Q02 (review): the earlier submissions of the same claimed patch, so the host computes the real patch of each before a carried verdict or QA evidence counts.
+      samePatch: (submissionId) => submissions.carriedSources(submissionId),
       // Card P09: the `qa` check reads the submission's QA gate (independent evidence, as the owner would).
       qaGate: async (submissionId) => landingQaGate(qaEvidence)(submissionId),
       // Card P09 (fourth slice): the `docs` check reads the documents describing the task that are not yet verified against the submission's code (read only).
@@ -1132,7 +1138,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
     // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
-    const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), refreshRounds: (taskId) => workspaceOps.refreshRounds(taskId), attemptOf: attemptOfAgents(assignments), onRecorded: async (e) => {
+    const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), refreshRounds: (taskId) => workspaceOps.refreshRounds(taskId), citationRequired: async (projectId, taskId) => (await qaReview?.requiresCitation(projectId, taskId)) === true, attemptOf: attemptOfAgents(assignments), onRecorded: async (e) => {
       // Card U09b: a submission is a step of its task, so a replay can link to the diff (a code submission) or the comment (a review, a QA report, a sign-off). A code submission is only proposed for landing; the others are decisions that were made.
       const words = e.kind === "code" ? "submitted code for review and landing" : e.kind === "review" ? `reviewed a submission${e.verdict === undefined ? "" : ` (${e.verdict})`}` : e.kind === "qa" ? "reported a QA result" : e.kind === "signoff" ? `${e.decision === "decline" ? "declined" : "signed off"} a submission` : "submitted a document";
       // Card P10: an approval puts the submission in its landing branch's queue, and a review that takes an approval back takes it out (both best effort; the owner, an integrator or the author can still add it).
@@ -1201,6 +1207,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       invalidated: async (e) => { try { await docObligations.afterQaInvalidation(e); } catch (error) { await docCheckFailed(`doc-lost-failed:${e.evidence[0]!.evidenceId}`, { kind: "qa-evidence", id: e.evidence[0]!.evidenceId }, e.projectId, `QA evidence of task ${e.taskId} was invalidated`, error); } },
       // Card Q02 (review policy): the checks and the number of independent original sources the project's policy asks of a task; and the original each cited desk record stands on (`DeskService.independence`).
       policy: async (projectId, taskId) => qaReview?.gateTerms(projectId, taskId),
+      carriedFrom: (submissionId) => submissions.carriedFrom(submissionId),
       deskOrigins: async (reader, ids) => { const r = await desks.independence(reader, ids); return { origins: new Map(r.groups.flatMap((g) => g.records.map((id) => [id, g.origin] as const))), unavailable: r.unavailable }; },
     });
     qaForDecisions = qaEvidence;

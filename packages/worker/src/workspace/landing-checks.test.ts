@@ -92,6 +92,11 @@ test("the patch ID of the reviewed base and tree is computed by the host from it
     const empty = await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: w.g("rev-parse", `${base}^{tree}`) } });
     assert.match(String(empty.reviewedProblem), /hold no change/);
     assert.equal((await port({ ...scope, checks: [], maxOutputBytes: 1000 })).reviewedPatchId, undefined, "not asked: not computed");
+    // Card Q02 (carry-over): the patch ID of each earlier submission's base and tree, in the order asked; one that cannot be read, holds no change or is not an object ID is null, never an ID; at most 20.
+    const carried = await port({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: later.tree }, carried: [{ base, tree: staged.tree }, { base, tree: "9".repeat(40) }, { base, tree: later.tree }, { base, tree: w.g("rev-parse", `${base}^{tree}`) }, { base: "--output=x", tree: later.tree }] });
+    assert.deepEqual(carried.carriedPatchIds, [staged.patchId, null, old.change?.patchId, null, null]);
+    assert.equal((await port({ ...scope, checks: [], maxOutputBytes: 1000, carried: Array.from({ length: 25 }, () => ({ base, tree: staged.tree })) })).carriedPatchIds?.length, 20);
+    assert.equal((await port({ ...scope, checks: [], maxOutputBytes: 1000 })).carriedPatchIds, undefined, "not asked: not computed");
   } finally { await w.done(); }
 });
 

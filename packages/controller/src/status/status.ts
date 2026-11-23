@@ -2854,7 +2854,7 @@ export class StatusService {
       const a = await this.#deps.submissions.approvalOf(c.id);
       let review: string;
       if (a === undefined) review = "unknown";
-      else if (a.approved) review = a.approvedBy === "review_disabled_single_agent" ? "not required (no other agent of the project could review it)" : `approved by ${shown(a.approvedBy ?? "?", 80)}`;
+      else if (a.approved) review = a.approvedBy === "review_disabled_single_agent" ? "not required (no other agent of the project could review it)" : `approved by ${shown(a.approvedBy ?? "?", 80)}${a.carriedFrom === undefined ? "" : ` on ${a.carriedFrom}, carried over by the same patch ID (the landing checks that both are really the same patch; it is not committed without a review of its own)`}`;
       else if (a.newest !== undefined) review = `the newest review says ${a.newest}; it waits for a new submission from its author`;
       else review = "none yet; it waits for a reviewer";
       // A verdict that cites what it judged against (card Q02, sixth slice) says so; one that cites nothing reads as before.
@@ -2970,7 +2970,7 @@ export class StatusService {
       const scope = `${p.scope.workClasses.length === 0 ? "every work class" : `work class ${p.scope.workClasses.join(" and ")}`}${p.scope.taskIds.length === 0 ? "" : `, only ${p.scope.taskIds.length} named task(s)`}`;
       const t = p.triggers;
       const triggers = [t.onSubmission ? "each new code submission" : "", t.periodicMinutes === null ? "" : `every ${t.periodicMinutes} minutes`, t.onIncident ? "an incident opened in the project" : ""].filter((x) => x !== "");
-      lines.push(line(`Review policy (revision ${policy.revision}): covers ${scope}. A review starts on ${triggers.length === 0 ? "nothing (no trigger is on)" : triggers.join(", ")}. Extra required checks: ${p.requiredChecks.length === 0 ? "none" : p.requiredChecks.map((c) => quoted(c, 80)).join(", ")}. Passing independent review ${p.gatesCompletion ? "gates landing (the qa and review checks are required for those tasks, and the newest code of each unfinished one is sent for review)" : "does not gate landing"}. Each required check needs ${p.independentSources} independent original source(s).`, cite("project", projectId)));
+      lines.push(line(`Review policy (revision ${policy.revision}): covers ${scope}. A review starts on ${triggers.length === 0 ? "nothing (no trigger is on)" : triggers.join(", ")}. Extra required checks: ${p.requiredChecks.length === 0 ? "none" : p.requiredChecks.map((c) => quoted(c, 80)).join(", ")}. Passing independent review ${p.gatesCompletion ? "gates landing (the qa and review checks are required for those tasks, and the newest code of each unfinished one is sent for review)" : "does not gate landing"}. Each required check needs ${p.independentSources} independent original source(s). ${p.requireVerdictCitations === true ? "A reviewer's verdict must cite the criteria version it judged against." : "A verdict need not cite the criteria version."}`, cite("project", projectId)));
     }
     if (reqs.total === 0) lines.push(line(after > 0 ? "No more scheduled reviews are open." : "No scheduled review is open.", cite("project", projectId)));
     else {

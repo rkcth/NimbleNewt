@@ -29,6 +29,8 @@ export interface QaReviewPolicyBody {
   readonly gatesCompletion: boolean;
   /** How many independent original sources (a copy and its original are one; one recorder is one) each required check needs a pass from. */
   readonly independentSources: number;
+  /** Whether a reviewer's verdict (on a task in scope) must cite the task contract version it judged against; a rejection that cites also names the unmet owner requirement. Absent in older records: off. */
+  readonly requireVerdictCitations?: boolean;
   /** When each trigger was last switched on: work before it is not reviewed backwards (a new policy does not start by reviewing the backlog). */
   readonly since: { readonly submission?: string; readonly periodic?: string; readonly incident?: string; readonly gate?: string };
   readonly updatedBy: string;
@@ -45,7 +47,7 @@ const hex = (...parts: string[]): string => createHash("sha256").update(parts.jo
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const json = (v: object): JsonObject => JSON.parse(JSON.stringify(v)) as JsonObject;
 /** What a project without a policy is: nothing reviews by itself, nothing is added, independent review does not gate completion. */
-export const NO_POLICY = (projectId: string): Omit<QaReviewPolicyBody, "updatedBy" | "updatedAt"> => ({ projectId, scope: { workClasses: [], taskIds: [] }, triggers: { onSubmission: false, periodicMinutes: null, onIncident: false }, requiredChecks: [], gatesCompletion: false, independentSources: 1, since: {} });
+export const NO_POLICY = (projectId: string): Omit<QaReviewPolicyBody, "updatedBy" | "updatedAt"> => ({ projectId, scope: { workClasses: [], taskIds: [] }, triggers: { onSubmission: false, periodicMinutes: null, onIncident: false }, requiredChecks: [], gatesCompletion: false, independentSources: 1, requireVerdictCitations: false, since: {} });
 
 /** A review (or QA re-check) the scheduler owes: one independent look at one code submission, assigned to an agent that did not work on it. */
 export interface QaReviewRequestBody {
@@ -97,7 +99,7 @@ export function inPolicyScope(policy: Pick<QaReviewPolicyBody, "scope">, taskId:
 
 /** The set command as stored: every field optional (a field left out stays as it was), validated. */
 export function checkPolicyChange(command: Record<string, unknown>): {
-  workClasses?: ("P" | "PC")[]; taskIds?: string[]; onSubmission?: boolean; periodicMinutes?: number | null; onIncident?: boolean; requiredChecks?: string[]; gatesCompletion?: boolean; independentSources?: number;
+  workClasses?: ("P" | "PC")[]; taskIds?: string[]; onSubmission?: boolean; periodicMinutes?: number | null; onIncident?: boolean; requiredChecks?: string[]; gatesCompletion?: boolean; independentSources?: number; requireVerdictCitations?: boolean;
 } {
   const out: ReturnType<typeof checkPolicyChange> = {};
   const list = (v: unknown, field: string, max: number): unknown[] => (Array.isArray(v) && v.length <= max ? v : bad(field, `must be a list of at most ${max}`));
@@ -110,7 +112,7 @@ export function checkPolicyChange(command: Record<string, unknown>): {
     const v = list(command["taskIds"], "taskIds", QA_REVIEW_LIMITS.taskIds).map((x) => checkTaskId(x));
     out.taskIds = [...new Set(v)].sort();
   }
-  for (const k of ["onSubmission", "onIncident", "gatesCompletion"] as const) if (command[k] !== undefined) { if (typeof command[k] !== "boolean") bad(k, "must be true or false"); (out as Record<string, unknown>)[k] = command[k]; }
+  for (const k of ["onSubmission", "onIncident", "gatesCompletion", "requireVerdictCitations"] as const) if (command[k] !== undefined) { if (typeof command[k] !== "boolean") bad(k, "must be true or false"); (out as Record<string, unknown>)[k] = command[k]; }
   if (command["periodicMinutes"] !== undefined) {
     const m = command["periodicMinutes"];
     if (m !== null && (typeof m !== "number" || !Number.isSafeInteger(m) || m < QA_REVIEW_LIMITS.minPeriodMinutes || m > QA_REVIEW_LIMITS.maxPeriodMinutes)) bad("periodicMinutes", `must be a whole number of minutes from ${QA_REVIEW_LIMITS.minPeriodMinutes} to ${QA_REVIEW_LIMITS.maxPeriodMinutes}, or null to stop the periodic review`);
@@ -165,6 +167,12 @@ export class QaReviewService {
     return p.requiredChecks.length === 0 && p.independentSources === 1 ? undefined : { requiredChecks: p.requiredChecks, independentSources: p.independentSources };
   }
 
+  /** Whether a verdict on this task must cite the criteria version (card Q02): the policy asks for it and the task is in its scope. A project with no policy, or a task outside it, is not asked. */
+  async requiresCitation(projectId: string, taskId: string): Promise<boolean> {
+    const p = await this.policyOf(projectId);
+    return p?.requireVerdictCitations === true && (await this.#covers(p, taskId));
+  }
+
   /** The landing checks the policy adds for one task: `qa` and `review`, when it gates completion and the task is in scope. */
   async landingChecks(projectId: string, taskId: string | undefined): Promise<readonly Check[]> {
     const p = await this.policyOf(projectId);
@@ -204,10 +212,10 @@ export class QaReviewService {
   /** The owner sets the project's review policy; fields left out stay as they were. Switching a trigger on records when, so work before it is not reviewed backwards. */
   async set(owner: Principal, command: NoActor & Record<string, unknown> & { projectId: string }): Promise<{ revision: number; replayed: boolean }> {
     if (owner.kind !== "owner") throw new DomainError("forbidden", `${owner.id} may not change a project's review policy`);
-    for (const k of Object.keys(command)) if (!["commandId", "projectId", "workClasses", "taskIds", "onSubmission", "periodicMinutes", "onIncident", "requiredChecks", "gatesCompletion", "independentSources"].includes(k)) bad(k, "is not a field of this command");
+    for (const k of Object.keys(command)) if (!["commandId", "projectId", "workClasses", "taskIds", "onSubmission", "periodicMinutes", "onIncident", "requiredChecks", "gatesCompletion", "independentSources", "requireVerdictCitations"].includes(k)) bad(k, "is not a field of this command");
     const projectId = checkProjectId(command.projectId);
     const change = checkPolicyChange(command);
-    if (Object.keys(change).length === 0) bad("onSubmission", "name what to change: workClasses, taskIds, onSubmission, periodicMinutes, onIncident, requiredChecks, gatesCompletion or independentSources");
+    if (Object.keys(change).length === 0) bad("onSubmission", "name what to change: workClasses, taskIds, onSubmission, periodicMinutes, onIncident, requiredChecks, gatesCompletion, independentSources or requireVerdictCitations");
     const result = await this.#runner.command("qa.review.policy.set", { commandId: scopedCommandId(owner.id, command.commandId), actor: owner.id }, async () => ({
       payload: { projectId, change: json(change) },
       build: async (): Promise<Built> => {
@@ -230,7 +238,7 @@ export class QaReviewService {
         if (gates) since.gate = before.gatesCompletion && before.since.gate !== undefined ? before.since.gate : now;
         const next: QaReviewPolicyBody = {
           projectId, scope: { workClasses: change.workClasses ?? before.scope.workClasses, taskIds: change.taskIds ?? before.scope.taskIds }, triggers,
-          requiredChecks: change.requiredChecks ?? before.requiredChecks, gatesCompletion: change.gatesCompletion ?? before.gatesCompletion, independentSources: change.independentSources ?? before.independentSources, since, updatedBy: owner.id, updatedAt: now,
+          requiredChecks: change.requiredChecks ?? before.requiredChecks, gatesCompletion: change.gatesCompletion ?? before.gatesCompletion, independentSources: change.independentSources ?? before.independentSources, requireVerdictCitations: change.requireVerdictCitations ?? before.requireVerdictCitations ?? false, since, updatedBy: owner.id, updatedAt: now,
         };
         const ref = { kind: KIND, id: projectId };
         const c: Change = current === undefined ? { type: "create", ref, body: json(next) } : { type: "update", ref, expectedRevision: current.revision, body: json(next) };

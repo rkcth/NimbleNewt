@@ -94,6 +94,8 @@ export interface QaGate {
   /** The task contract version and the owner decisions this verdict stands on. */
   readonly criteriaRevision: number;
   readonly decisions: readonly QaDecisionRef[];
+  /** Earlier submissions of the same task and the same patch ID whose current evidence was counted (card Q02: evidence carries over only by an unchanged patch ID); absent when none was. */
+  readonly carriedFrom?: readonly string[];
   readonly required: readonly string[];
   readonly checks: readonly QaGateCheck[];
   readonly counts: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number };
@@ -150,6 +152,8 @@ export interface QaEvidencePorts {
    * The project's review policy as it applies to one task (card Q02, review policy): the check names it adds to the contract's and how many independent original sources each needs. Absent, or `undefined` for a task
    * the policy's scope leaves out: nothing is added.
    */
+  /** The earlier code submissions of the same task with the same patch ID (`SubmissionService.carriedFrom`): current independent QA evidence on them counts for a later submission of the unchanged patch. Absent: nothing carries over. */
+  readonly carriedFrom?: (submissionId: string) => Promise<readonly string[]>;
   readonly policy?: (projectId: string, taskId: string) => Promise<{ readonly requiredChecks: readonly string[]; readonly independentSources: number } | undefined>;
   /**
    * The original each desk record stands on (`DeskService.independence`: a copy and a copy of a copy stand on the original they came from), read as `reader`. `unavailable`: records that do not exist or the reader may not read.
@@ -889,16 +893,22 @@ export class QaEvidenceService {
     const reliance = await this.#reliance(taskId, reads);
     const index = await this.#index(taskId);
     if (index.revision !== undefined) reads.push({ kind: "qa-evidence-index", id: taskId, revision: index.revision });
+    // Card Q02 (amended 2026-10-28): evidence carries over to a later submission only by an unchanged patch ID; only evidence that is current and still holds carries (stale evidence of an earlier submission is not this one's).
+    const carriedSubs = new Set(await this.#ports.carriedFrom?.(submissionId) ?? []);
+    const carriedUsed = new Set<string>();
     const usable: (QaEvidenceBody & { id: string })[] = [];
     const stale: { id: string; reasons: QaStaleReason[] }[] = [];
     for (const id of index.body.ids) {
       const found = await this.#runner.get("qa-evidence", id);
       const e = found?.body as unknown as QaEvidenceBody | undefined;
-      if (found === undefined || e === undefined || e.submissionId !== submissionId || e.source !== "independent") continue;
+      if (found === undefined || e === undefined || (e.submissionId !== submissionId && !carriedSubs.has(e.submissionId)) || e.source !== "independent") continue;
+      // Evidence carried from an earlier copy that this submission's own submitter recorded is a self-check of this submission (card Q02 review): it never counts here.
+      if (e.submissionId !== submissionId && e.recordedBy === sub.submittedBy) continue;
       reads.push({ kind: "qa-evidence", id, revision: found.revision });
-      if (e.state !== "current") { stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }
+      const own = e.submissionId === submissionId;
+      if (e.state !== "current") { if (own) stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }
       const reasons = await this.#staleness(e, contract, reliance, reads);
-      if (reasons.length > 0) stale.push({ id, reasons }); else usable.push({ ...e, id });
+      if (reasons.length > 0) { if (own) stale.push({ id, reasons }); } else { usable.push({ ...e, id }); if (!own) carriedUsed.add(e.submissionId); }
     }
     const pending: string[] = [];
     // Check names of independent evidence on this submission that no longer holds and whose re-check is not done by evidence (pending, or settled only by a newer tree): with no required
@@ -957,7 +967,7 @@ export class QaEvidenceService {
     const decisions: QaDecisionRef[] = (reliance?.links ?? []).filter((l) => l.state === "current").map((l) => ({ id: l.decisionId, version: l.version, topic: l.topic }));
     const seen = new Set<string>();
     const bound = reads.filter((r) => { const k = `${r.kind}\u0000${r.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
-    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending, ...(needed > 1 ? { sourcesNeeded: needed, shortfalls } : {}) }, reads: bound };
+    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending, ...(needed > 1 ? { sourcesNeeded: needed, shortfalls } : {}), ...(carriedUsed.size > 0 ? { carriedFrom: [...carriedUsed].sort() } : {}) }, reads: bound };
   }
 }
 
