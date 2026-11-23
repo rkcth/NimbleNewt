@@ -52,7 +52,7 @@ test("chat: a repair and a judgement in one owner message (either order); a revi
       { kind: "command", op: "defect.review", args: { id: defect, verdict: "fixed" }, evidence: words, basis: "owner" },
     ]);
     assert.deepEqual(out.map((o: any) => o.status), ["applied", "proposed"], JSON.stringify(out));
-    const ok = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: out[1].proposalId, evidence: "do that", basis: "owner" }]);
+    const ok = await turn("m2", `yes, do that ${out[1].proposalId}`, [{ kind: "apply_proposal", proposalId: out[1].proposalId, evidence: `do that ${out[1].proposalId}`, basis: "owner" }]);
     assert.equal(ok[0].status, "applied", JSON.stringify(ok));
     const now = (await call(boot.token, "defect.get", { id: defect })).result.item;
     assert.deepEqual([now.state, now.repairVersion, now.checks.map((x: any) => [x.version, x.verdict])], ["resolved", 2, [[2, "fixed"]]]);
@@ -69,7 +69,7 @@ test("chat: a repair and a judgement in one owner message (either order); a revi
       { kind: "command", op: "defect.repair", args: { id: d2, version: 3 }, evidence: w2, basis: "owner" },
     ]);
     assert.deepEqual(out2.map((o: any) => o.status), ["proposed", "applied"], JSON.stringify(out2));
-    const st = await turn("m4", "yes, go", [{ kind: "apply_proposal", proposalId: out2[0].proposalId, evidence: "yes, go", basis: "owner" }]);
+    const st = await turn("m4", `yes, go ${out2[0].proposalId}`, [{ kind: "apply_proposal", proposalId: out2[0].proposalId, evidence: `yes, go ${out2[0].proposalId}`, basis: "owner" }]);
     assert.notEqual(st[0].status, "applied", JSON.stringify(st));
 
     // An invented revision on a judgement (not in the owner's words) is replaced: the controller pins the defect's real revision itself.
@@ -83,13 +83,13 @@ test("chat: a repair and a judgement in one owner message (either order); a revi
     const wq = `as I saw it at revision ${seen}, the third typo is fixed`;
     const outq = await turn("m5q", wq, [{ kind: "command", op: "defect.review", args: { id: d3, verdict: "fixed", expectedRevision: seen }, evidence: wq, basis: "owner" }]);
     assert.equal(outq[0].status, "proposed", JSON.stringify(outq));
-    const apq = await turn("m6q", "yes, record it", [{ kind: "apply_proposal", proposalId: outq[0].proposalId, evidence: "yes, record it", basis: "owner" }]);
+    const apq = await turn("m6q", `yes, record it ${outq[0].proposalId}`, [{ kind: "apply_proposal", proposalId: outq[0].proposalId, evidence: `yes, record it ${outq[0].proposalId}`, basis: "owner" }]);
     assert.notEqual(apq[0].status, "applied", JSON.stringify(apq));
     assert.deepEqual((await call(boot.token, "defect.get", { id: d3 })).result.item.checks, []);
     const w3 = "the third typo fix works";
     const out3 = await turn("m5", w3, [{ kind: "command", op: "defect.review", args: { id: d3, verdict: "fixed", expectedRevision: 9999 }, evidence: w3, basis: "owner" }]);
     assert.equal(out3[0].status, "proposed", JSON.stringify(out3));
-    const ap3 = await turn("m6", "yes, go", [{ kind: "apply_proposal", proposalId: out3[0].proposalId, evidence: "yes, go", basis: "owner" }]);
+    const ap3 = await turn("m6", `yes, go ${out3[0].proposalId}`, [{ kind: "apply_proposal", proposalId: out3[0].proposalId, evidence: `yes, go ${out3[0].proposalId}`, basis: "owner" }]);
     assert.equal(ap3[0].status, "applied", JSON.stringify(ap3));
   } finally {
     await c.close();

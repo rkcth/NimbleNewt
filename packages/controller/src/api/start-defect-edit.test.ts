@@ -80,13 +80,13 @@ test("through the running controller an unfinished defect's finding and severity
     assert.equal((await state(b)).severity, "minor", "nothing changed yet");
     // The reporter changes the same defect meanwhile: the owner's "yes" is stale and applies nothing to it.
     assert.ok((await call(rev.token, "defect.edit", { id: b, finding: "A typo in step 2." }, "e5")).ok);
-    const late = await turn("m-1", "yes, do that", [{ kind: "apply_proposal", proposalId: sevTurn[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const late = await turn("m-1", `yes, do that ${sevTurn[0].proposalId}`, [{ kind: "apply_proposal", proposalId: sevTurn[0].proposalId, evidence: `do that ${sevTurn[0].proposalId}`, basis: "owner" }]);
     assert.notEqual(late[0].status, "applied", JSON.stringify(late));
     assert.deepEqual([(await state(b)).severity, (await state(b)).edits.length], ["minor", 1]);
     // Said again, shown again at the new revision, applied.
     const again = await turn("m-2", sev, [{ kind: "command", op: "defect.edit", args: { id: b, severity: "major" }, evidence: sev, basis: "owner" }]);
     assert.equal(again[0].status, "proposed", JSON.stringify(again));
-    const yes = await turn("m-3", "yes, do that", [{ kind: "apply_proposal", proposalId: again[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const yes = await turn("m-3", `yes, do that ${again[0].proposalId}`, [{ kind: "apply_proposal", proposalId: again[0].proposalId, evidence: `do that ${again[0].proposalId}`, basis: "owner" }]);
     assert.equal(yes[0].status, "applied", JSON.stringify(yes));
     assert.deepEqual([(await state(b)).severity, (await state(b)).finding.text, (await state(b)).edits.map((e: any) => [e.by, e.previousSeverity ?? null, e.previousFinding ?? null])], ["major", "A typo in step 2.", [[rev.id, null, "A typo in step 1."], [rob.id, "minor", null]]]);
 
@@ -101,7 +101,7 @@ test("through the running controller an unfinished defect's finding and severity
     assert.equal((await state(a)).edits.length, 1, "none of the refused turns applied");
     const own = await turn("m-7", words, [{ kind: "command", op: "defect.edit", args: { id: a, finding: "the guide never mentions the restore command", reason: "I looked again and the old text was wrong" }, evidence: words, basis: "owner" }]);
     assert.equal(own[0].status, "proposed", JSON.stringify(own));
-    assert.equal((await turn("m-8", "go ahead", [{ kind: "apply_proposal", proposalId: own[0].proposalId, evidence: "go ahead", basis: "owner" }]))[0].status, "applied");
+    assert.equal((await turn("m-8", `go ahead ${own[0].proposalId}`, [{ kind: "apply_proposal", proposalId: own[0].proposalId, evidence: `go ahead ${own[0].proposalId}`, basis: "owner" }]))[0].status, "applied");
     const owned = await state(a);
     assert.deepEqual([owned.finding.text, owned.edits.length, owned.edits[1].by, owned.edits[1].reason, owned.state, owned.cycles], ["the guide never mentions the restore command", 2, rob.id, "I looked again and the old text was wrong", "open", 0]);
     shown = await lines();
@@ -132,14 +132,14 @@ test("through the running controller an unfinished defect's finding and severity
     assert.equal(unclearNo[0].status, "asked", JSON.stringify(unclearNo));
     assert.ok(unclearNo[0].options.some((o: string) => o.startsWith(`${escTurn[0].proposalId}: `)) && unclearNo[0].options.some((o: string) => o.startsWith(`${minorTurn[0].proposalId}: `)), JSON.stringify(unclearNo));
     assert.equal(await status(minorTurn[0].proposalId), "open", "nothing dropped");
-    const oldDropped = await turn("m-9e", "drop the old typo change", [{ kind: "discard_proposal", proposalId: sevTurn[0].proposalId, evidence: "drop the old typo change", basis: "owner" }]);
+    const oldDropped = await turn("m-9e", `drop the old typo change ${sevTurn[0].proposalId}`, [{ kind: "discard_proposal", proposalId: sevTurn[0].proposalId, evidence: `drop the old typo change ${sevTurn[0].proposalId}`, basis: "owner" }]);
     assert.equal(oldDropped[0].status, "discarded", JSON.stringify(oldDropped));
     const unclearYes = await turn("m-9f", "Yes.", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "yes", basis: "owner" }]);
     assert.equal(unclearYes[0].status, "asked", JSON.stringify(unclearYes));
     assert.equal((await state(a)).severity, "major", "nothing applied while two are open");
     // A message that is wholly quoted material has no words of the owner's own and is not read at all.
     await assert.rejects(c.chat!.submit(boot.token, { messageId: "m-9q", text: "> yes" }), (e: any) => e.code === "invalid_command");
-    const dropped = await turn("m-9g", "drop the minor change", [{ kind: "discard_proposal", proposalId: minorTurn[0].proposalId, evidence: "drop the minor change", basis: "owner" }]);
+    const dropped = await turn("m-9g", `drop the minor change ${minorTurn[0].proposalId}`, [{ kind: "discard_proposal", proposalId: minorTurn[0].proposalId, evidence: `drop the minor change ${minorTurn[0].proposalId}`, basis: "owner" }]);
     assert.equal(dropped[0].status, "discarded", JSON.stringify(dropped));
     // With exactly one open, "Yes." agrees to it.
     const escYes = await turn("m-10", "Yes.", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "yes", basis: "owner" }]);

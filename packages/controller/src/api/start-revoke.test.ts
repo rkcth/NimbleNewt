@@ -239,7 +239,7 @@ test("in chat the revoke lists the running calls and asks whether they finish, a
     seen.preview = proposed.outcomes[0].preview;
     await sleep(30);
     seen.abortedBeforeAccept = (await call(owner, "catalog.running", { name, version: "1.0.0" })).result.items.length;
-    const applied = await say("m3", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await say("m3", `yes, do that ${proposed.outcomes[0].proposalId}`, [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: `do that ${proposed.outcomes[0].proposalId}`, basis: "owner" }]);
     seen.appliedStatus = applied.outcomes[0].status; seen.appliedAll = applied.outcomes[0];
   });
   assert.equal(seen.askedStatus, "asked", JSON.stringify(seen));
@@ -267,7 +267,7 @@ test("in chat, when the owner already said finish no question is asked and a cho
     const text2 = `revoke ${name} 1.0.0 because it is bad`;
     const forged = await say("m2", text2, [{ kind: "command", op: "catalog.revoke", args: { name, version: "1.0.0", reason: "it is bad", runningCalls: "cancel" }, evidence: text2, basis: "owner" }]);
     seen.forged = forged.outcomes[0].status;
-    const applied = await say("m3", "yes, do that", [{ kind: "apply_proposal", proposalId: said.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await say("m3", `yes, do that ${said.outcomes[0].proposalId}`, [{ kind: "apply_proposal", proposalId: said.outcomes[0].proposalId, evidence: `do that ${said.outcomes[0].proposalId}`, basis: "owner" }]);
     seen.applied = applied.outcomes[0].status; seen.appliedAll = applied.outcomes[0];
     assert.equal((await call(owner, "catalog.running", { name, version: "1.0.0" })).ok, true);
   });
@@ -489,7 +489,7 @@ test("past revocations are read by the owner through the API and in chat; the st
     seen.proposed = proposed.outcomes[0];
     seen.proposedWhy = proposed.outcomes[0].message;
     seen.beforeAccept = (await call(owner, "catalog.policy.get", {})).result.item.runningCalls;
-    const applied = await say("s3", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await say("s3", `yes, do that ${proposed.outcomes[0].proposalId}`, [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: `do that ${proposed.outcomes[0].proposalId}`, basis: "owner" }]);
     seen.applied = applied.outcomes[0].status;
     seen.afterAccept = (await call(owner, "catalog.policy.get", {})).result.item;
     void c; void ownerPrincipal;
@@ -561,7 +561,7 @@ test("in chat the owner sets the standing policy in their own words (no fixed wo
   await scenario(async ({ say, name }) => {
     const finish = "from now on let running calls end on their own when I revoke a tool";
     seen.finish = (await say("f1", finish, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "finish" }, evidence: finish, basis: "owner" }])).outcomes[0];
-    seen.finishApplied = (await say("f3", "yes, do that", [{ kind: "apply_proposal", proposalId: seen.finish.proposalId, evidence: "do that", basis: "owner" }])).outcomes[0].status;
+    seen.finishApplied = (await say("f3", `yes, do that ${seen.finish.proposalId}`, [{ kind: "apply_proposal", proposalId: seen.finish.proposalId, evidence: `do that ${seen.finish.proposalId}`, basis: "owner" }])).outcomes[0].status;
     const cancel = "when I revoke a tool stop running calls right away";
     seen.cancel = (await say("f2", cancel, [{ kind: "command", op: "catalog.policy.change", args: { runningCalls: "cancel" }, evidence: cancel, basis: "owner" }])).outcomes[0];
     const ask = "what happens to running calls when I revoke a tool now";
@@ -578,7 +578,7 @@ test("in chat the owner sets the standing policy in their own words (no fixed wo
     const run = "clean up what retention may remove, for real";
     const proposed = (await say("r1", run, [{ kind: "command", op: "retention.run", args: { dryRun: false, confirm: "f".repeat(64) }, evidence: run, basis: "owner" }])).outcomes[0];
     seen.runProposed = proposed;
-    const applied = (await say("r2", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.proposalId, evidence: "do that", basis: "owner" }])).outcomes[0];
+    const applied = (await say("r2", `yes, do that ${proposed.proposalId}`, [{ kind: "apply_proposal", proposalId: proposed.proposalId, evidence: `do that ${proposed.proposalId}`, basis: "owner" }])).outcomes[0];
     seen.runApplied = applied;
     const hold = `why is ${name} 1.0.0 kept`;
     const q = (text: string, request: Record<string, unknown>, mid: string) => say(mid, text, [{ kind: "status", request, evidence: text, basis: "owner" }]).then((r) => r.outcomes[0]);
@@ -633,7 +633,7 @@ test("T02d close-out, composed: a second controller started on the same store ta
       seen.proposedStatus = proposed.outcomes[0].status;
       await sleep(80);
       seen.abortedBeforeAccept = aborted();
-      const applied = await sayB("b3", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: "do that", basis: "owner" }]);
+      const applied = await sayB("b3", `yes, do that ${proposed.outcomes[0].proposalId}`, [{ kind: "apply_proposal", proposalId: proposed.outcomes[0].proposalId, evidence: `do that ${proposed.outcomes[0].proposalId}`, basis: "owner" }]);
       seen.appliedStatus = applied.outcomes[0].status;
       seen.recorded = (await b.services.catalog.revocationOf(name, "1.0.0"))?.runningCalls;
       // The first controller hears from the store (its own revoke listener never fired: the command was taken by the second).

@@ -561,7 +561,9 @@ export class ChatService {
     const early: PlanItem[] = [];
     for (const intent of intents) {
       if (intent.kind !== "answer") { work.push({ intent, text, trusted: false, quoted: hasQuoted }); continue; }
-      if (intent.basis === "quoted" || !evidenceInText(intent.evidence, text) || !evidenceStrong(intent.evidence)) { early.push({ i: work.length + early.length, kind: "refused", code: "untrusted_authority", message: "That answer is not in your own words." }); continue; }
+      // A reply of one word ("A", "finish") is no phrase, so the model's claim of what was chosen cannot be checked against it. It counts only when it is the owner's whole message and, read against the recorded question, names exactly one recorded answer, and that is the answer the model reported.
+      const oneWord = intent.basis !== "quoted" && evidenceInText(intent.evidence, text) && !evidenceStrong(intent.evidence) && evidenceWholeMessage(intent.evidence, text) && intent.choice === await this.#choiceSaid(owner, intent.turnId, text);
+      if (intent.basis === "quoted" || !evidenceInText(intent.evidence, text) || (!evidenceStrong(intent.evidence) && !oneWord)) { early.push({ i: work.length + early.length, kind: "refused", code: "untrusted_authority", message: "That answer is not in your own words." }); continue; }
       const expanded = await this.#expandAnswer(owner, intent.turnId, intent.choice);
       if ("refuse" in expanded) { early.push({ i: work.length + early.length, kind: "refused", code: "not_resumable", message: expanded.refuse }); continue; }
       resumes = intent.turnId;
@@ -597,10 +599,10 @@ export class ChatService {
       }
       if (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") {
         // A message that is only "yes" or "no" names no proposal: it counts only while exactly one is open. With several open the model's pick would be a guess, so the owner is asked which.
-        if (!trusted && !evidenceStrong(intent.evidence)) {
-          openForAnswer ??= [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))];
-          if (openForAnswer.length > 1) {
-            push({ i, kind: "asked", question: `More than one proposal is open, and a message that is only "${intent.kind === "apply_proposal" ? "yes" : "no"}" does not say which. Nothing was done. Which one do you mean? Say it in a few words (or drop the ones you no longer want).`, options: openForAnswer.slice(0, CHAT_LIMITS.options).map((p) => `${p.id}: ${quotedText(p.summary[0] ?? "", 80)}`) });
+        if (!trusted) {
+          openForAnswer ??= [...(await this.#openProposals(owner.id, OPEN_SCAN)), ...(await this.#openEdits(owner))];
+          if (openForAnswer.length > 1 && !namesOneProposal(intent.evidence, intent.proposalId, openForAnswer)) {
+            push({ i, kind: "asked", question: `More than one proposal is open, and ${evidenceStrong(intent.evidence) ? "your words" : `a message that is only "${intent.kind === "apply_proposal" ? "yes" : "no"}"`} do${evidenceStrong(intent.evidence) ? "" : "es"} not say which. Nothing was done. Which one do you mean? Say it in a few words (or drop the ones you no longer want).`, options: openForAnswer.slice(0, CHAT_LIMITS.options).map((p) => `${p.id}: ${quotedText(p.summary[0] ?? "", 80)}`) });
             continue;
           }
         }
@@ -2966,7 +2968,7 @@ export class ChatService {
     }
   }
 
-  async #openProposals(ownerId: string): Promise<{ id: string; summary: string[] }[]> {
+  async #openProposals(ownerId: string, limit = 10): Promise<{ id: string; summary: string[] }[]> {
     // Every record is read until ten are found: proposals are never deleted and their IDs are hashes, so a scan that stopped early would miss open ones at random (the count of a message that is only "yes" relies on it).
     const out: { id: string; summary: string[] }[] = [];
     let after: string | undefined;
@@ -2976,10 +2978,28 @@ export class ChatService {
         after = a.id;
         const b = a.body as unknown as ChatProposalBody;
         if (b.ownerId === ownerId && b.status === "open") out.push({ id: a.id, summary: [...b.preview] });
-        if (out.length >= 10) return out;
+        if (out.length >= limit) return out;
       }
       if (chunk.length < 1000) return out;
     }
+  }
+
+  /** The recorded answer a one-word reply names, from the question the chat itself asked: its whole text equals exactly one recorded choice or exactly one option's label. Never from what the model says; nothing when it is not one. */
+  async #choiceSaid(owner: Principal, turnId: string, words: string): Promise<string | undefined> {
+    const old = typeof turnId === "string" ? await this.#turn(turnId) : undefined;
+    if (old === undefined || old.ownerId !== owner.id || old.held === undefined || old.resumedBy !== undefined) return undefined;
+    const asked = old.plan.find((it): it is Extract<PlanItem, { kind: "asked" }> => it.kind === "asked" && it.field !== undefined);
+    if (asked === undefined) return undefined;
+    const said = tidyWords(words);
+    if (said === "") return undefined;
+    const choices = asked.choices ?? [];
+    const hits = new Set<string>();
+    choices.forEach((choice, k) => {
+      const label = asked.options.length === choices.length ? asked.options[k] : undefined;
+      const names = label === undefined ? [] : [label, label.split(": ")[0] ?? "", /\(([^()]*)\)/.exec(label)?.[1] ?? ""];
+      if (tidyWords(choice) === said || names.some((n) => tidyWords(n) === said)) hits.add(choice);
+    });
+    return hits.size === 1 ? [...hits][0] : undefined;
   }
 
   async #openEdits(owner: Principal): Promise<{ id: string; summary: string[] }[]> {
@@ -3207,4 +3227,27 @@ function decisionWordsMatch(words: string, text: string, all: boolean): boolean 
 /** Why an address cannot be a probe's, in the words of the probe's own check (the field name left off), or `undefined` when it can. */
 function probeUrlProblem(url: string): string | undefined {
   try { probeUrl(url); return undefined; } catch (e) { return e instanceof Error ? e.message.replace(/^url: /, "").slice(0, 200) : "is not usable"; }
+}
+
+/** Enough open proposals to tell them apart: more than this and the owner is asked rather than the model's pick trusted on a partial list. */
+const OPEN_SCAN = 100;
+
+/** Lower case, white space collapsed, punctuation at either end dropped. */
+const tidyWords = (s: string): string => s.toLowerCase().replace(/\s+/g, " ").replace(/^[\p{P}\s]+|[\p{P}\s]+$/gu, "");
+
+/**
+ * Whether the owner's words single out the proposal the model picked among several open ones: they say something that appears in that proposal's text and in no other open one's (a word of at least
+ * three letters or any number), or its ID as written. Words that fit every proposal alike ("yes please", "do that") name none, so the owner is asked. No word list: only the open proposals decide. A pick that is not open at all is left
+ * to the stale-proposal checks; a list too long to read in full names nothing.
+ */
+function namesOneProposal(evidence: string, proposalId: string, open: readonly { id: string; summary: string[] }[]): boolean {
+  if (open.length >= OPEN_SCAN) return false;
+  const chosen = open.find((p) => p.id === proposalId);
+  if (chosen === undefined) return evidenceStrong(evidence);
+  const said = evidence.toLowerCase();
+  if (said.includes(chosen.id.toLowerCase())) return true;
+  const tokens = (text: string): Set<string> => new Set((text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => /^\p{N}+$/u.test(t) || [...t].length >= 3));
+  const own = tokens(chosen.summary.join(" "));
+  const others = open.filter((p) => p !== chosen).map((p) => tokens(p.summary.join(" ")));
+  return [...tokens(evidence)].some((t) => own.has(t) && others.every((o) => !o.has(t)));
 }

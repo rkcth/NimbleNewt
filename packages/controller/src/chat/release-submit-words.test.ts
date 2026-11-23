@@ -68,7 +68,7 @@ for (const backend of backends) {
       const sevenWords = `Once more (5). ${words}`;
       const again = await turn("s7", sevenWords, [cmd({ manifest: manifest() }, sevenWords)]);
       assert.equal(again[0]!.status, "proposed", JSON.stringify(again[0]));
-      const applied = await turn("s8", "yes, go ahead with that one", [{ kind: "apply_proposal", proposalId: again[0]!.proposalId, evidence: "go ahead with that one", basis: "owner" }]);
+      const applied = await turn("s8", "yes, go ahead with the win32 one", [{ kind: "apply_proposal", proposalId: again[0]!.proposalId, evidence: "go ahead with the win32 one", basis: "owner" }]);
       assert.equal(applied[0]!.status, "applied", JSON.stringify(applied[0]));
       assert.equal((await listed()).length, 1, "the same manifest is the same candidate");
 

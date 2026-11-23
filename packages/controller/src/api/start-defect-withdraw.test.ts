@@ -74,7 +74,7 @@ test("through the running controller a defect reported by mistake is withdrawn b
     const stale = await turn("m-s0", early, [{ kind: "command", op: "defect.withdraw", args: { id: wrong, reason: "it was a misreading" }, evidence: early, basis: "owner" }]);
     assert.equal(stale[0].status, "proposed", JSON.stringify(stale));
     assert.ok((await call(boot.token, "defect.override", { id: wrong, outcome: "repair-again", reason: "let them try again" }, "o1")).ok);
-    const late = await turn("m-s1", "yes, drop it", [{ kind: "apply_proposal", proposalId: stale[0].proposalId, evidence: "drop it", basis: "owner" }]);
+    const late = await turn("m-s1", `yes, drop it ${stale[0].proposalId}`, [{ kind: "apply_proposal", proposalId: stale[0].proposalId, evidence: `drop it ${stale[0].proposalId}`, basis: "owner" }]);
     assert.notEqual(late[0].status, "applied", JSON.stringify(late));
     assert.equal((await state(wrong)).state, "open", "the stale withdrawal was not applied");
     // Open again with its failed check counted: still only the owner may take it back.
@@ -95,7 +95,7 @@ test("through the running controller a defect reported by mistake is withdrawn b
     const proposed = await turn("m-1", words, [{ kind: "command", op: "defect.withdraw", args: { id: wrong, reason: "I looked at the wrong version", expectedRevision: 1 }, evidence: words, basis: "owner" }]);
     assert.equal(proposed[0].status, "proposed", JSON.stringify(proposed));
     assert.equal((await state(wrong)).state, "escalated", "nothing changed yet");
-    const applied = await turn("m-2", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await turn("m-2", `yes, do that ${proposed[0].proposalId}`, [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: `do that ${proposed[0].proposalId}`, basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     const gone = await state(wrong);
     assert.deepEqual([gone.state, gone.resolution.kind, gone.resolution.reason, gone.cycles, gone.checks.map((x: any) => x.verdict)], ["withdrawn", "withdrawn", "I looked at the wrong version", 2, ["not-fixed", "not-fixed"]]);
