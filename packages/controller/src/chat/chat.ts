@@ -605,8 +605,13 @@ export class ChatService {
           // The same holds when the one word comes with the proposal's ID: "no <ID>" never applies it and "yes <ID>" never drops it.
           const withoutId = words.replace(idPattern(intent.proposalId), " ");
           const sole = tidyWords(withoutId === words && evidenceStrong(intent.evidence) ? "" : withoutId);
-          if ((intent.kind === "apply_proposal" ? REFUSAL : ASSENT).has(sole)) {
+          if ((intent.kind === "apply_proposal" ? NOT_APPLY : NOT_DROP).has(sole)) {
             push({ i, kind: "asked", question: `Your message was only ${quotedText(sole, 20)}${withoutId === words ? "" : " and the proposal's ID"}, which does not ${intent.kind === "apply_proposal" ? "agree to the proposal, so it was not applied" : "drop the proposal, so it was kept"}. Nothing was done. What would you like: go ahead with it, or drop it?`, options: [] });
+            continue;
+          }
+          // A message that is only the proposal's ID names it and says nothing about going ahead or dropping it (the model sees no earlier turn, so it could only guess which way): the owner is asked.
+          if (withoutId !== words && sole === "") {
+            push({ i, kind: "asked", question: `Your message was only the proposal's ID ${intent.proposalId}, which names it but does not say whether to go ahead with it or drop it. Nothing was done. What would you like: go ahead with ${intent.proposalId}, or drop it?`, options: [] });
             continue;
           }
           // A list of policy edits that cannot be read is not taken as none open: the owner is asked (fail closed).
@@ -3292,6 +3297,12 @@ const ASSENT = new Set(["yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", 
 const REFUSAL = new Set(["no", "n", "nope", "nah", "cancel", "stop", "never", "dont", "don't", "don\u2019t"]);
 /** One-word replies that agree or refuse: they answer a question only when they are one of its recorded choices, never through an option's label. */
 const AGREEMENT = new Set([...ASSENT, ...REFUSAL]);
+/**
+ * One-word messages (alone or beside the proposal's ID) that never apply a proposal, and ones that never drop one: the refusal and agreement words plus the plain words for dropping or accepting a proposal.
+ * Used only to ask instead of acting; they never make the chat do anything, and they are not used for answers to a question (that is `AGREEMENT`).
+ */
+const NOT_APPLY = new Set([...REFUSAL, "drop", "reject", "discard", "decline", "refuse"]);
+const NOT_DROP = new Set([...ASSENT, "apply", "approve", "accept", "confirm", "proceed"]);
 
 /** `id` as a whole in `text`, ignoring case: not inside a longer run of letters, digits, hyphens or underscores. */
 const idPattern = (id: string): RegExp => new RegExp(`(?<![\\p{L}\\p{N}_-])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_-])`, "giu");

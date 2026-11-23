@@ -350,14 +350,14 @@ for (const backend of backends) {
     script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
     const chat = w.chat();
     const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
-    for (const text of ["no", "No!", "nope", "Nah.", "cancel", "don't", "Never.", "Don’t", "Stop!"]) {
+    for (const text of ["no", "No!", "nope", "Nah.", "cancel", "don't", "Never.", "Don’t", "Stop!", "Drop.", "reject", "discard", "decline", "Refuse!"]) {
       script[text] = [{ kind: "apply_proposal", proposalId: oak, evidence: text, basis: "owner" }];
       const o = only((await say(w, chat, text)).outcomes);
       assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
       assert.match(o.question!, /does not agree to the proposal/);
       assert.equal((await list(w, "project.list")).length, 0, `${text}: nothing applied`);
     }
-    for (const text of ["yes", "OK.", "sure"]) {
+    for (const text of ["yes", "OK.", "sure", "Apply.", "approve", "accept", "confirm", "proceed"]) {
       script[text] = [{ kind: "discard_proposal", proposalId: oak, evidence: text, basis: "owner" }];
       const o = only((await say(w, chat, text)).outcomes);
       assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
@@ -473,6 +473,23 @@ for (const backend of backends) {
     const yes = await reply(`${elm} yes`, "discard_proposal", elm);
     assert.equal(yes.status, "asked", JSON.stringify(yes));
     assert.match(yes.question!, /does not drop the proposal/);
+    // a word of dropping beside the ID never applies, and a word of accepting beside it never drops
+    for (const text of [`drop ${elm}`, `Reject ${elm}.`, `${elm}: discard`]) {
+      const o = await reply(text, "apply_proposal", elm);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not agree to the proposal/);
+    }
+    for (const text of [`approve ${elm}`, `${elm} accept`]) {
+      const o = await reply(text, "discard_proposal", elm);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not drop the proposal/);
+    }
+    // the ID alone names the proposal but says neither yes nor no: whichever way the model read it, the owner is asked
+    for (const [text, kind] of [[elm, "apply_proposal"], [`${elm.toUpperCase()}?`, "apply_proposal"], [`${elm} ${elm}.`, "apply_proposal"], [`${elm}!`, "discard_proposal"]] as const) {
+      const o = await reply(text, kind, elm);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /only the proposal's ID .* does not say whether to go ahead with it or drop it/);
+    }
     assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), [], "nothing applied by any of these");
     // the exact ID wins over the coincidental words, and the closed proposal's ID beside it does not count as another one
     const applied = await reply(`yes, try again 7 times if you must: ${elm}, not ${ash}`, "apply_proposal", elm);
