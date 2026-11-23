@@ -646,7 +646,7 @@ export class PolicyEditService {
 
   async #reserve(owner: Principal, reserve: boolean, tool: string, project: ScopeRef): Promise<Built> {
     const summary = [`${reserve ? "Reserve" : "Release"} ${tool} in project "${project.name}" ${reserve ? "for you" : "from you"}.`];
-    if (!reserve) throw new Refusal("mandatory_gate", `${tool} is reserved for you in "${project.name}" and a chat message does not release it: a human gate is only lowered by you directly, in the review policy of the project (settings or API). Nothing was changed.`);
+    if (!reserve) throw new Refusal("mandatory_gate", `A chat message does not release ${tool} in "${project.name}" from you: a tool reserved for you is only lowered by you directly, never by chat, and there is no control for that yet. Nothing was changed.`);
     const found = await this.#deps.reviews.getPolicy(owner, project.id);
     if (found === undefined) throw new Refusal("unavailable", "the review policy cannot be read");
     if (found.policy.mandatoryHuman.includes(tool)) return { summary, explanation: [`${tool} is reserved for you already.`], direction: "neutral", noop: true };

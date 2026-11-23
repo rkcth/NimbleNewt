@@ -500,13 +500,17 @@ test("the guide's review policy sentences keep a tool for the owner through the 
   const said = [...para.matchAll(/"((?:always ask me|reserve)[^"]+)"/g)].map((m) => m[1]!);
   assert.deepEqual(said, ["always ask me before git-push in Garden", "reserve git-commit for me in this project"]);
   const release = "Stop reserving git-push, give it back to the agents";
+  const focus = "Let's work on Garden";
+  let system = "";
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-rev-"));
   const fetch: typeof globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
     const text = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    system = body.messages.find((m) => m.role === "system")?.content ?? "";
+    // The shape the interpreter prompt asks for: the project named in the owner's words goes in the change (projectName), the evidence is their words copied exactly; a release is the same object with type unreserve.
     const tool = text.includes("git-push") ? "git-push" : "git-commit";
     const change = { type: text === release ? "unreserve" : "reserve", tool, ...(text.includes("in Garden") ? { projectName: "Garden" } : {}) };
-    const intents = text === release || said.includes(text) ? [...(text.includes("in Garden") ? [{ kind: "switch_focus", projectName: "Garden", evidence: "in Garden", basis: "owner" }] : []), { kind: "policy_edit", change, evidence: text === release ? "Stop reserving git-push" : text.replace(/ in Garden| in this project/, ""), basis: "owner" }] : [{ kind: "none", reason: "not in the guide" }];
+    const intents = text === focus ? [{ kind: "switch_focus", projectName: "Garden", evidence: focus, basis: "owner" }] : text === release || said.includes(text) ? [{ kind: "policy_edit", change, evidence: text, basis: "owner" }] : [{ kind: "none", reason: "not in the guide" }];
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
   };
   let l: Awaited<ReturnType<typeof launch>> | undefined;
@@ -516,13 +520,16 @@ test("the guide's review policy sentences keep a tool for the owner through the 
     await call(live, "project.create", { name: "Garden" }, "p1");
     const ask = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join("").replace(/\s+/g, " "); };
     const first = await ask(said[0]!);
+    // A real model learns this shape only from the interpreter prompt: it gives the change, both of the guide's sentences, and what to answer for a release.
+    for (const want of ['{"kind":"policy_edit","change":{"type":"reserve"', "type unreserve", ...said]) assert.ok(system.includes(want), `the interpreter prompt does not carry ${want}`);
     assert.match(first, /git-push will always ask you/, first);
     assert.ok(!/refused|not applied|not in the guide/i.test(first), first);
     const again = await ask(said[0]!);
     assert.match(again, /reserved for you already/, `asking again changes nothing:\n${again}`);
+    await ask(focus);
     const second = await ask(said[1]!);
     assert.match(second, /git-commit will always ask you/, `the project in focus is used:\n${second}`);
     const back = await ask(release);
-    assert.match(back, /only lowered by you directly/, `the chat does not give a reserved tool back:\n${back}`);
+    assert.match(back, /only lowered by you directly, never by chat, and there is no control for that yet/, `the chat does not give a reserved tool back:\n${back}`);
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
