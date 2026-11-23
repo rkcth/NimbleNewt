@@ -8,6 +8,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
 import { instantOf, isLocalDate, isLocalTime, knownZone } from "../meetings/zones.js";
 import type { PauseService, PauseScope } from "../lifecycle/pause.js";
+import { redactText } from "../security/redact.js";
 import type { ReleaseActivationService } from "./activation.js";
 
 /**
@@ -100,6 +101,8 @@ export interface WindowQuiesce {
   readonly paused?: boolean;
   /** Running attempts the window froze (it releases these and no other freeze). */
   readonly frozen: readonly string[];
+  /** Of those, the ones already made quiet (settled and checkpointed): a sweep that waits on another attempt does not suspend these again. */
+  readonly settled?: readonly string[];
   readonly running: number;
   readonly waiting: number;
   readonly parked: number;
@@ -110,7 +113,7 @@ export interface WindowQuiesce {
   /** A restore step that failed and is tried again at each sweep. */
   readonly problem?: string;
 }
-export interface WindowCheckpoint { readonly name: string; readonly digest: string; readonly at: string }
+export interface WindowCheckpoint { readonly name: string; readonly digest: string; readonly at: string; /** What was not checked (a backup sealed for everything is checked by its manifest only). */ readonly note?: string }
 export interface QuarantineBody { readonly candidateId: string; readonly reason: string; readonly at: string; readonly windowId: string }
 export interface WindowView extends WindowBody { readonly revision: number; readonly rollback?: { readonly to: string; readonly ok: boolean; readonly reasons: readonly string[] } }
 
@@ -118,8 +121,8 @@ export interface WindowNotice { readonly commandId: string; readonly windowId: s
 /** How the window quiets the installation (the dispatcher and the pause gate, composed by the embedder). */
 export interface WindowQuiescePort {
   readonly pauses: Pick<PauseService, "pause" | "resumeOwnHold" | "gateState" | "ownPause">;
-  /** Every attempt not finished, with whether a freeze is on it now. */
-  attempts(): Promise<readonly { readonly attemptId: string; readonly state: string; readonly frozen: boolean }[]>;
+  /** Every attempt not finished, with whether a freeze is on it now and that freeze's reason (an attempt has one freeze: the reason tells whose it is). */
+  attempts(): Promise<readonly { readonly attemptId: string; readonly state: string; readonly frozen: boolean; readonly frozenReason?: string }[]>;
   /** Suspend without release: new calls refused, calls in flight settled, a checkpoint taken. Throws when the attempt cannot be made quiet. */
   freeze(attemptId: string, reason: string): Promise<void>;
   /** Lifts a freeze. A `not_found` (the attempt ended) is fine. */
@@ -138,7 +141,7 @@ export interface WindowOptions {
   /** Quiet the installation for the window (suspend running work, hold new work) and put it back at the end. Without it the window only waits for `liveAttempts`. */
   readonly quiesce?: WindowQuiescePort;
   /** Takes the checkpoint: a snapshot of state, configuration and artifacts that was verified. Without it no checkpoint is taken. */
-  readonly checkpoint?: () => Promise<{ readonly name: string; readonly digest: string; readonly verified: boolean; readonly problems?: readonly string[] }>;
+  readonly checkpoint?: () => Promise<{ readonly name: string; readonly digest: string; readonly verified: boolean; readonly problems?: readonly string[]; readonly note?: string }>;
   /** Files one owner notice; a `command_conflict` counts as already filed. */
   readonly notify?: (notice: WindowNotice) => Promise<void>;
   /** The clock windows are judged on (milliseconds); default `Date.now`. */
@@ -160,6 +163,10 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
 /** The controller acting on the owner's standing word for one window: owner-level, never a task, and named so the audit shows where it came from. */
 const WINDOW_ACTOR: Principal = { id: "service:release-window", kind: "owner", name: "release-window", grants: [] };
 const INSTALLATION: PauseScope = { kind: "installation", id: "installation" };
+/** The start of every freeze reason a window writes: an attempt holds one freeze, so a window lifts a freeze only while it still carries this (a landing or a recipe change may have lifted it and set its own). */
+const freezeTag = (windowId: string): string => `maintenance window ${windowId}:`;
+/** Error text for records the owner (and a release.manage holder) reads: control characters out, secrets marked, and host paths hidden (a backup's failure names its folder). */
+const recordText = (e: unknown, max = 160): string => redactText(errorText(e)).replace(/(?<![\w.])(?:[A-Za-z]:)?[\\/](?:[^\s'"`,;:()<>\\/]+[\\/])+[^\s'"`,;:()<>]*/g, "<path>").slice(0, max);
 
 export class ReleaseWindowService {
   readonly #runner: CommandRunner;
@@ -355,15 +362,15 @@ export class ReleaseWindowService {
     if (this.#o.checkpoint !== undefined && w.checkpoint === undefined) {
       let made: Awaited<ReturnType<NonNullable<WindowOptions["checkpoint"]>>> | undefined;
       let why = "";
-      try { made = await this.#o.checkpoint(); } catch (error) { why = errorText(error); }
-      if (made !== undefined && (!made.verified || made.problems?.length)) { why = `the snapshot did not verify (${(made.problems ?? []).slice(0, 3).join("; ").slice(0, 160)})`; made = undefined; }
+      try { made = await this.#o.checkpoint(); } catch (error) { why = recordText(error); }
+      if (made !== undefined && (!made.verified || made.problems?.length)) { why = `the snapshot did not verify (${recordText((made.problems ?? []).slice(0, 3).join("; "))})`; made = undefined; }
       if (made === undefined) {
         const next = this.#next(w, "failed", `the checkpoint could not be taken, so nothing was switched: ${why || "no snapshot"}`);
         const saved = await this.#write(rev, w, next, "release.window.checkpoint", cid("checkpoint-failed"));
         await this.#tell(saved, next);
         return true;
       }
-      const marked: WindowBody = { ...w, checkpoint: { name: made.name.slice(0, 200), digest: made.digest, at: this.#runner.now() }, history: [...w.history, { at: this.#runner.now(), event: "checkpoint", reason: made.name.slice(0, 120) }].slice(-WINDOW_LIMITS.history) };
+      const marked: WindowBody = { ...w, checkpoint: { name: made.name.slice(0, 200), digest: made.digest, at: this.#runner.now(), ...(made.note === undefined ? {} : { note: made.note.slice(0, 200) }) }, history: [...w.history, { at: this.#runner.now(), event: "checkpoint", reason: made.name.slice(0, 120) }].slice(-WINDOW_LIMITS.history) };
       rev = await this.#write(rev, w, marked, "release.window.checkpoint", cid("checkpoint"));
       w = marked;
     }
@@ -435,40 +442,60 @@ export class ReleaseWindowService {
     }
     // The pause must still hold: new work would otherwise start while the release switches. The window does not set it again against the owner's word; it waits (and ends deferred) instead.
     if ((await port.pauses.gateState(INSTALLATION))?.intent !== "pause") return hold("the pause holding new work was lifted during the window; cancel the window, or pause the installation again");
-    const all = await port.attempts();
-    const running = all.filter((a) => a.state === "running");
-    const waiting = all.filter((a) => a.state === "waiting").length;
-    const parked = all.filter((a) => a.state === "parked").length;
+    const tag = freezeTag(w.windowId);
+    const ours = (a: { frozen: boolean; frozenReason?: string }): boolean => a.frozen && (a.frozenReason ?? "").startsWith(tag);
+    let all = await port.attempts();
     const limit = port.limit ?? 200;
     if (q.quietAt === undefined) {
-      if (running.length > limit) return hold(`${running.length} agent attempts are running; the window can suspend at most ${limit}`);
-      // Recorded before the freeze, so a crash still knows which freezes are the window's. A freeze somebody else set stays theirs.
-      const mine = new Set(q.frozen);
-      for (const a of running) if (!a.frozen) mine.add(a.attemptId);
-      if (mine.size !== q.frozen.length) {
-        q = { ...q, frozen: [...mine] };
-        const next = { ...w, quiesce: q };
-        rev = await this.#write(rev, w, next, "release.window.quiesce", cid(`quiesce-freezing-${rev}`));
-        w = next;
+      // Listed again after each round: an attempt whose start was already under way when the pause closed the gate becomes running meanwhile, and must be made quiet too (as the H12q coordinator does).
+      for (let round = 0; ; round++) {
+        const running = all.filter((a) => a.state === "running");
+        if (running.length > limit) return hold(`${running.length} agent attempts are running; the window can suspend at most ${limit}`);
+        // Recorded before the freeze, so a crash still knows which freezes are the window's. A freeze somebody else set stays theirs (an attempt holds one freeze: its reason says whose).
+        const mine: Set<string> = new Set<string>(q.frozen);
+        for (const a of running) if (!a.frozen || ours(a)) mine.add(a.attemptId);
+        if (mine.size !== q.frozen.length) {
+          q = { ...q, frozen: [...mine] };
+          const next = { ...w, quiesce: q };
+          rev = await this.#write(rev, w, next, "release.window.quiesce", cid(`quiesce-freezing-${rev}`));
+          w = next;
+        }
+        const settled: Set<string> = new Set<string>(q.settled ?? []);
+        const failed: string[] = [];
+        let work = 0;
+        for (const a of running) {
+          if (!mine.has(a.attemptId) || (settled.has(a.attemptId) && ours(a))) continue;
+          // Someone else's freeze took the place of the window's since it was recorded (a landing lifted it and froze again): theirs, not touched.
+          if (a.frozen && !ours(a)) continue;
+          work++;
+          try { await port.freeze(a.attemptId, `${tag} suspended while the installation is updated`); settled.add(a.attemptId); }
+          catch (error) { if (error instanceof DomainError && error.code === "not_found") settled.add(a.attemptId); else failed.push(`${a.attemptId}: ${recordText(error, 80)}`); }
+        }
+        if (settled.size !== (q.settled ?? []).length) {
+          q = { ...q, settled: [...settled] };
+          const next = { ...w, quiesce: q };
+          rev = await this.#write(rev, w, next, "release.window.quiesce", cid(`quiesce-settled-${rev}`));
+          w = next;
+        }
+        if (failed.length > 0) return hold(`${failed.length} running attempt(s) could not be made quiet (${failed[0]}); nothing was stopped`.slice(0, 200));
+        if (work === 0 || round >= 3) break;
+        all = await port.attempts();
       }
-      const failed: string[] = [];
-      for (const a of running) {
-        if (a.frozen && !mine.has(a.attemptId)) continue;
-        try { await port.freeze(a.attemptId, `maintenance window ${w.windowId}: suspended while the installation is updated`); }
-        catch (error) { if (!(error instanceof DomainError && error.code === "not_found")) failed.push(`${a.attemptId}: ${errorText(error).slice(0, 80)}`); }
-      }
-      if (failed.length > 0) return hold(`${failed.length} running attempt(s) could not be made quiet (${failed[0]}); nothing was stopped`.slice(0, 200));
     }
-    const summary = `${running.length} running attempt(s) suspended with a checkpoint and not released; ${waiting} waiting and ${parked} parked left where they are; ${q.prior === "active" ? "new work held by the window's pause" : "new work held by the earlier pause"}`;
+    const running = all.filter((a) => a.state === "running").length;
+    const waiting = all.filter((a) => a.state === "waiting").length;
+    const parked = all.filter((a) => a.state === "parked").length;
+    const held = q.prior === "active" && (await port.pauses.ownPause(INSTALLATION, [{ operationId: cid("pause"), actor: WINDOW_ACTOR.id }])) !== undefined ? "new work held by the window's pause" : "new work held by a pause the window did not make (it stays after the window)";
+    const summary = `${running} running attempt(s) suspended with a checkpoint and not released; ${waiting} waiting and ${parked} parked left where they are; ${held}`;
     const { waiting: _w, ...rest } = w;
-    const quiet: WindowBody = { ...(rest as WindowBody), quiesce: { ...q, running: running.length, waiting, parked, summary, quietAt: q.quietAt ?? this.#runner.now() } };
+    const quiet: WindowBody = { ...(rest as WindowBody), quiesce: { ...q, running, waiting, parked, summary, quietAt: q.quietAt ?? this.#runner.now() } };
     if (q.quietAt === undefined || w.waiting !== undefined) rev = await this.#write(rev, w, quiet, "release.window.quiesce", cid("quiet"));
     return { quiet: true, rev, w: q.quietAt === undefined || w.waiting !== undefined ? quiet : w };
   }
 
   /**
-   * Puts back what the window set: the freezes it made are lifted and its own pause is lifted (only that very pause: an owner's pause already there, or set again later, is left). Safe to repeat; a step that fails is
-   * kept in the record and tried again at the next sweep.
+   * Puts back what the window set: the freezes it made are lifted (only while they are still the window's: a freeze someone set since stays) and its own pause is lifted (only that very pause, and not
+   * once a Stop or a Suspend took it over: an owner's pause already there, or set again later, is left). Safe to repeat; a step that fails is kept in the record and tried again at the next sweep.
    */
   async #restore(windowId: string): Promise<void> {
     const port = this.#o.quiesce;
@@ -479,30 +506,45 @@ export class ReleaseWindowService {
     if (q === undefined || q.restoredAt !== undefined || OPEN_STATES.has(w.status)) return;
     const problems: string[] = [];
     let released = 0;
-    for (const id of q.frozen) {
-      try { await port.release(id); released++; } catch (error) { if (!(error instanceof DomainError && error.code === "not_found")) problems.push(`${id}: ${errorText(error).slice(0, 80)}`); }
+    let kept = 0;
+    if (q.frozen.length > 0) {
+      const tag = freezeTag(windowId);
+      let now: Map<string, { frozen: boolean; frozenReason?: string }> | undefined;
+      try { now = new Map((await port.attempts()).map((a) => [a.attemptId, a])); } catch (error) { problems.push(`attempts: ${recordText(error, 80)}`); }
+      for (const id of now === undefined ? [] : q.frozen) {
+        const a = now!.get(id);
+        // Ended, or no longer frozen: nothing of the window's is left on it.
+        if (a === undefined || !a.frozen) continue;
+        if (!(a.frozenReason ?? "").startsWith(tag)) { kept++; continue; }
+        try { await port.release(id); released++; } catch (error) { if (!(error instanceof DomainError && error.code === "not_found")) problems.push(`${id}: ${recordText(error, 80)}`); }
+      }
     }
     let gate = "no pause was made by the window";
     if (q.prior === "paused") gate = "the pause that was there before the window was left as it was";
     else if (q.paused === true || q.prior === "active") {
       const own = await port.pauses.ownPause(INSTALLATION, [{ operationId: `rwin:${windowId}:pause`, actor: WINDOW_ACTOR.id }]);
-      if (own === undefined) gate = (await port.pauses.gateState(INSTALLATION))?.intent === "pause" ? "the installation is paused by someone else now, and that pause was left as it is" : "the installation was already active again";
+      const state = await port.pauses.gateState(INSTALLATION);
+      if (own === undefined) gate = state?.intent === "pause" ? "the installation is paused by someone else now, and that pause was left as it is" : "the installation was already active again";
+      // A Stop or a Suspend the owner asked for during the window took the window's pause over and relies on it: it stays until the owner resumes.
+      else if (state?.takenOver === true) gate = "a stop or suspension took the window's pause over, so it was left for the owner to lift";
       else {
         try { await port.pauses.resumeOwnHold(WINDOW_ACTOR, { commandId: `rwin:${windowId}:resume`, scope: INSTALLATION, reason: `maintenance window ${windowId} ended (${w.status})`, requestId: own }); gate = "the window's own pause was lifted"; }
         catch (error) {
           if (error instanceof DomainError && error.code === "invalid_command") gate = "the window's pause was no longer in force (someone changed it), so nothing was lifted";
-          else problems.push(`pause: ${errorText(error).slice(0, 100)}`);
+          else problems.push(`pause: ${recordText(error, 100)}`);
         }
       }
     }
     const rev = (await this.#runner.get(WINDOW, windowId))!.revision;
     if (problems.length > 0) {
-      if (q.problem === problems.join("; ")) return;
-      await this.#write(rev, w, { ...w, quiesce: { ...q, problem: problems.join("; ").slice(0, 300) } }, "release.window.restore", `rwin:${windowId}:restore-problem-${rev}`);
+      const problem = problems.join("; ").slice(0, 300);
+      if (q.problem === problem) return;
+      await this.#write(rev, w, { ...w, quiesce: { ...q, problem } }, "release.window.restore", `rwin:${windowId}:restore-problem-${rev}`);
       return;
     }
     const { problem: _p, ...clean } = q;
-    await this.#write(rev, w, { ...w, quiesce: { ...clean, restoredAt: this.#runner.now(), summary: `put back: ${released} suspended attempt(s) released; ${gate}` } }, "release.window.restore", `rwin:${windowId}:restored`);
+    const others = kept === 0 ? "" : `; ${kept} attempt(s) now held by someone else's freeze were left as they are`;
+    await this.#write(rev, w, { ...w, quiesce: { ...clean, restoredAt: this.#runner.now(), summary: `put back: ${released} suspended attempt(s) released${others}; ${gate}` } }, "release.window.restore", `rwin:${windowId}:restored`);
   }
 
   #activated(w: WindowBody, from: string | undefined): WindowBody {

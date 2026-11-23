@@ -12,7 +12,7 @@ import { FLOOR_RETIRED_SETTINGS, FLOOR_SETTINGS, MeetingFloorService, floorSetti
 import { RetirementService } from "../retirement/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, combineThinkingStores, guardStorage, localThinkingStores, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
-import { verifyBackup, manifestDigestOf, BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupScopeSettingService, BackupSystem, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, SIGNING_SECRET_NAME, secretsSourceOf, sealsBackups, type SecretsSink, type SigningSecretStore, MaintenanceBarrier, NamedWork, stopAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
+import { checkpointOf, BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupScopeSettingService, BackupSystem, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, SIGNING_SECRET_NAME, secretsSourceOf, sealsBackups, type SecretsSink, type SigningSecretStore, MaintenanceBarrier, NamedWork, stopAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile, rm, statfs } from "node:fs/promises";
 import { activeProjectIds, defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
@@ -35,7 +35,7 @@ import { ASSIGNMENT_EVENTS, AssignmentService } from "../domain/assignments.js";
 import { WaitService } from "../domain/waits.js";
 import { DeskService, HistoryService, RetrievalService, WorkingNoteService, ContextRouteSettingsService, StartSizeService, ThinkingStore, ThinkingService, InspectionService } from "../context/index.js";
 import { existsSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   UnsupportedEnvironmentError, checkEnvironment, checkFilesystems, checkPrerequisites, decideStartup, detectDistribution, detectEnvironment, hostLine, overrideRequested, overriddenCheck, prerequisiteProblems, realProbes, recordHost, recordOverride,
   type EnvironmentFacts, type FilesystemDetector, type FilesystemReport, type PrerequisiteNeed, type PrerequisiteReport, type Probes, type StartupCheck,
@@ -1769,11 +1769,11 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       // `dispatch` is built later: until then there is nothing running to suspend.
       quiesce: {
         pauses,
-        attempts: async () => { if (dispatch === undefined) return []; const out: { attemptId: string; state: string; frozen: boolean }[] = []; for (const a of await dispatch.dispatcher.liveAttempts(dispatch.principal)) out.push({ ...a, frozen: a.state === "running" && (await dispatch.dispatcher.get(dispatch.principal, a.attemptId))?.frozen !== undefined }); return out; },
+        attempts: async () => { if (dispatch === undefined) return []; const out: { attemptId: string; state: string; frozen: boolean; frozenReason?: string }[] = []; for (const a of await dispatch.dispatcher.liveAttempts(dispatch.principal)) { const f = (await dispatch.dispatcher.get(dispatch.principal, a.attemptId))?.frozen; out.push({ ...a, frozen: f !== undefined, ...(f === undefined ? {} : { frozenReason: f.reason }) }); } return out; },
         freeze: async (attemptId: string, reason: string) => { await dispatch?.dispatcher.quiesce(dispatch.principal, attemptId, reason.slice(0, 300), { strictMs: 10_000 }); },
         release: async (attemptId: string) => { await dispatch?.dispatcher.release(dispatch.principal, attemptId); },
       },
-      ...(backups === undefined ? {} : { checkpoint: async () => { const made = await backups.backUpNow("manual"); const check = await verifyBackup(made.path); return { name: basename(made.path), digest: manifestDigestOf(made.manifest), verified: check.ok, problems: check.problems }; } }),
+      ...(backups === undefined ? {} : { checkpoint: async () => checkpointOf(await backups.backUpNow("manual")) }),
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: n.level, label: n.label, ref: { kind: "release-window", id: n.windowId }, detail: n.detail }); },
     });
     releaseWindowsLive = releaseWindows;

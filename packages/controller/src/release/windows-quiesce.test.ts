@@ -42,12 +42,12 @@ interface W {
   ready: (content: string, approve?: boolean) => Promise<{ id: string; digest: string }>;
   pointer: () => string | undefined;
   storage: ControllerStorage; epoch: number;
-  pauses: PauseService; att: Att[]; log: string[]; q: { freezeFails: Set<string>; releaseFails: Set<string>; pauseBoom: boolean };
+  pauses: PauseService; att: Att[]; log: string[]; q: { freezeFails: Set<string>; releaseFails: Set<string>; pauseBoom: boolean; pauseBoomAfter: boolean; onFreeze?: (id: string) => void };
   qwin: (o?: Partial<WindowOptions>) => ReleaseWindowService;
   /** A prepared window that is open now, on a world where v1 is current. */
   open: () => Promise<{ windowId: string; v1: string; v2: string; w: ReleaseWindowService }>;
 }
-interface Att { attemptId: string; state: string; frozen: boolean }
+interface Att { attemptId: string; state: string; frozen: boolean; frozenReason?: string }
 const INST: PauseScope = { kind: "installation", id: "installation" };
 
 for (const backend of backends) {
@@ -83,16 +83,17 @@ for (const backend of backends) {
         const pauses = PauseService.withEpoch(world.storage, projects.epoch, { waits }, options);
         const att: Att[] = [];
         const log: string[] = [];
-        const q = { freezeFails: new Set<string>(), releaseFails: new Set<string>(), pauseBoom: false };
+        const q: W["q"] = { freezeFails: new Set<string>(), releaseFails: new Set<string>(), pauseBoom: false, pauseBoomAfter: false };
         const port: WindowQuiescePort = {
           pauses: {
-            pause: async (by, cmd) => { if (q.pauseBoom) { q.pauseBoom = false; throw new Error("the controller stopped"); } log.push("pause"); return pauses.pause(by, cmd); },
+            pause: async (by, cmd) => { if (q.pauseBoom) { q.pauseBoom = false; throw new Error("the controller stopped"); } log.push("pause"); const r = await pauses.pause(by, cmd); if (q.pauseBoomAfter) { q.pauseBoomAfter = false; throw new Error("the controller stopped after the pause"); } return r; },
             resumeOwnHold: async (by, cmd) => { log.push("resume"); return pauses.resumeOwnHold(by, cmd); },
             gateState: (s) => pauses.gateState(s), ownPause: (s, o) => pauses.ownPause(s, o),
           },
           attempts: async () => att.map((a) => ({ ...a })),
-          freeze: async (id) => { log.push(`freeze ${id}`); if (q.freezeFails.has(id)) throw new DomainError("unavailable", "a call would not settle"); att.find((a) => a.attemptId === id)!.frozen = true; },
-          release: async (id) => { log.push(`release ${id}`); if (q.releaseFails.has(id)) throw new DomainError("unavailable", "the dispatcher is busy"); const a = att.find((x) => x.attemptId === id); if (a === undefined) throw new DomainError("not_found", "gone"); a.frozen = false; },
+          // As the dispatcher: an attempt holds one freeze, and a second freeze keeps the first one's reason.
+          freeze: async (id, reason) => { log.push(`freeze ${id}`); const a = att.find((x) => x.attemptId === id)!; if (!a.frozen) { a.frozen = true; a.frozenReason = reason; } q.onFreeze?.(id); if (q.freezeFails.has(id)) throw new DomainError("unavailable", "a call would not settle"); },
+          release: async (id) => { log.push(`release ${id}`); if (q.releaseFails.has(id)) throw new DomainError("unavailable", "the dispatcher is busy"); const a = att.find((x) => x.attemptId === id); if (a === undefined) throw new DomainError("not_found", "gone"); a.frozen = false; delete a.frozenReason; },
         };
         const qwin = (o: Partial<WindowOptions> = {}): ReleaseWindowService => win({ quiesce: port, checkpoint: async () => { log.push("checkpoint"); return { name: "backup-1", digest: sha("backup-1"), verified: true }; }, ...o });
         const open = async () => {
@@ -146,6 +147,7 @@ for (const backend of backends) {
     assert.equal(waiting.status, "prepared");
     assert.match(waiting.waiting ?? "", /1 running attempt\(s\) could not be made quiet \(att-r2/);
     assert.equal(waiting.history.filter((h) => h.event === "waiting").length, 1, "the same wait is written once");
+    assert.equal(c.log.filter((l) => l === "freeze att-r1").length, 1, "review: an attempt already made quiet is not suspended (and checkpointed) again at each sweep");
     assert.equal(c.pointer(), v1, "nothing switched");
     assert.ok(!c.log.includes("checkpoint"), "no snapshot before the installation is quiet");
     assert.ok(!c.log.some((l) => l.startsWith("release")), "never released while held");
@@ -172,12 +174,13 @@ for (const backend of backends) {
   suite("cancel clears only the window's own gates: an owner's earlier pause stays, and a freeze somebody else set stays", async (c) => {
     await c.pauses.pause(c.owner, { commandId: cid("op"), scope: INST, reason: "owner pause" });
     const { windowId, w } = await c.open();
-    c.att.push({ attemptId: "att-r1", state: "running", frozen: false }, { attemptId: "att-r2", state: "running", frozen: true }, { attemptId: "att-r3", state: "running", frozen: false });
+    c.att.push({ attemptId: "att-r1", state: "running", frozen: false }, { attemptId: "att-r2", state: "running", frozen: true, frozenReason: "landing: the agent's work is being changed" }, { attemptId: "att-r3", state: "running", frozen: false });
     c.q.freezeFails.add("att-r3");
     await w.tick();
     assert.equal((await w.get(c.owner, windowId)).quiesce?.prior, "paused");
     assert.ok(!c.log.includes("pause"), "the window did not pause what was already paused");
     assert.deepEqual(c.log.filter((l) => l.startsWith("freeze")), ["freeze att-r1", "freeze att-r3"], "a freeze somebody else set was not touched");
+    assert.deepEqual([...((await w.get(c.owner, windowId)).quiesce?.frozen ?? [])].sort(), ["att-r1", "att-r3"], "review: the record never lists a freeze somebody else set as the window's");
     await w.cancel(c.owner, { commandId: cid("x"), windowId });
     assert.equal((await w.get(c.owner, windowId)).status, "cancelled");
     assert.deepEqual(c.att.map((a) => a.frozen), [false, true, false], "its own freezes are lifted; the other freeze stays");
@@ -282,5 +285,85 @@ for (const backend of backends) {
     assert.equal(g.status, "activated");
     assert.deepEqual([g.quiesce, g.checkpoint], [undefined, undefined]);
     assert.equal((await c.pauses.gateState(INST))?.intent ?? "active", "active");
+  });
+
+  suite("review: a Stop or Suspend the owner asked for during the window takes the window's pause over, and the window's end does not lift it", async (c) => {
+    const { windowId, w } = await c.open();
+    c.att.push({ attemptId: "att-r1", state: "running", frozen: false });
+    c.q.freezeFails.add("att-r1");
+    await w.tick();
+    // What the stop service does when the scope is already paused: it keeps that pause and marks it taken over.
+    await c.pauses.dropResumeCondition(c.owner, INST);
+    assert.equal((await c.pauses.gateState(INST))?.takenOver, true);
+    await w.cancel(c.owner, { commandId: cid("x"), windowId });
+    assert.equal((await c.pauses.gateState(INST))?.intent, "pause", "the stop still relies on the pause");
+    assert.ok(!c.log.includes("resume"));
+    assert.match((await w.get(c.owner, windowId)).quiesce?.summary ?? "", /stop or suspension took the window's pause over/);
+  });
+
+  suite("review: a freeze someone else set in place of the window's (a landing lifted it and froze again) is not lifted when the window ends", async (c) => {
+    const { windowId, w } = await c.open();
+    c.att.push({ attemptId: "att-r1", state: "running", frozen: false }, { attemptId: "att-r2", state: "running", frozen: false });
+    c.q.freezeFails.add("att-r2");
+    await w.tick();
+    // The landing's own quiesce: it found the window's freeze, ran, and at its end released and froze again for a second step of its own.
+    const a = c.att[0]!;
+    assert.match(a.frozenReason ?? "", new RegExp(`^maintenance window ${windowId}:`));
+    a.frozenReason = "landing: the agent's work is being changed (second step)";
+    await w.tick();
+    assert.equal(c.log.filter((l) => l === "freeze att-r1").length, 1, "an attempt already quiet is not suspended again at each sweep");
+    await w.cancel(c.owner, { commandId: cid("x"), windowId });
+    assert.deepEqual(c.att.map((x) => x.frozen), [true, false], "the landing's freeze stays; the window's own is lifted");
+    assert.ok(!c.log.includes("release att-r1"));
+    assert.match((await w.get(c.owner, windowId)).quiesce?.summary ?? "", /1 suspended attempt\(s\) released; 1 attempt\(s\) now held by someone else's freeze/);
+  });
+
+  suite("review: a crash after the pause and before its record is settled by replay: the gate holds one pause request", async (c) => {
+    const { windowId, w } = await c.open();
+    c.q.pauseBoomAfter = true;
+    await assert.rejects(() => w.tick(), /after the pause/);
+    assert.equal((await c.pauses.gateState(INST))?.intent, "pause");
+    assert.equal((await w.get(c.owner, windowId)).quiesce?.paused, undefined, "the record does not yet say so");
+    await w.tick();
+    assert.equal((await w.get(c.owner, windowId)).status, "activated");
+    assert.equal((await c.pauses.gate(c.owner, INST))?.requests, 1, "the replay made no second pause");
+  });
+
+  suite("review: an attempt that becomes running while the others are being suspended is suspended too before the checkpoint", async (c) => {
+    const { windowId, w } = await c.open();
+    c.att.push({ attemptId: "att-r1", state: "running", frozen: false }, { attemptId: "att-w", state: "waiting", frozen: false });
+    // Its start was already under way when the gate closed.
+    c.q.onFreeze = (id) => { if (id === "att-r1") c.att[1]!.state = "running"; };
+    await w.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "activated");
+    assert.deepEqual(c.log, ["pause", "freeze att-r1", "freeze att-w", "checkpoint"]);
+    assert.deepEqual([...(g.quiesce?.frozen ?? [])].sort(), ["att-r1", "att-w"]);
+    assert.equal(g.quiesce?.running, 2);
+  });
+
+  suite("review: the owner re-pausing after lifting the window's pause is said as a pause the window did not make", async (c) => {
+    const { windowId, w } = await c.open();
+    c.att.push({ attemptId: "att-r1", state: "running", frozen: false });
+    c.q.freezeFails.add("att-r1");
+    await w.tick();
+    await c.pauses.resume(c.owner, { commandId: cid("or"), scope: INST, reason: "lift" });
+    await c.pauses.pause(c.owner, { commandId: cid("op"), scope: INST, reason: "mine now" });
+    c.q.freezeFails.clear();
+    await w.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "activated");
+    assert.match(g.quiesce?.summary ?? "", /a pause the window did not make/);
+  });
+
+  suite("review: a checkpoint failure that names a host path is recorded without the path", async (c) => {
+    const { windowId } = await c.open();
+    const w = c.qwin({ checkpoint: async () => { throw new Error("ENOSPC: no space left on device, write '/srv/nn-state/backups/backup-1/tasks.jsonl'"); } });
+    await w.tick();
+    const g = await w.get(c.owner, windowId);
+    assert.equal(g.status, "failed");
+    assert.match(g.reason ?? "", /no space left on device, write '<path>'/);
+    assert.ok(!/nn-state|srv/.test(JSON.stringify(g)), "no host path in the record");
+    assert.ok(!/nn-state|srv/.test(JSON.stringify(c.told)), "nor in the owner's notice");
   });
 }
