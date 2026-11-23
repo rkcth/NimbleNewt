@@ -41,6 +41,7 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import type { ArtifactReplacement, ReplacedDeliverable, StaleDeliverable } from "../submissions/acceptance.js";
 import { isFinished as isDefectFinished, type DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
+import type { QaReviewService } from "../submissions/qa-review-policy.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -291,6 +292,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
+  qa_policy: { keys: ["projectId", "after"], about: "the project's review policy and its open scheduled reviews (after: how many were shown)" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId", "after"], about: "the project's documentation obligations (card Q03), at most 30 at a time (flagged first; after: how many documents were already shown, to see the next 30): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
   task_docs: { keys: ["taskId|taskTitle", "after"], about: "the documentation due for one task (card Q03), at most 30 documents at a time (after: how many were already shown, to see the next 30): the documents that describe it, which are verified against its tested code and which are flagged (unverified or stale) and why (every flagged one is due: the docs gate holds the task's landing until it is verified again, even when its flag names another task it describes; so is a verified one whose tested code of this task no longer passes its QA gate, as the docs gate refuses it too), the update tasks open for them (assigned or not), what would verify each, and the tested code each was last verified against; a task no document describes says so" },
@@ -414,6 +416,7 @@ export type StatusRequest =
   | { readonly kind: "submissions_project"; readonly projectId: string }
   | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
+  | { readonly kind: "qa_policy"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "docs"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "landing_settings"; readonly projectId: string }
@@ -778,6 +781,8 @@ export interface StatusDeps {
   readonly defects?: Pick<DefectService, "forTask" | "unresolved">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
+  /** The project's review policy and its scheduled reviews (card Q02). Absent: the `qa_policy` view says it is not kept here. */
+  readonly qaReview?: Pick<QaReviewService, "get" | "requests">;
   /** The submissions of a task (card Q01b), read with the submission service's own rule (`list`, `approvalOf` of what it listed). Absent: the `submissions` view says submissions are not kept here. */
   readonly submissions?: Pick<SubmissionService, "list" | "approvalOf"> & Partial<Pick<SubmissionService, "waiting">>;
   /** The commit made for an approved submission and the release open on a task's checkout (card H12o sixth slice), read-only and taking no caller; absent: the submissions view says nothing about commits. */
@@ -1021,6 +1026,7 @@ export class StatusService {
       case "submissions": { onlyKnown(request, ["kind", "taskId"]); return this.submissionLines(by, request.taskId); }
       case "submissions_project": { onlyKnown(request, ["kind", "projectId"]); return this.submissionsProjectLines(by, request.projectId); }
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
+      case "qa_policy": { onlyKnown(request, ["kind", "projectId", "after"]); return this.qaPolicyLines(by, request.projectId, request.after); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId", "after"]); return this.docLines(by, request.projectId, undefined, request.after); }
       case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
@@ -2793,6 +2799,34 @@ export class StatusService {
       lines.push(line(`Defect ${x.id} (${x.severity}) in task ${x.taskId}, deliverable ${x.deliverableId} version ${x.version}: ${words[x.state] ?? x.state}; ${x.cycles} of ${x.limit} repair and review cycles used; responsible ${shown(x.responsibleAgent, 60)}. Finding: ${quoted(x.finding.text, 160)}.`, cite("defect", x.id), cite("deliverable", x.deliverableId), cite("task", x.taskId)));
     }
     if (total > found.items.length) lines.push(line(`${total - found.items.length} more unfinished defect(s) are not shown; defect.list lists the defects of one deliverable.`, cite("project", projectId)));
+    return { observedAt: at, lines };
+  }
+
+  /** The project's review policy and the reviews it scheduled (card Q02). The review service's read rules apply: the owner, or an agent that may read the project's tasks (it sees only the reviews assigned to it). */
+  async qaPolicyLines(by: Principal, projectIdValue: string, afterValue?: unknown): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.qaReview === undefined) return { observedAt: at, lines: [line("The review policy is not kept on this controller.", cite("project", projectId))] };
+    const after = afterValue === undefined ? 0 : typeof afterValue === "number" && Number.isSafeInteger(afterValue) && afterValue >= 0 ? afterValue : 0;
+    let policy: Awaited<ReturnType<QaReviewService["get"]>>;
+    let reqs: Awaited<ReturnType<QaReviewService["requests"]>>;
+    try { policy = await this.#deps.qaReview.get(by, projectId); reqs = await this.#deps.qaReview.requests(by, projectId, { after }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const p = policy.item;
+    const lines: Line[] = [];
+    if (policy.isDefault) lines.push(line("No review policy is set for this project: nothing starts a review by itself, no extra checks are required, and independent review does not gate landing.", cite("project", projectId)));
+    else {
+      const scope = `${p.scope.workClasses.length === 0 ? "every work class" : `work class ${p.scope.workClasses.join(" and ")}`}${p.scope.taskIds.length === 0 ? "" : `, only ${p.scope.taskIds.length} named task(s)`}`;
+      const t = p.triggers;
+      const triggers = [t.onSubmission ? "each new code submission" : "", t.periodicMinutes === null ? "" : `every ${t.periodicMinutes} minutes`, t.onIncident ? "an incident opened in the project" : ""].filter((x) => x !== "");
+      lines.push(line(`Review policy (revision ${policy.revision}): covers ${scope}. A review starts on ${triggers.length === 0 ? "nothing (no trigger is on)" : triggers.join(", ")}. Extra required checks: ${p.requiredChecks.length === 0 ? "none" : p.requiredChecks.map((c) => quoted(c, 80)).join(", ")}. Passing independent review ${p.gatesCompletion ? "gates landing (the qa and review checks are required for those tasks)" : "does not gate landing"}. Each required check needs ${p.independentSources} independent original source(s).`, cite("project", projectId)));
+    }
+    if (reqs.total === 0) lines.push(line(after > 0 ? "No more scheduled reviews are open." : "No scheduled review is open.", cite("project", projectId)));
+    else {
+      lines.push(line(`${reqs.total} scheduled review(s) open${after > 0 ? `, from number ${after + 1}` : ""}.`, cite("project", projectId)));
+      const why = { submission: "a new code submission", periodic: "the periodic review", incident: "an incident" } as const;
+      for (const r of reqs.items) lines.push(line(`Task ${r.taskId}, code ${r.submissionId} (tree ${r.tree.slice(0, 12)}): ${why[r.trigger]}, ${r.assignee === undefined ? "waiting for a reviewer that did not work on the task" : `assigned to ${shown(r.assignee, 80)}`}, since ${r.createdAt}.`, cite("task", r.taskId), cite("submission", r.submissionId)));
+      if (reqs.next !== undefined) lines.push(line(`More reviews follow: ask again with after ${reqs.next}.`, cite("project", projectId)));
+    }
     return { observedAt: at, lines };
   }
 

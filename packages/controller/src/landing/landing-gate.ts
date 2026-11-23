@@ -95,8 +95,8 @@ export interface DirectorGateView { readonly taskId: string; readonly submission
 export interface DefectsGateView { readonly taskId: string; readonly checked: number; readonly unresolved: number; readonly items: readonly { readonly id: string; readonly severity: string; readonly state: string; readonly finding: string; readonly deliverableTitle: string }[] }
 export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string }
 export interface LandingGateDeps {
-  /** The project's required checks (`IntegrationPolicyService.effective`). */
-  readonly requiredChecks: (projectId: string) => Promise<readonly Check[]>;
+  /** The project's required checks (`IntegrationPolicyService.effective`), and for the task named the checks its project's review policy adds (card Q02: independent review gates completion). */
+  readonly requiredChecks: (projectId: string, taskId?: string) => Promise<readonly Check[]>;
   /** The task contract's test commands, leaving out a change any of the authors (the assignee and the submitter of the landed submission) made itself (`undefined`: no contract). */
   readonly tests: (taskId: string, authors: readonly string[]) => Promise<ContractTests | undefined>;
   /** Whether a code submission is approved, and its patch ID (`SubmissionService.approvalOf`). */
@@ -140,7 +140,7 @@ export class LandingGate {
   /** Judges one landing. Never throws for what the host or a record says: anything that cannot be looked at is `not_run`. It throws only when the required checks themselves cannot be read (nothing is then landed). */
   async evaluate(call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string; readonly author?: string; readonly host: LandingCheckHost | undefined }): Promise<LandingChecksRecord> {
     const at = this.#deps.now();
-    const required = [...(await this.#deps.requiredChecks(call.projectId))];
+    const required = [...(await this.#deps.requiredChecks(call.projectId, call.taskId))];
     const sub = call.submissionId === undefined ? {} : { submissionId: call.submissionId };
     if (required.length === 0) return { required, passed: true, ...sub, results: [], at };
     // The reviewed submission is read first: the host computes the patch ID of its base and tree, and its submitter is an author whose own contract versions are not used.
@@ -205,7 +205,7 @@ export class LandingGate {
     }
     // The project's required checks were read before the host's run (which may take minutes): a check required since then was never judged for this landing, so it is answered as `added` (nothing else is read; a read
     // that throws refuses the landing). A check no longer required does not matter: the landing met the stricter set, so it is not read again either (a dropped check that fails now would refuse a landing the policy allows).
-    const now = new Set(await this.#deps.requiredChecks(ctx.call.projectId));
+    const now = new Set(await this.#deps.requiredChecks(ctx.call.projectId, ctx.call.taskId));
     const added = [...now].filter((c) => !record.required.includes(c));
     if (added.length > 0) return { changed: [], record, added };
     const fresh: LandingCheckEntry[] = [];
