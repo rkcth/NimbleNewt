@@ -10,6 +10,11 @@
 //   straggler     starts a detached background process in the worktree (its PID in STUB_AGENT_PID_FILE), then reports.
 //   straggler-outside  like an embedded PostgreSQL a test started: a detached server working in a directory outside the
 //                 worktree, and a helper process of it whose environment is emptied; both PIDs in STUB_AGENT_PID_FILE.
+//   continued     card W04, variant C: a stopped-early agent that runs the bench's real continuation extension at each end
+//                 (continuation-extension.mjs, driven the way Pi drives it: message_end, then agent_before_settle). After
+//                 STUB_AGENT_SOLVE_AFTER nudges (default: never) it does the work and ends with a done report; STUB_AGENT_LAST
+//                 (thinking-only | length | report-blocked) picks how it stops early each time. Without the runner's
+//                 PI_EVAL_CONTINUATION_CONFIG nothing continues it, as with variant B.
 //   solve         copies STUB_AGENT_SOLUTION_DIR's files into the worktree, commits, and reports done (an honest agent).
 import { execFileSync, spawn } from "node:child_process";
 import { cpSync, existsSync, writeFileSync } from "node:fs";
@@ -39,6 +44,38 @@ const finalTurn = (content) => {
   emit({ type: "turn_start" });
   const message = reply(content, "stop");
   emit({ type: "turn_end", message, toolResults: [] });
+  emit({ type: "agent_end", messages: [] });
+  emit({ type: "agent_settled", aborted: false });
+};
+
+const continued = async () => {
+  const { createContinuation } = await import("./continuation-extension.mjs");
+  const ext = process.env.PI_EVAL_CONTINUATION_CONFIG ? createContinuation() : null;
+  const solveAfter = process.env.STUB_AGENT_SOLVE_AFTER === undefined ? Infinity : Number(process.env.STUB_AGENT_SOLVE_AFTER);
+  const how = process.env.STUB_AGENT_LAST || "announced";
+  toolTurn("ls");
+  for (let nudges = 0; ; nudges++) {
+    emit({ type: "turn_start" });
+    const solving = nudges >= solveAfter;
+    let content, stop = "stop";
+    if (solving) {
+      cpSync(process.env.STUB_AGENT_SOLUTION_DIR, dir, { recursive: true });
+      execFileSync("git", ["-C", dir, "add", "-A"]);
+      execFileSync("git", ["-C", dir, "commit", "-q", "-m", "stub: solve"]);
+      content = [{ type: "text", text: "Done. I made the change and ran the tests; they pass." }];
+    } else if (how === "thinking-only") content = [{ type: "thinking", thinking: "Now I should edit the file." }];
+    else if (how === "length") { content = [{ type: "thinking", thinking: "Deliberating at length." }]; stop = "length"; }
+    else if (how === "report-blocked") content = [{ type: "text", text: "Blocked. The fixture needs a database I cannot start here." }];
+    else content = [{ type: "text", text: "I have read the task. Next I'll make the change and add the tests." }];
+    const message = reply(content, stop);
+    ext?.onMessageEnd({ type: "message_end", message });
+    emit({ type: "turn_end", message, toolResults: [] });
+    const go = ext?.onBeforeSettle({ type: "agent_before_settle", entries: [], continue: false });
+    if (go?.continue !== true) break;
+    // Pi stores the extension's message as a session entry and logs it (entry_appended), then sends it as a user-role message.
+    emit({ type: "entry_appended", entry: { ...go.entries.at(-1), id: `stub-${nudges}` } });
+    emit({ type: "message_end", message: { role: "user", content: go.entries.at(-1).content, timestamp: Date.now() } });
+  }
   emit({ type: "agent_end", messages: [] });
   emit({ type: "agent_settled", aborted: false });
 };
@@ -89,6 +126,9 @@ switch (mode) {
     finalTurn([{ type: "text", text: "I started the test database and stopped." }]);
     break;
   }
+  case "continued":
+    await continued();
+    break;
   case "solve": {
     toolTurn("ls");
     cpSync(process.env.STUB_AGENT_SOLUTION_DIR, dir, { recursive: true });

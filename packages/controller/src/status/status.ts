@@ -41,6 +41,7 @@ import type { ArtifactBody } from "../artifacts/service.js";
 import type { ArtifactReplacement, ReplacedDeliverable, StaleDeliverable } from "../submissions/acceptance.js";
 import { isFinished as isDefectFinished, type DefectService } from "../submissions/defects.js";
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
+import type { QaReviewService } from "../submissions/qa-review-policy.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -283,6 +284,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
   database_transfer: { keys: [], about: "which database the controller runs on, the databases it can be moved to, the last move and whether the host restarts the controller onto a new database by itself" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
+  lifecycle: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what is paused or stopped, why and how far (scope as in stop_cleanup; none: the installation and active agents)" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why; a corrected finding or severity says how many times it was edited and by whom last, and what the severity was), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
@@ -291,6 +293,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
+  qa_policy: { keys: ["projectId", "after"], about: "the project's review policy and its open scheduled reviews (after: how many were shown)" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
   docs: { keys: ["projectId", "after"], about: "the project's documentation obligations (card Q03), at most 30 at a time (flagged first; after: how many documents were already shown, to see the next 30): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
   task_docs: { keys: ["taskId|taskTitle", "after"], about: "the documentation due for one task (card Q03), at most 30 documents at a time (after: how many were already shown, to see the next 30): the documents that describe it, which are verified against its tested code and which are flagged (unverified or stale) and why (every flagged one is due: the docs gate holds the task's landing until it is verified again, even when its flag names another task it describes; so is a verified one whose tested code of this task no longer passes its QA gate, as the docs gate refuses it too), the update tasks open for them (assigned or not), what would verify each, and the tested code each was last verified against; a task no document describes says so" },
@@ -414,6 +417,7 @@ export type StatusRequest =
   | { readonly kind: "submissions_project"; readonly projectId: string }
   | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
+  | { readonly kind: "qa_policy"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "docs"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "landing_settings"; readonly projectId: string }
@@ -422,6 +426,7 @@ export type StatusRequest =
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
   | { readonly kind: "database_transfer" }
+  | { readonly kind: "lifecycle"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
@@ -674,7 +679,7 @@ export interface StatusDeps {
   /** Suspected and confirmed stall concerns (card V01). Absent: none are shown. */
   readonly stall?: Pick<StallService, "list">;
   /** Pause gates (card L01). Absent: no gate is shown and none is assumed. */
-  readonly pauses?: Pick<PauseService, "status" | "isPaused">;
+  readonly pauses?: Pick<PauseService, "status" | "isPaused"> & Partial<Pick<PauseService, "gate">>;
   /** The setup readiness view (card U14). Absent: the `setup` view is not offered. */
   readonly setup?: { check(by: Principal): Promise<{ readonly ready: boolean; readonly next?: string; readonly items: readonly { readonly id: string; readonly label: string; readonly state: string; readonly required: boolean; readonly detail: string; readonly guide: { readonly question: string; readonly recommended: string; readonly ifDeclined: string } }[] }> };
   /** Which event sources are watched (card H13f). Absent: the view is not offered. */
@@ -780,6 +785,8 @@ export interface StatusDeps {
   readonly defects?: Pick<DefectService, "forTask" | "unresolved">;
   /** QA evidence of a task and the gate of each checked submission (card Q02). Absent: the `qa` view says QA evidence is not kept here. */
   readonly qa?: Pick<QaEvidenceService, "list" | "gate" | "project">;
+  /** The project's review policy and its scheduled reviews (card Q02). Absent: the `qa_policy` view says it is not kept here. */
+  readonly qaReview?: Pick<QaReviewService, "get" | "requests">;
   /** The submissions of a task (card Q01b), read with the submission service's own rule (`list`, `approvalOf` of what it listed). Absent: the `submissions` view says submissions are not kept here. */
   readonly submissions?: Pick<SubmissionService, "list" | "approvalOf"> & Partial<Pick<SubmissionService, "waiting">>;
   /** The commit made for an approved submission and the release open on a task's checkout (card H12o sixth slice), read-only and taking no caller; absent: the submissions view says nothing about commits. */
@@ -1013,6 +1020,7 @@ export class StatusService {
       case "timeline": { onlyKnown(request, ["kind", "projectId", "agent", "since", "limit"]); return this.timelineLines(by, request); }
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "database_transfer": { onlyKnown(request, ["kind"]); return this.databaseTransferLines(by); }
+      case "lifecycle": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.lifecycleLines(by, request); }
       case "stop_cleanup": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.stopCleanupLines(by, request); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
@@ -1023,6 +1031,7 @@ export class StatusService {
       case "submissions": { onlyKnown(request, ["kind", "taskId"]); return this.submissionLines(by, request.taskId); }
       case "submissions_project": { onlyKnown(request, ["kind", "projectId"]); return this.submissionsProjectLines(by, request.projectId); }
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
+      case "qa_policy": { onlyKnown(request, ["kind", "projectId", "after"]); return this.qaPolicyLines(by, request.projectId, request.after); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId", "after"]); return this.docLines(by, request.projectId, undefined, request.after); }
       case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
@@ -2323,6 +2332,60 @@ export class StatusService {
   }
 
   /**
+   * What is paused or stopped (read only, for the owner who asks "what is paused?"): the gate of one task, agent, team or the whole installation, or with none named the installation and every active agent (the first 50). A gate says who paused it,
+   * the reason (someone's words, so quoted and clipped), and what the runtime has actually reached, which is kept apart from what was asked. A scope the caller may not read reads as missing. Teams and tasks are read when they are named.
+   */
+  async lifecycleLines(by: Principal, asked: { readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const gateOf = this.#deps.pauses?.gate;
+    // Owner only (review): `gate` answers "no gate" for a scope the caller may not read, which would read as "not paused"; anyone else is told nothing, as a missing view.
+    if (gateOf === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    if ((asked.scopeKind === undefined) !== (asked.scopeId === undefined) || (asked.scope !== undefined && asked.scopeKind !== undefined)) return invalid("scope", "give scope, or scopeKind with scopeId");
+    const given = asked.scope ?? (asked.scopeKind === undefined ? undefined : { kind: asked.scopeKind, id: asked.scopeId! });
+    if (asked.taskId !== undefined && given !== undefined) return invalid("taskId", "name either a task or a scope");
+    type ScopeKind = "task" | "agent" | "team" | "installation";
+    const check = (sc: { kind?: unknown; id?: unknown }): { kind: ScopeKind; id: string } => {
+      if (typeof sc !== "object" || sc === null || (sc.kind !== "task" && sc.kind !== "agent" && sc.kind !== "team" && sc.kind !== "installation") || typeof sc.id !== "string" || sc.id.length === 0 || sc.id.length > 200) return invalid("scope", "must be { kind: task, agent, team or installation, id }");
+      return { kind: sc.kind, id: sc.id };
+    };
+    // The owner may read every gate, so no gate means never paused.
+    const read = (scope: { kind: ScopeKind; id: string }): ReturnType<NonNullable<typeof gateOf>> => gateOf.call(this.#deps.pauses, by, scope);
+    const words = (scope: { kind: ScopeKind; id: string }): string => (scope.kind === "installation" ? "The whole installation" : `${scope.kind[0]!.toUpperCase()}${scope.kind.slice(1)} ${shown(scope.id, 80)}`);
+    const describe = (scope: { kind: ScopeKind; id: string }, g: Awaited<ReturnType<NonNullable<typeof gateOf>>>): Line => {
+      if (g === undefined || g.intent !== "pause") return line(`${words(scope)} is not paused.`, cite("pause-gate", `${scope.kind}:${scope.id}`));
+      const reached = g.observed === undefined ? "nothing has been reported yet about what the runtime has reached" : `the runtime reports ${shown(g.observed.state, 40)} (as of ${shown(g.observed.at, 40)})`;
+      return line(`${words(scope)} is paused${g.pausedAt === undefined ? "" : ` since ${shown(g.pausedAt, 40)}`}${g.owner === undefined ? "" : `, by ${shown(g.owner, 80)}`}${g.reason === undefined ? "" : `, reason ${quoted(g.reason, 160)}`}; ${reached}${g.resumeAt === undefined ? "" : `. It is to lift by itself after ${shown(g.resumeAt.at, 40)}`}.`, cite("pause-gate", g.id, g.revision));
+    };
+    const scope = asked.taskId !== undefined ? { kind: "task" as const, id: checkTaskId(asked.taskId) } : given !== undefined ? check(given) : undefined;
+    if (scope !== undefined) {
+      const g = await read(scope);
+      // A task is also held by the agent, team or installation above it: its own gate says only its own pause, so the holds above are named too when the task's pause status can say them.
+      const lines: Line[] = [describe(scope, g)];
+      if (scope.kind === "task" && this.#deps.pauses !== undefined) {
+        const st = await this.#deps.pauses.status(by, scope.id);
+        for (const h of st?.gates ?? []) if (h.scope.kind !== "task" || h.scope.id !== scope.id) lines.push(line(`It is also held by the pause on ${words(h.scope as { kind: ScopeKind; id: string }).toLowerCase()}${h.gate.reason === undefined ? "" : `, reason ${quoted(h.gate.reason, 160)}`}.`, cite("pause-gate", h.gate.id, h.gate.revision)));
+      }
+      return { observedAt: this.#runner.now(), lines };
+    }
+    const everything = { kind: "installation" as const, id: "installation" };
+    const top = await read(everything);
+    const lines: Line[] = [describe(everything, top)];
+    const source = this.#deps.agents;
+    let paused = lines[0]!.text.includes(" is paused") ? 1 : 0;
+    if (source !== undefined) {
+      let listed: Awaited<ReturnType<typeof source.list>>;
+      try { listed = await source.list(by, { state: "active", limit: 51 }); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return { observedAt: this.#runner.now(), lines }; throw error; }
+      const items = listed.items.slice(0, 50);
+      for (const a of items) {
+        const sc = { kind: "agent" as const, id: a.id };
+        const g = await read(sc);
+        if (g !== undefined && g.intent === "pause") { paused += 1; lines.push(line(`${quoted(a.friendlyName, 80)}: ${describe(sc, g).text}`, cite("agent", a.id), cite("pause-gate", g.id, g.revision))); }
+      }
+      lines.push(line(`${items.length}${listed.items.length > 50 || listed.next !== undefined ? " or more" : ""} active agent${items.length === 1 ? "" : "s"} checked${listed.items.length > 50 || listed.next !== undefined ? " (the first 50)" : ""}; ${paused === 0 ? "none is paused" : `${paused} scope${paused === 1 ? " is" : "s are"} paused`}. Teams and tasks are read when named.`, cite("agents", "active")));
+    }
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
    * A task's starting sizes across its hand-offs (card C07i), from the watch's own record: the newest points, what older ones were rolled up into, the alerts open with where the originals are kept, and the thresholds in force.
    * A route whose window is not known has no share: it is said to be unknown, never shown as zero.
    */
@@ -2795,6 +2858,34 @@ export class StatusService {
       lines.push(line(`Defect ${x.id} (${x.severity}) in task ${x.taskId}, deliverable ${x.deliverableId} version ${x.version}: ${words[x.state] ?? x.state}; ${x.cycles} of ${x.limit} repair and review cycles used; responsible ${shown(x.responsibleAgent, 60)}. Finding: ${quoted(x.finding.text, 160)}.`, cite("defect", x.id), cite("deliverable", x.deliverableId), cite("task", x.taskId)));
     }
     if (total > found.items.length) lines.push(line(`${total - found.items.length} more unfinished defect(s) are not shown; defect.list lists the defects of one deliverable.`, cite("project", projectId)));
+    return { observedAt: at, lines };
+  }
+
+  /** The project's review policy and the reviews it scheduled (card Q02). The review service's read rules apply: the owner, or an agent that may read the project's tasks (it sees only the reviews assigned to it). */
+  async qaPolicyLines(by: Principal, projectIdValue: string, afterValue?: unknown): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const projectId = checkProjectId(projectIdValue);
+    const at = this.#runner.now();
+    if (this.#deps.qaReview === undefined) return { observedAt: at, lines: [line("The review policy is not kept on this controller.", cite("project", projectId))] };
+    const after = afterValue === undefined ? 0 : typeof afterValue === "number" && Number.isSafeInteger(afterValue) && afterValue >= 0 ? afterValue : 0;
+    let policy: Awaited<ReturnType<QaReviewService["get"]>>;
+    let reqs: Awaited<ReturnType<QaReviewService["requests"]>>;
+    try { policy = await this.#deps.qaReview.get(by, projectId); reqs = await this.#deps.qaReview.requests(by, projectId, { after }); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
+    const p = policy.item;
+    const lines: Line[] = [];
+    if (policy.isDefault) lines.push(line("No review policy is set for this project: nothing starts a review by itself, no extra checks are required, and independent review does not gate landing.", cite("project", projectId)));
+    else {
+      const scope = `${p.scope.workClasses.length === 0 ? "every work class" : `work class ${p.scope.workClasses.join(" and ")}`}${p.scope.taskIds.length === 0 ? "" : `, only ${p.scope.taskIds.length} named task(s)`}`;
+      const t = p.triggers;
+      const triggers = [t.onSubmission ? "each new code submission" : "", t.periodicMinutes === null ? "" : `every ${t.periodicMinutes} minutes`, t.onIncident ? "an incident opened in the project" : ""].filter((x) => x !== "");
+      lines.push(line(`Review policy (revision ${policy.revision}): covers ${scope}. A review starts on ${triggers.length === 0 ? "nothing (no trigger is on)" : triggers.join(", ")}. Extra required checks: ${p.requiredChecks.length === 0 ? "none" : p.requiredChecks.map((c) => quoted(c, 80)).join(", ")}. Passing independent review ${p.gatesCompletion ? "gates landing (the qa and review checks are required for those tasks, and the newest code of each unfinished one is sent for review)" : "does not gate landing"}. Each required check needs ${p.independentSources} independent original source(s).`, cite("project", projectId)));
+    }
+    if (reqs.total === 0) lines.push(line(after > 0 ? "No more scheduled reviews are open." : "No scheduled review is open.", cite("project", projectId)));
+    else {
+      lines.push(line(`${reqs.total} scheduled review(s) open${after > 0 ? `, from number ${after + 1}` : ""}.`, cite("project", projectId)));
+      const why = { submission: "a new code submission", periodic: "the periodic review", incident: "an incident", gate: "independent review is required before it may land" } as const;
+      for (const r of reqs.items) lines.push(line(`Task ${r.taskId}, code ${r.submissionId} (tree ${r.tree.slice(0, 12)}): ${why[r.trigger]}, ${r.assignee === undefined ? "waiting for a reviewer that did not work on the task" : `assigned to ${shown(r.assignee, 80)}`}, since ${r.createdAt}.`, cite("task", r.taskId), cite("submission", r.submissionId)));
+      if (reqs.next !== undefined) lines.push(line(`More reviews follow: ask again with after ${reqs.next}.`, cite("project", projectId)));
+    }
     return { observedAt: at, lines };
   }
 

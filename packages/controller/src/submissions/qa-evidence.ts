@@ -44,6 +44,8 @@ export interface QaEvidenceBody {
   readonly recordedBy: string;
   readonly recordedAt: string;
   readonly checks: readonly QaCheck[];
+  /** Desk records (card A10) the evidence was derived from, when the recorder says so (card Q02, original-source counting): a copy and its original are one source, whoever cites either. */
+  readonly sources?: readonly string[];
   readonly state: "current" | "invalidated";
   readonly invalidatedAt?: string;
   readonly invalidatedBy?: string;
@@ -98,7 +100,13 @@ export interface QaGate {
   /** Independent evidence for this submission that no longer holds, with why. */
   readonly stale: readonly { readonly id: string; readonly reasons: readonly QaStaleReason[] }[];
   readonly pendingRechecks: readonly string[];
+  /** How many independent original sources each required check needs (the project's review policy; 1 without one), and the checks that passed but have fewer (reason `fewer_sources`). */
+  readonly sourcesNeeded?: number;
+  readonly shortfalls?: readonly { readonly check: string; readonly sources: number }[];
 }
+
+/** Each task's newest code submission in a project, newest first, with everyone that submitted code on the task (`QaEvidenceService.newestCode`). */
+export interface NewestCode { readonly tasks: readonly { readonly taskId: string; readonly submissionId: string; readonly at: string; readonly tree: string; readonly submittedBy: string; readonly contributors: readonly string[] }[]; readonly scanLimited: boolean }
 
 /** One task's newest code submission and where it stands with QA (the project QA view). */
 export interface QaProjectItem {
@@ -138,6 +146,16 @@ export interface QaEvidencePorts {
    * effort, like `recorded`; the port must not do anything twice for the same record (the controller's documentation check is keyed by evidence and decides from the documents' current state).
    */
   readonly invalidated?: (e: { readonly taskId: string; readonly projectId: string; readonly evidence: readonly { readonly evidenceId: string; readonly submissionId: string }[] }) => Promise<void>;
+  /**
+   * The project's review policy as it applies to one task (card Q02, review policy): the check names it adds to the contract's and how many independent original sources each needs. Absent, or `undefined` for a task
+   * the policy's scope leaves out: nothing is added.
+   */
+  readonly policy?: (projectId: string, taskId: string) => Promise<{ readonly requiredChecks: readonly string[]; readonly independentSources: number } | undefined>;
+  /**
+   * The original each desk record stands on (`DeskService.independence`: a copy and a copy of a copy stand on the original they came from), read as `reader`. `unavailable`: records that do not exist or the reader may not read.
+   * Absent: evidence cannot cite sources, and each record counts by its recorder alone.
+   */
+  readonly deskOrigins?: (reader: Principal, ids: readonly string[]) => Promise<{ readonly origins: ReadonlyMap<string, string>; readonly unavailable: readonly string[] }>;
 }
 
 /** A record a gate verdict was read from, at the revision read: a write that binds the verdict checks each is still there (card Q03: `doc.obligation.verify`). */
@@ -152,8 +170,11 @@ const CHECKERS = ["qa", "reviewer"] as const;
 /** The notification store keeps at most this much detail text. */
 const NOTICE_CHARS = 200;
 /** The QA service as the actor of a check it starts itself (`contractChanged`). It holds no grants and is never a caller of any operation. */
+const DSK = /^dsk-[a-z2-7]{20}$/;
+/** The reader of the gate's own source lookup: the owner's level, so a copy's original is found whoever recorded the evidence (the recorder's own access was checked when it cited the record). */
+const QA_READER = { id: "service:qa-evidence-sources", kind: "owner", name: "qa-evidence-sources", grants: [] } as unknown as Principal;
 const QA_SERVICE = { id: "service:qa-evidence", kind: "service", name: "qa-evidence", grants: [] } as unknown as Principal;
-export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, projectScanReads: 20, chunk: 40, supersedeChunk: 80, maxChunks: 12 } as const;
+export const QA_LIMITS = { perTask: 200, checks: 50, checkName: 200, detail: 2000, environment: 500, decisions: 20, skewMs: 5 * 60 * 1000, projectTasks: 200, sources: 10, projectScanReads: 20, chunk: 40, supersedeChunk: 80, maxChunks: 12 } as const;
 
 /** Prefix of the hashed text of a later chunk's command ID: 121 characters, so the text is longer than any command ID `scopedCommandId` takes (at most 120). */
 const CHUNK_SEED = "qa.evidence.check/chunk/".padEnd(121, "/");
@@ -279,14 +300,16 @@ export class QaEvidenceService {
    * Records QA evidence on one code submission. `criteriaRevision` must be the task contract version in force (a stale one is `stale_revision` with the current version); `decisions` names the
    * owner decisions the work was judged against and must include every decision the task relies on.
    */
-  async record(by: Principal, command: NoActor & { submissionId: string; criteriaRevision: number; decisions?: readonly string[]; environment: string; observedAt: string; checks: readonly { name: string; result: string; detail?: string }[] }): Promise<{ id: string; revision: number; replayed: boolean; source: "self" | "independent"; settled: readonly string[]; open: readonly QaOpenRecheck[] }> {
+  async record(by: Principal, command: NoActor & { submissionId: string; criteriaRevision: number; decisions?: readonly string[]; environment: string; observedAt: string; checks: readonly { name: string; result: string; detail?: string }[]; sources?: readonly string[] }): Promise<{ id: string; revision: number; replayed: boolean; source: "self" | "independent"; settled: readonly string[]; open: readonly QaOpenRecheck[] }> {
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
-    for (const k of Object.keys(command)) if (!["commandId", "submissionId", "criteriaRevision", "decisions", "environment", "observedAt", "checks"].includes(k)) bad(k, "is not a field of this command");
+    for (const k of Object.keys(command)) if (!["commandId", "submissionId", "criteriaRevision", "decisions", "environment", "observedAt", "checks", "sources"].includes(k)) bad(k, "is not a field of this command");
     const commandId = checkCommandId(command.commandId);
     if (typeof command.submissionId !== "string" || !SBM.test(command.submissionId)) bad("submissionId", "is not a submission ID");
     if (!Number.isSafeInteger(command.criteriaRevision) || command.criteriaRevision < 0) bad("criteriaRevision", "must be the task contract version you checked against (0 when it has none)");
     const decisions = command.decisions === undefined ? [] : command.decisions;
     if (!Array.isArray(decisions) || decisions.length > QA_LIMITS.decisions || decisions.some((d) => typeof d !== "string" || !DEC.test(d)) || new Set(decisions).size !== decisions.length) bad("decisions", `must be a list of at most ${QA_LIMITS.decisions} different decision IDs`);
+    const sources = command.sources === undefined ? [] : command.sources;
+    if (!Array.isArray(sources) || sources.length > QA_LIMITS.sources || sources.some((d) => typeof d !== "string" || !DSK.test(d)) || new Set(sources).size !== sources.length) bad("sources", `must be a list of at most ${QA_LIMITS.sources} different desk record IDs`);
     const environment = text(command.environment, "environment", { min: 1, max: QA_LIMITS.environment, multiline: true });
     const observedAt = text(command.observedAt, "observedAt", { min: 20, max: 30 });
     const ms = Date.parse(observedAt);
@@ -309,9 +332,14 @@ export class QaEvidenceService {
     const scoped = scopedCommandId(by.id, commandId);
     const id = derivedId("qae", scoped);
     const result = await this.#runner.command("qa.evidence.record", { commandId: scoped, actor: by.id }, async () => ({
-      payload: { submissionId: command.submissionId, criteriaRevision: command.criteriaRevision, decisions: [...decisions as string[]], environment, observedAt, checks: json(checks) as unknown as JsonObject },
+      payload: { submissionId: command.submissionId, criteriaRevision: command.criteriaRevision, decisions: [...decisions as string[]], environment, observedAt, checks: json(checks) as unknown as JsonObject, ...((sources as string[]).length === 0 ? {} : { sources: [...sources as string[]].sort() }) },
       build: async () => {
         const { sub, taskId, task } = await this.#submission(by, command.submissionId);
+        if ((sources as string[]).length > 0) {
+          if (this.#ports.deskOrigins === undefined) throw new DomainError("unavailable", "this controller does not keep desk records to cite as sources");
+          const found = await this.#ports.deskOrigins(by, sources as string[]);
+          if (found.unavailable.length > 0) bad("sources", `${found.unavailable[0]} is not a desk record you can read`);
+        }
         if (task.state === "cancelled") throw new DomainError("invalid_command", "the task is cancelled");
         if (ms > Date.parse(this.#runner.now()) + QA_LIMITS.skewMs) bad("observedAt", "is in the future");
         const self = by.id === sub.submittedBy;
@@ -340,7 +368,7 @@ export class QaEvidenceService {
         if (index.body.ids.length >= QA_LIMITS.perTask) throw new DomainError("unavailable", `a task holds at most ${QA_LIMITS.perTask} QA evidence records`);
         const now = this.#runner.now();
         const source = self ? "self" : "independent";
-        const body: QaEvidenceBody = { taskId, projectId: task.projectId, submissionId: command.submissionId, tree: sub.tree, source, criteriaRevision: contract.version, decisions: cited, environment: redactText(environment), observedAt, recordedBy: by.id, recordedAt: now, checks, state: "current" };
+        const body: QaEvidenceBody = { taskId, projectId: task.projectId, submissionId: command.submissionId, tree: sub.tree, source, criteriaRevision: contract.version, decisions: cited, environment: redactText(environment), observedAt, recordedBy: by.id, recordedAt: now, checks, ...((sources as string[]).length === 0 ? {} : { sources: [...sources as string[]].sort() }), state: "current" };
         // What this record and the other evidence of the same source on the submission that still holds name: a re-check is settled only when they name again every check the invalidated
         // record named (those still required, when the contract names checks), so a narrower re-check does not pass on fewer checks than were looked at before.
         const required = this.#required(contract.body);
@@ -734,6 +762,73 @@ export class QaEvidenceService {
   }
 
   /**
+   * How many independent original sources a set of current independent records stands on (card Q02, counting by original source). Two records are one source when the same agent recorded both, or when they cite
+   * desk records with the same original (`DeskService.independence`: a copy and a copy of a copy stand on the original they came from). A record that cites nothing stands on its recorder alone; a cited record
+   * that cannot be found any more stands on itself. Read at the owner's level so a copy's original is found whoever recorded the evidence.
+   */
+  async #sourceGroups(records: readonly (QaEvidenceBody & { id: string })[]): Promise<(subset: readonly (QaEvidenceBody & { id: string })[]) => number> {
+    const roots = new Map<string, string>();
+    const cited = [...new Set(records.flatMap((r) => r.sources ?? []))];
+    if (cited.length > 0 && this.#ports.deskOrigins !== undefined) {
+      const found = await this.#ports.deskOrigins(QA_READER, cited);
+      for (const [id, root] of found.origins) roots.set(id, root);
+    }
+    const rootOf = (id: string): string => roots.get(id) ?? id;
+    return (subset) => {
+      const parent = new Map<string, string>();
+      const find = (x: string): string => { let r = x; while (parent.get(r) !== r) r = parent.get(r)!; return r; };
+      const join = (a: string, b: string): void => { if (!parent.has(a)) parent.set(a, a); if (!parent.has(b)) parent.set(b, b); parent.set(find(a), find(b)); };
+      for (const r of subset) {
+        const me = `rec:${r.id}`;
+        join(me, `by:${r.recordedBy}`);
+        for (const s of r.sources ?? []) join(me, `root:${rootOf(s)}`);
+      }
+      return new Set(subset.map((r) => find(`rec:${r.id}`))).size;
+    };
+  }
+
+  /**
+   * Each task's NEWEST code submission in a project (by `submittedAt`, then ID) and everyone that submitted code on the task, newest submissions first (card Q02: the review policy's scheduler and the project QA view
+   * share this scan). Reads no gate and no evidence. Bounded: at most `reads` pages of `pageSize` submissions (`scanLimited` when more exist; the table is in hash order of IDs, not time order). Controller-internal: no
+   * caller's rights are checked, so the callers that show it to someone check them.
+   */
+  async newestCode(projectIdValue: string, limits: { readonly pageSize: number; readonly reads: number } = { pageSize: 500, reads: QA_LIMITS.projectScanReads }): Promise<NewestCode> {
+    const projectId = checkProjectId(projectIdValue);
+    const found = await this.newestCodeIn(new Set([projectId]), limits);
+    return { tasks: found.byProject.get(projectId) ?? [], scanLimited: found.scanLimited };
+  }
+
+  /**
+   * `newestCode` for several projects with ONE bounded scan of the submissions (card Q02 review: the review scheduler's round reads the table once, not once per project with a policy). The same bound and order.
+   */
+  async newestCodeIn(projectIds: ReadonlySet<string>, limits: { readonly pageSize: number; readonly reads: number } = { pageSize: 500, reads: QA_LIMITS.projectScanReads }): Promise<{ readonly byProject: ReadonlyMap<string, NewestCode["tasks"]>; readonly scanLimited: boolean }> {
+    const newest = new Map<string, { id: string; at: string; tree: string; by: string; projectId: string }>();
+    const who = new Map<string, Set<string>>();
+    let after: string | undefined;
+    let scanLimited = true;
+    if (projectIds.size === 0) return { byProject: new Map(), scanLimited: false };
+    for (let read = 0; read < limits.reads; read++) {
+      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: limits.pageSize });
+      for (const row of chunk) {
+        after = row.id;
+        const b = row.body as unknown as SubmissionBody;
+        if (!projectIds.has(b.projectId) || b.kind !== "code" || b.tree === undefined || !TREE.test(b.tree)) continue;
+        who.set(b.taskId, (who.get(b.taskId) ?? new Set()).add(b.submittedBy));
+        const had = newest.get(b.taskId);
+        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt, tree: b.tree, by: b.submittedBy, projectId: b.projectId });
+      }
+      if (chunk.length < limits.pageSize) { scanLimited = false; break; }
+    }
+    const byProject = new Map<string, NewestCode["tasks"][number][]>();
+    for (const [taskId, n] of [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))) {
+      const list = byProject.get(n.projectId) ?? [];
+      list.push({ taskId, submissionId: n.id, at: n.at, tree: n.tree, submittedBy: n.by, contributors: [...(who.get(taskId) ?? [])].sort() });
+      byProject.set(n.projectId, list);
+    }
+    return { byProject, scanLimited };
+  }
+
+  /**
    * The project's QA picture (card Q02, project QA view): for each task of the project the caller may read, its NEWEST code submission (by `submittedAt`, then ID) and where it stands with QA.
    * `passes`: the gate passes. `waiting`: no independent evidence at all, current or stale (the work waits for QA; a self-check does not count; the checks the contract requires then also read as missing). `stale`: evidence existed but no longer holds, or a re-check is pending.
    * `failing`: current evidence has failed, blocked, not-run or missing checks, or relies on a superseded decision. Older submissions of a task are not shown (the newest is the work). Read only; a task
@@ -746,22 +841,11 @@ export class QaEvidenceService {
     const proj = await this.#runner.get("project", projectId);
     const mayRead = by.kind === "owner" || (by.kind === "agent" && by.taskScope === undefined && allows(by, "task.read", projectId));
     if (proj === undefined || !mayRead) return hidden("project");
-    const newest = new Map<string, { id: string; at: string }>();
-    let after: string | undefined;
-    let scanLimited = true;
-    for (let read = 0; read < limits.reads; read++) {
-      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: limits.pageSize });
-      for (const row of chunk) {
-        after = row.id;
-        const b = row.body as unknown as SubmissionBody;
-        if (b.projectId !== projectId || b.kind !== "code" || b.tree === undefined || !TREE.test(b.tree)) continue;
-        const had = newest.get(b.taskId);
-        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt });
-      }
-      if (chunk.length < limits.pageSize) { scanLimited = false; break; }
-    }
+    const scan = await this.newestCode(projectId, limits);
+    const newest = new Map(scan.tasks.map((t) => [t.taskId, { id: t.submissionId, at: t.at }] as const));
+    const scanLimited = scan.scanLimited;
     // The tasks with the newest code first, so a bounded read covers the work most recently submitted.
-    const candidates = [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+    const candidates = [...newest];
     const items: QaProjectItem[] = [];
     let looked = 0;
     for (const [taskId, sub] of candidates) {
@@ -795,9 +879,11 @@ export class QaEvidenceService {
    * Not bound: a contract or a reliance that does not exist yet (the storage has no guard for absence) and the contract versions (never rewritten).
    */
   async gateBound(by: Principal, submissionIdValue: string): Promise<{ gate: QaGate; reads: readonly QaGateRead[] }> {
-    const { sub, taskId } = await this.#submission(by, submissionIdValue);
+    const { sub, taskId, task } = await this.#submission(by, submissionIdValue);
     const submissionId = submissionIdValue;
     const reads: QaGateRead[] = [];
+    // The project's review policy (card Q02): the checks it adds to the contract's and how many independent original sources each check needs. Not bound in `reads` (a policy change counts from the next read).
+    const policy = await this.#ports.policy?.(task.projectId, taskId);
     const contract = await this.#contract(taskId);
     if (contract.revision !== undefined) reads.push({ kind: "task-contract", id: taskId, revision: contract.revision });
     const reliance = await this.#reliance(taskId, reads);
@@ -835,12 +921,29 @@ export class QaEvidenceService {
     const reasons = new Set<string>();
     if ((reliance?.links ?? []).some((l) => l.state !== "current")) reasons.add("decision_superseded");
     const newestFirst = [...usable].reverse();
-    const required = this.#required(contract.body);
+    const contractRequired = this.#required(contract.body);
+    const extra = (policy?.requiredChecks ?? []).filter((n) => !contractRequired.includes(n));
+    const required = [...contractRequired, ...extra];
     // With no required checks, every check named in any current independent record is judged (by the newest record naming it): a later record that leaves a check out does not hide an
-    // earlier failure of it.
-    const names = required.length > 0 ? required : [...new Set([...newestFirst.flatMap((e) => e.checks.map((c) => c.name)), ...carried])];
+    // earlier failure of it. The policy's checks are required either way.
+    const names = contractRequired.length > 0 ? required : [...new Set([...extra, ...newestFirst.flatMap((e) => e.checks.map((c) => c.name)), ...carried])];
+    const needed = Math.max(1, policy?.independentSources ?? 1);
+    const sourceOf = needed > 1 ? await this.#sourceGroups(usable) : undefined;
+    const shortfalls: { check: string; sources: number }[] = [];
     const checks: QaGateCheck[] = names.map((name) => {
-      for (const e of newestFirst) { const c = e.checks.find((x) => x.name === name); if (c !== undefined) return { name, result: c.result, evidenceId: e.id }; }
+      for (const e of newestFirst) {
+        const c = e.checks.find((x) => x.name === name);
+        if (c === undefined) continue;
+        // A pass counts only as many times as there are independent original sources behind it: a copy and its original, and records of one recorder, are one source. Only the passes newer than the newest
+        // record that did not pass the check count (card Q02 review): a pass that a later failure contradicted does not add a source to a newer pass.
+        if (c.result === "passed" && sourceOf !== undefined) {
+          const run: (QaEvidenceBody & { id: string })[] = [];
+          for (const x of newestFirst) { const y = x.checks.find((z) => z.name === name); if (y === undefined) continue; if (y.result !== "passed") break; run.push(x); }
+          const have = sourceOf(run);
+          if (have < needed) { shortfalls.push({ check: name, sources: have }); return { name, result: "missing" as const, evidenceId: e.id }; }
+        }
+        return { name, result: c.result, evidenceId: e.id };
+      }
       return { name, result: "missing" as const };
     });
     const count = (r: QaGateCheck["result"]): number => checks.filter((c) => c.result === r).length;
@@ -850,10 +953,11 @@ export class QaEvidenceService {
     if (counts.blocked > 0) reasons.add("check_blocked");
     if (counts.notRun > 0) reasons.add("check_not_run");
     if (counts.missing > 0) reasons.add("check_missing");
+    if (shortfalls.length > 0) reasons.add("fewer_sources");
     const decisions: QaDecisionRef[] = (reliance?.links ?? []).filter((l) => l.state === "current").map((l) => ({ id: l.decisionId, version: l.version, topic: l.topic }));
     const seen = new Set<string>();
     const bound = reads.filter((r) => { const k = `${r.kind}\u0000${r.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
-    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending }, reads: bound };
+    return { gate: { taskId, submissionId, tree: sub.tree, verdict: reasons.size === 0 && checks.length > 0 ? "passed" : "failed", reasons: [...reasons], criteriaRevision: contract.version, decisions, required, checks, counts, stale, pendingRechecks: pending, ...(needed > 1 ? { sourcesNeeded: needed, shortfalls } : {}) }, reads: bound };
   }
 }
 

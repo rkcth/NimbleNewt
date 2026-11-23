@@ -26,7 +26,7 @@ import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { RESOURCE_CONTROLS, MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { RESOURCE_CONTROLS, MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, reviewPolicyForeign, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason, LIFECYCLE_OPS, PAUSE_NOT_PLAIN, WHOLE_INSTALLATION_WORDS } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -639,7 +639,7 @@ export class ChatService {
       if (intent.kind === "status") {
         // A read: it changes nothing, so quoted material cannot make it do harm, but it still needs the owner's own words like everything else. The view that needs a project gets the one in focus.
         const request: Record<string, unknown> = { ...intent.request };
-        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs", "qa_project", "submissions_project", "defect_risks", "landing_queue", "landing_settings", "observations", "lessons", "experiments"].includes(String(request["kind"]))) {
+        if (request["projectId"] === undefined && ["changes", "delivered", "noticeboard", "agenda", "meetings", "standups", "standup_questions", "timeline", "wip_backup", "docs", "qa_project", "qa_policy", "submissions_project", "defect_risks", "landing_queue", "landing_settings", "observations", "lessons", "experiments"].includes(String(request["kind"]))) {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           request["projectId"] = currentFocus.projectId;
         }
@@ -647,7 +647,7 @@ export class ChatService {
         // agents and teams are read from the records and the one whose name stands as a whole word of the owner's message is meant - a name inside
         // a bigger word names nothing. Nothing is invented: one answer decides, several ask which, none says what is not called that; an ID the
         // owner gave is used as given, and the words are the chat's own field, never sent to the status service (which takes IDs and refuses an unknown key).
-        if (request["kind"] === "stop_cleanup") {
+        if ((request["kind"] === "stop_cleanup" || request["kind"] === "lifecycle")) {
           // An ID the owner wrote decides, and nothing here overwrites it: words beside it are dropped, as a task title beside an ID is. An ID only the interpreter
           // offered beside a name does not outweigh the owner's words: it is dropped and the name is looked up in what the owner said. The status service takes IDs only, so the words never leave the chat.
           // (The interpreter speaks the flat form only; the nested `scope` is the API's and comes as it came.)
@@ -689,9 +689,9 @@ export class ChatService {
         }
         // A task's activity, explanations, replay, hand-off, work report (card W10) or stop cleanup is asked for by the task's title (the project in focus); a title that fits more than one task asks nothing and says so.
         // A title beside an ID, or one that is not text, is dropped: the ID (or the missing task) decides. A stop-cleanup question that names a scope has no use for a title either, so the title goes.
-        if (request["kind"] === "stop_cleanup" && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
-        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "defects" || request["kind"] === "qa" || request["kind"] === "task_docs" || request["kind"] === "submissions" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
-        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "defects" || request["kind"] === "qa" || request["kind"] === "task_docs" || request["kind"] === "submissions" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || (request["kind"] === "stop_cleanup" && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
+        if ((request["kind"] === "stop_cleanup" || request["kind"] === "lifecycle") && (request["scope"] !== undefined || request["scopeKind"] !== undefined)) delete request["taskTitle"];
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "defects" || request["kind"] === "qa" || request["kind"] === "task_docs" || request["kind"] === "submissions" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || ((request["kind"] === "stop_cleanup" || request["kind"] === "lifecycle") && request["scope"] === undefined && request["scopeKind"] === undefined)) && (request["taskId"] !== undefined || typeof request["taskTitle"] !== "string")) delete request["taskTitle"];
+        if ((request["kind"] === "activity" || request["kind"] === "explanations" || request["kind"] === "replay" || request["kind"] === "thinking" || request["kind"] === "handoff" || request["kind"] === "handoff_archive" || request["kind"] === "start_size" || request["kind"] === "work_report" || request["kind"] === "defects" || request["kind"] === "qa" || request["kind"] === "task_docs" || request["kind"] === "submissions" || request["kind"] === "attempt_endings" || request["kind"] === "command_state" || ((request["kind"] === "stop_cleanup" || request["kind"] === "lifecycle") && request["scope"] === undefined && request["scopeKind"] === undefined)) && request["taskId"] === undefined && typeof request["taskTitle"] === "string") {
           if (currentFocus.projectId === undefined) { push({ i, kind: "refused", code: "invalid_command", message: "Which project do you mean?" }); continue; }
           const wanted = request["taskTitle"];
           const { exact, partial } = await this.#taskCandidates(token, currentFocus.projectId, wanted);
@@ -857,6 +857,8 @@ export class ChatService {
       if (intent.op === "responsibility.probe.set" && typeof intent.args["url"] === "string") { const bad = probeUrlProblem(intent.args["url"]); if (bad !== undefined) { push({ i, kind: "refused", code: "invalid_command", message: `That address cannot be a health address, so the probe was not set: it ${bad}.` }); continue; } }
       if (intent.op === "responsibility.probe.set" && typeof intent.args["url"] === "string" && !addressWritten(words, intent.args["url"])) { push({ i, kind: "refused", code: "unsupported_value", message: "That address is not written out in your message exactly as it would be asked, so the probe was not set. Write the whole address, for example https://web.example.com/health." }); continue; }
       // How long running work may go on before a drain cancels it must be the owner's own number, never one the model chose (card R04c).
+      // A review policy's extra check names, interval and source count are the owner's own (card Q02 review): the general words check treats `requiredChecks` as a fixed choice (the landing checks) and does not read numbers.
+      if (intent.op === "qa.review.policy.set") { const off = reviewPolicyForeign(intent.args, words); if (off !== undefined) { push({ i, kind: "refused", code: "unsupported_value", message: `What was given for ${quotedText(off, 60)} is not in your message, so the review policy was not proposed. ${off === "periodicMinutes" ? "How often should the review run (15 minutes to 30 days)?" : off === "independentSources" ? "How many independent sources should each check need (1 to 5)?" : off === "gatesCompletion" ? "Should passing independent review be required before the work of those tasks may land?" : "Which checks, in your words, should the review require?"}` }); continue; } }
       if (intent.op === "routing.drain" && !durationInWords(intent.args["drainSeconds"] as number, words)) { push({ i, kind: "refused", code: "unsupported_value", message: "How long running work may go on is not in your message, so the drain was not started; the chat will not pick a time that could cancel work early. How long may it go on?" }); continue; }
       // Accepting a platform that passed only after earlier failures is never read out of the owner's wording and never taken from the interpreter (card X09b part 2 review, redone): the approval is drawn up as a
       // proposal that shows the exact earlier failures the gate lists, and the owner's confirmation of that shown proposal is the acceptance. No wording is a gate; the binding is the shown failures themselves.
@@ -2228,6 +2230,32 @@ export class ChatService {
       if (args["reason"] === undefined) args["reason"] = "requested by the owner in chat";
       fillNotes.push(`What this would do, worked out just now: ${shown}`);
     }
+    // Pause, resume and stop by words: the owner's own words name the scope (an agent, a team, a task of the project in focus, or everything); nothing is guessed, and the API's nested `scope` is built here from what was found.
+    if (LIFECYCLE_OPS.has(intent.op)) {
+      const found = await this.#lifecycleScope(token, args, words, focus, intent.op);
+      if (!found.ok) return found;
+      delete args["scopeKind"];
+      delete args["scopeName"];
+      args["scope"] = found.scope;
+      labels[found.scope.id] = found.label;
+      extraTargets.push(found.label);
+      if (typeof args["reason"] !== "string" || args["reason"].trim() === "") args["reason"] = "requested by the owner in chat";
+      if (intent.op === "lifecycle.stop") {
+        if (args["mode"] === undefined) { args["mode"] = "stop"; fillNotes.push("You did not say whether to keep its place: this is a full stop. Say \"suspend\" instead to stop at a saved point."); }
+        if (args["mode"] !== "stop" && args["mode"] !== "suspend") return refuse("invalid_command", "mode is stop or suspend");
+        fillNotes.push(args["mode"] === "stop" ? "What a stop does: the scope is paused at once, prepared inside a deadline, and then its running work ends, including local processes, swarm children and background jobs. Assignments and goals are untouched and nothing resumes by itself; a resume lifts it." : "What a suspend does: the scope is paused at once and checkpointed; its work is called suspended only after a durable checkpoint. Assignments and goals are untouched and nothing resumes by itself.");
+      } else if (args["mode"] !== undefined) return refuse("invalid_command", "mode is an argument of lifecycle.stop only");
+      if (found.scope.kind === "installation") fillNotes.push("This reaches every agent, team and task in the whole installation.");
+      // Second review: a pause applies at once, so any doubt about which one is meant or whether it is meant now shows it first instead.
+      if (intent.op === "lifecycle.pause" && found.near !== undefined) showFirst = `your message also names ${found.near}, whose name is close to this one, so it is shown first`;
+      else if (intent.op === "lifecycle.pause" && PAUSE_NOT_PLAIN.test(words)) showFirst = "your message has a not, an if or a when in it, so the pause is shown first rather than applied";
+      // A resume lifts the scope's pause whoever set it (a stop, a suspend or a hand-off that took it over included): the proposal says whose pause it is, and nothing is proposed for a scope that is not paused.
+      if (intent.op === "lifecycle.resume") {
+        const gate = await this.#get(token, "lifecycle.status", { scope: found.scope });
+        if (gate === undefined || gate["intent"] !== "pause") return refuse("invalid_command", `${found.scope.kind === "installation" ? "the whole installation" : `${found.scope.kind} ${quotedText(found.label, 80)}`} is not paused, so there is nothing to resume`);
+        fillNotes.push(`What this lifts: the pause set${typeof gate["owner"] === "string" ? ` by ${quotedText(gate["owner"], 80)}` : ""}${typeof gate["pausedAt"] === "string" ? ` at ${quotedText(gate["pausedAt"], 40)}` : ""}${typeof gate["reason"] === "string" ? `, reason ${quotedText(gate["reason"], 160)}` : ""}${gate["takenOver"] === true ? "; a stop, a suspend or a hand-off has taken this pause over, and resuming lifts it too" : ""}. A pause on a team or the whole installation above it stays.`);
+      }
+    }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
       const named = args["toAgentName"];
@@ -2686,13 +2714,57 @@ export class ChatService {
     return all.filter((t) => (t["title"] as string).trim().toLowerCase() === wanted).map((t) => ({ id: t["id"] as string, state: t["state"] as string }));
   }
 
+  /**
+   * The scope of a pause, resume or stop named in the owner's words. Nothing is guessed: no scope asks which, an agent or team name must stand as a whole word of the message, several answers ask, none says what is not called that, and the
+   * whole installation needs the owner's own word for everything (never the bare order, which also sits in the message). A task is the one titled that in the project in focus.
+   */
+  async #lifecycleScope(token: string, args: Record<string, unknown>, words: string, focus: { projectId?: string }, op: string): Promise<{ ok: true; scope: { kind: "task" | "agent" | "team" | "installation"; id: string }; label: string; near?: string } | Extract<Resolved, { ok: false }>> {
+    const kind = args["scopeKind"];
+    const rawName = args["scopeName"];
+    if (args["scope"] !== undefined) return refuse("invalid_command", "scope is built by the chat from scopeKind and scopeName");
+    if ((kind !== undefined && typeof kind !== "string") || (rawName !== undefined && typeof rawName !== "string")) return refuse("invalid_command", "scopeKind and scopeName must be text");
+    const name = typeof rawName === "string" ? rawName.trim() : "";
+    const what = op.slice("lifecycle.".length);
+    const choices = ["an agent (say its name)", "a team (say its name)", "a task (say its title)", "everything (the whole installation)"];
+    if (kind !== undefined && kind !== "task" && kind !== "agent" && kind !== "team" && kind !== "installation") return { ok: false, kind: "ask", question: `A ${what} is for a task, an agent, a team or the whole installation, not for ${quotedText(kind, 40)}. Which did you mean?`, options: choices };
+    if (kind === "installation") {
+      if (name === "" || !WHOLE_INSTALLATION_WORDS.test(name) || !wholeWord(words, name)) return { ok: false, kind: "ask", question: `Nothing was done. Do you mean the whole installation, every agent and task? A ${what} of everything needs you to say so in your own words (for example "everything" or "the whole installation"). Otherwise, which agent, team or task?`, options: choices };
+      return { ok: true, scope: { kind: "installation", id: "installation" }, label: "the whole installation" };
+    }
+    if (name === "") return { ok: false, kind: "ask", question: `Nothing was done. What should be ${what === "stop" ? "stopped" : what === "pause" ? "paused" : "resumed"}: an agent, a team, a task or everything? Say which, in a few words.`, options: choices };
+    if (kind === "task") {
+      if (focus.projectId === undefined) return { ok: false, kind: "ask", question: "Which project is that task in? Nothing was done.", options: [] };
+      const { exact, partial } = await this.#taskCandidates(token, focus.projectId, name);
+      const candidates = exact.length > 0 ? exact : partial;
+      if (candidates.length === 0) return refuse("not_found", `no task called ${quotedText(name, 80)} in that project`);
+      if (exact.length !== 1) return { ok: false, kind: "ask", question: exact.length > 1 ? `More than one task is called ${quotedText(name, 80)}. Which one?` : `No task is called ${quotedText(name, 80)}, but ${candidates.length === 1 ? "one task fits" : "these tasks fit"}. Which one do you mean?`, options: candidates.slice(0, CHAT_LIMITS.options).map((m) => `${m.id}: ${quotedText(m.title, 80)} (${m.state})`) };
+      return { ok: true, scope: { kind: "task", id: exact[0]!.id }, label: exact[0]!.title };
+    }
+    const label = kind === undefined ? "agent or team" : kind;
+    const { items: all, complete } = await this.#scopeCandidates(token, kind === undefined ? ["agent", "team"] : [kind], true);
+    // Review: the one meant is named in the owner's message AND within the name the interpreter read (scopeName, itself checked to be the owner's words), so "pause Zed, Ann asked" never pauses Ann.
+    let hit = namesMeant(words, all).filter((c) => nameInWords(name, c.name));
+    if (hit.length > 1) { const same = hit.filter((c) => sameName(c.name, name)); if (same.length > 0) hit = same; }
+    if (hit.length === 0) {
+      const plural = kind === undefined ? "agents or teams" : `${kind}s`;
+      return refuse("not_found", !complete ? `no ${label} among the first ${String(all.length)} ${plural} is called ${quotedText(name, 80)}, and there are more. Which did you mean?` : all.length === 0 ? `no ${label} of this installation is called ${quotedText(name, 80)}, and there are no ${plural} at all` : `no ${label} of this installation is called ${quotedText(name, 80)}. Here they are: ${titleList(all.map((c) => c.name))}. Which did you mean?`);
+    }
+    if (hit.length > 1) return { ok: false, kind: "ask", question: `More than one ${label} here answers to the name in your message. Nothing was done. Which did you mean?`, options: hit.slice(0, CHAT_LIMITS.options).map((f) => `${f.id}: ${quotedText(f.name, 60)} (${f.kind})`) };
+    const chosen = hit[0]!;
+    // Second review: another agent or team the message also names, whose name holds this one or is held in it ("pause Ann, Ann Lee is fine"), or one of the other kind with the same name, leaves room for a misreading.
+    const others = kind === undefined ? all : [...all, ...(await this.#scopeCandidates(token, [kind === "agent" ? "team" : "agent"], true)).items];
+    const cn = chosen.name.normalize("NFC");
+    const near = others.find((c) => !(c.kind === chosen.kind && c.id === chosen.id) && nameInWords(words, c.name) && (nameAt(cn).test(c.name.normalize("NFC")) || nameAt(c.name.normalize("NFC")).test(cn)));
+    return { ok: true, scope: { kind: chosen.kind, id: chosen.id }, label: chosen.name, ...(near === undefined ? {} : { near: `${near.kind} ${quotedText(near.name, 60)}` }) };
+  }
+
   /** The installation's agents and teams as the owner can name them (card L02e leftover): the kind a lifecycle scope takes, the ID for that scope and the name it goes by. Retired agents are in: what the stop of one cost is a fair thing to ask afterwards. */
   /** `complete` is false when a list was longer than the pages one look reads: a name not found then may still be there, and the owner is told so. */
-  async #scopeCandidates(token: string, kinds: readonly ("agent" | "team")[]): Promise<{ items: { kind: "agent" | "team"; id: string; name: string }[]; complete: boolean }> {
+  async #scopeCandidates(token: string, kinds: readonly ("agent" | "team")[], activeOnly = false): Promise<{ items: { kind: "agent" | "team"; id: string; name: string }[]; complete: boolean }> {
     const out: { kind: "agent" | "team"; id: string; name: string }[] = [];
     let complete = true;
     for (const kind of kinds) {
-      const listed = await this.#listPages(token, kind === "agent" ? "agent.list" : "team.list", {});
+      const listed = await this.#listPages(token, kind === "agent" ? "agent.list" : "team.list", activeOnly && kind === "agent" ? { state: "active" } : {});
       if (!listed.complete) complete = false;
       for (const item of listed.items) {
         const name = String(kind === "agent" ? item["friendlyName"] ?? "" : item["name"] ?? "").trim();

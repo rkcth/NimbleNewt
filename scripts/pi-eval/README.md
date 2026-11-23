@@ -273,10 +273,14 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
 
 - `results.jsonl`: one line per run: task, size, variant, repeat, base and solution commits, the bench's own commit, route
   (provider, model, thinking), start and end time, wall time, exit code, timeout, **outcome** and the reason, the end kind,
-  the last stop reason and visible characters, turns, tool calls, tokens, nudges (0 until W04), PLAN.md progress, commits
+  the last stop reason and visible characters, turns, tool calls, tokens, nudges (W04: the continuations a variant C run was given, else 0), PLAN.md progress, commits
   ahead of the base, the diff stat, the hidden test counts, and whether a tool call named another checkout or tried to push or reach the owner's keys (contaminated; `credentialAttempts`, `guardRefusals` and `isolation` say more).
   A Pi run also carries `argClean` (card W01b, below): `{ applied, requests, requestsChanged, stringsChanged,
-  argumentsChanged, errors }`, counts only.
+  argumentsChanged, errors }`, counts only. A variant C run carries `continuation` (card W04, below): `{ max, installed,
+  nudges, lengthNudges, endedByReport, errors, logged }`, counts only (`installed: false` when the agent never loaded the
+  extension or it could not read the runner's config; `logged`: the nudges Pi's own log shows, a second count beside the
+  extension's file). A run that is not installed or whose two counts differ is not a measurement of C (it may be B
+  under C's name): `report.mjs` names it, leaves it out of the variant's rates and fails the variant's gate.
 - `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`, stdout only), Pi's stderr (`pi-stderr.log`), the
   setup, the acceptance run (`hidden-setup.log`, `hidden-tests.log`), the shipped suites (`shipped-setup.log`,
   `shipped-tests.log`), the diff stat. The record's `hidden` is the acceptance result (with `interfaceMismatch` and
@@ -375,14 +379,31 @@ the tool calls' arguments) and `isolation.test.mjs` (the real Pi against a stand
   the result (`completionRules: { sha256, chars }`). A short note in front says what differs on the Pi command line: no
   `nimblenewt__work-end` tool (end with a report that starts with the result instead) and nothing checks the checkout.
   Until W06, B was "tick and commit after each step"; results of earlier batches carry no `completionRules`.
-- **C** B (the same prompt, with the completion rules) plus the bounded continuation of W04, and **D** C plus a relaunch that reuses the stored session
-  (`PI_EVAL_SESSION_ID` makes `pi-agent.mjs` pass `--session-id`). Both are refused with "needs W04" until W04 lands.
+- **C** B (the same prompt, with the completion rules) plus the bounded continuation of W04. The worker continues a turn
+  that yields early through Pi Durable's `onYield` hook (at most 3 nudges, then the answer stands); the Pi command line has
+  no such hook, so `continuation-extension.mjs` (loaded by `pi-agent.mjs` with `-e` next to the W01b extension, only when the
+  run has a continuation config) does the same at Pi's own last boundary, `agent_before_settle`: it appends the nudge as a
+  user-role message and asks for one more request (`continue: true`). The bound and the words come from this checkout's
+  built pi-adapter through the runner (`loadContinuationConfig`: `DEFAULT_MAX_CONTINUATIONS`, `CONTINUATION_MARK`, `nudgeText`;
+  build first), written to `continuation-config.json` in the run's folder, and the run records the config's bound. No nudge
+  after an error or abort, once the bound is used, or after a final report that states its result as done, partial or blocked
+  (the Pi command line has no `work.end`; that report is its stand-in, as the worker gives none after an accepted work.end).
+  A stop at the output limit gets the worker's cut-off lead. Counts (never text) go to `continuation.json` beside the log
+  and into the record (`nudges`, `continuation`). Offline tests: `continuation.test.mjs` (the extension through a fake
+  runner), `runner.test.mjs` (a stopped-early stand-in agent continued exactly 3 times through the real extension, in the
+  record), `isolation.test.mjs` (the real Pi against a stand-in server: 4 requests, the nudge in each later one).
+  Running C against Radiance is a separate step (no run has been made): `node scripts/pi-eval/run.mjs --variants C --repeats 1`
+  (the Radiance gate and the token budget apply as for B).
+- **D** C plus a relaunch that reuses the stored session (`PI_EVAL_SESSION_ID` makes `pi-agent.mjs` pass `--session-id`).
+  The relaunch driver does not exist, so D is still refused ("needs W04 and a driver that relaunches Pi with the stored session").
 
 ## The release gates
 
 Per variant: verified finish at least **90 %** of S runs, **85 %** of M runs, **70 %** of L runs; false done (`wrong`) at
 most **5 %** of all runs; **zero** unclassified runs (every non-finish is named). Interface mismatches count as
-non-finishes only. The shipped-wording score is printed per variant and gates nothing. The report shows each rate with its
+non-finishes and toward false done. A continuation variant (C) also needs every run to have had the continuation as
+configured (W04: installed, and its counts equal to Pi's log); any other run is left out of its rates and fails its gate.
+The shipped-wording score is printed per variant and gates nothing. The report shows each rate with its
 Wilson 95 % interval and says when a rate that meets its gate still has an interval reaching below it (too few runs to be
 sure), then a PASS/FAIL line per variant and one RESULT line.
 
@@ -462,7 +483,7 @@ capture, hidden tests copied in and run, classification and the report. One run 
   commit has not been made; it would give firmer rates.
 - **A control run** (one repeat per task by Claude, `--agent scripts/pi-eval/agents/claude-agent.mjs --label
   claude-control`) is supported and its wrapper is tested against a fake CLI, but it has not been run.
-- **Variants C and D** wait for W04 (and D for a session the runner can relaunch).
+- **Variant C is built but not yet run on the real route** (no results.jsonl rows for C); **D** waits for a driver that relaunches Pi with the stored session.
 - **Spec fit is lexical.** It sees literals, regexes, property names and imports inside assertions; it does not see a
   demand built at run time (a helper that compares against a computed string), the order or count of outputs, or the
   types an acceptance file relies on beyond its imports. A literal kept in a constant outside the assertions
@@ -479,7 +500,8 @@ capture, hidden tests copied in and run, classification and the report. One run 
   the reference checkout, any directory holding a checkout, the results, or the home directory (except Pi's install),
   or the solution's short SHA. It does not see a relative walk (`cat ../c07m/...`), a path built at run time, or a
   search from `/`. Read flagged runs, and spot-check some unflagged finishes, before trusting a rate.
-- **Nudges and the W02 end kinds** come from the worker once W02/W04 exist; the bench reads the CLI log only, so
-  `nudges` is 0 and `endKind` is the bench's own reading.
+- **Nudges and the W02 end kinds.** `endKind` is the bench's own reading of the CLI log. `nudges` is 0 for A and B; for C it
+  is what the bench's extension gave (a Pi-command-line stand-in of the worker's hook, not the worker's own code path:
+  the worker's `turn.continue` refusals, restarts and lease checks have no counterpart here).
 - **Windows.** The runner and classifier are plain Node (no shell, `node:path`, `child.kill` where there are no process
   groups), but it has only been run on Linux, and the default Pi location is `~/.local/pi-cli`.

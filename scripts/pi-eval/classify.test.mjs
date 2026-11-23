@@ -412,3 +412,15 @@ test("a model reply without input and output token counts is counted as missing 
   assert.equal(some.usageMissing, 2, "no usage, and usage without output");
   assert.equal(summarizeLogText("").usageMissing, 0);
 });
+
+test("W04: only the bench continuation's own custom message entries in Pi's log count as logged nudges", () => {
+  const lines = [
+    { type: "entry_appended", entry: { type: "custom_message", customType: "nimblenewt-continuation", content: "[m] n" } },
+    { type: "entry_appended", entry: { type: "custom_message", customType: "another-extension", content: "x" } },
+    { type: "entry_appended", entry: { type: "custom", customType: "nimblenewt-continuation" } },
+    { type: "entry_appended", entry: null },
+    { type: "entry_appended" },
+    { type: "entry_appended", entry: { type: "custom_message", customType: "nimblenewt-continuation", content: "[m] n" } },
+  ];
+  assert.equal(summarizeLogText(lines.map((l) => JSON.stringify(l)).join("\n")).continuationEntries, 2);
+});
