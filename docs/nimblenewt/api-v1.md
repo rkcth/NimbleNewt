@@ -2836,7 +2836,7 @@ Result: `{ item }`: `verdict` (`passed` or `failed`), `reasons`, `tree`, `criter
 
 #### `qa.review.policy.get`
 
-The project's review policy (card Q02): which tasks need independent QA (`scope`: work classes `P`/`PC` and task IDs; empty means all), when a review starts by itself (`triggers`: on each new code submission, every `periodicMinutes`, when an incident is opened in the project), the check names it adds to the task contract's (`requiredChecks`), whether passing independent review gates completion (`gatesCompletion`: a landing of a task in scope also needs the `qa` and `review` checks), and how many independent original sources each check needs (`independentSources`). The owner, or an agent that may read the project's tasks. A project with none has everything off.
+The project's review policy (card Q02): which tasks need independent QA (`scope`: work classes `P`/`PC` and task IDs; empty means all), when a review starts by itself (`triggers`: on each new code submission, every `periodicMinutes`, when an incident is opened in the project), the check names it adds to the task contract's (`requiredChecks`), whether passing independent review gates completion (`gatesCompletion`: a landing of a task in scope also needs the `qa` and `review` checks), how many independent original sources each check needs (`independentSources`), and whether a reviewer's verdict must cite the criteria version (`requireVerdictCitations`). The owner, or an agent that may read the project's tasks. A project with none has everything off.
 
 Arguments:
 
@@ -8130,7 +8130,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.review.policy.set`
 
-The owner sets the project's review policy (owner only; fields left out stay as they were). `workClasses` (`P`, `PC`) and `taskIds` say which tasks are covered (empty lists: all); `onSubmission` starts a review of each new code submission made after it was switched on, `periodicMinutes` (15 to 43200, null to stop) reviews the newest code of every unfinished task in scope each period, `onIncident` starts a review of the newest code of tasks in scope when an incident is opened in the project; `requiredChecks` are check names the QA gate requires besides the task contract's; `gatesCompletion` makes a landing of a task in scope need the `qa` and `review` checks whatever the landing settings say, and asks for a review of the newest code of each unfinished task in scope that has no independent evidence yet (the owner is told when nobody can review it); a request whose task left the scope, or whose trigger was switched off while review does not gate completion, is closed; `independentSources` (1 to 5) is how many independent original sources (a copy and its original are one; one agent is one) each required check needs. A scheduled review goes to a reviewer agent that did not work on the task and never pauses, messages or takes work from the agents working on it. The chat shows it first.
+The owner sets the project's review policy (owner only; fields left out stay as they were). `workClasses` (`P`, `PC`) and `taskIds` say which tasks are covered (empty lists: all); `onSubmission` starts a review of each new code submission made after it was switched on, `periodicMinutes` (15 to 43200, null to stop) reviews the newest code of every unfinished task in scope each period, `onIncident` starts a review of the newest code of tasks in scope when an incident is opened in the project; `requiredChecks` are check names the QA gate requires besides the task contract's; `gatesCompletion` makes a landing of a task in scope need the `qa` and `review` checks whatever the landing settings say, and asks for a review of the newest code of each unfinished task in scope that has no independent evidence yet (the owner is told when nobody can review it); a request whose task left the scope, or whose trigger was switched off while review does not gate completion, is closed; `independentSources` (1 to 5) is how many independent original sources (a copy and its original are one; one agent is one) each required check needs; `requireVerdictCitations` makes every review of a task in scope cite the task contract version it judged against (a rejection then also names the unmet owner requirement). A scheduled review goes to a reviewer agent that did not work on the task and never pauses, messages or takes work from the agents working on it. The chat shows it first.
 
 Arguments:
 
@@ -8144,6 +8144,7 @@ Arguments:
 - `requiredChecks` (optional): check names (at most 20)
 - `gatesCompletion` (optional): true or false
 - `independentSources` (optional): 1 to 5
+- `requireVerdictCitations` (optional): true or false
 
 Result: `{ revision, replayed }`.
 

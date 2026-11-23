@@ -70,10 +70,10 @@ for (const backend of backends) {
     assert.equal(await svc.approvalOf("../x"), undefined);
     // A one-agent project: no review is required, and that counts as approved, on the record as such.
     const solo = c.open({ reviewersAvailableIn: async () => [] });
-    const alone = await solo.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    const alone = await solo.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: T2 });
     assert.deepEqual([(await solo.approvalOf(alone.id))?.approved, (await solo.approvalOf(alone.id))?.approvedBy], [true, "review_disabled_single_agent"]);
     // Where review is required (or the requirement was not judged) and nobody reviewed, it is not approved.
-    const plain = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
+    const plain = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: T2 });
     assert.equal((await c.svc.approvalOf(plain.id))?.approved, false);
     // At most 50 reviews of one submission are kept; the 51st is refused and the verdict list is unchanged.
     for (let i = 0; i < 47; i++) await svc.record(i % 2 === 0 ? rev : ray, { commandId: cid("many"), taskId: c.task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve" });

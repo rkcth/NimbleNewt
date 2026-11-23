@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { assignmentIdOf } from "../domain/assignment-model.js";
@@ -79,6 +79,8 @@ export interface SubmissionApproval {
   /** When the submission was recorded. */
   readonly submittedAt: string;
   readonly approved: boolean;
+  /** Set when the review it answers with is an earlier submission's of the same task and the same patch ID (card Q02): the submission the verdict was given on. */
+  readonly carriedFrom?: string;
   /** What the newest review of it says, when it has one (card P09 tells a review that asked for changes apart from one that has not been given). */
   readonly newest?: "approve" | "changes" | "reject";
   /** What the newest review cites (the criteria version, the decisions and, for a rejection, the unmet requirement), when it cites anything (card Q02, sixth slice). */
@@ -98,6 +100,12 @@ interface VerdictsBody { readonly reviews: readonly { readonly id: string; reado
 /** What a review cited, as kept with the subject's verdict list and answered by `approvalOf` (card Q02, sixth slice). */
 export interface ReviewCited { readonly criteriaRevision: number; readonly decisions: readonly { readonly id: string; readonly version: number }[]; readonly unmet?: string }
 const VERDICTS = "submission-verdicts";
+/** The code submissions of one task that name one patch ID, oldest first (card Q02: what carries over to a later submission of an unchanged patch). */
+interface LineageBody { readonly taskId: string; readonly patchId: string; readonly ids: readonly string[] }
+const LINEAGE = "patch-lineage";
+const MAX_LINEAGE = 20;
+const PATCH = /^[0-9a-f]{40,64}$/;
+const lineageId = (taskId: string, patchId: string): string => createHash("sha256").update(`${taskId}\0${patchId}`).digest("hex").slice(0, 32);
 /** The director sign-offs recorded about one submission, oldest first (record kind `submission-signoffs`, keyed by the subject's ID; written in the same write as the sign-off, like the reviews). */
 interface SignoffsBody { readonly signoffs: readonly { readonly id: string; readonly decision: "approve" | "decline"; readonly by: string; readonly at: string }[] }
 const SIGNOFFS = "submission-signoffs";
@@ -208,6 +216,8 @@ export interface SubmissionOptions extends RunnerOptions {
    * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
    */
   readonly refreshRounds?: (taskId: string) => Promise<number>;
+  /** Whether the project's review policy requires a review of this task to cite the criteria version (card Q02, `QaReviewService.requiresCitation`). Absent: citing stays optional. */
+  readonly citationRequired?: (projectId: string, taskId: string) => Promise<boolean>;
   /** Told once a submission is recorded (card U09b), so the task's activity shows it and its replay can link to the diff or the review comment. Best effort and repeatable (keyed by the submission); a failure changes nothing. */
   readonly onRecorded?: (event: { readonly submissionId: string; readonly taskId: string; readonly kind: SubmissionKind; readonly role: string; readonly submittedBy: string; readonly verdict?: string; readonly decision?: string }) => Promise<void>;
 }
@@ -296,6 +306,7 @@ export class SubmissionService {
   readonly #waitingTasks: number;
   readonly #waitingScan: { readonly pageSize: number; readonly reads: number };
   readonly #codeKept: number;
+  readonly #citationRequired: SubmissionOptions["citationRequired"];
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
@@ -305,6 +316,7 @@ export class SubmissionService {
     this.#waitingTasks = options.waitingTasks ?? WAITING_TASKS;
     this.#waitingScan = options.waitingScan ?? WAITING_SCAN;
     this.#codeKept = options.codeIndexKept ?? CODE_INDEX_KEPT;
+    this.#citationRequired = options.citationRequired;
   }
 
   /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
@@ -421,6 +433,8 @@ export class SubmissionService {
         }
         // A review that cites is read against the task as it is now, and every approval against the decisions the task relies on (a replay above never gets here, so it keeps what the first record read).
         let citeChecks: Change[] = [];
+        // Card Q02: a project whose review policy requires citations refuses a review that cites nothing (the verdict is then judged against the criteria in force; a rejection also names the unmet requirement).
+        if (kind === "review" && asked.criteriaRevision === undefined && this.#citationRequired !== undefined && await this.#citationRequired(task.projectId, taskId)) bad("criteriaRevision", "this project's review policy requires a verdict to cite the task contract version it judged against (criteriaRevision, 0 when the task has none; a rejection also names the unmet owner requirement)");
         if (kind === "review" && asked.criteriaRevision !== undefined) {
           const read = await readReviewCite(this.#runner, { projectId: task.projectId, taskId }, { criteriaRevision: asked.criteriaRevision, decisions: asked.decisions ?? [] });
           citeChecks = [...read.changes];
@@ -431,7 +445,7 @@ export class SubmissionService {
           for (const c of await readApprovalReliance(this.#runner, taskId, named)) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c);
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -527,6 +541,41 @@ export class SubmissionService {
     const cited: ReviewCited | undefined = body.criteriaRevision === undefined ? undefined : { criteriaRevision: body.criteriaRevision, decisions: (body.decisions ?? []).map((d) => ({ id: d, version: body.decisionVersions?.[d] ?? 0 })), ...(body.unmet === undefined ? {} : { unmet: body.unmet }) };
     const next: VerdictsBody = { reviews: [...list, { id, verdict: body.verdict, by: body.submittedBy, at: body.submittedAt, ...(cited === undefined ? {} : { cited }) }] };
     return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
+  }
+
+  /**
+   * Code with one patch ID (card Q02, "a verdict carries over only by unchanged patch-id"): each code submission is added, in the same write, to the list of its task's submissions with the same patch ID,
+   * so a later submission of the same patch (a rebase onto a new base) can be recognised, and a changed patch never can. Only IDs are kept (at most `MAX_LINEAGE`, the oldest drop off); data written before this
+   * has no list, so nothing carries over from it (fail closed).
+   */
+  async #lineageChange(id: string, body: SubmissionBody): Promise<Change[]> {
+    if (body.kind !== "code" || body.patchId === undefined || !PATCH.test(body.patchId)) return [];
+    const lineage = lineageId(body.taskId, body.patchId);
+    const current = await this.#runner.get(LINEAGE, lineage);
+    const ids = ((current?.body as unknown as LineageBody | undefined)?.ids ?? []);
+    if (ids.includes(id)) return [];
+    const next: LineageBody = { taskId: body.taskId, patchId: body.patchId, ids: [...ids, id].slice(-MAX_LINEAGE) };
+    const ref = { kind: LINEAGE, id: lineage };
+    return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
+  }
+
+  /**
+   * The earlier code submissions of the same task whose patch ID is the same as this one's (a rebase keeps the patch ID; any change to the patch changes it), newest first. The controller's own question (the QA gate
+   * and `approvalOf`); takes no caller. A submission without a patch ID, or none recorded in the lineage, has none.
+   */
+  async carriedFrom(submissionId: string): Promise<readonly string[]> {
+    const found = (await this.#runner.get("submission", submissionId))?.body as unknown as SubmissionBody | undefined;
+    if (found === undefined || found.kind !== "code" || found.patchId === undefined || !PATCH.test(found.patchId)) return [];
+    const ids = ((await this.#runner.get(LINEAGE, lineageId(found.taskId, found.patchId)))?.body as unknown as LineageBody | undefined)?.ids ?? [];
+    const out: string[] = [];
+    for (const other of [...ids].reverse()) {
+      if (other === submissionId) continue;
+      const b = (await this.#runner.get("submission", other))?.body as unknown as SubmissionBody | undefined;
+      // Each one is read again: the same task, a code submission and the same patch ID, recorded before this one (a submission never inherits from a later one).
+      if (b === undefined || b.kind !== "code" || b.taskId !== found.taskId || b.patchId !== found.patchId || b.submittedAt > found.submittedAt) continue;
+      out.push(other);
+    }
+    return out;
   }
 
   /** A document submission is added to its project's index in the same write (card Q03b); the oldest entries beyond `DOC_INDEX_KEPT` drop off. */
@@ -698,11 +747,19 @@ export class SubmissionService {
     if (typeof submissionId !== "string" || !/^sbm-[a-z2-7]{20}$/.test(submissionId)) return undefined;
     const found = (await this.#runner.get("submission", submissionId))?.body as unknown as SubmissionBody | undefined;
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
-    const reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
+    let reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
+    // Card Q02 (amended 2026-10-28): with no review of its own, the newest verdict on an earlier submission of the same task and the SAME patch ID carries over (a rebase keeps the patch ID); a changed patch never does.
+    let carriedFrom: string | undefined;
+    if (reviews.length === 0) {
+      for (const other of await this.carriedFrom(submissionId)) {
+        const list = ((await this.#runner.get(VERDICTS, other))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
+        if (list.length > 0) { reviews = list; carriedFrom = other; break; }
+      }
+    }
     const newest = reviews[reviews.length - 1];
     const signoffs = ((await this.#runner.get(SIGNOFFS, submissionId))?.body as unknown as SignoffsBody | undefined)?.signoffs ?? [];
     const lastSignoff = signoffs[signoffs.length - 1];
-    const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
+    const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }) } : { ...base, approved: false, newest: newest.verdict, ...(newest.cited === undefined ? {} : { cited: newest.cited }), reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };

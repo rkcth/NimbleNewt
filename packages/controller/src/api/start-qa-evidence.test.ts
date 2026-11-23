@@ -41,7 +41,7 @@ async function world(name: string, extra: object = {}) {
   await s.assignments.assignTask({ commandId: "as1", actor: rob.id, taskId: task, owner: { kind: "agent", id: ann.id } } as never);
   await s.assignments.admitAttempt({ commandId: "adm1", actor: rob.id, taskId: task, expectedRevision: (await s.assignments.getAssignment(task))!.revision, generation: 1, owner: { kind: "agent", id: ann.id }, harness: "pi" } as never);
   const code = async (t: string, cid: string): Promise<string> => {
-    const r = await call(ann.token, "submission.record", { taskId: task, kind: "code", role: "author", base, tree: t, patchId: patch }, cid);
+    const r = await call(ann.token, "submission.record", { taskId: task, kind: "code", role: "author", base, tree: t, patchId: t }, cid);
     assert.equal(r.ok, true, JSON.stringify(r));
     return r.result.id as string;
   };
