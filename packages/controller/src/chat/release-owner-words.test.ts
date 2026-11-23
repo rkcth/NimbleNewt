@@ -157,7 +157,8 @@ for (const backend of backends) {
         const shown = (lateShown2[0]!.preview ?? []).join(" ");
         assert.match(shown, /linux x64 passed only after 1 earlier failure/, `the preview names the flaky platform: ${shown.slice(0, 400)}`);
         assert.match(shown, new RegExp(sick), "and it names the attempt that failed");
-        const lateConfirm = await turn("m23", "confirm that approval", [{ kind: "apply_proposal", proposalId: lateShown2[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
+        // the refused one is still open, with the same first line: the owner names this one by its ID
+        const lateConfirm = await turn("m23", `confirm that approval ${lateShown2[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: lateShown2[0]!.proposalId, evidence: `confirm that approval ${lateShown2[0]!.proposalId}`, basis: "owner" }]);
         assert.equal(lateConfirm[0]!.status, "applied", `the approval that showed the gate as it stands goes through: ${JSON.stringify(lateConfirm[0])}`);
         assert.equal((await gate(late)).approved, true);
       }
