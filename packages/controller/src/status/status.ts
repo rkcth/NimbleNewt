@@ -2759,7 +2759,7 @@ export class StatusService {
       const a = await this.#deps.submissions.approvalOf(c.id);
       let review: string;
       if (a === undefined) review = "unknown";
-      else if (a.approved) review = a.approvedBy === "review_disabled_single_agent" ? "not required (no other agent of the project could review it)" : `approved by ${shown(a.approvedBy ?? "?", 80)}`;
+      else if (a.approved) review = a.approvedBy === "review_disabled_single_agent" ? "not required (no other agent of the project could review it)" : `approved by ${shown(a.approvedBy ?? "?", 80)}${a.carriedFrom === undefined ? "" : ` on ${a.carriedFrom}, carried over by the same patch ID (the landing checks that both are really the same patch; it is not committed without a review of its own)`}`;
       else if (a.newest !== undefined) review = `the newest review says ${a.newest}; it waits for a new submission from its author`;
       else review = "none yet; it waits for a reviewer";
       // A verdict that cites what it judged against (card Q02, sixth slice) says so; one that cites nothing reads as before.

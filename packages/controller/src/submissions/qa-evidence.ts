@@ -902,6 +902,8 @@ export class QaEvidenceService {
       const found = await this.#runner.get("qa-evidence", id);
       const e = found?.body as unknown as QaEvidenceBody | undefined;
       if (found === undefined || e === undefined || (e.submissionId !== submissionId && !carriedSubs.has(e.submissionId)) || e.source !== "independent") continue;
+      // Evidence carried from an earlier copy that this submission's own submitter recorded is a self-check of this submission (card Q02 review): it never counts here.
+      if (e.submissionId !== submissionId && e.recordedBy === sub.submittedBy) continue;
       reads.push({ kind: "qa-evidence", id, revision: found.revision });
       const own = e.submissionId === submissionId;
       if (e.state !== "current") { if (own) stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }

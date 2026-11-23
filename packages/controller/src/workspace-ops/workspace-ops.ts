@@ -185,7 +185,7 @@ export interface WorkspaceDeps {
    * Whether a code submission is approved (card H12o, `SubmissionService.approvalOf`). Needed for a `release` that names `submissionId`; without it such a release is `unavailable`. Asked when the request is made and again
    * right before the host is asked (a review may say `changes` while the task is made quiet).
    */
-  readonly approvalOf?: (submissionId: string) => Promise<{ readonly taskId: string; readonly base: string; readonly tree: string; readonly approved: boolean; readonly approvedBy?: string; readonly reason?: string; readonly submittedBy?: string } | undefined>;
+  readonly approvalOf?: (submissionId: string) => Promise<{ readonly taskId: string; readonly base: string; readonly tree: string; readonly approved: boolean; readonly approvedBy?: string; readonly reason?: string; readonly submittedBy?: string; readonly carriedFrom?: string } | undefined>;
   /**
    * The landing queue (card P10, `LandingQueueOps`). When given, a `landing` lands only the oldest approved submission of the landing branch's queue (`check` answers it, or `undefined` for the owner's landing of a task
    * with nothing queued while the queue is empty), asked when the request is made and again right before the host is asked; the host is told the submission's base and tree, and a landing the host confirms as exactly
@@ -435,6 +435,9 @@ export class WorkspaceOpService {
     if (!a.approved || a.approvedBy === undefined) throw new DomainError("review_invalid", `submission ${value} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); it is committed only once a reviewer approves it`, { field: "submissionId" });
     // The submission service refuses a review of one's own submission when it is recorded (card Q01b); an approval that still names the author is not an approval (card H12o, permit slice: it would open the review gate).
     if (a.submittedBy !== undefined && a.approvedBy === a.submittedBy) throw new DomainError("review_invalid", `submission ${value} is approved only by its own author; it is committed only once another reviewer approves it`, { field: "submissionId" });
+    // An approval carried over from an earlier submission of the same claimed patch (card Q02) is checked only by the landing gate, where the host computes both patches; a release computes none, so it is not a
+    // review-gate permit for this submission's tree.
+    if (a.carriedFrom !== undefined) throw new DomainError("review_invalid", `submission ${value} has no review of its own (its approval was carried over from ${String(a.carriedFrom).slice(0, 40)}); it is committed here only once a reviewer approves it, or it lands through the landing checks`, { field: "submissionId" });
     if (!OID.test(a.base) || !OID.test(a.tree)) throw new DomainError("invalid_command", `submission ${value} does not name a base commit and a tree`, { field: "submissionId" });
     return { id: value, base: a.base, tree: a.tree, approvedBy: a.approvedBy.slice(0, 200) };
   }

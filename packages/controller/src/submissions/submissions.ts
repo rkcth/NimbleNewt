@@ -564,16 +564,28 @@ export class SubmissionService {
    * and `approvalOf`); takes no caller. A submission without a patch ID, or none recorded in the lineage, has none.
    */
   async carriedFrom(submissionId: string): Promise<readonly string[]> {
+    return (await this.carriedSources(submissionId)).map((s) => s.submissionId);
+  }
+
+  /**
+   * `carriedFrom` with each earlier submission's base and tree (card Q02 review): the landing gate has the host compute the real patch ID of each, since a submission's `patchId` is only its submitter's word.
+   * Only entries listed BEFORE this submission in the lineage count (the order the writes were made in, so two submissions recorded in the same millisecond never inherit from each other); a submission no longer in
+   * the lineage (dropped as the oldest) has none.
+   */
+  async carriedSources(submissionId: string): Promise<readonly { readonly submissionId: string; readonly base: string; readonly tree: string; readonly submittedBy: string }[]> {
+    if (typeof submissionId !== "string" || !/^sbm-[a-z2-7]{20}$/.test(submissionId)) return [];
     const found = (await this.#runner.get("submission", submissionId))?.body as unknown as SubmissionBody | undefined;
     if (found === undefined || found.kind !== "code" || found.patchId === undefined || !PATCH.test(found.patchId)) return [];
     const ids = ((await this.#runner.get(LINEAGE, lineageId(found.taskId, found.patchId)))?.body as unknown as LineageBody | undefined)?.ids ?? [];
-    const out: string[] = [];
-    for (const other of [...ids].reverse()) {
+    const at = ids.indexOf(submissionId);
+    if (at <= 0) return [];
+    const out: { submissionId: string; base: string; tree: string; submittedBy: string }[] = [];
+    for (const other of ids.slice(0, at).reverse()) {
       if (other === submissionId) continue;
       const b = (await this.#runner.get("submission", other))?.body as unknown as SubmissionBody | undefined;
       // Each one is read again: the same task, a code submission and the same patch ID, recorded before this one (a submission never inherits from a later one).
-      if (b === undefined || b.kind !== "code" || b.taskId !== found.taskId || b.patchId !== found.patchId || b.submittedAt > found.submittedAt) continue;
-      out.push(other);
+      if (b === undefined || b.kind !== "code" || b.taskId !== found.taskId || b.patchId !== found.patchId || b.submittedAt > found.submittedAt || b.base === undefined || b.tree === undefined) continue;
+      out.push({ submissionId: other, base: b.base, tree: b.tree, submittedBy: b.submittedBy });
     }
     return out;
   }
@@ -749,17 +761,24 @@ export class SubmissionService {
     if (found === undefined || found.kind !== "code" || found.base === undefined || found.tree === undefined) return undefined;
     let reviews = ((await this.#runner.get(VERDICTS, submissionId))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
     // Card Q02 (amended 2026-10-28): with no review of its own, the newest verdict on an earlier submission of the same task and the SAME patch ID carries over (a rebase keeps the patch ID); a changed patch never does.
+    // The verdict that carries is the NEWEST one given on any earlier submission of the same patch (card Q02 review): a later rejection of the same patch on an older submission is not hidden by an earlier approval
+    // on a nearer one. An approval given by this submission's own submitter is not an approval of this submission (the author cannot approve its own work, whoever wrote the earlier copy).
     let carriedFrom: string | undefined;
+    let ownCarried = false;
     if (reviews.length === 0) {
+      let best: { at: string; list: VerdictsBody["reviews"]; from: string } | undefined;
       for (const other of await this.carriedFrom(submissionId)) {
         const list = ((await this.#runner.get(VERDICTS, other))?.body as unknown as VerdictsBody | undefined)?.reviews ?? [];
-        if (list.length > 0) { reviews = list; carriedFrom = other; break; }
+        const last = list[list.length - 1];
+        if (last !== undefined && (best === undefined || last.at > best.at)) best = { at: last.at, list, from: other };
       }
+      if (best !== undefined) { reviews = best.list; carriedFrom = best.from; ownCarried = best.list[best.list.length - 1]!.by === found.submittedBy; }
     }
     const newest = reviews[reviews.length - 1];
     const signoffs = ((await this.#runner.get(SIGNOFFS, submissionId))?.body as unknown as SignoffsBody | undefined)?.signoffs ?? [];
     const lastSignoff = signoffs[signoffs.length - 1];
     const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
+    if (newest !== undefined && ownCarried && newest.verdict === "approve") return { ...base, approved: false, reason: `the approval that would carry over from ${carriedFrom} was given by this submission's own submitter; another reviewer has to approve it` };
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }) } : { ...base, approved: false, newest: newest.verdict, ...(newest.cited === undefined ? {} : { cited: newest.cited }), reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };

@@ -189,4 +189,56 @@ for (const backend of backends) {
       assert.deepEqual(await submissions.carriedFrom("sbm-" + "a".repeat(20)), []);
     } finally { await t.w.close(); }
   });
+
+  test(`${backend.name}: a carried verdict is the newest on the patch, never the later submitter's own approval or evidence, and the lineage order decides what is earlier (card Q02 review)`, async () => {
+    const t = await world(backend.open);
+    try {
+      const { owner, agent, submissions, qa } = t;
+      const ann = await agent("ann", ["author"]), rev = await agent("rev", ["reviewer"]), ray = await agent("ray", ["reviewer"]), rex = await agent("rex", ["author", "reviewer", "qa"]), qaAgent = await agent("qa", ["qa"]);
+      // A later rejection of the same patch on an OLDER submission is not hidden by an earlier approval on a nearer one: the newest verdict on the patch carries.
+      const taskA = await t.task();
+      const a1 = await t.code(ann, taskA, BASE, P1, "1");
+      const a2 = await t.code(ann, taskA, BASE2, P1, "2");
+      await t.rv(rev, taskA, a2, "approve");
+      await t.rv(rex, taskA, a1, "reject");
+      const a3 = await t.code(ann, taskA, BASE, P1, "3");
+      const got = await submissions.approvalOf(a3);
+      assert.deepEqual([got?.approved, got?.newest, got?.carriedFrom], [false, "reject", a1]);
+      await t.rv(ray, taskA, a2, "approve");
+      assert.deepEqual([(await submissions.approvalOf(a3))?.approved, (await submissions.approvalOf(a3))?.carriedFrom], [true, a2], "a newer approval decides again");
+      // The reviewer who approved the earlier copy submits the same patch itself: that approval is not an approval of its own submission, and evidence it recorded is a self-check there.
+      const taskB = await t.task();
+      const b1 = await t.code(ann, taskB, BASE, P1, "4");
+      await t.rv(rex, taskB, b1, "approve");
+      await t.ev(rex, b1);
+      assert.equal((await qa.gate(owner, b1)).verdict, "passed");
+      const b2 = await t.code(rex, taskB, BASE2, P1, "5");
+      const mine = await submissions.approvalOf(b2);
+      assert.equal(mine?.approved, false);
+      assert.match(mine?.reason ?? "", /own submitter/);
+      const g = await qa.gate(owner, b2);
+      assert.deepEqual([g.verdict, g.carriedFrom], ["failed", undefined]);
+      // Another reviewer's approval and another agent's evidence on the earlier copy do carry to it.
+      await t.rv(rev, taskB, b1, "approve");
+      await t.ev(qaAgent, b1);
+      assert.deepEqual([(await submissions.approvalOf(b2))?.approved, (await submissions.approvalOf(b2))?.approvedBy], [true, rev.id]);
+      assert.deepEqual((await qa.gate(owner, b2)).carriedFrom, [b1]);
+      // Two submissions recorded in the same millisecond: the one written first is the earlier one; they never inherit from each other both ways.
+      const taskC = await t.task();
+      const c1 = (await submissions.record(ann, { commandId: cid("s"), taskId: taskC, kind: "code", role: "author", base: BASE, tree: tree("6"), patchId: P2 })).id;
+      const c2 = (await submissions.record(ann, { commandId: cid("s"), taskId: taskC, kind: "code", role: "author", base: BASE2, tree: tree("7"), patchId: P2 })).id;
+      assert.deepEqual([await submissions.carriedFrom(c2), await submissions.carriedFrom(c1)], [[c1], []]);
+      // Nothing crosses tasks: the same patch ID on another task has its own lineage.
+      const taskD = await t.task();
+      const d1 = await t.code(ann, taskD, BASE2, P1, "8");
+      assert.deepEqual(await submissions.carriedFrom(d1), []);
+      assert.equal((await submissions.approvalOf(d1))?.approved, false);
+      // At most 20 submissions are kept per task and patch: the oldest drop off and have nothing to inherit any more; the newest inherits from the 19 before it.
+      const taskE = await t.task();
+      const ids: string[] = [];
+      for (let i = 0; i < 22; i++) { t.advance(1000); ids.push((await submissions.record(ann, { commandId: cid("s"), taskId: taskE, kind: "code", role: "author", base: BASE, tree: i.toString(16).padStart(2, "0").repeat(20), patchId: P2 })).id); }
+      assert.equal((await submissions.carriedFrom(ids[21]!)).length, 19);
+      assert.deepEqual(await submissions.carriedFrom(ids[1]!), [], "a submission no longer in the lineage has none");
+    } finally { await t.w.close(); }
+  });
 }

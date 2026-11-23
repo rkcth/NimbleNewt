@@ -24,6 +24,8 @@ export interface LandingCheckCall {
   readonly maxOutputBytes: number;
   /** The reviewed code submission's base commit and tree: their stable patch ID is computed here from this checkout's own objects (`reviewedPatchId`), so the controller does not rely on the patch ID the submitter named. */
   readonly reviewed?: { readonly base: string; readonly tree: string };
+  /** Earlier submissions that claim the same patch (controller card Q02, carry-over): the patch ID of each base..tree is computed here too (`carriedPatchIds`, in order), at most `CARRIED_MAX`. */
+  readonly carried?: readonly { readonly base: string; readonly tree: string }[];
   /** Aborted when the controller stops waiting for the answer: the running check's whole process tree is killed (`SandboxRun.kill`) and no further check is started; each is then `not-run`. */
   readonly signal?: AbortSignal;
 }
@@ -40,7 +42,11 @@ export interface LandingCheckReport {
   /** When `reviewed` was asked: the stable patch ID of its base..tree, or why it could not be computed. */
   readonly reviewedPatchId?: string;
   readonly reviewedProblem?: string;
+  /** When `carried` was asked: the stable patch ID of each one's base..tree, in the order asked (`null`: it could not be computed or holds no change). */
+  readonly carriedPatchIds?: readonly (string | null)[];
 }
+/** At most this many earlier submissions' patch IDs are computed for one landing. */
+export const CARRIED_MAX = 20;
 export interface LandingChecksOptions {
   readonly git: GitBridge;
   /** Where the task's checkout is on this host (`LocalWorkspaces.locate`). */
@@ -84,8 +90,16 @@ export function landingChecks(options: LandingChecksOptions): (call: LandingChec
         reviewed = id === undefined ? { reviewedProblem: "the reviewed base and tree hold no change" } : { reviewedPatchId: id };
       } catch (error) { reviewed = { reviewedProblem: `the reviewed change could not be read: ${reason(error)}` }; }
     }
+    let carried: { carriedPatchIds: (string | null)[] } | Record<string, never> = {};
+    if (Array.isArray(call.carried) && call.carried.length > 0) {
+      const ids: (string | null)[] = [];
+      for (const c of call.carried.slice(0, CARRIED_MAX)) {
+        try { ids.push((await options.git.patchId({ gitDir: where.gitDir, base: String(c?.base), to: String(c?.tree) })) ?? null); } catch { ids.push(null); }
+      }
+      carried = { carriedPatchIds: ids };
+    }
     for (const check of asked) ran.push(stopped(call.signal) ? { name: String(check?.name ?? ""), state: "not-run", reason: STOPPED } : await runOne(options, where, change!.tree, check, call.maxOutputBytes, call.signal));
-    return { checkout: true, change, checks: ran, ...reviewed };
+    return { checkout: true, change, checks: ran, ...reviewed, ...carried };
   };
 }
 

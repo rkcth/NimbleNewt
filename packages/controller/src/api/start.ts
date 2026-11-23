@@ -985,6 +985,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       requiredChecks: async (projectId, taskId) => { const base = (await integration.effective(projectId)).requiredChecks; const extra = qaReview === undefined ? [] : await qaReview.landingChecks(projectId, taskId); return withPolicyChecks(base, extra); },
       tests: (taskId, authors) => contracts.landingTests(taskId, authors),
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      // Card Q02 (review): the earlier submissions of the same claimed patch, so the host computes the real patch of each before a carried verdict or QA evidence counts.
+      samePatch: (submissionId) => submissions.carriedSources(submissionId),
       // Card P09: the `qa` check reads the submission's QA gate (independent evidence, as the owner would).
       qaGate: async (submissionId) => landingQaGate(qaEvidence)(submissionId),
       // Card P09 (fourth slice): the `docs` check reads the documents describing the task that are not yet verified against the submission's code (read only).
