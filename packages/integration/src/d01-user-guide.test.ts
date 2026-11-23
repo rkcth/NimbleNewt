@@ -490,6 +490,51 @@ test("every status view the guide's finished-work section lists is a real status
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+// The toolbox maintainers' view of the guide (card T08, eighth slice): the three sentences are asked through the real launcher and chat, a stand-in plays the model and sees only the owner's words of the message (a tool
+// name and a page offset can only come from them), and what the guide says about the answer is true of it.
+test("the guide's toolbox maintainer sentences are answered by the chat with the view's own text, a tool and a page come only from the owner's words, and what the section says about the view is true (card T08)", async () => {
+  const whole = guide();
+  const rows = blocksAfter(whole, "toolbox-maintainers")[0]!.split("\n").map((x) => x.trim()).filter((x) => x.length > 0).map((x) => { const m = /^toolbox_maintainers\s+"(.+)"$/.exec(x); assert.ok(m !== null, x); return m[1]!; });
+  assert.deepEqual(rows, ["Who maintains the toolbox?", "Who can approve the proposals for the lint tool?", "Who maintains the toolbox, after the first 10?"]);
+  assert.ok(statusKindsInSource().has("toolbox_maintainers"), "toolbox_maintainers is a real status kind");
+  const from = whole.indexOf("\n## Shared tools: who may decide what agents propose");
+  assert.ok(from >= 0, "the guide has the section");
+  const next = whole.indexOf("\n## ", from + 1);
+  const text = whole.slice(from, next < 0 ? undefined : next);
+  for (const word of ["**toolbox**", "**maintain the toolbox**", "let Ann maintain the toolbox", "not to a role or a title", "never decides its own proposal", "**Who maintains the toolbox.**", "every project", "made for those projects alone", "not counted for it", "reads \"at least\"", "ten at a time", "after the first 10", "only you decide", "read-only", "only you can ask", "toolbox proposals view"]) assert.ok(text.includes(word), `the guide's section does not mention "${word}"`);
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-toolbox-"));
+  let system = "";
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const said = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    system = body.messages.find((m) => m.role === "system")?.content ?? "";
+    const tool = /\bfor the (\w+) tool\b/.exec(said)?.[1];
+    const skipped = /\bafter the first (\d+)\b/.exec(said)?.[1];
+    const intents = rows.includes(said) ? [intent("status", { request: { kind: "toolbox_maintainers", ...(tool === undefined ? {} : { name: tool }), ...(skipped === undefined ? {} : { after: Number(skipped) }) } }, said)] : [{ kind: "none", reason: "not in the guide" }];
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
+    const live = l;
+    const ask = async (say: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([say]), write: (t) => out.push(t) }); return out.join("").replace(/\s+/g, " "); };
+    // Nobody holds the right yet: the view says so (and that then only the owner decides).
+    const none = await ask(rows[0]!);
+    assert.match(none, /No agent holds toolbox\.manage now: only the owner decides toolbox proposals\./);
+    // Ann is given the right for every project by the owner's own request: she is listed by name with her ID, the reach and the count.
+    const ann = (await call(live, "agent.create", { friendlyName: "Ann" }, "ag-ann")).result.id as string;
+    assert.equal((await call(live, "grant.create", { grantee: `agent:${ann}`, action: "toolbox.manage", project: "*", basis: "the owner asked" }, "gr-ann")).ok, true);
+    const listed = await ask(rows[0]!);
+    assert.match(listed, new RegExp(`"Ann" \\(agent:${ann}\\) holds toolbox\\.manage for every project, so it may decide proposals for any shared tool; no proposal waits for a decision it may make\\.`));
+    assert.match(system, /toolbox_maintainers \(name for one tool, after: how many were already shown\)/, "the prompt tells the model about the kind");
+    // The sentence that names no shared tool that exists is not answered with a list; one that names a count past the end shows nothing more.
+    assert.ok(!/Ann/.test(await ask(rows[1]!)), "a tool that does not exist lists no maintainer");
+    assert.match(await ask(rows[2]!), /There are no more maintainers to show\./);
+    // Asking changed nothing: the view is the same afterwards.
+    assert.equal((await ask(rows[0]!)).replace(/As of \S+/, ""), listed.replace(/As of \S+/, ""));
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 // The review policy paragraph of the guide (card D01, sixth slice): the owner's sentences for keeping a tool for themselves are asked through the real chat (a scripted stand-in plays the model, as above), and what the
 // guide says about it is true of what the chat does: the reply says the tool will always ask the owner, asking again changes nothing, and releasing it from chat is refused.
 test("the guide's review policy sentences keep a tool for the owner through the chat, once, and the chat never gives it back (card D01)", async () => {

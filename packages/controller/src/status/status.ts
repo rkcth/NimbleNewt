@@ -337,6 +337,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   grant_reliance: { keys: ["grantId"], about: "owner only: the running work that relies on a standing right, before the owner takes it back: the unfinished tasks of the agent that holds it that have an attempt running now, in the project the right is for (a task is named by its title; at most 10 are listed and the rest counted, and a look that could not read everything says so). Without grantId it answers every active right that has such work. It is what the right covers, never a record of what the work will use; taking a right back is a proposal shown first" },
   catalog_policy: { keys: [], about: "what happens to tool calls that are running when the owner revokes their tool version and names no choice: the one in force, where it comes from and the owner's own setting" },
   toolbox: { keys: [], about: "the shared tools (toolbox): for each one the version in use, who it is for (all agents, roles, teams or projects), the platforms it declares, how many agents keep a personal copy of it and which version the agents using it stay on (each keeps the version of its first run until it opts in); who maintains them is a grant of toolbox.manage (status kind settings, or grant.create)" },
+  toolbox_maintainers: { keys: ["name", "after"], about: "owner only: who may decide the shared toolbox's proposals: the active agents that hold toolbox.manage now (by name, with its ID), whether the right covers every project or only the projects named (then only tools made for those projects alone), and how many proposals wait for a decision each may make (its own never count); name: one shared tool, to see only the maintainers whose right covers it; at most 10 at a time (after: how many were already shown, to see the next 10). The owner always may decide too. Read only; deciding is toolbox.proposal.decide, giving or taking back the right is grant.create or grant.revoke with toolbox.manage" },
   toolbox_proposals: { keys: ["state"], about: "owner only: the proposals agents made for the shared toolbox (improvements of a shared tool, or a personal tool offered to become a shared one): for each one the tool, the author (by name, with its ID), the version it is against and whether that is still the version in use, what it changes, the access it adds or drops and its state; by default those waiting (open, or with changes requested), with the number deferred; state names another (deferred, accepted, rejected, withdrawn or all). A maintainer or the owner decides with toolbox.proposal.decide" },
   agents: { keys: ["state", "limit"], about: "the agents (active unless state says retired) with their roles and team, and the coordinator marked with its lifecycle state (running, paused, stopping, suspended, stopped or unknown) and the pause that holds it; also whether the coordinator is an agent at all. An agent's name is its own words, shown quoted" },
   standup_questions: { keys: ["projectId"], about: "what the stand-ups asked the owner: the questions still waiting for an answer (the topic and the words asked) and the latest answers the owner gave; the owner answers one in chat in their own words" },
@@ -438,6 +439,7 @@ export type StatusRequest =
   | { readonly kind: "catalog_policy" }
   | { readonly kind: "toolbox" }
   | { readonly kind: "toolbox_proposals"; readonly state?: string }
+  | { readonly kind: "toolbox_maintainers"; readonly name?: string; readonly after?: number }
   | { readonly kind: "grant_reliance"; readonly grantId?: string }
   | { readonly kind: "chat_budget" }
   | { readonly kind: "landing" }
@@ -628,6 +630,8 @@ export interface StatusDeps {
     forks(by: Principal, name: string): Promise<{ readonly forks: readonly { readonly baseRevoked: boolean }[] }>;
     /** Who is pinned to which version of a shared tool (card T08). Absent: the view does not say. */
     consumers?(by: Principal, name: string): Promise<{ readonly inUse?: string; readonly pins: readonly { readonly agent: string; readonly version: string; readonly revoked: boolean; readonly setAside: boolean }[] }>;
+    /** Who may decide toolbox proposals (card T08, eighth slice), owner only. Absent: the maintainers view is not offered. */
+    maintainers?(by: Principal, query: { name?: string; after?: number }): Promise<{ readonly tool?: string; readonly items: readonly { readonly agent: string; readonly everyProject: boolean; readonly projects: readonly string[]; readonly waiting?: number; readonly waitingMore?: true }[]; readonly after: number; readonly more: boolean; readonly scanLimited: boolean }>;
     /** Toolbox proposals (card T08). Absent: the proposals view is not offered. */
     proposals?(by: Principal, query: { state?: string; limit?: number }): Promise<{ readonly items: readonly { readonly id: string; readonly revision: number; readonly kind: string; readonly target: string; readonly author: string; readonly state: string; readonly round: number; readonly base?: { readonly version: string }; readonly from?: { readonly name: string; readonly version: string }; readonly changes: { readonly instructions: boolean; readonly executable: boolean; readonly manifest: boolean }; readonly permissionChanges: { readonly added: readonly string[]; readonly removed: readonly string[] }; readonly stale?: boolean; readonly current?: string; readonly released?: { readonly version: string } }[]; readonly next?: string; readonly partial?: true }>;
   };
@@ -1036,6 +1040,7 @@ export class StatusService {
       case "grant_reliance": { onlyKnown(request, ["kind", "grantId"]); return this.grantRelianceLines(by, request.grantId); }
       case "catalog_policy": { onlyKnown(request, ["kind"]); return this.catalogPolicyLines(by); }
       case "toolbox": { onlyKnown(request, ["kind"]); return this.toolboxLines(by); }
+      case "toolbox_maintainers": { onlyKnown(request, ["kind", "name", "after"]); return this.toolboxMaintainerLines(by, request.name, request.after); }
       case "toolbox_proposals": { onlyKnown(request, ["kind", "state"]); return this.toolboxProposalLines(by, request.state); }
       case "landing": { onlyKnown(request, ["kind"]); return this.landingLines(by); }
       case "wakes": { onlyKnown(request, ["kind"]); return this.wakeLines(by); }
@@ -1999,6 +2004,41 @@ export class StatusService {
       }
       return n;
     };
+  }
+
+  /**
+   * Who may decide the toolbox's proposals (card T08, eighth slice), owner only: the maintainers, the reach of each one's right and the proposals waiting for it. Read only; at most 10 at a time.
+   */
+  async toolboxMaintainerLines(by: Principal, nameValue: unknown, afterValue: unknown): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const maintainers = this.#deps.toolbox?.maintainers;
+    if (maintainers === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    if (nameValue !== undefined && typeof nameValue !== "string") invalid("name", "must be a shared tool's name");
+    if (afterValue !== undefined && (typeof afterValue !== "number" || !Number.isSafeInteger(afterValue) || afterValue < 0)) invalid("after", "must be a whole number from 0");
+    const at = this.#runner.now();
+    let found;
+    try { found = await maintainers.call(this.#deps.toolbox, by, { ...(nameValue === undefined ? {} : { name: nameValue as string }), ...(afterValue === undefined ? {} : { after: afterValue as number }) }); } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return undefined;
+      throw error;
+    }
+    const lines: Line[] = [];
+    const named = this.#agentLabeller();
+    const projectName = async (id: string): Promise<string> => {
+      const r = await this.#runner.get("project", id).catch(() => undefined);
+      const n = (r?.body as unknown as { name?: unknown } | undefined)?.name;
+      return typeof n === "string" && n.trim() !== "" ? `${quoted(n, 40)} (${shown(id, 60)})` : shown(id, 60);
+    };
+    const tool = found.tool === undefined ? "any shared tool" : shown(found.tool, 80);
+    for (const m of found.items) {
+      const who = await named(m.agent);
+      const reach = m.everyProject ? "for every project, so it may decide proposals for any shared tool" : `for the projects ${(await Promise.all(m.projects.slice(0, 5).map(projectName))).join(", ")}${m.projects.length > 5 ? ` and ${m.projects.length - 5} more` : ""}, so it may decide proposals only for shared tools made for those projects alone`;
+      const waiting = m.waiting === undefined ? "the proposals waiting for it could not be counted" : m.waiting === 0 && m.waitingMore !== true ? `no proposal waits for a decision it may make${found.tool === undefined ? "" : ` on ${tool}`}` : `${m.waitingMore === true ? "at least " : ""}${m.waiting} proposal${m.waiting === 1 ? "" : "s"} wait${m.waiting === 1 ? "s" : ""} for a decision it may make${found.tool === undefined ? "" : ` on ${tool}`}`;
+      lines.push(line(`${who} holds toolbox.manage ${reach}; ${waiting}.`, cite("agent", m.agent.slice("agent:".length))));
+    }
+    if (found.items.length === 0) lines.push(line(found.after > 0 ? "There are no more maintainers to show." : found.tool === undefined ? "No agent holds toolbox.manage now: only the owner decides toolbox proposals." : `No agent's toolbox.manage covers ${tool} now: only the owner decides proposals for it.`, cite("installation", "installation")));
+    else lines.push(line("The owner may always decide a proposal; an agent never decides its own. The proposals themselves are the status kind toolbox_proposals.", cite("installation", "installation")));
+    if (found.more) lines.push(line(`There are more maintainers; ask again with after ${found.after + found.items.length} to see the next ones.`, cite("installation", "installation")));
+    if (found.scanLimited) lines.push(line("The look stopped before it had read every agent; there may be more maintainers.", cite("installation", "installation")));
+    return { observedAt: at, lines };
   }
 
   /**
