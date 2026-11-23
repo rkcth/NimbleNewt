@@ -5,6 +5,9 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { CALL_LIMIT, SMALL_CALL_LIMIT, STORED_ARGS_LIMIT, SUMMARY_LIMIT, argTexts } from "./tool-args.mjs";
 
+/** Card W04: the custom type of the bench continuation extension's nudge entry (continuation-extension.mjs). */
+export const CONTINUATION_CUSTOM_TYPE = "nimblenewt-continuation";
+
 /** Every ending a run can have. `unclassified` exists only so a gap in this file is counted instead of hidden; the gates require none. */
 export const OUTCOMES = Object.freeze(["verified-finish", "stopped-early", "length", "empty", "wrong", "interface-mismatch", "timeout", "server-rejected-history", "error", "unclassified"]);
 
@@ -109,6 +112,8 @@ export function newSummary() {
     last: null, parseErrors: 0, events: 0,
     // The agent's own test runs: the counts of the last one that printed any, and how many ran.
     selfTestRuns: 0, lastSelfTest: null, pendingTests: new Set(),
+    // Card W04 (variant C): the continuation entries Pi itself logged (`entry_appended` of the bench extension's message).
+    continuationEntries: 0,
   };
 }
 
@@ -121,6 +126,7 @@ export function addEvent(s, e) {
     case "agent_start": s.agentStart = true; break;
     case "agent_end": s.agentEnd = true; break;
     case "agent_settled": s.settled = true; s.aborted = e.aborted === true; break;
+    case "entry_appended": if (e.entry?.type === "custom_message" && e.entry.customType === CONTINUATION_CUSTOM_TYPE) s.continuationEntries++; break;
     case "turn_end": s.turns++; break;
     case "tool_execution_start":
       s.toolCalls++;
@@ -234,11 +240,15 @@ export function reportEndsWork(summary) {
   if (last === null || last.visibleChars === 0 || last.stopReason === "length") return false;
   if (ANNOUNCES_STEP.test(last.visibleTail)) return false;
   const text = last.visibleText ?? `${last.visibleHead ?? ""}\n${last.visibleTail ?? ""}`;
+  // A report that opens with its result as a caveat label ("Not done: the fixture needs a database") states it.
+  if (OPENS_NOT_DONE.test(text)) return true;
   const cut = CAVEAT_LABEL.exec(text);
   const body = cut === null ? text : text.slice(0, cut.index);
   const stated = statedResult(body.slice(0, 600), body.slice(-600), body.length > 600);
-  return stated === "done" || stated === "not-done";
+  // "Done: I changed lib.mjs ..." (done-label) states its result too: for the ending only whether one is stated matters.
+  return stated === "done" || stated === "done-label" || stated === "not-done";
 }
+const OPENS_NOT_DONE = /^[^\p{L}\p{N}]{0,12}not\s+done\b/iu;
 
 /** Whether the agent's last own test run that printed counts was green (some passed, none failed). */
 export const selfTestsGreen = (summary) => summary.lastSelfTest !== null && summary.lastSelfTest !== undefined && (summary.lastSelfTest.pass ?? 0) > 0 && summary.lastSelfTest.fail === 0;

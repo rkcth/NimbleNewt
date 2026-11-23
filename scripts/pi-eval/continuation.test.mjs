@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import continuationExtension, { CONTINUATION_CUSTOM_TYPE, createContinuation, readConfig } from "./continuation-extension.mjs";
 import { readContinuation } from "./lib/runner.mjs";
@@ -39,11 +40,11 @@ test("a cut-off reply gets the cut-off words; thinking-only and empty replies ar
   assert.equal(settle(c).entries.at(-1).content, "[MARK] NUDGE");
   c.onMessageEnd(reply([]));
   assert.equal(settle(c).continue, true);
-  assert.deepEqual({ ...c.counts }, { max: 3, nudges: 3, lengthNudges: 1, endedByReport: false, errors: 0 });
+  assert.deepEqual({ ...c.counts }, { configured: true, max: 3, nudges: 3, lengthNudges: 1, endedByReport: false, errors: 0 });
 });
 
 test("a report that states done, partial or blocked ends the work: no nudge, and it is counted", () => {
-  for (const t of ["Done. I changed lib.mjs and ran the tests.", "Partial. Steps 1 and 2 are done; step 3 needs a database.", "Blocked by a missing fixture."]) {
+  for (const t of ["Done. I changed lib.mjs and ran the tests.", "Done: changed lib.mjs; the tests pass.", "Partial. Steps 1 and 2 are done; step 3 needs a database.", "Blocked by a missing fixture.", "Not done: the fixture needs a database I cannot start here.", "**Result: partial**\n\nStep 3 is left."]) {
     const c = createContinuation({ config: CFG, file: null });
     c.onMessageEnd(reply(text(t)));
     assert.equal(settle(c), undefined, t);
@@ -58,6 +59,16 @@ test("an error or an abort is a hard exit and is never continued; no reply at al
     c.onMessageEnd(reply(text("Next I'll try."), stop));
     assert.equal(settle(c), undefined, stop);
   }
+  // Pi's own outcome of the run counts too: an error or abort after a reply that would otherwise be continued.
+  for (const outcome of ["error", "aborted"]) {
+    const c = createContinuation({ config: CFG, file: null });
+    c.onMessageEnd(reply(text("Next I'll try.")));
+    assert.equal(c.onBeforeSettle({ type: "agent_before_settle", entries: [], continue: false, outcome }), undefined, outcome);
+    assert.equal(c.counts.nudges, 0);
+  }
+  const ok = createContinuation({ config: CFG, file: null });
+  ok.onMessageEnd(reply(text("Next I'll try.")));
+  assert.equal(ok.onBeforeSettle({ type: "agent_before_settle", entries: [], continue: false, outcome: "completed" }).continue, true);
   assert.equal(settle(createContinuation({ config: CFG, file: null })), undefined);
 });
 
@@ -73,13 +84,15 @@ test("a nudge after the report is over: an agent that states done only after bei
 test("the counts file holds numbers only, is written at load and after each decision, and never the text", () => {
   const file = join(dir, "c1.json");
   const c = createContinuation({ config: CFG, file });
-  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { max: 3, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 0 });
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { configured: true, max: 3, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 0 });
   c.onMessageEnd(reply(text("SECRET-TEXT-OF-THE-AGENT. Next I'll go on.")));
   settle(c);
   const raw = readFileSync(file, "utf8");
-  assert.deepEqual(JSON.parse(raw), { max: 3, nudges: 1, lengthNudges: 0, endedByReport: false, errors: 0 });
+  assert.deepEqual(JSON.parse(raw), { configured: true, max: 3, nudges: 1, lengthNudges: 0, endedByReport: false, errors: 0 });
   assert.doesNotMatch(raw, /SECRET|NUDGE|MARK/);
-  assert.deepEqual(readContinuation(file), { max: 3, nudges: 1, lengthNudges: 0, endedByReport: false, errors: 0 });
+  assert.deepEqual(readContinuation(file), { configured: true, max: 3, nudges: 1, lengthNudges: 0, endedByReport: false, errors: 0 });
+  writeFileSync(file, JSON.stringify({ configured: "yes", max: 3.5, nudges: -1, lengthNudges: "2", endedByReport: 1, errors: null, text: "x" }));
+  assert.deepEqual(readContinuation(file), { configured: false, max: 0, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 0 }, "only whole numbers and true flags are taken");
   assert.equal(readContinuation(join(dir, "missing.json")), null);
 });
 
@@ -91,6 +104,7 @@ test("a bad or missing config continues nothing and says so (errors), and never 
     c.onMessageEnd(reply(text("Next I'll go on.")));
     assert.equal(settle(c), undefined);
     assert.equal(c.counts.errors, 1, JSON.stringify(config));
+    assert.equal(c.counts.configured, false);
   }
   writeFileSync(bad, JSON.stringify({ ...CFG, max: 11 }));
   assert.throws(() => readConfig(bad), /0 to 10/);
@@ -106,7 +120,7 @@ test("the extension registers on message_end and agent_before_settle only", () =
 });
 
 test("the bench's variant C is the continuation variant of the shipped task set; D still needs a relaunch driver", () => {
-  const set = loadTaskset(new URL("./taskset.json", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+  const set = loadTaskset(fileURLToPath(new URL("./taskset.json", import.meta.url)));
   assert.equal(set.variants.C.continuation, true);
   assert.equal(set.variants.C.needs, undefined);
   assert.equal(set.variants.C.prompt, set.variants.B.prompt, "C is B plus the continuation");

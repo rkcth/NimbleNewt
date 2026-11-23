@@ -151,7 +151,7 @@ test("W04 variant C: an agent that keeps stopping early is continued exactly 3 t
   const r = await runOne(continuedCtx(), set.tasks[0], "C", 1);
   assert.equal(r.outcome, "stopped-early", r.reason);
   assert.equal(r.nudges, 3);
-  assert.deepEqual(r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0 });
+  assert.deepEqual(r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0, logged: 3 });
   assert.equal(finalReplies(r), 5, "the work turn, the first stop, and one reply after each of the 3 nudges");
   const cfg = JSON.parse(readFileSync(join(r.artifacts, "continuation-config.json"), "utf8"));
   assert.deepEqual(cfg, CONTINUATION, "the runner hands the agent the worker's words");
@@ -200,8 +200,15 @@ test("W04 variant C: an honest blocked report is not nudged (the stand-in of an 
 
 test("W04 variant C: an agent that never loads the continuation is recorded as not installed, with 0 nudges (not a C measurement)", async () => {
   const r = await runOne({ ...ctx("first-turn"), continuation: CONTINUATION }, set.tasks[0], "C", 1);
-  assert.deepEqual(r.continuation, { max: 3, installed: false });
+  assert.deepEqual(r.continuation, { max: 3, installed: false, logged: 0 });
   assert.equal(r.nudges, 0);
+});
+
+test("W04 variant C: an extension that loads but cannot read the runner's config is recorded as not installed, and continues nothing", async () => {
+  const r = await runOne(continuedCtx({ PI_EVAL_CONTINUATION_CONFIG: join(root, "no-such-config.json") }), set.tasks[0], "C", 1);
+  assert.deepEqual(r.continuation, { max: 3, installed: false, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 1, logged: 0 });
+  assert.equal(r.nudges, 0);
+  assert.equal(r.outcome, "stopped-early", r.reason);
 });
 
 test("a solution that passes the hidden tests but does not build is not a finish", async () => {

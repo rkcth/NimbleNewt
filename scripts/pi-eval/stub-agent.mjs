@@ -72,7 +72,8 @@ const continued = async () => {
     emit({ type: "turn_end", message, toolResults: [] });
     const go = ext?.onBeforeSettle({ type: "agent_before_settle", entries: [], continue: false });
     if (go?.continue !== true) break;
-    // Pi stores the extension's message as a user-role entry; the log's own events are the model's replies, so the stub notes it.
+    // Pi stores the extension's message as a session entry and logs it (entry_appended), then sends it as a user-role message.
+    emit({ type: "entry_appended", entry: { ...go.entries.at(-1), id: `stub-${nudges}` } });
     emit({ type: "message_end", message: { role: "user", content: go.entries.at(-1).content, timestamp: Date.now() } });
   }
   emit({ type: "agent_end", messages: [] });

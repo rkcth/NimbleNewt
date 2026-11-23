@@ -277,7 +277,9 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
   ahead of the base, the diff stat, the hidden test counts, and whether a tool call named another checkout or tried to push or reach the owner's keys (contaminated; `credentialAttempts`, `guardRefusals` and `isolation` say more).
   A Pi run also carries `argClean` (card W01b, below): `{ applied, requests, requestsChanged, stringsChanged,
   argumentsChanged, errors }`, counts only. A variant C run carries `continuation` (card W04, below): `{ max, installed,
-  nudges, lengthNudges, endedByReport, errors }`, counts only (`installed: false` when the agent never loaded the extension).
+  nudges, lengthNudges, endedByReport, errors, logged }`, counts only (`installed: false` when the agent never loaded the
+  extension or it could not read the runner's config; `logged`: the nudges Pi's own log shows, a second count beside the
+  extension's file; `report.mjs` names runs that are not installed or whose two counts differ).
 - `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`, stdout only), Pi's stderr (`pi-stderr.log`), the
   setup, the acceptance run (`hidden-setup.log`, `hidden-tests.log`), the shipped suites (`shipped-setup.log`,
   `shipped-tests.log`), the diff stat. The record's `hidden` is the acceptance result (with `interfaceMismatch` and

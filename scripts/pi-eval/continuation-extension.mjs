@@ -11,12 +11,13 @@
 //
 // The words come from the runner (PI_EVAL_CONTINUATION_CONFIG, a JSON file the runner wrote from the built pi-adapter:
 // { max, mark, nudge, lengthNudge }), so they are the worker's own. Counts only, never content: PI_EVAL_CONTINUATION_FILE
-// (beside the log) holds { max, nudges, lengthNudges, endedByReport, errors }, written at load and after every decision;
+// (beside the log) holds { configured, max, nudges, lengthNudges, endedByReport, errors }, written at load and after every
+// decision (configured: the config was read and checked; without it nothing is continued);
 // the runner copies it into the run record. It never throws.
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
-import { addEvent, newSummary, reportEndsWork } from "./lib/classify.mjs";
+import { CONTINUATION_CUSTOM_TYPE, addEvent, newSummary, reportEndsWork } from "./lib/classify.mjs";
 
-export const CONTINUATION_CUSTOM_TYPE = "nimblenewt-continuation";
+export { CONTINUATION_CUSTOM_TYPE };
 
 /** Reads and checks the config file; a bad one is an error the caller reports (the extension then continues nothing). */
 export function readConfig(file) { return checkConfig(JSON.parse(readFileSync(file, "utf8"))); }
@@ -30,12 +31,13 @@ export function checkConfig(c) {
 
 /** The extension's state and handlers, apart from Pi (tests drive them with a fake runner). */
 export function createContinuation({ config = process.env.PI_EVAL_CONTINUATION_CONFIG, file = process.env.PI_EVAL_CONTINUATION_FILE } = {}) {
-  const counts = { max: 0, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 0 };
+  const counts = { configured: false, max: 0, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 0 };
   const summary = newSummary();
   let cfg = null;
   try {
     cfg = typeof config === "object" && config !== null ? checkConfig(config) : readConfig(config);
     counts.max = cfg.max;
+    counts.configured = true;
   } catch { counts.errors++; }
   const save = () => {
     if (!file) return;
@@ -50,6 +52,8 @@ export function createContinuation({ config = process.env.PI_EVAL_CONTINUATION_C
   const onBeforeSettle = (event) => {
     try {
       if (cfg === null || counts.nudges >= cfg.max) return undefined;
+      // Pi's own reading of the run (completed, aborted, error): an abort or an error is a hard exit, whatever the last reply was.
+      if (event?.outcome === "error" || event?.outcome === "aborted") return undefined;
       const last = summary.last;
       if (last === null || last.stopReason === "error" || last.stopReason === "aborted") return undefined;
       if (reportEndsWork(summary)) { counts.endedByReport = true; save(); return undefined; }

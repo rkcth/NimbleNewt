@@ -923,7 +923,7 @@ test("W04: the real Pi, variant C: a stop that announces a next step is continue
     const c = await run("C", announce);
     assert.equal(fakeModel.bodies.length, 4, c.why);
     assert.equal(c.r.nudges, 3, c.why);
-    assert.deepEqual(c.r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0 }, c.why);
+    assert.deepEqual(c.r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0, logged: 3 }, c.why);
     const users = (body) => JSON.parse(body).messages.filter((m) => m.role === "user").map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text ?? "").join("")));
     const last = users(fakeModel.bodies[3]);
     assert.equal(last.filter((t) => t.startsWith(config.mark)).length, 3, c.why);
@@ -937,6 +937,7 @@ test("W04: the real Pi, variant C: a stop that announces a next step is continue
     assert.equal(fakeModel.bodies.length, 1, d.why);
     assert.equal(d.r.continuation.endedByReport, true, d.why);
     assert.equal(d.r.nudges, 0);
+    assert.equal(d.r.continuation.logged, 0, d.why);
   } finally { fakeModel.finalText = "Done. Nothing to change."; }
 });
 

@@ -382,11 +382,18 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     const summary = await summarizeLogFile(logFile);
     const argClean = readArgClean(join(artifacts, "arg-clean.json"));
     if (argClean) record.argClean = argClean;
-    // A variant with the continuation but an agent that never wrote its counts (another agent, or the extension not loaded)
-    // keeps installed: false and 0 nudges: the run is not a variant C measurement and says so.
+    // A variant with the continuation but an agent that never wrote its counts (another agent, or the extension not loaded),
+    // or whose extension could not read the config the runner wrote (or read another bound), keeps installed: false: the run
+    // is not a variant C measurement and says so. `logged` is what Pi's own log shows (its entry_appended events of the
+    // extension's nudge), a second count beside the extension's file; the two differ only if one of them was changed.
     if (variant.continuation === true) {
       const c = readContinuation(join(artifacts, "continuation.json"));
-      if (c) { record.continuation = { ...record.continuation, ...c, installed: true }; record.nudges = c.nudges; }
+      const logged = summary.continuationEntries ?? 0;
+      if (c) {
+        const { configured, max, ...counts } = c;
+        record.continuation = { ...record.continuation, installed: configured && max === record.continuation.max, ...counts, logged };
+        record.nudges = c.nudges;
+      } else record.continuation = { ...record.continuation, logged };
     }
     const plan = existsSync(join(dir, "PLAN.md")) ? planProgress(readFileSync(join(dir, "PLAN.md"), "utf8")) : null;
     const ch = await changesOf(dir, task.base);
@@ -450,14 +457,14 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
 
 /**
  * Card W04: the counts the bench's continuation extension left beside the log (continuation-extension.mjs), or null when it
- * wrote none. Only these fields are taken from the file, as numbers and one flag.
+ * wrote none. Only these fields are taken from the file, as numbers and two flags.
  */
 export function readContinuation(file) {
   let raw;
   try { raw = JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
   if (raw === null || typeof raw !== "object") return null;
   const n = (k) => (Number.isSafeInteger(raw[k]) && raw[k] >= 0 ? raw[k] : 0);
-  return { max: n("max"), nudges: n("nudges"), lengthNudges: n("lengthNudges"), endedByReport: raw.endedByReport === true, errors: n("errors") };
+  return { configured: raw.configured === true, max: n("max"), nudges: n("nudges"), lengthNudges: n("lengthNudges"), endedByReport: raw.endedByReport === true, errors: n("errors") };
 }
 
 /**
