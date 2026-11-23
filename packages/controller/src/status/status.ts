@@ -1853,6 +1853,9 @@ export class StatusService {
     const lines: Line[] = [];
     const rec = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined);
     const text = (v: unknown, max = 200): string => (typeof v === "string" ? shown(v, max) : "");
+    // A failure's words come from the host (a system error can carry the folder or file it was about): the backups folder is named in words and any other quoted path is left out, as the backup notices do.
+    const root = rec(listed.status)?.["root"];
+    const pathless = (v: unknown): string => (typeof v !== "string" ? "" : (typeof root === "string" && root.length > 1 ? v.split(root).join("the backups folder") : v).replace(/'(?:\/|[A-Za-z]:\\|\\\\)[^']*'/g, "(a path)"));
     if (config !== undefined) {
       const schedule = rec(config["schedule"]);
       const rules = rec(config["rules"]);
@@ -1864,11 +1867,11 @@ export class StatusService {
         const holds = typeof t["count"] === "number" ? `${t["count"]} backup${t["count"] === 1 ? "" : "s"}${typeof t["newest"] === "string" ? `, the newest ${text(t["newest"], 80)}` : ""}` : "";
         const last = rec(t["lastError"]);
         const test = rec(t["lastTest"]);
-        lines.push(line(`${text(t["name"], 80)} (${text(t["kind"], 20)}${typeof t["location"] === "string" ? `, ${quoted(t["location"], 120)}` : ""}): ${ok ? "can be reached" : `cannot be reached${typeof t["problem"] === "string" ? ` (${quoted(t["problem"], 120)})` : ""}`}${holds === "" ? "" : `; holds ${holds}`}${typeof t["staysUpToDays"] === "number" ? `; a backup stays up to ${t["staysUpToDays"]} days` : ""}${typeof t["lastCopyAt"] === "string" ? `; last copy ${text(t["lastCopyAt"], 40)}` : ""}${last === undefined ? "" : `; last problem ${text(last["at"], 40)}: ${quoted(typeof last["message"] === "string" ? last["message"] : "", 120)}`}${test === undefined ? "" : `; last test ${test["ok"] === true ? "passed" : "failed"} ${text(test["at"], 40)}`}.`, cite("backup-target", text(t["id"], 40) || "main")));
+        lines.push(line(`${text(t["name"], 80)} (${text(t["kind"], 20)}${typeof t["location"] === "string" ? `, ${quoted(t["location"], 120)}` : ""}): ${ok ? "can be reached" : `cannot be reached${typeof t["problem"] === "string" ? ` (${quoted(pathless(t["problem"]), 120)})` : ""}`}${holds === "" ? "" : `; holds ${holds}`}${typeof t["staysUpToDays"] === "number" ? `; a backup stays up to ${t["staysUpToDays"]} days` : ""}${typeof t["lastCopyAt"] === "string" ? `; last copy ${text(t["lastCopyAt"], 40)}` : ""}${last === undefined ? "" : `; last problem ${text(last["at"], 40)}: ${quoted(pathless(last["message"]), 120)}`}${test === undefined ? "" : `; last test ${test["ok"] === true ? "passed" : "failed"} ${text(test["at"], 40)}`}.`, cite("backup-target", text(t["id"], 40) || "main")));
       }
       if (Array.isArray(config["targets"]) && config["targets"].length + 1 > places.length) lines.push(line("More places are set than are shown here.", here));
       const restore = rec(config["lastTestRestore"]);
-      lines.push(line(restore === undefined ? "No test restore has been made yet." : `The last test restore (${text(restore["at"], 40)}, ${text(restore["name"], 80)}) ${restore["ok"] === true ? "passed" : "FAILED"}: ${quoted(typeof restore["detail"] === "string" ? restore["detail"] : "", 160)}`, here));
+      lines.push(line(restore === undefined ? "No test restore has been made yet." : `The last test restore (${text(restore["at"], 40)}, ${text(restore["name"], 80)}) ${restore["ok"] === true ? "passed" : "FAILED"}: ${quoted(pathless(restore["detail"]), 160)}`, here));
       const pending = Array.isArray(config["pendingPurges"]) ? config["pendingPurges"].length : 0;
       if (pending > 0) lines.push(line(`${pending} delete${pending === 1 ? "" : "s"} of named backups ${pending === 1 ? "is" : "are"} not finished on every place and will be retried.`, here));
       const scope = rec(config["scope"]);
@@ -1883,7 +1886,7 @@ export class StatusService {
     }
     const page = all.slice(start, start + limit);
     const failed = rec(listed.status)?.["lastError"] === undefined ? undefined : rec(rec(listed.status)!["lastError"]);
-    if (failed !== undefined && request.after === undefined) lines.push(line(`The last backup attempt failed (${text(failed["at"], 40)}): ${quoted(typeof failed["message"] === "string" ? failed["message"] : "", 160)}`, here));
+    if (failed !== undefined && request.after === undefined) lines.push(line(`The last backup attempt failed (${text(failed["at"], 40)}): ${quoted(pathless(failed["message"]), 160)}`, here));
     if (all.length === 0) lines.push(line("No backup exists yet.", here));
     for (const b of page) {
       const rows = typeof b["rows"] === "number" ? `${b["rows"]} rows` : "";
@@ -1935,7 +1938,7 @@ export class StatusService {
       lines.push(line(`${shown(g.id, 40)}: ${shown(b.grantee, 60)} may ${shown(b.action, 60)} in ${where(b)}; ${when}. Basis: ${quoted(b.basis, 100)}.`.slice(0, 400), cite("grant", g.id, g.revision)));
     }
     const filter = `${grantee === undefined ? "" : ` for ${shown(grantee, 60)}`}${project === undefined ? "" : ` in project ${shown(project, 60)} or every project`}`;
-    const head = found.length === 0 ? `No ${state === "revoked" ? "taken-back" : "active"} right${filter} ${request.after === undefined ? "is on record" : "follows that one"}.` : `${found.length} ${state === "revoked" ? "taken-back" : "active"} right${found.length === 1 ? "" : "s"}${filter}, in the order they were made${request.after === undefined ? "" : ", after the one you named"}. To take one back, give its ID.`;
+    const head = found.length === 0 ? `No ${state === "revoked" ? "taken-back" : "active"} right${filter} ${request.after === undefined ? "is on record" : "follows that one"}.` : `${found.length} ${state === "revoked" ? "taken-back" : "active"} right${found.length === 1 ? "" : "s"}${filter}, listed by ID${request.after === undefined ? "" : ", after the one you named"}. To take one back, give its ID.`;
     lines.unshift(line(head, cite("grants", state)));
     if (more) lines.push(line(`More rights follow; ask for them after ${shown(found[found.length - 1]!.id, 40)}, or narrow the question by agent or project.`, cite("grants", state)));
     else if (cut && last !== undefined) lines.push(line(`The look stopped after 2000 records; ask again after ${shown(last, 40)}, or narrow the question by agent or project.`, cite("grants", state)));

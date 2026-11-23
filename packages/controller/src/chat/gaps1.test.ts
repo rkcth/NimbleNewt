@@ -111,7 +111,7 @@ const CONFIG = {
   schedule: { everyHours: 24, hourUtc: 2, verifyEveryDays: 7, text: "Backups are made every 24 hours at 02:00 UTC. A backup is test-restored every 7 days to prove it can be used." },
   rules: { daily: 7, weekly: 4, maxAgeDays: 35, overrides: "counts", text: "A backup is deleted once it falls outside the newest 7 daily and 4 weekly copies or is older than 35 days." },
   main: { id: "main", name: "main backups folder", kind: "folder", reachable: true, count: 25, newest: manifest(0).name, staysUpToDays: 35, lastCopyAt: "2026-11-30T02:00:05.000Z" },
-  targets: [{ id: "usb", name: "USB stick", kind: "disk", location: "/mnt/usb", reachable: false, problem: "the folder is not there", staysUpToDays: 35, lastError: { at: "2026-11-29T02:00:00.000Z", message: "no such folder" } }],
+  targets: [{ id: "usb", name: "USB stick", kind: "disk", location: "/mnt/usb", reachable: false, problem: "the folder is not there", staysUpToDays: 35, lastError: { at: "2026-11-29T02:00:00.000Z", message: "copying x: no such folder 'C:\\nn\\usb'" } }],
   lastTestRestore: { at: "2026-11-27T02:00:00.000Z", ok: false, name: manifest(3).name, target: "main", method: "restore", detail: "a table file did not match its digest" },
   pendingPurges: [{ id: "p1", names: ["a"], since: "2026-11-28T00:00:00.000Z", results: {} }],
   recentPurges: [],
@@ -129,7 +129,7 @@ for (const backend of backends) {
     const extra: ApiExtra = (storage, epoch, built) => {
       holder.status = StatusService.withEpoch(storage, epoch, {
         assignments: built.assignments, waits: WaitService.withEpoch(storage, epoch, built.assignments, options), blockers: BlockerService.withEpoch(storage, epoch, options), contracts: built.contracts,
-        ...(over.none === true ? {} : { backups: { config: over.config ?? (async () => { calls.config++; return CONFIG as unknown as Record<string, unknown>; }), list: over.list ?? (async () => { calls.list++; return { items, status: { lastError: { at: "2026-11-26T02:00:00.000Z", message: "the disk was full" } } }; }) } }),
+        ...(over.none === true ? {} : { backups: { config: over.config ?? (async () => { calls.config++; return CONFIG as unknown as Record<string, unknown>; }), list: over.list ?? (async () => { calls.list++; return { items, status: { root: "/srv/nn/backups", lastError: { at: "2026-11-26T02:00:00.000Z", message: "the disk was full in /srv/nn/backups/tmp, writing '/var/tmp/nn/rows.jsonl'" } } }; }) } }),
       }, options);
       holder.grants = GrantService.withEpoch(storage, epoch, options);
       return {
@@ -176,7 +176,9 @@ for (const backend of backends) {
       assert.match(t, /The last test restore \(2026-11-27T02:00:00\.000Z, [^)]*\) FAILED: "a table file did not match its digest"/);
       assert.match(t, /1 delete of named backups is not finished on every place and will be retried\./);
       assert.match(t, /What backups leave out: Backups leave out private scratch older than 30 days\./);
-      assert.match(t, /The last backup attempt failed \(2026-11-26T02:00:00\.000Z\): "the disk was full"/);
+      assert.match(t, /The last backup attempt failed \(2026-11-26T02:00:00\.000Z\): "the disk was full in the backups folder\/tmp, writing \(a path\)"/);
+      assert.match(t, /last problem 2026-11-29T02:00:00\.000Z: "copying x: no such folder \(a path\)"/);
+      assert.doesNotMatch(t, /\/srv\/nn|\/var\/tmp|nn\\usb/, "no host path from a failure's words is shown");
       assert.equal((t.match(/^backup-2026/gm) ?? []).length, 10, "ten backups by default");
       assert.match(t, new RegExp(`15 older backups follow; ask for more after ${names[9]}\\.`));
       assert.ok(a.outcomes[0]!.lines!.every((l) => l.cites.length > 0), "every line cites a record");
@@ -232,7 +234,7 @@ for (const backend of backends) {
     try {
       const shown = (await say(q)).outcomes[0]!;
       assert.equal(shown.status, "proposed", JSON.stringify(shown));
-      assert.match(shown.message ?? "", /a backup copies all your data to this machine and to every place backups go, and takes room and time, so it is shown first/);
+      assert.match(shown.message ?? "", /a backup copies your data \(less what you chose to leave out of backups\) to this machine and then to every place backups go, older backups past your keep rules are removed as usual, and it takes room and time, so it is shown first/);
       assert.deepEqual(calls.made, [], "nothing is made before the owner agrees");
       const done = (await say("Yes, do that.")).outcomes[0]!;
       assert.equal(done.status, "applied", JSON.stringify(done));
@@ -403,6 +405,28 @@ for (const backend of backends) {
       assert.equal((await say(both)).outcomes[0]!.status, "answered");
       assert.equal(seen.at(-1)!["agentId" as never], bob);
       assert.deepEqual(stand.violations, []);
+    } finally { await w.close(); }
+  });
+
+  // One look reads at most 2000 rights (ten pages of 200). On the reference store only: 2001 rights on every backend would take minutes, and the limit is the status service's own count, not the store's.
+  if (backend.name === "reference store") suite("a look that reads 2000 rights without filling a page stops there and names where to go on; asking again after that ID reads the rest", async () => {
+    const { w, holder } = await open({}, newCalls());
+    try {
+      const garden = await w.project("Garden");
+      const ann = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Ann" })).id;
+      const cy = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Cy" })).id;
+      for (let i = 0; i < 2001; i++) await holder.grants!.grant(w.owner, { commandId: cid("g"), grantee: `agent:${ann}`, action: "task.read", project: garden, source: "direct", basis: `batch ${i}` } as never);
+      const ids: string[] = [];
+      for (let page = await w.world.storage.listAggregates("grant-record", { limit: 1000 }); page.length > 0; page = await w.world.storage.listAggregates("grant-record", { afterId: page.at(-1)!.id, limit: 1000 })) ids.push(...page.map((r) => r.id));
+      assert.equal(ids.length, 2001);
+      const stop = ids[1999]!;
+      const first = (await holder.status!.ask(w.owner, { kind: "grants", agentId: cy }))!;
+      assert.match(first.lines[0]!.text, /^No active right for agent:/);
+      assert.equal(first.lines.at(-1)!.text, `The look stopped after 2000 records; ask again after ${stop}, or narrow the question by agent or project.`);
+      const on = (await holder.status!.ask(w.owner, { kind: "grants", agentId: cy, after: stop }))!;
+      assert.deepEqual(on.lines.map((l) => l.text), [`No active right for agent:${cy} follows that one.`], "the rest is read, and nothing says it stopped");
+      const anns = (await holder.status!.ask(w.owner, { kind: "grants", agentId: ann, after: stop }))!;
+      assert.equal(anns.lines.filter((l) => l.text.startsWith(`${ids[2000]}: agent:${ann} may task.read`)).length, 1, "the one right after the stop is found");
     } finally { await w.close(); }
   });
 }
