@@ -455,10 +455,11 @@ capture, hidden tests copied in and run, classification and the report. One run 
 
 ## Not done yet
 
-- **The baseline.** W01's acceptance asks for a recorded baseline of variants A and B over the whole set. The first one
-  (2026-11-09/10) is invalid (see the top); a new one on the acceptance suites has not been run. Run
-  `node scripts/pi-eval/run.mjs` at a quiet time and record the batch (its commit, route, model and per-run results are in
-  `results.jsonl`) in the implementation notes.
+- **A full-set baseline in one run.** The first baseline (2026-11-09/10) is invalid (see the top). The baseline W01
+  records is a set of batches on the acceptance suites (2026-11-10/11 and 2026-11-17 to 2026-11-19, both variants on all
+  nine tasks, each run's commit, route, model and result in `results.jsonl` and in the implementation notes), with 2 to 6
+  runs per variant and size. A single run of `node scripts/pi-eval/run.mjs` over the whole set (54 runs) at one bench
+  commit has not been made; it would give firmer rates.
 - **A control run** (one repeat per task by Claude, `--agent scripts/pi-eval/agents/claude-agent.mjs --label
   claude-control`) is supported and its wrapper is tested against a fake CLI, but it has not been run.
 - **Variants C and D** wait for W04 (and D for a session the runner can relaunch).
