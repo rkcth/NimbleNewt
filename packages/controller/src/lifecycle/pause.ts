@@ -709,10 +709,11 @@ export class PauseService implements PauseGuard, PauseLookup {
   // ---- reads --------------------------------------------------------------------------------------------------------------------
 
   /** The gate's state with no viewer check, for the services that decide whether their own record is still the cause of it (card L02d). */
-  async gateState(scope: PauseScope): Promise<{ intent: string; requestId?: string } | undefined> {
+  async gateState(scope: PauseScope): Promise<{ intent: string; requestId?: string; takenOver?: true } | undefined> {
     const found = await this.#runner.get("pause-gate", gateIdOf(checkScope(scope)));
     const b = found?.body as unknown as PauseGateBody | undefined;
-    return b === undefined ? undefined : { intent: b.intent, ...(b.requestId === undefined ? {} : { requestId: b.requestId }) };
+    // `takenOver`: a Stop, a Suspend or a hand-off now relies on this pause (card K07 review), so a service that made it does not lift it.
+    return b === undefined ? undefined : { intent: b.intent, ...(b.requestId === undefined ? {} : { requestId: b.requestId }), ...(b.takenOver === true ? { takenOver: true as const } : {}) };
   }
 
   /**

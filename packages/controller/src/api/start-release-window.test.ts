@@ -129,6 +129,9 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     const sweep = async () => { const t = await c.dispatch!.dispatcher.tick(); const loop = t.loops.find((x) => x.name === "release.windows"); assert.ok(loop?.ok === true, JSON.stringify(t.loops.filter((x) => !x.ok))); };
     await sweep();
     assert.equal((await owner("release.window.get", { windowId })).result.status, "activated");
+    // K07 review: the real wiring quieted the installation with the window's own pause (no attempt was running) and keeps it while the release has not confirmed its start.
+    const quiet = (await owner("release.window.get", { windowId })).result.quiesce as { prior: string; paused: boolean; running: number };
+    assert.deepEqual([quiet.prior, quiet.paused, quiet.running], ["active", true, 0]);
     assert.equal((JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release, id);
     assert.equal((await owner("release.window.cancel", { windowId }, "cx")).error?.code, "invalid_transition", "an activated window is rolled back, not cancelled");
     assert.ok((await owner("release.confirm", { releaseId: id }, "cf")).ok);
@@ -142,6 +145,7 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     const asked = "how are the maintenance windows doing";
     const answer = JSON.stringify(await turn("m3", asked, [{ kind: "status", request: { kind: "release_windows" }, evidence: asked, basis: "owner" }]));
     assert.ok(answer.includes(windowId) && answer.includes("committed"), answer);
+    assert.ok(answer.includes("Quiet: put back: 0 suspended attempt(s) released; the window") && answer.includes("own pause was lifted"), answer);
 
     // Once a release ran here it stays staged for going back, but it is never taken as "the update waiting": with the first release current, the loose words take the second one; once the second
     // was installed too (the first is now the previous release), nothing is waiting and the owner is told so instead of being offered the first one back.
