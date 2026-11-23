@@ -125,6 +125,19 @@ test("documentation obligations through the running controller and the owner's c
     const noTask = await turn("m3c", qn, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Moon landing" }, evidence: qn, basis: "owner" }]);
     assert.equal(noTask[0].status, "refused", JSON.stringify(noTask));
     assert.equal((await call(far.token, "status.ask", { request: { kind: "task_docs", taskId: task } })).error.code, "not_found");
+    // The rest of a long list by chat (Q03 slice 9): the owner says "what else is there?", the model asks the same view with `after` (the count the view's last line gave), the owner's words carry no number
+    // beyond that. Here the project has one document, so the page says nothing comes after it (the 31-document paging is in the status test); a number that is not a whole count is refused.
+    const qm = "what other documents are there beyond the first 30?";
+    const more = await turn("m3d", qm, [{ kind: "status", request: { kind: "docs", after: 30 }, evidence: qm, basis: "owner" }]);
+    assert.equal(more[0].status, "answered", JSON.stringify(more));
+    assert.match((more[0].lines as { text: string }[])[1]!.text, /^There are only 1 document\(s\) here, so nothing comes after 30\./);
+    const moreTask = await turn("m3e", qm, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Fix the login", after: 30 }, evidence: qm, basis: "owner" }]);
+    assert.match((moreTask[0].lines as { text: string }[])[1]!.text, /^There are only 1 document\(s\) here, so nothing comes after 30\./);
+    const viaApiMore = await call(boot.token, "status.ask", { request: { kind: "task_docs", taskId: task, after: 30 } });
+    assert.deepEqual((moreTask[0].lines as { text: string }[]).map((l) => l.text), (viaApiMore.result.item.lines as { text: string }[]).map((l) => l.text));
+    const badAfter = await turn("m3f", qm, [{ kind: "status", request: { kind: "docs", after: -2 }, evidence: qm, basis: "owner" }]);
+    assert.equal(badAfter[0].status, "refused", JSON.stringify(badAfter));
+    assert.equal((await call(far.token, "status.ask", { request: { kind: "docs", projectId: project, after: 30 } })).error.code, "not_found");
 
     // A release by chat (shown first): the document is flagged for the release version, and a verification must name it.
     const ship = "we are shipping 2.0, flag the docs";
@@ -155,7 +168,8 @@ test("documentation obligations through the running controller and the owner's c
 
     // Every owner control of the card is a chat command, and the view is a status kind of the project in focus.
     for (const op of ["doc.obligation.record", "doc.obligation.verify", "doc.impact.check", "doc.release.check"]) assert.ok(CHAT_OPS[op], op);
-    assert.deepEqual(STATUS_KINDS["docs"]?.keys, ["projectId"]);
+    assert.deepEqual(STATUS_KINDS["docs"]?.keys, ["projectId", "after"]);
+    assert.deepEqual(STATUS_KINDS["task_docs"]?.keys, ["taskId|taskTitle", "after"]);
 
     // The task's acceptance criteria change: the contract change itself invalidates the QA evidence, and the verified page is flagged by itself as having lost it (Q03 next slice), with an update task for Dora.
     const set = await call(boot.token, "contract.set", { taskId: task, expectedVersion: 0, acceptanceCriteria: ["a user can log in with a passkey"] }, "c1");
