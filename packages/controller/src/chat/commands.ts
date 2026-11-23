@@ -510,6 +510,40 @@ export function recurrenceWords(value: unknown): string {
   return short(value);
 }
 
+/** The weekdays (0 Sunday to 6 Saturday) as people write them: the name, its short form, or the plural ("Mondays"). */
+const DAY_WORDS = ["sun(?:day)?", "mon(?:day)?", "tue(?:s(?:day)?)?", "wed(?:nesday)?|weds", "thu(?:r(?:s(?:day)?)?)?", "fri(?:day)?", "sat(?:urday)?"];
+/**
+ * Whether the owner's own words name every weekday of a weekly meeting: by its name ("Monday", "Mon", "Mondays"), Monday to Friday by "weekdays", "workdays" or "business days", Saturday and Sunday by "weekends".
+ * A day the model chose is not the owner's: a meeting on the wrong days invites agents on the wrong days, so it is asked about instead of proposed.
+ */
+export function weekdaysInWords(days: readonly number[], text: string): boolean {
+  const t = text.toLowerCase();
+  const working = /\b(?:week ?days?|work ?days?|working days?|business days?)\b/.test(t);
+  const weekend = /\bweek-?ends?\b/.test(t);
+  return days.every((d) => new RegExp(`\\b(?:${DAY_WORDS[d] ?? "(?!)"})s?\\b`).test(t) || (working && d >= 1 && d <= 5) || (weekend && (d === 0 || d === 6)));
+}
+
+/**
+ * Whether the owner's own words give the day of a one-off meeting, where `today` is the date on the meeting zone's calendar now: the day written out (as `grantDateInWords` reads it: `2026-11-24`, `24/11/2026`,
+ * `November 24th`), "today" or "tonight", "tomorrow", "the day after tomorrow", "in 3 days", or the weekday's name ("on Friday", "next Friday") within the next two weeks. "Soon" or "once" names no day: the day
+ * would be the model's, so it is asked for. The date and its moment in UTC are still shown on the proposal for the owner to confirm.
+ */
+export function oneOffDayInWords(date: string, text: string, today: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (m === null) return false;
+  const own = ` ${text.toLowerCase().replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim()} `;
+  if (dayInWords({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]), text: date }, own)) return true;
+  const ahead = Math.round((Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
+  if (!Number.isSafeInteger(ahead) || ahead < 0) return false;
+  const rest = own.replace(/\bday after tomorrow\b/g, " ");
+  if (ahead === 0 && /\b(?:today|tonight|this (?:morning|afternoon|evening))\b/.test(own)) return true;
+  if (ahead === 1 && /\btomorrow\b/.test(rest)) return true;
+  if (ahead === 2 && rest !== own) return true;
+  for (const n of own.matchAll(new RegExp(`\\bin (\\d{1,3}|${NUMBER_WORDS()}) days?\\b`, "g"))) if (numberOf(n[1]!) === ahead) return true;
+  const weekday = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))).getUTCDay();
+  return ahead <= 13 && new RegExp(`\\b(?:${DAY_WORDS[weekday]!})s?\\b`).test(own);
+}
+
 /**
  * Whether the owner's own words give this length of a maintenance window in minutes (card K07): a length said outright ("for 90 minutes", "an hour", "2 hrs", "half an hour"), hours and minutes
  * together ("an hour and a half", "two and a half hours", "2 hours and 30 minutes", "1h30m", "an hour and a quarter"), or an end time after the start the proposal shows, with that start written too
