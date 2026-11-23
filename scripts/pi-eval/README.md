@@ -279,7 +279,8 @@ Not in the repository. By default `/srv/code/worktrees-pi/eval-results/` (or `--
   argumentsChanged, errors }`, counts only. A variant C run carries `continuation` (card W04, below): `{ max, installed,
   nudges, lengthNudges, endedByReport, errors, logged }`, counts only (`installed: false` when the agent never loaded the
   extension or it could not read the runner's config; `logged`: the nudges Pi's own log shows, a second count beside the
-  extension's file; `report.mjs` names runs that are not installed or whose two counts differ).
+  extension's file). A run that is not installed or whose two counts differ is not a measurement of C (it may be B
+  under C's name): `report.mjs` names it, leaves it out of the variant's rates and fails the variant's gate.
 - `runs/<runId>/`: the prompt given, Pi's whole JSON log (`agent.jsonl`, stdout only), Pi's stderr (`pi-stderr.log`), the
   setup, the acceptance run (`hidden-setup.log`, `hidden-tests.log`), the shipped suites (`shipped-setup.log`,
   `shipped-tests.log`), the diff stat. The record's `hidden` is the acceptance result (with `interfaceMismatch` and
@@ -400,7 +401,9 @@ the tool calls' arguments) and `isolation.test.mjs` (the real Pi against a stand
 
 Per variant: verified finish at least **90 %** of S runs, **85 %** of M runs, **70 %** of L runs; false done (`wrong`) at
 most **5 %** of all runs; **zero** unclassified runs (every non-finish is named). Interface mismatches count as
-non-finishes only. The shipped-wording score is printed per variant and gates nothing. The report shows each rate with its
+non-finishes and toward false done. A continuation variant (C) also needs every run to have had the continuation as
+configured (W04: installed, and its counts equal to Pi's log); any other run is left out of its rates and fails its gate.
+The shipped-wording score is printed per variant and gates nothing. The report shows each rate with its
 Wilson 95 % interval and says when a rate that meets its gate still has an interval reaching below it (too few runs to be
 sure), then a PASS/FAIL line per variant and one RESULT line.
 

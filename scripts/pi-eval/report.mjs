@@ -6,7 +6,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderReport } from "./lib/stats.mjs";
+import { continuationOff, renderReport } from "./lib/stats.mjs";
 
 export function readResults(file) {
   if (!existsSync(file)) return [];
@@ -39,8 +39,8 @@ function main(argv) {
   const inTests = records.filter((r) => r.guardRefusalsInTests > 0);
   if (inTests.length > 0) process.stdout.write(`note: refused inside project tests: ${inTests.reduce((n, r) => n + r.guardRefusalsInTests, 0)}, not counted (the git wrapper still refused them; not contamination): ${inTests.map((r) => `${r.runId} ${r.guardRefusalsInTests}`).join(", ")}\n`);
   // Card W04: a continuation run whose extension did not run as configured, or whose counts file and Pi's log disagree.
-  const notC = records.filter((r) => r.continuation !== undefined && (r.continuation.installed !== true || (r.continuation.logged !== undefined && r.continuation.logged !== r.continuation.nudges)));
-  if (notC.length > 0) process.stdout.write(`note: ${notC.length} continuation run(s) without the continuation as configured (not installed, or its counts differ from Pi's log): ${notC.map((r) => r.runId).join(", ")}\n`);
+  const notC = records.filter(continuationOff);
+  if (notC.length > 0) process.stdout.write(`note: ${notC.length} continuation run(s) without the continuation as configured (not installed, or its counts differ from Pi's log), left out of the rates and failing their variant's gate: ${notC.map((r) => r.runId).join(", ")}\n`);
   return o.strict && !rep.pass ? 1 : 0;
 }
 

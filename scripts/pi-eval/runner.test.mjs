@@ -204,6 +204,14 @@ test("W04 variant C: an agent that never loads the continuation is recorded as n
   assert.equal(r.nudges, 0);
 });
 
+test("W04 variant C: an extension that read another bound than the runner recorded is not installed (not a measurement of C)", async () => {
+  const other = join(root, "continuation-other-max.json");
+  writeFileSync(other, JSON.stringify({ ...CONTINUATION, max: 2 }));
+  const r = await runOne(continuedCtx({ PI_EVAL_CONTINUATION_CONFIG: other }), set.tasks[0], "C", 1);
+  assert.equal(r.nudges, 2, "the extension went by the file it read");
+  assert.deepEqual(r.continuation, { max: 3, installed: false, nudges: 2, lengthNudges: 0, endedByReport: false, errors: 0, logged: 2 });
+});
+
 test("W04 variant C: an extension that loads but cannot read the runner's config is recorded as not installed, and continues nothing", async () => {
   const r = await runOne(continuedCtx({ PI_EVAL_CONTINUATION_CONFIG: join(root, "no-such-config.json") }), set.tasks[0], "C", 1);
   assert.deepEqual(r.continuation, { max: 3, installed: false, nudges: 0, lengthNudges: 0, endedByReport: false, errors: 1, logged: 0 });

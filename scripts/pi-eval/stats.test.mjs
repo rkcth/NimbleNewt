@@ -1,7 +1,7 @@
 // Tests for the bench's aggregation, Wilson intervals and release gates.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { aggregate, gatesFor, renderReport, wilson } from "./lib/stats.mjs";
+import { aggregate, continuationOff, gatesFor, renderReport, wilson } from "./lib/stats.mjs";
 
 const close = (a, b, eps = 1e-4) => assert.ok(Math.abs(a - b) < eps, `${a} vs ${b}`);
 
@@ -151,4 +151,34 @@ test("a contaminated run is never a verified finish: it is left out of the table
   assert.match(mixed.text, /contaminated \(left out, never a finish\): 7 run\(s\)/);
   const totals = compare(dirtyKinds.map((r) => ({ ...r, taskId: "t", agent: "pi" }))).totals[0];
   assert.deepEqual([totals.finish, totals.wrong, totals.mismatch, totals.other, totals.contaminated], [0, 0, 0, 0, 7]);
+});
+
+test("W04: a continuation run without the continuation as configured is left out of its variant's rates and fails its gate", () => {
+  const on = { max: 3, installed: true, nudges: 2, lengthNudges: 0, endedByReport: true, errors: 0, logged: 2 };
+  const c = (size, outcomes, continuation = on) => runs("C", size, outcomes).map((r) => ({ ...r, continuation }));
+  const good = [...c("S", { "verified-finish": 10 }), ...c("M", { "verified-finish": 10 }), ...c("L", { "verified-finish": 10 })];
+  assert.equal(gatesFor("C", aggregate(good)).pass, true);
+  for (const off of [{ max: 3, installed: false, logged: 0 }, { ...on, installed: false }, { ...on, logged: 1 }, { ...on, logged: 3 }, "yes"]) {
+    assert.equal(continuationOff({ continuation: off }), true, JSON.stringify(off));
+    // A run that would be a verified finish, but is variant B under C's name: never in C's rates, and C fails.
+    const recs = [...good, ...c("S", { "verified-finish": 1 }, off)];
+    const g = aggregate(recs).find((x) => x.variant === "C" && x.size === "S");
+    assert.equal(g.n, 10);
+    assert.equal(g.counts["verified-finish"], 10);
+    assert.equal(g.continuationOff, 1);
+    const r = gatesFor("C", aggregate(recs));
+    assert.equal(r.pass, false);
+    assert.match(r.failures.join("; "), /1 run\(s\) without the continuation as configured/);
+  }
+  assert.equal(continuationOff({ variant: "B" }), false, "a run without a continuation record is not a continuation run");
+  assert.equal(continuationOff({ continuation: on }), false);
+  // Only such runs: the variant is not measured, and the report says why.
+  const only = renderReport([...c("S", { "verified-finish": 2 }, { max: 3, installed: false, logged: 0 })]);
+  assert.equal(only.pass, false);
+  assert.match(only.text, /S verified finish: not measured/);
+  assert.match(only.text, /runs without the continuation as configured .*: 2 gate = 0: FAIL/);
+  // Variant B beside it is untouched.
+  const withB = renderReport([...good, ...runs("B", "S", { "verified-finish": 3 })]);
+  assert.match(withB.text, /\| B +\| S +\| 1 +\| 3 /);
+  assert.match(withB.text, /\| C +\| S +\| 1 +\| 10 /);
 });
