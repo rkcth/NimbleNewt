@@ -33,30 +33,46 @@ export function shapeReviewCite(c: { readonly criteriaRevision?: unknown; readon
 }
 
 /**
- * Reads what a cited verdict names, as the QA evidence record does: the task contract must still be at the cited version (else `stale_revision`: read the current criteria and judge again), each decision must be one of
- * the task or its project and in force, and an approval of work that relies on a decision that was superseded, or on one the review does not name, is refused (card C08: work bound to a superseded decision fails
- * review; a rejection or a request for changes is still allowed, since it is the right answer). Returns the version of each decision cited and the checks that keep the write from running on a decision that changed meanwhile.
+ * Reads what a cited verdict names, as the QA evidence record does: the task contract must still be at the cited version (else `stale_revision`: read the current criteria and judge again), and each decision must be
+ * one of the task or its project and in force. Returns the version of each decision cited and the checks that keep the write from running on a contract or a decision that changed meanwhile.
  */
-export async function readReviewCite(runner: Pick<CommandRunner, "get">, scope: { readonly projectId: string; readonly taskId: string }, cite: ReviewCite, verdict: string): Promise<{ readonly versions: Readonly<Record<string, number>>; readonly changes: readonly Change[] }> {
-  const contract = (await runner.get("task-contract", scope.taskId))?.body as unknown as { version?: number } | undefined;
-  const version = contract?.version ?? 0;
+export async function readReviewCite(runner: Pick<CommandRunner, "get">, scope: { readonly projectId: string; readonly taskId: string }, cite: ReviewCite): Promise<{ readonly versions: Readonly<Record<string, number>>; readonly changes: readonly Change[] }> {
+  const found = await runner.get("task-contract", scope.taskId);
+  const version = (found?.body as unknown as { version?: number } | undefined)?.version ?? 0;
   if (version !== cite.criteriaRevision) throw new DomainError("stale_revision", `the task contract is at version ${version}, not ${cite.criteriaRevision}: read its acceptance criteria and judge against them`, { currentRevision: version });
   const versions: Record<string, number> = {};
-  const changes: Change[] = [];
+  const changes: Change[] = found === undefined ? [] : [{ type: "check", ref: { kind: "task-contract", id: scope.taskId }, expectedRevision: found.revision }];
   for (const d of cite.decisions) {
-    const found = await runner.get("decision", d);
-    const body = found?.body as unknown as OwnerDecisionBody | undefined;
-    if (found === undefined || body === undefined || body.projectId !== scope.projectId || (body.taskId !== undefined && body.taskId !== scope.taskId)) bad("decisions", `${d} is not a decision of this task or its project`);
+    const got = await runner.get("decision", d);
+    const body = got?.body as unknown as OwnerDecisionBody | undefined;
+    if (got === undefined || body === undefined || body.projectId !== scope.projectId || (body.taskId !== undefined && body.taskId !== scope.taskId)) bad("decisions", `${d} is not a decision of this task or its project`);
     if (body!.state !== "active") bad("decisions", `${d} is ${body!.state}${body!.supersededBy === undefined ? "" : ` (the current one is ${body!.supersededBy})`}: a verdict is judged against the decisions in force`);
     versions[d] = body!.version;
-    changes.push({ type: "check", ref: { kind: "decision", id: d }, expectedRevision: found!.revision });
-  }
-  if (verdict === "approve") {
-    const reliance = (await runner.get("decision-reliance", relianceIdOf(scope.taskId)))?.body as unknown as RelianceBody | undefined;
-    for (const l of reliance?.links ?? []) {
-      if (l.state !== "current") bad("decisions", `the task relies on decision ${l.decisionId}, which was superseded: the work is revalidated against the current decision (decision.revalidate) before it can be approved`);
-      if (!cite.decisions.includes(l.decisionId)) bad("decisions", `the task relies on decision ${l.decisionId}: name it`);
-    }
+    changes.push({ type: "check", ref: { kind: "decision", id: d }, expectedRevision: got!.revision });
   }
   return { versions, changes };
+}
+
+/**
+ * Card C08 as Q02 asks it: work bound to a superseded decision fails review. Every approval, cited or not, is refused while a decision the task relies on (`decision.link`) is no longer in force: its link was marked
+ * superseded, or the decision itself is superseded or disputed (read from the decision, as the C08 guard does, so the time before propagation marks the link is covered too). A rejection or a request for changes is
+ * not held to it (it is the right answer to such work). An approval that cites (`named` given) must also name every decision the task relies on. Returns the checks on the reliance record and on each decision read,
+ * so a correction or a new link racing the approval lands strictly before or after it.
+ */
+export async function readApprovalReliance(runner: Pick<CommandRunner, "get">, taskId: string, named: readonly string[] | undefined): Promise<readonly Change[]> {
+  const found = await runner.get("decision-reliance", relianceIdOf(taskId));
+  if (found === undefined) return [];
+  const changes: Change[] = [{ type: "check", ref: { kind: "decision-reliance", id: found.id }, expectedRevision: found.revision }];
+  const seen = new Set<string>();
+  for (const l of (found.body as unknown as RelianceBody).links ?? []) {
+    const got = await runner.get("decision", l.decisionId);
+    const d = got?.body as unknown as OwnerDecisionBody | undefined;
+    if (got !== undefined && !seen.has(got.id)) { seen.add(got.id); changes.push({ type: "check", ref: { kind: "decision", id: got.id }, expectedRevision: got.revision }); }
+    if (l.state !== "current" || (d !== undefined && d.state !== "active")) {
+      const now = d?.state === "disputed" ? "is disputed" : `was superseded${(d?.supersededBy ?? l.supersededBy) === undefined ? "" : ` by ${d?.supersededBy ?? l.supersededBy}`}`;
+      bad("decisions", `the task relies on decision ${l.decisionId}, which ${now}: the work is revalidated against the current decision (decision.revalidate) before it can be approved`);
+    }
+    if (named !== undefined && !named.includes(l.decisionId)) bad("decisions", `the task relies on decision ${l.decisionId}: name it`);
+  }
+  return changes;
 }

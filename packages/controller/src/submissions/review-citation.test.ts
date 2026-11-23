@@ -1,5 +1,5 @@
 // Card Q02 (sixth slice): a reviewer's verdict may cite the task contract version and the owner decisions it judged against; a rejection that cites names the unmet owner requirement; a stale version, a decision not in force
-// and an approval of work bound to a superseded decision are refused. A review that cites nothing is as before. Runs on all four storage backends.
+// and an approval of work bound to a superseded decision (cited or not) are refused. A review that cites nothing is otherwise as before. Runs on all four storage backends.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError, type DomainErrorCode } from "../domain/errors.js";
@@ -11,6 +11,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { SubmissionService } from "./index.js";
+import { readApprovalReliance, readReviewCite } from "./review-citation.js";
 
 after(stopServer);
 
@@ -121,11 +122,27 @@ for (const backend of backends) {
       const changes = await review(rev, { verdict: "changes", criteriaRevision: 2, decisions: [dB] });
       assert.equal(typeof changes.id, "string");
       assert.deepEqual((await svc.approvalOf(code.id))?.cited, { criteriaRevision: 2, decisions: [{ id: dB, version: 1 }] }, "the newest review decides what is answered");
-      // An uncited approval of the same work is still accepted as before (no citation, no check).
+      // Work bound to a superseded decision fails review whether or not the approval cites (card Q02 citing C08); a request for changes without a citation is still allowed.
+      await refuses("invalid_command", () => review(rev, { verdict: "approve" }), /which was superseded/);
+      const uncitedChanges = await review(rev, { verdict: "changes" });
+      assert.equal("cited" in ((await svc.approvalOf(code.id)) ?? {}), false, "an uncited newest review answers no citation");
+      // Before propagation marks the link, the decision itself is read: superseded or disputed refuses the approval too.
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dOld, "current")], revalidations: 0, followUps: [] });
+      await refuses("invalid_command", () => review(rev, { verdict: "approve" }), new RegExp(`${dOld}, which was superseded by ${dA}`));
+      const dDisputed = derivedId("dec", cid("d"));
+      await plant("decision", dDisputed, decision("disputed"));
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dDisputed, "current")], revalidations: 0, followUps: [] });
+      await refuses("invalid_command", () => review(rev, { verdict: "approve" }), /which is disputed/);
+      // Revalidated against the decision in force, the uncited approval is accepted as before.
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dA, "current")], revalidations: 1, followUps: [] });
       const old = await review(rev, { verdict: "approve" });
       assert.equal((await svc.approvalOf(code.id))?.approved, true);
       assert.equal("cited" in ((await svc.approvalOf(code.id)) ?? {}), false);
-      assert.ok(old.id !== rejected.id);
+      assert.ok(old.id !== rejected.id && old.id !== uncitedChanges.id);
+      // The write is ordered against a contract change, a new link or a correction: the reads come back as revision checks.
+      const reads = await readReviewCite(runner, { projectId: project, taskId: task }, { criteriaRevision: 2, decisions: [dA] });
+      assert.deepEqual(reads.changes.map((c) => `${c.ref.kind}/${c.ref.id}`), [`task-contract/${task}`, `decision/${dA}`]);
+      assert.deepEqual((await readApprovalReliance(runner, task, undefined)).map((c) => `${c.ref.kind}/${c.ref.id}`), [`decision-reliance/${relianceIdOf(task)}`, `decision/${dA}`]);
 
       // Access rules hold as before: an agent that cannot read the task finds no such task; the author never reviews its own work; a code or qa submission carries no citation.
       await refuses("not_found", () => review(stranger, { verdict: "approve", criteriaRevision: 2 }));

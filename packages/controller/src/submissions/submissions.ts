@@ -10,7 +10,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { readReviewCite, shapeReviewCite } from "./review-citation.js";
+import { readApprovalReliance, readReviewCite, shapeReviewCite } from "./review-citation.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -397,12 +397,16 @@ export class SubmissionService {
           if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
           guards = attempt.guards ?? [];
         }
-        // A review that cites is read against the task as it is now (a replay above never gets here, so it keeps what the first record read).
-        let citeChecks: readonly Change[] = [];
+        // A review that cites is read against the task as it is now, and every approval against the decisions the task relies on (a replay above never gets here, so it keeps what the first record read).
+        let citeChecks: Change[] = [];
         if (kind === "review" && asked.criteriaRevision !== undefined) {
-          const read = await readReviewCite(this.#runner, { projectId: task.projectId, taskId }, { criteriaRevision: asked.criteriaRevision, decisions: asked.decisions ?? [] }, asked.verdict!);
-          citeChecks = read.changes;
+          const read = await readReviewCite(this.#runner, { projectId: task.projectId, taskId }, { criteriaRevision: asked.criteriaRevision, decisions: asked.decisions ?? [] });
+          citeChecks = [...read.changes];
           body = { ...body, decisionVersions: read.versions };
+        }
+        if (kind === "review" && asked.verdict === "approve") {
+          const named = asked.criteriaRevision === undefined ? undefined : asked.decisions ?? [];
+          for (const c of await readApprovalReliance(this.#runner, taskId, named)) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c);
         }
         const ref = { kind: "submission", id };
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
