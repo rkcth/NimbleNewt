@@ -119,6 +119,13 @@ export const DOC_INDEX_KEPT = 100;
 interface CodeIndexBody { readonly complete: boolean; readonly entries: readonly { readonly taskId: string; readonly id: string; readonly at: string; readonly by: string }[] }
 const CODE_INDEX = "code-submission-index";
 export const CODE_INDEX_KEPT = 500;
+/** A stored code index as the service reads it: `undefined` when absent or not readable as an index (then it is not trusted). */
+function codeIndexOf(found: { readonly body: unknown; readonly revision: number } | undefined): { body: CodeIndexBody; revision: number } | undefined {
+  const b = found?.body as Partial<CodeIndexBody> | undefined;
+  if (found === undefined || b === undefined || b === null || typeof b.complete !== "boolean" || !Array.isArray(b.entries)) return undefined;
+  if (!b.entries.every((e) => e !== null && typeof e === "object" && typeof e.taskId === "string" && typeof e.id === "string" && typeof e.at === "string" && typeof e.by === "string")) return undefined;
+  return { body: b as CodeIndexBody, revision: found.revision };
+}
 /**
  * A review's write met another review of the same subject written at the same moment (card H12o review): both changed the subject's verdict list. Not a refusal: the command is built again from the
  * list as it now is (`rebuildOnVerdictRace`), a few times, and only then answered `unavailable` (send it again).
@@ -535,19 +542,16 @@ export class SubmissionService {
 
   /** The code index of a project as stored: `undefined` when absent or not readable as an index (then it is not trusted). */
   async #readCodeIndex(projectId: string): Promise<{ body: CodeIndexBody; revision: number } | undefined> {
-    const found = await this.#runner.get(CODE_INDEX, projectId);
-    const b = found?.body as unknown as Partial<CodeIndexBody> | undefined;
-    if (found === undefined || b === undefined || typeof b.complete !== "boolean" || !Array.isArray(b.entries)) return undefined;
-    if (!b.entries.every((e) => e !== null && typeof e === "object" && typeof e.taskId === "string" && typeof e.id === "string" && typeof e.at === "string" && typeof e.by === "string")) return undefined;
-    return { body: b as CodeIndexBody, revision: found.revision };
+    return codeIndexOf(await this.#runner.get(CODE_INDEX, projectId));
   }
 
   /** A code submission is added to its project's index in the same write (card Q01b sixth slice); the first one of a project with older code seeds the index from one bounded scan. */
   async #codeIndexChange(id: string, body: SubmissionBody): Promise<Change[]> {
     if (body.kind !== "code" || body.tree === undefined || body.base === undefined || this.#codeKept <= 0) return [];
     const ref = { kind: CODE_INDEX, id: body.projectId };
+    // One read: the revision checked by the write is the revision of the entries the write was built from.
     const found = await this.#runner.get(CODE_INDEX, body.projectId);
-    const had = await this.#readCodeIndex(body.projectId);
+    const had = codeIndexOf(found);
     // An index that exists but cannot be read is left alone (a write could not be revision-checked against what it does not understand); the view scans for such a project.
     if (found !== undefined && had === undefined) return [];
     let entries: { taskId: string; id: string; at: string; by: string }[] = [...(had?.body.entries ?? [])];
@@ -670,7 +674,8 @@ export class SubmissionService {
       const task = await this.#readableTask(by, taskId);
       if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") return undefined;
       const a = await this.approvalOf(sub.id);
-      if (a === undefined || a.projectId !== projectId) return undefined;
+      // An index entry is only a pointer: the submission itself must be this project's code of this task and, for an agent, its own (as the scan reads them).
+      if (a === undefined || a.projectId !== projectId || a.taskId !== taskId || (ownOnly && a.submittedBy !== by.id)) return undefined;
       const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
       return { taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) };
     };

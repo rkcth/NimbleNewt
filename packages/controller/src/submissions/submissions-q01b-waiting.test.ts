@@ -392,5 +392,11 @@ for (const backend of backends) {
     const view = await c.svc.waiting(c.owner, c.project);
     assert.equal(view.source, "index");
     assert.deepEqual(view.items, []);
+    // An entry is checked against the submission itself: one naming another task of the project is left out, and an agent named as the author of another agent's code does not see it.
+    await c.plant("code-submission-index", c.project, { complete: true, entries: [{ taskId: t3, id: x.id, at: "2026-11-22T10:00:00.000Z", by: ann.id }, { taskId: t2, id: w.id, at: "2026-11-22T10:00:00.000Z", by: bob.id }] });
+    assert.deepEqual((await c.svc.waiting(c.owner, c.project)).items.map((i) => [i.taskId, i.submissionId]), [[t2, w.id]]);
+    const asBob = await c.svc.waiting(bob, c.project);
+    assert.equal(asBob.source, "index");
+    assert.deepEqual(asBob.items, []);
   });
 }
