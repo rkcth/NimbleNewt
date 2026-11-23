@@ -26,7 +26,7 @@ const listed = (system: string, op: string): string[] => {
 };
 
 // Pin: the prompt is about this long. The ceiling is 2,000 characters above what is now (a card that adds a control fits); the floor is 4,000 below it, so a large cut that dropped controls is seen too. Moving either is a decision.
-const SIZE = 152_217;
+const SIZE = 152_899;
 const CEILING = SIZE + 2_000;
 const FLOOR = SIZE - 4_000;
 

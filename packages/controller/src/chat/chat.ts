@@ -26,7 +26,7 @@ import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { RESOURCE_CONTROLS, MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -951,7 +951,7 @@ export class ChatService {
     const titleKey = Object.entries(TITLE_KEYS).find(([, id]) => id === asked.field)?.[0];
     if (titleKey !== undefined) delete args[titleKey];
     if (asked.field === "projectId") delete args["projectName"];
-    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", questionId: "questionTopic", id: "itemTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle" }[asked.field];
+    const nameKey = { scheduleId: "standupTitle", inquiryId: "questionTopic", questionId: "questionTopic", id: "itemTopic", occurrenceId: "meetingTopic", decisionId: "decisionTopic", motionId: "motionTopic", recordId: "meetingTopic", briefId: "agentName", watchedTaskId: "watchedTaskTitle", disputeId: "disputeTopic", chosen: "choiceWords", resourceId: "resourceLabel" }[asked.field];
     if (nameKey !== undefined) delete args[nameKey];
     if (asked.field.startsWith("integration.")) {
       // An answer to one of the project-creation questions fills one field of the integration section (a number for the refresh rounds, a list for the checks); the choice is the owner's word, so it counts as said.
@@ -964,7 +964,7 @@ export class ChatService {
     args[asked.field] = choice;
     // The owner's pick among letting running calls finish, cancelling them and pausing their tasks is their word, as is the platform (or chip) they name for a host: it counts as said, like the project-creation answers.
     // A motion or meeting picked from the question of a meeting control (card M02h) is likewise the owner's own choice, and so is the stand-up question picked for an answer (card M03h).
-    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "meetingTopic" || asked.field === "decisionId" || asked.field === "questionId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
+    work[asked.intentIndex] = { from: target.from, intent: { ...target.intent, args }, text: asked.field === "runningCalls" || asked.field === "meetingTopic" || asked.field === "decisionId" || asked.field === "questionId" || asked.field === "disputeId" || asked.field === "chosen" || asked.field === "resourceId" || asked.field === "motionId" || asked.field === "recordId" || asked.field === "os" || asked.field === "arch" ? `${target.text}. ${choice}` : target.text };
     return { work, quoted: old.quotedCount > 0 };
   }
 
@@ -1645,8 +1645,10 @@ export class ChatService {
       if (found === undefined) return refuse("not_found", "no such agenda item");
       labels[String(args["itemId"])] = String(found["topic"]);
     }
+    // A resource is named by its label, or by an ID the owner just picked from the choices offered (it is in their words then); an ID the model made up is not the owner's.
+    if (RESOURCE_CONTROLS.has(intent.op) && typeof args["resourceId"] === "string" && !words.toLowerCase().includes(args["resourceId"].toLowerCase())) return refuse("unsupported_value", "which resource is meant is not in your message, so nothing was proposed. Which resource do you mean?");
     // Ongoing responsibilities (card P04): a responsibility is named by its title, a managed resource by its label, an incident by the responsibility's title and, when it has several, the words of its signature. Exactly one match, else the owner is asked.
-    if (intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release") {
+    if (intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" || intent.op === "lease.acquire" || intent.op === "lease.release" || RESOURCE_CONTROLS.has(intent.op)) {
       const pick = (what: string, field: string, words: string, items: { id: string; name: string }[]): { id: string } | ReturnType<typeof refuse> | { ok: false; kind: "ask"; question: string; options: string[]; field: string; choices: string[] } => {
         const matches = items.filter((i) => words === "" || i.name.toLowerCase().includes(words));
         if (matches.length === 0) return refuse("not_found", words === "" ? `there is no ${what} in that project` : `no ${what} in that project is called ${quotedText(words, 80)}`);
@@ -1660,7 +1662,7 @@ export class ChatService {
         return v?.trim().toLowerCase();
       };
       const dutyTitle = intent.op === "responsibility.update" || intent.op === "responsibility.probe.set" || intent.op === "incident.resolve" ? words("responsibilityTitle") : undefined;
-      const resourceLabel = intent.op.startsWith("lease.") ? words("resourceLabel") : undefined;
+      const resourceLabel = intent.op.startsWith("lease.") || RESOURCE_CONTROLS.has(intent.op) ? words("resourceLabel") : undefined;
       const signature = intent.op === "incident.resolve" ? words("incidentSignature") : undefined;
       for (const w of [dutyTitle, resourceLabel, signature]) if (typeof w === "object") return w;
       if ((intent.op === "responsibility.update" || intent.op === "responsibility.probe.set") && args["responsibilityId"] === undefined) {
@@ -1676,14 +1678,64 @@ export class ChatService {
         const r = pick("open incident", "incidentId", (signature as string | undefined) ?? "", own.map((i) => ({ id: String(i["id"]), name: String(i["signature"]) })));
         if (!("id" in r)) return r;
         args["incidentId"] = r.id;
-      } else if (intent.op.startsWith("lease.") && args["resourceId"] === undefined) {
+      } else if ((intent.op.startsWith("lease.") || RESOURCE_CONTROLS.has(intent.op)) && args["resourceId"] === undefined) {
         const listed = await this.#plainItems(token, "resource.list", { projectId, state: "bound" });
+        // Detaching, moving or changing the access of a resource must name it: with no label and several bound, the owner is asked rather than the first one taken.
+        if (RESOURCE_CONTROLS.has(intent.op) && (resourceLabel === undefined || resourceLabel === "") && listed.length > 1) return { ok: false, kind: "ask", question: "Which resource do you mean?", options: listed.slice(0, CHAT_LIMITS.options).map((m) => `${String(m["id"])} (${String(m["label"]).slice(0, 60)})`), field: "resourceId", choices: listed.slice(0, CHAT_LIMITS.options).map((m) => String(m["id"])) };
         const r = pick("resource", "resourceId", (resourceLabel as string | undefined) ?? "", listed.map((i) => ({ id: String(i["id"]), name: String(i["label"]) })));
         if (!("id" in r)) return r;
         args["resourceId"] = r.id;
+        if (RESOURCE_CONTROLS.has(intent.op)) { delete args["projectId"]; labels[r.id] = String(listed.find((i) => String(i["id"]) === r.id)?.["label"] ?? r.id); }
+      } else if (RESOURCE_CONTROLS.has(intent.op) && typeof args["resourceId"] === "string" && resourceLabel === undefined) {
+        // An ID the owner picked from the choices offered (or wrote): it must be a resource bound to this project.
+        const listed = await this.#plainItems(token, "resource.list", { projectId, state: "bound" });
+        const found = listed.find((i) => String(i["id"]) === args["resourceId"]);
+        if (found === undefined) return refuse("not_found", "no resource bound to that project has that ID");
+        delete args["projectId"]; labels[String(found["id"])] = String(found["label"]);
       } else if (dutyTitle !== undefined || resourceLabel !== undefined || signature !== undefined) {
         return refuse("invalid_command", "the message names the same thing twice over, as an ID and in words; which one is meant has to be settled.");
       }
+    }
+    // How a resource is reached: the access is a fixed choice (read or write) the words check lets through, so it is held to what the owner said here; the access a resource is left with is then what the proposal shows.
+    if (intent.op === "resource.scope") {
+      const access = args["access"];
+      if (access !== "read" && access !== "write") return refuse("invalid_command", "the access is read or write");
+      if (!(access === "write" ? /\b(writ|edit|modif|chang|read.?and.?write|full)/i : /\b(read|view|look|see|inspect)/i).test(words)) return refuse("unsupported_value", `${access === "write" ? "Write" : "Read"} access is not what your message says, so nothing was proposed. Which access did you mean, read or write?`);
+      if (args["paths"] !== undefined && (!Array.isArray(args["paths"]) || (args["paths"] as unknown[]).some((x) => typeof x !== "string"))) return refuse("invalid_command", "paths is a list of paths");
+    }
+    // A role's label: the label is the owner's own words; clearing it (no label) needs the owner to have said so, since a missing label is not a word the words check can see.
+    if (intent.op === "role.label") {
+      if (typeof args["name"] !== "string" || args["name"].trim() === "") return refuse("invalid_command", "which role is meant has to be said");
+      if (args["label"] === undefined) return refuse("invalid_command", "the label to show, or that it is to be cleared, has to be said");
+      if (args["label"] === null && !/\b(clear|remove|reset|drop|delete|unset|no label|without a label|default)\b/i.test(words)) return refuse("unsupported_value", "Clearing the label is not what your message says, so nothing was proposed. What label should the role show?");
+      if (args["label"] !== null && typeof args["label"] !== "string") return refuse("invalid_command", "label is text, or null to clear it");
+    }
+    // A conflict between two of the owner's own instructions (card C08), named by their words (any part of the topic or of either instruction) and settled by choosing one: the one that stands is named by words from it. Both are read from the
+    // Needs-you list, so what is chosen is exactly what the owner saw there; an ID is only ever one the owner just picked from the choices offered (and is checked against the list). Unclear words ask, never guess.
+    if (intent.op === "decision.resolve-dispute") {
+      const named = args["disputeTopic"], chosenWords = args["choiceWords"];
+      delete args["disputeTopic"]; delete args["choiceWords"];
+      if ((named !== undefined && typeof named !== "string") || (chosenWords !== undefined && typeof chosenWords !== "string")) return refuse("invalid_command", "disputeTopic and choiceWords must be text");
+      if (named !== undefined && args["disputeId"] !== undefined) return refuse("invalid_command", "the conflict is named twice over, as disputeId and as disputeTopic; which one is meant has to be settled.");
+      if (chosenWords !== undefined && args["chosen"] !== undefined) return refuse("invalid_command", "the instruction is named twice over, as chosen and as choiceWords; which one is meant has to be settled.");
+      const listed = await this.#deps.api.handle(token, { v: API_VERSION, op: "status.ask", args: { request: { kind: "needs_you", limit: 50 } } });
+      if (!listed.ok) return refuse(listed.error.code, listed.error.message);
+      const every = ((((listed.result["item"] ?? listed.result) as Record<string, unknown>)["items"] ?? []) as { kind: string; id: string; text: string; members?: { id: string; statement: string }[] }[]).filter((i) => i.kind === "dispute" && (i.members?.length ?? 0) >= 2);
+      const topicWords = typeof named === "string" ? named.trim().toLowerCase() : "";
+      const offered = (m: { id: string; text: string }): string => `${m.id} (${m.text.slice(0, 60)})`;
+      const matches = every.filter((i) => (args["disputeId"] === undefined ? topicWords === "" || i.text.toLowerCase().includes(topicWords) : i.id === args["disputeId"]));
+      if (matches.length === 0) return refuse("not_found", every.length === 0 ? "none of your instructions conflict at the moment" : topicWords === "" ? "that conflict is not waiting for your choice" : `no conflict between your instructions is about ${quotedText(topicWords, 80)}`);
+      if (matches.length > 1) return { ok: false, kind: "ask", question: "Which conflict are you settling?", options: matches.slice(0, CHAT_LIMITS.options).map(offered), field: "disputeId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+      const one = matches[0]!;
+      args["disputeId"] = one.id;
+      const members = one.members!;
+      const said = typeof chosenWords === "string" ? chosenWords.trim().toLowerCase() : "";
+      const fits = args["chosen"] !== undefined ? members.filter((m) => m.id === args["chosen"]) : said === "" ? [] : members.filter((m) => m.statement.toLowerCase().includes(said));
+      if (fits.length !== 1) return { ok: false, kind: "ask", question: `Which of these stands on ${quotedText(one.text.slice(0, 80), 90)}? Two of your instructions conflict.`, options: members.slice(0, CHAT_LIMITS.options).map((m) => offered({ id: m.id, text: m.statement })), field: "chosen", choices: members.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
+      args["chosen"] = fits[0]!.id;
+      showFirst = "the conflict and the instruction you chose are shown to you first";
+      labels[one.id] = one.text.slice(0, 80);
+      labels[fits[0]!.id] = fits[0]!.statement.slice(0, 80);
     }
     // A stand-up named by its title (or the only one of the project): exactly one whose title contains the words, else the owner is asked.
     if (intent.op === "standup.update") {
@@ -2423,6 +2475,10 @@ export class ChatService {
         const item = typeof args["scheduleId"] === "string" ? await this.#get(token, "standup.get", { scheduleId: args["scheduleId"] }) : undefined;
         const revision = (item?.["schedule"] as { revision?: number } | undefined)?.revision;
         return revision === undefined ? refuse("not_found", "no such stand-up") : { ok: true, name: "expectedRevision", value: revision + ahead(`standup:${args["scheduleId"] as string}`) };
+      }
+      case "resource": {
+        const item = typeof args["resourceId"] === "string" ? await this.#get(token, "resource.get", { resourceId: args["resourceId"] }) : undefined;
+        return item === undefined ? refuse("not_found", "no such resource") : { ok: true, name: "expectedRevision", value: (item["revision"] as number) + ahead(`resource:${args["resourceId"] as string}`) };
       }
       case "meeting-schedule": {
         const item = typeof args["scheduleId"] === "string" ? await this.#get(token, "meeting.schedule-get", { scheduleId: args["scheduleId"] }) : undefined;

@@ -11,7 +11,7 @@ export interface ChatOp {
   readonly verb: string;
   /** `apply`: at once. `propose`: always a proposal. `profile`: an explicit owner order applies directly in the derived and autonomous profiles and is a proposal in the strict one (or when read failed). */
   readonly mode: "apply" | "propose" | "profile";
-  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "meeting-schedule" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "backup-scope" | "defect" | "observation" | "lesson" | "experiment";
+  readonly revision?: "task" | "project" | "agent" | "assignment" | "contract" | "agenda" | "standup" | "meeting-schedule" | "grant" | "decision" | "notifications" | "difficulty-profiles" | "retention" | "catalog-policy" | "standing-proposal" | "profile-suggestion" | "concern" | "responsibility" | "doc-obligation" | "database-transfer" | "backup-scope" | "resource" | "defect" | "observation" | "lesson" | "experiment";
   /** The project the command is about is needed, and comes from the conversation's focus when the owner does not name it. */
   readonly needsProject?: boolean;
   /** The command hands a task to someone: it carries an explicit project and repository (checkout) and is always a proposal. */
@@ -334,6 +334,12 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "meeting.update-schedule": { verb: "Change a meeting's schedule", mode: "propose", revision: "meeting-schedule", needsProject: true },
   "meeting.call-urgent": { verb: "Call agents to a meeting now", mode: "propose", needsProject: true },
   "meeting.attend.call-now": { verb: "Call the whole project to a meeting now", mode: "propose", needsProject: true },
+  // Gaps closed by words (chat-control audit 2026-11-22): settling a conflict between two of the owner's own instructions, a role's display label, and a bound resource's detaching, moving or access. Each is shown first.
+  "decision.resolve-dispute": { verb: "Choose which of two conflicting instructions stands", mode: "propose" },
+  "role.label": { verb: "Set or clear a role's label", mode: "propose" },
+  "resource.unbind": { verb: "Detach a bound resource", mode: "propose", revision: "resource", needsProject: true },
+  "resource.move": { verb: "Point a bound resource elsewhere", mode: "propose", revision: "resource", needsProject: true },
+  "resource.scope": { verb: "Change a bound resource's access", mode: "propose", revision: "resource", needsProject: true },
   // How notifications reach the owner (card U11b): digest times, quiet hours, the hours before an unanswered item is escalated, and the channel. It only changes how the owner is told, can be set back by saying so, and applies from the next notification, so an explicit order applies at once. The settings revision is read, not quoted.
   // The critical path (card U11d, "U11f"): what the owner marks decides what is listed first and what pages them, so marking or unmarking is always shown first. The task is named by its title (taskTitle) and the project by its name (projectName).
   "critical.mark": { verb: "Mark or unmark the critical path (kind task, goal or project; marked false takes the mark off)", mode: "propose" },
@@ -407,6 +413,33 @@ export const MEETING_CHAT_ARGS: Readonly<Record<string, readonly string[]>> = {
   "meeting.call-urgent": ["projectId", "title", "reason", "agentNames", "durationMinutes"],
   "meeting.attend.call-now": ["projectId", "title", "reason", "durationMinutes"],
 };
+/** What the chat accepts for the owner's dispute, role-label and resource controls: names and words only, never the dispute, decision or resource IDs or revisions the chat reads from the records (an ID is accepted only from a choice the chat offered). */
+export const GAPS_CHAT_ARGS: Readonly<Record<string, readonly string[]>> = {
+  "decision.resolve-dispute": ["disputeTopic", "choiceWords", "disputeId", "chosen"],
+  "role.label": ["name", "label"],
+  "resource.unbind": ["resourceLabel", "resourceId"],
+  "resource.move": ["resourceLabel", "resourceId", "locator"],
+  "resource.scope": ["resourceLabel", "resourceId", "access", "paths"],
+};
+/** The resource controls, which name the resource by its label. */
+export const RESOURCE_CONTROLS: ReadonlySet<string> = new Set(["resource.unbind", "resource.move", "resource.scope"]);
+/** What each of them does, said before the details. */
+export const GAPS_MEANING: Readonly<Record<string, string>> = {
+  "decision.resolve-dispute": " (the instruction you choose stands and the other is dropped for good; the work that relied on the topic is told)",
+  "role.label": " (only the name shown for the role changes; no right, check or history does)",
+  "resource.unbind": " (the project stops using it; refused while a responsibility manages it or an unfinished task is dispatched against it)",
+  "resource.move": " (tasks already dispatched to it are not redirected until their checkout is confirmed)",
+  "resource.scope": " (replaces the access the project has to it)",
+};
+/** Why each is shown first. */
+export const GAPS_REASON: Readonly<Record<string, string>> = {
+  "decision.resolve-dispute": "choosing between your own conflicting instructions decides what the agents work from, and cannot be undone, so it is shown first",
+  "role.label": "it renames a role on every screen, so it is shown first",
+  "resource.unbind": "ending a binding stops the project's access to it, so it is shown first",
+  "resource.move": "pointing a resource somewhere else changes where work happens, so it is shown first",
+  "resource.scope": "it changes what the project may do with the resource, so it is shown first",
+};
+
 /** What `foreignValue` leaves alone on those: the time of day, the zone and a one-off date are worked out from the owner's words (the time is checked by `clockTimeInWords`, all three are shown on the proposal). */
 export const MEETING_SCHEDULE_EXEMPT: ReadonlySet<string> = new Set(["time", "timeZone", "date"]);
 
@@ -736,6 +769,8 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   // The meeting controls name who attends by agents' names and a schedule by its words, never by principal or schedule IDs, scopes or revisions: the chat fills those in from the records.
   const own = MEETING_CHAT_ARGS[op];
   if (own !== undefined) return [...own, ...Object.keys(TITLE_KEYS), "projectName"];
+  const gaps = GAPS_CHAT_ARGS[op];
+  if (gaps !== undefined) return [...gaps, ...Object.keys(TITLE_KEYS), "projectName"];
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
   return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative") && !(op === "meeting.record.open-vote" && k === "limitMinutes")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" || op === "responsibility.probe.set" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "retirement.agent" ? ["agentName"] : []), ...(op === "owner.answer" || op === "standup.answer-question" ? ["questionTopic"] : []), ...(op === "needs-you.answer" ? ["itemTopic"] : []), ...(op === "meeting.invite-direct" || op === "meeting.attend.wake" || op === "meeting.attend.wake-stop" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(MOTION_CONTROLS.has(op) || op === "meeting.proc.rule" || op === "meeting.proc.untable" || op === "meeting.proc.begin" || op === "meeting.proc.advance" ? ["motionTopic"] : []), ...(FLOOR_CONTROLS.has(op) ? ["meetingTopic"] : []), ...(op === "meeting.floor.ask" || op === "meeting.floor.address" ? ["agentName"] : []), ...(op === "meeting.floor.priorities" ? ["agendaTopic", "urgency"] : []), ...(op === "meeting.proc.owner-message" ? ["meetingTopic"] : []), ...(op === "meeting.record.finish" || op === "meeting.record.outcomes" ? ["meetingTopic"] : []), ...(op === "meeting.record.apply" ? ["decisionTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "task.assign" || op === "task.transfer" || op === "grant.create" || op === "toolbox.optin" ? ["agentName"] : []), ...(op === "grant.create" ? ["bundle"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
 }
@@ -820,6 +855,7 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   if (spec === undefined) return undefined;
   if (draft) return "you asked for a draft";
   if (op === "resource.bind" && args["access"] === "write") return "it gives write access";
+  if (op in GAPS_REASON) return GAPS_REASON[op];
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
   // Card U14c review: a notification change follows the profile, except two moves that are more than how the owner is told. An external channel sends notifications out of the installation (where data
   // goes), and switching the security detectors off silences the security reports; a boolean is not a word the owner's-words check can see, so a model could add it to an unrelated order. Both are shown first in every profile.
@@ -1158,7 +1194,7 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
   }
   // What the exception means is said before the details, so a long topic can never push it off the line.
   // A right's end (or that it has none) is said before the long basis and terms, so truncating the line can never drop it.
-  const meaning = op === "responsibility.probe.set" ? probeMeaning(args) : op === "chat.budget.set" ? chatBudgetMeaning(args) : op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.record.open-vote" ? " (members can vote from now on; the vote closes after its time, or when you count it)" : op === "meeting.record.close-vote" ? " (the ballots cast so far are counted; if it is adopted its changes are carried out or wait for your answer, as the policy says)" : op === "meeting.record.table" ? " (the motion ends with no vote and is not taken up again)" : op === "meeting.proc.begin" ? " (the comment rounds, the objection check and the vote follow; members are asked to speak)" : op === "meeting.proc.advance" ? " (one step: one member's turn, answer or ballot)" : op === "meeting.floor.cq-rule" ? " (dismissed lets the chair's question stand; upheld withdraws it)" : op === "meeting.proc.rule" ? " (a ruling on the objections that hold the vote: going ahead records them as dissent, tabling ends the motion with no vote and makes follow-up tasks, upholding asks for a clarification or an amendment and runs the objection check again)" : op === "meeting.proc.untable" ? " (the tabled motion stays on record; its wording is moved again and put to a vote after the objection check)" : op === "meeting.proc.owner-message" ? " (everyone who speaks in the meeting after it sees these words; nobody gets the floor by it)" : op === "meeting.record.finish" ? " (the meeting ends for good; motions not concluded are voided)" : op === "meeting.record.outcomes" ? (args["askOwner"] === true ? " (each outcome goes back to the conversation it came from, and every decision the meeting deferred also puts a question to you, which you answer in chat)" : " (each outcome goes back to the conversation it came from; nothing is asked of you)") : op === "meeting.record.apply" ? " (only changes already agreed that were not carried out; each is checked again against the rights and state it relies on)" : op === "meeting.invite-direct" || op === "meeting.attend.wake" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op in MEETING_CHAT_ARGS ? meetingMeaning(op, args) : op === "grant.create" ? grantMeaning(args, labels) : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
+  const meaning = op in GAPS_MEANING ? GAPS_MEANING[op]! : op === "responsibility.probe.set" ? probeMeaning(args) : op === "chat.budget.set" ? chatBudgetMeaning(args) : op === "meeting.record.owner-respond" ? ownerRespondMeaning(args, labels) : op === "meeting.record.open-vote" ? " (members can vote from now on; the vote closes after its time, or when you count it)" : op === "meeting.record.close-vote" ? " (the ballots cast so far are counted; if it is adopted its changes are carried out or wait for your answer, as the policy says)" : op === "meeting.record.table" ? " (the motion ends with no vote and is not taken up again)" : op === "meeting.proc.begin" ? " (the comment rounds, the objection check and the vote follow; members are asked to speak)" : op === "meeting.proc.advance" ? " (one step: one member's turn, answer or ballot)" : op === "meeting.floor.cq-rule" ? " (dismissed lets the chair's question stand; upheld withdraws it)" : op === "meeting.proc.rule" ? " (a ruling on the objections that hold the vote: going ahead records them as dissent, tabling ends the motion with no vote and makes follow-up tasks, upholding asks for a clarification or an amendment and runs the objection check again)" : op === "meeting.proc.untable" ? " (the tabled motion stays on record; its wording is moved again and put to a vote after the objection check)" : op === "meeting.proc.owner-message" ? " (everyone who speaks in the meeting after it sees these words; nobody gets the floor by it)" : op === "meeting.record.finish" ? " (the meeting ends for good; motions not concluded are voided)" : op === "meeting.record.outcomes" ? (args["askOwner"] === true ? " (each outcome goes back to the conversation it came from, and every decision the meeting deferred also puts a question to you, which you answer in chat)" : " (each outcome goes back to the conversation it came from; nothing is asked of you)") : op === "meeting.record.apply" ? " (only changes already agreed that were not carried out; each is checked again against the rights and state it relies on)" : op === "meeting.invite-direct" || op === "meeting.attend.wake" ? " (this meeting only, then the agent is back as it was; no long-running work in it)" : op in MEETING_CHAT_ARGS ? meetingMeaning(op, args) : op === "grant.create" ? grantMeaning(args, labels) : op === "integration.set" || op === "integration.default.set" || op === "project.create" ? landingMeaning(op, args) : "";
   // The verb is this file's own wording; an operation the table does not know is whoever called this saying an operation name, so even that is escaped.
   const line = `${short(spec?.verb ?? op)}${meaning}${parts.length === 0 ? "" : `: ${parts.join(", ")}`}`;
   // An answer to a held meeting decision carries the decision, the owner's alternative in full (150 characters) and its topic (80), which the usual line would cut: the line has room for all of them.
