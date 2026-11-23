@@ -482,12 +482,12 @@ export type StatusRequest =
 
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
 /** One item of the Needs-you list as data: what it is, what it is about and how the owner answers it in place. */
-export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string; /** For a defect: the revision of the escalation listed, which `needs-you.answer` takes as `expectedRevision`. */ readonly revision?: number }
+export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** For a dispute: the decisions in conflict, each as the owner said it (the chat matches the owner's words against these). */ readonly members?: readonly { readonly id: string; readonly statement: string }[]; /** For a dispute: the topic the instructions conflict on, as recorded (the chat matches the owner's topic words against it, never against the line's fixed wording). */ readonly topic?: string; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string; /** For a defect: the revision of the escalation listed, which `needs-you.answer` takes as `expectedRevision`. */ readonly revision?: number }
 /** What kind of thing waits for the owner, and how it is answered in place (`needs-you.answer`, card U11d). */
-export type NeedKind = "defect" | "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "blocker";
+export type NeedKind = "defect" | "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "dispute" | "blocker";
 /** How an item is answered: one of the named choices, or the owner's own words. */
 export type NeedAnswer = { readonly kind: "choice"; readonly choices: readonly string[] } | { readonly kind: "words" };
-interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer; revision?: number }
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer; revision?: number; members?: readonly { id: string; statement: string }[]; topic?: string }
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
@@ -750,6 +750,8 @@ export interface StatusDeps {
   /** A motion's procedure as its service tells it (card M06), and what a meeting waits on (card M05): the `meeting_procedure` and `meeting_waiting` views. Absent: the views are not offered. */
   readonly meetingProcedure?: (viewer: Principal, motionId: string) => Promise<Record<string, unknown> | undefined>;
   readonly meetingWaiting?: (viewer: Principal, recordId: string) => Promise<{ readonly waiting: Record<string, unknown>; readonly stage?: string; readonly motionId?: string } | undefined>;
+  /** The conflicts between the owner's own instructions that wait for their choice (card C08): absent, none are listed. */
+  readonly disputes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; taskId?: string; topic: string; openedAt: string; members: readonly { id: string; statement: string }[] }[]; truncated: boolean }>;
   readonly meetingQuestions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; topic: string; question: string; askedAt: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
   /** The critical path the owner marked (card U11d, "U11f"): ranks the Needs-you view and is shown by the `critical_path` request. Absent: nothing is marked. */
@@ -3496,6 +3498,14 @@ export class StatusService {
         all.push({ text: `A meeting asks you about ${quoted(q.topic, 80)}: ${quoted(q.question, 200)} (answer the question; the topic stays decided as the meeting left it)`, cites: [cite("owner-question", q.id, q.revision), cite("project", q.projectId)], projectId: q.projectId, since: q.askedAt, id: q.id, rank: 2, kind: "meeting-question", answer: { kind: "words" } });
       }
     }
+    // Conflicting instructions of the owner (card C08): work on the topic is blocked until the owner chooses one, which no agent and no arrival order does.
+    if (this.#deps.disputes !== undefined && by.kind === "owner") {
+      const open = await this.#deps.disputes(by, 51);
+      if (open.truncated || open.items.length > 50) truncated.push("disputes");
+      for (const d of open.items.slice(0, 50)) {
+        all.push({ text: `Two of your instructions conflict on ${quoted(d.topic, 80)}: ${d.members.map((m) => quoted(m.statement, 120)).join(" or ")}; nothing on that topic is in force and the work that relies on it waits (choose which one stands)`, cites: [cite("decision-dispute", d.id, d.revision), cite("project", d.projectId)], projectId: d.projectId, ...(d.taskId === undefined ? {} : { taskId: d.taskId }), since: d.openedAt, id: d.id, rank: 1, kind: "dispute", answer: { kind: "choice", choices: d.members.map((m) => m.id) }, members: d.members.map((m) => ({ id: m.id, statement: m.statement })), topic: d.topic });
+      }
+    }
     if (this.#deps.meetingInquiries !== undefined) {
       const open = await this.#deps.meetingInquiries(by, 51);
       if (open.truncated || open.items.length > 50) truncated.push("meeting inquiries");
@@ -3626,7 +3636,7 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
     if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
-    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text, ...(i.revision === undefined ? {} : { revision: i.revision }) }));
+    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text, ...(i.revision === undefined ? {} : { revision: i.revision }), ...(i.members === undefined ? {} : { members: i.members }), ...(i.topic === undefined ? {} : { topic: i.topic }) }));
     return { observedAt: this.#runner.now(), lines, items: views, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
   }
 
