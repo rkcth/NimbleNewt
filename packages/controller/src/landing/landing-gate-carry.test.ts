@@ -64,6 +64,12 @@ test("carried QA evidence passes only when the host finds the same patch in each
   const unknown = await run({ required: ["qa"], approval: () => own, qa: () => qaPassed({ carriedFrom: [EARLY] }), samePatch: null });
   assert.deepEqual([unknown.record.passed, unknown.record.results[0]!.result], [false, "fail"]);
   assert.match(unknown.record.results[0]!.summary, /could not be checked for the same patch/);
+  // The host answers fewer IDs than it was asked: each answer stands for the earlier submission at its own place in the list, so the unanswered one fails (never borrows another's answer). Card Q02 second review.
+  const short = await run({ required: ["qa"], approval: () => own, qa: () => qaPassed({ carriedFrom: [EARLY, OTHER] }), samePatch: two, carriedIds: () => [PATCH] });
+  assert.deepEqual([short.record.passed, short.record.results[0]!.result], [false, "fail"]);
+  assert.match(short.record.results[0]!.summary, new RegExp(`carried over from ${OTHER}, whose own base and tree could not be checked`));
+  const shortReview = await run({ approval: () => ({ ...carried, carriedFrom: OTHER }), samePatch: two, carriedIds: () => [PATCH] });
+  assert.deepEqual([shortReview.record.passed, shortReview.record.results[0]!.result], [false, "fail"]);
   // Evidence of its own only: as before.
   assert.deepEqual((await run({ required: ["qa"], approval: () => own, qa: () => qaPassed(), samePatch: null })).record.results.map((r) => r.result), ["pass"]);
 });
