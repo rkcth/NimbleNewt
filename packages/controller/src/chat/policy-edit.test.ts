@@ -849,8 +849,10 @@ for (const backend of backends) {
     const listed = (await c.edits.open(c.w.owner)).find((e) => e.id === fwd.editId)!;
     assert.equal(listed.forwardedBy, "agent:ann");
     assert.match(listed.summary[0]!, /^\(passed on by agent:ann\)/);
-    script["Yes go ahead with that edit."] = [{ kind: "apply_proposal", proposalId: fwd.editId, evidence: "go ahead with that edit", basis: "owner" }];
-    const r = await c.say("Yes go ahead with that edit.");
+    // fifty others are open, all alike: only the ID tells this one apart
+    const said = `Yes go ahead with that edit ${fwd.editId}.`;
+    script[said] = [{ kind: "apply_proposal", proposalId: fwd.editId, evidence: `go ahead with that edit ${fwd.editId}`, basis: "owner" }];
+    const r = await c.say(said);
     assert.match(r.reply[0]!, /passed on by agent:ann/);
   });
 

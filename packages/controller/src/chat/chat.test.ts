@@ -346,6 +346,217 @@ for (const backend of backends) {
     assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Oak"]);
   });
 
+  suite("a message that is only a word of refusal never applies the open proposal, and one that is only a word of agreement never drops it, whatever the model made of it", async (w, script) => {
+    script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
+    const chat = w.chat();
+    const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
+    for (const text of ["no", "No!", "nope", "Nah.", "cancel", "don't", "Never.", "Don’t", "Stop!"]) {
+      script[text] = [{ kind: "apply_proposal", proposalId: oak, evidence: text, basis: "owner" }];
+      const o = only((await say(w, chat, text)).outcomes);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not agree to the proposal/);
+      assert.equal((await list(w, "project.list")).length, 0, `${text}: nothing applied`);
+    }
+    for (const text of ["yes", "OK.", "sure"]) {
+      script[text] = [{ kind: "discard_proposal", proposalId: oak, evidence: text, basis: "owner" }];
+      const o = only((await say(w, chat, text)).outcomes);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not drop the proposal/);
+    }
+    // the plain readings still work: a bare "no" drops it, a bare "yes" applies a new one
+    script["no"] = [{ kind: "discard_proposal", proposalId: oak, evidence: "no", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "no", cid("m"))).outcomes).status, "discarded");
+    script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    script["yes"] = [{ kind: "apply_proposal", proposalId: elm, evidence: "yes", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes", cid("m"))).outcomes).status, "applied");
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Elm"]);
+  });
+
+  suite("after the chat asks about a message that was only a word of refusal or agreement, answering in a few words does what was said: one open is applied or dropped, with several open it asks which", async (w, script) => {
+    script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
+    script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
+    script["draft a project Ash"] = [cmd("project.create", { ...ASKED, name: "Ash" }, "draft a project Ash")];
+    const chat = w.chat();
+    const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
+    script["nope"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "nope", basis: "owner" }];
+    const asked = only((await say(w, chat, "nope")).outcomes);
+    assert.equal(asked.status, "asked");
+    assert.match(asked.question!, /go ahead with it, or drop it\?/);
+    script["go ahead with it"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "go ahead with it", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "go ahead with it")).outcomes).status, "applied");
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Oak"]);
+    // the other way round: asked, then "drop it" drops the one open proposal
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    script["yes"] = [{ kind: "discard_proposal", proposalId: elm, evidence: "yes", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes")).outcomes).status, "asked");
+    script["drop it"] = [{ kind: "discard_proposal", proposalId: elm, evidence: "drop it", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "drop it")).outcomes).status, "discarded");
+    // with two open, "go ahead with it" names neither, so the chat asks which and applies nothing
+    const elm2 = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    only((await say(w, chat, "draft a project Ash")).outcomes);
+    script["nope"] = [{ kind: "apply_proposal", proposalId: elm2, evidence: "nope", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "nope")).outcomes).status, "asked");
+    script["go ahead with it"] = [{ kind: "apply_proposal", proposalId: elm2, evidence: "go ahead with it", basis: "owner" }];
+    const which = only((await say(w, chat, "go ahead with it")).outcomes);
+    assert.equal(which.status, "asked", JSON.stringify(which));
+    assert.match(which.question!, /More than one proposal is open/);
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Oak"]);
+  });
+
+  suite("an agreement that names nothing the owner said singles out no proposal: with several open it asks which, however many words it has; words only one proposal has pick it (no word list)", async (w, script) => {
+    script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
+    script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
+    const chat = w.chat();
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
+    const none = async () => assert.equal((await list(w, "project.list")).length, 0, "nothing applied");
+    for (const [text, evidence] of [["Yes please, go ahead", "yes please"], ["do that now", "do that"], ["OK sure thing", "ok sure thing"], ["create the project", "create the project"]] as const) {
+      script[text] = [{ kind: "apply_proposal", proposalId: oak, evidence, basis: "owner" }];
+      const asked = only((await say(w, chat, text)).outcomes);
+      assert.equal(asked.status, "asked", `${text}: ${JSON.stringify(asked)}`);
+      await none();
+      script[`no ${text}`] = [{ kind: "discard_proposal", proposalId: oak, evidence, basis: "owner" }];
+      assert.equal(only((await say(w, chat, `no ${text}`)).outcomes).status, "asked", `no ${text}`);
+    }
+    assert.equal(only((await say(w, chat, "Yes please, go ahead", cid("m"))).outcomes).status, "asked", "asked again, nothing remembered");
+    // a word that only the other proposal has does not single out the one the model picked; an ID the owner wrote does
+    script["yes, the Elm one"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "the Elm one", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes, the Elm one")).outcomes).status, "asked");
+    await none();
+    // a pick that is not open at all (gone, or made up) is not taken on a bare word either
+    script["Yes"] = [{ kind: "apply_proposal", proposalId: "prop-00000000000000000000000000000000", evidence: "yes", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "Yes")).outcomes).status, "asked");
+    await none();
+    // quoted material cannot supply the words
+    script["yes please"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "the Oak one", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes please\n> the Oak one")).outcomes).code, "untrusted_authority");
+    await none();
+    script["yes, the Oak one"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "the Oak one", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes, the Oak one")).outcomes).status, "applied");
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Oak"]);
+    // with one left open, the plain words apply it again as before
+    script["yes please, now"] = [{ kind: "apply_proposal", proposalId: elm, evidence: "yes please", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes please, now")).outcomes).status, "applied");
+  });
+
+  suite("a one-word reply answers a question the chat asked only when it is exactly one recorded answer, taken from the recorded question and not from the model's claim", async (w, script) => {
+    const chat = w.chat();
+    script["make a project Elm"] = [cmd("project.create", { name: "Elm" }, "make a project Elm")];
+    const first = await say(w, chat, "make a project Elm");
+    const asked = only(first.outcomes);
+    assert.equal(asked.status, "asked", JSON.stringify(asked));
+    const answer = (choice: string, evidence: string) => [{ kind: "answer", turnId: first.turnId, choice, evidence, basis: "owner" }];
+    const refused = async (text: string, intents: unknown[]) => { script[text] = intents; const o = only((await say(w, chat, text, cid("m"))).outcomes); assert.equal(o.code, "untrusted_authority", `${text}: ${JSON.stringify(o)}`); };
+    await refused("Yes", answer("default", "yes"));
+    await refused("defaults", answer("default", "defaults"));
+    await refused("default", answer("human-promotes", "default"));
+    await refused("integration-branch", answer("default", "integration-branch"));
+    await refused("default", answer("default", "no"));
+    assert.equal((await chat.context(w.ownerToken)).awaiting!.turnId, first.turnId, "still waiting");
+    // the same word inside a longer message is no answer of one word, and a wholly quoted word is no message at all
+    script["well, default"] = answer("default", "default");
+    assert.equal(only((await say(w, chat, "well, default")).outcomes).code, "untrusted_authority");
+    script["> default"] = answer("default", "default");
+    await assert.rejects(say(w, chat, "> default"), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    script["default"] = answer("human-promotes", "human-promotes");
+    assert.equal(only((await say(w, chat, "default\n> human-promotes")).outcomes).code, "untrusted_authority");
+    // the label of one option names it too
+    script["Default."] = answer("default", "default.");
+    const next = only((await say(w, chat, "Default.")).outcomes);
+    assert.equal(next.status, "asked", JSON.stringify(next));
+    assert.ok(next.question!.includes("integrates"), "the next question follows");
+    assert.equal((await chat.getTurn(w.ownerToken, first.turnId))!.resumedBy !== undefined, true);
+    // the question just answered is not answered a second time by a one-word reply
+    script["default"] = answer("default", "default");
+    assert.equal(only((await say(w, chat, "default")).outcomes).code, "untrusted_authority");
+    // answered once only
+    script["default again"] = answer("default", "default");
+    assert.equal(only((await say(w, chat, "default again")).outcomes).code, "untrusted_authority");
+  });
+
+  suite("a one-word reply answers only the question the chat is waiting on now; a word of agreement answers only when the question offers it as a choice; a word two options share answers nothing", async (w, script) => {
+    const a = await w.project("A");
+    const chat = w.chat();
+    await chat.setFocus(w.ownerToken, { commandId: cid("f"), projectId: a });
+    const answer = (turnId: string, choice: string, evidence: string) => [{ kind: "answer", turnId, choice, evidence, basis: "owner" }];
+    // an older question that a later one replaced is not answered by one word, even with a recorded choice
+    script["make a project Elm"] = [cmd("project.create", { name: "Elm" }, "make a project Elm")];
+    script["make a project Oak"] = [cmd("project.create", { name: "Oak" }, "make a project Oak")];
+    const elm = await say(w, chat, "make a project Elm");
+    assert.equal(only(elm.outcomes).status, "asked");
+    const oak = await say(w, chat, "make a project Oak");
+    assert.equal(only(oak.outcomes).status, "asked");
+    assert.equal((await chat.context(w.ownerToken)).awaiting!.turnId, oak.turnId);
+    script["default"] = answer(elm.turnId, "default", "default");
+    assert.equal(only((await say(w, chat, "default")).outcomes).code, "untrusted_authority", "the replaced question");
+    assert.equal((await chat.getTurn(w.ownerToken, elm.turnId))!.resumedBy, undefined);
+    script["default"] = answer(oak.turnId, "default", "default");
+    assert.equal(only((await say(w, chat, "default")).outcomes).status, "asked", "the question waiting now is answered");
+    // option labels hold names someone else may have written: a bare "ok" does not pick the option whose name is "ok"
+    const duty = async (title: string) => { const r = await w.api.handle(w.ownerToken, { v: API_VERSION, op: "responsibility.create", commandId: cid("r"), args: { projectId: a, title, objective: "Up" } } as never); assert.ok(r.ok, JSON.stringify(r)); return (r as unknown as { result: { id: string } }).result.id; };
+    const okDuty = await duty("ok");
+    await duty("ok backup");
+    script["pause the ok duty"] = [cmd("responsibility.update", { responsibilityTitle: "ok", state: "paused" }, "pause the ok duty")];
+    const which = await say(w, chat, "pause the ok duty");
+    assert.equal(only(which.outcomes).status, "asked", JSON.stringify(which.outcomes));
+    assert.ok(only(which.outcomes).options!.some((o) => o.endsWith("(ok)")), JSON.stringify(only(which.outcomes).options));
+    script["ok"] = answer(which.turnId, okDuty, "ok");
+    assert.equal(only((await say(w, chat, "ok")).outcomes).code, "untrusted_authority", "an agreement word is not taken from a label");
+    // two options whose names are the same word: that word names neither
+    const backups = [await duty("Backup"), await duty("Backup")];
+    script["pause the backup duty"] = [cmd("responsibility.update", { responsibilityTitle: "backup", state: "paused" }, "pause the backup duty")];
+    const two = await say(w, chat, "pause the backup duty");
+    assert.equal(only(two.outcomes).status, "asked", JSON.stringify(two.outcomes));
+    for (const backup of backups) {
+      script["Backup"] = answer(two.turnId, backup, "backup");
+      assert.equal(only((await say(w, chat, "Backup", cid("m"))).outcomes).code, "untrusted_authority", "two labels say the same word, whichever the model names");
+    }
+    assert.equal((await chat.getTurn(w.ownerToken, two.turnId))!.resumedBy, undefined, "nothing was carried on");
+  });
+
+  suite("with several open, a message that also points to another open proposal asks; small common words name nothing; an unreadable list of policy edits asks; 100 or more open always asks", async (w, script) => {
+    let edits: "fail" | number | { id: string; summary: string[] }[] = "fail";
+    const policyEdits = { open: async () => { if (edits === "fail") throw new Error("the edits could not be read"); return (typeof edits === "number" ? Array.from({ length: edits }, (_, k) => ({ id: `pedit-${String(k).padStart(26, "0")}`, summary: [`Edit number ${k} of a zone`] })) : edits).map((e) => ({ ...e, status: "proposed" })); } };
+    const chat = w.chat({ policyEdits: policyEdits as never });
+    const names = async () => (await list(w, "project.list")).map((x) => x["name"]).sort();
+    for (const n of ["Oak", "Pine", "Elm", "Ash"]) script[`draft a project ${n}`] = [cmd("project.create", { ...ASKED, name: n }, `draft a project ${n}`)];
+    const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
+    // the policy edits cannot be read: even a lone chat proposal is not taken on a "yes"; its ID written out is
+    script["yes"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "yes", basis: "owner" }];
+    const unread = only((await say(w, chat, "yes")).outcomes);
+    assert.equal(unread.status, "asked", JSON.stringify(unread));
+    assert.match(unread.question!, /could not be read/);
+    script[`yes ${oak}`] = [{ kind: "apply_proposal", proposalId: oak, evidence: `yes ${oak}`, basis: "owner" }];
+    assert.equal(only((await say(w, chat, `yes ${oak}`)).outcomes).status, "applied");
+    assert.deepEqual(await names(), ["Oak"]);
+    // 100 open: asked however clearly the owner names it; 99 open: named, applied
+    const pine = only((await say(w, chat, "draft a project Pine")).outcomes).proposalId!;
+    script["yes, the Pine project"] = [{ kind: "apply_proposal", proposalId: pine, evidence: "the Pine project", basis: "owner" }];
+    edits = 99;
+    assert.equal(only((await say(w, chat, "yes, the Pine project")).outcomes).status, "asked", "100 open");
+    assert.deepEqual(await names(), ["Oak"]);
+    edits = 98;
+    assert.equal(only((await say(w, chat, "yes, the Pine project")).outcomes).status, "applied", "99 open");
+    assert.deepEqual(await names(), ["Oak", "Pine"]);
+    // a message that names the pick and another open proposal is not clear: asked; one that agrees to one and drops the other does both
+    edits = [];
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    const ash = only((await say(w, chat, "draft a project Ash")).outcomes).proposalId!;
+    script["yes Ash, or Elm"] = [{ kind: "apply_proposal", proposalId: ash, evidence: "yes Ash", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes Ash, or Elm")).outcomes).status, "asked");
+    script[`yes Ash, not ${elm}`] = [{ kind: "apply_proposal", proposalId: ash, evidence: "yes Ash", basis: "owner" }];
+    assert.equal(only((await say(w, chat, `yes Ash, not ${elm}`)).outcomes).status, "asked", "another proposal's ID");
+    assert.deepEqual(await names(), ["Oak", "Pine"]);
+    script["no Elm, yes Ash"] = [{ kind: "discard_proposal", proposalId: elm, evidence: "no Elm", basis: "owner" }, { kind: "apply_proposal", proposalId: ash, evidence: "yes Ash", basis: "owner" }];
+    assert.deepEqual((await say(w, chat, "no Elm, yes Ash")).outcomes.map((o) => o.status), ["discarded", "applied"]);
+    assert.deepEqual(await names(), ["Ash", "Oak", "Pine"]);
+    // "the" and "one" appear in one edit's text only, yet name nothing
+    edits = [{ id: "pedit-aaaaaaaaaaaaaaaaaaaaaaaaaa", summary: ["Let the reviewers read plans"] }, { id: "pedit-bbbbbbbbbbbbbbbbbbbbbbbbbb", summary: ["Remove access for Ann"] }];
+    script["yes, the one"] = [{ kind: "apply_proposal", proposalId: "pedit-aaaaaaaaaaaaaaaaaaaaaaaaaa", evidence: "yes, the one", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "yes, the one")).outcomes).status, "asked");
+  });
+
   suite("a drafted assignment carries explicit project and repository, is a proposal, and focus changes cannot retarget it", async (w, script) => {
     const a = await w.project("A");
     const b = await w.project("B");

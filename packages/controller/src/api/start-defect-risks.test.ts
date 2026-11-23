@@ -100,7 +100,7 @@ test("through the running controller the team-wide defect risks are answered in 
     const viaTask = await turn("m-t", byTask, [{ kind: "command", op: "needs-you.answer", args: { itemTopic: "Write the guide", answer: "repair-again" }, evidence: byTask, basis: "owner" }]);
     assert.equal(viaTask[0].status, "proposed", `the task's title picks the escalated defect: ${JSON.stringify(viaTask)}`);
     assert.match(JSON.stringify(viaTask), new RegExp(major), "and it is the defect of that task");
-    const applied = await turn("m-b", "yes, do that", [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await turn("m-b", `yes, do that ${proposed[0].proposalId}`, [{ kind: "apply_proposal", proposalId: proposed[0].proposalId, evidence: `do that ${proposed[0].proposalId}`, basis: "owner" }]);
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     const item = (await call(boot.token, "defect.get", { id: major })).result.item;
     assert.deepEqual([item.state, item.cycles, item.checks.map((x: any) => x.verdict), item.overrideRecords.map((o: any) => [o.outcome, o.reason])], ["open", 1, ["not-fixed"], [["repair-again", "answered from the Needs-you list"]]]);
@@ -132,7 +132,7 @@ test("through the running controller the team-wide defect risks are answered in 
     assert.ok((await call(boot.token, "needs-you.answer", { kind: "defect", id: major, answer: "repair-again", expectedRevision: listedTwice.revision }, "na4")).ok);
     await failAgain("3");
     assert.equal((await call(boot.token, "defect.get", { id: major })).result.item.state, "escalated");
-    const late = await turn("m-e", "yes, do that", [{ kind: "apply_proposal", proposalId: stale[0].proposalId, evidence: "do that", basis: "owner" }]);
+    const late = await turn("m-e", `yes, do that ${stale[0].proposalId}`, [{ kind: "apply_proposal", proposalId: stale[0].proposalId, evidence: `do that ${stale[0].proposalId}`, basis: "owner" }]);
     assert.notEqual(late[0].status, "applied", JSON.stringify(late));
     assert.match(JSON.stringify(late), /escalated again/);
     const still = (await call(boot.token, "defect.get", { id: major })).result.item;

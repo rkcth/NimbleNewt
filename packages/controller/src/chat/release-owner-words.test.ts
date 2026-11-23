@@ -117,7 +117,7 @@ for (const backend of backends) {
       const quietArgs = JSON.parse(JSON.stringify((await chat.getProposal(w.ownerToken, quietShown[0]!.proposalId!))!.steps[0]!.args)) as Record<string, unknown>;
       assert.deepEqual(quietArgs["expectedFailures"], [fail], "what the approval binds to is the chat's own reading of the gate, not anything the interpreter sent");
       assert.equal((await gate(cand)).approved, false, "a model-set flag approves nothing by itself");
-      assert.equal((await turn("m7c", "no, forget that one", [{ kind: "discard_proposal", proposalId: quietShown[0]!.proposalId, evidence: "forget that one", basis: "owner" }]))[0]!.status, "discarded");
+      assert.equal((await turn("m7c", `no, forget that one ${quietShown[0]!.proposalId}`, [{ kind: "discard_proposal", proposalId: quietShown[0]!.proposalId, evidence: `forget that one ${quietShown[0]!.proposalId}`, basis: "owner" }]))[0]!.status, "discarded");
       // The owner's later confirmation of the proposal that showed the failures is itself the acceptance — no special words said beforehand.
       const shipConfirm = await turn("m8", "yes, approve it", [{ kind: "apply_proposal", proposalId: shipShown[0]!.proposalId, evidence: "approve it", basis: "owner" }]);
       assert.equal(shipConfirm[0]!.status, "applied", `confirming the shown proposal is the acceptance: ${JSON.stringify(shipConfirm[0])}`);
@@ -157,7 +157,8 @@ for (const backend of backends) {
         const shown = (lateShown2[0]!.preview ?? []).join(" ");
         assert.match(shown, /linux x64 passed only after 1 earlier failure/, `the preview names the flaky platform: ${shown.slice(0, 400)}`);
         assert.match(shown, new RegExp(sick), "and it names the attempt that failed");
-        const lateConfirm = await turn("m23", "confirm that approval", [{ kind: "apply_proposal", proposalId: lateShown2[0]!.proposalId, evidence: "confirm that", basis: "owner" }]);
+        // the refused one is still open, with the same first line: the owner names this one by its ID
+        const lateConfirm = await turn("m23", `confirm that approval ${lateShown2[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: lateShown2[0]!.proposalId, evidence: `confirm that approval ${lateShown2[0]!.proposalId}`, basis: "owner" }]);
         assert.equal(lateConfirm[0]!.status, "applied", `the approval that showed the gate as it stands goes through: ${JSON.stringify(lateConfirm[0])}`);
         assert.equal((await gate(late)).approved, true);
       }
@@ -261,7 +262,7 @@ for (const backend of backends) {
       const stop = "stop letting host:rig run release tests";
       const stopShown = await turn("w6", stop, [{ kind: "command", op: "release.host", args: { hostId: "host:rig", active: false }, evidence: stop, basis: "owner" }]);
       assert.equal(stopShown[0]!.status, "proposed", `withdrawing a host needs no os or arch: ${JSON.stringify(stopShown[0])}`);
-      assert.equal((await turn("w7", "yes, take it off the release machines", [{ kind: "apply_proposal", proposalId: stopShown[0]!.proposalId, evidence: "take it off", basis: "owner" }]))[0]!.status, "applied");
+      assert.equal((await turn("w7", `yes, take it off the release machines ${stopShown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: stopShown[0]!.proposalId, evidence: `take it off the release machines ${stopShown[0]!.proposalId}`, basis: "owner" }]))[0]!.status, "applied");
       assert.equal((await call("release.start", { candidateId: cand, cell: linux, hostId: "host:rig" })).error?.code, "forbidden", "the withdrawn machine takes no test now");
     } finally { await w.close(); }
   });
