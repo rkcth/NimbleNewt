@@ -195,7 +195,7 @@ test("in chat the owner defines a source and watches it by plain words; the path
     assert.equal((await s.principals.authenticate(boot.token)).kind, "owner");
     const before = (await c.api.handle(boot.token, { v: 1, op: "events.sources.get", args: {} } as never)) as unknown as { result: { item: { sources: { id: string }[] } } };
     assert.ok(!before.result.item.sources.some((x) => x.id === "seed-orders"), "not defined until the owner accepts");
-    const applied = await turn("m3", "yes, go ahead", [{ kind: "apply_proposal", proposalId: (shown[0] as { proposalId: string }).proposalId, evidence: "go ahead", basis: "owner" }]);
+    const applied = await turn("m3", `yes, go ahead ${(shown[0] as { proposalId: string }).proposalId}`, [{ kind: "apply_proposal", proposalId: (shown[0] as { proposalId: string }).proposalId, evidence: `go ahead ${(shown[0] as { proposalId: string }).proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     const got = (await c.api.handle(boot.token, { v: 1, op: "events.sources.get", args: {} } as never)) as unknown as { result: { item: { sources: { id: string; definition?: { taskId?: string; path?: string } }[] } } };
     const def = got.result.item.sources.find((x) => x.id === "seed-orders")!;

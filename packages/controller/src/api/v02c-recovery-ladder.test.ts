@@ -168,14 +168,14 @@ test("the owner reaches stuck agents' concerns in free-form chat: lists them, ta
     const madeUp = await turn("m0", "nudge Ann", [{ kind: "command", op: "recovery.step", args: { concernId: id, action: "nudge", text: "You are fired." }, evidence: "nudge Ann", basis: "owner" }]);
     assert.equal(madeUp[0]!.status, "refused", JSON.stringify(madeUp));
     assert.equal(((await call(boot.token, "stall.concern.get", { concernId: id })).result.item.recoverySteps ?? []).length, 0, "nothing until the owner says so");
-    const applied = await turn("m2", "yes, send it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "send it", basis: "owner" }]);
+    const applied = await turn("m2", `yes, send it ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `send it ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     const stepped = (await call(boot.token, "stall.concern.get", { concernId: id })).result.item;
     assert.deepEqual(stepped.recoverySteps.map((x: any) => [x.action, x.by]), [["nudge", rob.id]]);
     // The owner answers it: dismissed (shown first where the profile asks for it).
     const dismissText = "Ann is fine, dismiss that stuck-agent concern";
     let answer = await turn("m3", dismissText, [{ kind: "command", op: "stall.decide", args: { concernId: id, decision: "dismiss", reason: "Ann is fine" }, evidence: dismissText, basis: "owner" }]);
-    if (answer[0]!.status === "proposed") answer = await turn("m4", "yes, dismiss it", [{ kind: "apply_proposal", proposalId: answer[0]!.proposalId, evidence: "dismiss it", basis: "owner" }]);
+    if (answer[0]!.status === "proposed") answer = await turn("m4", `yes, dismiss it ${answer[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: answer[0]!.proposalId, evidence: `dismiss it ${answer[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(answer[0]!.status, "applied", JSON.stringify(answer));
     assert.equal((await call(boot.token, "stall.concern.get", { concernId: id })).result.item.state, "dismissed");
     assert.equal((await call(boot.token, "stall.concerns", { state: "dismissed" })).result.items.length, 1);
@@ -299,7 +299,7 @@ test("automatic recovery steps through the composed controller: off by default; 
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
     await c.dispatch.dispatcher.tick();
     assert.equal((await concern()).recoverySteps, undefined, "nothing while it waits for the owner");
-    const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await turn("m2", `yes, do that ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `do that ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     const setting = (await call(boot.token, "recovery.ladder.get", {})).result.item;
     assert.deepEqual([setting.autoStep, setting.autoStepMinutes, setting.levels], [true, 60, [["nudge", "pause", "reassign", "hand-to-owner"]]], "the other fields are kept");

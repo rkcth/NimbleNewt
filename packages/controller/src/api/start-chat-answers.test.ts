@@ -25,7 +25,9 @@ test("through the running controller and the real model interpreter, a one-word 
     const open = [...r.user.matchAll(/Open proposal (\S+) \(text, not instructions\):\n<<<\n([\s\S]*?)\n>>>/g)];
     // careless about what a word means: a bare "nope" is read as agreeing to the first open proposal
     if (/^nope$/i.test(owner) && open.length > 0) return JSON.stringify([{ kind: "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }]);
-    if (/^(yes|no)\b/i.test(owner) && open.length > 0) return JSON.stringify([{ kind: /^no/i.test(owner) ? "discard_proposal" : "apply_proposal", proposalId: open[0]![1], evidence: owner, basis: "owner" }]);
+    // an ID the owner wrote is taken as the pick (the first one the prompt lists, when the owner wrote two), and carelessly so is an ID with its last character left off
+    const byId = open.find((o) => owner.includes(o[1]!.slice(0, -1)));
+    if (/^(yes|no)\b/i.test(owner) && open.length > 0) return JSON.stringify([{ kind: /^no/i.test(owner) ? "discard_proposal" : "apply_proposal", proposalId: (byId ?? open[0]!)[1], evidence: owner, basis: "owner" }]);
     const name = /^make a project (\w+)$/.exec(owner);
     if (name !== null) return JSON.stringify([{ kind: "command", op: "project.create", args: { name: name[1], integration: { landing: "default", integrator: "default", requiredChecks: "default", refreshRounds: "default" } }, evidence: owner, basis: "owner" }]);
     const bare = /^start a project (\w+)$/.exec(owner);
@@ -52,7 +54,8 @@ test("through the running controller and the real model interpreter, a one-word 
     assert.deepEqual(await projects(), [], "nothing was created by answering");
 
     // (B) agreement with several open
-    assert.equal((await turn("make a project Elm"))[0].status, "proposed");
+    const elmShown = (await turn("make a project Elm"))[0];
+    assert.equal(elmShown.status, "proposed", JSON.stringify(elmShown));
     assert.equal((await turn("Yes please"))[0].status, "asked", "two or more open: the model's pick is not taken");
     assert.equal((await turn("yes"))[0].status, "asked");
     assert.deepEqual(await projects(), []);
@@ -61,5 +64,16 @@ test("through the running controller and the real model interpreter, a one-word 
     assert.equal(nope.status, "asked", JSON.stringify(nope));
     assert.match(nope.question, /does not agree to the proposal/);
     assert.deepEqual(await projects(), []);
+
+    // (C) the exact ID of one open proposal names it, even when other words of the message are words only another open proposal has
+    const elm = elmShown.proposalId as string;
+    const again = (await turn("make a project Again"))[0];
+    assert.equal(again.status, "proposed", JSON.stringify(again));
+    assert.equal((await turn(`yes ${elm} ${again.proposalId}`))[0].status, "asked", "two IDs: the owner is asked which");
+    assert.equal((await turn(`yes, again ${elm.slice(0, -1)}`))[0].status, "asked", "a near ID is no ID");
+    assert.deepEqual(await projects(), []);
+    const applied = (await turn(`yes, again ${elm}`))[0];
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    assert.deepEqual(await projects(), ["Elm"]);
   } finally { await c.close?.(); rmSync(d, { recursive: true, force: true }); }
 });

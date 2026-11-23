@@ -324,7 +324,7 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
     const shown = await turn("m1", e1, [{ kind: "command", op: "maintenance.settings.enable", args: { what: "bosses" }, evidence: e1, basis: "owner" }]);
     assert.equal(shown[0]!.status, "proposed", "widening is shown first");
     assert.equal((await get()).effective.bosses, false);
-    assert.equal((await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]))[0]!.status, "applied");
+    assert.equal((await turn("m2", `yes, do that ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `do that ${shown[0]!.proposalId}`, basis: "owner" }]))[0]!.status, "applied");
     assert.equal((await get()).effective.bosses, true);
     const e2 = "turn off supervisor decisions for environment changes";
     assert.equal((await turn("m3", e2, [{ kind: "command", op: "maintenance.settings.disable", args: { what: "bosses" }, evidence: e2, basis: "owner" }]))[0]!.status, "applied", "narrowing applies at once");
@@ -353,7 +353,7 @@ test("the settings are the owner's alone, race-safe and replay-safe, and the cha
     assert.equal(forged[0]!.status, "proposed");
     assert.equal((await call(w.owner, "maintenance.get", { maintenanceId: mid })).result.item.status, "pending");
     assert.match(JSON.stringify(forged[0]), /asks: mount/, "the owner sees the request");
-    { const o = (await turn("m10", "yes, go ahead", [{ kind: "apply_proposal", proposalId: forged[0]!.proposalId, evidence: "go ahead", basis: "owner" }]))[0]!; assert.equal(o.status, "applied", JSON.stringify(o)); }
+    { const o = (await turn("m10", `yes, go ahead ${forged[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: forged[0]!.proposalId, evidence: `go ahead ${forged[0]!.proposalId}`, basis: "owner" }]))[0]!; assert.equal(o.status, "applied", JSON.stringify(o)); }
     const after = (await call(w.owner, "maintenance.get", { maintenanceId: mid })).result.item;
     assert.deepEqual([after.status, after.decision.specDigest], ["applied", item.specDigest], "the decision is for the digest of the record, not the one the interpreter wrote");
     const other = "approve it";

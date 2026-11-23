@@ -350,14 +350,14 @@ for (const backend of backends) {
     script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
     const chat = w.chat();
     const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
-    for (const text of ["no", "No!", "nope", "Nah.", "cancel", "don't", "Never.", "Don’t", "Stop!"]) {
+    for (const text of ["no", "No!", "nope", "Nah.", "cancel", "don't", "Never.", "Don’t", "Stop!", "Drop.", "reject", "discard", "decline", "Refuse!"]) {
       script[text] = [{ kind: "apply_proposal", proposalId: oak, evidence: text, basis: "owner" }];
       const o = only((await say(w, chat, text)).outcomes);
       assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
       assert.match(o.question!, /does not agree to the proposal/);
       assert.equal((await list(w, "project.list")).length, 0, `${text}: nothing applied`);
     }
-    for (const text of ["yes", "OK.", "sure"]) {
+    for (const text of ["yes", "OK.", "sure", "Apply.", "approve", "accept", "confirm", "proceed"]) {
       script[text] = [{ kind: "discard_proposal", proposalId: oak, evidence: text, basis: "owner" }];
       const o = only((await say(w, chat, text)).outcomes);
       assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
@@ -438,6 +438,63 @@ for (const backend of backends) {
     // with one left open, the plain words apply it again as before
     script["yes please, now"] = [{ kind: "apply_proposal", proposalId: elm, evidence: "yes please", basis: "owner" }];
     assert.equal(only((await say(w, chat, "yes please, now")).outcomes).status, "applied");
+  });
+
+  suite("the exact ID of one open proposal in the owner's own words names it, whatever other words coincide with another proposal's text; another open ID, a near ID, a closed one's ID or a bare yes does not", async (w, script) => {
+    script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
+    script["draft a project Again 7"] = [cmd("project.create", { ...ASKED, name: "Again 7" }, "draft a project Again 7")];
+    script["draft a project Ash"] = [cmd("project.create", { ...ASKED, name: "Ash" }, "draft a project Ash")];
+    const chat = w.chat();
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    const other = only((await say(w, chat, "draft a project Again 7")).outcomes).proposalId!;
+    const ash = only((await say(w, chat, "draft a project Ash")).outcomes).proposalId!;
+    script["drop the Ash draft"] = [{ kind: "discard_proposal", proposalId: ash, evidence: "drop the Ash draft", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "drop the Ash draft")).outcomes).status, "discarded");
+    const reply = async (text: string, kind: "apply_proposal" | "discard_proposal", proposalId: string, evidence = text) => { script[text] = [{ kind, proposalId, evidence, basis: "owner" }]; return only((await say(w, chat, text, cid("m"))).outcomes); };
+    // a bare yes with two open still asks
+    assert.equal((await reply("yes", "apply_proposal", elm)).status, "asked");
+    // without the ID, words that only the other proposal has ("again", "7") point at it, so the chat asks (the design of the chat-answers slice, kept)
+    assert.equal((await reply("yes, again 7 the first one", "apply_proposal", elm)).status, "asked");
+    // both open IDs: the owner named two, so the chat asks
+    assert.equal((await reply(`yes ${elm} ${other}`, "apply_proposal", elm)).status, "asked");
+    // a near ID (a character left off or added) is no ID
+    for (const near of [elm.slice(0, -1), `${elm}0`, `x${elm}`]) assert.equal((await reply(`yes, again 7 ${near}`, "apply_proposal", elm)).status, "asked", near);
+    assert.equal((await reply(`yes, again 7 ${elm}0`, "apply_proposal", elm, `yes, again 7 ${elm}`)).status, "asked", "cited words that cut a longer word short are no ID either");
+    // the ID must be in the owner's own words: the model cannot supply it in its evidence, nor through quoted text
+    assert.equal((await reply("yes, again 7", "apply_proposal", elm, `yes, again 7 ${elm}`)).code, "untrusted_authority");
+    script["yes please"] = [{ kind: "apply_proposal", proposalId: elm, evidence: `go ahead ${elm}`, basis: "owner" }];
+    assert.equal(only((await say(w, chat, `yes please\n> go ahead ${elm}`)).outcomes).code, "untrusted_authority");
+    // a closed proposal's ID applies nothing
+    assert.notEqual((await reply(`yes, go ahead with ${ash}`, "apply_proposal", ash)).status, "applied");
+    // the one word still decides which way: "no <ID>" never applies, "yes <ID>" never drops
+    const no = await reply(`No, ${elm}.`, "apply_proposal", elm);
+    assert.equal(no.status, "asked", JSON.stringify(no));
+    assert.match(no.question!, /does not agree to the proposal/);
+    const yes = await reply(`${elm} yes`, "discard_proposal", elm);
+    assert.equal(yes.status, "asked", JSON.stringify(yes));
+    assert.match(yes.question!, /does not drop the proposal/);
+    // a word of dropping beside the ID never applies, and a word of accepting beside it never drops
+    for (const text of [`drop ${elm}`, `Reject ${elm}.`, `${elm}: discard`]) {
+      const o = await reply(text, "apply_proposal", elm);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not agree to the proposal/);
+    }
+    for (const text of [`approve ${elm}`, `${elm} accept`]) {
+      const o = await reply(text, "discard_proposal", elm);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /does not drop the proposal/);
+    }
+    // the ID alone names the proposal but says neither yes nor no: whichever way the model read it, the owner is asked
+    for (const [text, kind] of [[elm, "apply_proposal"], [`${elm.toUpperCase()}?`, "apply_proposal"], [`${elm} ${elm}.`, "apply_proposal"], [`${elm}!`, "discard_proposal"]] as const) {
+      const o = await reply(text, kind, elm);
+      assert.equal(o.status, "asked", `${text}: ${JSON.stringify(o)}`);
+      assert.match(o.question!, /only the proposal's ID .* does not say whether to go ahead with it or drop it/);
+    }
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), [], "nothing applied by any of these");
+    // the exact ID wins over the coincidental words, and the closed proposal's ID beside it does not count as another one
+    const applied = await reply(`yes, try again 7 times if you must: ${elm}, not ${ash}`, "apply_proposal", elm);
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Elm"]);
   });
 
   suite("a one-word reply answers a question the chat asked only when it is exactly one recorded answer, taken from the recorded question and not from the model's claim", async (w, script) => {

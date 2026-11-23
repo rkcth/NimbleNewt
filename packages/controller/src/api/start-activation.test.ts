@@ -106,7 +106,7 @@ test("release staging and activation end to end: the owner's word only, bound to
     assert.ok(JSON.stringify(shown[0]!.preview).includes(st2.digest), "the preview shows the digest of the staged record, filled in by the controller, not the interpreter's");
     assert.ok(!JSON.stringify(shown[0]!.preview).includes(sha("an invented digest")));
     assert.equal(link(), `releases/${one}`, "a proposal switches nothing");
-    const applied = await turn("m2", "yes, activate it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "activate it", basis: "owner" }]);
+    const applied = await turn("m2", `yes, activate it ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `activate it ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     assert.equal(link(), `releases/${two}`);
     const dropText = "do not require approval for activating releases";
@@ -124,7 +124,7 @@ test("release staging and activation end to end: the owner's word only, bound to
     const cf = await turn("m4b", cfText, [{ kind: "command", op: "release.confirm", args: { releaseId: two }, evidence: cfText, basis: "owner" }]);
     assert.equal(cf[0]!.status, "proposed", JSON.stringify(cf));
     assert.equal((await owner("release.status", {})).result.item.lastKnownGood.id, one, "a proposal changes nothing");
-    const cfYes = await turn("m4c", "yes, mark it", [{ kind: "apply_proposal", proposalId: cf[0]!.proposalId, evidence: "mark it", basis: "owner" }]);
+    const cfYes = await turn("m4c", `yes, mark it ${cf[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: cf[0]!.proposalId, evidence: `mark it ${cf[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(cfYes[0]!.status, "applied", JSON.stringify(cfYes));
     assert.deepEqual([(await owner("release.status", {})).result.item.lastKnownGood.id, (await owner("release.status", {})).result.item.lastKnownGood.via], [two, "owner"]);
 
@@ -233,7 +233,7 @@ test("signed releases, the release.manage permission, the migration plan and the
     const shown = await turn("t1", trustText, [{ kind: "command", op: "release.trust.add", args: { keyFile: "build.pub", label: "build machine" }, evidence: trustText, basis: "owner" }]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
     assert.equal((await owner("release.trust.list", {})).result.item.keys.length, 0, "a proposal trusts nothing");
-    const yes = await turn("t2", "yes, trust it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "trust it", basis: "owner" }]);
+    const yes = await turn("t2", `yes, trust it ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `trust it ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(yes[0]!.status, "applied", JSON.stringify(yes));
     const listed = (await owner("release.trust.list", {})).result.item;
     assert.deepEqual([listed.keys.length, listed.required], [1, true]);
@@ -262,7 +262,7 @@ test("signed releases, the release.manage permission, the migration plan and the
     assert.equal(prop[0]!.status, "proposed", JSON.stringify(prop));
     const preview = JSON.stringify(prop[0]!.preview);
     assert.ok(preview.includes(plan) && !preview.includes(sha("invented")) && preview.includes("home") && preview.includes("Signed by trusted key"), preview);
-    const applied = await turn("a2", "yes, activate it", [{ kind: "apply_proposal", proposalId: prop[0]!.proposalId, evidence: "activate it", basis: "owner" }]);
+    const applied = await turn("a2", `yes, activate it ${prop[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: prop[0]!.proposalId, evidence: `activate it ${prop[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     assert.equal((JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release, one);
   } finally { await c.close(); unlockAll(join(root, "releases")); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
