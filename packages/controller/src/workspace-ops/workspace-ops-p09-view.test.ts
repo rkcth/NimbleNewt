@@ -12,6 +12,8 @@ import { PrincipalService, type Principal } from "../security/index.js";
 import { SubmissionService } from "../submissions/index.js";
 import { StatusService } from "../status/index.js";
 import { WorkspaceOpService, type WorkspacePort, type WorkspaceDeps } from "./index.js";
+import { StorageError } from "../storage/index.js";
+import type { ControllerStorage } from "../storage/types.js";
 
 after(stopServer);
 
@@ -265,7 +267,7 @@ for (const backend of backends) {
     try {
       r.host.fail = true;
       // One landing per form, each in a short command name, so the shown name's 60-character cut cannot hide a path that was not replaced.
-      const forms: [string, string][] = [["run file:///home/rob/a/b", "/home/rob"], ["run C:\\Users\\rob\\x", "Users"], ["run \\\\srv\\share\\y", "srv"], ["run \\\\?\\C:\\x", "C:"], ["run ../../etc/z", "etc/z"], ["run /home/rob\\q/w", "q/w"], ["run path:/srv/ai/x", "srv/ai"]];
+      const forms: [string, string][] = [["run file:///home/rob/a/b", "/home/rob"], ["run C:\\Users\\rob\\x", "Users"], ["run \\\\srv\\share\\y", "srv\\share"], ["run \\\\?\\C:\\x", "C:"], ["run ../../etc/z", "etc/z"], ["run /home/rob\\q/w", "q/w"], ["run path:/srv/ai/x", "srv/ai"]];
       for (const [k, [name, leak]] of forms.entries()) {
         r.views.commandName = name;
         await r.land(`v9-${k}`);
@@ -301,6 +303,66 @@ for (const backend of backends) {
       const tail = (await view.ask(r.owner, { kind: "landing_checks", taskId: r.task, after: 5 } as never))!.lines.map((l) => l.text).join("\n");
       assert.match(tail, /showing 6 to 6/);
       assert.match(tail, /1 of these could not be read/);
+    } finally { await r.store.close(); }
+  });
+  test(`${backend.name}: a landing is recorded even when the project's landing index is changed by others on every try, and an index entry that could only be written on its own still reaches the view (card P09 second review)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      // The project's index is one record shared by every landing of the project: here each write that touches it is refused as changed meanwhile, `refusals` times, as a busy project's other landings would.
+      let refusals = Infinity, refused = 0;
+      const touches = (input: { changes: readonly { ref: { kind: string } }[] }) => input.changes.some((c) => c.ref.kind === "workspace-landings-project");
+      const busy = new Proxy(r.store.storage, { get: (target, prop, recv) => {
+        if (prop === "applyOperation") return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => { if (touches(input) && refused < refusals) { refused++; throw new StorageError("revision_conflict", "the landing index changed meanwhile"); } return target.applyOperation(input); };
+        const v = Reflect.get(target, prop, recv) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } }) as ControllerStorage;
+      const service = WorkspaceOpService.withEpoch(busy, r.projects.epoch, r.deps(), options);
+      const land = (commandId: string) => service.request(r.owner, { commandId, operation: "landing", taskId: r.task, reason: "ready", submissionId: r.sub });
+      const first = await land("v11a");
+      assert.equal(first.state, "done", first.summary);
+      assert.ok(refused >= 12, `the index was refused ${refused} times`);
+      // The outcome is recorded (a repeat answers it); the view, whose index could never be written, lists nothing rather than something false.
+      const again = await land("v11a");
+      assert.equal(again.state, "done");
+      assert.equal(again.id, first.id);
+      assert.match((await r.ask(r.owner, { taskId: r.task }))!, /No landing attempt is on record/);
+      // Refused only for the tries that carry the index with the outcome: the outcome is written without it, then the index on its own.
+      refused = 0; refusals = 12;
+      const second = await land("v11b");
+      assert.equal(second.state, "done", second.summary);
+      assert.equal(refused, 12);
+      const text = (await r.ask(r.owner, { projectId: r.project }))!;
+      assert.match(text, /1 landing attempt\(s\) on record/);
+      assert.ok(text.includes(second.id), text);
+      assert.match((await r.ask(r.owner, { taskId: r.task }))!, new RegExp(`Attempt 1: request ${second.id}`));
+    } finally { await r.store.close(); }
+  });
+
+  test(`${backend.name}: host paths written URL-encoded, with look-alike slashes or led by a home or environment name are hidden, and a credential in a command is cut (card P09 second review)`, async () => {
+    const r = await rig(["tests"]);
+    try {
+      r.host.fail = true;
+      const forms: [string, string][] = [["run %2Fhome%2Fr9b%2Fx", "r9b"], ["run %5Csrv%5Cr9b%5Cy", "r9b"], ["run \u2215home\u2215r9b\u2215x", "r9b"], ["run \uff0fhome\uff0fr9b", "r9b"], ["run ~r9b/notes", "r9b"], ["run ~/secret", "secret"], ["run $HOME/.cfg/r9b", "r9b"], ["run ${HOME}/r9b", "r9b"], ["run %USERPROFILE%\\r9b", "r9b"], ["run \"C:\\Users\\r9b\\x\"", "r9b"]];
+      for (const [k, [name, leak]] of forms.entries()) {
+        r.views.commandName = name;
+        await r.land(`v12-${k}`);
+        const newest = (await r.ask(r.owner, { taskId: r.task }))!.split("\n").find((l) => l.startsWith("tests failed"))!;
+        assert.ok(!newest.includes(leak), `"${leak}" is not shown: ${newest}`);
+        assert.match(newest, /\[a path\]/, newest);
+      }
+      const secret = ["API", "KEY=", "abcd1234", "efgh5678", "ijkl"].join("");
+      r.views.commandName = `${secret} npm test`;
+      await r.land("v12-key");
+      const newest = (await r.ask(r.owner, { taskId: r.task }))!.split("\n").find((l) => l.startsWith("tests failed"))!;
+      assert.ok(!newest.includes("abcd1234"), newest);
+      assert.match(newest, /\[redacted\] npm test failed/, newest);
+      // The record is already cut when the gate writes it; the view cuts again whatever a record holds (one written before that rule, or by another writer): a stand-in record holds the raw text here.
+      const got = (await r.service.landings({ taskId: r.task }, 0, 1)).items[0]!;
+      const raw = { ...got, summary: `refused near %2Fhome%2Fr9b with ${secret}`, checks: { ...got.checks!, results: got.checks!.results.map((e) => ({ ...e, summary: `see ${secret}`, runs: [{ name: `${secret} /home/r9b/t`, state: "failed" as const, exitCode: 1 }] })) } };
+      const view = StatusService.withEpoch(r.store.storage, r.projects.epoch, { ...r.base, landingChecks: { landings: async () => ({ items: [{ ...raw, position: 1 }], total: 1, next: 1, unreadable: 0, cap: 20, full: false }) } }, options);
+      const shownText = (await view.ask(r.owner, { kind: "landing_checks", taskId: r.task } as never))!.lines.map((l) => l.text).join("\n");
+      assert.ok(!shownText.includes("abcd1234") && !shownText.includes("r9b"), shownText);
+      assert.match(shownText, /Commands: \[redacted\] \[a path\] failed \(exit 1\)/, shownText);
     } finally { await r.store.close(); }
   });
 }

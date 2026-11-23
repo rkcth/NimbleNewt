@@ -593,7 +593,10 @@ export class WorkspaceOpService {
     // A lost race on the open index alone (the landing queue's take-out rewrites it unchanged, card P10) is built again; one on the request itself means another writer settled it, and that is what is answered.
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: async () => [...(await this.#landingIndexChange(id, body)), ...(clearOpen ? await this.#openChange(rec.body.taskId, null, id) : [])] });
+        // Card P09: the view's index joins the first tries only; a race on it (the project's index is shared by every landing of the project) never keeps the outcome from being recorded.
+        const indexed = attempt < 3;
+        await this.#write(actor, commandId, "workspace.finish", id, { creates: false, payload: { state: "uncertain" }, body: () => body, expectedRevision: rec.revision, also: async () => [...(indexed ? await this.#landingIndexChange(id, body) : []), ...(clearOpen ? await this.#openChange(rec.body.taskId, null, id) : [])] });
+        if (!indexed) await this.#indexAlone(actor, commandId, id, body);
         return body;
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
@@ -811,8 +814,12 @@ export class WorkspaceOpService {
       const counter = counts ? await this.#runner.get(ROUNDS, outcome.taskId) : undefined;
       const round = counts ? ((counter?.body as unknown as { rounds?: number } | undefined)?.rounds ?? 0) + 1 : undefined;
       const final: WorkspaceRecordBody = round === undefined ? outcome : { ...outcome, round };
+      // Card P09: the view's index joins the first tries only; past them the outcome is written without it and the index is added on its own, so a race on the project's index (shared by every landing of the
+      // project) never uses up the tries that record a landing.
+      const indexed = attempt < 12;
       try {
-        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(await this.#dequeueChange(final)), ...(await this.#landingIndexChange(id, final)), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
+        await this.#write(actor, `${scoped}:finish:${outcome.state}`, "workspace.finish", id, { creates: false, payload: { state: outcome.state }, body: () => final, expectedRevision: current.revision, also: async () => [...(round === undefined ? [] : this.#roundChange(final.taskId, round, counter?.revision)), ...(await this.#commitChange(id, final)), ...(await this.#dequeueChange(final)), ...(indexed ? await this.#landingIndexChange(id, final) : []), ...(final.held !== undefined && final.held.length > 0 ? [] : await this.#openChange(final.taskId, null, id))] });
+        if (!indexed) await this.#indexAlone(actor, `${scoped}:finish:${outcome.state}`, id, final);
         return { ...final, id, replayed: false };
       } catch (error) {
         if (!(error instanceof DomainError && error.code === "stale_revision")) throw error;
@@ -868,6 +875,27 @@ export class WorkspaceOpService {
       out.push(current === undefined ? { type: "create", ref, body: json({ ids }) } : { type: "update", ref, expectedRevision: current.revision, body: json({ ids }) });
     }
     return out;
+  }
+
+  /**
+   * The view's index entries written on their own (card P09), after an outcome that was recorded without them: a few tries, and never an error, since the outcome is already recorded and the index only serves the
+   * owner's view (an entry that still cannot be written leaves that attempt out of the view; the landing itself is unchanged).
+   */
+  async #indexAlone(actor: string, commandId: string, id: string, final: WorkspaceRecordBody): Promise<void> {
+    if (final.operation !== "landing") return;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) await sleep(Math.round(Math.random() * 20 * attempt));
+      try {
+        await this.#runner.command("workspace.landing-index", { commandId: `${commandId}:index`, actor }, async () => ({
+          payload: { requestId: id },
+          build: async () => {
+            const changes = await this.#landingIndexChange(id, final);
+            return { ref: changes[0]?.ref ?? { kind: RECORD, id }, creates: changes[0]?.type === "create", changes, detail: { taskId: final.taskId }, contention: async () => new DomainError("stale_revision", "the landing index changed at the same moment") };
+          },
+        }));
+        return;
+      } catch { /* tried again; an index entry is never worth failing a recorded landing */ }
+    }
   }
 
   /**

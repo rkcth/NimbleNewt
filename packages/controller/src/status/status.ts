@@ -48,6 +48,7 @@ import type { LandingPage } from "../workspace-ops/workspace-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
 import type { SubmissionService } from "../submissions/submissions.js";
 import { allows, inTaskScope } from "../security/access.js";
+import { redactText } from "../security/redact.js";
 import type { Principal, PrincipalBody } from "../security/principals.js";
 import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
@@ -828,8 +829,13 @@ const LANDING_CHECKS_PAGE = 5;
 /** Host paths replaced by a mark in the `landing_checks` view: a gate text or a test command may quote a path of the machine that ran the checks. */
 // In order: `file:` URLs; network and `\\?\` paths; drive paths; then absolute or `~` or `..`-led paths of two or more parts with either separator (a part runs to a space, quote, bracket or separator). A URL such as
 // `https://host/a/b` is left as it is: its parts follow `//` or a word, never a free-standing separator.
+// Before them, URL-encoded separators (`%2F`, `%5C`) and look-alike slashes (division, fraction and full-width slashes, reverse solidus forms) are read as plain separators, and paths led by a home or environment
+// name (`~`, `~user`, `$HOME`, `${HOME}`, `%USERPROFILE%`) are marked even with one part.
 const hidePaths = (text: string): string => text
+  .replace(/%2f/gi, "/").replace(/%5c/gi, "\\")
+  .replace(/[\u2044\u2215\u29f8\uff0f]/g, "/").replace(/[\u29f5\u29f9\ufe68\uff3c]/g, "\\")
   .replace(/\bfile:[^\s"'`<>]*/gi, "[a path]")
+  .replace(/(?<![\w.\/\\-])(?:~[\w.-]*|\$\{?[A-Za-z_]\w*\}?|%[A-Za-z_]\w*%)(?:[\/\\][^\s"'`<>()[\]{},;|\/\\]+)+[\/\\]?/g, "[a path]")
   .replace(/\\\\[^\s"'`<>]+/g, "[a path]")
   .replace(/(?<![\w])[A-Za-z]:[\\/][^\s"'`<>]*/g, "[a path]")
   .replace(/(?<![\w.\/\\-])(?:~|\.\.?)?(?:[\/\\][^\s"'`<>()[\]{},;|\/\\]+){2,}[\/\\]?/g, "[a path]");
@@ -2523,7 +2529,8 @@ export class StatusService {
     if (next <= after) return { observedAt: at, lines: [line(`${what}: ${page.total} landing attempt(s) are on record${kept}, none after number ${after}.`, c)] };
     const lines: Line[] = [line(`${what}: ${page.total} landing attempt(s) on record${kept}, newest first; showing ${after + 1} to ${next}.`, c)];
     if ((page.unreadable ?? 0) > 0) lines.push(line(`${page.unreadable} of these could not be read as a landing of this ${hasTask ? "task" : "project"} (the record is gone or is not one) and are left out.`, c));
-    const plain = (text: unknown, max: number): string => shown(hidePaths(typeof text === "string" ? text : ""), max);
+    // Credentials are cut before the paths are read (reading `%2F` as a separator could otherwise split a credential the redaction would have found), and again by `shown`.
+    const plain = (text: unknown, max: number): string => shown(hidePaths(redactText(typeof text === "string" ? text : "")), max);
     const short = (oid: unknown): string => (typeof oid === "string" ? oid.slice(0, 12) : "unknown");
     const outcome: Record<string, string> = { done: "was carried out by the host", refused: "was refused, so nothing was landed", failed: "failed at the host and may have changed the checkout", uncertain: "ended with an unknown result (the host may have acted)", started: "has not finished" };
     page.items.forEach((a, n) => {
