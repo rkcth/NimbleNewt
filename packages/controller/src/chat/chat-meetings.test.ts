@@ -423,6 +423,9 @@ test("a time of day counts only when the owner's words give it", () => {
   for (const [time, words] of either) assert.equal(clockTimeReading(time, words), "either", `${time} in "${words}"`);
   assert.equal(clockTimeReading("03:00", "at 3pm"), undefined);
   assert.equal(clockTimeReading("03:00", "with 3 agents"), undefined);
+  // A leading zero fixes the hour as written: the other half of the day is not the owner's (re-check).
+  for (const [time, words] of [["21:30", "at 09:30"], ["15:00", "at 03:00"], ["15:00", "meet at 03.00 Eastern"]] as const) assert.equal(clockTimeReading(time, words), undefined, `${time} in "${words}"`);
+  assert.equal(clockTimeReading("21:30", "at 09:30pm"), "said");
 });
 
 test("a one-off date is shown with its weekday and month, so a day read the other way round is plain", () => {

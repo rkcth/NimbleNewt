@@ -507,7 +507,9 @@ export function clockTimeReading(time: unknown, text: string): "said" | "either"
     if (/^(?:\d{1,2}|[a-z]+)$/.test(written) && !/\b(?:at|from|around|about|by|for|until|till|after|before)\s+$|@\s*$/.test(t.slice(Math.max(0, m.index - 12), m.index))) continue;
     const times = clockTimes(written);
     if (!times.includes(want)) continue;
-    if (times.length === 1 || /^0\d[:.]\d{2}$/.test(written)) return "said";
+    // `09:30` written with its leading zero is that hour only (the first reading), never 21:30: the other half of the day is not in the owner's words.
+    if (/^0\d[:.]\d{2}$/.test(written)) { if (times[0] === want) return "said"; continue; }
+    if (times.length === 1) return "said";
     either = true;
   }
   return either ? "either" : undefined;
