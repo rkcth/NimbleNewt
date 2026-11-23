@@ -161,6 +161,21 @@ for (const backend of backends) {
     assert.deepEqual(c.asked, []);
   });
 
+  scene("the same code submitted again and a reviewer asked for changes to it: the older approval is not filled in; named, it is proposed with a note", async (c) => {
+    const a = await c.code(T("a")); await c.approve(a);
+    const again = await c.code(T("a"));
+    await c.svc.record(c.reviewer, { commandId: cid("r"), taskId: c.task, kind: "review", role: "reviewer", subject: again, verdict: "changes" });
+    const r = await c.say("commit the approved parser fix");
+    assert.equal(r.outcomes[0]!.status, "refused", JSON.stringify(r.outcomes[0]));
+    assert.equal(r.outcomes[0]!.proposalId, undefined);
+    assert.match(String(r.outcomes[0]!.message), new RegExp(`newest code of "parser fix" \\(${again},[^]*\\(a reviewer asked for changes to it\\), so nothing was proposed\\. 1 older approved submission is not committed, but newer code followed it`));
+    const named = await c.say(`commit submission ${a} of the parser fix`, { submissionId: a });
+    assert.equal(named.outcomes[0]!.status, "proposed", JSON.stringify(named.outcomes[0]));
+    assert.match(JSON.stringify(named.outcomes[0]), new RegExp(`The same code was submitted again on \\\\"parser fix\\\\" after it \\(${again}, submitted [^)]+\\), and a reviewer asked for changes to that submission`));
+    assert.doesNotMatch(JSON.stringify(named.outcomes[0]), /Newer code/);
+    assert.deepEqual(c.asked, []);
+  });
+
   scene("a task title two tasks share is asked about first, before anything is looked up", async (c) => {
     const id = await c.code(T("a")); await c.approve(id);
     await c.w.task(c.project, "parser fix");

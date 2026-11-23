@@ -18,8 +18,8 @@ export interface ApprovedCode {
  */
 export interface ApprovedCodeFound {
   readonly items: readonly ApprovedCode[];
-  /** `committed`: a commit is recorded for the newest code itself (the checkout's head then moved past every submission's base). */
-  readonly newest?: ApprovedCode & { readonly committed?: boolean };
+  /** `committed`: a commit is recorded for the newest code itself (the checkout's head then moved past every submission's base). `changesAsked`: its newest review says `changes` or `reject` (a reviewer took back exactly that code). */
+  readonly newest?: ApprovedCode & { readonly committed?: boolean; readonly changesAsked?: boolean };
   readonly truncated: boolean;
 }
 
@@ -48,12 +48,13 @@ export function approvedCodeLookup(deps: { readonly submissions: Pick<Submission
     }
     codes.sort(newerFirst);
     const items: ApprovedCode[] = [];
-    let newest: (ApprovedCode & { committed?: boolean }) | undefined;
+    let newest: (ApprovedCode & { committed?: boolean; changesAsked?: boolean }) | undefined;
     for (const c of codes) {
       const a = await deps.submissions.approvalOf(c.id);
       const known = a === undefined || a.taskId !== taskId ? c : { ...c, base: a.base, tree: a.tree };
       if (c === codes[0]) {
-        newest = (await deps.commit(c.id)) === undefined ? known : { ...known, committed: true };
+        const asked = a !== undefined && a.taskId === taskId && (a.newest === "changes" || a.newest === "reject");
+        newest = (await deps.commit(c.id)) === undefined ? (asked ? { ...known, changesAsked: true } : known) : { ...known, committed: true };
         if (newest.committed === true) continue;
       }
       if (a === undefined || a.taskId !== taskId || !a.approved || a.approvedBy === undefined || a.approvedBy === a.submittedBy) continue;
