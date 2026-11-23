@@ -713,7 +713,8 @@ export class ChatService {
             const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
             const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
             if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called ${quotedText(agentName.trim(), 80)}` }); continue; }
-            if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) }); continue; }
+            // Two agents may share a name: each option carries its ID, which the owner can then say.
+            if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => `${String(a["friendlyName"]).slice(0, 60)} (${String(a["id"])})`) }); continue; }
             request["agentId"] = String(found[0]!["id"]);
           }
           if (request["projectId"] === undefined && typeof projectName === "string" && projectName.trim() !== "") {

@@ -28,8 +28,8 @@ test("the owner reads the backup settings and the backups that exist, and takes 
     const request: Record<string, unknown> = { kind: "backups" };
     const limit = /(\d+) at a time/.exec(owner);
     if (limit !== null) request["limit"] = Number(limit[1]);
-    const after = /after (backup-\S+)/.exec(owner);
-    if (after !== null) request["after"] = after[1];
+    const after = /after (\d+)/.exec(owner);
+    if (after !== null) request["after"] = Number(after[1]);
     for (const [k, v] of Object.entries(request)) if (k !== "kind" && !own.includes(String(v).toLowerCase())) violations.push(`${k}=${String(v)}`);
     return JSON.stringify([{ kind: "status", request, evidence: owner, basis: "owner" }]);
   } };
@@ -66,8 +66,8 @@ test("the owner reads the backup settings and the backups that exist, and takes 
       assert.match(t2, new RegExp(`${name}: (manual|scheduled), made `));
       assert.match(t2, /holds 1 backup, the newest /);
       assert.equal((await c.services.backups!.list()).length, 1, "reading again made nothing");
-      const later = await turn(`which backups do I have? 5 at a time, after ${name}`);
-      assert.doesNotMatch(later.flatMap((o) => (o.lines ?? []).map((l) => l.text)).join("\n"), /Backups are made|backup-2026/, "the page after the last one is empty of backups");
+      const later = (await turn("which backups do I have? 5 at a time, after 1")).flatMap((o) => (o.lines ?? []).map((l) => l.text)).join("\n");
+      assert.equal(later, "There is 1 backup, so none follow the first 1; ask again from the start.", "the page after the last one is empty of backups");
 
       // Nobody else reads them: an agent, a client and a task credential are refused.
       const project = (await call(boot.token, "project.create", { name: "Garden" }, "p1")).result.id as string;

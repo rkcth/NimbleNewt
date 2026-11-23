@@ -323,8 +323,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
-  backups: { keys: ["limit", "after"], about: "owner only, read only: how backups are set (schedule, what is kept, each place copies go to, last test restore, what is left out), then the backups newest first, limit at a time (default 10); after is the last name shown" },
-  grants: { keys: ["agentId|agentName", "projectId|projectName", "state", "limit", "after"], about: "owner only, read only: the standing rights, each with its ID, holder, action, project and whether it is in force; state active (default) or revoked; a project also shows rights for every project; after is the last ID shown" },
+  backups: { keys: ["limit", "after"], about: "owner only, read only: how backups are set (schedule, what is kept, each place copies go to, last test restore, what is left out), then the backups newest first, limit at a time (default 10); after: how many backups were already shown" },
+  grants: { keys: ["agentId|agentName", "projectId|projectName", "state", "limit", "after"], about: "owner only, read only: the standing rights, each with its ID, holder, action, project and whether it is in force; state active (default) or revoked; a project also shows rights for every project; 20 a page; after: how many were already shown, or a right's ID" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in four groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) the limits on spawning child tasks (depth, live children, children in all), and the P/PC work balance (places kept for improvement work and its ceiling from workClass.pcFloor and pcCeiling, production and improvement attempts running and waiting, places lent to production, whether improvement work is short of its reserve and why): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
@@ -461,8 +461,8 @@ export type StatusRequest =
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "release_windows" }
-  | { readonly kind: "backups"; readonly limit?: number; readonly after?: string }
-  | { readonly kind: "grants"; readonly agentId?: string; readonly projectId?: string; readonly state?: string; readonly limit?: number; readonly after?: string }
+  | { readonly kind: "backups"; readonly limit?: number; readonly after?: number }
+  | { readonly kind: "grants"; readonly agentId?: string; readonly projectId?: string; readonly state?: string; readonly limit?: number; readonly after?: number | string }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
@@ -1832,24 +1832,26 @@ export class StatusService {
 
   /**
    * The backups in plain lines, owner only, read only (the chat's `backups` kind; the same reads as `backup.config.status` and `backup.list`, which no chat question could reach). The first page says how backups are set and
-   * how each place is doing; `after` (the name of the last backup shown) gives the next page of the backups themselves. At most 50 backups a page; nothing is made or changed, and a read that fails is said in one line.
+   * how each place is doing; `after` (how many backups were already shown: the model sees no earlier answer, so it takes the number from the owner's words, "the next backups" being after 10) gives a later page of the backups themselves.
+   * At most 50 backups a page; nothing is made or changed, and a read that fails is said in one line.
    */
-  async backupLines(by: Principal, request: { limit?: number; after?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async backupLines(by: Principal, request: { limit?: number; after?: number }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const source = this.#deps.backups;
     const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be a whole number from 1 to 50");
-    if (request.after !== undefined && !(typeof request.after === "string" && request.after.length >= 1 && request.after.length <= STATUS_LIMITS.id)) invalid("after", "must be the name of the last backup shown");
+    if (request.after !== undefined && (typeof request.after !== "number" || !Number.isSafeInteger(request.after) || request.after < 0)) invalid("after", "must be a whole number from 0 (how many backups were already shown)");
+    const start = request.after ?? 0;
     if (source === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const here = cite("backups", "main");
     let config: Record<string, unknown> | undefined;
     let listed: Awaited<ReturnType<NonNullable<StatusDeps["backups"]>["list"]>>;
     try {
-      config = request.after === undefined ? await source.config(by) : undefined;
+      config = start === 0 ? await source.config(by) : undefined;
       listed = await source.list(by);
     } catch (error) {
       if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
       return { observedAt: this.#runner.now(), lines: [line("The backups cannot be read right now.", here)] };
     }
-    if (listed === undefined || (request.after === undefined && config === undefined)) return undefined;
+    if (listed === undefined || (start === 0 && config === undefined)) return undefined;
     const lines: Line[] = [];
     const rec = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined);
     const text = (v: unknown, max = 200): string => (typeof v === "string" ? shown(v, max) : "");
@@ -1878,38 +1880,38 @@ export class StatusService {
       if (scope !== undefined && typeof scope["text"] === "string") lines.push(line(`What backups leave out: ${text(scope["text"], 300)}`, here));
     }
     const all = listed.items;
-    let start = 0;
-    if (request.after !== undefined) {
-      const at = all.findIndex((b) => b["name"] === request.after);
-      if (at < 0) return { observedAt: this.#runner.now(), lines: [line(`No backup is called ${quoted(request.after, 80)} now, so there is no page after it; ask again from the start.`, here)] };
-      start = at + 1;
-    }
+    if (start > 0 && start >= all.length) return { observedAt: this.#runner.now(), lines: [line(`There ${all.length === 1 ? "is 1 backup" : `are ${all.length} backups`}, so none follow the first ${start}; ask again from the start.`, here)] };
     const page = all.slice(start, start + limit);
+    if (start > 0) lines.push(line(`Backups ${start + 1} to ${start + page.length} of ${all.length}, newest first.`, here));
     const failed = rec(listed.status)?.["lastError"] === undefined ? undefined : rec(rec(listed.status)!["lastError"]);
-    if (failed !== undefined && request.after === undefined) lines.push(line(`The last backup attempt failed (${text(failed["at"], 40)}): ${quoted(pathless(failed["message"]), 160)}`, here));
+    if (failed !== undefined && start === 0) lines.push(line(`The last backup attempt failed (${text(failed["at"], 40)}): ${quoted(pathless(failed["message"]), 160)}`, here));
     if (all.length === 0) lines.push(line("No backup exists yet.", here));
     for (const b of page) {
       const rows = typeof b["rows"] === "number" ? `${b["rows"]} rows` : "";
       lines.push(line(`${text(b["name"], 100)}: ${text(b["kind"], 20)}, made ${text(b["createdAt"], 40)}${rows === "" ? "" : `, ${rows}`}; agents' conversation state ${text(b["piState"], 80) || "not included"}${typeof b["notFullCopy"] === "string" ? `; not a full copy: ${text(b["notFullCopy"], 160)}` : ""}.`, cite("backup", text(b["name"], 100))));
     }
-    if (start + page.length < all.length) lines.push(line(`${all.length - start - page.length} older backup${all.length - start - page.length === 1 ? "" : "s"} follow; ask for more after ${text(page[page.length - 1]?.["name"], 100)}.`, here));
+    if (start + page.length < all.length) lines.push(line(`${all.length - start - page.length} older backup${all.length - start - page.length === 1 ? "" : "s"} follow; ask for the next ones (after ${start + page.length}).`, here));
     return { observedAt: this.#runner.now(), lines };
   }
 
   /**
    * The standing rights in plain lines, owner only, read only (the chat's `grants` kind over the same records as `grant.list`): each right's ID (what taking one back needs), who holds it, what it allows and where, whether it is in force and when or why it
-   * ends. By agent, project (a right for every project counts for any project), state (active or taken back) and `after` (the ID of the last one shown). One look reads at most 2000 records, and one that stops early says where to go on.
+   * ends. By agent, project (a right for every project counts for any project), state (active or taken back) and `after`: how many were already shown (the model sees no earlier answer, so it takes the number from the owner's
+   * words, "the next rights" being after 20), or the ID a stopped look named to go on after. One look reads at most 2000 records, and one that stops early says where to go on.
    */
-  async grantLines(by: Principal, request: { agentId?: string; projectId?: string; state?: string; limit?: number; after?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async grantLines(by: Principal, request: { agentId?: string; projectId?: string; state?: string; limit?: number; after?: number | string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const grantee = request.agentId === undefined ? undefined : `agent:${this.#agentFilter(request.agentId)}`;
     const project = request.projectId === undefined ? undefined : checkProjectId(request.projectId);
     const state = request.state === undefined ? "active" : request.state === "active" || request.state === "revoked" ? request.state : invalid("state", "must be active or revoked");
     const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be a whole number from 1 to 50");
-    if (request.after !== undefined && !(typeof request.after === "string" && /^grt-[a-z2-7]{20}$/.test(request.after))) invalid("after", "must be the ID of the last right shown (grt-...)");
+    if (request.after !== undefined && !(typeof request.after === "number" && Number.isSafeInteger(request.after) && request.after >= 0) && !(typeof request.after === "string" && /^grt-[a-z2-7]{20}$/.test(request.after))) invalid("after", "must be how many rights were already shown, or the ID of a right (grt-...)");
+    const skip = typeof request.after === "number" ? request.after : 0;
+    const fromId = typeof request.after === "string" ? request.after : undefined;
     if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const now = this.#runner.now();
     const found: { id: string; revision: number; body: GrantRecordBody }[] = [];
-    let last = request.after;
+    let last = fromId;
+    let skipped = 0;
     let more = false;
     let cut = false;
     scan: for (let round = 0; round < 10; round++) {
@@ -1917,6 +1919,7 @@ export class StatusService {
       for (const r of page) {
         const body = r.body as unknown as GrantRecordBody;
         if (body.state !== state || (grantee !== undefined && body.grantee !== grantee) || (project !== undefined && body.project !== project && body.project !== "*")) { last = r.id; continue; }
+        if (skipped < skip) { skipped++; last = r.id; continue; }
         if (found.length === limit) { more = true; break scan; }
         found.push({ id: r.id, revision: view<GrantRecordBody>(r).revision, body });
         last = r.id;
@@ -1938,9 +1941,12 @@ export class StatusService {
       lines.push(line(`${shown(g.id, 40)}: ${shown(b.grantee, 60)} may ${shown(b.action, 60)} in ${where(b)}; ${when}. Basis: ${quoted(b.basis, 100)}.`.slice(0, 400), cite("grant", g.id, g.revision)));
     }
     const filter = `${grantee === undefined ? "" : ` for ${shown(grantee, 60)}`}${project === undefined ? "" : ` in project ${shown(project, 60)} or every project`}`;
-    const head = found.length === 0 ? `No ${state === "revoked" ? "taken-back" : "active"} right${filter} ${request.after === undefined ? "is on record" : "follows that one"}.` : `${found.length} ${state === "revoked" ? "taken-back" : "active"} right${found.length === 1 ? "" : "s"}${filter}, listed by ID${request.after === undefined ? "" : ", after the one you named"}. To take one back, give its ID.`;
+    const what = `${state === "revoked" ? "taken-back" : "active"} right`;
+    const head = found.length === 0
+      ? (fromId !== undefined ? `No ${what}${filter} follows that one.` : skip > 0 && !cut ? `No ${what}${filter} follows the first ${skip}; there ${skipped === 1 ? "is 1" : `are ${skipped}`}.` : skip > 0 ? `No ${what}${filter} was found after the first ${skipped} in this look.` : `No ${what}${filter} is on record.`)
+      : `${found.length} ${what}${found.length === 1 ? "" : "s"}${filter}, listed by ID${fromId !== undefined ? ", after the one you named" : skip > 0 ? `, numbers ${skip + 1} to ${skip + found.length}` : ""}. To take one back, give its ID.`;
     lines.unshift(line(head, cite("grants", state)));
-    if (more) lines.push(line(`More rights follow; ask for them after ${shown(found[found.length - 1]!.id, 40)}, or narrow the question by agent or project.`, cite("grants", state)));
+    if (more) lines.push(line(fromId === undefined ? `More rights follow; ask for the next ones (after ${skip + found.length}), or narrow the question by agent or project.` : `More rights follow; ask for them after ${shown(found[found.length - 1]!.id, 40)}, or narrow the question by agent or project.`, cite("grants", state)));
     else if (cut && last !== undefined) lines.push(line(`The look stopped after 2000 records; ask again after ${shown(last, 40)}, or narrow the question by agent or project.`, cite("grants", state)));
     return { observedAt: now, lines };
   }

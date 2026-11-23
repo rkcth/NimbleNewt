@@ -90,13 +90,19 @@ test("the interpreter prompt describes the backups and grants views, back-up-now
   assert.ok(system.length < 160_000, `the prompt stays near its size (${system.length})`);
 });
 
-test("the guide says what the chat does: rights are listed by asking in words and taken back by their ID; backups are read, made and changed in words", () => {
+test("the guide says what the chat does: rights are listed by asking in words and taken back by their ID; backups are read, made and changed in words", async () => {
+  const system = await prompt();
   const guide = readFileSync(join(root, "docs", "nimblenewt", "user-guide.md"), "utf8").replace(/\r\n/g, "\n");
   assert.ok(!guide.includes("type `/nimblenewt.grant-list {}` in the chat"), "the rights are no longer listed by a typed command only");
-  assert.match(guide, /To see them, ask in your own words \("what rights does Ann have\?", "what can the garden agents do\?"\): the answer lists each right with its ID, who holds it, where it works and whether it is in force\./);
+  assert.match(guide, /To see them, ask in your own words \("what rights does Ann have\?", "what can the garden agents do\?"\): the answer lists each right with its ID, who holds it, where it works and whether it is in force, /);
   assert.match(guide, /To take one back, say so and give that ID \("take back grt-\.\.\. because the team moved on"\)/);
   assert.match(guide, /\n## Backups\n/);
-  assert.match(guide, /newest first, ten at a time\. Asking changes nothing\./);
+  assert.match(guide, /newest first, ten at a time\. For more, say "show me the next backups" or "the backups after 20" \(the chat does not remember which page you saw last, so a page is named by how many backups came before it\)\. Asking changes nothing\./);
+  assert.match(guide, /whether it is in force, twenty at a time \("what other rights are there\?" gives the next twenty, "the rights after 40" the ones after that\)\./);
+  // The guide's paging sentences are the prompt's rule: ten backups and twenty rights a page, the next page after the page size.
+  assert.match(system, /the next backups are after 10, the third page after 20/);
+  assert.match(system, /the next rights are after 20, the third page after 40/);
+  assert.match(STATUS_KINDS["grants"]!.about, /20 a page/);
   assert.match(guide, /each of these is shown to you first and happens only when you agree\./);
   // The sentences are true: ten at a time is the default, and each of the owner's orders is a proposal.
   assert.match(STATUS_KINDS["backups"]!.about, /default 10/);
@@ -154,13 +160,13 @@ for (const backend of backends) {
     const calls = newCalls();
     const q1 = "how are my backups doing?";
     const q2 = "which backups do I have? show me 5 at a time";
-    const next = (name: string) => `which backups do I have? show me 5 at a time, after ${name}`;
+    const next = (n: number) => `which backups do I have? show me 5 at a time, after ${n}`;
     const names = Array.from({ length: 25 }, (_, i) => manifest(i).name);
     const table: Table = {
       [q1]: (system) => (/backups\(limit, after\)/.test(system) ? [status({ kind: "backups" }, q1)] : []),
       [q2]: () => [status({ kind: "backups", limit: 5 }, q2)],
-      [next(names[4]!)]: () => [status({ kind: "backups", limit: 5, after: names[4] }, next(names[4]!))],
-      [next("backup-nothing")]: () => [status({ kind: "backups", limit: 5, after: "backup-nothing" }, next("backup-nothing"))],
+      [next(5)]: () => [status({ kind: "backups", limit: 5, after: 5 }, next(5))],
+      [next(25)]: () => [status({ kind: "backups", limit: 5, after: 25 }, next(25))],
       "how are my backups doing, 99 at a time": () => [status({ kind: "backups", limit: 99 }, "how are my backups doing, 99 at a time")],
     };
     const { w, say, audit, stand } = await open(table, calls);
@@ -180,21 +186,63 @@ for (const backend of backends) {
       assert.match(t, /last problem 2026-11-29T02:00:00\.000Z: "copying x: no such folder \(a path\)"/);
       assert.doesNotMatch(t, /\/srv\/nn|\/var\/tmp|nn\\usb/, "no host path from a failure's words is shown");
       assert.equal((t.match(/^backup-2026/gm) ?? []).length, 10, "ten backups by default");
-      assert.match(t, new RegExp(`15 older backups follow; ask for more after ${names[9]}\\.`));
+      assert.match(t, /15 older backups follow; ask for the next ones \(after 10\)\./);
       assert.ok(a.outcomes[0]!.lines!.every((l) => l.cites.length > 0), "every line cites a record");
       const t2 = said((await say(q2)).outcomes as never);
       assert.equal((t2.match(/^backup-2026/gm) ?? []).length, 5);
-      assert.match(t2, new RegExp(`20 older backups follow; ask for more after ${names[4]}\\.`));
-      const third = said((await say(next(names[4]!))).outcomes as never);
-      assert.doesNotMatch(third, /Backups are made|What is kept/, "a later page is the backups only");
-      assert.deepEqual(third.match(/^backup-2026-[^:]*/gm), names.slice(5, 10), "the page begins right after the one named");
-      const gone = (await say(next("backup-nothing"))).outcomes[0]!;
+      assert.match(t2, /20 older backups follow; ask for the next ones \(after 5\)\./);
+      const third = said((await say(next(5))).outcomes as never);
+      assert.doesNotMatch(third, /Backups are made|What is kept|last backup attempt failed/, "a later page is the backups only");
+      assert.match(third, /^Backups 6 to 10 of 25, newest first\./);
+      assert.deepEqual(third.match(/^backup-2026-[^:]*/gm), names.slice(5, 10), "the page begins right after the five already shown");
+      const gone = (await say(next(25))).outcomes[0]!;
       assert.equal(gone.status, "answered");
-      assert.match(said([gone] as never), /No backup is called "backup-nothing" now/);
+      assert.equal(said([gone] as never), "There are 25 backups, so none follow the first 25; ask again from the start.");
       const big = (await say("how are my backups doing, 99 at a time")).outcomes[0]!;
       assert.equal(big.status, "refused", "more than 50 at a time is refused");
       assert.equal(await audit(), before, "reading backups writes nothing");
       assert.deepEqual(stand.violations, [], "the stand-in model handed over only the owner's words");
+    } finally { await w.close(); }
+  });
+
+  suite("the owner's words alone reach the later pages (\"show me the next backups\", \"the third page of rights\"): the prompt gives the rule, and the model takes the number from it and the owner's words, never from an earlier answer", async () => {
+    const calls = newCalls();
+    // The stand-in applies the prompt's own rule to the owner's words, the way a model is asked to: it finds the numbers in the prompt (no rule there: it hands over nothing), and it is never shown an earlier answer.
+    const rule = (system: string, user: string, view: "backups" | "rights", page: 2 | 3): number | undefined => {
+      assert.doesNotMatch(user, /follow; ask for|Backups \d+ to|listed by ID/, "the model sees no earlier answer");
+      const m = new RegExp(`the next ${view} are after (\\d+), the third page after (\\d+)`).exec(system);
+      return m === null ? undefined : Number(m[page - 1]);
+    };
+    const pick = (kind: string, view: "backups" | "rights", page: 2 | 3, words: string) => (system: string, user: string): unknown[] => { const n = rule(system, user, view, page); return n === undefined ? [] : [status({ kind, after: n }, words)]; };
+    const words = { b2: "show me the next backups", b3: "the third page of my backups", g2: "what other rights are there?", g3: "the third page of rights" } as const;
+    const table: Table = { [words.b2]: pick("backups", "backups", 2, words.b2), [words.b3]: pick("backups", "backups", 3, words.b3), [words.g2]: pick("grants", "rights", 2, words.g2), [words.g3]: pick("grants", "rights", 3, words.g3) };
+    // Only `after` is exempt from the own-words check here, and only because the test checks its value against the rule below.
+    const { w, say, holder, seen, stand } = await open(table, calls, {}, new Set(["after"]));
+    try {
+      const names = Array.from({ length: 25 }, (_, i) => manifest(i).name);
+      const b2 = said((await say(words.b2)).outcomes as never);
+      assert.equal(seen.at(-1)!["after" as never], 10);
+      assert.match(b2, /^Backups 11 to 20 of 25, newest first\./);
+      assert.deepEqual(b2.match(/^backup-2026-[^:]*/gm), names.slice(10, 20));
+      assert.match(b2, /5 older backups follow; ask for the next ones \(after 20\)\./);
+      const b3 = said((await say(words.b3)).outcomes as never);
+      assert.equal(seen.at(-1)!["after" as never], 20);
+      assert.deepEqual(b3.match(/^backup-2026-[^:]*/gm), names.slice(20, 25));
+      assert.doesNotMatch(b3, /follow; ask for/, "the last page says no more follow");
+      const ann = (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: "Ann" })).id;
+      const garden = await w.project("Garden");
+      for (let i = 0; i < 45; i++) await holder.grants!.grant(w.owner, { commandId: cid("g"), grantee: `agent:${ann}`, action: "task.read", project: garden, source: "direct", basis: `batch ${i}` } as never);
+      const first = (await holder.status!.ask(w.owner, { kind: "grants" }))!.lines.map((l) => /^(grt-[a-z2-7]{20}):/.exec(l.text)?.[1]).filter((x): x is string => x !== undefined);
+      const g2 = said((await say(words.g2)).outcomes as never);
+      assert.equal(seen.at(-1)!["after" as never], 20);
+      assert.match(g2, /^20 active rights, listed by ID, numbers 21 to 40\./);
+      assert.match(g2, /More rights follow; ask for the next ones \(after 40\)/);
+      const g3 = said((await say(words.g3)).outcomes as never);
+      assert.equal(seen.at(-1)!["after" as never], 40);
+      assert.match(g3, /^5 active rights, listed by ID, numbers 41 to 45\./);
+      const later = [...g2.matchAll(/^(grt-[a-z2-7]{20}):/gm), ...g3.matchAll(/^(grt-[a-z2-7]{20}):/gm)].map((m) => m[1]!);
+      assert.equal(new Set([...first, ...later]).size, 45, "the three pages hold every right once");
+      assert.deepEqual(stand.violations, [], "every other value was the owner's words");
     } finally { await w.close(); }
   });
 
@@ -332,14 +380,29 @@ for (const backend of backends) {
       const first = await run("list my rights, 1 at a time");
       const firstIds = first.t.match(/grt-[a-z2-7]{20}(?=: )/g)!;
       assert.equal(firstIds.length, 1);
-      assert.match(first.t, new RegExp(`More rights follow; ask for them after ${firstIds[0]}`));
-      const pageText = `list my rights, 1 at a time, after ${firstIds[0]}`;
-      table[pageText] = () => [status({ kind: "grants", limit: 1, after: firstIds[0] }, pageText)];
+      assert.match(first.t, /More rights follow; ask for the next ones \(after 1\), or narrow/);
+      const pageText = "list my rights, 1 at a time, after 1";
+      table[pageText] = () => [status({ kind: "grants", limit: 1, after: 1 }, pageText)];
       const second = await run(pageText);
-      assert.notEqual(second.t.match(/grt-[a-z2-7]{20}(?=: )/)![0], firstIds[0], "the next page starts after the one named");
+      assert.match(second.t, /^1 active right, listed by ID, numbers 2 to 2\./);
+      assert.notEqual(second.t.match(/grt-[a-z2-7]{20}(?=: )/)![0], firstIds[0], "the next page starts after the one already shown");
+      // An ID the owner says (as a stopped look names one) is a place to go on after.
+      const idText = `list my rights, 1 at a time, after ${firstIds[0]}`;
+      table[idText] = () => [status({ kind: "grants", limit: 1, after: firstIds[0] }, idText)];
+      const byId = await run(idText);
+      assert.equal(byId.t.match(/grt-[a-z2-7]{20}(?=: )/)![0], second.t.match(/grt-[a-z2-7]{20}(?=: )/)![0], "after the first ID is the same right as after 1");
+      assert.match(byId.t, new RegExp(`More rights follow; ask for them after ${second.t.match(/grt-[a-z2-7]{20}(?=: )/)![0]}`));
+      const pastText = "list my rights, after 40";
+      table[pastText] = () => [status({ kind: "grants", after: 40 }, pastText)];
+      assert.equal((await run(pastText)).t.split("\n")[0], "No active right follows the first 40; there are 4.");
 
       assert.deepEqual([(await run("what rights does Zed have?")).o.code], ["not_found"]);
-      assert.equal((await run("what rights does Cat have?")).o.status, "asked", "two agents of one name are asked about");
+      const cats = await run("what rights does Cat have?");
+      assert.equal(cats.o.status, "asked", "two agents of one name are asked about");
+      const options = (cats.o as unknown as { options: string[] }).options;
+      assert.equal(options.length, 2);
+      assert.equal(new Set(options).size, 2, "each option can be told apart");
+      for (const o of options) assert.match(o, /^Cat \([^)]+\)$/);
       assert.equal((await run("what rights are there in the Nowhere project?")).o.code, "not_found");
       assert.equal((await run("what is Zed doing?")).o.code, "not_found");
       assert.equal((await run("which rights are sleeping?")).o.status, "refused");
@@ -382,9 +445,14 @@ for (const backend of backends) {
       for (let i = 0; i < 55; i++) await holder.grants!.grant(w.owner, { commandId: cid("g"), grantee: `agent:${ann}`, action: "task.read", project: garden, source: "direct", basis: `batch ${i}` } as never);
       const big = (await holder.status!.ask(w.owner, { kind: "grants", limit: 50 }))!;
       assert.equal(big.lines.filter((l) => /^grt-/.test(l.text)).length, 50);
-      assert.match(big.lines.at(-1)!.text, /^More rights follow; ask for them after grt-/);
-      const rest = (await holder.status!.ask(w.owner, { kind: "grants", limit: 50, after: /^(grt-[a-z2-7]{20})/.exec(big.lines.at(-2)!.text)![1]! }))!;
+      assert.equal(big.lines.at(-1)!.text, "More rights follow; ask for the next ones (after 50), or narrow the question by agent or project.");
+      const rest = (await holder.status!.ask(w.owner, { kind: "grants", limit: 50, after: 50 }))!;
       assert.equal(rest.lines.filter((l) => /^grt-/.test(l.text)).length, 5);
+      assert.deepEqual(new Set([...big.lines, ...rest.lines].map((l) => /^(grt-[a-z2-7]{20}):/.exec(l.text)?.[1]).filter((x) => x !== undefined)).size, 55, "the two pages hold every right once");
+      const byId = (await holder.status!.ask(w.owner, { kind: "grants", limit: 50, after: /^(grt-[a-z2-7]{20})/.exec(big.lines.at(-2)!.text)![1]! }))!;
+      assert.deepEqual(byId.lines.filter((l) => /^grt-/.test(l.text)).map((l) => l.text), rest.lines.filter((l) => /^grt-/.test(l.text)).map((l) => l.text), "after the 50th ID is after 50");
+      await assert.rejects(holder.status!.ask(w.owner, { kind: "grants", after: -1 }), /after/);
+      await assert.rejects(holder.status!.ask(w.owner, { kind: "backups", after: "backup-x" as never }), /after/);
       await assert.rejects(holder.status!.ask(w.owner, { kind: "grants", limit: 51 }), /limit/);
       await assert.rejects(holder.status!.ask(w.owner, { kind: "grants", after: "grt-nonsense" }), /after/);
 
