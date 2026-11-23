@@ -64,6 +64,17 @@ export interface DefectBody {
   /** The owner's decisions on it, oldest first (`defect-override` records). */
   readonly overrides: readonly string[];
   readonly resolution?: { readonly kind: "fixed" | "accepted-as-is" | "withdrawn"; readonly by: string; readonly at: string; readonly ref: string; /** Why a withdrawn report was taken back (redacted). */ readonly reason?: string };
+  /** Changes made to the finding text or the severity before the defect was finished, oldest first (card Q04, editing). Absent on a defect never edited; each entry keeps what it replaced. */
+  readonly edits?: readonly DefectEdit[];
+}
+
+/** One edit of a defect: who, when, and the finding text or severity it replaced (only what changed is set; the text was redacted when recorded). */
+export interface DefectEdit {
+  readonly by: string;
+  readonly at: string;
+  readonly previousFinding?: string;
+  readonly previousSeverity?: DefectSeverity;
+  readonly reason?: string;
 }
 
 /** One check of a repair. Immutable: a failed check is never rewritten, whatever the owner decides later. */
@@ -113,6 +124,8 @@ const MAX_PER_DELIVERABLE = 100;
 const MAX_EVIDENCE = 10;
 const MAX_FINDING = 2000;
 const MAX_REASON = 2000;
+/** A defect is edited at most this many times (its edits keep what they replaced); after that the report is withdrawn and made again. */
+export const MAX_DEFECT_EDITS = 20;
 const UNRESOLVED_PAGE = 500;
 const UNRESOLVED_PAGES = 20;
 const CHECKERS = ["reviewer", "qa", "director"] as const;
@@ -141,7 +154,7 @@ const revisionOf = (value: unknown): number | undefined => {
  *
  * Who checks: the owner, or an agent that may read the deliverable, holds the reviewer, qa or director role in the project and did none of the work of the version it judges (a QA agent that made the repair is
  * one of its contributors and cannot pass it). Who repairs: the responsible agent or the owner. Who overrides: the owner only. Who withdraws a mistaken report: the owner, or the reporting
- * agent while no check of a repair has failed and when it did none of the repair's work.
+ * agent while no check of a repair has failed and when it did none of the repair's work. Who edits the finding or severity of an unfinished defect: the same two, on the same terms.
  */
 export class DefectService {
   readonly #runner: CommandRunner;
@@ -455,6 +468,61 @@ export class DefectService {
         const next: DefectBody = { ...rest, state: "withdrawn", resolution: { kind: "withdrawn", by: by.id, at: this.#runner.now(), ref: command.id, reason: redactText(reason) } };
         const ref = { kind: "defect", id: command.id };
         return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: agg.revision, body: next as unknown as JsonObject }], detail: { defect: command.id, withdrawn: true } };
+      },
+    }));
+    return { id: result.id, revision: result.revision, replayed: result.replayed };
+  }
+
+  /**
+   * Corrects what a defect says before it is finished (card Q04, editing): the finding text, the severity, or both, by the agent that reported it or the owner. The reporting agent may do so only while no check
+   * of a repair has failed (so never once escalated) and when it did none of the repair's work; after that only the owner may (the same terms as a withdrawal). It works while the defect is `open`,
+   * `repair-submitted` or `escalated`; a fixed, accepted or withdrawn defect is refused. Nothing else changes: the state, cycle count, checks, evidence and the owner's decisions stay, and a
+   * decision that already named the finding keeps the text it saw. Each edit is kept on the defect (who, when, the text or severity it replaced, why), at most 20 per defect. A value equal to the
+   * current one is not an edit; an edit that changes nothing is refused.
+   */
+  async edit(by: Principal, command: NoActor & { id: string; finding?: string; severity?: string; reason?: string; expectedRevision?: number }): Promise<{ id: string; revision: number; replayed: boolean }> {
+    object(command, ["commandId", "id", "finding", "severity", "reason", "expectedRevision"]);
+    const commandId = checkCommandId(command.commandId);
+    if (typeof command.id !== "string" || !ID.test(command.id)) bad("id", "is not a defect ID");
+    if (command.finding === undefined && command.severity === undefined) bad("finding", "give the corrected finding, the severity, or both");
+    const finding = command.finding === undefined ? undefined : text(command.finding, "finding", { min: 1, max: MAX_FINDING, multiline: true });
+    if (command.severity !== undefined && !(DEFECT_SEVERITIES as readonly string[]).includes(command.severity)) bad("severity", `must be one of ${DEFECT_SEVERITIES.join(", ")}`);
+    const reason = command.reason === undefined ? undefined : text(command.reason, "reason", { min: 1, max: MAX_REASON, multiline: true });
+    const expected = revisionOf(command.expectedRevision);
+    const result = await this.#runner.command("defect.edit", { commandId: scopedCommandId(by.id, commandId), actor: by.id }, async () => ({
+      payload: { id: command.id, finding: finding ?? null, severity: command.severity ?? null, reason: reason ?? null, expectedRevision: expected ?? null },
+      build: async () => {
+        const { agg, body } = await this.#load(by, command.id);
+        const owner = by.kind === "owner" && by.taskScope === undefined;
+        if (!owner && !(by.kind === "agent" && by.id === body.reportedBy)) throw new DomainError("forbidden", "only the agent that reported the defect, or the owner, may edit it");
+        if (expected !== undefined && agg.revision !== expected) throw new DomainError("stale_revision", `the defect is at revision ${agg.revision}, not ${expected}`, { currentRevision: agg.revision });
+        if (isFinished(body.state)) throw new DomainError("invalid_transition", `the defect is already ${body.state}: it is no longer edited`);
+        if (!owner) {
+          if (body.cycles > 0 || body.state === "escalated") throw new DomainError("forbidden", `a check of its repair found it not fixed (${body.cycles} cycle(s)): only the owner may edit it now`);
+          if (body.repairVersion !== undefined) {
+            const d = (await this.#runner.get("deliverable", body.deliverableId))!.body as unknown as DeliverableBody;
+            if (this.#contributors(d, await this.#version(body.deliverableId, body.repairVersion)).has(by.id)) throw new DomainError("forbidden", `an agent that did the work of the repair, version ${body.repairVersion}, may not edit the defect`);
+          }
+        }
+        const newFinding = finding === undefined ? undefined : redactText(finding);
+        const textChanged = newFinding !== undefined && newFinding !== body.finding.text;
+        const severityChanged = command.severity !== undefined && command.severity !== body.severity;
+        if (!textChanged && !severityChanged) throw new DomainError("invalid_command", "the finding and the severity are already what you gave: nothing to change", { field: "finding" });
+        const edits = Array.isArray(body.edits) ? body.edits : [];
+        if (edits.length >= MAX_DEFECT_EDITS) throw new DomainError("invalid_transition", `the defect was edited ${MAX_DEFECT_EDITS} times already: withdraw it and report it again`);
+        const entry: DefectEdit = {
+          by: by.id, at: this.#runner.now(),
+          ...(textChanged ? { previousFinding: body.finding.text } : {}), ...(severityChanged ? { previousSeverity: body.severity } : {}),
+          ...(reason === undefined ? {} : { reason: redactText(reason) }),
+        };
+        const next: DefectBody = {
+          ...body,
+          finding: textChanged ? { ...body.finding, text: newFinding! } : body.finding,
+          severity: severityChanged ? command.severity as DefectSeverity : body.severity,
+          edits: [...edits, entry],
+        };
+        const ref = { kind: "defect", id: command.id };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: agg.revision, body: next as unknown as JsonObject }], detail: { defect: command.id, edited: true, finding: textChanged, severity: severityChanged ? command.severity! : null } };
       },
     }));
     return { id: result.id, revision: result.revision, replayed: result.replayed };

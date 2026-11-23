@@ -128,6 +128,7 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "defect.repair": { verb: "Say which newer version of the deliverable repairs a defect", mode: "apply" },
   "defect.review": { verb: "Judge the repair of a defect (verdict fixed or not-fixed, with what is still wrong)", mode: "propose", revision: "defect" },
   "defect.withdraw": { verb: "Take a defect report back as mistaken (reason in the owner's words: wrong version, a duplicate, a misreading); the report and its checks stay on the record", mode: "propose", revision: "defect" },
+  "defect.edit": { verb: "Correct a defect's finding text or severity before it is finished (the corrected finding and any reason in the owner's words; severity critical, major or minor); the state, cycle count and checks stay, and the edit is kept on the defect", mode: "propose", revision: "defect" },
   "defect.override": { verb: "Decide a defect yourself (outcome accept-as-is, keeping the finding on the record, or repair-again, keeping the cycle count; reason in the owner's words)", mode: "propose", revision: "defect" },
   // QA evidence (card Q02): invalidating evidence whose criteria or owner decisions changed, and scheduling its re-check, only applies what the records already say; it applies at once.
   "qa.evidence.check": { verb: "Check whether a task's QA evidence still holds (its acceptance criteria and the owner decisions it was judged against unchanged); evidence that no longer holds is invalidated and a re-check is scheduled", mode: "apply" },
