@@ -86,7 +86,7 @@ for (const backend of backends) {
     });
     const service = WorkspaceOpService.withEpoch(store.storage, projects.epoch, deps(), options);
     const land = (commandId: string) => service.request(owner, { commandId, operation: "landing", taskId: task, reason: "ready", submissionId: sub });
-    return { store, owner, task, sub, review, signoff, views, reads, host, calls, told, control, land, gateSeen: () => gateSeen };
+    return { store, owner, project, integration, task, sub, review, signoff, views, reads, host, calls, told, control, land, gateSeen: () => gateSeen };
   };
 
   test(`${backend.name}: nothing changed between the reads: the landing goes ahead as before, the host ran the checks once and the records were read again (card P09)`, async () => {
@@ -171,6 +171,31 @@ for (const backend of backends) {
       assert.equal(t.reads.approvals + t.reads.defects + t.reads.qa + t.reads.docs + t.reads.director, at, "nothing was read again");
       assert.equal(t.control.rechecked, 1);
     } finally { await t.store.close(); }
+  });
+
+  test(`${backend.name}: a check the project requires since the checks were judged stops the landing before the host is asked, tells nobody, and a check no longer required changes nothing (card P09)`, async () => {
+    const r = await rig(["review"]);
+    try {
+      // The policy is read before the host runs the tests (minutes); a check required since then was never judged for this landing.
+      r.control.afterGate = async () => { await r.integration.set(r.owner, { commandId: cid("req"), projectId: r.project, requiredChecks: ["review", "defects"] }); };
+      const out = await r.land("w7");
+      assert.equal(out.state, "refused", out.summary);
+      assert.match(out.summary!, /the project's required checks changed while this landing was judged \(it now also requires defects, which was not judged for it\), so nothing was landed/);
+      assert.equal(r.calls.runs.length, 0, "the host was never asked to write");
+      assert.equal(r.reads.defects, 0, "nothing else was read: the added check is judged by the next landing");
+      assert.deepEqual([out.checks!.passed, out.checks!.required], [true, ["review"]], "the gate's own answer is kept as it was");
+      assert.equal(r.told.length, 0, "the author cannot change the policy, so nobody is told");
+      assert.equal(out.toldAuthor, undefined);
+      // Asked again, the landing is judged under the checks now required (here the defects are clear) and goes ahead.
+      const again = await r.land("w8");
+      assert.equal(again.state, "done", again.summary);
+      assert.deepEqual(again.checks!.required, ["review", "defects"]);
+      // A check dropped since the judgement does not refuse: the landing met the stricter set.
+      r.control.afterGate = async () => { await r.integration.set(r.owner, { commandId: cid("req"), projectId: r.project, requiredChecks: ["review"] }); };
+      const fewer = await r.land("w9");
+      assert.equal(fewer.state, "done", fewer.summary);
+      assert.equal(r.calls.runs.length, 2);
+    } finally { await r.store.close(); }
   });
 
   test(`${backend.name}: a change after the host was asked cannot stop the landing already under way; the next landing sees it (card P09: the limit that remains)`, async () => {

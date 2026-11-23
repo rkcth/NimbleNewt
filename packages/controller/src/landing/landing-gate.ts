@@ -27,7 +27,8 @@ import { redactText } from "../security/redact.js";
  * and the host is not asked. When `tests` had no commands to run (none set, or only by the task's authors), the record says so (`testsNeedOwner`) so the owner can be told. When the gate stops waiting for the host, it aborts
  * the call's `signal` so the host stops the checks' processes.
  * Read-once windows: the review, QA, documents, director and defects checks are read after the host's run, one after the other, and the landing then shows its lease and queue once more; `recheck` reads those records again as the very last
- * step before the host is asked (same host report, nothing run again), so a change that landed in between refuses the landing. A change after the host was asked cannot be stopped: the host's write is not part of the controller's records.
+ * step before the host is asked (same host report, nothing run again), so a change that landed in between refuses the landing; it also reads the project's required checks again (read before the host's run), and a check
+ * required since then refuses the landing. A change after the host was asked cannot be stopped: the host's write is not part of the controller's records.
  */
 export type LandingCheckResult = "pass" | "fail" | "not_run";
 export interface LandingCheckRunShown { readonly name: string; readonly state: "passed" | "failed" | "not-run"; readonly exitCode?: number | null; readonly timedOut?: boolean; readonly ms?: number; /** The end of its output or why it did not run, redacted and cut. */ readonly note?: string }
@@ -193,14 +194,19 @@ export class LandingGate {
    * Reads the records again right before the host is asked to write (card P09, read-once windows): the review, QA, documents, director and defects checks that `record` found passing are judged once more from the
    * controller's records, with the same host report (the tests ran once on the integrated tree; the submission's base and tree never change, so nothing is run or computed again). Answers the checks that no longer
    * pass (`changed`, as they now read) and the record as it now stands (not passed when any changed). A record this gate did not answer is a fault (it throws, and the landing is refused: nothing is landed on a
-   * judgement that cannot be read again). A landing that required none of these checks reads nothing.
+   * judgement that cannot be read again). The project's required checks are read again first: a check required since the first judgement is answered as `added` (the landing is refused; nothing else is read). A landing that
+   * required none of the record checks reads only the required checks.
    */
-  async recheck(record: LandingChecksRecord): Promise<{ readonly changed: readonly LandingCheckEntry[]; readonly record: LandingChecksRecord }> {
+  async recheck(record: LandingChecksRecord): Promise<{ readonly changed: readonly LandingCheckEntry[]; readonly record: LandingChecksRecord; readonly added?: readonly string[] }> {
     const ctx = this.#judged.get(record);
     if (ctx === undefined) {
       if (!record.results.some((e) => RECORD_CHECKS.includes(e.check))) return { changed: [], record };
       throw new Error("the checks of this landing were not judged by this gate, so they cannot be read again");
     }
+    // The project's required checks were read before the host's run (which may take minutes): a check required since then was never judged for this landing, so it is answered as `added` (nothing else is read; a read
+    // that throws refuses the landing). A check no longer required does not matter: the landing met the stricter set.
+    const added = [...new Set(await this.#deps.requiredChecks(ctx.call.projectId))].filter((c) => !record.required.includes(c));
+    if (added.length > 0) return { changed: [], record, added };
     const fresh: LandingCheckEntry[] = [];
     for (const e of record.results) {
       if (!RECORD_CHECKS.includes(e.check) || e.result !== "pass") continue;

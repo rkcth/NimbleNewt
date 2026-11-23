@@ -208,9 +208,10 @@ export interface WorkspaceDeps {
   readonly landingGate?: (call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string; readonly author?: string; readonly host: WorkspacePort }) => Promise<LandingChecksRecord>;
   /**
    * Card P09 (read-once windows): asked for a landing the gate passed, as the very last step before the host is asked to land (after the lease and the queue were shown once more): the records that were judged (review, QA,
-   * documents, director, defects) are read again. It answers the checks that no longer pass and the record as it now stands; a throw (they cannot be read again) refuses the landing. Absent: not read again (unit rigs).
+   * documents, director, defects) are read again. It answers the checks that no longer pass and the record as it now stands, and `added`: checks the project requires since the first judgement (never judged for this
+   * landing; refused, nobody told: the author cannot change the policy). A throw (they cannot be read again) refuses the landing. Absent: not read again (unit rigs).
    */
-  readonly landingRecheck?: (record: LandingChecksRecord) => Promise<{ readonly changed: readonly LandingCheckEntry[]; readonly record: LandingChecksRecord }>;
+  readonly landingRecheck?: (record: LandingChecksRecord) => Promise<{ readonly changed: readonly LandingCheckEntry[]; readonly record: LandingChecksRecord; readonly added?: readonly string[] }>;
   /**
    * Card P10: told after a refresh round of a task is counted (the author's own refresh moved its checkout onto a newer head), with the task's round count; the landing queue reserves the task's place at the
    * refresh-round cap and tells the director when a reserved task needs another round. Best effort: a throw is ignored. Not told on a repeat of the call.
@@ -686,6 +687,7 @@ export class WorkspaceOpService {
           if (gated.required.length > 0 && this.#deps.landingRecheck !== undefined) {
             let again: Awaited<ReturnType<NonNullable<WorkspaceDeps["landingRecheck"]>>>;
             try { again = await this.#deps.landingRecheck(gated); } catch (error) { return { ok: false as const, reason: `the required checks could not be read again right before the landing, so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}: ${safe(error, 300)}` }; }
+            if (again.added !== undefined && again.added.length > 0) return { ok: false as const, reason: `the project's required checks changed while this landing was judged (it now also requires ${safe(again.added.join(", "), 120)}, which was not judged for it), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; ask for the landing again to judge it under the checks now required` };
             if (again.changed.length > 0) {
               gated = again.record;
               gateRefused = true;
