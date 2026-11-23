@@ -699,6 +699,29 @@ export class ChatService {
           request["taskId"] = matches[0]!.id;
           delete request["taskTitle"];
         }
+        // The tasks or the needs-attention list of one agent, or the rights one agent holds or a project's rights, asked for by name in the owner's words: the name is looked up in the active agents (exact, then loose) or the
+        // projects, and an ID given beside it wins. Unclear asks, unknown refuses; the names never reach the status service, which takes IDs only.
+        if (request["kind"] === "overview" || request["kind"] === "attention" || request["kind"] === "grants") {
+          const agentName = request["agentName"];
+          const projectName = request["kind"] === "grants" ? request["projectName"] : undefined;
+          delete request["agentName"];
+          if (request["kind"] === "grants") delete request["projectName"];
+          if ((agentName !== undefined && typeof agentName !== "string") || (projectName !== undefined && typeof projectName !== "string")) { push({ i, kind: "refused", code: "invalid_command", message: "agentName and projectName must be the names as the owner said them" }); continue; }
+          if (request["agentId"] === undefined && typeof agentName === "string" && agentName.trim() !== "") {
+            const agents = await this.#listAll(token, "agent.list", { state: "active" });
+            const wanted = agentName.trim().toLowerCase();
+            const exact = agents.filter((a) => String(a["friendlyName"]).trim().toLowerCase() === wanted);
+            const found = exact.length > 0 ? exact : agents.filter((a) => looseMatch(wanted, String(a["friendlyName"])));
+            if (found.length === 0) { push({ i, kind: "refused", code: "not_found", message: `no active agent is called ${quotedText(agentName.trim(), 80)}` }); continue; }
+            if (found.length > 1) { push({ i, kind: "asked", question: "Which agent do you mean?", options: found.slice(0, CHAT_LIMITS.options).map((a) => String(a["friendlyName"]).slice(0, 60)) }); continue; }
+            request["agentId"] = String(found[0]!["id"]);
+          }
+          if (request["projectId"] === undefined && typeof projectName === "string" && projectName.trim() !== "") {
+            const found = await this.#projectByIntent(token, undefined, projectName);
+            if (!found.ok) { push(found.kind === "ask" ? { i, kind: "asked", question: found.question, options: found.options } : { i, kind: "refused", code: found.code, message: found.message }); continue; }
+            request["projectId"] = found.id;
+          }
+        }
         // An agent's environment, or its change requests, asked for by the agent's name in the owner's words: the name is looked up in the active agents (exact, then loose); unclear asks.
         if (request["kind"] === "environment" || request["kind"] === "maintenance" || request["kind"] === "access") {
           const agentName = request["agentName"];
@@ -2287,6 +2310,13 @@ export class ChatService {
         // The suggestion's revision now; 0 before the first answer.
         const item = await this.#get(token, "approval.suggestion", {});
         return item === undefined || typeof item["revision"] !== "number" ? refuse("not_found", "the derived-profile question is not available") : { ok: true, name: "expectedRevision", value: item["revision"] as number };
+      }
+      case "backup-scope": {
+        // The backup scope setting as it is when the message is planned (0 before the owner ever set it), so a change made meanwhile makes the proposal stale; the owner never has to know the number.
+        let item: Record<string, unknown> | undefined;
+        try { item = await this.#get(token, "backup.config.status", {}); } catch (error) { if (error instanceof DomainError && error.code === "unavailable") return { ok: true }; throw error; }
+        const scope = item?.["scope"] as { revision?: unknown } | undefined;
+        return typeof scope?.revision === "number" ? { ok: true, name: "expectedRevision", value: scope.revision } : { ok: true };
       }
       case "database-transfer": {
         // The installation settings layer the two switches live in, as it is when the message is planned (0 before anything was set); a change to it before the owner confirms makes the proposal stale (card F04m).

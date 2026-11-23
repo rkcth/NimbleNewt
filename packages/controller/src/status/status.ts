@@ -17,6 +17,7 @@ import { DEFAULT_THRESHOLDS, type EvidenceBody } from "../health/assess.js";
 import type { ConcernBody, StallService } from "../health/stall.js";
 import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../hosts/hosts.js";
 import { relianceOf } from "../security/reliance.js";
+import { holdsNow, idleEnd, lapsedFromNonUse, type GrantRecordBody } from "../security/grants.js";
 import { relianceHead, relianceLines, relianceSummary } from "./reliance-words.js";
 import { quotedLine } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
@@ -271,7 +272,7 @@ export interface FailedEventDetail {
  */
 export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly string[]; readonly about: string }>> = {
   task: { keys: ["taskId|taskTitle"], about: "how one task is going and what blocks it" },
-  overview: { keys: ["projectId", "agentId", "state", "execution", "limit"], about: "the tasks of a project or of one agent, by state" },
+  overview: { keys: ["projectId", "agentId|agentName", "state", "execution", "limit"], about: "the tasks of a project or of one agent, by state" },
   changes: { keys: ["projectId", "since", "limit"], about: "what changed in a project since a time" },
   tools: { keys: ["projectId", "taskId|taskTitle", "since", "limit"], about: "which tools were used" },
   delivered: { keys: ["projectId", "taskId|taskTitle", "since"], about: "what was delivered" },
@@ -322,6 +323,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   wip_backup: { keys: ["projectId"], about: "the optional work-in-progress backup of a project (owner only): whether it is on, the remote and the one standing approval it rests on, and for each task the last backup the remote confirmed, the last failure (a failed push is never a backup) and the files left out because they looked like secrets" },
   event_sources: { keys: [], about: "which event sources are watched (timers, files and folders, git repositories, service health, model availability, task completion): each one, whether it is on, and what the ones you defined watch (owner only)" },
   release_windows: { keys: [], about: "owner only: the maintenance windows for release updates (card K07), newest first: which release each activates, when it opens and closes in its own time zone, its status (scheduled, prepared, activated, committed, reverted, missed, deferred, failed, cancelled) and why, what it waits for, whether the earlier release could still come back, and the releases quarantined after a failed window" },
+  backups: { keys: ["limit", "after"], about: "owner only, read only: how backups are set (schedule, what is kept, each place copies go to, last test restore, what is left out), then the backups newest first, limit at a time (default 10); after is the last name shown" },
+  grants: { keys: ["agentId|agentName", "projectId|projectName", "state", "limit", "after"], about: "owner only, read only: the standing rights, each with its ID, holder, action, project and whether it is in force; state active (default) or revoked; a project also shows rights for every project; after is the last ID shown" },
   release: { keys: ["candidateId", "limit"], about: "release testing (owner only): per platform the gate result (pass, flaky pass, fail, interrupted, timed out, running or not run), each attempt with its state, host and time (an open one also: picked up or not, when its host was last heard, when it ends as timed out), whether the candidate is approved, and what is staged and current; with candidateId for one candidate, without it for the newest few (limit 1 to 10, default 5)" },
   capacity: { keys: [], about: "the capacity settings in force, in four groups: the optional caps (attempts running at once per project, per agent, and the children reporting to one supervising agent, all off unless you turned one on), the host and global quotas (productive attempts in total and on one host, the places kept for inquiries and reviews, the queue, each host's declared CPUs and memory, what runs and waits now) the limits on spawning child tasks (depth, live children, children in all), and the P/PC work balance (places kept for improvement work and its ceiling from workClass.pcFloor and pcCeiling, production and improvement attempts running and waiting, places lent to production, whether improvement work is short of its reserve and why): each figure, whether you set it or it is the default, and which are off (owner only)" },
   settings: { keys: ["prefix"], about: "owner only (card U08): every setting with the value in force, whether it is the default, set by you, inherited or locked, and the layer it comes from; prefix narrows it to the settings whose name starts with it. Change one by saying so (the chat shows the change first)" },
@@ -346,7 +349,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   meeting_desk_reads: { keys: ["occurrenceId", "deskRecordId", "limit"], about: "what a meeting's chair read from absent members' desks and shared working notes (card M05b): each file with whose it is, its revision, how big it was, who read it and when, in the order the reads happened, and every refused attempt to change one (reading never changes, wakes or interrupts anyone); the meeting is named by its occurrence ID, which the meetings answer cites" },
   standup_briefs: { keys: ["occurrenceId|meetingTopic", "agent|agentName"], about: "the briefs prepared for a stand-up, or one agent's: what it did, what is unfinished, what blocks it, advice it needs, its priorities and the notes added to it" },
   reconnect: { keys: ["limit"], about: "remote workers that reconnected and wait for the owner's decision on their attempts (attempt, placement, host, the session that asked and since when: what reconnect.reaccept needs), and whether reconnected workers take their attempts up again by themselves (owner only)" },
-  attention: { keys: ["projectId", "agentId", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since, or names an artifact a newer one of the same name replaced), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
+  attention: { keys: ["projectId", "agentId|agentName", "state", "attentionKind", "since", "until", "limit"], about: "what in the overview needs a person's eye (card U13): tasks whose assignee is paused (paused_assignee), work whose worker or host can no longer be relied on (unreachable_worker), tool calls whose result is not known (uncertain_tool_result) and artifacts that are stale (stale_artifact: a newer one of the same name exists, the newest one of a task still open is over a week old, or a deliverable was submitted or accepted against a task contract whose expected result, acceptance criteria, required evidence or checks changed since, or names an artifact a newer one of the same name replaced), each with when it was seen; narrow by project, agent, task state (state), one kind of item (attentionKind) or a time span (since, until); the owner may leave the project out" },
   needs_you: { keys: ["limit"], about: "everything waiting for the owner, ranked: what holds up the critical path the owner marked first, then what holds up the most tasks, then the oldest" },
   critical_path: { keys: [], about: "what the owner marked as the critical path (tasks, goals and projects), whether each is still open, and which decisions waiting for the owner hold it up (owner only; the owner marks and unmarks by chat)" },
   setup: { keys: [], about: "the first-run setup walk-through (owner only): what is set up, what is still missing in the order a person sets it up (approval profile, first project and its repository, where it is hosted and its CI, model providers, the host, notifications, the first agent and its rights, the first task, budgets), and for the next open step the question to put to the owner in plain words, the recommended answer and what declining means. Use it when the owner asks how to get started, what is left to set up, or says to continue the setup" },
@@ -458,6 +461,8 @@ export type StatusRequest =
   | { readonly kind: "maintenance"; readonly maintenanceId?: string; readonly agent?: string; readonly status?: string; readonly limit?: number }
   | { readonly kind: "release"; readonly candidateId?: string; readonly limit?: number }
   | { readonly kind: "release_windows" }
+  | { readonly kind: "backups"; readonly limit?: number; readonly after?: string }
+  | { readonly kind: "grants"; readonly agentId?: string; readonly projectId?: string; readonly state?: string; readonly limit?: number; readonly after?: string }
   | { readonly kind: "jobs"; readonly limit?: number }
   | { readonly kind: "model_routes"; readonly level?: string; readonly name?: string }
   | { readonly kind: "standups"; readonly projectId: string; readonly limit?: number }
@@ -643,6 +648,11 @@ export interface StatusDeps {
   /** The web chat listener's settings and signed-in browsers (card U07b). Absent, or no listener running: the view is not offered. */
   /** The optional work-in-progress backup (card P02b). Absent: the view is not offered. */
   readonly wipBackup?: { get(by: Principal, projectId: string): Promise<{ readonly revision: number; readonly enabled: boolean; readonly remote?: string; readonly everyMinutes?: number; readonly credential?: string; readonly approvalHeld?: boolean; readonly approval?: { readonly basis: string; readonly approvedAt: string; readonly revokedAt?: string; readonly grantId?: string }; readonly tasks: readonly { readonly taskId: string; readonly ref: string; readonly lastSuccess?: { readonly commitId: string; readonly at: string; readonly files: number }; readonly lastFailure?: { readonly at: string; readonly reason: string }; readonly consecutiveFailures: number; readonly blocked: readonly { readonly path: string; readonly reason: string }[] }[] }> };
+  /** The backup configuration and the backups that exist, as `backup.config.status` and `backup.list` read them (the `backups` view). Owner only. Absent, or backups are not set up here: the view is not offered. */
+  readonly backups?: {
+    config(by: Principal): Promise<Record<string, unknown> | undefined>;
+    list(by: Principal): Promise<{ readonly items: readonly Record<string, unknown>[]; readonly status?: Record<string, unknown> } | undefined>;
+  };
   /** The reads of the settings and administration pages (card U08); owner only. */
   readonly admin?: Pick<AdminViewService, "settings" | "providers" | "secrets" | "sandbox" | "compatibility">;
   /** Records that still name a secret the installation keeps for something else (task T4b). Absent: the view is not offered. */
@@ -1055,6 +1065,8 @@ export class StatusService {
       case "capacity": { onlyKnown(request, ["kind"]); return this.capacityLines(by); }
       case "release": { onlyKnown(request, ["kind", "candidateId", "limit"]); return this.releaseLines(by, request); }
       case "release_windows": { onlyKnown(request, ["kind"]); return this.releaseWindowLines(by); }
+      case "backups": { onlyKnown(request, ["kind", "limit", "after"]); return this.backupLines(by, request); }
+      case "grants": { onlyKnown(request, ["kind", "agentId", "projectId", "state", "limit", "after"]); return this.grantLines(by, request); }
       case "environment": { onlyKnown(request, ["kind", "agent"]); return this.environmentLines(by, request.agent); }
       case "maintenance": { onlyKnown(request, ["kind", "maintenanceId", "agent", "status", "limit"]); return this.maintenanceLines(by, request); }
       case "access": { onlyKnown(request, ["kind", "agent"]); return this.accessLines(by, request); }
@@ -1816,6 +1828,118 @@ export class StatusService {
     for (const q of found.quarantined.slice(0, 5)) lines.push(line(`Release ${q.candidateId} is quarantined since ${q.at}: ${shown(q.reason, 160)}; no window can activate it.`, cite("release-quarantine", q.candidateId)));
     if (lines.length === 0) lines.push(line("No maintenance window is set.", cite("config-layer", "installation")));
     return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The backups in plain lines, owner only, read only (the chat's `backups` kind; the same reads as `backup.config.status` and `backup.list`, which no chat question could reach). The first page says how backups are set and
+   * how each place is doing; `after` (the name of the last backup shown) gives the next page of the backups themselves. At most 50 backups a page; nothing is made or changed, and a read that fails is said in one line.
+   */
+  async backupLines(by: Principal, request: { limit?: number; after?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const source = this.#deps.backups;
+    const limit = request.limit === undefined ? 10 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be a whole number from 1 to 50");
+    if (request.after !== undefined && !(typeof request.after === "string" && request.after.length >= 1 && request.after.length <= STATUS_LIMITS.id)) invalid("after", "must be the name of the last backup shown");
+    if (source === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    const here = cite("backups", "main");
+    let config: Record<string, unknown> | undefined;
+    let listed: Awaited<ReturnType<NonNullable<StatusDeps["backups"]>["list"]>>;
+    try {
+      config = request.after === undefined ? await source.config(by) : undefined;
+      listed = await source.list(by);
+    } catch (error) {
+      if (error instanceof DomainError && (error.code === "forbidden" || error.code === "unavailable")) return undefined;
+      return { observedAt: this.#runner.now(), lines: [line("The backups cannot be read right now.", here)] };
+    }
+    if (listed === undefined || (request.after === undefined && config === undefined)) return undefined;
+    const lines: Line[] = [];
+    const rec = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined);
+    const text = (v: unknown, max = 200): string => (typeof v === "string" ? shown(v, max) : "");
+    if (config !== undefined) {
+      const schedule = rec(config["schedule"]);
+      const rules = rec(config["rules"]);
+      if (schedule !== undefined) lines.push(line(text(schedule["text"], 380), here));
+      if (rules !== undefined) lines.push(line(`What is kept: ${text(rules["text"], 380)}`, here));
+      const places = [rec(config["main"]), ...(Array.isArray(config["targets"]) ? config["targets"].map(rec) : [])].filter((t): t is Record<string, unknown> => t !== undefined).slice(0, 12);
+      for (const t of places) {
+        const ok = t["reachable"] === true;
+        const holds = typeof t["count"] === "number" ? `${t["count"]} backup${t["count"] === 1 ? "" : "s"}${typeof t["newest"] === "string" ? `, the newest ${text(t["newest"], 80)}` : ""}` : "";
+        const last = rec(t["lastError"]);
+        const test = rec(t["lastTest"]);
+        lines.push(line(`${text(t["name"], 80)} (${text(t["kind"], 20)}${typeof t["location"] === "string" ? `, ${quoted(t["location"], 120)}` : ""}): ${ok ? "can be reached" : `cannot be reached${typeof t["problem"] === "string" ? ` (${quoted(t["problem"], 120)})` : ""}`}${holds === "" ? "" : `; holds ${holds}`}${typeof t["staysUpToDays"] === "number" ? `; a backup stays up to ${t["staysUpToDays"]} days` : ""}${typeof t["lastCopyAt"] === "string" ? `; last copy ${text(t["lastCopyAt"], 40)}` : ""}${last === undefined ? "" : `; last problem ${text(last["at"], 40)}: ${quoted(typeof last["message"] === "string" ? last["message"] : "", 120)}`}${test === undefined ? "" : `; last test ${test["ok"] === true ? "passed" : "failed"} ${text(test["at"], 40)}`}.`, cite("backup-target", text(t["id"], 40) || "main")));
+      }
+      if (Array.isArray(config["targets"]) && config["targets"].length + 1 > places.length) lines.push(line("More places are set than are shown here.", here));
+      const restore = rec(config["lastTestRestore"]);
+      lines.push(line(restore === undefined ? "No test restore has been made yet." : `The last test restore (${text(restore["at"], 40)}, ${text(restore["name"], 80)}) ${restore["ok"] === true ? "passed" : "FAILED"}: ${quoted(typeof restore["detail"] === "string" ? restore["detail"] : "", 160)}`, here));
+      const pending = Array.isArray(config["pendingPurges"]) ? config["pendingPurges"].length : 0;
+      if (pending > 0) lines.push(line(`${pending} delete${pending === 1 ? "" : "s"} of named backups ${pending === 1 ? "is" : "are"} not finished on every place and will be retried.`, here));
+      const scope = rec(config["scope"]);
+      if (scope !== undefined && typeof scope["text"] === "string") lines.push(line(`What backups leave out: ${text(scope["text"], 300)}`, here));
+    }
+    const all = listed.items;
+    let start = 0;
+    if (request.after !== undefined) {
+      const at = all.findIndex((b) => b["name"] === request.after);
+      if (at < 0) return { observedAt: this.#runner.now(), lines: [line(`No backup is called ${quoted(request.after, 80)} now, so there is no page after it; ask again from the start.`, here)] };
+      start = at + 1;
+    }
+    const page = all.slice(start, start + limit);
+    const failed = rec(listed.status)?.["lastError"] === undefined ? undefined : rec(rec(listed.status)!["lastError"]);
+    if (failed !== undefined && request.after === undefined) lines.push(line(`The last backup attempt failed (${text(failed["at"], 40)}): ${quoted(typeof failed["message"] === "string" ? failed["message"] : "", 160)}`, here));
+    if (all.length === 0) lines.push(line("No backup exists yet.", here));
+    for (const b of page) {
+      const rows = typeof b["rows"] === "number" ? `${b["rows"]} rows` : "";
+      lines.push(line(`${text(b["name"], 100)}: ${text(b["kind"], 20)}, made ${text(b["createdAt"], 40)}${rows === "" ? "" : `, ${rows}`}; agents' conversation state ${text(b["piState"], 80) || "not included"}${typeof b["notFullCopy"] === "string" ? `; not a full copy: ${text(b["notFullCopy"], 160)}` : ""}.`, cite("backup", text(b["name"], 100))));
+    }
+    if (start + page.length < all.length) lines.push(line(`${all.length - start - page.length} older backup${all.length - start - page.length === 1 ? "" : "s"} follow; ask for more after ${text(page[page.length - 1]?.["name"], 100)}.`, here));
+    return { observedAt: this.#runner.now(), lines };
+  }
+
+  /**
+   * The standing rights in plain lines, owner only, read only (the chat's `grants` kind over the same records as `grant.list`): each right's ID (what taking one back needs), who holds it, what it allows and where, whether it is in force and when or why it
+   * ends. By agent, project (a right for every project counts for any project), state (active or taken back) and `after` (the ID of the last one shown). One look reads at most 2000 records, and one that stops early says where to go on.
+   */
+  async grantLines(by: Principal, request: { agentId?: string; projectId?: string; state?: string; limit?: number; after?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const grantee = request.agentId === undefined ? undefined : `agent:${this.#agentFilter(request.agentId)}`;
+    const project = request.projectId === undefined ? undefined : checkProjectId(request.projectId);
+    const state = request.state === undefined ? "active" : request.state === "active" || request.state === "revoked" ? request.state : invalid("state", "must be active or revoked");
+    const limit = request.limit === undefined ? 20 : Number.isSafeInteger(request.limit) && request.limit >= 1 && request.limit <= 50 ? request.limit : invalid("limit", "must be a whole number from 1 to 50");
+    if (request.after !== undefined && !(typeof request.after === "string" && /^grt-[a-z2-7]{20}$/.test(request.after))) invalid("after", "must be the ID of the last right shown (grt-...)");
+    if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    const now = this.#runner.now();
+    const found: { id: string; revision: number; body: GrantRecordBody }[] = [];
+    let last = request.after;
+    let more = false;
+    let cut = false;
+    scan: for (let round = 0; round < 10; round++) {
+      const page = await this.#runner.list("grant-record", { ...(last === undefined ? {} : { afterId: last }), limit: 200 });
+      for (const r of page) {
+        const body = r.body as unknown as GrantRecordBody;
+        if (body.state !== state || (grantee !== undefined && body.grantee !== grantee) || (project !== undefined && body.project !== project && body.project !== "*")) { last = r.id; continue; }
+        if (found.length === limit) { more = true; break scan; }
+        found.push({ id: r.id, revision: view<GrantRecordBody>(r).revision, body });
+        last = r.id;
+      }
+      if (page.length < 200) break;
+      if (round === 9) cut = true;
+    }
+    const lines: Line[] = [];
+    const where = (b: GrantRecordBody): string => `${b.project === "*" ? "every project" : `project ${shown(b.project, 60)}`}${b.resource === undefined ? "" : `, only ${shown(b.resource.kind, 20)} ${shown(b.resource.id, 60)}`}`;
+    for (const g of found) {
+      const b = g.body;
+      let when: string;
+      if (b.state === "revoked") when = `taken back${b.revokedAt === undefined ? "" : ` ${shown(b.revokedAt, 40)}`}${b.revokedReason === undefined ? "" : ` (${quoted(b.revokedReason, 100)})`}`;
+      else if (b.expiresAt !== undefined && b.expiresAt <= now) when = `ended ${shown(b.expiresAt, 40)}`;
+      else if (b.notBefore !== undefined && b.notBefore > now) when = `not in force yet, starts ${shown(b.notBefore, 40)}`;
+      else if (lapsedFromNonUse(b, now)) when = "lapsed because it went unused";
+      else if (!(await holdsNow(this.#runner, b, now))) when = "not in force (the right it rests on no longer holds)";
+      else when = `in force, ${b.expiresAt === undefined ? "until you take it back" : `until ${shown(b.expiresAt, 40)}`}${b.idleDays === undefined ? "" : `, lapses if unused until ${shown(idleEnd(b) ?? "", 40)}`}`;
+      lines.push(line(`${shown(g.id, 40)}: ${shown(b.grantee, 60)} may ${shown(b.action, 60)} in ${where(b)}; ${when}. Basis: ${quoted(b.basis, 100)}.`.slice(0, 400), cite("grant", g.id, g.revision)));
+    }
+    const filter = `${grantee === undefined ? "" : ` for ${shown(grantee, 60)}`}${project === undefined ? "" : ` in project ${shown(project, 60)} or every project`}`;
+    const head = found.length === 0 ? `No ${state === "revoked" ? "taken-back" : "active"} right${filter} ${request.after === undefined ? "is on record" : "follows that one"}.` : `${found.length} ${state === "revoked" ? "taken-back" : "active"} right${found.length === 1 ? "" : "s"}${filter}, in the order they were made${request.after === undefined ? "" : ", after the one you named"}. To take one back, give its ID.`;
+    lines.unshift(line(head, cite("grants", state)));
+    if (more) lines.push(line(`More rights follow; ask for them after ${shown(found[found.length - 1]!.id, 40)}, or narrow the question by agent or project.`, cite("grants", state)));
+    else if (cut && last !== undefined) lines.push(line(`The look stopped after 2000 records; ask again after ${shown(last, 40)}, or narrow the question by agent or project.`, cite("grants", state)));
+    return { observedAt: now, lines };
   }
 
   /** The agents woken for a meeting (card M04h), one line each, owner only. A read that fails is said in one line. */
