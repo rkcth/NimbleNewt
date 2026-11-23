@@ -168,8 +168,10 @@ test("in the terminal chat a host's credential is asked for in words, shown firs
     assert.doesNotMatch(first, /host:workbench\./, "asking shows no credential");
     const turn = await l.controller.chat!.submit(l.ownerToken, { messageId: "probe", text: asked });
     const proposalId = (turn.outcomes[0] as unknown as { proposalId: string }).proposalId;
-    script["yes please"] = [{ kind: "apply_proposal", proposalId, evidence: "yes please", basis: "owner" }];
-    const shown = await said("yes please");
+    // Two proposals are open (the first ask and the probe), so a bare "yes" would be asked about: the owner names the one they mean by its ID.
+    const accept = `yes please, go ahead with ${proposalId}`;
+    script[accept] = [{ kind: "apply_proposal", proposalId, evidence: accept, basis: "owner" }];
+    const shown = await said(accept);
     const match = /^(host:workbench\.[A-Za-z0-9_-]+)$/m.exec(shown);
     assert.ok(match, shown);
     assert.match(shown, /shown once, kept nowhere/);
@@ -177,7 +179,7 @@ test("in the terminal chat a host's credential is asked for in words, shown firs
     assert.equal((await l.controller.services.principals.authenticate(token)).id, "host:workbench");
     assert.equal([...shown.matchAll(new RegExp(token.replace(/[.]/g, "\\."), "g"))].length, 1, "written once");
     // Asking again in the same words does not show it again.
-    assert.doesNotMatch(await said("yes please"), /host:workbench\.[A-Za-z0-9_-]{20}/);
+    assert.doesNotMatch(await said(accept), /host:workbench\.[A-Za-z0-9_-]{20}/);
     const key = token.split(".")[1]!;
     for (const v of secrets.values.values()) assert.ok(!v.includes(key), "the secret store does not hold it");
     for (const line of [...printed, ...l.notes]) assert.ok(!line.includes(key));
