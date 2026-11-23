@@ -48,10 +48,10 @@ for (const backend of backends) {
     const integration = IntegrationPolicyService.withEpoch(store.storage, projects.epoch, options);
     await integration.set(owner, { commandId: cid("req"), projectId: project, requiredChecks: [...required] });
     // The controlled views.
-    const views = { qa: "passed" as "passed" | "failed", pending: [] as { obligationId: string; title: string; reason: string }[], defects: 0, defectsFail: false };
+    const views = { qa: "passed" as "passed" | "failed", pending: [] as { obligationId: string; title: string; reason: string }[], defects: 0, defectsFail: false, policyFail: false };
     const reads = { approvals: 0, qa: 0, docs: 0, defects: 0, director: 0 };
     const gate = new LandingGate({
-      requiredChecks: async (p) => (await integration.effective(p)).requiredChecks,
+      requiredChecks: async (p) => { if (views.policyFail) throw new Error("policy store down"); return (await integration.effective(p)).requiredChecks; },
       tests: async () => ({ version: 1, checks: [{ name: "unit", run: ["npm", "test"] }] }),
       approvalOf: async (id) => { reads.approvals++; return svc.approvalOf(id); },
       qaGate: async (id): Promise<QaGateView> => { reads.qa++; return { taskId: task, submissionId: id, tree: TREE, verdict: views.qa, reasons: views.qa === "passed" ? [] : ["check_failed"] }; },
@@ -190,12 +190,28 @@ for (const backend of backends) {
       const again = await r.land("w8");
       assert.equal(again.state, "done", again.summary);
       assert.deepEqual(again.checks!.required, ["review", "defects"]);
-      // A check dropped since the judgement does not refuse: the landing met the stricter set.
-      r.control.afterGate = async () => { await r.integration.set(r.owner, { commandId: cid("req"), projectId: r.project, requiredChecks: ["review"] }); };
+      // A check dropped since the judgement does not refuse, and is not read again: here a defect is reported in the same window, which the policy no longer asks about.
+      r.control.afterGate = async () => { await r.integration.set(r.owner, { commandId: cid("req"), projectId: r.project, requiredChecks: ["review"] }); r.views.defects = 1; };
+      const before = r.reads.defects;
       const fewer = await r.land("w9");
       assert.equal(fewer.state, "done", fewer.summary);
+      assert.equal(r.reads.defects, before + 1, "the dropped check was read by the judgement only, not again");
       assert.equal(r.calls.runs.length, 2);
+      assert.equal(r.told.length, 0);
     } finally { await r.store.close(); }
+    // The project's required checks that cannot be read the second time refuse the landing (nothing is landed, nobody is told), and the next landing goes ahead: the refusal leaves nothing open.
+    const p = await rig(["review"]);
+    try {
+      p.control.afterGate = async () => { p.views.policyFail = true; };
+      const out = await p.land("w10");
+      assert.equal(out.state, "refused", out.summary);
+      assert.match(out.summary!, /could not be read again right before the landing, so nothing was landed: policy store down/);
+      assert.deepEqual([p.calls.runs.length, p.told.length, out.checks!.passed], [0, 0, true]);
+      p.views.policyFail = false;
+      const again = await p.land("w11");
+      assert.equal(again.state, "done", again.summary);
+      assert.equal(p.calls.runs.length, 1);
+    } finally { await p.store.close(); }
   });
 
   test(`${backend.name}: a change after the host was asked cannot stop the landing already under way; the next landing sees it (card P09: the limit that remains)`, async () => {

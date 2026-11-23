@@ -194,8 +194,8 @@ export class LandingGate {
    * Reads the records again right before the host is asked to write (card P09, read-once windows): the review, QA, documents, director and defects checks that `record` found passing are judged once more from the
    * controller's records, with the same host report (the tests ran once on the integrated tree; the submission's base and tree never change, so nothing is run or computed again). Answers the checks that no longer
    * pass (`changed`, as they now read) and the record as it now stands (not passed when any changed). A record this gate did not answer is a fault (it throws, and the landing is refused: nothing is landed on a
-   * judgement that cannot be read again). The project's required checks are read again first: a check required since the first judgement is answered as `added` (the landing is refused; nothing else is read). A landing that
-   * required none of the record checks reads only the required checks.
+   * judgement that cannot be read again). The project's required checks are read again first: a check required since the first judgement is answered as `added` (the landing is refused; nothing else is read), and a check no
+   * longer required is not read again. A landing that required none of the record checks reads only the required checks.
    */
   async recheck(record: LandingChecksRecord): Promise<{ readonly changed: readonly LandingCheckEntry[]; readonly record: LandingChecksRecord; readonly added?: readonly string[] }> {
     const ctx = this.#judged.get(record);
@@ -204,12 +204,13 @@ export class LandingGate {
       throw new Error("the checks of this landing were not judged by this gate, so they cannot be read again");
     }
     // The project's required checks were read before the host's run (which may take minutes): a check required since then was never judged for this landing, so it is answered as `added` (nothing else is read; a read
-    // that throws refuses the landing). A check no longer required does not matter: the landing met the stricter set.
-    const added = [...new Set(await this.#deps.requiredChecks(ctx.call.projectId))].filter((c) => !record.required.includes(c));
+    // that throws refuses the landing). A check no longer required does not matter: the landing met the stricter set, so it is not read again either (a dropped check that fails now would refuse a landing the policy allows).
+    const now = new Set(await this.#deps.requiredChecks(ctx.call.projectId));
+    const added = [...now].filter((c) => !record.required.includes(c));
     if (added.length > 0) return { changed: [], record, added };
     const fresh: LandingCheckEntry[] = [];
     for (const e of record.results) {
-      if (!RECORD_CHECKS.includes(e.check) || e.result !== "pass") continue;
+      if (!RECORD_CHECKS.includes(e.check) || e.result !== "pass" || !now.has(e.check)) continue;
       const bound = { boundTo: ctx.tree };
       if (e.check === "review") fresh.push(await this.#review(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report));
       else if (e.check === "qa") fresh.push(await this.#qa(ctx.call, ctx.tree, ctx.patchId, bound, ctx.reviewed, ctx.reviewProblem, ctx.report));
