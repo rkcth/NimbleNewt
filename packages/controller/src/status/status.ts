@@ -284,6 +284,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   shutdown: { keys: [], about: "whether the system is shutting down and what remains" },
   database_transfer: { keys: [], about: "which database the controller runs on, the databases it can be moved to, the last move and whether the host restarts the controller onto a new database by itself" },
   stop_cleanup: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what the latest Suspend or Stop of a task, agent, team or the installation spent on cleanup and what was charged to the budgets (name the task by its title; for an agent or a team give scopeKind agent or team with the name as the owner said it in scopeName, or its ID in scopeId; for the whole installation scopeKind installation is enough; a stop is not read for a project); a scope with no request of its own is answered from the wider scope whose stop reaches it (its agent, a team above it, a parent task of its swarm or the installation), and the answer names that scope" },
+  lifecycle: { keys: ["taskId|taskTitle", "scopeKind", "scopeId|scopeName"], about: "what is paused or stopped, why and how far (scope as in stop_cleanup; none: the installation and active agents)" },
   handoff: { keys: ["taskId|taskTitle"], about: "the hand-off of a task to another agent" },
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why; a corrected finding or severity says how many times it was edited and by whom last, and what the severity was), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
@@ -425,6 +426,7 @@ export type StatusRequest =
   | { readonly kind: "handoff_archive"; readonly taskId?: string; readonly archiveId?: string; readonly section?: string; readonly from?: number }
   | { readonly kind: "shutdown" }
   | { readonly kind: "database_transfer" }
+  | { readonly kind: "lifecycle"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "stop_cleanup"; readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; /** The same scope as flat fields, the form a chat request can take (a request there has no nesting). */ readonly scopeKind?: string; readonly scopeId?: string }
   | { readonly kind: "timeline"; readonly projectId: string; readonly agent?: string; readonly since?: string; readonly limit?: number }
   | { readonly kind: "meetings"; readonly projectId: string; readonly limit?: number }
@@ -677,7 +679,7 @@ export interface StatusDeps {
   /** Suspected and confirmed stall concerns (card V01). Absent: none are shown. */
   readonly stall?: Pick<StallService, "list">;
   /** Pause gates (card L01). Absent: no gate is shown and none is assumed. */
-  readonly pauses?: Pick<PauseService, "status" | "isPaused">;
+  readonly pauses?: Pick<PauseService, "status" | "isPaused"> & Partial<Pick<PauseService, "gate">>;
   /** The setup readiness view (card U14). Absent: the `setup` view is not offered. */
   readonly setup?: { check(by: Principal): Promise<{ readonly ready: boolean; readonly next?: string; readonly items: readonly { readonly id: string; readonly label: string; readonly state: string; readonly required: boolean; readonly detail: string; readonly guide: { readonly question: string; readonly recommended: string; readonly ifDeclined: string } }[] }> };
   /** Which event sources are watched (card H13f). Absent: the view is not offered. */
@@ -1016,6 +1018,7 @@ export class StatusService {
       case "timeline": { onlyKnown(request, ["kind", "projectId", "agent", "since", "limit"]); return this.timelineLines(by, request); }
       case "shutdown": { onlyKnown(request, ["kind"]); return this.shutdownLines(by); }
       case "database_transfer": { onlyKnown(request, ["kind"]); return this.databaseTransferLines(by); }
+      case "lifecycle": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.lifecycleLines(by, request); }
       case "stop_cleanup": { onlyKnown(request, ["kind", "taskId", "scope", "scopeKind", "scopeId"]); return this.stopCleanupLines(by, request); }
       case "handoff": { onlyKnown(request, ["kind", "taskId"]); return this.handoffLines(by, request.taskId); }
       case "start_size": { onlyKnown(request, ["kind", "taskId"]); return this.startSizeLines(by, request.taskId); }
@@ -2324,6 +2327,60 @@ export class StatusService {
           : "Some of the cleanup spend is not charged yet; it is retried until it is.", cite("stop", r.intentId)));
     else if (r.scanCut) lines.push(line("More charges are open than this view reads, so a charge this request is still making on an attempt not listed above may not be shown.", cite("stop", r.intentId)));
     return { observedAt: at, lines };
+  }
+
+  /**
+   * What is paused or stopped (read only, for the owner who asks "what is paused?"): the gate of one task, agent, team or the whole installation, or with none named the installation and every active agent (the first 50). A gate says who paused it,
+   * the reason (someone's words, so quoted and clipped), and what the runtime has actually reached, which is kept apart from what was asked. A scope the caller may not read reads as missing. Teams and tasks are read when they are named.
+   */
+  async lifecycleLines(by: Principal, asked: { readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    const gateOf = this.#deps.pauses?.gate;
+    // Owner only (review): `gate` answers "no gate" for a scope the caller may not read, which would read as "not paused"; anyone else is told nothing, as a missing view.
+    if (gateOf === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
+    if ((asked.scopeKind === undefined) !== (asked.scopeId === undefined) || (asked.scope !== undefined && asked.scopeKind !== undefined)) return invalid("scope", "give scope, or scopeKind with scopeId");
+    const given = asked.scope ?? (asked.scopeKind === undefined ? undefined : { kind: asked.scopeKind, id: asked.scopeId! });
+    if (asked.taskId !== undefined && given !== undefined) return invalid("taskId", "name either a task or a scope");
+    type ScopeKind = "task" | "agent" | "team" | "installation";
+    const check = (sc: { kind?: unknown; id?: unknown }): { kind: ScopeKind; id: string } => {
+      if (typeof sc !== "object" || sc === null || (sc.kind !== "task" && sc.kind !== "agent" && sc.kind !== "team" && sc.kind !== "installation") || typeof sc.id !== "string" || sc.id.length === 0 || sc.id.length > 200) return invalid("scope", "must be { kind: task, agent, team or installation, id }");
+      return { kind: sc.kind, id: sc.id };
+    };
+    // The owner may read every gate, so no gate means never paused.
+    const read = (scope: { kind: ScopeKind; id: string }): ReturnType<NonNullable<typeof gateOf>> => gateOf.call(this.#deps.pauses, by, scope);
+    const words = (scope: { kind: ScopeKind; id: string }): string => (scope.kind === "installation" ? "The whole installation" : `${scope.kind[0]!.toUpperCase()}${scope.kind.slice(1)} ${shown(scope.id, 80)}`);
+    const describe = (scope: { kind: ScopeKind; id: string }, g: Awaited<ReturnType<NonNullable<typeof gateOf>>>): Line => {
+      if (g === undefined || g.intent !== "pause") return line(`${words(scope)} is not paused.`, cite("pause-gate", `${scope.kind}:${scope.id}`));
+      const reached = g.observed === undefined ? "nothing has been reported yet about what the runtime has reached" : `the runtime reports ${shown(g.observed.state, 40)} (as of ${shown(g.observed.at, 40)})`;
+      return line(`${words(scope)} is paused${g.pausedAt === undefined ? "" : ` since ${shown(g.pausedAt, 40)}`}${g.owner === undefined ? "" : `, by ${shown(g.owner, 80)}`}${g.reason === undefined ? "" : `, reason ${quoted(g.reason, 160)}`}; ${reached}${g.resumeAt === undefined ? "" : `. It is to lift by itself after ${shown(g.resumeAt.at, 40)}`}.`, cite("pause-gate", g.id, g.revision));
+    };
+    const scope = asked.taskId !== undefined ? { kind: "task" as const, id: checkTaskId(asked.taskId) } : given !== undefined ? check(given) : undefined;
+    if (scope !== undefined) {
+      const g = await read(scope);
+      // A task is also held by the agent, team or installation above it: its own gate says only its own pause, so the holds above are named too when the task's pause status can say them.
+      const lines: Line[] = [describe(scope, g)];
+      if (scope.kind === "task" && this.#deps.pauses !== undefined) {
+        const st = await this.#deps.pauses.status(by, scope.id);
+        for (const h of st?.gates ?? []) if (h.scope.kind !== "task" || h.scope.id !== scope.id) lines.push(line(`It is also held by the pause on ${words(h.scope as { kind: ScopeKind; id: string }).toLowerCase()}${h.gate.reason === undefined ? "" : `, reason ${quoted(h.gate.reason, 160)}`}.`, cite("pause-gate", h.gate.id, h.gate.revision)));
+      }
+      return { observedAt: this.#runner.now(), lines };
+    }
+    const everything = { kind: "installation" as const, id: "installation" };
+    const top = await read(everything);
+    const lines: Line[] = [describe(everything, top)];
+    const source = this.#deps.agents;
+    let paused = lines[0]!.text.includes(" is paused") ? 1 : 0;
+    if (source !== undefined) {
+      let listed: Awaited<ReturnType<typeof source.list>>;
+      try { listed = await source.list(by, { state: "active", limit: 51 }); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return { observedAt: this.#runner.now(), lines }; throw error; }
+      const items = listed.items.slice(0, 50);
+      for (const a of items) {
+        const sc = { kind: "agent" as const, id: a.id };
+        const g = await read(sc);
+        if (g !== undefined && g.intent === "pause") { paused += 1; lines.push(line(`${quoted(a.friendlyName, 80)}: ${describe(sc, g).text}`, cite("agent", a.id), cite("pause-gate", g.id, g.revision))); }
+      }
+      lines.push(line(`${items.length}${listed.items.length > 50 || listed.next !== undefined ? " or more" : ""} active agent${items.length === 1 ? "" : "s"} checked${listed.items.length > 50 || listed.next !== undefined ? " (the first 50)" : ""}; ${paused === 0 ? "none is paused" : `${paused} scope${paused === 1 ? " is" : "s are"} paused`}. Teams and tasks are read when named.`, cite("agents", "active")));
+    }
+    return { observedAt: this.#runner.now(), lines };
   }
 
   /**

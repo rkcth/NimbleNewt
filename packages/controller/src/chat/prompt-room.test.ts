@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { OPERATIONS } from "../api/operations.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { CHAT_OPS, TITLE_KEYS, acceptedArgs } from "./commands.js";
+import { CHAT_OPS, LIFECYCLE_OPS, TITLE_KEYS, acceptedArgs } from "./commands.js";
 import { ModelInterpreter, type ModelCall } from "./model-interpreter.js";
 import { cid, openWorld } from "./testing/harness.js";
 
@@ -26,7 +26,7 @@ const listed = (system: string, op: string): string[] => {
 };
 
 // Pin: the prompt is about this long. The ceiling is 2,000 characters above what is now (a card that adds a control fits); the floor is 4,000 below it, so a large cut that dropped controls is seen too. Moving either is a decision.
-const SIZE = 152_773;
+const SIZE = 153_455; // chat pause +485, K07 window +250, review policy +556 on 152,217 (2026-11-23)
 const CEILING = SIZE + 2_000;
 const FLOOR = SIZE - 4_000;
 
@@ -45,7 +45,9 @@ test("a title key shows only beside the ID it stands in for, on exactly the oper
     const keys = listed(system, op);
     // The chat still accepts both keys everywhere it did; the line shows a title only as `id|title`, where the operation takes that ID, and never the ID or the title alone.
     for (const [title, id] of Object.entries(TITLE_KEYS)) {
-      assert.ok(acceptedArgs(op)!.includes(title), `${op} still accepts ${title}`);
+      // Pause, resume and stop name their task by scopeKind task with scopeName (they were never chat commands taking a title, and their operations take no taskId), so they take no title key.
+      if (LIFECYCLE_OPS.has(op)) assert.ok(!acceptedArgs(op)!.includes(title), `${op} names a task by scopeName, not ${title}`);
+      else assert.ok(acceptedArgs(op)!.includes(title), `${op} still accepts ${title}`);
       assert.ok(!keys.includes(title) && !keys.includes(id), `${op} shows neither ${title} nor ${id} on its own`);
       const real = OPERATIONS.find((o) => o.name === op)!;
       if (Object.keys(real.args).some((k) => k.replace(/\?$/, "") === id)) assert.ok(keys.includes(`${id}|${title}`), `${op} lists ${id}|${title}, as its operation takes ${id}`);

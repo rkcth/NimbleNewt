@@ -413,6 +413,62 @@ test("with every model server down, each typed recovery order in the guide runs 
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
+// The guide's "Pausing, resuming and stopping work" sentences go through the real interpreter and the real chat (a stand-in plays the model and never hands over a word the owner did not say), and each does what the
+// section says: a pause of an agent applies at once, the question is answered from the records, a resume and a stop are shown first and change nothing until the yes, stopping everything is shown first too, and a
+// bare "stop" asks which and does nothing. The section's claims about what is shown first are the ones this test checks.
+test("the guide's pause, resume and stop sentences work in free words: a pause applies at once, resume and stop are shown first, and a bare stop asks (chat-control gap 1)", async () => {
+  const whole = guide();
+  const from = whole.indexOf("\n## Pausing, resuming and stopping work");
+  assert.ok(from >= 0, "the guide has the section");
+  const next = whole.indexOf("\n## ", from + 1);
+  const section = whole.slice(from, next < 0 ? undefined : next);
+  const said = blocksAfter(section, "lifecycle-words").flatMap((b) => b.split("\n")).map((x) => /^You: (.+)$/.exec(x.trim())?.[1]).filter((x): x is string => x !== undefined);
+  assert.deepEqual(said, ["pause Ann while I look at what she is doing", "what is paused right now?", "carry on with Ann", "stop the Garden team, we are changing the plan", "stop everything"]);
+  for (const claim of ["**Pausing**", "**Resuming** and **stopping** are always shown first", "a bare \"stop\" is never read as everything", "**What is paused**", "Pausing **everything** is shown to you first", "Force Stop is a typed order only"]) assert.ok(section.includes(claim), `the section says: ${claim}`);
+  const bare = "stop please";
+  let system = "";
+  const understood = (text: string): unknown[] => {
+    if (text === said[0]) return [intent("command", { op: "lifecycle.pause", args: { scopeKind: "agent", scopeName: "Ann" } }, text)];
+    if (text === said[1]) return [intent("status", { request: { kind: "lifecycle" } }, text)];
+    if (text === said[2]) return [intent("command", { op: "lifecycle.resume", args: { scopeKind: "agent", scopeName: "Ann" } }, text)];
+    if (text === said[3]) return [intent("command", { op: "lifecycle.stop", args: { scopeKind: "team", scopeName: "Garden" } }, text)];
+    if (text === said[4]) return [intent("command", { op: "lifecycle.stop", args: { scopeKind: "installation", scopeName: "everything" } }, text)];
+    if (text === bare) return [intent("command", { op: "lifecycle.stop", args: {} }, text)];
+    return [{ kind: "none", reason: "not in the guide" }];
+  };
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-life-"));
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const text = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    system = body.messages.find((m) => m.role === "system")?.content ?? "";
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(understood(text)) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
+    const live = l;
+    const agentId = (await call(live, "agent.create", { friendlyName: "Ann", roles: ["author"] }, "a1")).result.id as string;
+    const teamId = (await call(live, "team.create", { name: "Garden" }, "tm1")).result.id as string;
+    const ask = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join("").replace(/\s+/g, " "); };
+    const gate = async (kind: string, id: string): Promise<string> => (await call(live, "lifecycle.status", { scope: { kind, id } })).result.item.intent as string;
+    const first = await ask(said[0]!);
+    assert.equal(await gate("agent", agentId), "pause", `a pause applies at once:\n${first}`);
+    for (const want of ["lifecycle.pause", "lifecycle.resume", "lifecycle.stop", "status kind lifecycle", "To pause, resume or stop work"]) assert.ok(system.includes(want), `the interpreter prompt does not carry ${want}`);
+    const list = await ask(said[1]!);
+    assert.match(list, /Ann/, list);
+    assert.match(list, /is paused/, list);
+    await ask(said[2]!);
+    assert.equal(await gate("agent", agentId), "pause", "a resume is shown first and lifts nothing before the yes");
+    await ask(said[3]!);
+    assert.equal(await gate("team", teamId), "active", "a stop is shown first and stops nothing before the yes");
+    await ask(said[4]!);
+    assert.equal(await gate("installation", "installation"), "active", "stopping everything is shown first too");
+    const asked = await ask(bare);
+    assert.equal(await gate("installation", "installation"), "active", asked);
+    assert.match(asked, /Nothing was done/, asked);
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
 // The views the guide's "Checking on finished work" section describes. Each is one status kind; the section's block lists the kind and a sentence to say. The test below asks every sentence of the block through the
 // real chat (a scripted stand-in plays the model, so the table below is only its "understanding") and fails when a listed kind is not a real status kind, when the chat does not answer it, or when a kind that
 // section has to cover is missing from the guide.
