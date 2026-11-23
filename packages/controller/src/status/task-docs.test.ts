@@ -176,7 +176,65 @@ for (const backend of backends) {
       const many = (await ask(owner, export_))!.lines;
       assert.match(many[0]!.text, /^31 document\(s\) describe Export: 31 flagged \(0 stale, 31 unverified\), 0 verified against tested code\. Documentation is due for this task: 31 document\(s\)/);
       assert.equal(many.filter((l) => /^User document /.test(l.text)).length, 30);
-      assert.match(many[many.length - 1]!.text, /^1 more document\(s\) are not shown here/);
+      assert.match(many[many.length - 1]!.text, /^1 more document\(s\) are not shown here; ask again with after 30 to see the next 1\./);
+      // The rest is reachable (Q03 slice 9): asking again after the 30 shown gives the others, in the same order, with nothing twice and nothing lost.
+      const titlesOf = (r: { lines: readonly { text: string }[] }): string[] => r.lines.filter((l) => /^User document /.test(l.text)).map((l) => /^User document "?([^"(]*?)"? \(/.exec(l.text)?.[1] ?? l.text.slice(0, 60));
+      const rest = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 30 }))!;
+      assert.equal(rest.lines[0]!.text, many[0]!.text, "the counts cover every document on every page");
+      assert.match(rest.lines[1]!.text, /^Showing documents 31 to 31 of 31, in the same order/);
+      assert.equal(titlesOf(rest).length, 1);
+      assert.ok(!rest.lines.some((l) => /more document\(s\) are not shown/.test(l.text)), "the last page does not point further");
+      const firstPage = titlesOf({ lines: many });
+      assert.equal(new Set([...firstPage, ...titlesOf(rest)]).size, 31, "the two pages are 31 different documents");
+      // A page in the middle says what it shows and where to go on; beyond the end is said, not an error; a number that is not a whole count is refused; a read creates nothing.
+      const middle = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 10 }))!;
+      assert.match(middle.lines[1]!.text, /^Showing documents 11 to 31 of 31/);
+      assert.equal(titlesOf(middle).length, 21);
+      const beyond = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 31 }))!;
+      assert.match(beyond.lines[1]!.text, /^There are only 31 document\(s\) here, so nothing comes after 31\./);
+      assert.equal(titlesOf(beyond).length, 0);
+      const farBeyond = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 1000 }))!;
+      assert.match(farBeyond.lines[1]!.text, /^There are only 31 document\(s\) here, so nothing comes after 1000\./);
+      // Exactly 30 left from after 1: a full page and no line pointing further; from 29 the page starts at the 30th and holds the last two.
+      const fromOne = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 1 }))!;
+      assert.match(fromOne.lines[1]!.text, /^Showing documents 2 to 31 of 31,/);
+      assert.equal(titlesOf(fromOne).length, 30);
+      assert.deepEqual(titlesOf(fromOne), [...firstPage.slice(1), ...titlesOf(rest)], "the same order on every page");
+      assert.ok(!fromOne.lines.some((l) => /more document\(s\) are not shown/.test(l.text)));
+      assert.deepEqual((await status.ask(owner, { kind: "task_docs", taskId: export_, after: 0 }))!.lines.map((l) => l.text), many.map((l) => l.text), "after 0 is the first page as before");
+      const from29 = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 29 }))!;
+      assert.match(from29.lines[1]!.text, /^Showing documents 30 to 31 of 31,/);
+      assert.deepEqual(titlesOf(from29), [firstPage[29]!, ...titlesOf(rest)]);
+      for (const bad of [-1, 1.5, Number.NaN, 2 ** 60, "3" as unknown as number]) await assert.rejects(async () => status.ask(owner, { kind: "task_docs", taskId: export_, after: bad }), /after: must be a whole number from 0/);
+      // Access first: a stranger asking for a later page is refused like for the first.
+      assert.equal(await status.ask(nogrant, { kind: "task_docs", taskId: export_, after: 30 }), undefined);
+      // An invalid number is refused before anything is read, whoever asks (it says nothing about the task).
+      await assert.rejects(async () => status.ask(nogrant, { kind: "task_docs", taskId: export_, after: -1 }), /after: must be a whole number from 0/);
+      // The project's own view pages the same way.
+      const all = (await status.ask(owner, { kind: "docs", projectId: project }))!;
+      const total = Number(/^(\d+) document\(s\) tracked/.exec(all.lines[0]!.text)![1]);
+      assert.ok(total >= 31);
+      const projectRest = (await status.ask(owner, { kind: "docs", projectId: project, after: 30 }))!;
+      assert.match(projectRest.lines[1]!.text, new RegExp(`^Showing documents 31 to ${Math.min(total, 60)} of ${total}`));
+      assert.equal(titlesOf(projectRest).length + titlesOf(all).length >= Math.min(total, 60), true);
+      assert.equal(new Set([...titlesOf(all), ...titlesOf(projectRest)]).size, titlesOf(all).length + titlesOf(projectRest).length, "no document twice across the project's pages");
+      await assert.rejects(async () => status.ask(owner, { kind: "docs", projectId: project, after: -1 }), /after: must be a whole number from 0/);
+      // Paging writes nothing: the document index is as it was.
+      const before = JSON.stringify((await docs.list(owner, project)).items.map((i) => [i.id, i.revision]));
+      await status.ask(owner, { kind: "task_docs", taskId: export_, after: 30 });
+      assert.equal(JSON.stringify((await docs.list(owner, project)).items.map((i) => [i.id, i.revision])), before);
+      // With more than two pages the last line of each page names where the next one starts (the number the owner or the model hands back), and the pages end exactly at the last document.
+      for (let i = 31; i < 62; i++) await record(`Export page ${i}`, [export_]);
+      const p1 = (await status.ask(owner, { kind: "task_docs", taskId: export_ }))!.lines;
+      assert.match(p1[p1.length - 1]!.text, /^32 more document\(s\) are not shown here; ask again with after 30 to see the next 30\./);
+      const p2 = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 30 }))!.lines;
+      assert.match(p2[1]!.text, /^Showing documents 31 to 60 of 62/);
+      assert.match(p2[p2.length - 1]!.text, /^2 more document\(s\) are not shown here; ask again with after 60 to see the next 2\./);
+      const p3 = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 60 }))!.lines;
+      assert.match(p3[1]!.text, /^Showing documents 61 to 62 of 62/);
+      assert.equal(p3.filter((l) => /^User document /.test(l.text)).length, 2);
+      assert.ok(!p3.some((l) => /more document\(s\) are not shown/.test(l.text)));
+      assert.equal(new Set([...titlesOf({ lines: p1 }), ...titlesOf({ lines: p2 }), ...titlesOf({ lines: p3 })]).size, 62, "three pages, 62 different documents");
     } finally { await world.close(); }
   });
 }

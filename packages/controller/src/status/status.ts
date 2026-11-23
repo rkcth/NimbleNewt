@@ -291,8 +291,8 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_project: { keys: ["projectId"], about: "the project's QA picture (card Q02): for each task, its newest code submission and whether QA has checked it: what waits for QA (no independent evidence yet; a self-check does not count), what has evidence that no longer holds or a re-check pending, what fails (failed, blocked, not run or missing checks) and what passes, each with the task and the reasons; older submissions of a task are not listed. Ask the qa view with a task for the records" },
-  docs: { keys: ["projectId"], about: "the project's documentation obligations (card Q03): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
-  task_docs: { keys: ["taskId|taskTitle"], about: "the documentation due for one task (card Q03): the documents that describe it, which are verified against its tested code and which are flagged (unverified or stale) and why (every flagged one is due: the docs gate holds the task's landing until it is verified again, even when its flag names another task it describes; so is a verified one whose tested code of this task no longer passes its QA gate, as the docs gate refuses it too), the update tasks open for them (assigned or not), what would verify each, and the tested code each was last verified against; a task no document describes says so" },
+  docs: { keys: ["projectId", "after"], about: "the project's documentation obligations (card Q03), at most 30 at a time (flagged first; after: how many documents were already shown, to see the next 30): each user or developer document, support guide and promotional asset with where it lives, the agent keeping it, the version it applies to, the tasks it describes and the capabilities it claims; whether it is verified against tested code (which document change, and per task the code tree whose QA gate passed), unverified or stale (both flagged) and why, and its update tasks with whether each is assigned; for a flagged document, \"To verify:\" lists the newest document changes (document submission IDs) of the project made since the flag that the viewer may read, and per task the code to check it against (card Q03b)" },
+  task_docs: { keys: ["taskId|taskTitle", "after"], about: "the documentation due for one task (card Q03), at most 30 documents at a time (after: how many were already shown, to see the next 30): the documents that describe it, which are verified against its tested code and which are flagged (unverified or stale) and why (every flagged one is due: the docs gate holds the task's landing until it is verified again, even when its flag names another task it describes; so is a verified one whose tested code of this task no longer passes its QA gate, as the docs gate refuses it too), the update tasks open for them (assigned or not), what would verify each, and the tested code each was last verified against; a task no document describes says so" },
   qa: { keys: ["taskId|taskTitle"], about: "what QA checked on a task (card Q02): each QA evidence record with the code tree it checked, who recorded it (an independent check or the author's own self-check), the environment, when it ran, the contract version and owner decisions it was judged against, and its results kept apart (passed, failed, blocked, not run); whether each still holds or was invalidated by a change and the re-checks scheduled; and per checked submission whether the QA gate passes and why not. Ask qa.evidence.check to invalidate evidence that no longer holds and schedule its re-check" },
   work_report: { keys: ["taskId|taskTitle"], about: "the report an agent gave when it ended its work on a task, done or not (what it did, found, left and could not do), its running notes, the questions a second agent put to it about a done and its answers, whether the report was found supported, was not supported or was not questioned (and why), and the task's earlier attempts' reports in short" },
   attempt_endings: { keys: ["taskId|taskTitle"], about: "how each attempt of a task ended or stands, newest first (card W08): who worked it on which route, when it started and ended, why its last turn stopped in plain words (cut off at the reply limit, ended with prose and no work.end, announced a step but made no call, no visible text, normal, or unknown), the nudges it got to go on, how far its plan got (steps checked of how many), its stops before the work was done, whether the checks of its done passed, whether a second agent questioned its report, its waits for jobs, and the blocker it left with what that blocker says, answering questions such as why did the last attempt stop or how far did it get" },
@@ -405,12 +405,12 @@ export type StatusRequest =
   | { readonly kind: "work_report"; readonly taskId: string }
   | { readonly kind: "defects"; readonly taskId: string }
   | { readonly kind: "qa"; readonly taskId: string }
-  | { readonly kind: "task_docs"; readonly taskId: string }
+  | { readonly kind: "task_docs"; readonly taskId: string; readonly after?: number }
   | { readonly kind: "submissions"; readonly taskId: string }
   | { readonly kind: "submissions_project"; readonly projectId: string }
   | { readonly kind: "defect_risks"; readonly projectId: string }
   | { readonly kind: "qa_project"; readonly projectId: string }
-  | { readonly kind: "docs"; readonly projectId: string }
+  | { readonly kind: "docs"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "landing_settings"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
@@ -999,12 +999,12 @@ export class StatusService {
       case "work_report": { onlyKnown(request, ["kind", "taskId"]); return this.workReportLines(by, request.taskId); }
       case "defects": { onlyKnown(request, ["kind", "taskId"]); return this.defectLines(by, request.taskId); }
       case "qa": { onlyKnown(request, ["kind", "taskId"]); return this.qaLines(by, request.taskId); }
-      case "task_docs": { onlyKnown(request, ["kind", "taskId"]); return this.taskDocLines(by, request.taskId); }
+      case "task_docs": { onlyKnown(request, ["kind", "taskId", "after"]); return this.taskDocLines(by, request.taskId, request.after); }
       case "submissions": { onlyKnown(request, ["kind", "taskId"]); return this.submissionLines(by, request.taskId); }
       case "submissions_project": { onlyKnown(request, ["kind", "projectId"]); return this.submissionsProjectLines(by, request.projectId); }
       case "defect_risks": { onlyKnown(request, ["kind", "projectId"]); return this.defectRiskLines(by, request.projectId); }
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
-      case "docs": { onlyKnown(request, ["kind", "projectId"]); return this.docLines(by, request.projectId); }
+      case "docs": { onlyKnown(request, ["kind", "projectId", "after"]); return this.docLines(by, request.projectId, undefined, request.after); }
       case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
@@ -2318,8 +2318,10 @@ export class StatusService {
    * The documentation obligations of a project (card Q03), at most 30: flagged ones (stale, then unverified) first, then verified ones, each with what it was verified against or why it is flagged, its
    * claims and its open update tasks (assigned or not). The service's read rule applies (the right to read the project's tasks).
    */
-  async docLines(by: Principal, projectIdValue: string, forTask?: { readonly id: string; readonly title: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async docLines(by: Principal, projectIdValue: string, forTask?: { readonly id: string; readonly title: string }, afterValue?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const projectId = checkProjectId(projectIdValue);
+    if (afterValue !== undefined && (!Number.isSafeInteger(afterValue) || afterValue < 0)) invalid("after", "must be a whole number from 0");
+    const after = afterValue ?? 0;
     const at = this.#runner.now();
     if (this.#deps.docs === undefined) return { observedAt: at, lines: [line("Documentation obligations are not kept on this controller.", cite("project", projectId))] };
     let list: Awaited<ReturnType<DocObligationService["list"]>>;
@@ -2360,7 +2362,10 @@ export class StatusService {
     else lines.push(line(`${items.length} document(s) describe ${shown(forTask.title)}: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${items.length - flagged} verified against tested code${lapsed.size === 0 ? "" : ` (${lapsed.size} of them no longer hold for this task: verified against code that no longer passes its QA gate)`}. ${due === 0 ? `No documentation is due for this task (the docs gate still checks that the code landed is the tree each document was verified against${unread.size === 0 ? "" : `; whether the tested code ${unread.size} verified document(s) stand on still passes its QA gate could not be read here, and the docs gate checks that too`}).` : `Documentation is due for this task: ${due} document(s); the docs gate holds its landing until each is verified again.${unread.size === 0 ? "" : ` Whether the tested code ${unread.size} other verified document(s) stand on still passes its QA gate could not be read here; the docs gate checks that too.`}`}`, cite("task", forTask.id), cite("project", projectId)));
     // One read of the project's document changes per flag time (card Q03b review): a release flags many documents at the same moment, and each read may go through the whole index.
     const changesSince = new Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>();
-    for (const d of items.slice(0, 30)) {
+    // The next 30 from `after` (cards Q03 slice 9): the same order every time, so asking again after the last one shown continues where the view stopped.
+    const end = Math.min(items.length, after + 30);
+    if (after > 0) lines.push(line(after >= items.length ? `There are only ${items.length} document(s) here, so nothing comes after ${after}.` : `Showing documents ${after + 1} to ${end} of ${items.length}, in the same order (flagged ones first).`, cite("project", projectId)));
+    for (const d of items.slice(after, end)) {
       const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
       const v = d.verification;
       const verified = v === undefined ? "" : ` Last verified ${v.verifiedAt} by ${shown(v.verifiedBy, 80)} for version ${quoted(v.version, 40)}: document change ${v.documentSubmissionId} (${v.artifactDigest.slice(0, 19)}) against ${v.evidence.map((e) => `tree ${e.tree.slice(0, 12)} of ${e.taskId} (${e.submissionId})`).join(", ")}.`;
@@ -2376,7 +2381,7 @@ export class StatusService {
       const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d, changesSince);
       lines.push(line(`${head}. ${state}${elsewhere}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
     }
-    if (items.length > 30) lines.push(line(`${items.length - 30} more document(s) are not shown here (doc.obligation.list has them all).`, cite("project", projectId)));
+    if (items.length > end) lines.push(line(`${items.length - end} more document(s) are not shown here; ask again with after ${end} to see the next ${Math.min(30, items.length - end)}.`, cite("project", projectId)));
     return { observedAt: at, lines };
   }
 
@@ -2384,13 +2389,15 @@ export class StatusService {
    * The documentation due for one task (card Q03): the project's documents that describe the task (the `docs` view's lines for them, with flags that concern other tasks of the same document marked as
    * such). Needs the right to read the task, and then the documents' own read rule.
    */
-  async taskDocLines(by: Principal, taskIdValue: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+  async taskDocLines(by: Principal, taskIdValue: string, after?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const taskId = checkTaskId(taskIdValue);
+    // A page number that is not a whole count is refused before anything is read (the same check `docLines` makes for the project view).
+    if (after !== undefined && (!Number.isSafeInteger(after) || after < 0)) invalid("after", "must be a whole number from 0");
     const task = await this.#runner.get("task", taskId);
     if (task === undefined) return undefined;
     const body = task.body as unknown as TaskBody;
     if (!this.#mayReadTask(by, body.projectId, taskId)) return undefined;
-    return this.docLines(by, body.projectId, { id: taskId, title: body.title });
+    return this.docLines(by, body.projectId, { id: taskId, title: body.title }, after);
   }
 
   /**

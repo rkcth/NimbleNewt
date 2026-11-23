@@ -441,7 +441,7 @@ test("every status view the guide's finished-work section lists is a real status
   const next = whole.indexOf("\n## ", from + 1);
   const text = whole.slice(from, next < 0 ? undefined : next);
   // The views and controls are the section's bold terms (a plain word such as "withdraw" would still be found inside "withdrawn" after the control itself was dropped).
-  for (const word of ["**Submissions**", "**Code waiting in a project.**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**Landing settings**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**correct**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**committed the approved code**", "*permit commit*", "*plain commit*", "*not made yet*", "*could not be read just now*", "commit the approved parser fix", "when the task's newest code is approved and not committed yet", "proposes nothing", "(in task \"<the task's title>\")", "**release**", "no longer count", "**Documents of a project.**", "**stale**", "**unverified**", "No documentation obligations are recorded for this project", "To verify:", "**Who reviews, and how approvals are counted.**", "**Keeping a tool for yourself.**", "**review policy**", "*independence required*", "`review.repairCycles`", "always ask me before git-push in Garden", "reserve git-commit for me in this project"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
+  for (const word of ["**Submissions**", "**Code waiting in a project.**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**Landing settings**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**correct**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**committed the approved code**", "*permit commit*", "*plain commit*", "*not made yet*", "*could not be read just now*", "commit the approved parser fix", "when the task's newest code is approved and not committed yet", "proposes nothing", "(in task \"<the task's title>\")", "**release**", "no longer count", "**Documents of a project.**", "30 documents at a time", "Asking for the next ones", "does not remember which page you saw last", "**stale**", "**unverified**", "No documentation obligations are recorded for this project", "To verify:", "**Who reviews, and how approvals are counted.**", "**Keeping a tool for yourself.**", "**review policy**", "*independence required*", "`review.repairCycles`", "always ask me before git-push in Garden", "reserve git-commit for me in this project"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
 
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
   // The stand-in reads the owner's words the way the interpreter prompt asks a model to: a task view names the task by its title (the chat finds it in the project in focus), and a project view
@@ -531,5 +531,59 @@ test("the guide's review policy sentences keep a tool for the owner through the 
     assert.match(second, /git-commit will always ask you/, `the project in focus is used:\n${second}`);
     const back = await ask(release);
     assert.match(back, /only lowered by you directly, never by chat, and there is no control for that yet/, `the chat does not give a reserved tool back:\n${back}`);
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+// The documents view's paging sentences (card Q03 slice 9): the model never sees an earlier answer, so the interpreter prompt gives it a rule it can apply from the owner's words alone (the next documents
+// are after 30, the third page after 60, a number the owner gives is used as said). The guide's quoted sentences go through the real interpreter and the real chat (a stand-in plays the model, applying that
+// rule), and each answer is the state API's own page for that number.
+test("the guide's sentences for the next documents reach the right page through the chat, with the number taken from the owner's words (card Q03)", async () => {
+  const whole = guide();
+  const from = whole.indexOf("- **Documents of a project.**");
+  assert.ok(from >= 0, "the guide has the paragraph");
+  const para = whole.slice(from, whole.indexOf("\n- ", from + 3));
+  const said = [...para.matchAll(/"((?:show me the next|show the documents after|the third page)[^"]*)"/g)].map((m) => m[1]!);
+  assert.deepEqual(said, ["show me the next documents", "show the documents after 60", "the third page of documents"]);
+  const focus = "Let's work on Garden";
+  let system = "";
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-docs-"));
+  // The prompt's rule, read the way a model is asked to: a number the owner gives, else 30 for each page before the one asked for.
+  const afterFrom = (text: string): number => { const n = /after (\d+)/.exec(text); if (n !== null) return Number(n[1]); return /third page/.test(text) ? 60 : 30; };
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const text = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    system = body.messages.find((m) => m.role === "system")?.content ?? "";
+    const intents = text === focus ? [{ kind: "switch_focus", projectName: "Garden", evidence: focus, basis: "owner" }] : said.includes(text) ? [intent("status", { request: { kind: "docs", after: afterFrom(text) } }, text)] : [{ kind: "none", reason: "not in the guide" }];
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
+    const live = l;
+    const project = (await call(live, "project.create", { name: "Garden" }, "p1")).result.id as string;
+    const task = (await call(live, "task.create", { projectId: project, title: "Export" }, "t1")).result.id as string;
+    const made = (await call(live, "agent.create", { friendlyName: "Dora", roles: ["docs"] }, "a1")).result.id as string;
+    const keeper = made.startsWith("agent:") ? made : `agent:${made}`;
+    const granted = await call(live, "grant.create", { grantee: keeper, action: "task.read", project, basis: "Dora keeps Garden's documents" }, "g1");
+    assert.equal(granted.ok, true, JSON.stringify(granted));
+    for (let i = 1; i <= 61; i++) {
+      const r = await call(live, "doc.obligation.record", { projectId: project, title: `Export page ${i}`, location: `docs/export-${i}.md`, audience: "user", owner: keeper, applicableVersion: "1.0", implementationRefs: [task] }, `o${i}`);
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    const ask = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join("").replace(/\s+/g, " "); };
+    await ask(focus);
+    // A real model learns the rule only from the interpreter prompt.
+    for (const want of ["You do not see earlier answers", '"show me the next documents"', "the second page is after 30, the third page after 60", '"the documents after 60" is after 60']) assert.ok(system.includes(want), `the interpreter prompt does not carry ${want}`);
+    const want = { "show me the next documents": [30, "Showing documents 31 to 60 of 61"], "show the documents after 60": [60, "Showing documents 61 to 61 of 61"], "the third page of documents": [60, "Showing documents 61 to 61 of 61"] } as const;
+    for (const text of said) {
+      const [after, line] = want[text as keyof typeof want];
+      const printed = await ask(text);
+      const view = await call(live, "status.ask", { request: { kind: "docs", projectId: project, after } });
+      const viewLines = (view.result.item.lines as { text: string }[]).map((x) => x.text.replace(/\s+/g, " "));
+      assert.equal(viewLines[1], `${line}, in the same order (flagged ones first).`, `${text}: ${JSON.stringify(viewLines.slice(0, 2))}`);
+      assert.ok(!/not in the guide|refused|invalid_command|not_found/i.test(printed), `${text}:\n${printed}`);
+      // The chat prints the page the state API gives for that number: its counts, where it starts, and its first document.
+      for (const shownLine of viewLines.slice(0, 3)) assert.ok(printed.includes(shownLine), `${text}: the chat did not print "${shownLine}":\n${printed}`);
+    }
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

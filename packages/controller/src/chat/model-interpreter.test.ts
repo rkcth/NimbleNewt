@@ -239,3 +239,17 @@ test("the prompt tells the model to name the task for a release and copy an ID o
   const asking = new ModelInterpreter({ complete: async () => JSON.stringify([{ kind: "clarify", question: "Which submission should be committed? The submissions view of the task shows its ID (sbm-...).", options: [] }]) }, () => ["a/primary"]);
   assert.equal(((await asking.interpret({ ...input, text: "commit the approved parser fix", quoted: [] })) as unknown[]).length, 1);
 });
+
+test("the prompt tells the model how to ask for the rest of a long documentation list, in any words (card Q03 slice 9); the intents it describes pass the checks", async () => {
+  let system = "";
+  const text = "what other documents are there?";
+  const intents = [{ kind: "status", request: { kind: "docs", after: 30 }, evidence: text, basis: "owner" }];
+  const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return JSON.stringify(intents); } }, () => ["a/primary"]);
+  const out = await m.interpret({ ...input, text, quoted: [] }) as unknown[];
+  assert.equal(out.length, 1, JSON.stringify(out));
+  assert.deepEqual(STATUS_KINDS["docs"]?.keys, ["projectId", "after"]);
+  assert.deepEqual(STATUS_KINDS["task_docs"]?.keys, ["taskId|taskTitle", "after"]);
+  // The model sees no earlier answer, so the number comes from the owner's words by a rule it can apply: next = after 30, the third page = after 60, a number said is used as said.
+  assert.match(system, /Both documentation views show 30 documents a page, in the same order each time; after \(a whole number\) is how many were already shown\. You do not see earlier answers, so take it from the owner's words/);
+  assert.match(system, /\("show me the next documents", "what other documents are there\?"\) or the second page is after 30, the third page after 60 \(30 for each page before it\); a number the owner gives is used as said \("the documents after 60" is after 60, "from document 61" is after 60\)/);
+});
