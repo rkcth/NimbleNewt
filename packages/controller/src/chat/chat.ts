@@ -26,7 +26,7 @@ import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason, LIFECYCLE_OPS, WHOLE_INSTALLATION_WORDS } from "./commands.js";
+import { MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason, LIFECYCLE_OPS, PAUSE_NOT_PLAIN, WHOLE_INSTALLATION_WORDS } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -2165,6 +2165,15 @@ export class ChatService {
         fillNotes.push(args["mode"] === "stop" ? "What a stop does: the scope is paused at once, prepared inside a deadline, and then its running work ends, including local processes, swarm children and background jobs. Assignments and goals are untouched and nothing resumes by itself; a resume lifts it." : "What a suspend does: the scope is paused at once and checkpointed; its work is called suspended only after a durable checkpoint. Assignments and goals are untouched and nothing resumes by itself.");
       } else if (args["mode"] !== undefined) return refuse("invalid_command", "mode is an argument of lifecycle.stop only");
       if (found.scope.kind === "installation") fillNotes.push("This reaches every agent, team and task in the whole installation.");
+      // Second review: a pause applies at once, so any doubt about which one is meant or whether it is meant now shows it first instead.
+      if (intent.op === "lifecycle.pause" && found.near !== undefined) showFirst = `your message also names ${found.near}, whose name is close to this one, so it is shown first`;
+      else if (intent.op === "lifecycle.pause" && PAUSE_NOT_PLAIN.test(words)) showFirst = "your message has a not, an if or a when in it, so the pause is shown first rather than applied";
+      // A resume lifts the scope's pause whoever set it (a stop, a suspend or a hand-off that took it over included): the proposal says whose pause it is, and nothing is proposed for a scope that is not paused.
+      if (intent.op === "lifecycle.resume") {
+        const gate = await this.#get(token, "lifecycle.status", { scope: found.scope });
+        if (gate === undefined || gate["intent"] !== "pause") return refuse("invalid_command", `${found.scope.kind === "installation" ? "the whole installation" : `${found.scope.kind} ${quotedText(found.label, 80)}`} is not paused, so there is nothing to resume`);
+        fillNotes.push(`What this lifts: the pause set${typeof gate["owner"] === "string" ? ` by ${quotedText(gate["owner"], 80)}` : ""}${typeof gate["pausedAt"] === "string" ? ` at ${quotedText(gate["pausedAt"], 40)}` : ""}${typeof gate["reason"] === "string" ? `, reason ${quotedText(gate["reason"], 160)}` : ""}${gate["takenOver"] === true ? "; a stop, a suspend or a hand-off has taken this pause over, and resuming lifts it too" : ""}. A pause on a team or the whole installation above it stays.`);
+      }
     }
     // A hand-off: the recipient named by the agent's name (exactly one active agent), and, for completing or cancelling, the hand-off itself found as the one going on for the named task.
     if (intent.op === "handoff.prepare" || intent.op === "handoff.takeover") {
@@ -2624,7 +2633,7 @@ export class ChatService {
    * The scope of a pause, resume or stop named in the owner's words. Nothing is guessed: no scope asks which, an agent or team name must stand as a whole word of the message, several answers ask, none says what is not called that, and the
    * whole installation needs the owner's own word for everything (never the bare order, which also sits in the message). A task is the one titled that in the project in focus.
    */
-  async #lifecycleScope(token: string, args: Record<string, unknown>, words: string, focus: { projectId?: string }, op: string): Promise<{ ok: true; scope: { kind: "task" | "agent" | "team" | "installation"; id: string }; label: string } | Extract<Resolved, { ok: false }>> {
+  async #lifecycleScope(token: string, args: Record<string, unknown>, words: string, focus: { projectId?: string }, op: string): Promise<{ ok: true; scope: { kind: "task" | "agent" | "team" | "installation"; id: string }; label: string; near?: string } | Extract<Resolved, { ok: false }>> {
     const kind = args["scopeKind"];
     const rawName = args["scopeName"];
     if (args["scope"] !== undefined) return refuse("invalid_command", "scope is built by the chat from scopeKind and scopeName");
@@ -2656,7 +2665,12 @@ export class ChatService {
       return refuse("not_found", !complete ? `no ${label} among the first ${String(all.length)} ${plural} is called ${quotedText(name, 80)}, and there are more. Which did you mean?` : all.length === 0 ? `no ${label} of this installation is called ${quotedText(name, 80)}, and there are no ${plural} at all` : `no ${label} of this installation is called ${quotedText(name, 80)}. Here they are: ${titleList(all.map((c) => c.name))}. Which did you mean?`);
     }
     if (hit.length > 1) return { ok: false, kind: "ask", question: `More than one ${label} here answers to the name in your message. Nothing was done. Which did you mean?`, options: hit.slice(0, CHAT_LIMITS.options).map((f) => `${f.id}: ${quotedText(f.name, 60)} (${f.kind})`) };
-    return { ok: true, scope: { kind: hit[0]!.kind, id: hit[0]!.id }, label: hit[0]!.name };
+    const chosen = hit[0]!;
+    // Second review: another agent or team the message also names, whose name holds this one or is held in it ("pause Ann, Ann Lee is fine"), or one of the other kind with the same name, leaves room for a misreading.
+    const others = kind === undefined ? all : [...all, ...(await this.#scopeCandidates(token, [kind === "agent" ? "team" : "agent"], true)).items];
+    const cn = chosen.name.normalize("NFC");
+    const near = others.find((c) => !(c.kind === chosen.kind && c.id === chosen.id) && nameInWords(words, c.name) && (nameAt(cn).test(c.name.normalize("NFC")) || nameAt(c.name.normalize("NFC")).test(cn)));
+    return { ok: true, scope: { kind: chosen.kind, id: chosen.id }, label: chosen.name, ...(near === undefined ? {} : { near: `${near.kind} ${quotedText(near.name, 60)}` }) };
   }
 
   /** The installation's agents and teams as the owner can name them (card L02e leftover): the kind a lifecycle scope takes, the ID for that scope and the name it goes by. Retired agents are in: what the stop of one cost is a fair thing to ask afterwards. */

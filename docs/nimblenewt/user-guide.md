@@ -293,8 +293,8 @@ You: stop the Garden team, we are changing the plan
 You: stop everything
 ```
 
-- **Pausing** an agent, a team or a task starts at once, because it only makes things stricter: no new work starts there until you resume it. Work that is already running in the background may finish. Pausing **everything** is shown to you first, like the orders below, because it holds every agent.
-- **Resuming** and **stopping** are always shown first, with what they would do, and happen only when you say yes. A stop ends the running work of that agent, team or task, including its local programs and background jobs, but keeps the tasks and who they are assigned to; nothing starts again by itself, and a resume lifts it. Ask to "suspend" instead if you want it to stop at a saved point.
+- **Pausing** an agent, a team or a task starts at once, because it only makes things stricter: no new work starts there until you resume it. Work that is already running in the background may finish. Pausing **everything** is shown to you first, like the orders below, because it holds every agent. A pause is also shown to you first when your words have a "don't", an "if", a "when" or a "maybe" in them, or when they also name another agent or team whose name is close to the one meant (Ann and Ann Lee).
+- **Resuming** and **stopping** are always shown first, with what they would do, and happen only when you say yes. A stop ends the running work of that agent, team or task, including its local programs and background jobs, but keeps the tasks and who they are assigned to; nothing starts again by itself, and a resume lifts it. A resume says whose pause it would lift and why it was set. Ask to "suspend" instead if you want it to stop at a saved point.
 - **Stopping everything** needs you to say so: a bare "stop" is never read as everything. NimbleNewt asks which agent, team, task or "everything" you mean.
 - **What is paused** is answered from the records: the whole installation and each active agent (the first 50), who paused it, why, and how far it has actually got. Name a team or a task to see that one.
 

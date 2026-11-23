@@ -704,6 +704,11 @@ export function grantDateInWords(value: unknown, ownText: string): string | unde
 /** The pause, resume and stop of work by words: the scope is flat (`scopeKind`, `scopeName`) in a chat message and the chat builds the API's `scope` from it. */
 export const LIFECYCLE_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop"]);
 /** What the owner's words for the whole installation can be. Anything else is asked about: a bare "stop" is never read as everything. */
+/**
+ * Words that make a pause sentence something other than a plain order (second review): a negation ("don't pause Ann"), a condition or a time to come ("if Ann breaks the build, pause her", "pause Ann once she
+ * is done") or a maybe. A pause otherwise applies at once; with one of these in the owner's words it is shown first, so a misreading is seen before anything is held.
+ */
+export const PAUSE_NOT_PLAIN = /(?:^|[^\p{L}\p{N}])(?:don['\u2019]?t|do not|doesn['\u2019]?t|does not|didn['\u2019]?t|did not|not|never|no need|no longer|if|unless|when|whenever|once|in case|whether|maybe|perhaps|might|would|could|should|shall|later|tomorrow|tonight)(?![\p{L}\p{N}])/iu;
 export const WHOLE_INSTALLATION_WORDS = /\b(everything|everyone|everybody|every ?\w+|all|whole|entire|installation|system|nimblenewt|lot)\b/i;
 
 /** Whether the owner's words (lowercased, padded) name this calendar day: see `grantDateInWords`. */
@@ -779,7 +784,8 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "task.transition:cancelled": /\b(cancel|drop|abandon)/i,
   "project.update:archived": /\b(archive)/i,
   "agent.retire": /\b(retire|fire|let go|remove)/i,
-  "lifecycle.pause": /\b(pause|hold|freeze|halt|suspend|stop|wait|park|hang on|put .* on ice)/i,
+  // Second review: whole words only, so "Ann is waiting" or "Ann holds the lease" is no order to pause (a pause applies at once); the target's own name never supplies the verb (see `ownerSaysMove`).
+  "lifecycle.pause": /\b(?:pause|hold|freeze|halt|suspend|stop|wait|park|hang on)\b|\bput\b.*\bon ice\b/i,
   "dependency.remove": /\b(remove|delete|drop|unlink)/i,
   "handoff.complete": /\b(complete|finish|transfer|move|give|pass on|hand (?:it|over)|go ahead)/i,
   "handoff.cancel": /\b(cancel|stop|abort|drop|call off)/i,
@@ -810,7 +816,9 @@ export function ownerSaysMove(op: string, args: Readonly<Record<string, unknown>
   const named = names.map((n) => new RegExp(`(^|[^a-z0-9])${esc(dotless(n))}($|[^a-z0-9])`, "i"));
   // A question is not an order: sentences ending in "?" never count.
   const sentences = (joined.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((s) => !s.trimEnd().endsWith("?"));
-  return sentences.some((s) => verb.test(s) && named.some((r) => r.test(s)));
+  // A pause applies at once (second review): the verb must stand outside the target's name, so an agent called Parker or Holden is not paused by a sentence that only names it.
+  const outside = (s: string): string => (key === "lifecycle.pause" ? named.reduce((t, r) => t.replace(new RegExp(r.source, "gi"), "$1 $2"), s) : s);
+  return sentences.some((s) => verb.test(outside(s)) && named.some((r) => r.test(s)));
 }
 
 /** Commands that are plain edits of text or fields: with quoted material in the message they may still apply; every other command becomes a proposal. */

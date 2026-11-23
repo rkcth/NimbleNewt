@@ -132,6 +132,11 @@ for (const backend of backends) {
 
   suite("a pause of everything is shown first and needs the owner's own word for everything; it holds every agent only after the yes", async (c) => {
     await c.agent("Ann");
+    // Second review: words that hold the proposal's own label ("the whole installation") and an ordering verb would pass the own-words rule; only the installation rule shows it first.
+    const said = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "installation", scopeName: "the whole installation" }, "pause the whole installation"))).outcomes[0]!;
+    assert.equal(said.status, "proposed", JSON.stringify(said));
+    assert.match(JSON.stringify(said), /holds every agent's new work/);
+    assert.equal(await c.paused("installation", "installation"), false);
     const text = owned(c, "lifecycle.pause", { scopeKind: "installation", scopeName: "everything" }, "pause everything");
     const o = (await c.say(text)).outcomes[0]!;
     assert.equal(o.status, "proposed", JSON.stringify(o));
@@ -278,6 +283,55 @@ for (const backend of backends) {
     const idle = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Ann" }, "Ann is a good agent"))).outcomes[0]!;
     assert.equal(idle.status, "proposed", JSON.stringify(idle));
     assert.equal(await c.paused("agent", ann), false);
+  });
+
+  suite("second review: a pause read from a negation, a condition, an inflected verb or a verb inside the agent's own name is shown first, never applied at once", async (c) => {
+    const ann = await c.agent("Ann");
+    const parker = await c.agent("Parker");
+    for (const text of ["don't pause Ann", "do not hold Ann", "if Ann breaks the build, pause her too, Ann", "pause Ann once she is done", "maybe pause Ann", "Ann is waiting for a review", "Ann holds the lease"]) {
+      const o = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Ann" }, text))).outcomes[0]!;
+      assert.equal(o.status, "proposed", `${text}: ${JSON.stringify(o)}`);
+    }
+    // "Parker" holds "park", a word for pausing: the name alone is not the owner saying so.
+    const named = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Parker" }, "Parker did well today"))).outcomes[0]!;
+    assert.equal(named.status, "proposed", JSON.stringify(named));
+    // A name that holds the whole word ("Park Ranger") does not say it either.
+    const ranger = await c.agent("Park Ranger");
+    const whole = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Park Ranger" }, "Park Ranger did well today"))).outcomes[0]!;
+    assert.equal(whole.status, "proposed", JSON.stringify(whole));
+    assert.equal(await c.paused("agent", ranger), false);
+    assert.equal(await c.paused("agent", ann), false);
+    assert.equal(await c.paused("agent", parker), false);
+    // A plain order still applies at once.
+    assert.equal((await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Parker" }, "park Parker"))).outcomes[0]!.status, "applied");
+    assert.equal(await c.paused("agent", parker), true);
+  });
+
+  suite("second review: a pause whose message also names an agent or team with a name close to the one meant (one inside the other, or the other kind of the same name) is shown first", async (c) => {
+    const ann = await c.agent("Ann");
+    const annLee = await c.agent("Ann Lee");
+    const garden = await c.agent("Garden");
+    const team = (await c.w.agents.createTeam(c.w.owner, { commandId: cid("tm"), name: "Garden" })).id;
+    // The model read the longer name although the order was for Ann: the owner sees it before anything is held.
+    const longer = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Ann Lee" }, "pause Ann, Ann Lee is fine"))).outcomes[0]!;
+    assert.equal(longer.status, "proposed", JSON.stringify(longer));
+    assert.match(JSON.stringify(longer), /also names agent .*Ann/);
+    const kinds = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Garden" }, "pause the Garden team"))).outcomes[0]!;
+    assert.equal(kinds.status, "proposed", JSON.stringify(kinds));
+    for (const [k, id] of [["agent", ann], ["agent", annLee], ["agent", garden], ["team", team]] as const) assert.equal(await c.paused(k, id), false, `${k} ${id}`);
+  });
+
+  suite("second review: a resume says whose pause it lifts, and a scope that is not paused is refused before anything is proposed", async (c) => {
+    const ann = await c.agent("Ann");
+    await c.agent("Bob");
+    await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Ann", reason: "checking her work" }, "pause Ann, checking her work"));
+    assert.equal(await c.paused("agent", ann), true);
+    const o = (await c.say(owned(c, "lifecycle.resume", { scopeKind: "agent", scopeName: "Ann" }, "resume Ann"))).outcomes[0]!;
+    assert.equal(o.status, "proposed", JSON.stringify(o));
+    assert.match(JSON.stringify(o), /What this lifts: the pause set by .*reason .*checking her work/);
+    const idle = (await c.say(owned(c, "lifecycle.resume", { scopeKind: "agent", scopeName: "Bob" }, "resume Bob"))).outcomes[0]!;
+    assert.deepEqual([idle.status, idle.code], ["refused", "invalid_command"], JSON.stringify(idle));
+    assert.match(idle.message ?? "", /not paused/);
   });
 
   suite("with two proposals open a bare yes does not choose between a stop and a resume; naming one does", async (c) => {
