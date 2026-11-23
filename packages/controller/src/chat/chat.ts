@@ -602,9 +602,11 @@ export class ChatService {
         // A message that is only "yes" or "no" names no proposal: it counts only while exactly one is open. With several open the model's pick would be a guess, so the owner is asked which.
         if (!trusted) {
           // A message that is only a word of refusal ("no") never agrees to a proposal, and one that is only a word of agreement ("yes") never drops one, whatever the model made of it: the chat reads that one word itself.
-          const sole = evidenceStrong(intent.evidence) ? "" : tidyWords(words);
+          // The same holds when the one word comes with the proposal's ID: "no <ID>" never applies it and "yes <ID>" never drops it.
+          const withoutId = words.replace(idPattern(intent.proposalId), " ");
+          const sole = tidyWords(withoutId === words && evidenceStrong(intent.evidence) ? "" : withoutId);
           if ((intent.kind === "apply_proposal" ? REFUSAL : ASSENT).has(sole)) {
-            push({ i, kind: "asked", question: `Your message was only ${quotedText(sole, 20)}, which does not ${intent.kind === "apply_proposal" ? "agree to the proposal, so it was not applied" : "drop the proposal, so it was kept"}. Nothing was done. What would you like: go ahead with it, or drop it?`, options: [] });
+            push({ i, kind: "asked", question: `Your message was only ${quotedText(sole, 20)}${withoutId === words ? "" : " and the proposal's ID"}, which does not ${intent.kind === "apply_proposal" ? "agree to the proposal, so it was not applied" : "drop the proposal, so it was kept"}. Nothing was done. What would you like: go ahead with it, or drop it?`, options: [] });
             continue;
           }
           // A list of policy edits that cannot be read is not taken as none open: the owner is asked (fail closed).
@@ -3291,14 +3293,19 @@ const REFUSAL = new Set(["no", "n", "nope", "nah", "cancel", "stop", "never", "d
 /** One-word replies that agree or refuse: they answer a question only when they are one of its recorded choices, never through an option's label. */
 const AGREEMENT = new Set([...ASSENT, ...REFUSAL]);
 
+/** `id` as a whole in `text`, ignoring case: not inside a longer run of letters, digits, hyphens or underscores. */
+const idPattern = (id: string): RegExp => new RegExp(`(?<![\\p{L}\\p{N}_-])${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}_-])`, "giu");
+/** Whether `text` holds the proposal ID `id` as written (see `idPattern`). */
+const saysId = (text: string, id: string): boolean => id.length > 0 && idPattern(id).test(text);
+
 /** Small words that say nothing about which proposal is meant: they neither name one nor point away from one. */
 const PLAIN_WORDS = new Set(["the", "and", "for", "that", "this", "these", "those", "with", "from", "into", "onto", "one", "ones", "yes", "yeah", "yep", "please", "okay", "sure", "its", "not", "but", "you", "your", "our", "all", "any", "are", "was", "were", "has", "have", "had", "will", "would", "should", "can", "could", "just", "now", "then", "there", "here", "what", "which", "too", "also", "thanks", "thank", "ahead", "them", "they", "their", "let", "lets", "out", "off", "about", "only"]);
 
 /**
  * Whether the owner's words single out the proposal the model picked among several open ones: the words the model cites say something that appears in that proposal's text and in no other open one's (a word of
- * at least three letters that is not a plain small word, or any number), or its ID as written; and the owner's whole message says nothing that points to another open proposal instead (a word that proposal's text
- * has and the pick's has not, or its ID), unless the same message also agrees to or drops that other one. Words that fit every proposal alike ("yes please", "do that") name none, so the owner is asked. A pick that
- * is not open at all is left to the stale-proposal checks; a list too long to read in full names nothing.
+ * at least three letters that is not a plain small word, or any number); and the owner's whole message says nothing that points to another open proposal instead (a word that proposal's text has and the
+ * pick's has not, or its ID), unless the same message also agrees to or drops that other one. The pick's exact ID in the cited words names it outright, unless the message also gives another open one's ID.
+ * Words that fit every proposal alike ("yes please", "do that") name none, so the owner is asked. A pick that is not open at all is left to the stale-proposal checks; a list too long to read in full names nothing.
  */
 function namesOneProposal(evidence: string, words: string, proposalId: string, open: readonly { id: string; summary: string[] }[], targeted: ReadonlySet<string>): boolean {
   if (open.length >= OPEN_SCAN) return false;
@@ -3310,8 +3317,11 @@ function namesOneProposal(evidence: string, words: string, proposalId: string, o
   const message = words.toLowerCase();
   const said = tokens(words);
   const elsewhere = others.filter((p) => !targeted.has(p.id));
+  // An ID is the most precise way to name a proposal. Another open one's ID in the message asks which; otherwise the pick's exact ID in the owner's cited words names it, whatever other words of the message
+  // happen to appear in another proposal's text ("again", a number). Only a whole ID counts: one with a character left off or added is no ID of the pick (and a near ID of another one still asks).
+  if (elsewhere.some((p) => saysId(words, p.id))) return false;
+  if (saysId(evidence, chosen.id) && saysId(words, chosen.id)) return true;
   if (elsewhere.some((p) => message.includes(p.id.toLowerCase()) || [...tokens(p.summary.join(" "))].some((t) => !own.has(t) && said.has(t)))) return false;
-  if (evidence.toLowerCase().includes(chosen.id.toLowerCase())) return true;
   const otherTokens = others.map((p) => tokens(p.summary.join(" ")));
   return [...tokens(evidence)].some((t) => own.has(t) && otherTokens.every((o) => !o.has(t)));
 }
