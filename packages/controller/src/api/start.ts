@@ -12,7 +12,7 @@ import { FLOOR_RETIRED_SETTINGS, FLOOR_SETTINGS, MeetingFloorService, floorSetti
 import { RetirementService } from "../retirement/index.js";
 import { DeletionLedger, LEDGER_FILE, QuotaMeter, RETENTION_DEFAULTS, ReserveFile, RetentionService, RetentionSettingsService, combineThinkingStores, guardStorage, localThinkingStores, type RetentionValues } from "../retention/index.js";
 import { JOURNAL_FILE, PENDING_FILE, keepDataLocks, type DataLockKeeper, type LockEnv } from "../backup/index.js";
-import { BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupScopeSettingService, BackupSystem, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, SIGNING_SECRET_NAME, secretsSourceOf, sealsBackups, type SecretsSink, type SigningSecretStore, MaintenanceBarrier, NamedWork, stopAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
+import { checkpointOf, BackupConfigService, BackupEncryption, BackupEncryptionSettingService, BackupScopeSettingService, BackupSystem, BackupKeyPinService, BackupProofReminder, BackupProofStore, BackupService, BackupSigningService, SIGNING_SECRET_NAME, secretsSourceOf, sealsBackups, type SecretsSink, type SigningSecretStore, MaintenanceBarrier, NamedWork, stopAllWork, StagedRestore, applyPendingRestore, createBackup, readKeyringFile, type PendingRestore, type PiStateSource } from "../backup/index.js";
 import { readFile, rm, statfs } from "node:fs/promises";
 import { activeProjectIds, defaultEventSources } from "./default-sources.js";
 import { ImprovementService } from "../standups/improvements.js";
@@ -1778,6 +1778,15 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const releaseWindows = activation === undefined || options.releases === undefined ? undefined : ReleaseWindowService.withEpoch(storage, epoch, {
       activation, root: options.releases.root,
       liveAttempts: async () => (dispatch === undefined ? 0 : (await dispatch.dispatcher.liveAttempts(dispatch.principal)).filter((x) => x.state === "running").length),
+      // Quiesce and checkpoint (card K07): running attempts are suspended with the dispatcher's own Suspend and new work is held by the installation pause; the checkpoint is a verified backup.
+      // `dispatch` is built later: until then there is nothing running to suspend.
+      quiesce: {
+        pauses,
+        attempts: async () => { if (dispatch === undefined) return []; const out: { attemptId: string; state: string; frozen: boolean; frozenReason?: string }[] = []; for (const a of await dispatch.dispatcher.liveAttempts(dispatch.principal)) { const f = (await dispatch.dispatcher.get(dispatch.principal, a.attemptId))?.frozen; out.push({ ...a, frozen: f !== undefined, ...(f === undefined ? {} : { frozenReason: f.reason }) }); } return out; },
+        freeze: async (attemptId: string, reason: string) => { await dispatch?.dispatcher.quiesce(dispatch.principal, attemptId, reason.slice(0, 300), { strictMs: 10_000 }); },
+        release: async (attemptId: string) => { await dispatch?.dispatcher.release(dispatch.principal, attemptId); },
+      },
+      ...(backups === undefined ? {} : { checkpoint: async () => checkpointOf(await backups.backUpFresh("manual")) }),
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: n.level, label: n.label, ref: { kind: "release-window", id: n.windowId }, detail: n.detail }); },
     });
     releaseWindowsLive = releaseWindows;

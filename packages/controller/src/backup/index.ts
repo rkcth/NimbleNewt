@@ -14,6 +14,7 @@ export { PI_LIMITS, copyPiState, validRel, validStoreId, writePiState, type PiSt
 export { stopAllWork } from "./stop-work.js";
 export { acquireDataLock, acquireDataLocks, keepDataLocks, DataLockBusy, LOCK_FILE, type DataLock, type DataLockKeeper, type LockEnv } from "./data-lock.js";
 export { manifestDigestOf } from "./verify.js";
+export { checkpointOf, type CheckpointCheck } from "./checkpoint.js";
 export { BACKUP_NAME, JOURNAL_FILE, KEY_FILE, PENDING_FILE, STAGING_DIR, StagedRestore, applyPendingRestore, externalSince, type ExternalSince, canon, canonSync, type ApplyOptions, type PendingRestore, type RestoreStatus, type RestorePlan, type StagedRestoreOptions } from "./staged-restore.js";
 export { BackupProofStore, type BackupProofBody } from "./proof.js";
 export { BackupSigningService, SIGNATURE_FILE, SIGNING_SECRET_NAME, AUTHENTICITY_NOTE, checkSignature, generateSigningKey, signManifest, signingKeyIdOf, trustedKeyOf, type BackupSigner, type SignatureCheck, type SignatureRecord, type SignatureTrust, type SigningKeyEntry, type SigningSecretStore, type TrustedSigningKey } from "./signing.js";
