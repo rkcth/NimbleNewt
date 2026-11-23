@@ -214,6 +214,8 @@ test("the prompt tells the model how to read a project's required landing checks
   assert.match(system, /integration\.set with requiredChecks and, only when the owner names a project other than the one in focus, projectName/);
   assert.match(system, /\blanding_settings\b[^"]*only the owner can read it/);
   assert.ok(system.includes("landing_settings"), "the status kind is listed with its keys");
+  // Correcting a defect's finding or severity (card Q04 sixth slice) is described: the operation, the fields, shown first, and what stays.
+  assert.match(system, /defect\.edit \(id from the defects view; finding, the corrected text in the owner's words copied exactly, and\/or severity critical, major or minor; reason in the owner's words when they gave one\): it is shown to the owner first, works until the defect is fixed, accepted as it is or withdrawn, changes nothing else \(state, cycles and checks stay\)/);
   // The defects check (card Q04 fifth slice) is one of the checks the model may list, with what it means and what does not block.
   assert.match(system, /landing_settings\(projectId\) - owner only: [^;]*a director's sign-off, no unfinished defects; an empty list says none are required/, "the landing_settings status kind names the defects check too");
   assert.match(system, /is verified\), defects \(no defect reported against the task's deliverables is still open, awaiting a check or escalated; one the owner accepted as it is, a resolved one and a withdrawn one do not block\)/);

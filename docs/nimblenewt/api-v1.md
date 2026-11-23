@@ -8042,6 +8042,22 @@ Arguments:
 
 Result: `{ id, revision, replayed }`.
 
+#### `defect.edit`
+
+Corrects what a defect says before it is finished (card Q04): the `finding` text, the `severity`, or both. The owner, or the agent that reported it while no check of a repair has failed and when it did none of the repair's work (after a failed check, and so once escalated, only the owner). Works on a defect that is `open`, `repair-submitted` or `escalated`; a fixed, accepted or withdrawn defect is refused (`invalid_transition`). The state, cycle count, checks, evidence and owner decisions are unchanged, and each edit is kept on the defect (`edits`: who, when, the finding or severity it replaced, the optional `reason`), at most 20 (then withdraw it and report again). A value equal to the current one is not an edit and an edit that changes nothing is refused (`invalid_command`). `expectedRevision` refuses a stale view.
+
+Arguments:
+
+- `id`: the defect
+- `finding` (optional): the corrected finding (1 to 2000 characters)
+- `severity` (optional): `critical`, `major` or `minor`
+- `reason` (optional): why it was corrected
+- `expectedRevision` (optional): the defect's revision you read
+
+Result: `{ id, revision, replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
 #### `qa.evidence.record`
 
 Records QA evidence on one code submission (card Q02): the tree it names is the version checked. Names the task contract version in force (`criteriaRevision`; a stale one is `stale_revision` with the current version), the owner decisions the work was judged against (every decision the task relies on must be named, and a superseded one is refused: revalidate first), the environment, when the checks ran, and each check with its result: `passed`, `failed`, `blocked` (could not be run) or `not-run`, kept apart. The owner, or an agent that may read the task and holds the qa or reviewer role in the project (the role alone opens nothing); the agent that submitted the code may record a self-check, which is kept and never counted by the gate. Independent evidence on a submission settles a pending re-check once it, with the other independent evidence on the submission that still holds, names again every check the invalidated record named (only those the contract still requires, when it names checks); the author's new self-check settles only the re-check of its own earlier self-check, the same way. Evidence on a newer code submission of the task also settles the re-checks still pending on older ones (normally a new code submission already did). Independent evidence then runs the documentation impact check of the task by itself (card Q03, as `doc.impact.check` with this submission, by the controller): affected documents are flagged with update tasks for their keepers, except a document already verified against, or flagged for, code of the task submitted after this submission (evidence recorded late on older code does not move it back); a check that cannot run is told to the owner and the evidence stays recorded. Repeating the same command ID records once (and repeats the same documentation check, which flags nothing twice).

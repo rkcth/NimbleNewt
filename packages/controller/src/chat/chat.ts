@@ -29,7 +29,7 @@ import type { Reliance } from "../security/reliance.js";
 import { FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
-import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
+import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
 
 // ---- records -------------------------------------------------------------------------------------------------------------------
 
@@ -576,13 +576,16 @@ export class ChatService {
     const pending = new Map<string, number>();
     const answeredHere = new Set<string>();
     let coordinatorRevision: number | undefined;
+    let openForAnswer: { id: string; summary: string[] }[] | undefined;
     for (const [n, { intent, text: words, trusted, quoted, from }] of work.entries()) {
       const i = items.length;
       const push = (item: PlanItem): void => { items.push(item); workOf.push(n); };
       if (intent.kind === "clarify") { push({ i, kind: "asked", question: intent.question, options: intent.options ?? [] }); continue; }
       if (intent.kind === "none") { push({ i, kind: "ignored", reason: intent.reason }); continue; }
       if (intent.kind === "answer") { push({ i, kind: "refused", code: "not_resumable", message: "an answer cannot be held" }); continue; }
-      if (!trusted && (intent.basis === "quoted" || !evidenceInText(intent.evidence, words) || !evidenceStrong(intent.evidence))) {
+      // A message that is only "yes" (or only "no") agrees to (or drops) a proposal shown to the owner: the guide says to say yes in any words, and such a message is the owner's whole own text.
+      const wholeAnswer = (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") && evidenceWholeMessage(intent.evidence, words);
+      if (!trusted && (intent.basis === "quoted" || !evidenceInText(intent.evidence, words) || (!evidenceStrong(intent.evidence) && !wholeAnswer))) {
         push({ i, kind: "refused", code: "untrusted_authority", message: intent.basis === "quoted" ? "That instruction came from quoted text, which cannot ask for anything; only your own message can ask for something." : "The words this was based on are not a phrase of your own message, so it was not done." });
         continue;
       }
@@ -593,6 +596,14 @@ export class ChatService {
         continue;
       }
       if (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") {
+        // A message that is only "yes" or "no" names no proposal: it counts only while exactly one is open. With several open the model's pick would be a guess, so the owner is asked which.
+        if (!trusted && !evidenceStrong(intent.evidence)) {
+          openForAnswer ??= [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))];
+          if (openForAnswer.length > 1) {
+            push({ i, kind: "asked", question: `More than one proposal is open, and a message that is only "${intent.kind === "apply_proposal" ? "yes" : "no"}" does not say which. Nothing was done. Which one do you mean? Say it in a few words (or drop the ones you no longer want).`, options: openForAnswer.slice(0, CHAT_LIMITS.options).map((p) => `${p.id}: ${quotedText(p.summary[0] ?? "", 80)}`) });
+            continue;
+          }
+        }
         push({ i, kind: intent.kind, proposalId: intent.proposalId, ...(intent.kind === "apply_proposal" && intent.lengthDays !== undefined && lengthInWords(intent.lengthDays, words) ? { lengthDays: intent.lengthDays } : {}) });
         continue;
       }
@@ -2956,18 +2967,19 @@ export class ChatService {
   }
 
   async #openProposals(ownerId: string): Promise<{ id: string; summary: string[] }[]> {
+    // Every record is read until ten are found: proposals are never deleted and their IDs are hashes, so a scan that stopped early would miss open ones at random (the count of a message that is only "yes" relies on it).
     const out: { id: string; summary: string[] }[] = [];
     let after: string | undefined;
-    for (let page = 0; page < 5; page++) {
-      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+    for (;;) {
+      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
       for (const a of chunk) {
         after = a.id;
         const b = a.body as unknown as ChatProposalBody;
-        if (b.ownerId === ownerId && b.status === "open" && out.length < 10) out.push({ id: a.id, summary: [...b.preview] });
+        if (b.ownerId === ownerId && b.status === "open") out.push({ id: a.id, summary: [...b.preview] });
+        if (out.length >= 10) return out;
       }
-      if (chunk.length < 200) break;
+      if (chunk.length < 1000) return out;
     }
-    return out;
   }
 
   async #openEdits(owner: Principal): Promise<{ id: string; summary: string[] }[]> {
@@ -2975,14 +2987,14 @@ export class ChatService {
   }
 
   async #openCount(ownerId: string): Promise<number> {
+    // Read to the end (or to the limit), for the same reason as #openProposals.
     let count = 0;
     let after: string | undefined;
-    for (let page = 0; page < 5; page++) {
-      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of chunk) { after = a.id; const b = a.body as unknown as ChatProposalBody; if (b.ownerId === ownerId && b.status === "open") count++; }
-      if (chunk.length < 200) break;
+    for (;;) {
+      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
+      for (const a of chunk) { after = a.id; const b = a.body as unknown as ChatProposalBody; if (b.ownerId === ownerId && b.status === "open" && ++count >= CHAT_LIMITS.openProposals) return count; }
+      if (chunk.length < 1000) return count;
     }
-    return count;
   }
 }
 
