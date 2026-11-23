@@ -626,9 +626,11 @@ function dayInWords({ year, month, day, text }: { year: number; month: number; d
   return false;
 }
 
-/** The argument names the interpreter prompt lists for an operation: what the chat accepts, without `projectName` (said once for all) and without the title keys (one hand-written sentence says a task or prerequisite ID may be given as its title). */
+/** The argument names the interpreter prompt lists for an operation: what the chat accepts, without `projectName` (said once for all). A title key is not listed on its own: it is shown beside the ID it stands in for (`taskId|taskTitle`, `prerequisiteId|prerequisiteTitle`), so it is on exactly the lines where a title can be resolved, and nowhere else. */
 export function promptArgs(op: string): readonly string[] {
-  return (acceptedArgs(op) ?? []).filter((k) => k !== "projectName" && !(k in TITLE_KEYS));
+  const accepted = acceptedArgs(op) ?? [];
+  const titleOf = (k: string): string | undefined => Object.entries(TITLE_KEYS).find(([title, id]) => id === k && accepted.includes(title))?.[0];
+  return accepted.filter((k) => k !== "projectName" && !(k in TITLE_KEYS)).map((k) => { const title = titleOf(k); return title === undefined ? k : `${k}|${title}`; });
 }
 
 export function acceptedArgs(op: string): readonly string[] | undefined {

@@ -7,7 +7,8 @@ import { ModelInterpreter, type ModelCall } from "./model-interpreter.js";
 import { cid, openWorld } from "./testing/harness.js";
 
 // Room in the interpreter prompt (card "prompt headroom"). The operation list used to repeat ", taskTitle, prerequisiteTitle" on every line although only the operations that take a task ID or a prerequisite ID
-// can use them; now one sentence in the hand-written part says so and the lines show the keys of their own record. The chat still accepts the keys exactly as before (`acceptedArgs` is unchanged).
+// can use them; now the title shows only beside the ID it stands in for (`taskId|taskTitle`, the notation the status list already uses), and one sentence in the hand-written part says how to give it.
+// The chat still accepts the keys exactly as before (`acceptedArgs` is unchanged).
 // The prompt size is pinned below so that growth is a decision, not an accident: the older test in gaps1.test.ts only caps it at 160,000.
 
 after(stopServer);
@@ -25,7 +26,7 @@ const listed = (system: string, op: string): string[] => {
 };
 
 // Pin: the prompt is about this long. The ceiling is 2,000 characters above what is now (a card that adds a control fits); the floor is 4,000 below it, so a large cut that dropped controls is seen too. Moving either is a decision.
-const SIZE = 150_887;
+const SIZE = 151_346;
 const CEILING = SIZE + 2_000;
 const FLOOR = SIZE - 4_000;
 
@@ -35,40 +36,43 @@ test("the prompt size is pinned: not above the ceiling (growth is a decision) an
   assert.ok(n >= FLOOR, `the prompt is ${n} characters, below the pinned floor ${FLOOR}: a cut this large must be checked for dropped controls, then SIZE lowered on purpose`);
 });
 
-test("the title keys are one sentence, not on every line, and only the operations that take that ID can use them", async () => {
+test("a title key shows only beside the ID it stands in for, on exactly the operations that take that ID, and one sentence says how to give it", async () => {
   const system = await promptText();
-  assert.match(system, /Where an operation lists taskId or prerequisiteId, give the task or prerequisite as taskTitle or prerequisiteTitle instead, in the owner's own words and with no ID \(said here once, not on each line\); an operation that lists neither takes no task title\./);
+  assert.match(system, /Where an operation lists taskId\|taskTitle or prerequisiteId\|prerequisiteTitle, give the task or prerequisite as taskTitle or prerequisiteTitle instead, in the owner's own words and with no ID; an operation that lists neither takes no task title\./);
+  assert.ok(system.includes("Operations, each as name(args; `a|b` means either): "), "the list says what a|b means, as the status list does");
   let withTask = 0, withPrerequisite = 0;
   for (const op of Object.keys(CHAT_OPS)) {
     const keys = listed(system, op);
-    for (const key of Object.keys(TITLE_KEYS)) assert.ok(!keys.includes(key), `${op} does not repeat ${key}`);
-    // The chat still accepts both keys everywhere it did; the line shows the ID argument that they stand in for, where the operation has one.
+    // The chat still accepts both keys everywhere it did; the line shows a title only as `id|title`, where the operation takes that ID, and never the ID or the title alone.
     for (const [title, id] of Object.entries(TITLE_KEYS)) {
       assert.ok(acceptedArgs(op)!.includes(title), `${op} still accepts ${title}`);
+      assert.ok(!keys.includes(title) && !keys.includes(id), `${op} shows neither ${title} nor ${id} on its own`);
       const real = OPERATIONS.find((o) => o.name === op)!;
-      if (id in real.args) assert.ok(keys.includes(id), `${op} lists ${id}, which its operation takes`);
-      if (keys.includes(id)) assert.ok(acceptedArgs(op)!.includes(id), `${op} lists ${id} only when the chat accepts it`);
+      if (Object.keys(real.args).some((k) => k.replace(/\?$/, "") === id)) assert.ok(keys.includes(`${id}|${title}`), `${op} lists ${id}|${title}, as its operation takes ${id}`);
+      if (keys.includes(`${id}|${title}`)) assert.ok(acceptedArgs(op)!.includes(id), `${op} lists ${id}|${title} only when the chat accepts ${id}`);
+      for (const k of keys) if (k !== `${id}|${title}`) assert.ok(!k.split("|").includes(title), `${op}: ${title} is on no other key (${k})`);
     }
-    if (keys.includes("taskId")) withTask++;
-    if (keys.includes("prerequisiteId")) withPrerequisite++;
+    if (keys.includes("taskId|taskTitle")) withTask++;
+    if (keys.includes("prerequisiteId|prerequisiteTitle")) withPrerequisite++;
   }
   assert.ok(withTask > 20 && withPrerequisite === 2, `${withTask} operations take a task ID, ${withPrerequisite} a prerequisite ID`);
 });
 
-test("the operation lines read as expected, written out by hand (not rebuilt with promptArgs): an ID where the operation takes one, no title keys, no projectName", async () => {
+test("the operation lines read as expected, written out by hand (not rebuilt with promptArgs): id|title where the operation takes the ID, no title key elsewhere, no projectName", async () => {
   const system = await promptText();
   for (const line of [
-    "; task.transition(taskId, expectedRevision, to) - Move task;",
-    "; dependency.add(taskId, prerequisiteId, responsible) - Add dependency;",
+    "; task.transition(taskId|taskTitle, expectedRevision, to) - Move task;",
+    "; dependency.add(taskId|taskTitle, prerequisiteId|prerequisiteTitle, responsible) - Add dependency;",
+    "; resume.retry(checkId, taskId|taskTitle) - Start the resume check of task over;",
     "; project.update(projectId, expectedRevision, name, goal, state, addRepositories, versionControl) - Change project;",
   ]) assert.ok(system.includes(line), line);
   assert.ok(!/\btaskTitle, prerequisiteTitle\b/.test(system), "the old pair is on no line");
   // The task IDs of a document obligation (implementationRefs, claims) are not taskId: a title never resolved into them, and the line does not invite one.
-  assert.ok(!listed(system, "doc.obligation.record").some((k) => k === "taskId" || k === "prerequisiteId"));
+  assert.ok(!listed(system, "doc.obligation.record").some((k) => /taskId|taskTitle|prerequisite/.test(k)));
 });
 
 for (const backend of backends) {
-  // The stand-in model sees only the prompt and the owner's words. It looks in the prompt for the operation line and for the rule about titles; with no rule it hands over nothing.
+  // The stand-in model sees only the prompt and the owner's words. It uses a title key only when the operation's line shows it beside the ID (`taskId|taskTitle`) and the prompt has the rule about titles; otherwise it hands over nothing.
   const model = (violations: string[]): ModelCall => ({
     complete: async (_route, r) => {
       const owner = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(r.user)![1]!;
@@ -80,8 +84,8 @@ for (const backend of backends) {
         return {};
       };
       let intents: unknown[] = [];
-      if (owner === "Water beans is ready") { const t = take("task.transition", ["taskId"]); if (t !== undefined) intents = [intent("task.transition", { taskTitle: "Water beans", to: "ready" })]; }
-      if (owner === "Dig the bed only after Buy seeds is done") { const t = take("dependency.add", ["taskId", "prerequisiteId"]); if (t !== undefined) intents = [intent("dependency.add", { taskTitle: "Dig the bed", prerequisiteTitle: "Buy seeds" })]; }
+      if (owner === "Water beans is ready") { const t = take("task.transition", ["taskId|taskTitle"]); if (t !== undefined) intents = [intent("task.transition", { taskTitle: "Water beans", to: "ready" })]; }
+      if (owner === "Dig the bed only after Buy seeds is done") { const t = take("dependency.add", ["taskId|taskTitle", "prerequisiteId|prerequisiteTitle"]); if (t !== undefined) intents = [intent("dependency.add", { taskTitle: "Dig the bed", prerequisiteTitle: "Buy seeds" })]; }
       if (owner === "Plant the pea shoots is ready") intents = [intent("task.transition", { taskTitle: "Water beans", to: "ready" })];
       if (owner === "rename the garden project") intents = [intent("project.update", { taskTitle: "Water beans", name: "Yard" })];
       if (owner === "rename the Garden project to Yard, as in Water beans") intents = [intent("project.update", { projectName: "Garden", taskTitle: "Water beans", name: "Yard" })];
@@ -102,7 +106,7 @@ for (const backend of backends) {
     return { w, say, project, beans, bed, seeds, state, violations };
   };
 
-  test(`${backend.name}: a task and a prerequisite named by their titles are still found through the real chat and ModelInterpreter, with the title rule from one sentence of the prompt`, async () => {
+  test(`${backend.name}: a task and a prerequisite named by their titles are still found through the real chat and ModelInterpreter, from the key on the operation's line and the title rule of the prompt`, async () => {
     const { w, say, beans, bed, seeds, state, violations } = await open();
     try {
       const a = (await say("Water beans is ready")).outcomes[0]!;
