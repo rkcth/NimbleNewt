@@ -526,7 +526,7 @@ test("the guide's toolbox maintainer sentences are answered by the chat with the
     assert.equal((await call(live, "grant.create", { grantee: `agent:${ann}`, action: "toolbox.manage", project: "*", basis: "the owner asked" }, "gr-ann")).ok, true);
     const listed = await ask(rows[0]!);
     assert.match(listed, new RegExp(`"Ann" \\(agent:${ann}\\) holds toolbox\\.manage for every project, so it may decide proposals for any shared tool; no proposal waits for a decision it may make\\.`));
-    assert.match(system, /toolbox_maintainers \(name for one tool, after: how many were already shown\)/, "the prompt tells the model about the kind");
+    assert.match(system, /toolbox_maintainers \(name: one tool in the owner.s own words; it shows 10 at a time, so the next ones are after 10, then after 20\)/, "the prompt tells the model about the kind");
     // The sentence that names no shared tool that exists is not answered with a list; one that names a count past the end shows nothing more.
     assert.ok(!/Ann/.test(await ask(rows[1]!)), "a tool that does not exist lists no maintainer");
     assert.match(await ask(rows[2]!), /There are no more maintainers to show\./);

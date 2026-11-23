@@ -66,7 +66,7 @@ test("toolbox maintainers (card T08): the owner asks who may decide proposals in
     assert.match(text, new RegExp(`"Maya" \\(${maya.pid}\\) holds toolbox\\.manage for every project, so it may decide proposals for any shared tool; 1 proposal waits for a decision it may make\\.`));
     assert.match(text, new RegExp(`"Pat" \\(${pat.pid}\\) holds toolbox\\.manage for the projects "Orchard" \\(${other}\\), so it may decide proposals only for shared tools made for those projects alone; no proposal waits`));
     assert.doesNotMatch(text, /Cody|Garden/, "an agent without the right is not listed");
-    assert.match(prompts[0]!, /toolbox_maintainers \(name for one tool, after: how many were already shown\)/, "the interpreter prompt describes the kind");
+    assert.match(prompts[0]!, /toolbox_maintainers \(name: one tool in the owner.s own words; it shows 10 at a time, so the next ones are after 10, then after 20\)/, "the interpreter prompt describes the kind");
 
     // A tool named in the owner's words narrows the list to those whose right covers it; Pat's right does not cover a tool made for coders.
     const one = (await say("who can approve the proposals for the lint tool?"))[0];

@@ -37,7 +37,7 @@ for (const backend of backends) {
         const desks = DeskService.withEpoch(world.storage, projects.epoch, options);
         const cat = CatalogService.withEpoch(world.storage, projects.epoch, desks, options);
         const props = ToolboxProposalService.withEpoch(world.storage, projects.epoch, cat, desks, options, async () => undefined);
-        const ports = { agents, principals, catalog: cat, proposals: props };
+        const ports = { agents, principals, grants: GrantService.withEpoch(world.storage, projects.epoch, options), catalog: cat, proposals: props };
         const c: Ctx = {
           cat, props, desks, principals, agents, owner, a, b, ta, storage: world.storage, epoch: projects.epoch, ports,
           agent: async (friendlyName, grants, extra = {}) => {
@@ -136,6 +136,33 @@ for (const backend of backends) {
     await refuses("invalid_command", () => toolboxMaintainers(c.owner, c.ports, { name: "nimblenewt.x" }));
     await refuses("invalid_command", () => toolboxMaintainers(c.owner, c.ports, { name: 5 }));
     for (const bad of [-1, 1.5, "1", Number.NaN, 2_000_000, null]) await refuses("invalid_command", () => toolboxMaintainers(c.owner, c.ports, { after: bad }), /after/);
+  });
+
+  suite("a right that has ended or lapsed from non-use is not held, a wider action that covers toolbox.manage is, and only an agent that could hold the right has its rights judged", async (c) => {
+    const { maya, pat } = await cast(c);
+    const grants = GrantService.withEpoch(c.storage, c.epoch, options);
+    const ann = await c.agent("Ann2", worker(c.a));
+    const bea = await c.agent("Bea", worker(c.a));
+    const cal = await c.agent("Cal", [...worker(c.a), { action: "toolbox.*", project: c.b }]);
+    await grants.grant(c.owner, { commandId: cid("gr"), grantee: ann.pid, action: TOOLBOX_MANAGE, project: "*", source: "direct", basis: "until December", expiresAt: "2026-12-01T00:00:00.000Z" });
+    await grants.grant(c.owner, { commandId: cid("gr"), grantee: bea.pid, action: TOOLBOX_MANAGE, project: c.a, source: "direct", basis: "while in use", idleDays: 3 });
+    assert.deepEqual(await names(c), [maya.pid, pat.pid, ann.pid, bea.pid, cal.pid].sort(), "all five hold it today");
+    // Judged ten days later: Ann's right has ended and Bea's has lapsed from non-use; the rights on the agents' own records still hold.
+    const later = PrincipalService.withEpoch(c.storage, c.epoch, { ...options, clock: () => "2026-12-02T12:00:00.000Z" });
+    const judged: string[] = [];
+    const counting = { current: async (id: string) => { judged.push(id); return later.current(id); }, get: (id: string) => later.get(id) };
+    const out = await toolboxMaintainers(c.owner, { ...c.ports, principals: counting });
+    assert.deepEqual(out.items.map((x) => x.agent).sort(), [maya.pid, pat.pid, cal.pid].sort());
+    assert.deepEqual(out.items.find((x) => x.agent === cal.pid)!.projects, [c.b], "toolbox.* for Orchard is the right for Orchard");
+    // Only those five were judged: the two agents with no such right anywhere (Ann and Cody of the cast) were passed over without reading every grant record for them.
+    assert.deepEqual(judged.sort(), [maya.pid, pat.pid, ann.pid, bea.pid, cal.pid].sort());
+    // A wait longer than one page of the proposals (or a look that stopped early) is marked "at least"; one that fits is not.
+    const waitOf = async (answer: { items: { author: string }[]; next?: string; partial?: true }) =>
+      (await toolboxMaintainers(c.owner, { ...c.ports, proposals: { list: async () => answer as never } }, { name: "lint" })).items.filter((x) => x.agent === maya.pid).map((x) => [x.waiting, x.waitingMore]);
+    const hundred = Array.from({ length: MAINTAINER_LIMITS.waiting }, () => ({ author: pat.pid }));
+    assert.deepEqual(await waitOf({ items: hundred, next: "more" }), [[100, true]]);
+    assert.deepEqual(await waitOf({ items: hundred.slice(0, 3), next: "more", partial: true }), [[3, true]]);
+    assert.deepEqual(await waitOf({ items: [...hundred.slice(0, 2), { author: maya.pid }] }), [[2, undefined]], "Maya's own is not counted, and nothing more waits");
   });
 
   suite("more than one page: ten at a time, `after` is how many were already shown, the next page continues in the same order, and a longer wait is counted as at least", async (c) => {

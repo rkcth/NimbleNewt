@@ -1,6 +1,7 @@
 import type { AgentService } from "../agents/index.js";
 import { DomainError } from "../domain/errors.js";
-import { allows } from "../security/access.js";
+import { allows, covers } from "../security/access.js";
+import type { GrantService } from "../security/grants.js";
 import type { Principal } from "../security/principals.js";
 import type { PrincipalService } from "../security/principals.js";
 import { maintainsAnywhere, mayManage, toolboxName, TOOLBOX_MANAGE, type CatalogService } from "./catalog.js";
@@ -36,7 +37,8 @@ export interface MaintainersAnswer {
 }
 export interface MaintainerPorts {
   readonly agents: Pick<AgentService, "list">;
-  readonly principals: Pick<PrincipalService, "current">;
+  readonly principals: Pick<PrincipalService, "current" | "get">;
+  readonly grants: Pick<GrantService, "list">;
   readonly catalog: Pick<CatalogService, "toolbox">;
   readonly proposals: Pick<ToolboxProposalService, "list">;
 }
@@ -54,13 +56,23 @@ export async function toolboxMaintainers(by: Principal, ports: MaintainerPorts, 
     if (found === undefined) throw new DomainError("not_found", `no shared tool ${name}`);
     tool = { name, audience: found.audience };
   }
+  // Second review: judging an agent's rights reads every grant and restriction record, so only an agent that could hold the right at all is judged: one whose own record, or a grant record given to it,
+  // names an action that covers toolbox.manage (whether such a right still holds, is restricted or has lapsed is then the controller's own judgment). The grant records are read once per look.
+  const holders = new Set<string>();
+  for (let afterId: string | undefined; ;) {
+    const page = await ports.grants.list(by, { ...(afterId === undefined ? {} : { afterId }), limit: 200 });
+    for (const g of page.items) if (covers(g.action, TOOLBOX_MANAGE)) holders.add(g.grantee);
+    if (page.next === undefined) break;
+    afterId = page.next;
+  }
+  const mayHold = async (principalId: string): Promise<boolean> => holders.has(principalId) || ((await ports.principals.get(principalId))?.grants ?? []).some((g) => covers(g.action, TOOLBOX_MANAGE));
   const items: MaintainerRow[] = [];
   let matched = 0, scanned = 0, more = false, scanLimited = false;
   scanning: for (let afterId: string | undefined; ;) {
     const page = await ports.agents.list(by, { state: "active", ...(afterId === undefined ? {} : { afterId }), limit: 200 });
     for (const agent of page.items) {
       scanned += 1;
-      const p = await ports.principals.current(agent.principalId);
+      const p = (await mayHold(agent.principalId)) ? await ports.principals.current(agent.principalId) : undefined;
       if (p !== undefined && p.kind === "agent" && maintainsAnywhere(p) && (tool === undefined || mayManage(p, tool.audience))) {
         matched += 1;
         if (matched > after) {
