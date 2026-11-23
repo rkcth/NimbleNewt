@@ -674,8 +674,8 @@ export class SubmissionService {
       const task = await this.#readableTask(by, taskId);
       if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") return undefined;
       const a = await this.approvalOf(sub.id);
-      // An index entry is only a pointer: the submission itself must be this project's code of this task and, for an agent, its own (as the scan reads them).
-      if (a === undefined || a.projectId !== projectId || a.taskId !== taskId || (ownOnly && a.submittedBy !== by.id)) return undefined;
+      // An index entry is only a pointer: the submission itself must be this project's code of this task, made at the time the entry says (the time chose it as the task's newest), and, for an agent, its own (as the scan reads them).
+      if (a === undefined || a.projectId !== projectId || a.taskId !== taskId || a.submittedAt !== sub.at || (ownOnly && a.submittedBy !== by.id)) return undefined;
       const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
       return { taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) };
     };

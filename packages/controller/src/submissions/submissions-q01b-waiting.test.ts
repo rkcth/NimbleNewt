@@ -393,10 +393,35 @@ for (const backend of backends) {
     assert.equal(view.source, "index");
     assert.deepEqual(view.items, []);
     // An entry is checked against the submission itself: one naming another task of the project is left out, and an agent named as the author of another agent's code does not see it.
-    await c.plant("code-submission-index", c.project, { complete: true, entries: [{ taskId: t3, id: x.id, at: "2026-11-22T10:00:00.000Z", by: ann.id }, { taskId: t2, id: w.id, at: "2026-11-22T10:00:00.000Z", by: bob.id }] });
+    const atOf = async (id: string): Promise<string> => ((await c.read("submission", id))!.body as { submittedAt: string }).submittedAt;
+    const [xAt, wAt] = [await atOf(x.id), await atOf(w.id)];
+    await c.plant("code-submission-index", c.project, { complete: true, entries: [{ taskId: t3, id: x.id, at: xAt, by: ann.id }, { taskId: t2, id: w.id, at: wAt, by: bob.id }] });
     assert.deepEqual((await c.svc.waiting(c.owner, c.project)).items.map((i) => [i.taskId, i.submissionId]), [[t2, w.id]]);
     const asBob = await c.svc.waiting(bob, c.project);
     assert.equal(asBob.source, "index");
     assert.deepEqual(asBob.items, []);
+    // An entry whose time is not the submission's own is left out (the time decides which code of a task is the newest).
+    assert.notEqual(wAt, "2026-11-22T09:00:00.000Z");
+    await c.plant("code-submission-index", c.project, { complete: true, entries: [{ taskId: t2, id: w.id, at: "2026-11-22T09:00:00.000Z", by: ann.id }] });
+    assert.deepEqual((await c.svc.waiting(c.owner, c.project)).items, []);
+    await c.plant("code-submission-index", c.project, { complete: true, entries: [{ taskId: t2, id: w.id, at: wAt, by: ann.id }] });
+    assert.deepEqual((await c.svc.waiting(c.owner, c.project)).items.map((i) => i.submissionId), [w.id]);
+  });
+
+  suite("the first code of a project with older code, sent by many writers at once: each seeds from its own scan, one creates the index, the others meet it and are built again from it; every submission is indexed once and the index stays complete", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    const old = await code({ svc: c.old }, ann, await c.mkTask("Old"), "0"); tick();
+    assert.equal(await c.read("code-submission-index", c.project), undefined);
+    const tasks = await Promise.all(Array.from({ length: 8 }, (_, i) => c.mkTask(`First ${i}`)));
+    // Separate service instances (nothing shared but the storage), half by each agent.
+    const done = await Promise.all(tasks.map((t, i) => code({ svc: c.custom({}) }, i % 2 === 0 ? ann : bob, t, String(i + 1))));
+    const stored = (await c.read("code-submission-index", c.project))!.body as { complete: boolean; entries: { id: string }[] };
+    assert.equal(stored.complete, true);
+    assert.equal(stored.entries.length, 9);
+    assert.deepEqual(new Set(stored.entries.map((e) => e.id)), new Set([old.id, ...done.map((d) => d.id)]));
+    const view = await c.svc.waiting(c.owner, c.project);
+    assert.equal(view.source, "index");
+    assert.equal(view.items.length, 9);
   });
 }
