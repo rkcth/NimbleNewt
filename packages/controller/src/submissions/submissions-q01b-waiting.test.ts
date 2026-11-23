@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { AssignmentService } from "../domain/assignments.js";
 import { BlockerService } from "../domain/blockers.js";
+import { CommandRunner } from "../domain/runner.js";
 import { ProjectService } from "../domain/service.js";
 import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -24,7 +25,7 @@ const BASE = T("c"), PATCH = T("d");
 
 for (const backend of backends) {
   const suite = (name: string, body: (c: {
-    ask(by: Principal, projectId?: string): Promise<string[] | undefined>; owner: Principal; project: string; elsewhere: string; svc: SubmissionService;
+    ask(by: Principal, projectId?: string): Promise<string[] | undefined>; owner: Principal; project: string; elsewhere: string; svc: SubmissionService; old: SubmissionService; plant(kind: string, id: string, body: object): Promise<void>; read(kind: string, id: string): Promise<{ body: unknown; revision: number } | undefined>; custom(options: object): SubmissionService;
     agent(name: string, roles: string[], project?: string): Promise<Principal>; mkTask(title: string): Promise<string>; finish(taskId: string, to: "done" | "cancelled"): Promise<void>;
     lone(reviewersAvailable: () => Promise<string[]>): { svc: SubmissionService; status: StatusService }; bare(): StatusService; withoutWaiting(): StatusService; scanned(pageSize: number, reads: number): StatusService; listScanned(pageSize: number, reads: number): StatusService; capped(tasks: number): StatusService; count(): Promise<number>; mkTaskIn(projectId: string, title: string): Promise<string>;
     faulty(fails: (kind: string, id: string) => boolean): StatusService;
@@ -76,7 +77,14 @@ for (const backend of backends) {
         for (const t of (await projects.listTasks({ projectId: project, limit: 100 })).items) { const l = await svc.list(owner, t.id, { limit: 100 }); total += l.items.length; }
         return total;
       };
-      await body({ lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, listScanned, capped, count, mkTaskIn: async (projectId: string, title: string) => (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId, title })).id, faulty });
+      const old = SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, codeIndexKept: 0 });
+      const runner = new CommandRunner(world.storage, epoch, options);
+      const plant = async (kind: string, id: string, b: object): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: b as never } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: b as never }], detail: {} }) }));
+      };
+      const custom = (o: object): SubmissionService => SubmissionService.withEpoch(world.storage, epoch, async (id) => roles.get(id) ?? [], { ...svcOptions, ...o });
+      await body({ plant, read: async (k, i) => runner.get(k, i), custom, old, lone, ask, owner, project, elsewhere, svc, agent, mkTask, finish, bare: () => StatusService.withEpoch(world.storage, epoch, base, options), withoutWaiting, scanned, listScanned, capped, count, mkTaskIn: async (projectId: string, title: string) => (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId, title })).id, faulty });
     } finally { await world.close(); }
   });
 
@@ -167,7 +175,7 @@ for (const backend of backends) {
   suite("a partial scan is said and never reads as 'nothing waits'", async (c) => {
     const ann = await c.agent("ann", ["author"]);
     const bob = await c.agent("bob", ["author"]);
-    for (const title of ["A1", "A2", "A3"]) await code(c, ann, await c.mkTask(title), "a");
+    for (const title of ["A1", "A2", "A3"]) await code({ svc: c.old }, ann, await c.mkTask(title), "a");
     const small = c.scanned(1, 1);
     const text = (await small.ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
     assert.match(text.join("\n"), /Only part of the submissions stored on this controller \(for every project\) was looked at, so other tasks, or newer code of a listed task, may exist\./);
@@ -238,9 +246,10 @@ for (const backend of backends) {
     const ann = await c.agent("ann", ["author"]);
     const other = await c.agent("olly", ["author"], c.elsewhere);
     const mine = await c.mkTask("Small one");
-    await code(c, ann, mine, "a");
+    // Data written before the index existed (the old writer leaves no index): such a project is scanned, as it was.
+    await code({ svc: c.old }, ann, mine, "a");
     // Six code submissions in the other project: with a scan of 2 rows x 2 reads the table cannot be read to its end.
-    for (let i = 0; i < 6; i++) await code(c, other, await c.mkTaskIn(c.elsewhere, `Busy ${i}`), "b");
+    for (let i = 0; i < 6; i++) await code({ svc: c.old }, other, await c.mkTaskIn(c.elsewhere, `Busy ${i}`), "b");
     const lines = (await c.scanned(2, 2).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
     assert.match(lines.join("\n"), /Only part of the submissions stored on this controller \(for every project\) was looked at/);
     assert.doesNotMatch(lines.join("\n"), /Busy/, "the other project's tasks are never listed");
@@ -277,5 +286,111 @@ for (const backend of backends) {
     }
     // With nothing failing, all 12 are listed.
     assert.match((await c.faulty(() => false).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines[0]!.text, /^12 task\(s\) wait for a reviewer/);
+  });
+
+  suite("the project's code index answers without a scan: another project's volume no longer makes the answer partial, and the index is written with each code submission, once, even when many arrive together", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const other = await c.agent("olly", ["author"], c.elsewhere);
+    const mine = await c.mkTask("Small one");
+    const first = await code(c, ann, mine, "a");
+    for (let i = 0; i < 6; i++) await code(c, other, await c.mkTaskIn(c.elsewhere, `Busy ${i}`), "b");
+    const view = await c.custom({ waitingScan: { pageSize: 2, reads: 2 } }).waiting(c.owner, c.project);
+    assert.equal(view.source, "index");
+    assert.equal(view.scanLimited, false);
+    assert.deepEqual(view.items.map((i) => i.submissionId), [first.id]);
+    const lines = (await c.scanned(2, 2).ask(c.owner, { kind: "submissions_project", projectId: c.project }))!.lines.map((l) => l.text);
+    assert.doesNotMatch(lines.join("\n"), /Only part of/);
+    // The index is one record per project, carrying the code of that project only.
+    const stored = (await c.read("code-submission-index", c.project))!.body as { complete: boolean; entries: { id: string }[] };
+    assert.equal(stored.complete, true);
+    assert.deepEqual(stored.entries.map((e) => e.id), [first.id]);
+    // Eight code submissions of eight tasks at once: every one is recorded and indexed (a write that met another is built again), none twice.
+    const tasks = await Promise.all(Array.from({ length: 8 }, (_, i) => c.mkTask(`Burst ${i}`)));
+    const done = await Promise.all(tasks.map((t, i) => code(c, ann, t, String(i))));
+    const after = await c.svc.waiting(c.owner, c.project);
+    assert.equal(after.source, "index");
+    assert.equal(after.items.length, 9);
+    assert.deepEqual(new Set(after.items.map((i) => i.submissionId)), new Set([first.id, ...done.map((d) => d.id)]));
+    // A replay of a command writes nothing new: the entry list is unchanged.
+    const revision = (await c.read("code-submission-index", c.project))!.revision;
+    const again = await c.svc.record(ann, { commandId: "replay-1", taskId: mine, kind: "code", role: "author", base: BASE, tree: T("e"), patchId: PATCH });
+    const replayed = await c.svc.record(ann, { commandId: "replay-1", taskId: mine, kind: "code", role: "author", base: BASE, tree: T("e"), patchId: PATCH });
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.id, again.id);
+    assert.equal((await c.read("code-submission-index", c.project))!.revision, revision + 1);
+  });
+
+  suite("a project whose code was written before the index existed is scanned and read as before; the first new code seeds the index from one bounded scan, complete only when the scan reached the end", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const [t1, t2, t3] = [await c.mkTask("Old one"), await c.mkTask("Old two"), await c.mkTask("New one")];
+    const a = await code({ svc: c.old }, ann, t1, "1"); tick();
+    const b = await code({ svc: c.old }, ann, t2, "2"); tick();
+    assert.equal(await c.read("code-submission-index", c.project), undefined);
+    const before = await c.svc.waiting(c.owner, c.project);
+    assert.equal(before.source, "scan");
+    assert.deepEqual(new Set(before.items.map((i) => i.submissionId)), new Set([a.id, b.id]));
+    // Reading created no index.
+    assert.equal(await c.read("code-submission-index", c.project), undefined);
+    const n = await code(c, ann, t3, "3");
+    const stored = (await c.read("code-submission-index", c.project))!.body as { complete: boolean; entries: { id: string }[] };
+    assert.equal(stored.complete, true);
+    assert.deepEqual(new Set(stored.entries.map((e) => e.id)), new Set([a.id, b.id, n.id]));
+    const view = await c.custom({ waitingScan: { pageSize: 1, reads: 1 } }).waiting(c.owner, c.project);
+    assert.equal(view.source, "index");
+    assert.equal(view.items.length, 3);
+  });
+
+  suite("an index seeded from a scan that stopped early is marked incomplete: the view then scans too and uses both, and says it looked at part when the scan stops; an unreadable index is never trusted", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const [t1, t2, t3] = [await c.mkTask("Old one"), await c.mkTask("Old two"), await c.mkTask("New one")];
+    const a = await code({ svc: c.old }, ann, t1, "1"); tick();
+    const b = await code({ svc: c.old }, ann, t2, "2"); tick();
+    const n = await code({ svc: c.custom({ waitingScan: { pageSize: 1, reads: 1 } }) }, ann, t3, "3");
+    const stored = (await c.read("code-submission-index", c.project))!.body as { complete: boolean };
+    assert.equal(stored.complete, false);
+    const view = await c.svc.waiting(c.owner, c.project);
+    assert.equal(view.source, "scan");
+    assert.equal(view.scanLimited, false, "the full scan reached the end, so nothing is missing");
+    assert.deepEqual(new Set(view.items.map((i) => i.submissionId)), new Set([a.id, b.id, n.id]));
+    const cut = await c.custom({ waitingScan: { pageSize: 1, reads: 1 } }).waiting(c.owner, c.project);
+    assert.equal(cut.scanLimited, true);
+    assert.ok(cut.items.some((i) => i.submissionId === n.id), "the index's own entry is used even when the scan stops early");
+    // A damaged index is ignored: the view scans, and a new code submission leaves it alone rather than writing over what it cannot read.
+    await c.plant("code-submission-index", c.project, { entries: "nonsense" });
+    const damaged = await c.svc.waiting(c.owner, c.project);
+    assert.equal(damaged.source, "scan");
+    assert.equal(damaged.items.length, 3);
+    const t4 = await c.mkTask("Newer one");
+    const m = await code(c, ann, t4, "4");
+    assert.deepEqual((await c.read("code-submission-index", c.project))!.body, { entries: "nonsense" });
+    assert.ok((await c.svc.waiting(c.owner, c.project)).items.some((i) => i.submissionId === m.id));
+  });
+
+  suite("the index keeps the newest code of each task by each agent; more than its limit drops the oldest and makes it incomplete; an agent still sees only its own newest code; an entry that points at nothing, or at another project's code, is left out", async (c) => {
+    const ann = await c.agent("ann", ["author"]);
+    const bob = await c.agent("bob", ["author"]);
+    const [t1, t2, t3] = [await c.mkTask("One"), await c.mkTask("Two"), await c.mkTask("Three")];
+    const x = await code(c, ann, t1, "1"); tick();
+    const y = await code(c, bob, t1, "2"); tick();
+    const mineOnly = await c.svc.waiting(ann, c.project);
+    assert.deepEqual(mineOnly.items.map((i) => i.submissionId), [x.id], "an agent sees its own newest code, though another agent's is newer");
+    assert.deepEqual((await c.svc.waiting(c.owner, c.project)).items.map((i) => i.submissionId), [y.id]);
+    const z = await code(c, ann, t1, "3"); tick();
+    const stored = (await c.read("code-submission-index", c.project))!.body as { entries: { id: string }[] };
+    assert.deepEqual(stored.entries.map((e) => e.id), [y.id, z.id], "one entry per task and agent");
+    // A limit of 2 entries: the third (task two) pushes the oldest off and the index says it no longer covers everything.
+    const small = c.custom({ codeIndexKept: 2 });
+    const w = await code({ svc: small }, ann, t2, "4"); tick();
+    const s2 = (await c.read("code-submission-index", c.project))!.body as { complete: boolean; entries: { id: string }[] };
+    assert.equal(s2.complete, false);
+    assert.deepEqual(s2.entries.map((e) => e.id), [z.id, w.id]);
+    assert.equal((await c.svc.waiting(c.owner, c.project)).items.length, 2);
+    // Entries that point at nothing or at another project are not listed.
+    const other = await c.agent("olly", ["author"], c.elsewhere);
+    const foreign = await code(c, other, await c.mkTaskIn(c.elsewhere, "Else"), "5");
+    await c.plant("code-submission-index", c.project, { complete: true, entries: [{ taskId: t3, id: "sbm-aaaaaaaaaaaaaaaaaaaa", at: "2026-11-22T10:00:00.000Z", by: ann.id }, { taskId: t3, id: foreign.id, at: "2026-11-22T10:00:00.000Z", by: other.id }] });
+    const view = await c.svc.waiting(c.owner, c.project);
+    assert.equal(view.source, "index");
+    assert.deepEqual(view.items, []);
   });
 }

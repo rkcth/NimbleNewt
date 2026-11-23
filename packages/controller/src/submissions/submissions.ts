@@ -111,6 +111,15 @@ interface DocIndexBody { readonly items: readonly { readonly id: string; readonl
 const DOC_INDEX = "document-submission-index";
 export const DOC_INDEX_KEPT = 100;
 /**
+ * The code submissions of each project (card Q01b sixth slice; record kind `code-submission-index`, keyed by the project ID): the newest code of each task by each submitting agent, written in the SAME write as the
+ * code submission it indexes (revision-checked: a write that met another code submission of the project is built again, as for document changes). `complete` says every code submission of the project is covered:
+ * an index first written for a project that already has code is seeded by one bounded scan of the table (`complete` only when that scan reached the end), and `complete` turns false when more than `CODE_INDEX_KEPT`
+ * entries would be kept (the oldest drop off). Only IDs, tasks, authors and times are kept; every read takes the submission itself. An absent or unreadable index is never trusted: the waiting view then scans.
+ */
+interface CodeIndexBody { readonly complete: boolean; readonly entries: readonly { readonly taskId: string; readonly id: string; readonly at: string; readonly by: string }[] }
+const CODE_INDEX = "code-submission-index";
+export const CODE_INDEX_KEPT = 500;
+/**
  * A review's write met another review of the same subject written at the same moment (card H12o review): both changed the subject's verdict list. Not a refusal: the command is built again from the
  * list as it now is (`rebuildOnVerdictRace`), a few times, and only then answered `unavailable` (send it again).
  */
@@ -185,6 +194,8 @@ export interface SubmissionOptions extends RunnerOptions {
   readonly waitingTasks?: number;
   /** How many submission rows one project-wide waiting view scans (card Q01b fifth slice review), injectable so a test can shrink it. Default `WAITING_SCAN`. */
   readonly waitingScan?: { readonly pageSize: number; readonly reads: number };
+  /** How many (task, agent) entries one project's code index keeps (card Q01b sixth slice), injectable so a test can shrink it. Default `CODE_INDEX_KEPT`; 0 writes no index at all (what data written before the index existed looks like). */
+  readonly codeIndexKept?: number;
   /**
    * How many refresh rounds the task's author has made, as the controller counted them (card H12p, `WorkspaceOpService.refreshRounds`). When given, a code submission carries THAT number: the agent cannot state its own,
    * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
@@ -244,6 +255,8 @@ export interface WaitingView {
   readonly items: readonly WaitingItem[];
   readonly truncated: boolean;
   readonly scanLimited: boolean;
+  /** Where the code list came from: `index` (the project's complete code index, no scan) or `scan` (no usable complete index: the table was scanned, bounded). */
+  readonly source: "index" | "scan";
 }
 /** The most tasks one waiting view reads (newest code first). */
 export const WAITING_TASKS = 200;
@@ -275,6 +288,7 @@ export class SubmissionService {
   readonly #docKept: number;
   readonly #waitingTasks: number;
   readonly #waitingScan: { readonly pageSize: number; readonly reads: number };
+  readonly #codeKept: number;
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
@@ -283,6 +297,7 @@ export class SubmissionService {
     this.#docKept = options.docIndexKept ?? DOC_INDEX_KEPT;
     this.#waitingTasks = options.waitingTasks ?? WAITING_TASKS;
     this.#waitingScan = options.waitingScan ?? WAITING_SCAN;
+    this.#codeKept = options.codeIndexKept ?? CODE_INDEX_KEPT;
   }
 
   /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
@@ -409,7 +424,7 @@ export class SubmissionService {
           for (const c of await readApprovalReliance(this.#runner, taskId, named)) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c);
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -487,6 +502,7 @@ export class SubmissionService {
     if ((await this.#runner.get("submission", id)) === undefined && (body.kind === "review" || body.kind === "signoff")) return new VerdictRace("unavailable", `another ${body.kind === "signoff" ? "sign-off" : "review"} of submission ${String(body.subject)} was recorded at the same moment; send this one again`);
     // Two document changes of one project at the same moment both add to the project's index (card Q03b): the one that lost is built again from the index as it now is.
     if ((await this.#runner.get("submission", id)) === undefined && body.kind === "document") return new DocIndexRace("unavailable", `another document change of this project was recorded at the same moment; send this one again`);
+    if ((await this.#runner.get("submission", id)) === undefined && body.kind === "code") return new DocIndexRace("unavailable", `another code submission of this project was recorded at the same moment; send this one again`);
     return new DomainError("command_conflict", `submission ${id} already exists, so this command ID was used by something else`);
   }
 
@@ -515,6 +531,57 @@ export class SubmissionService {
     if (list.some((x) => x.id === id)) return [];
     const next: DocIndexBody = { items: [...list, { id, taskId: body.taskId }].slice(-this.#docKept) };
     return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
+  }
+
+  /** The code index of a project as stored: `undefined` when absent or not readable as an index (then it is not trusted). */
+  async #readCodeIndex(projectId: string): Promise<{ body: CodeIndexBody; revision: number } | undefined> {
+    const found = await this.#runner.get(CODE_INDEX, projectId);
+    const b = found?.body as unknown as Partial<CodeIndexBody> | undefined;
+    if (found === undefined || b === undefined || typeof b.complete !== "boolean" || !Array.isArray(b.entries)) return undefined;
+    if (!b.entries.every((e) => e !== null && typeof e === "object" && typeof e.taskId === "string" && typeof e.id === "string" && typeof e.at === "string" && typeof e.by === "string")) return undefined;
+    return { body: b as CodeIndexBody, revision: found.revision };
+  }
+
+  /** A code submission is added to its project's index in the same write (card Q01b sixth slice); the first one of a project with older code seeds the index from one bounded scan. */
+  async #codeIndexChange(id: string, body: SubmissionBody): Promise<Change[]> {
+    if (body.kind !== "code" || body.tree === undefined || body.base === undefined || this.#codeKept <= 0) return [];
+    const ref = { kind: CODE_INDEX, id: body.projectId };
+    const found = await this.#runner.get(CODE_INDEX, body.projectId);
+    const had = await this.#readCodeIndex(body.projectId);
+    // An index that exists but cannot be read is left alone (a write could not be revision-checked against what it does not understand); the view scans for such a project.
+    if (found !== undefined && had === undefined) return [];
+    let entries: { taskId: string; id: string; at: string; by: string }[] = [...(had?.body.entries ?? [])];
+    let complete = had?.body.complete ?? false;
+    if (had === undefined) {
+      const seen = new Map<string, { taskId: string; id: string; at: string; by: string }>();
+      let after: string | undefined;
+      let reachedEnd = false;
+      const { pageSize, reads } = this.#waitingScan;
+      for (let read = 0; read < reads && !reachedEnd; read++) {
+        const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
+        for (const row of chunk) {
+          after = row.id;
+          const b = row.body as unknown as SubmissionBody;
+          if (b.projectId !== body.projectId || b.kind !== "code" || b.tree === undefined || b.base === undefined) continue;
+          const key = `${b.taskId}\n${b.submittedBy}`, old = seen.get(key);
+          if (old === undefined || b.submittedAt > old.at || (b.submittedAt === old.at && row.id > old.id)) seen.set(key, { taskId: b.taskId, id: row.id, at: b.submittedAt, by: b.submittedBy });
+        }
+        if (chunk.length < pageSize) reachedEnd = true;
+      }
+      entries = [...seen.values()];
+      complete = reachedEnd;
+    }
+    if (entries.some((e) => e.id === id)) return [];
+    // One entry per task and agent, the newest: of two at the same instant the greater ID, as the view reads it.
+    const mine = entries.find((e) => e.taskId === body.taskId && e.by === body.submittedBy);
+    if (mine === undefined || body.submittedAt > mine.at || (body.submittedAt === mine.at && id > mine.id)) {
+      entries = entries.filter((e) => e !== mine);
+      entries.push({ taskId: body.taskId, id, at: body.submittedAt, by: body.submittedBy });
+    }
+    entries.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : x.id < y.id ? -1 : 1));
+    if (entries.length > this.#codeKept) { entries = entries.slice(-this.#codeKept); complete = false; }
+    const next: CodeIndexBody = { complete, entries };
+    return [found === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }];
   }
 
   /**
@@ -575,20 +642,27 @@ export class SubmissionService {
     if (proj === undefined || !mayRead) throw new DomainError("not_found", "no such project");
     const ownOnly = by.kind !== "owner";
     const newest = new Map<string, { id: string; at: string }>();
-    let after: string | undefined;
-    let scanLimited = true;
-    const { pageSize, reads } = this.#waitingScan;
-    for (let read = 0; read < reads; read++) {
-      const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
-      for (const row of chunk) {
-        after = row.id;
-        const b = row.body as unknown as SubmissionBody;
-        if (b.projectId !== projectId || b.kind !== "code" || b.tree === undefined || b.base === undefined) continue;
-        if (ownOnly && b.submittedBy !== by.id) continue;
-        const had = newest.get(b.taskId);
-        if (had === undefined || b.submittedAt > had.at || (b.submittedAt === had.at && row.id > had.id)) newest.set(b.taskId, { id: row.id, at: b.submittedAt });
+    const note = (taskId: string, id: string, at: string): void => { const had = newest.get(taskId); if (had === undefined || at > had.at || (at === had.at && id > had.id)) newest.set(taskId, { id, at }); };
+    // The project's code index, when it exists, is readable and covers every code submission, answers without a scan; otherwise (absent, unreadable, or incomplete) the table is scanned as before, and an incomplete
+    // index adds its entries to what the scan found.
+    const index = await this.#readCodeIndex(projectId);
+    let scanLimited = false;
+    if (index !== undefined) for (const e of index.body.entries) if (!ownOnly || e.by === by.id) note(e.taskId, e.id, e.at);
+    if (index === undefined || !index.body.complete) {
+      let after: string | undefined;
+      scanLimited = true;
+      const { pageSize, reads } = this.#waitingScan;
+      for (let read = 0; read < reads; read++) {
+        const chunk = await this.#runner.list("submission", { ...(after === undefined ? {} : { afterId: after }), limit: pageSize });
+        for (const row of chunk) {
+          after = row.id;
+          const b = row.body as unknown as SubmissionBody;
+          if (b.projectId !== projectId || b.kind !== "code" || b.tree === undefined || b.base === undefined) continue;
+          if (ownOnly && b.submittedBy !== by.id) continue;
+          note(b.taskId, row.id, b.submittedAt);
+        }
+        if (chunk.length < pageSize) { scanLimited = false; break; }
       }
-      if (chunk.length < pageSize) { scanLimited = false; break; }
     }
     const candidates = [...newest].sort((x, y) => (x[1].at > y[1].at ? -1 : x[1].at < y[1].at ? 1 : x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
     const looked = candidates.slice(0, this.#waitingTasks);
@@ -596,7 +670,7 @@ export class SubmissionService {
       const task = await this.#readableTask(by, taskId);
       if (task === undefined || task.projectId !== projectId || task.state === "done" || task.state === "cancelled") return undefined;
       const a = await this.approvalOf(sub.id);
-      if (a === undefined) return undefined;
+      if (a === undefined || a.projectId !== projectId) return undefined;
       const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
       return { taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) };
     };
@@ -607,7 +681,7 @@ export class SubmissionService {
     for (const i of items) counts[i.state]++;
     const order = { needs_review: 0, changes_asked: 1, signoff_declined: 2, needs_signoff: 3, ready: 4 } as const;
     items.sort((x, y) => order[x.state] - order[y.state] || (x.submittedAt < y.submittedAt ? -1 : x.submittedAt > y.submittedAt ? 1 : x.taskId < y.taskId ? -1 : 1));
-    return { projectId, ownOnly, counts, items, truncated, scanLimited };
+    return { projectId, ownOnly, counts, items, truncated, scanLimited, source: index?.body.complete === true ? "index" : "scan" };
   }
 
   /**
