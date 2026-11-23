@@ -2648,7 +2648,8 @@ export class ChatService {
     }
     const label = kind === undefined ? "agent or team" : kind;
     const { items: all, complete } = await this.#scopeCandidates(token, kind === undefined ? ["agent", "team"] : [kind], true);
-    let hit = namesMeant(words, all);
+    // Review: the one meant is named in the owner's message AND within the name the interpreter read (scopeName, itself checked to be the owner's words), so "pause Zed, Ann asked" never pauses Ann.
+    let hit = namesMeant(words, all).filter((c) => nameInWords(name, c.name));
     if (hit.length > 1) { const same = hit.filter((c) => sameName(c.name, name)); if (same.length > 0) hit = same; }
     if (hit.length === 0) {
       const plural = kind === undefined ? "agents or teams" : `${kind}s`;

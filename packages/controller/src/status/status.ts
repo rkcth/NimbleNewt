@@ -2329,7 +2329,8 @@ export class StatusService {
    */
   async lifecycleLines(by: Principal, asked: { readonly taskId?: string; readonly scope?: { readonly kind: string; readonly id: string }; readonly scopeKind?: string; readonly scopeId?: string }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const gateOf = this.#deps.pauses?.gate;
-    if (gateOf === undefined) return undefined;
+    // Owner only (review): `gate` answers "no gate" for a scope the caller may not read, which would read as "not paused"; anyone else is told nothing, as a missing view.
+    if (gateOf === undefined || by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     if ((asked.scopeKind === undefined) !== (asked.scopeId === undefined) || (asked.scope !== undefined && asked.scopeKind !== undefined)) return invalid("scope", "give scope, or scopeKind with scopeId");
     const given = asked.scope ?? (asked.scopeKind === undefined ? undefined : { kind: asked.scopeKind, id: asked.scopeId! });
     if (asked.taskId !== undefined && given !== undefined) return invalid("taskId", "name either a task or a scope");
@@ -2338,10 +2339,8 @@ export class StatusService {
       if (typeof sc !== "object" || sc === null || (sc.kind !== "task" && sc.kind !== "agent" && sc.kind !== "team" && sc.kind !== "installation") || typeof sc.id !== "string" || sc.id.length === 0 || sc.id.length > 200) return invalid("scope", "must be { kind: task, agent, team or installation, id }");
       return { kind: sc.kind, id: sc.id };
     };
-    // A gate the caller may not read is `null` (the answer is then "nothing you may read"), never "not paused".
-    const read = async (scope: { kind: ScopeKind; id: string }): Promise<Awaited<ReturnType<NonNullable<typeof gateOf>>> | null> => {
-      try { return await gateOf.call(this.#deps.pauses, by, scope); } catch (error) { if (error instanceof DomainError && (error.code === "forbidden" || error.code === "not_found")) return null; throw error; }
-    };
+    // The owner may read every gate, so no gate means never paused.
+    const read = (scope: { kind: ScopeKind; id: string }): ReturnType<NonNullable<typeof gateOf>> => gateOf.call(this.#deps.pauses, by, scope);
     const words = (scope: { kind: ScopeKind; id: string }): string => (scope.kind === "installation" ? "The whole installation" : `${scope.kind[0]!.toUpperCase()}${scope.kind.slice(1)} ${shown(scope.id, 80)}`);
     const describe = (scope: { kind: ScopeKind; id: string }, g: Awaited<ReturnType<NonNullable<typeof gateOf>>>): Line => {
       if (g === undefined || g.intent !== "pause") return line(`${words(scope)} is not paused.`, cite("pause-gate", `${scope.kind}:${scope.id}`));
@@ -2351,7 +2350,6 @@ export class StatusService {
     const scope = asked.taskId !== undefined ? { kind: "task" as const, id: checkTaskId(asked.taskId) } : given !== undefined ? check(given) : undefined;
     if (scope !== undefined) {
       const g = await read(scope);
-      if (g === null) return undefined;
       // A task is also held by the agent, team or installation above it: its own gate says only its own pause, so the holds above are named too when the task's pause status can say them.
       const lines: Line[] = [describe(scope, g)];
       if (scope.kind === "task" && this.#deps.pauses !== undefined) {
@@ -2362,7 +2360,6 @@ export class StatusService {
     }
     const everything = { kind: "installation" as const, id: "installation" };
     const top = await read(everything);
-    if (top === null) return undefined;
     const lines: Line[] = [describe(everything, top)];
     const source = this.#deps.agents;
     let paused = lines[0]!.text.includes(" is paused") ? 1 : 0;
@@ -2373,7 +2370,7 @@ export class StatusService {
       for (const a of items) {
         const sc = { kind: "agent" as const, id: a.id };
         const g = await read(sc);
-        if (g !== null && g !== undefined && g.intent === "pause") { paused += 1; lines.push(line(`${quoted(a.friendlyName, 80)}: ${describe(sc, g).text}`, cite("agent", a.id), cite("pause-gate", g.id, g.revision))); }
+        if (g !== undefined && g.intent === "pause") { paused += 1; lines.push(line(`${quoted(a.friendlyName, 80)}: ${describe(sc, g).text}`, cite("agent", a.id), cite("pause-gate", g.id, g.revision))); }
       }
       lines.push(line(`${items.length}${listed.items.length > 50 || listed.next !== undefined ? " or more" : ""} active agent${items.length === 1 ? "" : "s"} checked${listed.items.length > 50 || listed.next !== undefined ? " (the first 50)" : ""}; ${paused === 0 ? "none is paused" : `${paused} scope${paused === 1 ? " is" : "s are"} paused`}. Teams and tasks are read when named.`, cite("agents", "active")));
     }

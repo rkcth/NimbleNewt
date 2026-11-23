@@ -43,6 +43,7 @@ interface Ctx {
   readonly chat: ReturnType<World["chat"]>;
   readonly agent: (name: string) => Promise<string>;
   readonly paused: (kind: string, id: string) => Promise<boolean>;
+  readonly status: StatusService;
 }
 
 for (const backend of backends) {
@@ -80,7 +81,7 @@ for (const backend of backends) {
         };
         const agent = async (name: string): Promise<string> => (await w.agents.create(w.owner, { commandId: cid("ag"), friendlyName: name })).id;
         const paused = async (kind: string, id: string): Promise<boolean> => (await pauses.gate(w.owner, { kind, id } as never))?.intent === "pause";
-        await body({ w, say, understands: (text, ...intents) => { table.set(text, intents); return text; }, lie: (t) => liars.add(t), rt, pauses, chat, agent, paused });
+        await body({ w, say, understands: (text, ...intents) => { table.set(text, intents); return text; }, lie: (t) => liars.add(t), rt, pauses, chat, agent, paused, status });
         // The interpreter was shown the owner's words and the open proposals, never what the chat answered earlier.
         for (const reply of replies.filter((r) => r.length > 25)) for (const p of prompts) assert.ok(!p.includes(reply), `an earlier answer reached the interpreter: ${reply}`);
       } finally { await w.close(); }
@@ -254,6 +255,22 @@ for (const backend of backends) {
     assert.equal(await c.paused("agent", ann), false);
   });
 
+  suite("the one paused is the one the interpreter named: another agent named elsewhere in the message is never paused in its place", async (c) => {
+    const ann = await c.agent("Ann");
+    const bob = await c.agent("Bob");
+    // There is no Zed: Ann, named only as who asked, is not paused instead, at once or otherwise.
+    const zed = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Zed" }, "pause Zed, Ann asked for it"))).outcomes[0]!;
+    assert.deepEqual([zed.status, zed.code], ["refused", "not_found"], JSON.stringify(zed));
+    const kindless = (await c.say(owned(c, "lifecycle.stop", { scopeName: "Zed" }, "stop Zed because Bob said so"))).outcomes[0]!;
+    assert.deepEqual([kindless.status, kindless.code], ["refused", "not_found"], JSON.stringify(kindless));
+    assert.equal(await c.paused("agent", ann), false);
+    assert.equal(await c.paused("agent", bob), false);
+    // A name the interpreter read with a word around it still finds the agent named inside it.
+    assert.equal((await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "agent Bob" }, "pause agent Bob, Ann is fine"))).outcomes[0]!.status, "applied");
+    assert.equal(await c.paused("agent", bob), true);
+    assert.equal(await c.paused("agent", ann), false);
+  });
+
   suite("a question, or a message with no word of ordering, is never applied at once even when the model reads it as a pause", async (c) => {
     const ann = await c.agent("Ann");
     const q = (await c.say(owned(c, "lifecycle.pause", { scopeKind: "agent", scopeName: "Ann" }, "what is Ann doing right now?"))).outcomes[0]!;
@@ -291,10 +308,16 @@ for (const backend of backends) {
     assert.deepEqual(callsOf(c), []);
     // The read of what is paused is the owner's too: an agent with other rights is told nothing about the gates.
     await c.pauses.pause(c.w.owner, { commandId: cid("pz"), scope: { kind: "agent", id: ann }, reason: "secret reason" });
-    for (const request of [{ kind: "lifecycle" }, { kind: "lifecycle", scopeKind: "agent", scopeId: ann }]) {
-      const seen = JSON.stringify(await c.w.api.handle(intruder.token, { v: API_VERSION, op: "status.ask", args: { request } } as never));
-      assert.ok(!seen.includes("secret reason") && !/is paused/.test(seen), seen);
+    // Review: asked of the status view itself (this world's API has no status view), an agent is not told "not paused" about a scope that is paused either; the view is missing for it,
+    // even for an agent with the right to read agents, which may read the gates themselves.
+    const reader = await c.w.agent("reader", [{ action: "agent.read", project: "*" }]);
+    for (const who of [intruder.principal, reader.principal]) {
+      for (const request of [{ kind: "lifecycle" }, { kind: "lifecycle", scopeKind: "agent", scopeId: ann }, { kind: "lifecycle", scopeKind: "installation", scopeId: "installation" }] as const) {
+        const seen = await c.status.ask(who, request as never);
+        assert.equal(seen, undefined, `${who.id}: ${JSON.stringify(seen)}`);
+      }
     }
+    assert.match((await c.status.ask(c.w.owner, { kind: "lifecycle", scopeKind: "agent", scopeId: ann } as never))!.lines.map((l) => l.text).join("\n"), /is paused.*reason "secret reason"/, "the owner reads it");
   });
 
   suite("what is paused is answered in free words for the installation and every agent, for one agent by name, and for the whole installation", async (c) => {
