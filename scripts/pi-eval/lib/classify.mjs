@@ -223,6 +223,23 @@ export function endKindOf(summary) {
   return "report";
 }
 
+/**
+ * Whether the last reply ends the work the way variant B's rules ask: a report that states its result as done, partial or
+ * blocked (the Pi command line has no work.end, so this report is its stand-in; W04's continuation gives no nudge after
+ * it, as the worker gives none after an accepted work.end). A reply that announces a next step, has no visible text or
+ * states no result is not an ending.
+ */
+export function reportEndsWork(summary) {
+  const last = summary.last;
+  if (last === null || last.visibleChars === 0 || last.stopReason === "length") return false;
+  if (ANNOUNCES_STEP.test(last.visibleTail)) return false;
+  const text = last.visibleText ?? `${last.visibleHead ?? ""}\n${last.visibleTail ?? ""}`;
+  const cut = CAVEAT_LABEL.exec(text);
+  const body = cut === null ? text : text.slice(0, cut.index);
+  const stated = statedResult(body.slice(0, 600), body.slice(-600), body.length > 600);
+  return stated === "done" || stated === "not-done";
+}
+
 /** Whether the agent's last own test run that printed counts was green (some passed, none failed). */
 export const selfTestsGreen = (summary) => summary.lastSelfTest !== null && summary.lastSelfTest !== undefined && (summary.lastSelfTest.pass ?? 0) > 0 && summary.lastSelfTest.fail === 0;
 

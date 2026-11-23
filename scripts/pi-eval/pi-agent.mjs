@@ -10,7 +10,7 @@
 // the real home, and Pi finds only the per-run configuration that reaches the model through the bench's key proxy.
 // Card W01b: Pi is started with the bench's extension arg-clean-extension.mjs (next to this file, so it is readable in the
 // sandbox like this script), which keeps lone surrogates out of the tool-call arguments Pi re-sends; it writes its counts
-// to arg-clean.json beside the log, which the runner copies into the run record.
+// to arg-clean.json beside the log, which the runner copies into the run record. Card W04 (variant C): see below.
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -30,11 +30,14 @@ const bin = realpathSync(process.env.PI_EVAL_PI_BIN || join(homedir(), ".local",
 const prompt = readFileSync(promptFile, "utf8");
 
 const extension = fileURLToPath(new URL("./arg-clean-extension.mjs", import.meta.url));
-const args = [bin, "-p", "-e", extension, ...(sessionId ? ["--session-id", sessionId] : ["--no-session"]), "--no-approve", "--provider", provider, "--model", model, "--thinking", thinking, "--mode", "json", prompt];
+// Card W04, variant C: with a continuation config (the runner's PI_EVAL_CONTINUATION_CONFIG) Pi also loads the bench's
+// continuation extension, which is the worker's bounded onYield hook at Pi's last boundary (continuation-extension.mjs).
+const continuation = process.env.PI_EVAL_CONTINUATION_CONFIG ? ["-e", fileURLToPath(new URL("./continuation-extension.mjs", import.meta.url))] : [];
+const args = [bin, "-p", "-e", extension, ...continuation, ...(sessionId ? ["--session-id", sessionId] : ["--no-session"]), "--no-approve", "--provider", provider, "--model", model, "--thinking", thinking, "--mode", "json", prompt];
 // stdout only in the JSON log: a warning on stderr written into it could split or swallow an event line.
 const log = openSync(logFile, "w");
 const errLog = openSync(join(dirname(logFile), "pi-stderr.log"), "w");
-const child = spawn(process.execPath, args, { cwd: dir, stdio: ["ignore", log, errLog], env: { ...process.env, PI_OFFLINE: "1", PI_EVAL_ARG_CLEAN_FILE: join(dirname(logFile), "arg-clean.json") } });
+const child = spawn(process.execPath, args, { cwd: dir, stdio: ["ignore", log, errLog], env: { ...process.env, PI_OFFLINE: "1", PI_EVAL_ARG_CLEAN_FILE: join(dirname(logFile), "arg-clean.json"), PI_EVAL_CONTINUATION_FILE: join(dirname(logFile), "continuation.json") } });
 closeSync(log);
 closeSync(errLog);
 // The runner stops the agent by signalling this process; pass it on so Pi is not left running.

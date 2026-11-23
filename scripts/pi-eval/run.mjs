@@ -2,7 +2,7 @@
 // The Pi completion bench (card W01). One command runs it:
 //   node scripts/pi-eval/run.mjs                      every task, variants A and B, the task set's repeats, then the report
 // Options:
-//   --tasks id,id        only these tasks            --variants A,B   which variants (C and D need W04 and are refused)
+//   --tasks id,id        only these tasks            --variants A,B   which variants (D needs a session relaunch driver and is refused; C runs the W04 continuation)
 //   --repeats N          runs per task and variant   --concurrency N  parallel runs (default 1, at most 3: Pi's limit on Radiance)
 //   --results DIR        where results go (default /srv/code/worktrees-pi/eval-results, or PI_EVAL_RESULTS)
 //   --work-root DIR      where throwaway checkouts go (default eval-work beside the results, or PI_EVAL_WORK_ROOT)

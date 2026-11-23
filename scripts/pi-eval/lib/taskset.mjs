@@ -17,6 +17,7 @@ export function loadTaskset(file) {
   if (!raw.variants || typeof raw.variants !== "object") problems.push("variants is required");
   // A variant name is part of each run's checkout directory name, so it must be a plain name.
   for (const k of Object.keys(raw.variants ?? {})) if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,20}$/.test(k)) problems.push(`variant ${JSON.stringify(k)}: name must be letters, digits and dashes`);
+  for (const [k, v] of Object.entries(raw.variants ?? {})) if (v?.continuation !== undefined && typeof v.continuation !== "boolean") problems.push(`variant ${JSON.stringify(k)}: continuation must be true or false`);
   const seen = new Set();
   const tasks = (Array.isArray(raw.tasks) ? raw.tasks : []).map((t, i) => {
     const where = `tasks[${i}] (${t?.id ?? "?"})`;
@@ -95,6 +96,22 @@ export async function loadCompletionRules() {
   try { ({ COMPLETION_RULES: text } = await import(url.href)); } catch (error) { throw new Error(`the completion rules could not be read from ${fileURLToPath(url)} (build the repository first: npx tsc --build): ${error?.message ?? error}`); }
   if (typeof text !== "string" || text.trim() === "") throw new Error("the built pi-adapter has no COMPLETION_RULES");
   return text;
+}
+
+/**
+ * The continuation of card W04 as the worker uses it, from this checkout's built pi-adapter: the bound (3), the mark in front of every continuation and the nudge's fixed words (and the same words with the cut-off lead for a reply stopped at the output limit). The repository must be built.
+ */
+export async function loadContinuationConfig() {
+  const base = "../../../packages/pi-adapter/dist/";
+  let max, mark, nudge, lengthNudge;
+  try {
+    ({ DEFAULT_MAX_CONTINUATIONS: max, CONTINUATION_MARK: mark } = await import(new URL(`${base}continuation.js`, import.meta.url).href));
+    const n = await import(new URL(`${base}worker/nudge.js`, import.meta.url).href);
+    nudge = n.nudgeText("stop");
+    lengthNudge = n.nudgeText("length");
+  } catch (error) { throw new Error(`the continuation could not be read from ${fileURLToPath(new URL(base, import.meta.url))} (build the repository first: npx tsc --build): ${error?.message ?? error}`); }
+  if (!Number.isSafeInteger(max) || typeof mark !== "string" || mark === "" || typeof nudge !== "string" || nudge.trim() === "" || typeof lengthNudge !== "string" || lengthNudge === nudge) throw new Error("the built pi-adapter's continuation is not what the bench expects");
+  return { max, mark, nudge, lengthNudge };
 }
 
 /** Fills a prompt template. Only the named placeholders are replaced; the task text and the completion rules are inserted as they are. A template that asks for the completion rules needs them. */

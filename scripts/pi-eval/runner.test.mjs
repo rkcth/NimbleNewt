@@ -41,7 +41,7 @@ before(() => {
   writeFileSync(join(bench, "taskset.json"), JSON.stringify({
     agent: { provider: "stub", model: "stub" },
     defaults: { repeats: 1, timeoutMinutes: { S: 1 }, copy: [], setup: null, test: { argv: ["node", "--test", "{{TEST_FILES}}"] } },
-    variants: { A: { prompt: "prompts/a.md" }, C: { needs: "W04" } },
+    variants: { A: { prompt: "prompts/a.md" }, C: { prompt: "prompts/a.md", continuation: true }, D: { prompt: "prompts/a.md", needs: "W04 and a relaunch driver" } },
     tasks: [{ id: "tiny", size: "S", base, solution, prompt: "tasks/tiny.md", hiddenFiles: ["lib.test.mjs"], testFiles: ["lib.test.mjs"] }],
   }));
   set = loadTaskset(join(bench, "taskset.json"));
@@ -131,10 +131,77 @@ test("calibration: the hidden tests fail at the base and pass at the solution", 
   assert.equal(c.solution.passed, true);
 });
 
-test("variants that need W04 are refused by the command, not run", () => {
-  let code = 0;
-  try { execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", set.file, "--repo", repo, "--variants", "C", "--results", join(root, "r2")], { stdio: "pipe" }); } catch (e) { code = e.status; }
-  assert.equal(code, 2);
+test("a variant that still needs something (D) is refused by the command, not run; C is accepted (W04)", () => {
+  const run = (v) => { try { return { code: 0, out: execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", set.file, "--repo", repo, "--variants", v, "--dry-run", "--results", join(root, "r2")], { stdio: "pipe", encoding: "utf8" }) }; } catch (e) { return { code: e.status, out: String(e.stderr) }; } };
+  const d = run("D");
+  assert.equal(d.code, 2);
+  assert.match(d.out, /variant D needs W04 and a relaunch driver/);
+  const c = run("C");
+  assert.equal(c.code, 0, c.out);
+  assert.match(c.out, /variant C repeat 1/);
+});
+
+// Card W04, bench variant C: the worker's bounded continuation on the Pi command line, here through the stand-in agent
+// that runs the bench's real continuation extension at each end (stub-agent.mjs mode "continued").
+const CONTINUATION = { max: 3, mark: "[NimbleNewt: the turn goes on]", nudge: "NUDGE-TEXT", lengthNudge: "CUT-OFF-LEAD NUDGE-TEXT" };
+const continuedCtx = (env = {}, extra = {}) => ({ ...ctx("continued"), continuation: CONTINUATION, agentEnv: { STUB_AGENT_MODE: "continued", STUB_AGENT_SOLUTION_DIR: join(root, "answer"), ...env }, ...extra });
+const finalReplies = (r) => readFileSync(join(r.artifacts, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.type === "turn_end").length;
+
+test("W04 variant C: an agent that keeps stopping early is continued exactly 3 times, then its stop stands; the record has the nudges", async () => {
+  const r = await runOne(continuedCtx(), set.tasks[0], "C", 1);
+  assert.equal(r.outcome, "stopped-early", r.reason);
+  assert.equal(r.nudges, 3);
+  assert.deepEqual(r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0 });
+  assert.equal(finalReplies(r), 5, "the work turn, the first stop, and one reply after each of the 3 nudges");
+  const cfg = JSON.parse(readFileSync(join(r.artifacts, "continuation-config.json"), "utf8"));
+  assert.deepEqual(cfg, CONTINUATION, "the runner hands the agent the worker's words");
+  const nudgesSeen = readFileSync(join(r.artifacts, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.message?.role === "user");
+  assert.deepEqual(nudgesSeen.map((e) => e.message.content), Array(3).fill(`${CONTINUATION.mark} ${CONTINUATION.nudge}`));
+});
+
+test("W04 variant C: the same agent in variant A is not continued: no nudge, no continuation record", async () => {
+  const r = await runOne(continuedCtx(), set.tasks[0], "A", 1);
+  assert.equal(r.outcome, "stopped-early", r.reason);
+  assert.equal(r.nudges, 0);
+  assert.equal(r.continuation, undefined);
+  assert.equal(finalReplies(r), 2);
+  assert.equal(existsSync(join(r.artifacts, "continuation-config.json")), false);
+});
+
+test("W04 variant C: an agent that does the work after 2 nudges finishes verified; the nudges are recorded and its done report ends the continuing", async () => {
+  const r = await runOne(continuedCtx({ STUB_AGENT_SOLVE_AFTER: "2" }), set.tasks[0], "C", 1);
+  assert.equal(r.outcome, "verified-finish", r.reason);
+  assert.equal(r.nudges, 2);
+  assert.equal(r.continuation.endedByReport, true);
+  assert.equal(finalReplies(r), 4);
+});
+
+test("W04 variant C: a thinking-only stop is continued; a cut-off reply is continued with the cut-off words and counted as such", async () => {
+  const t = await runOne(continuedCtx({ STUB_AGENT_LAST: "thinking-only" }), set.tasks[0], "C", 1);
+  assert.equal(t.nudges, 3);
+  assert.equal(t.continuation.lengthNudges, 0);
+  const l = await runOne(continuedCtx({ STUB_AGENT_LAST: "length" }), set.tasks[0], "C", 1);
+  assert.equal(l.nudges, 3);
+  assert.equal(l.continuation.lengthNudges, 3);
+  const users = readFileSync(join(l.artifacts, "agent.jsonl"), "utf8").split("\n").filter(Boolean).map((x) => JSON.parse(x)).filter((e) => e.message?.role === "user");
+  assert.ok(users.every((e) => e.message.content === `${CONTINUATION.mark} ${CONTINUATION.lengthNudge}`));
+});
+
+test("W04 variant C: an honest blocked report is not nudged (the stand-in of an accepted work.end), and the bound comes from the config", async () => {
+  const b = await runOne(continuedCtx({ STUB_AGENT_LAST: "report-blocked" }), set.tasks[0], "C", 1);
+  assert.equal(b.nudges, 0);
+  assert.equal(b.continuation.endedByReport, true);
+  const one = await runOne(continuedCtx({}, { continuation: { ...CONTINUATION, max: 1 } }), set.tasks[0], "C", 1);
+  assert.equal(one.nudges, 1);
+  assert.equal(one.continuation.max, 1);
+  const none = await runOne(continuedCtx({}, { continuation: { ...CONTINUATION, max: 0 } }), set.tasks[0], "C", 1);
+  assert.equal(none.nudges, 0);
+});
+
+test("W04 variant C: an agent that never loads the continuation is recorded as not installed, with 0 nudges (not a C measurement)", async () => {
+  const r = await runOne({ ...ctx("first-turn"), continuation: CONTINUATION }, set.tasks[0], "C", 1);
+  assert.deepEqual(r.continuation, { max: 3, installed: false });
+  assert.equal(r.nudges, 0);
 });
 
 test("a solution that passes the hidden tests but does not build is not a finish", async () => {

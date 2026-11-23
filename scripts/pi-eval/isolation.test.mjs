@@ -48,7 +48,7 @@ let listenerConnections = 0;
  * an `edit` call. `bodies` keeps every chat request body; with `strictArguments` a body whose tool-call arguments are not
  * well-formed Unicode JSON is refused with Radiance's 400.
  */
-const fakeModel = { toolCommand: null, editArguments: null, strictArguments: false, bodies: [] };
+const fakeModel = { toolCommand: null, editArguments: null, strictArguments: false, bodies: [], finalText: "Done. Nothing to change." };
 
 /** A stand-in for the model server: an OpenAI-style API on loopback that records the Authorization header of each request. */
 function fakeModelServer() {
@@ -85,7 +85,7 @@ function fakeModelServer() {
             return;
           }
           res.write(chunk({ role: "assistant", content: "" }));
-          res.write(chunk({ content: "Done. Nothing to change." }));
+          res.write(chunk({ content: fakeModel.finalText }));
           res.write(chunk({}, "stop", { usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } }));
           res.end("data: [DONE]\n\n");
           return;
@@ -142,7 +142,7 @@ before(async () => {
   writeFileSync(join(bench, "taskset.json"), JSON.stringify({
     agent: { provider: "fakeprov", model: "fake-model", thinking: "off" },
     defaults: { repeats: 1, timeoutMinutes: { S: 1 }, copy: [], setup: null, test: { argv: ["node", "--test", "{{TEST_FILES}}"] } },
-    variants: { A: { prompt: "prompts/a.md" } },
+    variants: { A: { prompt: "prompts/a.md" }, C: { prompt: "prompts/a.md", continuation: true } },
     tasks: [{ id: "tiny", size: "S", base, solution, prompt: "tasks/tiny.md", hiddenFiles: ["lib.test.mjs"], testFiles: ["lib.test.mjs"] }],
   }));
   set = loadTaskset(join(bench, "taskset.json"));
@@ -903,6 +903,41 @@ test("W01b: Pi's next request after a string `edits` holding lone surrogates rea
     // Counts only: the record file holds no text of the request.
     assert.doesNotMatch(readFileSync(join(r.artifacts, "arg-clean.json"), "utf8"), /oldText|=>|ud800/);
   } finally { fakeModel.editArguments = null; fakeModel.strictArguments = false; }
+});
+
+// Card W04, bench variant C through the real Pi (offline, stand-in server): the continuation extension loaded by pi-agent.mjs
+// asks Pi at its last boundary (agent_before_settle) for one more request with the worker's nudge, at most 3 times. The
+// stand-in always answers with a stop that announces a next step; the record says how many nudges it took.
+test("W04: the real Pi, variant C: a stop that announces a next step is continued 3 times with the worker's nudge, then it stands; variant A makes 1 request; a done report is not nudged", { skip: needsSandbox.skip || (piBin === null ? "Pi is not installed" : false) }, async () => {
+  const config = { max: 3, mark: "[NimbleNewt: the turn goes on]", nudge: "NUDGE-WORDS go on with PLAN.md", lengthNudge: "CUT-OFF NUDGE-WORDS" };
+  const run = async (variant, finalText) => {
+    fakeModel.finalText = finalText;
+    fakeModel.bodies = [];
+    const { ctx } = incidentCtx({ agent: ["node", join(here, "pi-agent.mjs")], agentEnv: { PI_EVAL_THINKING: "off" }, piBin, continuation: config });
+    const r = await runOne(ctx, set.tasks[0], variant, 1);
+    let err = ""; try { err = readFileSync(join(r.artifacts, "pi-stderr.log"), "utf8").slice(0, 1500); } catch { /* none */ }
+    return { r, why: `record ${JSON.stringify(r)}\npi stderr: ${err}\nbodies: ${fakeModel.bodies.length}` };
+  };
+  try {
+    const announce = "I have read the task. Next I'll make the change and add the tests.";
+    const c = await run("C", announce);
+    assert.equal(fakeModel.bodies.length, 4, c.why);
+    assert.equal(c.r.nudges, 3, c.why);
+    assert.deepEqual(c.r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0 }, c.why);
+    const users = (body) => JSON.parse(body).messages.filter((m) => m.role === "user").map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text ?? "").join("")));
+    const last = users(fakeModel.bodies[3]);
+    assert.equal(last.filter((t) => t.startsWith(config.mark)).length, 3, c.why);
+    assert.ok(last.filter((t) => t.startsWith(config.mark)).every((t) => t === `${config.mark} ${config.nudge}`), c.why);
+    assert.equal(users(fakeModel.bodies[0]).filter((t) => t.startsWith(config.mark)).length, 0, "the first request has no nudge");
+    assert.equal(c.r.outcome, "stopped-early", c.why);
+    const a = await run("A", announce);
+    assert.equal(fakeModel.bodies.length, 1, a.why);
+    assert.equal(a.r.continuation, undefined);
+    const d = await run("C", "Done. Nothing to change.");
+    assert.equal(fakeModel.bodies.length, 1, d.why);
+    assert.equal(d.r.continuation.endedByReport, true, d.why);
+    assert.equal(d.r.nudges, 0);
+  } finally { fakeModel.finalText = "Done. Nothing to change."; }
 });
 
 test("the checkout is still graded by the bench with its own environment (an honest agent under isolation is a verified finish)", needsSandbox, async () => {
