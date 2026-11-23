@@ -6,7 +6,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { SubmissionService } from "../submissions/index.js";
 import type { Principal } from "../security/index.js";
 import { ModelInterpreter } from "./model-interpreter.js";
-import { approvedCodeLookup, APPROVED_CODE_ASKED } from "./index.js";
+import { approvedCodeLookup, APPROVED_CODE_PAGES } from "./index.js";
 import { cid, openWorld, options } from "./testing/harness.js";
 
 after(stopServer);
@@ -68,16 +68,16 @@ for (const backend of backends) {
     assert.equal((await c.svc.list(c.w.owner, c.task, { limit: 100 })).items.length, 2);
   });
 
-  scene("no approved uncommitted code (nothing approved, not approved, already committed, own-author approval, other task): a plain refusal and no proposal", async (c) => {
+  scene("no approved uncommitted code (no code, newest not approved, newest already committed, made-up or unapproved ID): a plain refusal and no proposal", async (c) => {
     const refuse = async (text: string, args?: Record<string, unknown>): Promise<string> => {
       const r = await c.say(text, args);
       assert.equal(r.outcomes[0]!.status, "refused", JSON.stringify(r.outcomes[0]));
       assert.equal(r.outcomes[0]!.proposalId, undefined);
       return String(r.outcomes[0]!.message);
     };
-    assert.match(await refuse("commit the approved parser fix"), /no approved code of "parser fix" waiting to be committed/i);
+    assert.match(await refuse("commit the approved parser fix"), /No code has been submitted on "parser fix"/);
     const unapproved = await c.code(T("a"));
-    assert.match(await refuse("commit the approved parser fix now"), /no approved code/i);
+    assert.match(await refuse("commit the approved parser fix now"), new RegExp(`newest code of "parser fix" \\(${unapproved}, submitted [^)]+\\) is not approved code waiting to be committed[^]*nothing was proposed\\.$`));
     await c.approve(unapproved);
     c.commits.add(unapproved);
     assert.match(await refuse("commit the approved parser fix again"), /already committed/);
@@ -88,49 +88,51 @@ for (const backend of backends) {
     assert.equal(c.asked.length, 0);
   });
 
-  scene("two approved uncommitted submissions: the owner is asked which, with IDs and submit times; the choice is carried out once; an ID the owner names is verified", async (c) => {
+  scene("several approved uncommitted submissions: only the newest is filled in; an older one is proposed only when the owner names it; code that newer unapproved code followed is not filled in", async (c) => {
     const a = await c.code(T("a")); await c.approve(a);
     const b = await c.code(T("b")); await c.approve(b);
     const r = await c.say("commit the approved parser fix");
-    assert.equal(r.outcomes[0]!.status, "asked", JSON.stringify(r.outcomes[0]));
-    const text = JSON.stringify(r.outcomes[0]);
-    assert.ok(text.includes(a) && text.includes(b), text);
-    assert.match(text, /submitted 2026-11-22T/);
-    assert.ok(text.indexOf(b) < text.indexOf(a), "newest first");
+    assert.equal(r.outcomes[0]!.status, "proposed", JSON.stringify(r.outcomes[0]));
+    assert.match(String(r.outcomes[0]!.preview), new RegExp(`submissionId=${b}`));
+    assert.match(JSON.stringify(r.outcomes[0]), /the task's newest code, approved and not committed yet/);
     assert.deepEqual(c.asked, []);
-    // The owner picks one from the question: the chat looks the choice up again, shows it, and carries it out once on yes.
-    const pick = "the older one please";
-    c.reply([{ kind: "answer", turnId: (r as { turnId?: string }).turnId, choice: a, evidence: pick, basis: "owner" }]);
-    const picked = await c.chat.submit(c.w.ownerToken, { messageId: cid("m"), text: pick }) as unknown as { outcomes: { status: string; preview?: unknown; proposalId?: string }[] };
-    assert.equal(picked.outcomes[0]!.status, "proposed", JSON.stringify(picked.outcomes[0]));
-    assert.match(String(picked.outcomes[0]!.preview), new RegExp(`submissionId=${a}`));
-    assert.equal((await c.chat.applyProposal(c.w.ownerToken, { commandId: cid("a"), proposalId: picked.outcomes[0]!.proposalId! })).applied, true);
-    assert.deepEqual(c.asked.map((x: { submissionId?: string }) => x.submissionId), [a]);
-    c.asked.length = 0;
-    // The owner who names one of them gets a proposal at once, with no question.
+    // The owner who names the older one gets a proposal for it, and it is carried out once on yes.
     const named = await c.say(`commit submission ${a} of the parser fix`, { submissionId: a });
     assert.equal(named.outcomes[0]!.status, "proposed", JSON.stringify(named.outcomes[0]));
     assert.match(String(named.outcomes[0]!.preview), new RegExp(`submissionId=${a}`));
-    assert.equal(c.asked.length, 0);
+    assert.equal((await c.chat.applyProposal(c.w.ownerToken, { commandId: cid("a"), proposalId: named.outcomes[0]!.proposalId! })).applied, true);
+    assert.deepEqual(c.asked.map((x: { submissionId?: string }) => x.submissionId), [a]);
+    c.asked.length = 0;
+    // Newer code that is not approved yet: neither approved one is filled in, and the answer says why.
+    const n = await c.code(T("e"));
+    const later = await c.say("commit the approved parser fix please");
+    assert.equal(later.outcomes[0]!.status, "refused", JSON.stringify(later.outcomes[0]));
+    assert.equal(later.outcomes[0]!.proposalId, undefined);
+    assert.match(String(later.outcomes[0]!.message), new RegExp(`newest code of "parser fix" \\(${n},`));
+    assert.match(String(later.outcomes[0]!.message), /2 older approved submissions are not committed, but newer code followed them/);
+    assert.deepEqual(c.asked, []);
   });
 
-  scene("more waiting submissions than are listed: only five are offered; a lookup that fails proposes nothing (fails closed)", async (c) => {
-    const ids: string[] = [];
-    for (let i = 0; i < APPROVED_CODE_ASKED + 2; i++) { const id = await c.code(i.toString(16).repeat(40)); await c.approve(id); ids.push(id); }
-    const r = await c.say("commit the approved parser fix");
-    assert.equal(r.outcomes[0]!.status, "asked", JSON.stringify(r.outcomes[0]));
-    const text = JSON.stringify(r.outcomes[0]);
-    assert.equal(ids.filter((id) => text.includes(id)).length, APPROVED_CODE_ASKED, text);
-    assert.match(text, new RegExp(`${APPROVED_CODE_ASKED + 2} approved submissions`));
+  scene("a lookup that fails proposes nothing (fails closed), and a release that names no task is never proposed", async (c) => {
+    const id = await c.code(T("a")); await c.approve(id);
     c.failing.on = true;
     const down = await c.say("commit the approved parser fix please");
     assert.equal(down.outcomes[0]!.status, "refused", JSON.stringify(down.outcomes[0]));
     assert.match(String(down.outcomes[0]!.message), /could not be checked/);
     assert.equal(down.outcomes[0]!.proposalId, undefined);
+    c.failing.on = false;
+    c.lookups.length = 0;
+    const text = "commit the approved code";
+    c.reply([{ kind: "command", op: "workspace.request", args: { operation: "release", reason: text }, evidence: text, basis: "owner" }]);
+    const none = await c.chat.submit(c.w.ownerToken, { messageId: cid("m"), text }) as unknown as { outcomes: { status: string; message?: unknown; proposalId?: string }[] };
+    assert.equal(none.outcomes[0]!.status, "refused", JSON.stringify(none.outcomes[0]));
+    assert.match(String(none.outcomes[0]!.message), /no task was named/);
+    assert.equal(none.outcomes[0]!.proposalId, undefined);
+    assert.deepEqual(c.lookups, [], "nothing is looked up for no task");
     assert.deepEqual(c.asked, []);
   });
 
-  scene("a stranger or an agent cannot trigger it, and a release with no task is never proposed", async (c) => {
+  scene("an agent cannot trigger it: it is refused before any planning or lookup", async (c) => {
     const id = await c.code(T("a")); await c.approve(id);
     const agent = await c.w.agent("sneaky", [{ action: "*", project: "*" }]);
     const chat = c.w.chat({ interpreter: new ModelInterpreter({ complete: async () => "[]" }, () => ["a/primary"]), approvedCode: async () => { throw new Error("must not be looked up"); } });
@@ -146,6 +148,7 @@ for (const backend of backends) {
     const lookup = approvedCodeLookup({ submissions: c.svc, commit: async (id) => (c.commits.has(id) ? { commitId: "x" } : undefined) });
     const found = await lookup(c.w.owner, c.task);
     assert.deepEqual(found.items.map((i) => i.id), [a]);
+    assert.equal(found.newest?.id, b, "the newest code is named whatever its state");
     assert.equal(found.truncated, false);
     const other = await c.w.task((await c.w.project("Other")), "Other task");
     assert.deepEqual((await lookup(c.w.owner, other)).items, []);
@@ -170,6 +173,67 @@ test("with no lookup wired, a release naming no submission is refused and one na
     assert.match(String(none.outcomes[0]!.message), /cannot be looked up here/);
     const named = await say("commit sbm-abcdefghijklmnopqrst of the parser fix", { submissionId: "sbm-abcdefghijklmnopqrst" });
     assert.equal(named.outcomes[0]!.status, "proposed", JSON.stringify(named.outcomes[0]));
+    assert.deepEqual(asked, []);
+  } finally { await w.close(); }
+});
+
+// The lookup's rule is the release's own (workspace-ops `#approved`), over a stand-in submission service: the one-agent approval counts, an approval that names the author does not, nor one of another
+// task's record; a call that stopped at its own read bound and handed a cursor is followed (not partial); only the last call's cursor at the page bound makes the answer partial.
+test("the lookup counts exactly what a release accepts and reads the scan bound as the submissions view does", async () => {
+  const owner = { id: "owner:o", kind: "owner", grants: [] } as unknown as Principal;
+  const sid = (c: string): string => `sbm-${c.repeat(20)}`;
+  const approvals: Record<string, Record<string, unknown>> = {
+    [sid("a")]: { taskId: "tsk-1", approved: true, approvedBy: "review_disabled_single_agent", submittedBy: "agent:ann" },
+    [sid("b")]: { taskId: "tsk-1", approved: true, approvedBy: "agent:ann", submittedBy: "agent:ann" },
+    [sid("c")]: { taskId: "tsk-2", approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" },
+    [sid("d")]: { taskId: "tsk-1", approved: false, submittedBy: "agent:ann" },
+    [sid("e")]: { taskId: "tsk-1", approved: true, approvedBy: "agent:rev", submittedBy: "agent:ann" },
+  };
+  const at = (n: number): string => `2026-11-22T10:0${n}:00.000Z`;
+  const rows = [sid("a"), sid("b"), sid("c"), sid("d"), sid("e")].map((id, n) => ({ id, kind: "code", submittedAt: at(n) }));
+  let calls = 0;
+  // Each call hands one row and a cursor while rows are left, as a call that stops at its read bound does (scanLimited with next).
+  const lookup = approvedCodeLookup({
+    submissions: {
+      list: async (_by: unknown, _t: unknown, q: { afterId?: string }) => { calls++; const from = q.afterId === undefined ? 0 : Number(q.afterId) + 1; return { items: rows.slice(from, from + 1), ...(from + 1 < rows.length ? { next: String(from), scanLimited: true } : {}) } as never; },
+      approvalOf: async (id: string) => approvals[id] as never,
+    } as never,
+    commit: async () => undefined,
+  });
+  const all = await lookup(owner, "tsk-1");
+  assert.deepEqual(all.items.map((i) => i.id), [sid("e"), sid("a")], "a reviewer's and the one-agent approval count; the author's own, another task's and an unapproved one do not");
+  assert.equal(all.newest?.id, sid("e"));
+  assert.equal(all.truncated, false, "a call stopped at its read bound is followed, not read as partial");
+  assert.equal(calls, rows.length);
+});
+
+test("the lookup stops after its page bound and says so", async () => {
+  const owner = { id: "owner:o", kind: "owner", grants: [] } as unknown as Principal;
+  let calls = 0;
+  const lookup = approvedCodeLookup({
+    submissions: { list: async () => { calls++; return { items: [], next: "cursor", scanLimited: true } as never; }, approvalOf: async () => undefined } as never,
+    commit: async () => undefined,
+  });
+  const found = await lookup(owner, "tsk-1");
+  assert.equal(found.truncated, true);
+  assert.equal(found.newest, undefined);
+  assert.equal(calls, APPROVED_CODE_PAGES);
+});
+
+test("a partial scan never fills in a submission: the chat asks for the ID and proposes nothing", async () => {
+  const backend = backends[0]!;
+  const asked: unknown[] = [];
+  const w = await openWorld(backend, {}, undefined, { workspaceOps: { request: async (_b: unknown, c: unknown) => { asked.push(c); return { requestId: "wsr-x", state: "done" } as never; } } as never });
+  try {
+    const p = await w.project("Parser work");
+    await w.task(p, "parser fix");
+    const only = { id: "sbm-aaaaaaaaaaaaaaaaaaaa", submittedAt: "2026-11-22T10:00:00.000Z" };
+    const text = "commit the approved parser fix";
+    const chat = w.chat({ interpreter: new ModelInterpreter({ complete: async () => JSON.stringify([{ kind: "command", op: "workspace.request", args: { operation: "release", taskTitle: "parser fix", reason: text }, evidence: text, basis: "owner" }]) }, () => ["a/primary"]), approvedCode: async () => ({ items: [only], newest: only, truncated: true }) });
+    const r = await chat.submit(w.ownerToken, { messageId: cid("m"), text });
+    assert.equal(r.outcomes[0]!.status, "refused", JSON.stringify(r.outcomes[0]));
+    assert.match(String(r.outcomes[0]!.message), /Not every submission of "parser fix" could be read/);
+    assert.equal((r.outcomes[0] as { proposalId?: string }).proposalId, undefined);
     assert.deepEqual(asked, []);
   } finally { await w.close(); }
 });

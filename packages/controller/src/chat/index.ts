@@ -1,4 +1,4 @@
-export { approvedCodeLookup, APPROVED_CODE_PAGES, APPROVED_CODE_ASKED, type ApprovedCode, type ApprovedCodeFound, type ApprovedCodeLookup } from "./approved-code.js";
+export { approvedCodeLookup, APPROVED_CODE_PAGES, type ApprovedCode, type ApprovedCodeFound, type ApprovedCodeLookup } from "./approved-code.js";
 export { AUTHORITY_FIELDS, CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, proposalReason, type ChatOp } from "./commands.js";
 export { ModelInterpreter, type ModelCall, type ModelReply } from "./model-interpreter.js";
 export { HttpModelCall, type HttpModelOptions } from "./http-model.js";
