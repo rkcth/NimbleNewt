@@ -227,7 +227,8 @@ for (const backend of backends) {
       const taskC = await t.task();
       const c1 = (await submissions.record(ann, { commandId: cid("s"), taskId: taskC, kind: "code", role: "author", base: BASE, tree: tree("6"), patchId: P2 })).id;
       const c2 = (await submissions.record(ann, { commandId: cid("s"), taskId: taskC, kind: "code", role: "author", base: BASE2, tree: tree("7"), patchId: P2 })).id;
-      assert.deepEqual([await submissions.carriedFrom(c2), await submissions.carriedFrom(c1)], [[c1], []]);
+      const c3 = (await submissions.record(ann, { commandId: cid("s"), taskId: taskC, kind: "code", role: "author", base: BASE, tree: tree("8"), patchId: P2 })).id;
+      assert.deepEqual([await submissions.carriedFrom(c3), await submissions.carriedFrom(c2), await submissions.carriedFrom(c1)], [[c2, c1], [c1], []]);
       // Nothing crosses tasks: the same patch ID on another task has its own lineage.
       const taskD = await t.task();
       const d1 = await t.code(ann, taskD, BASE2, P1, "8");
