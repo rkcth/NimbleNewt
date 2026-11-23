@@ -2,3 +2,4 @@ export { ARCHITECTURES, CATALOG_LIMITS, CatalogService, OPERATING_SYSTEMS, TOOLB
 export { CatalogPolicyService, RUNNING_CALL_POLICIES, type CatalogPolicyView } from "./policy.js";
 export { NOTICE_LIMITS, readNotices, type ToolboxNotice } from "./notices.js";
 export { ACCEPTANCE_LIMIT, PROPOSAL_DECISIONS, PROPOSAL_KIND, PROPOSAL_LIMITS, PROPOSAL_STATES, ToolboxProposalService, type ProposalDecision, type ProposalKind, type ProposalState, type ProposalSummary, type ToolboxProposalBody } from "./proposals.js";
+export { MAINTAINER_LIMITS, toolboxMaintainers, type MaintainerPorts, type MaintainerRow, type MaintainersAnswer } from "./maintainers.js";

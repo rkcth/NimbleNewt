@@ -229,6 +229,19 @@ landing_settings  "What checks does Garden require before its work lands?"
 
 Everything is read from the project's own records: if a view says nothing is waiting, nothing is, unless the view also says it looked at only part of the records.
 
+## Shared tools: who may decide what agents propose
+
+Agents can share tools through the **toolbox**, and any agent that may read a shared tool can propose an improvement of it. You can always decide a proposal yourself. Another agent can decide proposals only if you gave it the right to **maintain the toolbox**: you give it or take it back by asking ("let Ann maintain the toolbox"), and the right belongs to that agent's identity, not to a role or a title. An agent never decides its own proposal.
+
+<!-- d01:toolbox-maintainers -->
+```
+toolbox_maintainers "Who maintains the toolbox?"
+toolbox_maintainers "Who can approve the proposals for the lint tool?"
+toolbox_maintainers "Who maintains the toolbox, after the first 10?"
+```
+
+- **Who maintains the toolbox.** The active agents that hold the right now, each by its name with its ID, how far its right reaches and how many proposals wait for a decision it may make. A right for every project covers any shared tool; a right for some projects covers only the shared tools made for those projects alone. An agent's own proposals are not counted for it, and a long wait reads "at least". Name a shared tool ("for the lint tool") to see only the maintainers whose right covers it. It shows ten at a time: say "after the first 10" for the next ten, and the answer tells you when there are more. If nobody holds the right it says so, and then only you decide. Asking is read-only and changes nothing, and only you can ask: an agent is told nothing of it. The proposals themselves are the toolbox proposals view.
+
 ## How much the team may do on its own
 
 Three things decide what happens without asking you.
