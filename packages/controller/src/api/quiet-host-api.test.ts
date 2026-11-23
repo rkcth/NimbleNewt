@@ -76,7 +76,7 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     const shown = await turn("m1", text, [{ kind: "command", op: "host.quiet.change", args: { graceHours: 6 }, evidence: text, basis: "owner" }]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
     assert.equal((await call(boot.token, "host.quiet.get", {})).result.item.effective.graceHours, 12, "nothing changed yet");
-    const applied = await turn("m2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await turn("m2", `yes, do that ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `do that ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     assert.equal((await call(boot.token, "host.quiet.get", {})).result.item.effective.graceHours, 6);
     const off = "never move work off a quiet host by yourself";
@@ -146,7 +146,7 @@ test("host.quiet.get/change and host.move-work through the API: owner only, vali
     const said = await turn("m5", words, [{ kind: "command", op: "host.move-work", args: { hostId: first }, evidence: words, basis: "owner" }]);
     assert.equal(said[0]!.status, "proposed", JSON.stringify(said));
     assert.equal((await c.dispatch!.remote!.placement(rob, attempt))!.hostId, other, "the proposal alone moves nothing");
-    const movedByOwner = await turn("m5-ok", "yes, do it", [{ kind: "apply_proposal", proposalId: said[0]!.proposalId, evidence: "yes, do it", basis: "owner" }]);
+    const movedByOwner = await turn("m5-ok", `yes, do it ${said[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: said[0]!.proposalId, evidence: `yes, do it ${said[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(movedByOwner[0]!.status, "applied", JSON.stringify(movedByOwner));
     const m = await call(boot.token, "host.move-work", { hostId: other }, "mv1");
     assert.ok(m.ok, JSON.stringify(m));

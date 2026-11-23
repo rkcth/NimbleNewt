@@ -419,7 +419,7 @@ test("the owner turns the automatic restart off and on by chat in their own word
     const stop = "please don't restart yourself after you move the database, I'll do it";
     const proposed = await rolePlay(c, boot.token, say, "s1", stop, { kind: "command", op: "database.transfer.set", args: { restart: false } });
     assert.equal(proposed[0].status, "proposed", JSON.stringify(proposed));
-    const applied = await rolePlay(c, boot.token, say, "s2", "yes, please do that", { kind: "apply_proposal", proposalId: proposed[0].proposalId });
+    const applied = await rolePlay(c, boot.token, say, "s2", `yes, please do that ${proposed[0].proposalId}`, { kind: "apply_proposal", proposalId: proposed[0].proposalId });
     assert.equal(applied[0].status, "applied", JSON.stringify(applied));
     const lines = JSON.stringify((await rolePlay(c, boot.token, say, "s3", "how are database moves set up?", { kind: "status", request: { kind: "database_transfer" } }))[0].lines);
     assert.match(lines, /automatic restart is off/);
@@ -427,7 +427,7 @@ test("the owner turns the automatic restart off and on by chat in their own word
     const bad = await c.api.handle(boot.token, { v: 1, op: "database.transfer.set", commandId: "bad", args: { restart: "maybe" } } as never) as any;
     assert.equal(bad.error.code, "invalid_command");
     const moved = await rolePlay(c, boot.token, say, "s4", "move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
-    const done = await rolePlay(c, boot.token, say, "s5", "go ahead and move it", { kind: "apply_proposal", proposalId: moved[0].proposalId });
+    const done = await rolePlay(c, boot.token, say, "s5", `go ahead and move it ${moved[0].proposalId}`, { kind: "apply_proposal", proposalId: moved[0].proposalId });
     assert.match(done[0].results[0].shown.join(" "), /automatic restart is off: restart the controller yourself/);
     await new Promise((r) => setTimeout(r, 150));
     assert.equal(events.length, 0, "the host was not asked to restart");
@@ -446,7 +446,7 @@ test("a copy a failed move left at the destination is removed by chat, in the ow
   try {
     const boot = await c.services.principals.bootstrapOwner({ name: "rob" });
     const first = await rolePlay(c, boot.token, say, "w1", "move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
-    const failed = await rolePlay(c, boot.token, say, "w2", "yes do it", { kind: "apply_proposal", proposalId: first[0].proposalId });
+    const failed = await rolePlay(c, boot.token, say, "w2", `yes do it ${first[0].proposalId}`, { kind: "apply_proposal", proposalId: first[0].proposalId });
     assert.notEqual(failed[0].status, "applied", JSON.stringify(failed));
     assert.equal(existsSync(newPath), true, "a partial copy was left (it could not be emptied)");
     fail = false;
@@ -458,15 +458,15 @@ test("a copy a failed move left at the destination is removed by chat, in the ow
     assert.equal(plan[0].status, "proposed", JSON.stringify(plan));
     assert.match(JSON.stringify(plan[0]), /left by a transfer that did not finish/);
     // The destination refuses at first; the owner is told and the copy stays.
-    const refused = await rolePlay(c, boot.token, say, "w5", "yes, remove it", { kind: "apply_proposal", proposalId: plan[0].proposalId });
+    const refused = await rolePlay(c, boot.token, say, "w5", `yes, remove it ${plan[0].proposalId}`, { kind: "apply_proposal", proposalId: plan[0].proposalId });
     assert.notEqual(refused[0].status, "applied", JSON.stringify(refused)); assert.equal(existsSync(newPath), true);
     canEmpty = true;
-    const removed = await rolePlay(c, boot.token, say, "w6", "try removing it again", { kind: "apply_proposal", proposalId: plan[0].proposalId });
+    const removed = await rolePlay(c, boot.token, say, "w6", `go ahead and remove it ${plan[0].proposalId}`, { kind: "apply_proposal", proposalId: plan[0].proposalId });
     assert.equal(removed[0].status, "applied", JSON.stringify(removed)); assert.equal(existsSync(newPath), false);
     const again = await rolePlay(c, boot.token, say, "w7", "remove the copy at moved", { kind: "command", op: "database.transfer.wipe", args: { target: "moved" } });
     assert.notEqual(again[0].status, "proposed", "an empty destination has nothing to remove"); assert.match(JSON.stringify(again), /nothing can be removed|is empty|nothing to remove/);
     const move = await rolePlay(c, boot.token, say, "w8", "now move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
-    const ok = await rolePlay(c, boot.token, say, "w9", "yes, please do that", { kind: "apply_proposal", proposalId: move[0].proposalId });
+    const ok = await rolePlay(c, boot.token, say, "w9", `yes, please do that ${move[0].proposalId}`, { kind: "apply_proposal", proposalId: move[0].proposalId });
     assert.equal(ok[0].status, "applied", JSON.stringify(ok));
   } finally { await c.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
@@ -527,17 +527,17 @@ for (const backend of ["sqlite", "postgres"] as const) {
       // Asked again, it goes through, and a resend of the same confirmation is not applied twice.
       const again = await rolePlay(c, boot.token, say, "m2", "please stop restarting yourself after a database move", { kind: "command", op: "database.transfer.set", args: { restart: false } });
       assert.equal(again[0].status, "proposed", JSON.stringify(again));
-      const yes = await rolePlay(c, boot.token, say, "m3", "yes, do that", { kind: "apply_proposal", proposalId: again[0].proposalId });
+      const yes = await rolePlay(c, boot.token, say, "m3", `yes, do that ${again[0].proposalId}`, { kind: "apply_proposal", proposalId: again[0].proposalId });
       assert.equal(yes[0].status, "applied", JSON.stringify(yes));
       const off = (await call(boot.token, "database.transfer.settings", {})).result.item;
       assert.equal(off.restart, false);
-      const resent = (await c.chat!.submit(boot.token, { messageId: "m3", text: "yes, do that" })).outcomes as any[];
+      const resent = (await c.chat!.submit(boot.token, { messageId: "m3", text: `yes, do that ${again[0].proposalId}` })).outcomes as any[];
       assert.equal(resent[0].status, "applied", JSON.stringify(resent));
       assert.equal((await call(boot.token, "database.transfer.settings", {})).result.item.revision, off.revision, "the resend changed nothing");
 
       // Off: the move is made and the host is not asked to restart.
       const plan = await rolePlay(c, boot.token, say, "m4", "move the database to moved", { kind: "command", op: "database.transfer.apply", args: { target: "moved" } });
-      const done = await rolePlay(c, boot.token, say, "m5", "go ahead and move it", { kind: "apply_proposal", proposalId: plan[0].proposalId });
+      const done = await rolePlay(c, boot.token, say, "m5", `go ahead and move it ${plan[0].proposalId}`, { kind: "apply_proposal", proposalId: plan[0].proposalId });
       assert.equal(done[0].status, "applied", JSON.stringify(done));
       assert.match(done[0].results[0].shown.join(" "), /automatic restart is off: restart the controller yourself/);
       await new Promise((r) => setTimeout(r, 150));
@@ -568,7 +568,7 @@ test("a PostgreSQL controller with the host's restart opt-in is restarted by the
     await current.api.handle(boot.token, { v: 1, op: "project.create", commandId: "p1", args: { name: "Orchard" } } as never);
     const plan = await rolePlay(current, boot.token, say, "m1", "move my data to the file to-file", { kind: "command", op: "database.transfer.apply", args: { target: "to-file" } });
     assert.equal(plan[0].status, "proposed", JSON.stringify(plan));
-    const answer = await rolePlay(current, boot.token, say, "m2", "yes, move it", { kind: "apply_proposal", proposalId: plan[0].proposalId });
+    const answer = await rolePlay(current, boot.token, say, "m2", `yes, move it ${plan[0].proposalId}`, { kind: "apply_proposal", proposalId: plan[0].proposalId });
     assert.equal(answer[0].status, "applied", JSON.stringify(answer));
     assert.match(answer[0].results[0].shown.join(" "), /The host restarts the controller onto it in a moment/);
     await done;
@@ -580,7 +580,7 @@ test("a PostgreSQL controller with the host's restart opt-in is restarted by the
     for (const [i, [words, value]] of ([["don't restart yourself after a database move any more", false], ["go back to restarting on your own after a move", true]] as const).entries()) {
       const asked = await rolePlay(current, boot.token, say, `r${i}a`, words, { kind: "command", op: "database.transfer.set", args: { restart: value } });
       assert.equal(asked[0].status, "proposed", JSON.stringify(asked));
-      const ok = await rolePlay(current, boot.token, say, `r${i}b`, `yes (${i})`, { kind: "apply_proposal", proposalId: asked[0].proposalId });
+      const ok = await rolePlay(current, boot.token, say, `r${i}b`, `yes please go ahead ${asked[0].proposalId}`, { kind: "apply_proposal", proposalId: asked[0].proposalId });
       assert.equal(ok[0].status, "applied", JSON.stringify(ok));
       assert.equal(((await current.api.handle(boot.token, { v: 1, op: "database.transfer.settings", args: {} } as never)) as any).result.item.restart, value);
     }
@@ -622,7 +622,7 @@ test("a switch left staged by a change stopped between its stage and its apply b
     await c.services.configuration.stage(rob, { commandId: "half2-st", layer: "installation", expectedRevision: r2, set: { "database.transfer.restart": false, "database.transfer.enabled": true } } as never);
     const asked = await rolePlay(c, boot.token, say, "m1", "let the database be moved again", { kind: "command", op: "database.transfer.set", args: { enabled: true } });
     assert.equal(asked[0].status, "proposed", JSON.stringify(asked));
-    const yes = await rolePlay(c, boot.token, say, "m2", "yes, go ahead and do that", { kind: "apply_proposal", proposalId: asked[0].proposalId });
+    const yes = await rolePlay(c, boot.token, say, "m2", `yes, go ahead and do that ${asked[0].proposalId}`, { kind: "apply_proposal", proposalId: asked[0].proposalId });
     assert.equal(yes[0].status, "applied", JSON.stringify(yes));
     const now = (await call(boot.token, "database.transfer.settings", {})).result.item;
     assert.deepEqual([now.enabled, now.restart], [true, true], "only what the owner confirmed is in force");

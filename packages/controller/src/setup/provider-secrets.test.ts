@@ -75,7 +75,9 @@ for (const backend of backends) {
         const text = `Add my local server mine at http://127.0.0.1:8002/v1 with the model big-local (65536 tokens), and a free cloud one spare at https://free.example.invalid/v1 with the model free-model (32000 tokens), whose key is the secret ${name}.`;
         const o = await say(text, [cmd("routing.provider.add", { providers: [mine, spare(name)] }, text)]);
         if (o.status === "proposed") {
-          const r = await say(`Yes, do that (${name}).`, [{ kind: "apply_proposal", proposalId: o.proposalId, evidence: `Yes, do that (${name}).`, basis: "owner" }]);
+          // Earlier names' proposals stay open, so the owner says which one is meant.
+          const yes = `Yes, do that (${name}) ${o.proposalId}.`;
+          const r = await say(yes, [{ kind: "apply_proposal", proposalId: o.proposalId, evidence: yes, basis: "owner" }]);
           assert.notEqual(r.status, "applied", name);
           assert.match(JSON.stringify(r), /credentialName/, name);
         } else assert.notEqual(o.status, "applied", name);

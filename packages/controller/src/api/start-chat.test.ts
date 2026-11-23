@@ -115,7 +115,7 @@ test("the owner reaches the coordinator through the chat: sets it up and starts 
     const drafted = await turn("m5", "have the coordinator break down: plant beans", [owner("coordinator", { action: "decompose", outcome: "plant beans" }, "have the coordinator break down")]);
     assert.equal(drafted[0]!.status, "proposed", JSON.stringify(drafted));
     assert.equal((await c.services.projects.listTasks({ projectId: project, limit: 10 } as never)).items.length, 0, "no task yet");
-    const applied = await turn("m6", "yes, apply that plan", [owner("apply_proposal", { proposalId: drafted[0]!.proposalId }, "apply that plan")]);
+    const applied = await turn("m6", `yes, apply that plan ${drafted[0]!.proposalId}`, [owner("apply_proposal", { proposalId: drafted[0]!.proposalId }, `apply that plan ${drafted[0]!.proposalId}`)]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     assert.equal((await c.services.projects.listTasks({ projectId: project, limit: 10 } as never)).items.length, 2, "both tasks exist now");
 
@@ -187,7 +187,7 @@ test("the owner grants and revokes rights through the state API and through the 
     const shown = await turn("c1", text, [owner({ op: "grant.create", args }, text)]);
     assert.equal(shown[0]!.status, "proposed", JSON.stringify(shown));
     assert.equal((await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string }) => g.state === "active").length, 0, "nothing exists before the owner applies it");
-    const applied = await turn("c2", "yes, do that", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "do that", basis: "owner" }]);
+    const applied = await turn("c2", `yes, do that ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `do that ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     const active = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string }) => g.state === "active");
     assert.equal(active.length, 1);
@@ -207,7 +207,7 @@ test("the owner grants and revokes rights through the state API and through the 
       assert.doesNotMatch(`${r[0]!.message ?? ""} ${line}`, /\bsay (only|that|everywhere)\b|for example "/i, `${n}: nothing tells the owner what to say`);
       assert.equal(await activeNow(), held, `${n}: a proposal grants nothing`);
       if (n === "limited") {
-        const no = await turn("c3no", "no, that is not what I meant", [{ kind: "discard_proposal", proposalId: r[0]!.proposalId, evidence: "that is not what I meant", basis: "owner" }]);
+        const no = await turn("c3no", `no, that is not what I meant ${r[0]!.proposalId}`, [{ kind: "discard_proposal", proposalId: r[0]!.proposalId, evidence: `that is not what I meant ${r[0]!.proposalId}`, basis: "owner" }]);
         assert.equal(no[0]!.status, "discarded", JSON.stringify(no));
         assert.equal(await activeNow(), held, "the owner's no ends it and nothing is held");
       }
@@ -226,7 +226,7 @@ test("the owner grants and revokes rights through the state API and through the 
     assert.match(scopedLine, /^Grant right \(no end: it never runs out and stays until you revoke it; only in "Garden"\)/, scopedLine);
     assert.doesNotMatch(scopedLine, /everywhere|every project/);
     assert.equal(await activeNow(), held, "a proposal grants nothing");
-    const gardenDone = await turn("c3g-ok", "yes, go ahead", [{ kind: "apply_proposal", proposalId: scoped[0]!.proposalId, evidence: "go ahead", basis: "owner" }]);
+    const gardenDone = await turn("c3g-ok", `yes, go ahead ${scoped[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: scoped[0]!.proposalId, evidence: `go ahead ${scoped[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(gardenDone[0]!.status, "applied", JSON.stringify(gardenDone));
     const gardenGrant = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string; project: string }) => g.state === "active" && g.project === garden);
     assert.equal(gardenGrant.length, 1, "the right reaches that one project");
@@ -266,7 +266,7 @@ test("the owner grants and revokes rights through the state API and through the 
     assert.match(datedLine, /\(ends 2030-01-01T00:00:00\.000Z; everywhere: it covers every project/, datedLine);
     assert.doesNotMatch(datedLine, /no end/, "a right that runs out is not said to last forever");
     assert.equal(await activeNow(), held, "a proposal grants nothing, whatever its wording");
-    const datedDone = await turn("c3i-ok", "yes, go ahead", [{ kind: "apply_proposal", proposalId: dated[0]!.proposalId, evidence: "go ahead", basis: "owner" }]);
+    const datedDone = await turn("c3i-ok", `yes, go ahead ${dated[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: dated[0]!.proposalId, evidence: `go ahead ${dated[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(datedDone[0]!.status, "applied", JSON.stringify(datedDone));
     const withEnd = (await call(boot.token, "grant.list", { grantee: "service:scanner" })).result.items.filter((g: { state: string; expiresAt?: string }) => g.state === "active" && g.expiresAt !== undefined);
     assert.equal(withEnd.length, 1, "the confirmed right is the one the line showed");
@@ -325,7 +325,7 @@ test("the owner grants and revokes rights through the state API and through the 
     const rtext = `take back grant ${active[0].id} because it is no longer needed`;
     const rshown = await turn("c4", rtext, [owner({ op: "grant.revoke", args: { grantId: active[0].id, reason: "it is no longer needed" } }, rtext)]);
     assert.equal(rshown[0]!.status, "proposed", JSON.stringify(rshown));
-    const rdone = await turn("c5", "yes revoke it", [{ kind: "apply_proposal", proposalId: rshown[0]!.proposalId, evidence: "revoke it", basis: "owner" }]);
+    const rdone = await turn("c5", `yes revoke it ${rshown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: rshown[0]!.proposalId, evidence: `revoke it ${rshown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(rdone[0]!.status, "applied", JSON.stringify(rdone));
     assert.equal((await call(boot.token, "grant.get", { grantId: active[0].id })).result.item.state, "revoked");
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

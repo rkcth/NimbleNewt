@@ -68,7 +68,7 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     assert.equal(proposed[0]!.status, "proposed", JSON.stringify(proposed));
     const seen = JSON.stringify(proposed[0]);
     for (const part of [id, staged.digest, "lasts 90 minutes", "60 (the default) minutes before", `${1024 ** 3} (the default) bytes free`, " UTC"]) assert.ok(seen.includes(part), `${part} in ${seen}`);
-    const yes = await turn("l2", "yes, set that window", [{ kind: "apply_proposal", proposalId: proposed[0]!.proposalId, evidence: "set that window", basis: "owner" }]);
+    const yes = await turn("l2", `yes, set that window ${proposed[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: proposed[0]!.proposalId, evidence: `set that window ${proposed[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(yes[0]!.status, "applied", JSON.stringify(yes));
     const set = (await owner("release.window.list", {})).result.windows;
     assert.deepEqual(set.map((w: { candidateId: string; status: string; durationMinutes: number }) => [w.candidateId, w.status, w.durationMinutes]), [[id, "scheduled", 90]]);
@@ -118,7 +118,7 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     assert.ok(JSON.stringify(shown[0]!.preview).includes(staged.digest), "the staged digest is filled in by the controller");
     assert.ok(!JSON.stringify(shown[0]!.preview).includes(sha("an invented digest")));
     assert.equal((await owner("release.window.list", {})).result.windows.length, 1, "a proposal sets nothing (only the cancelled window is there)");
-    const applied = await turn("m2", "yes, set it", [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: "set it", basis: "owner" }]);
+    const applied = await turn("m2", `yes, set it ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `set it ${shown[0]!.proposalId}`, basis: "owner" }]);
     assert.equal(applied[0]!.status, "applied", JSON.stringify(applied));
     const listed = (await owner("release.window.list", {})).result.windows.filter((w: { status: string }) => w.status !== "cancelled");
     assert.equal(listed.length, 1);
