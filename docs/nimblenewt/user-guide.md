@@ -280,9 +280,29 @@ What the sandbox does **not** do, so you can judge how much to trust a machine:
 - **Another machine is a separate decision.** Letting another computer run agents takes more than this guide covers: a credential for it (you can ask the chat for one), rights for it, and the worker set up on that machine ([getting started, step 6](getting-started.md#step-6-hosts-and-workers)). That machine is trusted in the same way: it sees the work you send it.
 - **No outside security audit has been done yet.** See the [security guide](security-guide.md) for the full list of known limits.
 
+## Pausing, resuming and stopping work
+
+Say it in your own words. NimbleNewt works out whether you mean one agent, a team, one task of the project you are working on, or everything, and it never guesses: if your words do not say which, it asks and does nothing.
+
+<!-- d01:lifecycle-words -->
+```
+You: pause Ann while I look at what she is doing
+You: what is paused right now?
+You: carry on with Ann
+You: stop the Garden team, we are changing the plan
+You: stop everything
+```
+
+- **Pausing** an agent, a team or a task starts at once, because it only makes things stricter: no new work starts there until you resume it. Work that is already running in the background may finish. Pausing **everything** is shown to you first, like the orders below, because it holds every agent.
+- **Resuming** and **stopping** are always shown first, with what they would do, and happen only when you say yes. A stop ends the running work of that agent, team or task, including its local programs and background jobs, but keeps the tasks and who they are assigned to; nothing starts again by itself, and a resume lifts it. Ask to "suspend" instead if you want it to stop at a saved point.
+- **Stopping everything** needs you to say so: a bare "stop" is never read as everything. NimbleNewt asks which agent, team, task or "everything" you mean.
+- **What is paused** is answered from the records: the whole installation and each active agent (the first 50), who paused it, why, and how far it has actually got. Name a team or a task to see that one.
+
+If the assistant is down, the typed orders in the next section do the same without it. Force Stop is a typed order only, not plain words.
+
 ## When the assistant is down: stopping and recovering without the model
 
-The chat understands plain words by asking a model. If every model server is down, or the chat starts answering strangely, you can still **stop, pause and take back rights**. These orders do not use the model at all; you type them exactly as written. They work in the terminal chat and in the phone web chat.
+The chat understands plain words by asking a model. If every model server is down, or the chat starts answering strangely, you can still **stop, pause and take back rights**. These orders do not use the model at all; you type them exactly as written, and because you typed the exact order, a typed stop runs at once without asking for a yes. They work in the terminal chat and in the phone web chat.
 
 When the model is not reachable, a normal message gets this answer, and nothing is done:
 

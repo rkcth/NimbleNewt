@@ -97,6 +97,11 @@ export const CHAT_OPS: Readonly<Record<string, ChatOp>> = {
   "retention.restore": { verb: "Restore a task's archived records", mode: "propose" },
   // Retirement (card P06): always shown first with what it would release; the chat fills in the confirmation from a preview it makes just now. A plan with live assignments is refused with what to release first.
   "retirement.agent": { verb: "Retire an agent (its leases are released, its grants and credential revoked and its identity disabled; refused while it still has unfinished tasks or answers for active responsibilities; its records stay and its ID is never reused)", mode: "propose" },
+  // Pause, resume and stop by words (card U06 left the typed `/nimblenewt.lifecycle-*` lines as the no-model fallback). The scope is `scopeKind` (task, agent, team or installation) with `scopeName`, the owner's own words, looked up by the chat.
+  // A pause only makes things stricter and is lifted by a resume, so it applies at once, except for the whole installation; a resume lifts a hold and a stop ends running work, so both are always shown first.
+  "lifecycle.pause": { verb: "Pause", mode: "apply" },
+  "lifecycle.resume": { verb: "Resume", mode: "propose" },
+  "lifecycle.stop": { verb: "Stop (mode stop or suspend)", mode: "propose" },
   "retirement.project": { verb: "Archive a project (its responsibilities are retired, its leases released, resource bindings unbound and the execution grants made for it revoked (read-only grants stay); refused while it has assigned unfinished tasks; everything stays readable and it can be restored)", mode: "propose", needsProject: true },
   "retirement.project.restore": { verb: "Restore an archived project to active (what archiving released is not brought back by itself)", mode: "propose", needsProject: true },
   "coverage.settings.set": { verb: "Change the coverage-lapse alert", mode: "apply" },
@@ -597,6 +602,11 @@ export function grantDateInWords(value: unknown, ownText: string): string | unde
   return days.some((d) => dayInWords(d, own)) ? iso : undefined;
 }
 
+/** The pause, resume and stop of work by words: the scope is flat (`scopeKind`, `scopeName`) in a chat message and the chat builds the API's `scope` from it. */
+export const LIFECYCLE_OPS: ReadonlySet<string> = new Set(["lifecycle.pause", "lifecycle.resume", "lifecycle.stop"]);
+/** What the owner's words for the whole installation can be. Anything else is asked about: a bare "stop" is never read as everything. */
+export const WHOLE_INSTALLATION_WORDS = /\b(everything|everyone|everybody|every ?\w+|all|whole|entire|installation|system|nimblenewt|lot)\b/i;
+
 /** Whether the owner's words (lowercased, padded) name this calendar day: see `grantDateInWords`. */
 function dayInWords({ year, month, day, text }: { year: number; month: number; day: number; text: string }, own: string): boolean {
   // 2026-11-30, on its own or followed by a time (`wholeWord` will not match a day running straight into a `T`).
@@ -628,7 +638,9 @@ export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;
   // `agendaTopic` names an agenda item by its words; the chat resolves it to the item (exactly one open item of the project, else it asks).
-  return [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(op === "meeting.record.owner-respond" && k === "alternative") && !(op === "meeting.record.open-vote" && k === "limitMinutes")), ...Object.keys(TITLE_KEYS), "projectName", ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" || op === "responsibility.probe.set" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "retirement.agent" ? ["agentName"] : []), ...(op === "owner.answer" || op === "standup.answer-question" ? ["questionTopic"] : []), ...(op === "needs-you.answer" ? ["itemTopic"] : []), ...(op === "meeting.invite-direct" || op === "meeting.attend.wake" || op === "meeting.attend.wake-stop" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(MOTION_CONTROLS.has(op) || op === "meeting.proc.rule" || op === "meeting.proc.untable" || op === "meeting.proc.begin" || op === "meeting.proc.advance" ? ["motionTopic"] : []), ...(FLOOR_CONTROLS.has(op) ? ["meetingTopic"] : []), ...(op === "meeting.floor.ask" || op === "meeting.floor.address" ? ["agentName"] : []), ...(op === "meeting.floor.priorities" ? ["agendaTopic", "urgency"] : []), ...(op === "meeting.proc.owner-message" ? ["meetingTopic"] : []), ...(op === "meeting.record.finish" || op === "meeting.record.outcomes" ? ["meetingTopic"] : []), ...(op === "meeting.record.apply" ? ["decisionTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "task.assign" || op === "task.transfer" || op === "grant.create" || op === "toolbox.optin" ? ["agentName"] : []), ...(op === "grant.create" ? ["bundle"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
+  const all = [...Object.keys(operation.args).map((k) => k.replace(/\?$/, "")).filter((k) => k !== "commandId" && !(LIFECYCLE_OPS.has(op) && ["scope", "background", "deadlineMs", "spendBudget"].includes(k)) && !(op === "meeting.record.owner-respond" && k === "alternative") && !(op === "meeting.record.open-vote" && k === "limitMinutes")), ...Object.keys(TITLE_KEYS), "projectName", ...(LIFECYCLE_OPS.has(op) ? ["scopeKind", "scopeName"] : []), ...(op === "agenda.correct" ? ["agendaTopic"] : []), ...(op === "standup.update" ? ["standupTitle"] : []), ...(op === "responsibility.update" || op === "responsibility.probe.set" ? ["responsibilityTitle"] : []), ...(op === "incident.resolve" ? ["responsibilityTitle", "incidentSignature"] : []), ...(op === "lease.acquire" || op === "lease.release" ? ["resourceLabel"] : []), ...(op === "release.cancel" ? ["candidateId"] : []), ...(op === "retirement.agent" ? ["agentName"] : []), ...(op === "owner.answer" || op === "standup.answer-question" ? ["questionTopic"] : []), ...(op === "needs-you.answer" ? ["itemTopic"] : []), ...(op === "meeting.invite-direct" || op === "meeting.attend.wake" || op === "meeting.attend.wake-stop" || op === "standup.add-statement" ? ["meetingTopic", "agentName"] : []), ...(op === "standup.prepare" ? ["meetingTopic"] : []), ...(op === "meeting.record.owner-respond" ? ["decisionTopic", "alternativeStatement", "alternativeTopic"] : []), ...(MOTION_CONTROLS.has(op) || op === "meeting.proc.rule" || op === "meeting.proc.untable" || op === "meeting.proc.begin" || op === "meeting.proc.advance" ? ["motionTopic"] : []), ...(FLOOR_CONTROLS.has(op) ? ["meetingTopic"] : []), ...(op === "meeting.floor.ask" || op === "meeting.floor.address" ? ["agentName"] : []), ...(op === "meeting.floor.priorities" ? ["agendaTopic", "urgency"] : []), ...(op === "meeting.proc.owner-message" ? ["meetingTopic"] : []), ...(op === "meeting.record.finish" || op === "meeting.record.outcomes" ? ["meetingTopic"] : []), ...(op === "meeting.record.apply" ? ["decisionTopic"] : []), ...(op === "watch.create" ? ["watchedTaskTitle", "watchedTaskId", "watchProject"] : []), ...(op === "watch.cancel" ? ["taskId", "watchId"] : []), ...(op === "handoff.prepare" || op === "handoff.takeover" ? ["toAgentName"] : []), ...(op === "task.assign" || op === "task.transfer" || op === "grant.create" || op === "toolbox.optin" ? ["agentName"] : []), ...(op === "grant.create" ? ["bundle"] : []), ...(op === "handoff.complete" || op === "handoff.cancel" || op === "resume.retry" || op === "resume.cancel" ? ["taskId"] : [])];
+  // The scope of a pause, resume or stop is named by `scopeKind` and `scopeName`; a task or prerequisite title does not name one.
+  return LIFECYCLE_OPS.has(op) ? all.filter((k) => !(k in TITLE_KEYS)) : all;
 }
 
 /**
@@ -658,6 +670,7 @@ export const MOVE_VERBS: Readonly<Record<string, RegExp>> = {
   "task.transition:cancelled": /\b(cancel|drop|abandon)/i,
   "project.update:archived": /\b(archive)/i,
   "agent.retire": /\b(retire|fire|let go|remove)/i,
+  "lifecycle.pause": /\b(pause|hold|freeze|halt|suspend|stop|wait|park|hang on|put .* on ice)/i,
   "dependency.remove": /\b(remove|delete|drop|unlink)/i,
   "handoff.complete": /\b(complete|finish|transfer|move|give|pass on|hand (?:it|over)|go ahead)/i,
   "handoff.cancel": /\b(cancel|stop|abort|drop|call off)/i,
@@ -710,6 +723,10 @@ export function proposalReason(op: string, args: Readonly<Record<string, unknown
   const spec = CHAT_OPS[op];
   if (spec === undefined) return undefined;
   if (draft) return "you asked for a draft";
+  // Pause, resume and stop by words: a stop ends running work and a resume lifts a hold, so both are always shown first; a pause only makes things stricter and applies at once, except for the whole installation (the one pause that halts every agent).
+  if (op === "lifecycle.stop") return "a stop ends running work, so it is shown first";
+  if (op === "lifecycle.resume") return "lifting a pause lets work start again, so it is shown first";
+  if (op === "lifecycle.pause" && (args["scope"] as { kind?: unknown } | undefined)?.kind === "installation") return "pausing the whole installation holds every agent's new work, so it is shown first";
   if (op === "resource.bind" && args["access"] === "write") return "it gives write access";
   if ((AUTHORITY_FIELDS[op] ?? []).some((f) => args[f] !== undefined)) return "it changes what someone may do or where work is done";
   // Card U14c review: a notification change follows the profile, except two moves that are more than how the owner is told. An external channel sends notifications out of the installation (where data
@@ -887,7 +904,7 @@ export const EVENT_SOURCE_EXEMPT: ReadonlySet<string> = new Set(["type", "source
  * (`github`, `gitlab`, `self-hosted`, `none`, project.create and project.update). Every other text (names, addresses, models) must be the owner's own. The exemption goes by key name at any
  * depth, so each operation exempts only its own choice: `location` on a project is a repository's folder or address, which must be the owner's words.
  */
-export const SETUP_EXEMPT: Readonly<Record<string, ReadonlySet<string>>> = { "routing.provider.add": new Set(["location", "kind"]), "project.create": new Set(["host"]), "project.update": new Set(["host"]) };
+export const SETUP_EXEMPT: Readonly<Record<string, ReadonlySet<string>>> = { "routing.provider.add": new Set(["location", "kind"]), "project.create": new Set(["host"]), "project.update": new Set(["host"]), "lifecycle.pause": new Set(["scopeKind"]), "lifecycle.resume": new Set(["scopeKind"]), "lifecycle.stop": new Set(["scopeKind", "mode"]) };
 
 export function foreignValue(args: Readonly<Record<string, unknown>>, ownText: string, path = "", strict: ReadonlySet<string> = new Set(), alsoExempt: ReadonlySet<string> = new Set()): string | undefined {
   const norm = (x: string) => x.toLowerCase().replace(/\s+/g, " ").trim();
@@ -1035,6 +1052,12 @@ export function describe(op: string, args: Readonly<Record<string, unknown>>, la
     }
     // A probe's address is shown whole, never cut (second review): it is the reach the owner approves, and two addresses alike in their first 77 characters must not look the same.
     if (op === "responsibility.probe.set" && key === "url" && typeof value === "string") { parts.push(`url=${Array.from(value, (c) => (UNSHOWN.test(c) ? `\\u{${c.codePointAt(0)!.toString(16)}}` : c)).join("")}`); continue; }
+    // The scope of a pause, resume or stop is shown as what it is (agent "Ann", the whole installation), never as the record's ID.
+    if (LIFECYCLE_OPS.has(op) && key === "scope" && value !== null && typeof value === "object") {
+      const sc = value as { kind?: unknown; id?: unknown };
+      parts.push(sc.kind === "installation" ? "scope=the whole installation" : `scope=${short(sc.kind)} ${quotedText(labels[String(sc.id)] ?? String(sc.id), NAME_LIMIT)}`);
+      continue;
+    }
     // A label is a record's own text (an agent wrote it when it made the record), so it is quoted the way a status answer quotes it; the argument's name is the interpreter's word and is escaped the same way.
     const label = typeof value === "string" ? labels[value] : undefined;
     parts.push(`${short(key)}=${label === undefined ? short(value) : quotedText(label, NAME_LIMIT)}`);
