@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { OPERATIONS } from "../api/operations.js";
 import { STATUS_KINDS } from "../status/index.js";
-import { CHAT_OPS, acceptedArgs } from "./commands.js";
+import { CHAT_OPS, acceptedArgs, promptArgs } from "./commands.js";
 import { ModelInterpreter } from "./model-interpreter.js";
 
 // Card U14 and the owner's rule that everything is reachable by free-form chat: the model is told about the setup walk-through, the project's host and CI, and the provider editing,
@@ -50,7 +50,7 @@ test("the interpreter prompt tells the model about credentials for agents and ho
     assert.ok(Object.hasOwn(CHAT_OPS, op), `${op} is a chat operation`);
     assert.equal(CHAT_OPS[op]?.mode, "propose", `${op} is shown first in every profile`);
     assert.ok(OPERATIONS.some((o) => o.name === op && o.kind === "command"), `${op} is an operation of the API`);
-    assert.ok(system.includes(`${op}(${(acceptedArgs(op) ?? []).filter((k) => k !== "projectName").join(", ")})`), `${op} is listed with its arguments from the one table`);
+    assert.ok(system.includes(`${op}(${promptArgs(op).join(", ")})`), `${op} is listed with its arguments from the one table`);
   }
   assert.ok(system.includes("credential.issue(kind, agentId, name"));
   assert.ok(system.includes("host.local.set(enabled, expectedRevision"));
@@ -73,7 +73,7 @@ test("the interpreter prompt tells the model how to have a meeting hand its outc
   const op = "meeting.record.outcomes";
   assert.equal(CHAT_OPS[op]?.mode, "propose", "it settles agenda topics and may fill the owner's inbox: shown first");
   assert.ok(OPERATIONS.some((o) => o.name === op && o.kind === "command"), "it is an operation of the API");
-  assert.ok(system.includes(`${op}(${(acceptedArgs(op) ?? []).filter((k) => k !== "projectName").join(", ")})`), "listed with its arguments from the one table");
+  assert.ok(system.includes(`${op}(${promptArgs(op).join(", ")})`), "listed with its arguments from the one table");
   assert.ok((acceptedArgs(op) ?? []).includes("askOwner") && (acceptedArgs(op) ?? []).includes("meetingTopic"));
   assert.match(system, /meeting\.record\.outcomes \(meetingTopic: words from the meeting/);
   assert.match(system, /askOwner true: each such decision then puts one question to the owner \(at most 10 wait at a time\)/);

@@ -626,6 +626,11 @@ function dayInWords({ year, month, day, text }: { year: number; month: number; d
   return false;
 }
 
+/** The argument names the interpreter prompt lists for an operation: what the chat accepts, without `projectName` (said once for all) and without the title keys (one hand-written sentence says a task or prerequisite ID may be given as its title). */
+export function promptArgs(op: string): readonly string[] {
+  return (acceptedArgs(op) ?? []).filter((k) => k !== "projectName" && !(k in TITLE_KEYS));
+}
+
 export function acceptedArgs(op: string): readonly string[] | undefined {
   const operation = OPERATION_BY_NAME.get(op);
   if (operation === undefined || operation.kind !== "command") return undefined;

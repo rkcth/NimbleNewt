@@ -1,7 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import { FIXED_PART_WORDS } from "../context/fixed-part.js";
 import { STATUS_KINDS } from "../status/index.js";
-import { CHAT_OPS, acceptedArgs } from "./commands.js";
+import { CHAT_OPS, promptArgs } from "./commands.js";
 import { checkIntents, type ChatInterpreter, type InterpreterInput } from "./interpreter.js";
 
 /**
@@ -19,7 +19,7 @@ export interface ModelCall {
 }
 
 /** What the model is told of each operation: its name, what it does and the argument names the chat accepts for it. Derived from the same table the answer is checked against, so the two cannot drift apart. */
-const OPERATION_LINES = Object.keys(CHAT_OPS).map((op) => `${op}(${(acceptedArgs(op) ?? []).filter((k) => k !== "projectName").join(", ")}) - ${CHAT_OPS[op]!.verb}`).join("; ");
+const OPERATION_LINES = Object.keys(CHAT_OPS).map((op) => `${op}(${promptArgs(op).join(", ")}) - ${CHAT_OPS[op]!.verb}`).join("; ");
 const STATUS_LINES = Object.entries(STATUS_KINDS).map(([kind, k]) => `${kind}(${k.keys.join(", ")}) - ${k.about}`).join("; ");
 
 const SYSTEM = [
@@ -34,7 +34,7 @@ const SYSTEM = [
   "- {\"kind\":\"answer\",\"turnId\":...,\"choice\":...,\"evidence\":...,\"basis\":...} when the owner answers the pending question",
   "- {\"kind\":\"none\",\"reason\":<text>} when nothing is asked",
   "The owner speaks naturally; there are no fixed phrases. Work out what is meant from any wording and choose the operation that does it. When it is unclear which project, task, agent, meeting or stand-up is meant, use a clarify intent instead of guessing.",
-  "A command's args use only the names listed for its operation. Where a title or a name is listed (taskTitle, projectName, standupTitle, meetingTopic, agentName, ...), give the owner's own words for it, copied exactly as they wrote them (a value that is not in their message is refused), and leave the ID out; the system looks it up and asks if it is unclear. Text to be recorded, such as a note, is likewise copied exactly from the message.",
+  "A command's args use only the names listed for its operation. Where an argument takes a task ID (taskId) or a prerequisite ID (prerequisiteId), give the task or prerequisite as taskTitle or prerequisiteTitle instead, in the owner's own words and with no ID; this is not listed on each operation. Where a title or a name is listed (projectName, standupTitle, meetingTopic, agentName, ...), give the owner's own words for it, copied exactly as they wrote them (a value that is not in their message is refused), and leave the ID out; the system looks it up and asks if it is unclear. Text to be recorded, such as a note, is likewise copied exactly from the message.",
   "A right given to a principal is grant.create, and it is drawn up as a proposal whatever the wording: its scope is the one project the owner named or every project, and a date it starts or ends is a day their own message gives. When they want the right to run out but name no day, ask with a clarify intent rather than picking one. When they say it should lapse once it goes unused for some time (and renew each time it is used), give that number of days as idleDays. When the owner wants an agent to be able to do its job in a project without naming rights (\"let Ann work on Garden\", \"give Ann what she needs for Garden\", \"set Ann up to work on the garden project\"), use one grant.create with agentName, projectName and bundle roles and no action: the system gives every right the agent's own roles stand for (the role templates), only in that project, one line each, shown first; a bundle is for one project, never every project (for every project the owner names each right). When they name the rights, give each with action instead and leave bundle out.",
   "To answer a meeting decision that waits for the owner (the needs_you status lists them), use meeting.record.owner-respond: response is agree, decline or alternative; decisionTopic is the owner's own words for which decision (any part of what was decided or its topic), with no ID; for an alternative, alternativeStatement is the owner's own decision in their words (alternativeTopic only if they name a topic). Several decisions may wait; the system asks which when the words fit more than one.",
   "To answer an item of the Needs-you list where it stands, in any words (\"yes, allow that review\", \"deny the deploy approval\", \"the payroll blocker is resolved: the bank confirmed\"), use needs-you.answer: itemTopic is the owner's own words for which item (any part of what the list says about it), never an ID or a kind; answer is the choice the item offers (allow or deny for a review only the owner decides, agree or decline for a meeting decision, approve or decline for a held resume, accept-as-is or repair-again for a defect that escalated to the owner) or the owner's own words (a question, a question a meeting asked, how a blocker was resolved); reason only if they give one, for a review or a defect. Several items may wait; the system asks which when the words fit more than one, and shows the item first.",

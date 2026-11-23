@@ -9,7 +9,7 @@ import { MeetingService } from "../meetings/index.js";
 import { ReviewService } from "../review/index.js";
 import { StandupService } from "../standups/index.js";
 import { StatusService } from "../status/index.js";
-import { CHAT_OPS, acceptedArgs, type ChatService, type Outcome } from "./index.js";
+import { CHAT_OPS, acceptedArgs, promptArgs, type ChatService, type Outcome } from "./index.js";
 import { ModelInterpreter } from "./model-interpreter.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
@@ -29,7 +29,7 @@ test("the operation table and the interpreter prompt describe answering in place
   assert.ok((acceptedArgs("needs-you.answer") ?? []).includes("itemTopic"));
   assert.match(system, /To answer an item of the Needs-you list where it stands/);
   assert.match(system, /itemTopic is the owner's own words for which item/);
-  assert.ok(system.includes(`needs-you.answer(${(acceptedArgs("needs-you.answer") ?? []).filter((k) => k !== "projectName").join(", ")})`), "listed with its arguments from the one table");
+  assert.ok(system.includes(`needs-you.answer(${promptArgs("needs-you.answer").join(", ")})`), "listed with its arguments from the one table");
 });
 
 for (const backend of backends) {

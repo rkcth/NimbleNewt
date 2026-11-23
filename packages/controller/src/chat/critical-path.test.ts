@@ -6,7 +6,7 @@ import { CriticalPathService } from "../critical/index.js";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { STATUS_KINDS } from "../status/index.js";
-import { CHAT_OPS, acceptedArgs, type ChatService, type Outcome } from "./index.js";
+import { CHAT_OPS, acceptedArgs, promptArgs, type ChatService, type Outcome } from "./index.js";
 import { ModelInterpreter } from "./model-interpreter.js";
 import { cid, openWorld, type World } from "./testing/harness.js";
 
@@ -24,7 +24,7 @@ test("the interpreter prompt tells the model about the critical path from the on
   assert.equal(CHAT_OPS[op]?.mode, "propose", "it decides what pages the owner: always shown first");
   assert.ok(OPERATIONS.some((o) => o.name === op && o.kind === "command"), "it is an operation of the API");
   assert.ok(OPERATIONS.some((o) => o.name === "critical.list" && o.kind === "query"));
-  assert.ok(system.includes(`${op}(${(acceptedArgs(op) ?? []).filter((k) => k !== "projectName").join(", ")})`), "listed with its arguments from the one table");
+  assert.ok(system.includes(`${op}(${promptArgs(op).join(", ")})`), "listed with its arguments from the one table");
   for (const k of ["kind", "taskId", "projectId", "marked", "taskTitle"]) assert.ok((acceptedArgs(op) ?? []).includes(k), k);
   assert.match(system, /critical\.mark\. kind is task \(that one task\), goal \(a task the owner wants delivered/);
   assert.match(system, /give taskTitle \(the owner's own words for the task\) or projectName, never an ID, and marked false when they take a mark off/);

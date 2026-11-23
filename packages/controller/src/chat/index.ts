@@ -1,5 +1,5 @@
 export { approvedCodeLookup, APPROVED_CODE_PAGES, type ApprovedCode, type ApprovedCodeFound, type ApprovedCodeLookup } from "./approved-code.js";
-export { AUTHORITY_FIELDS, CHAT_OPS, TITLE_KEYS, acceptedArgs, describe, foreignValue, hasRefMarker, proposalReason, type ChatOp } from "./commands.js";
+export { AUTHORITY_FIELDS, CHAT_OPS, TITLE_KEYS, acceptedArgs, promptArgs, describe, foreignValue, hasRefMarker, proposalReason, type ChatOp } from "./commands.js";
 export { ModelInterpreter, type ModelCall, type ModelReply } from "./model-interpreter.js";
 export { HttpModelCall, type HttpModelOptions } from "./http-model.js";
 export { CHAT_BUDGET_LIMITS, ChatSpendService, GuardedModelCall, ModelCoordinatorModel, chatRoutes, classOf, type ChatBudgetBody, type ChatBudgetView, type ChatSpendBody, type GuardOptions } from "./routed-model.js";
