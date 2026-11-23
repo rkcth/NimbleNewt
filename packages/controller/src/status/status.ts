@@ -746,7 +746,7 @@ export interface StatusDeps {
   readonly meetingProcedure?: (viewer: Principal, motionId: string) => Promise<Record<string, unknown> | undefined>;
   readonly meetingWaiting?: (viewer: Principal, recordId: string) => Promise<{ readonly waiting: Record<string, unknown>; readonly stage?: string; readonly motionId?: string } | undefined>;
   /** The conflicts between the owner's own instructions that wait for their choice (card C08): absent, none are listed. */
-  readonly disputes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; topic: string; openedAt: string; members: readonly { id: string; statement: string }[] }[]; truncated: boolean }>;
+  readonly disputes?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; taskId?: string; topic: string; openedAt: string; members: readonly { id: string; statement: string }[] }[]; truncated: boolean }>;
   readonly meetingQuestions?: (viewer: Principal, limit: number) => Promise<{ items: readonly { id: string; revision: number; projectId: string; topic: string; question: string; askedAt: string }[]; truncated: boolean }>;
   /** Resume checks held for the owner because changes were judged to matter to the task (card L04c). Owner only. Absent: they are not listed in the needs-you list. */
   /** The critical path the owner marked (card U11d, "U11f"): ranks the Needs-you view and is shown by the `critical_path` request. Absent: nothing is marked. */
@@ -3412,7 +3412,7 @@ export class StatusService {
       const open = await this.#deps.disputes(by, 51);
       if (open.truncated || open.items.length > 50) truncated.push("disputes");
       for (const d of open.items.slice(0, 50)) {
-        all.push({ text: `Two of your instructions conflict on ${quoted(d.topic, 80)}: ${d.members.map((m) => quoted(m.statement, 120)).join(" or ")}; nothing on that topic is in force and the work that relies on it waits (choose which one stands)`, cites: [cite("decision-dispute", d.id, d.revision), cite("project", d.projectId)], projectId: d.projectId, since: d.openedAt, id: d.id, rank: 1, kind: "dispute", answer: { kind: "choice", choices: d.members.map((m) => m.id) }, members: d.members.map((m) => ({ id: m.id, statement: m.statement })) });
+        all.push({ text: `Two of your instructions conflict on ${quoted(d.topic, 80)}: ${d.members.map((m) => quoted(m.statement, 120)).join(" or ")}; nothing on that topic is in force and the work that relies on it waits (choose which one stands)`, cites: [cite("decision-dispute", d.id, d.revision), cite("project", d.projectId)], projectId: d.projectId, ...(d.taskId === undefined ? {} : { taskId: d.taskId }), since: d.openedAt, id: d.id, rank: 1, kind: "dispute", answer: { kind: "choice", choices: d.members.map((m) => m.id) }, members: d.members.map((m) => ({ id: m.id, statement: m.statement })) });
       }
     }
     if (this.#deps.meetingInquiries !== undefined) {

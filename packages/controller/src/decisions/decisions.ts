@@ -778,7 +778,7 @@ export class DecisionService implements DecisionGuard {
    * The conflicts between the owner's own instructions that still wait for their choice, across every project, oldest first (the Needs-you list and the chat read them), each with the decisions in conflict as the owner said them.
    * Owner only. Reads at most 20 pages of 500 records; `truncated` says when there are more than `limit` or the scan stopped early.
    */
-  async openDisputes(by: Principal, limit: number): Promise<{ items: { id: string; revision: number; projectId: string; topic: string; openedAt: string; members: { id: string; statement: string; wording: string; version: number }[] }[]; truncated: boolean }> {
+  async openDisputes(by: Principal, limit: number): Promise<{ items: { id: string; revision: number; projectId: string; taskId?: string; topic: string; openedAt: string; members: { id: string; statement: string; wording: string; version: number }[] }[]; truncated: boolean }> {
     if (by.kind !== "owner" || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not list the conflicts between the owner's instructions`);
     const cap = Number.isSafeInteger(limit) && limit >= 1 && limit <= 200 ? limit : invalid("limit", "must be 1 to 200");
     const open: View<DisputeBody>[] = [];
@@ -795,7 +795,7 @@ export class DecisionService implements DecisionGuard {
     for (const d of open.slice(0, cap)) {
       const members = [];
       for (const m of d.members) { const got = body<OwnerDecisionBody>(await this.#runner.get("decision", m)); if (got !== undefined) members.push({ id: m, statement: got.statement, wording: got.wording, version: got.version }); }
-      items.push({ id: d.id, revision: d.revision, projectId: d.projectId, topic: d.topic, openedAt: d.openedAt, members });
+      items.push({ id: d.id, revision: d.revision, projectId: d.projectId, ...(d.taskId === undefined ? {} : { taskId: d.taskId }), topic: d.topic, openedAt: d.openedAt, members });
     }
     return { items, truncated };
   }

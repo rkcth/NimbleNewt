@@ -40,6 +40,13 @@ const RULES: Record<string, Rule> = {
   "Make the Docs resource read only": { op: "resource.scope", args: { resourceLabel: "Docs", access: "read" } },
   "Make the Docs resource look-only": { op: "resource.scope", invents: true, args: { resourceLabel: "Docs", access: "write" } },
   "Let the project change the Docs resource": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  // First review (2026-11-23): an instruction named whole beside a longer one that contains it, write access against "read only" words, a move that works, one onto another project's binding, and a yes that comes too late.
+  "Settle the deploy conflict: deploy on Friday": { op: "decision.resolve-dispute", args: { disputeTopic: "deploy", choiceWords: "deploy on Friday" } },
+  "Settle the deploy conflict: Friday": { op: "decision.resolve-dispute", args: { disputeTopic: "deploy", choiceWords: "Friday" } },
+  "Keep the Docs resource read only and do not change it": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Keep the Docs resource read only, with changes logged": { op: "resource.scope", args: { resourceLabel: "Docs", access: "write" } },
+  "Point the Docs resource at https://moved.example.test": { op: "resource.move", args: { resourceLabel: "Docs", locator: "https://moved.example.test" } },
+  "Point the Docs resource at https://other.example.test/data/inner": { op: "resource.move", args: { resourceLabel: "Docs", locator: "https://other.example.test/data/inner" } },
 };
 const DERIVED = new Set(["access", "label"]);
 
@@ -163,6 +170,7 @@ for (const backend of backends) {
       const ask = await say("Settle the conflict, go with the SQLite one");
       assert.equal(ask.status, "asked", JSON.stringify(ask));
       assert.equal(ask.options?.length, 2);
+      assert.match(String(ask.question), /Which conflict/, "the owner is asked which conflict, not given the first one");
       const one = await say("Settle the logging conflict: go with the JSON one");
       assert.equal(one.status, "proposed", JSON.stringify(one));
       assert.ok(JSON.stringify(one).includes("JSON lines"));
@@ -255,6 +263,68 @@ for (const backend of backends) {
       { const r = await apply(ro); assert.equal(r.applied, true, JSON.stringify(r)); }
       assert.equal((await state(docs)).scope.mode, "read");
       assert.deepEqual(violations, [`resourceId=${web}`, "locator=https://elsewhere.example.test"], "only the cases that invent on purpose handed over a value the owner did not say");
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: an instruction said whole is chosen over a longer one that contains it, part of both asks; a yes after the conflict was settled is refused and changes nothing; a conflict about one task carries the task`, async () => {
+    const { w, project, say, apply, conflict, needs } = await open();
+    try {
+      const c = await conflict("deploy", "deploy on Friday", "never deploy on Friday");
+      const part = await say("Settle the deploy conflict: Friday");
+      assert.equal(part.status, "asked", JSON.stringify(part));
+      const o = await say("Settle the deploy conflict: deploy on Friday");
+      assert.equal(o.status, "proposed", JSON.stringify(o));
+      assert.ok(JSON.stringify(o).includes("deploy on Friday") && !JSON.stringify(o).includes("never deploy"), JSON.stringify(o));
+      // Settled another way (the web list) before the owner's yes: the yes is refused, and the other choice stands.
+      await w.decisions.resolveDispute(w.owner, { commandId: cid("rd"), disputeId: c.dispute, chosen: c.two });
+      const late = await apply(o);
+      assert.equal(late.applied, false, JSON.stringify(late));
+      assert.match(JSON.stringify(late.failure), /already resolved/);
+      const now = await w.decisions.authoritative(w.owner, { projectId: project, topic: "deploy" });
+      assert.equal(now?.status === "decided" ? now.decision.statement : undefined, "never deploy on Friday");
+      // A conflict about one task: the item names the task, so it is ranked by the work it holds up.
+      const task = await w.task(project, "Ship the release");
+      const dec = (over: Record<string, unknown>) => w.decisions.record(w.owner, { commandId: cid("dec"), projectId: project, taskId: task, category: "decision", topic: "release day", source: { channel: "direct" }, ...over } as never) as Promise<{ version: number; disputeId?: string }>;
+      const base = await dec({ statement: "Monday", wording: "Monday", basedOn: 0 });
+      await dec({ statement: "Tuesday", wording: "Tuesday", basedOn: base.version });
+      const two = await dec({ statement: "Wednesday", wording: "Wednesday", basedOn: base.version });
+      const item = (await needs()).find((i) => i.id === two.disputeId) as { taskId?: string } | undefined;
+      assert.equal(item?.taskId, task);
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: a resource is moved by words; a move onto another project's binding is refused at the yes and nothing changes (never acknowledged for the owner); a yes after the resource changed is refused; write access against "read only" words is refused`, async () => {
+    const { w, project, say, apply } = await open();
+    try {
+      const other = await w.project("Orchard");
+      await w.resources.bindResource(w.owner, { commandId: cid("b"), projectId: other, kind: "service", label: "Data", locator: "https://other.example.test/data" } as never);
+      const docs = (await w.resources.bindResource(w.owner, { commandId: cid("b"), projectId: project, kind: "service", label: "Docs", locator: "https://docs.example.test" } as never)).id;
+      const state = async () => (await w.resources.get(w.owner, docs))! as unknown as { revision: number; locator: string; scope: { mode: string } };
+      const ro = await say("Keep the Docs resource read only and do not change it");
+      assert.equal(ro.status, "refused", JSON.stringify(ro));
+      assert.match(JSON.stringify(ro), /Write access is not what your message says/);
+      const ro2 = await say("Keep the Docs resource read only, with changes logged");
+      assert.equal(ro2.status, "refused", "a word like change does not outweigh read only");
+      assert.equal((await state()).scope.mode, "read");
+      const overlap = await say("Point the Docs resource at https://other.example.test/data/inner");
+      assert.equal(overlap.status, "proposed", JSON.stringify(overlap));
+      assert.ok(!JSON.stringify(overlap).includes("acknowledgeOverlap"), "the chat never acknowledges an overlap for the owner");
+      const refused = await apply(overlap);
+      assert.equal(refused.applied, false, JSON.stringify(refused));
+      assert.match(JSON.stringify(refused.failure), /bound to another project/);
+      assert.equal((await state()).locator, "https://docs.example.test");
+      const mv = await say("Point the Docs resource at https://moved.example.test");
+      assert.equal(mv.status, "proposed", JSON.stringify(mv));
+      // The resource changes before the owner's yes: the revision read when it was proposed no longer holds.
+      const before = await state();
+      await w.resources.setScope(w.owner, { commandId: cid("sc"), resourceId: docs, expectedRevision: before.revision, access: "write" });
+      const stale = await apply(mv);
+      assert.equal(stale.applied, false, JSON.stringify(stale));
+      assert.equal((await state()).locator, "https://docs.example.test");
+      const again = await say("Point the Docs resource at https://moved.example.test");
+      assert.equal(again.status, "proposed", JSON.stringify(again));
+      { const r = await apply(again); assert.equal(r.applied, true, JSON.stringify(r)); }
+      assert.equal((await state()).locator, "https://moved.example.test");
     } finally { await w.close(); }
   });
 }

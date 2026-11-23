@@ -1700,7 +1700,8 @@ export class ChatService {
     if (intent.op === "resource.scope") {
       const access = args["access"];
       if (access !== "read" && access !== "write") return refuse("invalid_command", "the access is read or write");
-      if (!(access === "write" ? /\b(writ|edit|modif|chang|read.?and.?write|full)/i : /\b(read|view|look|see|inspect)/i).test(words)) return refuse("unsupported_value", `${access === "write" ? "Write" : "Read"} access is not what your message says, so nothing was proposed. Which access did you mean, read or write?`);
+      // Write access also needs the message not to say the opposite ("read only", "no write", "don't let it change"): a word like "change" alone can stand in a sentence that asks for less.
+      if (!(access === "write" ? /\b(writ|edit|modif|chang|read.?and.?write|full)/i : /\b(read|view|look|see|inspect)/i).test(words) || (access === "write" && /\b(read[\s-]*only|look[\s-]*only|view[\s-]*only|no\s+writ|not\s+writ|without\s+writ|n[o']t\s+(?:let\s+\S+\s+|allow\s+\S+\s+to\s+)?(?:writ|edit|modif|chang))/i.test(words))) return refuse("unsupported_value", `${access === "write" ? "Write" : "Read"} access is not what your message says, so nothing was proposed. Which access did you mean, read or write?`);
       if (args["paths"] !== undefined && (!Array.isArray(args["paths"]) || (args["paths"] as unknown[]).some((x) => typeof x !== "string"))) return refuse("invalid_command", "paths is a list of paths");
     }
     // A role's label: the label is the owner's own words; clearing it (no label) needs the owner to have said so, since a missing label is not a word the words check can see.
@@ -1730,7 +1731,10 @@ export class ChatService {
       args["disputeId"] = one.id;
       const members = one.members!;
       const said = typeof chosenWords === "string" ? chosenWords.trim().toLowerCase() : "";
-      const fits = args["chosen"] !== undefined ? members.filter((m) => m.id === args["chosen"]) : said === "" ? [] : members.filter((m) => m.statement.toLowerCase().includes(said));
+      const loose = args["chosen"] !== undefined ? members.filter((m) => m.id === args["chosen"]) : said === "" ? [] : members.filter((m) => m.statement.toLowerCase().includes(said));
+      // Words that are one instruction whole, and only part of another ("deploy on Friday" beside "never deploy on Friday"), mean that one; any other overlap asks.
+      const whole = loose.length > 1 ? loose.filter((m) => m.statement.trim().toLowerCase().replace(/\s+/g, " ") === said.replace(/\s+/g, " ")) : [];
+      const fits = whole.length === 1 ? whole : loose;
       if (fits.length !== 1) return { ok: false, kind: "ask", question: `Which of these stands on ${quotedText(one.text.slice(0, 80), 90)}? Two of your instructions conflict.`, options: members.slice(0, CHAT_LIMITS.options).map((m) => offered({ id: m.id, text: m.statement })), field: "chosen", choices: members.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args["chosen"] = fits[0]!.id;
       showFirst = "the conflict and the instruction you chose are shown to you first";
