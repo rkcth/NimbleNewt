@@ -2166,12 +2166,33 @@
       ],
       "deliverable": "Today a turn's result says only completed, failed or cancelled (HostTurnResult, packages/worker/src/host/local.ts line 32), so a turn that ran out of tokens, one that ended on thinking with no visible text and one that ended with a full report look the same to the controller. Pi Durable answers on a length stop as on a normal stop (node_modules/@earendil-works/pi-durable/dist/harness/generation.js line 362). The Pi adapter worker (packages/pi-adapter/src/worker) classifies the ending of each turn as endKind: length, empty-visible-text, no-work-end (a natural stop without work.end), announced-step-without-tool-call (the last text says it will do something and no tool call follows), or normal, and HostTurnResult carries it with the visible text length",
       "acceptance_and_verification": "Every turn result from the local worker carries an endKind; a fixture for each kind (a scripted provider that stops on length, ends thinking-only, ends without work.end, announces a step and stops, and ends normally) yields that kind through the real worker process and host; the classification is recorded on the attempt; a result without endKind from an older worker is read as unknown, never as normal",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "813ddbb9",
+          "9dbc6c94",
+          "8082de50",
+          "d0a368d2",
+          "7821970a",
+          "54579b15",
+          "8921ff20",
+          "9259ad03",
+          "bdbf90e9",
+          "64150a6e",
+          "9ca33cc0"
+        ],
+        "ci_runs": [
+          "45129316825"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Every completed turn the Pi worker process sends carries endKind (length, empty-visible-text, no-work-end, announced-step-without-tool-call, normal) and visibleChars, classified by pi-adapter/src/worker/end-kind.ts; HostTurnResult.endKind is required and is unknown for a failed or cancelled turn, a process that ended, or a worker that sent none; integration w02-end-kinds plays one scripted-provider fixture per kind through the real sandboxed worker process, the host and the controller's LocalWorker; the dispatcher records turnEnd {endKind, visibleChars, at} on the attempt (dispatch/turn-end.test, four backends); a result without endKind, or with a kind the reader does not know, is recorded unknown, never normal (channel, host and dispatcher tests). normal means the turn called work.end and the controller accepted it (the bridge now offers nimblenewt__work-end); an attempt ended by the agent's work.end while its turn still ran is recorded normal. Limits: the fixtures use a scripted OpenAI-compatible endpoint, not a real model; the composed controller with a real task credential calling work.end through the bridge is unit-tested in parts, not run together in one test; a turn ending held in memory is lost if the controller dies before the end write; lastStopReason scans the stored transcript once per completed turn; a remote host that sends no endKind is recorded unknown."
+      }
     },
     {
       "id": "W03",
@@ -2183,12 +2204,26 @@
       ],
       "deliverable": "The dispatcher ends an attempt succeeded whenever the turn completed (packages/controller/src/dispatch/dispatcher.ts line 2020, the turn completed), and work-end resolveOnEnd (packages/controller/src/work-end/work-end.ts line 542) has no outcome for an agent that stopped without saying it was done. A turn that completed without work.end, or whose endKind is not normal, ends the attempt with a new outcome stopped-early: it is readmitted from its resumeFrom checkpoint on the same conversation and the same pinned host, at most twice per task, after which the task gets a visible blocker agent_stopped_early carrying the last visible text (bounded and quoted), the plan progress (checked and unchecked PLAN.md steps) and the diff stat of the workspace",
       "acceptance_and_verification": "A fixture agent that stops without work.end is never recorded succeeded; it is readmitted from its checkpoint on the same conversation and host, twice, and then the task carries an agent_stopped_early blocker with the last text, plan progress and diff stat; a turn that ends with work.end done is unchanged; a controller restart between readmits keeps the count; an owner stop or emergency stop still wins over a readmit",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "e04467f7",
+          "60b18930",
+          "9c88e7b1",
+          "8a084997"
+        ],
+        "ci_runs": [
+          "45129316825"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A completed turn whose endKind is not normal (length, empty-visible-text, no-work-end, announced-step-without-tool-call, or unknown) never ends the attempt succeeded: within two readmits per task the same attempt goes back to waiting, pinned to the host that ran it, with resumeFrom set to the turn's checkpoint and a new request ID in the same conversation (cmd:adm:<attempt>:se1, :se2); the third early stop ends it stopped-early (assignment abandoned) and the task gets an agent_stopped_early blocker (owner resolver, at most 1,000 characters) with the last visible text quoted once and escaped, the PLAN.md progress (checked of total, unchecked steps named) and the workspace diff stat against the task's base, or a plain statement that the host could not tell (dispatch/stopped-early.test, four backends; integration w03-stopped-early through the composed controller and the real sandboxed worker process, where the later runs' model requests carry the earlier turns). A normal end, a work.end done completed by the end hook, an accepted done still pending, and the agent's own blocked ending are unchanged; the readmit count is stored per task in the same write as the readmit and survives two controller restarts; an owner stop and an emergency stop, during the end hook or after the readmit was written, end the attempt abandoned with no readmit. PLAN.md is read without following links or blocking on a pipe and the diff stat runs no filter, driver or hook from the checkout (worker local-host tests). Limits: the fixtures use a scripted OpenAI-compatible endpoint, not a real model; a remote host does not report plan progress or diff stat yet (the blocker says so) and a remote result with no checkpoint ends stopped-early at once without a readmit; an early stop with no checkpoint is not readmitted (ASSUMPTION in the notes); the count resets when the owner assigns the task again; the readmitted run sends the task text again with the note."
+      }
     },
     {
       "id": "W04",
