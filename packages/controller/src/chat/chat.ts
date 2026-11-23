@@ -1700,9 +1700,23 @@ export class ChatService {
     if (intent.op === "resource.scope") {
       const access = args["access"];
       if (access !== "read" && access !== "write") return refuse("invalid_command", "the access is read or write");
-      // Write access also needs the message not to say the opposite ("read only", "no write", "don't let it change"): a word like "change" alone can stand in a sentence that asks for less.
-      if (!(access === "write" ? /\b(writ|edit|modif|chang|read.?and.?write|full)/i : /\b(read|view|look|see|inspect)/i).test(words) || (access === "write" && /\b(read[\s-]*only|look[\s-]*only|view[\s-]*only|no\s+writ|not\s+writ|without\s+writ|n[o']t\s+(?:let\s+\S+\s+|allow\s+\S+\s+to\s+)?(?:writ|edit|modif|chang))/i.test(words))) return refuse("unsupported_value", `${access === "write" ? "Write" : "Read"} access is not what your message says, so nothing was proposed. Which access did you mean, read or write?`);
+      // The access must be what the message says, in every sentence shape (accessSaid): write is refused when the message asks for less ("read only", "only read it", "read access"), read when it asks
+      // for more ("read and write", "no longer read only", an edit not turned down). The resource's own label is not read as a word about access.
+      const resourceId = args["resourceId"] as string;
+      if (!accessSaid(words, labels[resourceId] ?? "", access)) return refuse("unsupported_value", `${access === "write" ? "Write" : "Read"} access is not what your message says, so nothing was proposed. Which access did you mean, read or write?`);
       if (args["paths"] !== undefined && (!Array.isArray(args["paths"]) || (args["paths"] as unknown[]).some((x) => typeof x !== "string"))) return refuse("invalid_command", "paths is a list of paths");
+      // The new scope replaces the old one whole: with no paths said, a resource limited to some paths keeps that limit (a change of access never opens the whole resource unasked), and the whole
+      // resource needs the owner's words for it. The proposal then says the access and the paths the project is left with.
+      const now = await this.#get(token, "resource.get", { resourceId });
+      const nowScope = (now?.["scope"] ?? {}) as { mode?: string; paths?: string[] };
+      const nowPaths = Array.isArray(nowScope.paths) ? nowScope.paths : [];
+      if (args["paths"] === undefined && nowPaths.length > 0) args["paths"] = [...nowPaths];
+      else if (Array.isArray(args["paths"]) && args["paths"].length === 0) {
+        if (nowPaths.length > 0 && !/\b(whole|entire|all of it|everything|every path|all paths|any path|anywhere|no longer limited|not limited|unlimited|without a limit)\b/i.test(words)) return refuse("unsupported_value", "Opening the whole resource is not what your message says, so nothing was proposed. Which paths should the project reach?");
+        delete args["paths"];
+      }
+      const nextPaths = Array.isArray(args["paths"]) ? [...new Set(args["paths"] as string[])].sort() : [];
+      if (nowScope.mode === access && JSON.stringify(nextPaths) === JSON.stringify([...nowPaths].sort())) return refuse("invalid_command", `the resource already has ${access} access${nowPaths.length > 0 ? " to those paths" : ""}; nothing to change`);
     }
     // A role's label: the label is the owner's own words; clearing it (no label) needs the owner to have said so, since a missing label is not a word the words check can see.
     if (intent.op === "role.label") {
@@ -1721,20 +1735,29 @@ export class ChatService {
       if (chosenWords !== undefined && args["chosen"] !== undefined) return refuse("invalid_command", "the instruction is named twice over, as chosen and as choiceWords; which one is meant has to be settled.");
       const listed = await this.#deps.api.handle(token, { v: API_VERSION, op: "status.ask", args: { request: { kind: "needs_you", limit: 50 } } });
       if (!listed.ok) return refuse(listed.error.code, listed.error.message);
-      const every = ((((listed.result["item"] ?? listed.result) as Record<string, unknown>)["items"] ?? []) as { kind: string; id: string; text: string; members?: { id: string; statement: string }[] }[]).filter((i) => i.kind === "dispute" && (i.members?.length ?? 0) >= 2);
-      const topicWords = typeof named === "string" ? named.trim().toLowerCase() : "";
+      const read = (listed.result["item"] ?? listed.result) as Record<string, unknown>;
+      const items = (read["items"] ?? []) as { kind: string; id: string; text: string; topic?: string; members?: { id: string; statement: string }[] }[];
+      const every = items.filter((i) => i.kind === "dispute" && (i.members?.length ?? 0) >= 2);
+      // The chat reads the first 50 items of the Needs-you list; when more wait, a conflict ranked further down is not in sight, which is said rather than "none".
+      const partial = (typeof read["count"] === "number" && read["count"] > items.length) || (Array.isArray(read["truncated"]) && read["truncated"].length > 0);
+      // Words that name no topic ("the conflict", "my instructions") are no topic: the owner is asked which conflict when there are several.
+      const topicWords = typeof named === "string" && !/^(?:(?:the|my|your|this|that|a|an|our)\s+)?(?:conflict|dispute|disagreement|instruction|clash)s?(?:\s+(?:between|of)\s+(?:my|your|the)\s+instructions)?$/.test(plainWords(named)) ? plainWords(named) : "";
       const offered = (m: { id: string; text: string }): string => `${m.id} (${m.text.slice(0, 60)})`;
-      const matches = every.filter((i) => (args["disputeId"] === undefined ? topicWords === "" || i.text.toLowerCase().includes(topicWords) : i.id === args["disputeId"]));
-      if (matches.length === 0) return refuse("not_found", every.length === 0 ? "none of your instructions conflict at the moment" : topicWords === "" ? "that conflict is not waiting for your choice" : `no conflict between your instructions is about ${quotedText(topicWords, 80)}`);
+      // The topic words are matched against the conflict's topic and its instructions, never against the line's fixed wording ("conflict", "waits", "choose"), which every conflict shares.
+      const matches = every.filter((i) => (args["disputeId"] === undefined ? topicWords === "" || [i.topic ?? i.text, ...i.members!.map((m) => m.statement)].some((t) => plainWords(t).includes(topicWords)) : i.id === args["disputeId"]));
+      if (matches.length === 0) return refuse("not_found", partial ? `${topicWords === "" ? "that conflict" : `a conflict about ${quotedText(topicWords, 80)}`} is not among the ${items.length} things waiting for you that the chat can read (more are waiting); answer some of those first, then ask again` : every.length === 0 ? "none of your instructions conflict at the moment" : topicWords === "" ? "that conflict is not waiting for your choice" : `no conflict between your instructions is about ${quotedText(topicWords, 80)}`);
       if (matches.length > 1) return { ok: false, kind: "ask", question: "Which conflict are you settling?", options: matches.slice(0, CHAT_LIMITS.options).map(offered), field: "disputeId", choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       const one = matches[0]!;
       args["disputeId"] = one.id;
       const members = one.members!;
-      const said = typeof chosenWords === "string" ? chosenWords.trim().toLowerCase() : "";
-      const loose = args["chosen"] !== undefined ? members.filter((m) => m.id === args["chosen"]) : said === "" ? [] : members.filter((m) => m.statement.toLowerCase().includes(said));
+      const said = typeof chosenWords === "string" ? plainWords(chosenWords) : "";
+      const loose = args["chosen"] !== undefined ? members.filter((m) => m.id === args["chosen"]) : said === "" ? [] : members.filter((m) => plainWords(m.statement).includes(said));
       // Words that are one instruction whole, and only part of another ("deploy on Friday" beside "never deploy on Friday"), mean that one; any other overlap asks.
-      const whole = loose.length > 1 ? loose.filter((m) => m.statement.trim().toLowerCase().replace(/\s+/g, " ") === said.replace(/\s+/g, " ")) : [];
-      const fits = whole.length === 1 ? whole : loose;
+      const whole = loose.length > 1 ? loose.filter((m) => plainWords(m.statement) === said) : [];
+      // The words must be where the owner keeps that instruction, not where they turn it down ("not the Friday one", "never deploy over deploy on Friday", "instead of SQLite"): words said only inside a
+      // longer instruction of the conflict, or only after a word that turns them down, ask which one stands.
+      const turnedDown = args["chosen"] === undefined && said !== "" && choiceTurnedDown(plainWords(words), said, members.map((m) => plainWords(m.statement)));
+      const fits = turnedDown ? [] : whole.length === 1 ? whole : loose;
       if (fits.length !== 1) return { ok: false, kind: "ask", question: `Which of these stands on ${quotedText(one.text.slice(0, 80), 90)}? Two of your instructions conflict.`, options: members.slice(0, CHAT_LIMITS.options).map((m) => offered({ id: m.id, text: m.statement })), field: "chosen", choices: members.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args["chosen"] = fits[0]!.id;
       showFirst = "the conflict and the instruction you chose are shown to you first";
@@ -3107,7 +3130,8 @@ export class ChatService {
         args["expectedRevision"] = cur!.revision;
         response = await this.#deps.api.handle(using, { v: API_VERSION, op: step.op, commandId: step.commandId, args: args as Record<string, unknown> });
       }
-      if (!response.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: response.error.message } });
+      // A move onto a location that overlaps another project's is refused by the service with an API argument the chat never sends; the owner, who may only have the chat, is told plainly what to do instead.
+      if (!response.ok) return withSecrets({ proposalId, applied: false, replayed: false, results, failure: { step: index, code: response.error.code, message: step.op === "resource.move" && response.error.message.includes("acknowledgeOverlap") ? MOVE_OVERLAP : response.error.message } });
       const made = secretOf(response.result);
       if (made !== undefined) secrets.push(made);
       results.push({ op: step.op, id: response.result["id"] as string, ...(typeof response.result["revision"] === "number" ? { revision: response.result["revision"] } : {}), ...(shownOf(response.result) === undefined ? {} : { shown: shownOf(response.result) as string[] }), ...(step.key === undefined ? {} : { key: step.key }), accepted: true, completed: response.completed ?? true, ...(response.awaits === undefined ? {} : { awaits: response.awaits }) });
@@ -3520,6 +3544,61 @@ const saysId = (text: string, id: string): boolean => id.length > 0 && idPattern
 
 /** Small words that say nothing about which proposal is meant: they neither name one nor point away from one. */
 const PLAIN_WORDS = new Set(["the", "and", "for", "that", "this", "these", "those", "with", "from", "into", "onto", "one", "ones", "yes", "yeah", "yep", "please", "okay", "sure", "its", "not", "but", "you", "your", "our", "all", "any", "are", "was", "were", "has", "have", "had", "will", "would", "should", "can", "could", "just", "now", "then", "there", "here", "what", "which", "too", "also", "thanks", "thank", "ahead", "them", "they", "their", "let", "lets", "out", "off", "about", "only"]);
+
+/** Why a move onto another project's location was refused, and what the owner can do instead, by chat alone. */
+const MOVE_OVERLAP = "the new location contains, or lies inside, a location bound to another project, so access in one project could reach the other's files. Nothing was changed: the chat does not move a resource onto another project's location. Point it at a location that does not overlap, or detach the other project's resource there first and then move this one.";
+
+/** Words that ask for both reading and changing ("read and write", "read-write", "read/write", "full access"). */
+const BOTH_ACCESS = /\bread[\s-]*(?:and|&|\/|\+|-)?[\s-]*writ\w*|\bfull\s+access\b/;
+/** Words that take a read-only limit away ("not read only", "no longer read-only", "not just read"). */
+const NOT_READ_ONLY = /\b(?:not|no longer|never|n't)\s+(?:be\s+|just\s+|only\s+|stay\s+)*(?:read|look|view)[\s-]*only\b|\b(?:not|n't)\s+(?:just|only)\s+(?:read|look|view|see)\b/g;
+/** Words that ask for reading only ("read only", "only read it", "read access", "view access"). */
+const READ_ONLY = /\b(?:read|look|view)[\s-]*only\b|\bonly\s+(?:be\s+able\s+to\s+)?(?:read|look|view|see|inspect)\b|\b(?:read|view)(?:ing)?\s+access\b/;
+/** A change of content turned down just before it ("no writing", "can't edit", "without modifying", "do not let it change"). */
+const TURNED_DOWN_BEFORE = /(?:\bnot|n't|\bno|\bnobody|\bno one|\bnone|\bnever|\bwithout|\bnor|\bcannot|\bstop)\s+(?:\S+\s+){0,3}$/;
+
+/**
+ * Whether the owner's message asks for this access to a resource. A word that only turns access down never gives it, and a word that only agrees never takes it away: write needs a word for
+ * changing and nothing asking for less (read only, only read, read access, a change turned down); read needs a word for reading and nothing asking for more (read and write, no longer read only, an
+ * edit that is not turned down). The resource's label is taken out first, so a resource called "Read Replica" says nothing about access.
+ */
+function accessSaid(message: string, label: string, access: "read" | "write"): boolean {
+  let m = message.normalize("NFC").toLowerCase();
+  if (label.trim() !== "") m = m.split(label.normalize("NFC").toLowerCase()).join(" ");
+  const both = BOTH_ACCESS.test(m);
+  const opened = new RegExp(NOT_READ_ONLY.source).test(m);
+  const rest = m.replace(NOT_READ_ONLY, " ");
+  if (access === "write") {
+    const asks = both || opened || /\b(?:writ|edit|modif|chang)/.test(m);
+    const less = !both && (READ_ONLY.test(rest) || /\b(?:no\s+writ|not\s+writ|without\s+writ|n[o']t\s+(?:let\s+\S+\s+|allow\s+\S+\s+to\s+)?(?:writ|edit|modif|chang))/.test(rest));
+    return asks && !less;
+  }
+  const asks = READ_ONLY.test(rest) || /\b(?:read|reads|reading|view|viewing|look|looking|see|inspect)\b/.test(rest);
+  const more = both || opened || [...rest.matchAll(/\b(?:writ|edit|modif)\w*/g)].some((x) => !TURNED_DOWN_BEFORE.test(rest.slice(Math.max(0, x.index - 40), x.index)));
+  return asks && !more;
+}
+
+/** Text compared the way the owner sees it: one Unicode form, lower case, single spaces, without the quotes and closing punctuation around it. */
+function plainWords(text: string): string {
+  return text.normalize("NFC").toLowerCase().replace(/\s+/g, " ").trim().replace(/^["'\u201c\u2018]+|["'\u201d\u2019.!?;:,]+$/gu, "").trim();
+}
+
+/** A word that turns down what follows it ("not", "drop", "over", "instead of", ...), at the end of the text before the choice words (an article or "the one about" may stand between). */
+const TURNS_DOWN = /(?:\bnot|n't|\bno|\bdrop|\bdropping|\bover|\binstead of|\brather than|\bagainst|\breject|\brejecting|\bremove|\bforget|\bignore|\bdiscard|\bcancel|\bexcept|\bbut not|\bnor)\s+(?:(?:keep|keeping|use|using|want|choose|pick|go with|take)\s+)?(?:(?:the|that|this)\s+)?(?:one\s+(?:about|with|saying|that says)\s+)?["'\u201c\u2018]?$/u;
+
+/**
+ * Whether the owner's message turns down the choice words rather than keeping them: every place the words stand is either inside a longer instruction of the conflict (said as part of
+ * "never deploy on Friday", they do not name "deploy on Friday") or right after a word that turns them down. Words not found in the message as written are left to the other checks.
+ */
+function choiceTurnedDown(message: string, said: string, statements: readonly string[]): boolean {
+  const spans: [number, number][] = [];
+  for (const st of statements) if (st.length > said.length && st.includes(said)) for (let at = message.indexOf(st); at >= 0; at = message.indexOf(st, at + 1)) spans.push([at, at + st.length]);
+  const places: number[] = [];
+  for (let at = message.indexOf(said); at >= 0; at = message.indexOf(said, at + 1)) places.push(at);
+  if (places.length === 0) return false;
+  const own = places.filter((at) => !spans.some(([a, b]) => at >= a && at + said.length <= b));
+  return own.length === 0 || own.every((at) => TURNS_DOWN.test(message.slice(Math.max(0, at - 60), at)));
+}
 
 /**
  * Whether the owner's words single out the proposal the model picked among several open ones: the words the model cites say something that appears in that proposal's text and in no other open one's (a word of

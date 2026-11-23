@@ -477,12 +477,12 @@ export type StatusRequest =
 
 /** `rank` is the kind of item in the fixed order used to break a tie: approvals, questions, meeting decisions, held resumes, blockers. */
 /** One item of the Needs-you list as data: what it is, what it is about and how the owner answers it in place. */
-export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** For a dispute: the decisions in conflict, each as the owner said it (the chat matches the owner's words against these). */ readonly members?: readonly { readonly id: string; readonly statement: string }[]; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string; /** For a defect: the revision of the escalation listed, which `needs-you.answer` takes as `expectedRevision`. */ readonly revision?: number }
+export interface NeedItemView { readonly kind: NeedKind; readonly id: string; readonly taskId?: string; readonly projectId?: string; readonly since: string; readonly critical: boolean; readonly answer: NeedAnswer; /** For a dispute: the decisions in conflict, each as the owner said it (the chat matches the owner's words against these). */ readonly members?: readonly { readonly id: string; readonly statement: string }[]; /** For a dispute: the topic the instructions conflict on, as recorded (the chat matches the owner's topic words against it, never against the line's fixed wording). */ readonly topic?: string; /** The item in words, as the line says it (for the chat to match what the owner calls it). */ readonly text: string; /** For a defect: the revision of the escalation listed, which `needs-you.answer` takes as `expectedRevision`. */ readonly revision?: number }
 /** What kind of thing waits for the owner, and how it is answered in place (`needs-you.answer`, card U11d). */
 export type NeedKind = "defect" | "question" | "approval" | "meeting-decision" | "meeting-question" | "meeting-inquiry" | "held-resume" | "dispute" | "blocker";
 /** How an item is answered: one of the named choices, or the owner's own words. */
 export type NeedAnswer = { readonly kind: "choice"; readonly choices: readonly string[] } | { readonly kind: "words" };
-interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer; revision?: number; members?: readonly { id: string; statement: string }[] }
+interface NeedItem { text: string; cites: Cite[]; taskId?: string; projectId?: string; since: string; id: string; rank: number; kind: NeedKind; answer: NeedAnswer; revision?: number; members?: readonly { id: string; statement: string }[]; topic?: string }
 
 // ---- retention status lines (card K06d) ---------------------------------------------------------------------------------------
 
@@ -3412,7 +3412,7 @@ export class StatusService {
       const open = await this.#deps.disputes(by, 51);
       if (open.truncated || open.items.length > 50) truncated.push("disputes");
       for (const d of open.items.slice(0, 50)) {
-        all.push({ text: `Two of your instructions conflict on ${quoted(d.topic, 80)}: ${d.members.map((m) => quoted(m.statement, 120)).join(" or ")}; nothing on that topic is in force and the work that relies on it waits (choose which one stands)`, cites: [cite("decision-dispute", d.id, d.revision), cite("project", d.projectId)], projectId: d.projectId, ...(d.taskId === undefined ? {} : { taskId: d.taskId }), since: d.openedAt, id: d.id, rank: 1, kind: "dispute", answer: { kind: "choice", choices: d.members.map((m) => m.id) }, members: d.members.map((m) => ({ id: m.id, statement: m.statement })) });
+        all.push({ text: `Two of your instructions conflict on ${quoted(d.topic, 80)}: ${d.members.map((m) => quoted(m.statement, 120)).join(" or ")}; nothing on that topic is in force and the work that relies on it waits (choose which one stands)`, cites: [cite("decision-dispute", d.id, d.revision), cite("project", d.projectId)], projectId: d.projectId, ...(d.taskId === undefined ? {} : { taskId: d.taskId }), since: d.openedAt, id: d.id, rank: 1, kind: "dispute", answer: { kind: "choice", choices: d.members.map((m) => m.id) }, members: d.members.map((m) => ({ id: m.id, statement: m.statement })), topic: d.topic });
       }
     }
     if (this.#deps.meetingInquiries !== undefined) {
@@ -3545,7 +3545,7 @@ export class StatusService {
     if (lines.length === 0) lines.push(line("Nothing is waiting for you."));
     else if (ranked.length > cap) lines.push(line(`${ranked.length - cap} more are waiting; deal with these first and ask again.`));
     if (truncated.length > 0) lines.push(line(`This list may be incomplete: there are more ${truncated.join(", ")} than could be looked at.`));
-    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text, ...(i.revision === undefined ? {} : { revision: i.revision }), ...(i.members === undefined ? {} : { members: i.members }) }));
+    const views: NeedItemView[] = ranked.slice(0, cap).map(({ i, critical }) => ({ kind: i.kind, id: i.id, ...(i.taskId === undefined ? {} : { taskId: i.taskId }), ...(i.projectId === undefined ? {} : { projectId: i.projectId }), since: i.since, critical, answer: i.answer, text: i.text, ...(i.revision === undefined ? {} : { revision: i.revision }), ...(i.members === undefined ? {} : { members: i.members }), ...(i.topic === undefined ? {} : { topic: i.topic }) }));
     return { observedAt: this.#runner.now(), lines, items: views, count: ranked.length, truncated, ...(holds === undefined ? {} : { critical: ranked.filter((r) => r.critical).length }) };
   }
 
