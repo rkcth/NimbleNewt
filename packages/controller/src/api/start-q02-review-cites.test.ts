@@ -135,7 +135,7 @@ for (const store of stores) {
       // The guide says what the view adds, in the words this view uses.
       const guide = readFileSync(fileURLToPath(new URL("../../../../docs/nimblenewt/user-guide.md", import.meta.url)), "utf8");
       assert.match(guide, /When the reviewer's newest verdict says what it judged against, the line adds it in brackets: the version of the task's acceptance criteria, the decisions of yours it was judged against and, for a rejection, the requirement of yours that is not met/);
-      assert.match(guide, /An approval is refused while the work relies on a decision of yours that was corrected or is in dispute/);
+      assert.match(guide, /An approval is refused while the work relies on a decision of yours that was corrected or is in dispute: after a correction, until the work is checked again against your current decision; while in dispute, until you settle it/);
       assert.match(OPERATION_BY_NAME.get("submission.record")!.summary + JSON.stringify(OPERATION_BY_NAME.get("submission.record")!.args), /criteriaRevision/);
     } finally { await c.close(); await db.close(); }
   });
