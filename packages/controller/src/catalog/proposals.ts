@@ -71,7 +71,7 @@ export interface ToolboxProposalBody {
   readonly submittedAt: string;
   readonly updatedAt: string;
 }
-/** `accepted`: the author's proposals accepted without a release and not yet released, at most `acceptedPerAuthor` (a further acceptance without a release is refused until one is released); absent in indexes written before this bound. `settled`: the author's proposals that reached an end (rejected, withdrawn, accepted and released), oldest first, at most `settledPerAuthor`; the oldest beyond that are removed with their record. Absent in indexes written before this bound. */
+/** `accepted`: the author's proposals accepted without a release and not yet released, at most `acceptedPerAuthor` (a further acceptance without a release is refused until one is released or rejected); absent in indexes written before this bound. `settled`: the author's proposals that reached an end (rejected, withdrawn, accepted and released), oldest first, at most `settledPerAuthor`; the oldest beyond that are removed with their record. Absent in indexes written before this bound. */
 interface AuthorIndex { readonly author: string; readonly pending: readonly string[]; readonly settled?: readonly string[]; readonly accepted?: readonly string[] }
 
 export interface ProposalSummary {
@@ -289,10 +289,13 @@ export class ToolboxProposalService {
     if (command.version !== undefined && decision !== "accept") invalid("version", "only an acceptance releases a version");
     if (command.audience !== undefined && !(decision === "accept" && p.kind === "promotion" && command.version !== undefined)) invalid("audience", "is given only when accepting a promotion with a release");
     if (command.version !== undefined && (typeof command.version !== "string" || !VERSION.test(command.version))) invalid("version", "must be major.minor.patch");
-    const allowed: Record<ProposalDecision, readonly ProposalState[]> = { accept: ["open", "changes_requested", "deferred", "accepted"], request_changes: ["open", "deferred"], defer: ["open", "changes_requested"], reject: ["open", "changes_requested", "deferred"], reopen: ["deferred"] };
+    // Second review of slice 7: an accepted proposal not yet released may also be rejected. Without it nothing ended one whose release had become impossible (an improvement whose base is no longer the
+    // version in use cannot be rebased once accepted; a promotion whose name was taken), and such proposals would hold places of the `acceptedPerAuthor` bound for good.
+    const allowed: Record<ProposalDecision, readonly ProposalState[]> = { accept: ["open", "changes_requested", "deferred", "accepted"], request_changes: ["open", "deferred"], defer: ["open", "changes_requested"], reject: ["open", "changes_requested", "deferred", "accepted"], reopen: ["deferred"] };
     const check = (cur: ToolboxProposalBody): void => {
       if (!allowed[decision].includes(cur.state)) throw new DomainError("invalid_command", `the proposal is ${cur.state}; it cannot be given ${decision.replace("_", " ")}`, { field: "decision" });
-      if (decision === "accept" && cur.state === "accepted" && (command.version === undefined || cur.released !== undefined)) throw new DomainError("invalid_command", cur.released !== undefined ? `the proposal was accepted and released as ${cur.released.version}` : "the proposal is accepted already; give a version to release it", { field: "decision" });
+      if ((decision === "accept" || decision === "reject") && cur.state === "accepted" && cur.released !== undefined) throw new DomainError("invalid_command", `the proposal was accepted and released as ${cur.released.version}`, { field: "decision" });
+      if (decision === "accept" && cur.state === "accepted" && command.version === undefined) throw new DomainError("invalid_command", "the proposal is accepted already; give a version to release it", { field: "decision" });
     };
     // The state is judged inside the write (so a repeat of a decision that was carried out is answered from its record).
     const to: ProposalState = decision === "accept" ? "accepted" : decision === "request_changes" ? "changes_requested" : decision === "defer" ? "deferred" : decision === "reject" ? "rejected" : "open";
@@ -659,7 +662,7 @@ export class ToolboxProposalService {
   /**
    * The changes that take a proposal off its author's list of proposals waiting (when it reached a final state). With `settle` (rejected, withdrawn, or accepted and released: nothing more can be decided on it) it also goes on
    * the author's list of ended proposals, and the oldest beyond `settledPerAuthor` are deleted in the same write, so a propose-and-withdraw loop cannot store records without bound. An accepted proposal not yet released stays
-   * (a later accept with a version still releases it) and is not counted among the ended ones; it is held on the author's `accepted` list instead, at most `acceptedPerAuthor` (`accepting`: refused beyond that).
+   * (a later accept with a version still releases it) and is not counted among the ended ones; it is held on the author's `accepted` list instead, at most `acceptedPerAuthor` (`accepting`: refused beyond that), until its release or its rejection ends it.
    */
   async #unindex(author: string, id: string, settle: boolean, accepting = false): Promise<{ changes: Change[]; audit: AuditEntry[] }> {
     const iref: AggregateRef = { kind: INDEX_KIND, id: derivedId("tpa", author) };
@@ -689,16 +692,22 @@ export class ToolboxProposalService {
       changes.push(...text);
       audit.push(...proposalTextAudit(text, "removed with the proposal"));
     }
-    // Accepted without a release and not yet released: counted against `acceptedPerAuthor`. An entry whose record is gone or no longer such a proposal only leaves the list. A release (or any ending) takes the proposal off it.
+    // Accepted without a release and not yet released: counted against `acceptedPerAuthor`. Every way out of that state (a release, or a rejection) ends the proposal here and takes it off the list in the same
+    // write, so other writes carry the list on without reading it. The acceptance that adds one reads the listed records: an entry whose record is gone or no longer such a proposal of this author leaves the
+    // list. At most `acceptedPerAuthor + removedPerWrite` are read in one write; any beyond (only a list changed by hand is that long) are kept unread and counted as held.
     let accepted: string[] | undefined;
     if (body?.accepted !== undefined || accepting) {
-      accepted = [];
-      for (const x of new Set((body?.accepted ?? []).filter((v): v is string => typeof v === "string" && PROPOSAL_ID.test(v) && v !== id))) {
-        const q = (await this.#runner.get(PROPOSAL_KIND, x))?.body as unknown as ToolboxProposalBody | undefined;
-        if (q !== undefined && q.author === author && q.state === "accepted" && q.released === undefined) accepted.push(x);
-      }
-      if (accepting) {
-        if (accepted.length >= PROPOSAL_LIMITS.acceptedPerAuthor) throw new DomainError("unavailable", `${accepted.length} proposals of this author are accepted and still waiting for a release (the most kept); release one (accept it again with a version) before accepting another without one`);
+      const listed = [...new Set((body?.accepted ?? []).filter((v): v is string => typeof v === "string" && PROPOSAL_ID.test(v) && v !== id))];
+      if (!accepting) accepted = listed;
+      else {
+        const read = listed.slice(0, PROPOSAL_LIMITS.acceptedPerAuthor + PROPOSAL_LIMITS.removedPerWrite);
+        accepted = [];
+        for (const x of read) {
+          const q = (await this.#runner.get(PROPOSAL_KIND, x))?.body as unknown as ToolboxProposalBody | undefined;
+          if (q !== undefined && q.author === author && q.state === "accepted" && q.released === undefined) accepted.push(x);
+        }
+        accepted.push(...listed.slice(read.length));
+        if (accepted.length >= PROPOSAL_LIMITS.acceptedPerAuthor) throw new DomainError("unavailable", `${accepted.length} proposals of this author are accepted and still waiting for a release (the most kept); release one (accept it again with a version) or reject one before accepting another without a version`);
         accepted.push(id);
       }
     }

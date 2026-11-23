@@ -686,6 +686,8 @@ for (const backend of backends) {
     const propose = async (own?: string) => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: own ?? better, rationale: "faster", tests: "ran it" })).proposalId;
     const newer = async () => propose(await c.note(cody.p, `console.log('lint, again ${n += 1}')`));
     const accept = (id: string, version?: string) => c.props.decide(maya.p, { commandId: cid("d"), proposalId: id, decision: "accept", ...(version === undefined ? {} : { version }) });
+    // The bound is read from the built module below; checked first so a changed bound fails at once instead of making thousands of acceptances.
+    assert.equal(PROPOSAL_LIMITS.acceptedPerAuthor, 20);
     const limit = PROPOSAL_LIMITS.acceptedPerAuthor;
     const index = async () => { const rows = await c.storage.listAggregates("toolbox-proposer", { limit: 5 }); assert.equal(rows.length, 1); return rows[0]!; };
     const held = async () => ((await index()).body.accepted ?? []) as string[];
@@ -734,12 +736,46 @@ for (const backend of backends) {
     await c.poke("toolbox-proposal", late, (b) => ({ ...b, author: maya.p.id }));
     assert.equal((await accept(next)).state, "accepted");
     assert.deepEqual(await held(), [...more, next]);
+    // Second review: an accepted proposal can become impossible to release (its base is no longer the version in use, and an accepted one is not rebased). A rejection ends it and frees its place.
+    const stuck = first[2]!;
+    await refuses("stale_revision", () => accept(stuck, "1.2.0"), /rebase it first/);
+    await refuses("invalid_command", () => c.props.rebase(maya.p, { commandId: cid("rb"), proposalId: stuck }), /only one still waiting is rebased/);
+    const over = await newer();
+    await refuses("unavailable", () => accept(over), /release one \(accept it again with a version\) or reject one/);
+    const settledBefore = ((await index()).body.settled ?? []) as string[];
+    assert.ok(await c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id: more[0]! }), "an accepted proposal keeps its text");
+    assert.equal((await c.props.decide(maya.p, { commandId: cid("d"), proposalId: more[0]!, decision: "reject", reason: "its base moved on" })).state, "rejected");
+    assert.deepEqual(await held(), [...more.slice(1), next], "the rejection takes it off the list");
+    assert.deepEqual((await index()).body.settled, [...settledBefore, more[0]!], "and onto the ended ones, in the same write");
+    assert.equal(await c.storage.getAggregate({ kind: PROPOSAL_TEXT_KIND, id: more[0]! }), undefined, "its kept text goes");
+    assert.match((await c.cat.notices(cody.p, { limit: 100 })).items.at(-1)!.text, /rejected your proposal .*its base moved on/);
+    await refuses("invalid_command", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: more[0]!, decision: "reject", reason: "again" }), /the proposal is rejected; it cannot be given reject/);
+    await refuses("invalid_command", () => accept(more[0]!, "1.2.0"), /the proposal is rejected/);
+    const freed = await newer();
+    assert.equal((await accept(freed)).state, "accepted");
+    assert.deepEqual(await held(), [...more.slice(1), next, freed]);
+    // One acceptance reads at most acceptedPerAuthor + removedPerWrite listed records; entries beyond those (only a list changed by hand is that long) are kept unread and counted as held.
+    const listedNow = await held();
+    assert.equal(listedNow.length, limit);
+    const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    const unknown = Array.from({ length: limit + PROPOSAL_LIMITS.removedPerWrite }, (_, i) => `tpp-${"a".repeat(18)}${alphabet[i >> 5]!}${alphabet[i & 31]!}`);
+    await c.poke("toolbox-proposer", (await index()).id, (b) => ({ ...b, accepted: [...unknown, ...listedNow] }));
+    await refuses("unavailable", () => accept(over), new RegExp(`^${limit} proposals of this author are accepted`));
+    // Within the entries read, unknown ones leave the list when the acceptance goes through.
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: more[1]!, decision: "reject", reason: "make room" });
+    const room = listedNow.filter((x) => x !== more[1]);
+    await c.poke("toolbox-proposer", (await index()).id, (b) => ({ ...b, accepted: [...unknown.slice(0, PROPOSAL_LIMITS.removedPerWrite), ...room] }));
+    assert.equal((await accept(over)).state, "accepted");
+    assert.deepEqual(await held(), [...room, over]);
+    // A released one is not rejected afterwards.
+    await refuses("invalid_command", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: first[0]!, decision: "reject", reason: "late" }), /accepted and released as 1\.1\.0/);
   });
 
   suite("slice 7: two acceptances without a release at the same moment cannot both take the last place", async (c) => {
     const { cody, maya } = await cast(c);
     const better = await c.note(cody.p, "console.log('lint, faster')");
     const propose = async () => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: better, rationale: "faster", tests: "ran it" })).proposalId;
+    assert.equal(PROPOSAL_LIMITS.acceptedPerAuthor, 20);
     const limit = PROPOSAL_LIMITS.acceptedPerAuthor;
     for (let i = 0; i < limit - 1; i += 1) await c.props.decide(maya.p, { commandId: cid("d"), proposalId: await propose(), decision: "accept" });
     const [x, y] = [await propose(), await propose()];
