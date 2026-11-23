@@ -247,6 +247,7 @@ test("the prompt tells the model how to ask for the rest of a long documentation
   assert.equal(out.length, 1, JSON.stringify(out));
   assert.deepEqual(STATUS_KINDS["docs"]?.keys, ["projectId", "after"]);
   assert.deepEqual(STATUS_KINDS["task_docs"]?.keys, ["taskId|taskTitle", "after"]);
-  assert.match(system, /Both documentation views show at most 30 documents; when they end with "N more document\(s\) are not shown here; ask again with after M" and the owner wants the rest/);
-  assert.match(system, /ask the same view again with after M \(a whole number, the count of documents already shown\)/);
+  // The model sees no earlier answer, so the number comes from the owner's words by a rule it can apply: next = after 30, the third page = after 60, a number said is used as said.
+  assert.match(system, /Both documentation views show 30 documents a page, in the same order each time; after \(a whole number\) is how many were already shown\. You do not see earlier answers, so take it from the owner's words/);
+  assert.match(system, /\("show me the next documents", "what other documents are there\?"\) or the second page is after 30, the third page after 60 \(30 for each page before it\); a number the owner gives is used as said \("the documents after 60" is after 60, "from document 61" is after 60\)/);
 });

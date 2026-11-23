@@ -193,6 +193,18 @@ for (const backend of backends) {
       const beyond = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 31 }))!;
       assert.match(beyond.lines[1]!.text, /^There are only 31 document\(s\) here, so nothing comes after 31\./);
       assert.equal(titlesOf(beyond).length, 0);
+      const farBeyond = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 1000 }))!;
+      assert.match(farBeyond.lines[1]!.text, /^There are only 31 document\(s\) here, so nothing comes after 1000\./);
+      // Exactly 30 left from after 1: a full page and no line pointing further; from 29 the page starts at the 30th and holds the last two.
+      const fromOne = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 1 }))!;
+      assert.match(fromOne.lines[1]!.text, /^Showing documents 2 to 31 of 31,/);
+      assert.equal(titlesOf(fromOne).length, 30);
+      assert.deepEqual(titlesOf(fromOne), [...firstPage.slice(1), ...titlesOf(rest)], "the same order on every page");
+      assert.ok(!fromOne.lines.some((l) => /more document\(s\) are not shown/.test(l.text)));
+      assert.deepEqual((await status.ask(owner, { kind: "task_docs", taskId: export_, after: 0 }))!.lines.map((l) => l.text), many.map((l) => l.text), "after 0 is the first page as before");
+      const from29 = (await status.ask(owner, { kind: "task_docs", taskId: export_, after: 29 }))!;
+      assert.match(from29.lines[1]!.text, /^Showing documents 30 to 31 of 31,/);
+      assert.deepEqual(titlesOf(from29), [firstPage[29]!, ...titlesOf(rest)]);
       for (const bad of [-1, 1.5, Number.NaN, 2 ** 60, "3" as unknown as number]) await assert.rejects(async () => status.ask(owner, { kind: "task_docs", taskId: export_, after: bad }), /after: must be a whole number from 0/);
       // Access first: a stranger asking for a later page is refused like for the first.
       assert.equal(await status.ask(nogrant, { kind: "task_docs", taskId: export_, after: 30 }), undefined);

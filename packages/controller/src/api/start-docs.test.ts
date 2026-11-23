@@ -125,8 +125,7 @@ test("documentation obligations through the running controller and the owner's c
     const noTask = await turn("m3c", qn, [{ kind: "status", request: { kind: "task_docs", taskTitle: "Moon landing" }, evidence: qn, basis: "owner" }]);
     assert.equal(noTask[0].status, "refused", JSON.stringify(noTask));
     assert.equal((await call(far.token, "status.ask", { request: { kind: "task_docs", taskId: task } })).error.code, "not_found");
-    // The rest of a long list by chat (Q03 slice 9): the owner says "what else is there?", the model asks the same view with `after` (the count the view's last line gave), the owner's words carry no number
-    // beyond that. Here the project has one document, so the page says nothing comes after it (the 31-document paging is in the status test); a number that is not a whole count is refused.
+    // The rest of a long list by chat (Q03 slice 9): the model sees no earlier answer, so it takes the number from the owner's words by the prompt's rule (the documents after the first 30 are after 30). Here the project has one document, so the page says nothing comes after it (the 31-document paging is in the status test); a number that is not a whole count is refused.
     const qm = "what other documents are there beyond the first 30?";
     const more = await turn("m3d", qm, [{ kind: "status", request: { kind: "docs", after: 30 }, evidence: qm, basis: "owner" }]);
     assert.equal(more[0].status, "answered", JSON.stringify(more));
