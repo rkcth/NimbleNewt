@@ -16,7 +16,7 @@ import type { Cite, StatusRequest } from "../status/index.js";
 import { quoted as quotedText } from "../status/explain.js";
 import { docVerifyCode } from "../submissions/doc-obligations.js";
 import { probeUrl } from "../projects/probes.js";
-import { instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
+import { daysBetween, instantOf, isLocalDate, isLocalTime, knownZone, wallClock } from "../meetings/zones.js";
 import type { ApprovedCodeLookup } from "./approved-code.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
 import { DEFAULT_REPLY_TOKENS, smallWindowWarning } from "../context/fixed-part.js";
@@ -26,7 +26,7 @@ import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
 import { relianceLines } from "../status/reliance-words.js";
 import type { Reliance } from "../security/reliance.js";
-import { MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeInWords, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
+import { MEETING_CHAT_ARGS, MEETING_SCHEDULE_EXEMPT, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords, FLOOR_CONTROLS, NEED_CHOICES, ROUTE_SETTING_EXEMPT, SETUP_EXEMPT, wholeWord, addressWritten, platformsNamed, platformChoices, saysPlatform, durationInWords, windowLengthInWords, leadInWords, sizeInWords, grantDateInWords, GRANT_BUNDLES, GRANT_BUNDLE_LIMIT, GRANT_EXEMPT, CHAT_OPS, LANDING_MEANS, PROJECT_AS_PROJECT, TITLE_KEYS, acceptedArgs, describe, foreignValue, landingOf, RELEASE_ID_KEYS, MAINTENANCE_ID_KEYS, OWNER_RESPOND_EXEMPT, MEETING_CONTROLS, MEETING_CONTROL_EXEMPT, RECOVERY_STEP_EXEMPT, WORKSPACE_REQUEST_EXEMPT, SIMULATION_EXEMPT, EVENT_SOURCE_EXEMPT, STREAM_SWITCH_EXEMPT, DEFECT_EXEMPT, DOC_EXEMPT, hasRefMarker, ownerSaysMove, proposalReason } from "./commands.js";
 import { CHECKS, INTEGRATORS, LANDINGS, profileDefaults } from "../policy/integration-policy.js";
 import { lengthInWords, type EditDraft, type PolicyEditService } from "./policy-edit.js";
 import { CHAT_LIMITS, checkIntents, evidenceInText, evidenceStrong, evidenceWholeMessage, refuseCredentials, splitQuoted, type ChatInterpreter, type Intent } from "./interpreter.js";
@@ -1128,7 +1128,15 @@ export class ChatService {
     const time = args["time"];
     if (isSchedule || time !== undefined) {
       if (typeof time !== "string" || !isLocalTime(time)) return refuse("invalid_command", "What time of day should the meeting be held? Say it in your own words (for example \"at 9:30\").");
-      if (!clockTimeInWords(time, words)) return refuse("unsupported_value", `The time ${quotedText(time, 10)} is not in your message as a time of day, so nothing was proposed; the chat will not pick one for you. What time should it be?`);
+      const reading = clockTimeReading(time, words);
+      if (reading === undefined) return refuse("unsupported_value", `The time ${quotedText(time, 10)} is not in your message as a time of day, so nothing was proposed; the chat will not pick one for you. What time should it be?`);
+      // A time said without am or pm ("at 3") could be either half of the day: one read as night-time (before 06:00) is asked about, since a meeting at 03:00 meant for 15:00 would be held at the wrong time; otherwise the reading taken is said.
+      if (reading === "either") {
+        const hour = Number(time.slice(0, 2));
+        const other = `${String((hour + 12) % 24).padStart(2, "0")}${time.slice(2)}`;
+        if (hour < 6) return refuse("unsupported_value", `Your message gives the time without am or pm, and it was read as ${time} at night, so nothing was proposed. Did you mean ${other}? Say the meeting again with am or pm (or a 24-hour time such as ${other}).`);
+        notes.push(`Your message gives the time without am or pm, so it is read as ${time} (${hour < 12 ? "in the morning" : hour < 18 ? "in the afternoon" : "in the evening"}), not ${other}.`);
+      }
     }
     const zone = args["timeZone"];
     if (zone !== undefined && (typeof zone !== "string" || knownZone(zone) === undefined)) return refuse("invalid_command", `${quotedText(String(zone), 64)} is not a time zone the system knows (an IANA name such as America/New_York)`);
@@ -1158,14 +1166,17 @@ export class ChatService {
       if (rule?.kind === "once" && knownZone(atZone) !== undefined && isLocalDate(rule.date) && isLocalTime(atTime)) {
         const now = Date.parse(this.#runner.now());
         // A one-off day the owner did not name (or one before today on the zone's calendar) is the model's, and a moment already past would end the schedule at once: both are asked about.
-        if (recurrence !== undefined && !oneOffDayInWords(rule.date, words, wallClock(now, atZone).date)) return refuse("unsupported_value", `The day ${quotedText(rule.date, 12)} is not in your message, so nothing was proposed; the chat will not pick a day for you. Which day should it be (a date, "tomorrow", or a weekday)?`);
+        const today = wallClock(now, atZone).date;
+        if (recurrence !== undefined && !oneOffDayInWords(rule.date, words, today)) return refuse("unsupported_value", `The day ${quotedText(rule.date, 12)} is not in your message, so nothing was proposed; the chat will not pick a day for you. Which day should it be (a date, "tomorrow", or a weekday)?`);
         const at = instantOf(rule.date, atTime, atZone);
         if (at <= now) return refuse("invalid_command", `${rule.date} at ${atTime} in ${quotedText(atZone, 64)} has already passed, so nothing was proposed. Which day should it be?`);
         const wall = wallClock(at, atZone);
         const later = wallClock(at + 3_600_000, atZone);
         const pad = (n: number): string => String(n).padStart(2, "0");
         const shift = `${wall.date} ${pad(wall.hour)}:${pad(wall.minute)}` !== `${rule.date} ${atTime}` ? `; that time does not exist that day, because the clocks go forward, so it starts at ${pad(wall.hour)}:${pad(wall.minute)} local time` : later.date === wall.date && later.hour === wall.hour && later.minute === wall.minute ? "; that time happens twice that night, because the clocks go back, so it starts at the first" : "";
-        instant = ` (${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC${shift})`;
+        // How far ahead the day is on the zone's calendar, so "Friday" said on a Friday shows whether it is today or next week.
+        const ahead = daysBetween(today, rule.date);
+        instant = ` (${new Date(at).toISOString().slice(0, 16).replace("T", " ")} UTC, ${ahead === 0 ? "today" : ahead === 1 ? "tomorrow" : `in ${ahead} days`} there${shift})`;
       }
       notes.push(`It is held ${recurrence === undefined ? (rule === undefined ? "as it is now" : `${recurrenceWords(rule)} as now`) : recurrenceWords(recurrence)}${atTime === "" ? "" : ` at ${quotedText(atTime, 10)}`} in ${atZone === "" ? "the schedule's own zone" : quotedText(atZone, 64)}${instant}, for ${typeof args["durationMinutes"] === "number" ? `${args["durationMinutes"]}` : isSchedule ? "30 (the default)" : typeof current?.["durationMinutes"] === "number" ? `${current["durationMinutes"]}` : "the same number of"} minutes. Check that this is when you meant.`);
     }
@@ -1173,7 +1184,10 @@ export class ChatService {
     if (isUpdate && Array.isArray(args["roster"])) {
       const now = new Set(args["roster"] as string[]);
       const off = ((current?.["roster"] as string[] | undefined) ?? []).filter((p) => !now.has(p));
-      const nameOf = async (p: string): Promise<string> => labels[p] ?? String((await activeAgents()).find((a) => `agent:${String(a["id"])}` === p)?.["friendlyName"] ?? p);
+      // An agent taken off may have retired since it was put on the roster: it is still named, not shown by its ID.
+      let retired: Record<string, unknown>[] | undefined;
+      const nameIn = (list: Record<string, unknown>[], p: string): unknown => list.find((a) => `agent:${String(a["id"])}` === p)?.["friendlyName"];
+      const nameOf = async (p: string): Promise<string> => labels[p] ?? String(nameIn(await activeAgents(), p) ?? nameIn((retired ??= await this.#listAll(token, "agent.list", { state: "retired" }).catch(() => [])), p) ?? p);
       const offNames = await Promise.all(off.map(nameOf));
       notes.push(`Who attends becomes exactly the agents named (the roster is replaced, not added to)${offNames.length === 0 ? "; nobody is taken off" : `; taken off: ${offNames.slice(0, 8).map((n) => quotedText(n, 40)).join(", ")}${offNames.length > 8 ? `, and ${offNames.length - 8} more` : ""}`}.`);
     }

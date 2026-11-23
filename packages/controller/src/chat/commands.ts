@@ -488,23 +488,42 @@ function clockTimes(written: string): number[] {
  * a time without am or pm is read both ways round the clock. A time the model chose is not the owner's, so it is asked for instead of proposed.
  */
 export function clockTimeInWords(time: unknown, text: string): boolean {
+  return clockTimeReading(time, text) !== undefined;
+}
+
+/**
+ * How the owner's words give this time of day: `said` when they fix it (am or pm, an hour past 12, `09:30` written with its leading zero, noon, midnight), `either` when they give it only
+ * without am or pm ("at 3", "9:30", "half past two", which could be 03:00 or 15:00), undefined when they do not give it at all (see `clockTimeInWords`). The chat says which reading was taken
+ * of an `either` time, and asks about one at night, so "at 3" can never quietly become 03:00.
+ */
+export function clockTimeReading(time: unknown, text: string): "said" | "either" | undefined {
   const at = typeof time === "string" ? /^(\d{2}):(\d{2})$/.exec(time) : null;
-  if (at === null) return false;
+  if (at === null) return undefined;
   const want = Number(at[1]) * 60 + Number(at[2]);
   const t = numbersOf(text);
+  let either = false;
   for (const m of t.matchAll(new RegExp(CLOCK, "g"))) {
     const written = m[0].trim();
     if (/^(?:\d{1,2}|[a-z]+)$/.test(written) && !/\b(?:at|from|around|about|by|for|until|till|after|before)\s+$|@\s*$/.test(t.slice(Math.max(0, m.index - 12), m.index))) continue;
-    if (clockTimes(written).includes(want)) return true;
+    const times = clockTimes(written);
+    if (!times.includes(want)) continue;
+    if (times.length === 1 || /^0\d[:.]\d{2}$/.test(written)) return "said";
+    either = true;
   }
-  return false;
+  return either ? "either" : undefined;
 }
 
 /** A recurrence in the owner's words, for the proposal line. */
 export function recurrenceWords(value: unknown): string {
   const r = value as { kind?: unknown; date?: unknown; days?: unknown } | null;
   const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  if (r?.kind === "once") return `once on ${short(r.date)}`;
+  // A one-off date is shown with its weekday and month in words too, so "Friday" read as next week's Friday, or "3/4/2027" read the other way round, is plain to see.
+  if (r?.kind === "once") {
+    const ymd = typeof r.date === "string" ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(r.date) : null;
+    const at = ymd === null ? undefined : new Date(Date.UTC(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])));
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    return `once on ${short(r.date)}${at === undefined || Number.isNaN(at.getTime()) || at.getUTCDate() !== Number(ymd![3]) ? "" : ` (${days[at.getUTCDay()]} ${at.getUTCDate()} ${months[at.getUTCMonth()]})`}`;
+  }
   if (r?.kind === "weekly" && Array.isArray(r.days)) return `every ${r.days.map((d) => days[d as number] ?? `day ${short(d)}`).join(", ")}`;
   if (r?.kind === "daily") return "every day";
   return short(value);

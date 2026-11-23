@@ -5,7 +5,7 @@ import { BlockerService } from "../domain/blockers.js";
 import { WaitService } from "../domain/waits.js";
 import { StatusService } from "../status/index.js";
 import { StandupService } from "../standups/index.js";
-import { clockTimeInWords, oneOffDayInWords, weekdaysInWords } from "./commands.js";
+import { clockTimeInWords, clockTimeReading, oneOffDayInWords, recurrenceWords, weekdaysInWords } from "./commands.js";
 import { ModelInterpreter, type ModelCall } from "./model-interpreter.js";
 import type { Outcome } from "./index.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
@@ -56,6 +56,12 @@ const RULES: Record<string, Rule> = {
   "Set up a sync with Bob every Monday at 9am Eastern time": { op: "meeting.schedule", invents: true, args: { title: "sync", agentNames: ["Bob"], time: "09:00", recurrence: { kind: "weekly", days: [1, 3] }, timeZone: "America/New_York" } },
   "Set up a sync with Bob every weekday at 9am Eastern time": { op: "meeting.schedule", args: { title: "sync", agentNames: ["Bob"], time: "09:00", recurrence: { kind: "weekly", days: [1, 2, 3, 4, 5] }, timeZone: "America/New_York" } },
   "Set up a sync with Bob every Mon and Thursdays at 9am Eastern time": { op: "meeting.schedule", args: { title: "sync", agentNames: ["Bob"], time: "09:00", recurrence: { kind: "weekly", days: [1, 4] }, timeZone: "America/New_York" } },
+  // A time without am or pm (second review): one read as night-time is asked about; any other reading is said on the proposal.
+  "Set up a daily sync with Bob at 3 Eastern time": { op: "meeting.schedule", args: { title: "daily sync", agentNames: ["Bob"], time: "03:00", recurrence: { kind: "daily" }, timeZone: "America/New_York" } },
+  "Set up a daily sync with Bob at 3 o'clock Eastern time": { op: "meeting.schedule", args: { title: "daily sync", agentNames: ["Bob"], time: "15:00", recurrence: { kind: "daily" }, timeZone: "America/New_York" } },
+  "Set up a daily sync with Bob at 3am Eastern time": { op: "meeting.schedule", args: { title: "daily sync", agentNames: ["Bob"], time: "03:00", recurrence: { kind: "daily" }, timeZone: "America/New_York" } },
+  "Set up a daily sync with Bob at 09:30 Eastern time": { op: "meeting.schedule", args: { title: "daily sync", agentNames: ["Bob"], time: "09:30", recurrence: { kind: "daily" }, timeZone: "America/New_York" } },
+  "Set up a retro with Bob next Friday at 3pm Eastern time": { op: "meeting.schedule", args: { title: "retro", agentNames: ["Bob"], time: "15:00", recurrence: { kind: "once", date: "2026-10-30" }, timeZone: "America/New_York" } },
 };
 const DERIVED = new Set(["time", "timeZone", "date", "kind", "state", "days"]);
 
@@ -176,6 +182,12 @@ for (const backend of backends) {
       assert.equal(roster.status, "proposed", JSON.stringify(roster));
       // A roster named for a schedule replaces the one it has: the proposal says Ann Lee would be taken off, so "add" cannot quietly drop her.
       assert.match(JSON.stringify(roster), /roster is replaced, not added to\); taken off: \\"Ann Lee\\"/);
+      // One taken off who has retired since is still named, not shown by an ID (second review).
+      const annRecord = (await w.agents.list(w.owner, { state: "active" })).items.find((a) => a.principalId === ann)!;
+      await w.agents.retire(w.owner, { commandId: cid("ret"), agentId: annRecord.id, expectedRevision: annRecord.revision } as never);
+      const rosterAfter = JSON.stringify(await say("Add Bob to the weekly planning meeting"));
+      assert.match(rosterAfter, /taken off: \\"Ann Lee\\"/, rosterAfter);
+      assert.ok(!rosterAfter.includes(ann), "the retired agent is named, not shown by its principal ID");
       // Two schedules fit "planning": the owner is asked which, with both titles.
       await w.meetings.createSchedule(w.owner, { commandId: cid("sc"), projectId: project, title: "Planning offsite", roster: [bob], time: "11:00", timeZone: "UTC", recurrence: { kind: "daily" } });
       const asked = await say("Pause the planning meeting");
@@ -277,7 +289,11 @@ for (const backend of backends) {
       const status = async (text: string) => { const o = await say(text); return [o.status, JSON.stringify(o)] as const; };
       const [tomorrow, tomorrowText] = await status("Set up a retro with Bob tomorrow at 3pm Eastern time");
       assert.equal(tomorrow, "proposed", tomorrowText);
-      assert.match(tomorrowText, /once on 2026-10-23.*2026-10-23 19:00 UTC/);
+      assert.match(tomorrowText, /once on 2026-10-23 \(Friday 23 October\).*2026-10-23 19:00 UTC, tomorrow there/);
+      // "next Friday" said on a Thursday: the proposal shows which Friday was taken, by weekday, month and how far ahead.
+      const [nextFri, nextFriText] = await status("Set up a retro with Bob next Friday at 3pm Eastern time");
+      assert.equal(nextFri, "proposed", nextFriText);
+      assert.match(nextFriText, /once on 2026-10-30 \(Friday 30 October\).*2026-10-30 19:00 UTC, in 8 days there/);
       assert.equal((await status("Set up a retro with Bob on Friday at 3pm Eastern time"))[0], "proposed", "a weekday within two weeks names the day");
       const [noDay, noDayText] = await status("Set up a one-off retro with Bob at 3pm Eastern time");
       assert.equal(noDay, "refused", noDayText);
@@ -292,10 +308,10 @@ for (const backend of backends) {
       assert.match(earlyText, /has already passed/);
       const [gap, gapText] = await status("Set up a night check with Bob on 2027-03-14 at 2:30am Eastern time");
       assert.equal(gap, "proposed", gapText);
-      assert.match(gapText, /2027-03-14 07:30 UTC; that time does not exist that day, because the clocks go forward, so it starts at 03:30 local time/);
+      assert.match(gapText, /2027-03-14 07:30 UTC, in 143 days there; that time does not exist that day, because the clocks go forward, so it starts at 03:30 local time/);
       const [twice, twiceText] = await status("Set up a night check with Bob on 2026-11-01 at 1:30am Eastern time");
       assert.equal(twice, "proposed", twiceText);
-      assert.match(twiceText, /2026-11-01 05:30 UTC; that time happens twice that night/);
+      assert.match(twiceText, /2026-11-01 05:30 UTC, in 10 days there; that time happens twice that night/);
       const [days, daysText] = await status("Set up a sync with Bob every Monday at 9am Eastern time");
       assert.equal(days, "refused", daysText);
       assert.match(daysText, /are not all named in your message/);
@@ -303,6 +319,18 @@ for (const backend of backends) {
       const [some, someText] = await status("Set up a sync with Bob every Mon and Thursdays at 9am Eastern time");
       assert.equal(some, "proposed", someText);
       assert.match(someText, /every Monday, Thursday/);
+      // A time without am or pm: read as 03:00 it is asked about (a meeting at 3 at night meant for 3 in the afternoon would be held at the wrong time); read as 15:00 the reading is said; 3am and 09:30 say nothing more.
+      const [night, nightText] = await status("Set up a daily sync with Bob at 3 Eastern time");
+      assert.equal(night, "refused", nightText);
+      assert.match(nightText, /without am or pm, and it was read as 03:00 at night.*Did you mean 15:00\?/);
+      const [afternoon, afternoonText] = await status("Set up a daily sync with Bob at 3 o'clock Eastern time");
+      assert.equal(afternoon, "proposed", afternoonText);
+      assert.match(afternoonText, /without am or pm, so it is read as 15:00 \(in the afternoon\), not 03:00/);
+      for (const said of ["Set up a daily sync with Bob at 3am Eastern time", "Set up a daily sync with Bob at 09:30 Eastern time"]) {
+        const [st, txt] = await status(said);
+        assert.equal(st, "proposed", txt);
+        assert.ok(!txt.includes("without am or pm"), `${said}: ${txt}`);
+      }
       assert.deepEqual(invented.sort(), ["Set up a one-off retro with Bob at 3pm Eastern time", "Set up a retro with Bob tomorrow at 4pm Eastern time", "Set up a sync with Bob every Monday at 9am Eastern time"].sort(), "each invented value was seen by this test");
       assert.equal((await schedules()).items.length, 0, "nothing was made");
     } finally { await w.close(); }
@@ -333,6 +361,24 @@ for (const backend of backends) {
       assert.ok(!second.includes("more meeting schedules"), second);
       const beyond = JSON.stringify(await say("Show me the meetings after 3"));
       assert.match(beyond, /no more meeting schedules after the first 2/);
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: when the meetings answer stops reading at its page cap it says there may be more, and never names a number that would show the same again`, async () => {
+    const { w, project } = await open();
+    try {
+      // A stand-in schedule source with more schedules than one answer reads: every page is full and has a next one.
+      let n = 0;
+      const page = (state: string) => async () => ({ items: Array.from({ length: 100 }, () => ({ id: `msc-${String(++n).padStart(20, "a")}`, revision: 1, title: `S${n}`, state, time: "09:00", timeZone: "UTC", recurrence: { kind: "daily" }, durationMinutes: 30, roster: [] })), next: "msc-aaaaaaaaaaaaaaaaaaaa" });
+      const statusOf = (state: string) => StatusService.withEpoch(w.world.storage, w.projects.epoch, { assignments: w.assignments, contracts: w.contracts, meetings: { planned: async () => ({ items: [] }), schedules: page(state) } } as never, options);
+      const ended = (await statusOf("ended").meetingLines(w.owner, { projectId: project }))!.lines.map((l) => l.text).join("\n");
+      assert.equal(n, 1000, "ten pages are read, no more");
+      assert.match(ended, /Not every meeting schedule of this project could be read for this answer \(it reads at most 1,000 of them, ended ones included\), so there may be more than shown/);
+      assert.ok(!/ask for the meetings after/.test(ended) && !/No meeting is planned/.test(ended), ended);
+      n = 0;
+      const on = (await statusOf("active").meetingLines(w.owner, { projectId: project }))!.lines.map((l) => l.text).join("\n");
+      assert.match(on, /There are more meeting schedules than shown: ask for the meetings after 10 to see the next ones/);
+      assert.ok(!on.includes("Not every meeting schedule"), on);
     } finally { await w.close(); }
   });
 
@@ -370,6 +416,21 @@ test("a time of day counts only when the owner's words give it", () => {
   for (const [time, words] of yes) assert.ok(clockTimeInWords(time, words), `${time} in "${words}"`);
   const no: [string, string][] = [["09:00", "with 3 agents every day"], ["03:00", "with 3 agents"], ["09:30", "at 9"], ["16:00", "for 45 minutes"], ["10:00", "Nov 10"], ["09:00", "agent-7 daily"], ["25:00", "at 5"]];
   for (const [time, words] of no) assert.ok(!clockTimeInWords(time, words), `${time} not in "${words}"`);
+  // Which readings the words allow (second review): am or pm, an hour past 12, a leading zero, noon and midnight fix the time; a bare hour leaves both halves of the day open.
+  const said: [string, string][] = [["15:00", "at 3pm"], ["03:00", "at 3am"], ["15:00", "at 15:00"], ["09:30", "at 09:30"], ["12:00", "at noon"], ["00:00", "at midnight"], ["14:30", "half past two pm"]];
+  for (const [time, words] of said) assert.equal(clockTimeReading(time, words), "said", `${time} in "${words}"`);
+  const either: [string, string][] = [["03:00", "at 3"], ["15:00", "at 3"], ["09:30", "at 9:30"], ["21:30", "at 9:30"], ["14:30", "half past two"], ["00:00", "at 12"], ["15:00", "at 3 o'clock"]];
+  for (const [time, words] of either) assert.equal(clockTimeReading(time, words), "either", `${time} in "${words}"`);
+  assert.equal(clockTimeReading("03:00", "at 3pm"), undefined);
+  assert.equal(clockTimeReading("03:00", "with 3 agents"), undefined);
+});
+
+test("a one-off date is shown with its weekday and month, so a day read the other way round is plain", () => {
+  assert.equal(recurrenceWords({ kind: "once", date: "2027-03-04" }), "once on 2027-03-04 (Thursday 4 March)");
+  assert.equal(recurrenceWords({ kind: "once", date: "2027-04-03" }), "once on 2027-04-03 (Saturday 3 April)");
+  assert.equal(recurrenceWords({ kind: "once", date: "2028-02-29" }), "once on 2028-02-29 (Tuesday 29 February)");
+  assert.equal(recurrenceWords({ kind: "once", date: "2027-02-29" }), "once on 2027-02-29", "a day that does not exist gets no weekday");
+  assert.equal(recurrenceWords({ kind: "weekly", days: [1, 4] }), "every Monday, Thursday");
 });
 
 void (null as unknown as World);

@@ -3109,10 +3109,11 @@ export class StatusService {
     const open: { id: string; revision: number; title: string; state: string; time: string; timeZone: string; recurrence: { kind: string; date?: string; days?: readonly number[] }; durationMinutes: number; roster: readonly string[] }[] = [];
     let skipped = 0;
     let more = false;
+    let capped = false;
     let cursor: string | undefined;
     if (this.#deps.meetings.schedules !== undefined) {
       for (let pages = 0; ; pages++) {
-        if (pages >= SCHEDULE_PAGES) { more = true; break; }
+        if (pages >= SCHEDULE_PAGES) { capped = true; break; }
         const page = await this.#deps.meetings.schedules(by, projectId, { limit: 100, ...(cursor === undefined ? {} : { afterId: cursor }) });
         for (const m of page?.items ?? []) {
           if (m.state === "ended") continue;
@@ -3131,6 +3132,8 @@ export class StatusService {
     }
     const shownSoFar = (after ?? 0) + open.length;
     if (more) lines.push(line(`There are more meeting schedules than shown: ask for the meetings after ${shownSoFar} to see the next ones.`, cite("project", projectId)));
+    // The read stopped at its page cap: there may be more, but asking again from the same point cannot reach them, so the answer says so instead of naming a number that would show the same.
+    else if (capped) lines.push(line(`Not every meeting schedule of this project could be read for this answer (it reads at most ${(SCHEDULE_PAGES * 100).toLocaleString("en-US")} of them, ended ones included), so there may be more than shown.`, cite("project", projectId)));
     else if (after !== undefined && open.length === 0) lines.push(line(`There are no more meeting schedules after the first ${skipped}.`, cite("project", projectId)));
     if (after !== undefined) return { observedAt: this.#runner.now(), lines };
     if (lines.length === 0) lines.push(line("No meeting is planned in this project.", cite("project", projectId)));
