@@ -30,7 +30,7 @@ export interface QaReviewPolicyBody {
   /** How many independent original sources (a copy and its original are one; one recorder is one) each required check needs a pass from. */
   readonly independentSources: number;
   /** When each trigger was last switched on: work before it is not reviewed backwards (a new policy does not start by reviewing the backlog). */
-  readonly since: { readonly submission?: string; readonly periodic?: string; readonly incident?: string };
+  readonly since: { readonly submission?: string; readonly periodic?: string; readonly incident?: string; readonly gate?: string };
   readonly updatedBy: string;
   readonly updatedAt: string;
 }
@@ -53,15 +53,20 @@ export interface QaReviewRequestBody {
   readonly taskId: string;
   readonly submissionId: string;
   readonly tree: string;
-  /** `submission`: a new code submission; `periodic`: the interval ran out; `incident`: an incident was opened in the project. */
-  readonly trigger: "submission" | "periodic" | "incident";
-  /** The submission, the period (`p<n>`) or the incident that started it. */
+  /**
+   * `submission`: a new code submission; `periodic`: the interval ran out; `incident`: an incident was opened in the project; `gate`: independent review gates completion and the task's newest code has no
+   * independent evidence from someone who did not work on it (card Q02 review: without it the landing is refused, so the review is asked for and the owner told when nobody can do it).
+   */
+  readonly trigger: "submission" | "periodic" | "incident" | "gate";
+  /** The submission (for `submission`; for `gate` the submission and when gating was switched on), the period (`p<n>`) or the incident that started it. */
   readonly cause: string;
   /** Absent while no eligible agent exists (the owner is told once; each sweep looks again). */
   readonly assignee?: string;
   readonly state: "open" | "done" | "superseded";
   readonly createdAt: string;
   readonly assignedAt?: string;
+  /** When the request last lost its assignee (nobody eligible): the owner is told again for each such stretch, not only the first. */
+  readonly waitingSince?: string;
   /** When the assignee, or the owner when nobody is eligible, was told (the sweep retries until it is). */
   readonly noticeAt?: string;
   readonly ownerNoticeAt?: string;
@@ -216,10 +221,13 @@ export class QaReviewService {
         const now = this.#runner.now();
         const triggers = { onSubmission: change.onSubmission ?? before.triggers.onSubmission, periodicMinutes: change.periodicMinutes === undefined ? before.triggers.periodicMinutes : change.periodicMinutes, onIncident: change.onIncident ?? before.triggers.onIncident };
         // A trigger that was off and is now on starts counting from now; one that stays on keeps its start; a periodic review whose interval changed starts again.
-        const since: { submission?: string; periodic?: string; incident?: string } = {};
+        const since: { submission?: string; periodic?: string; incident?: string; gate?: string } = {};
         if (triggers.onSubmission) since.submission = before.triggers.onSubmission && before.since.submission !== undefined ? before.since.submission : now;
         if (triggers.periodicMinutes !== null) since.periodic = before.triggers.periodicMinutes === triggers.periodicMinutes && before.since.periodic !== undefined ? before.since.periodic : now;
         if (triggers.onIncident) since.incident = before.triggers.onIncident && before.since.incident !== undefined ? before.since.incident : now;
+        // Gating switched on again asks again for the reviews it needs (the requests it closed when it was switched off keep their IDs).
+        const gates = change.gatesCompletion ?? before.gatesCompletion;
+        if (gates) since.gate = before.gatesCompletion && before.since.gate !== undefined ? before.since.gate : now;
         const next: QaReviewPolicyBody = {
           projectId, scope: { workClasses: change.workClasses ?? before.scope.workClasses, taskIds: change.taskIds ?? before.scope.taskIds }, triggers,
           requiredChecks: change.requiredChecks ?? before.requiredChecks, gatesCompletion: change.gatesCompletion ?? before.gatesCompletion, independentSources: change.independentSources ?? before.independentSources, since, updatedBy: owner.id, updatedAt: now,
@@ -289,7 +297,7 @@ export class QaReviewService {
       try {
         const index = await this.#index(policy.projectId);
         const t = policy.triggers;
-        if (index.open.length > 0 || t.onSubmission || t.periodicMinutes !== null || t.onIncident) active.push({ policy, ...index });
+        if (index.open.length > 0 || t.onSubmission || t.periodicMinutes !== null || t.onIncident || policy.gatesCompletion) active.push({ policy, ...index });
       } catch { total.errors++; }
     }
     if (active.length === 0) return total;
@@ -315,6 +323,11 @@ export class QaReviewService {
     const scan = { tasks };
     const newest = new Map(scan.tasks.map((x) => [x.taskId, x] as const));
     const now = this.#runner.now();
+    // An archived or deleted project is left alone: nothing is created, assigned or told (its open requests stay as they are and go on when the project is active again).
+    if (((await this.#runner.get("project", projectId))?.body as { state?: string } | undefined)?.state !== "active") return out;
+    // The reviewers of one worker are read once per round, not once per request (`reviewersAvailableIn` reads every agent).
+    const pools = new Map<string, Promise<readonly string[]>>();
+    const reviewers = (worker: string): Promise<readonly string[]> => { let p = pools.get(worker); if (p === undefined) { p = this.#ports.reviewers(projectId, worker); pools.set(worker, p); } return p; };
     // Load: how many open requests each agent already has, so the work is spread evenly.
     const load = new Map<string, number>();
     const open = new Map<string, QaReviewRequestBody & { id: string; revision: number }>();
@@ -337,17 +350,22 @@ export class QaReviewService {
       const info = newest.get(r.taskId);
       const done = await this.#independentEvidence(r, info);
       if (done !== undefined) { await this.#settle(r, "done", done); open.delete(r.id); out.settled++; continue; }
+      // The policy changed since the request was made (card Q02 review): a task no longer in scope, or a trigger switched off while independent review does not gate the task's completion, needs no review any more.
+      // The request is closed as superseded by the policy; nothing is asked of anyone. One kept by gating stays open (the landing needs it).
+      const covered = await this.#covers(policy, r.taskId);
+      const triggerOn = r.trigger === "submission" ? t.onSubmission : r.trigger === "periodic" ? t.periodicMinutes !== null : r.trigger === "incident" ? t.onIncident : false;
+      if (!covered || !(triggerOn || policy.gatesCompletion)) { await this.#settle(r, "superseded", "policy"); open.delete(r.id); out.superseded++; continue; }
       if (info === undefined) continue;
       let current = r;
-      if (r.assignee === undefined || !(await this.#stillEligible(r, info))) {
-        const pick = await this.#pick(projectId, r.taskId, info, load);
+      if (r.assignee === undefined || !(await this.#stillEligible(r, info, reviewers))) {
+        const pick = await this.#pick(r.taskId, info, load, reviewers);
         // An assignee that cannot review any more (it holds the task now, or left the reviewers) is replaced by the next eligible one, or leaves the request waiting with the owner told.
         if (pick !== r.assignee) { current = await this.#assign(r, pick, now); if (pick !== undefined) { load.set(pick, (load.get(pick) ?? 0) + 1); out.assigned++; } open.set(r.id, current); }
       }
       if (current.assignee === undefined) { out.unassigned++; await this.#tell(current, "owner"); } else await this.#tell(current, current.assignee);
     }
     // 2. Create what the triggers name.
-    if (!t.onSubmission && t.periodicMinutes === null && !t.onIncident) return out;
+    if (!t.onSubmission && t.periodicMinutes === null && !t.onIncident && !policy.gatesCompletion) return out;
     const wanted: { taskId: string; trigger: QaReviewRequestBody["trigger"]; cause: string }[] = [];
     const eligible: typeof scan.tasks[number][] = [];
     for (const x of scan.tasks) {
@@ -369,6 +387,14 @@ export class QaReviewService {
       const since = policy.since.incident;
       for (const incident of incidents.filter((x) => x.at >= since).slice(0, QA_REVIEW_LIMITS.incidents)) for (const x of eligible.slice(0, QA_REVIEW_LIMITS.tasksPerIncident)) wanted.push({ taskId: x.taskId, trigger: "incident", cause: incident.id });
     }
+    // Independent review gates completion: the newest code of each unfinished task in scope needs it before it may land, so it is asked for unless someone who did not work on the task already recorded independent
+    // evidence on it. This also reaches code made before the policy (a landing of it would be refused otherwise), and the owner is told when nobody can review it rather than finding the landing stuck.
+    if (policy.gatesCompletion) {
+      for (const x of eligible) {
+        const task = (await this.#runner.get("task", x.taskId))?.body as unknown as TaskBody | undefined;
+        if (task?.state !== "done") wanted.push({ taskId: x.taskId, trigger: "gate", cause: `${x.submissionId}@${policy.since.gate ?? ""}` });
+      }
+    }
     const owed = new Set([...open.values()].map((r) => r.submissionId));
     let made = 0;
     for (const w of wanted) {
@@ -378,7 +404,8 @@ export class QaReviewService {
       if (owed.has(info.submissionId)) continue;
       const id = `qrr-${hex(projectId, w.taskId, info.submissionId, w.trigger, w.cause)}`;
       if ((await this.#runner.get(REQUEST, id)) !== undefined) continue;
-      const assignee = await this.#pick(projectId, w.taskId, info, load);
+      if (w.trigger === "gate" && (await this.#independentEvidence({ projectId, taskId: w.taskId, submissionId: info.submissionId, createdAt: "" }, info)) !== undefined) continue;
+      const assignee = await this.#pick(w.taskId, info, load, reviewers);
       const body: QaReviewRequestBody = { projectId, taskId: w.taskId, submissionId: info.submissionId, tree: info.tree, trigger: w.trigger, cause: w.cause, ...(assignee === undefined ? {} : { assignee, assignedAt: now }), state: "open", createdAt: now };
       if (!(await this.#create(id, body))) continue;
       made++; out.created++; owed.add(info.submissionId);
@@ -410,17 +437,17 @@ export class QaReviewService {
   }
 
   /** Eligible reviewers for a task, least loaded first: never the submitters of its code, never the agent that holds it now. */
-  async #pick(projectId: string, taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>): Promise<string | undefined> {
+  async #pick(taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>, reviewers: (worker: string) => Promise<readonly string[]>): Promise<string | undefined> {
     const assignment = (await this.#runner.get("assignment", assignmentIdOf(taskId)))?.body as { owner?: { id?: string } } | undefined;
     const excluded = new Set([...info.contributors, info.submittedBy, ...(assignment?.owner?.id === undefined ? [] : [principalOf(assignment.owner.id)])].map(principalOf));
-    const pool = (await this.#ports.reviewers(projectId, info.submittedBy)).filter((r) => !excluded.has(principalOf(r)));
+    const pool = (await reviewers(info.submittedBy)).filter((r) => !excluded.has(principalOf(r)));
     pool.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
     return pool[0];
   }
 
-  async #stillEligible(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] }): Promise<boolean> {
+  async #stillEligible(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] }, reviewers: (worker: string) => Promise<readonly string[]>): Promise<boolean> {
     if (r.assignee === undefined) return false;
-    const pool = await this.#ports.reviewers(r.projectId, info.submittedBy);
+    const pool = await reviewers(info.submittedBy);
     const assignment = (await this.#runner.get("assignment", assignmentIdOf(r.taskId)))?.body as { owner?: { id?: string } } | undefined;
     const excluded = new Set([...info.contributors, ...(assignment?.owner?.id === undefined ? [] : [assignment.owner.id])].map(principalOf));
     return pool.includes(r.assignee) && !excluded.has(principalOf(r.assignee));
@@ -430,7 +457,7 @@ export class QaReviewService {
    * Independent QA evidence recorded on the request's submission after the request was made, by someone who did not work on the task (not a submitter of its code, not the agent that holds it now): its ID. Evidence
    * by another contributor counts for the QA gate as it always did, but it is not the independent review the policy asked for, so the request stays open for its reviewer.
    */
-  async #independentEvidence(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] } | undefined): Promise<string | undefined> {
+  async #independentEvidence(r: Pick<QaReviewRequestBody, "projectId" | "taskId" | "submissionId" | "createdAt">, info: { submittedBy: string; contributors: readonly string[] } | undefined): Promise<string | undefined> {
     const ids = ((await this.#runner.get("qa-evidence-index", r.taskId))?.body as unknown as { ids?: string[] } | undefined)?.ids ?? [];
     const assignment = (await this.#runner.get("assignment", assignmentIdOf(r.taskId)))?.body as { owner?: { id?: string } } | undefined;
     const submitter = ((await this.#runner.get("submission", r.submissionId))?.body as { submittedBy?: string } | undefined)?.submittedBy;
@@ -444,7 +471,7 @@ export class QaReviewService {
 
   async #create(id: string, body: QaReviewRequestBody): Promise<boolean> {
     try {
-      await this.#runner.command("qa.review.request", { commandId: `qrr:${id}`, actor: SERVICE }, async () => ({
+      const result = await this.#runner.command("qa.review.request", { commandId: `qrr:${id}`, actor: SERVICE }, async () => ({
         payload: { id },
         build: async (): Promise<Built> => {
           const index = await this.#index(body.projectId);
@@ -454,7 +481,8 @@ export class QaReviewService {
           return { ref, creates: true, changes, detail: { projectId: body.projectId, taskId: body.taskId, trigger: body.trigger } };
         },
       }));
-      return true;
+      // A replay means another controller (or an earlier round) made it with its own pick of assignee: this round neither counts nor tells it; the next round reads the stored request.
+      return !result.replayed;
     } catch (error) {
       // Another controller made it first, or the index moved: the next round looks again.
       if (error instanceof DomainError && (error.code === "command_conflict" || error.code === "stale_revision")) return false;
@@ -463,8 +491,8 @@ export class QaReviewService {
   }
 
   async #assign(r: QaReviewRequestBody & { id: string; revision: number }, assignee: string | undefined, now: string): Promise<QaReviewRequestBody & { id: string; revision: number }> {
-    const { noticeAt: _n, ownerNoticeAt: _o, assignee: _a, assignedAt: _t, ...kept } = r;
-    const next = { ...kept, ...(assignee === undefined ? {} : { assignee, assignedAt: now }) };
+    const { noticeAt: _n, ownerNoticeAt: _o, assignee: _a, assignedAt: _t, waitingSince: _w, ...kept } = r;
+    const next = { ...kept, ...(assignee === undefined ? { waitingSince: now } : { assignee, assignedAt: now }) };
     const result = await this.#runner.command("qa.review.assign", { commandId: `qrr-assign:${r.id}:${assignee ?? "none"}:${now}`, actor: SERVICE }, async () => ({
       payload: { id: r.id, assignee: assignee ?? null },
       build: async (): Promise<Built> => {
@@ -472,9 +500,9 @@ export class QaReviewService {
         if (found === undefined) throw new DomainError("not_found", "no such request");
         const cur = found.body as unknown as QaReviewRequestBody;
         if (cur.state !== "open") throw new DomainError("stale_revision", "the request was settled meanwhile");
-        const { noticeAt: _a1, ownerNoticeAt: _b1, assignee: _c1, assignedAt: _d1, ...base } = cur;
+        const { noticeAt: _a1, ownerNoticeAt: _b1, assignee: _c1, assignedAt: _d1, waitingSince: _e1, ...base } = cur;
         const ref = { kind: REQUEST, id: r.id };
-        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: json({ ...base, ...(assignee === undefined ? {} : { assignee, assignedAt: now }) }) }], detail: { id: r.id } };
+        return { ref, creates: false, changes: [{ type: "update", ref, expectedRevision: found.revision, body: json({ ...base, ...(assignee === undefined ? { waitingSince: now } : { assignee, assignedAt: now }) }) }], detail: { id: r.id } };
       },
     }));
     return { ...next, revision: result.revision };
@@ -517,9 +545,11 @@ export class QaReviewService {
     const words = to === "owner"
       ? `Nobody can review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review): every reviewer agent of the project worked on the task or holds it now. Add a reviewer agent to the project or review it yourself.`
       : `You are asked to review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review of tree ${r.tree.slice(0, 12)}): record QA evidence on it (qa.evidence.record).`;
+    // One notice per stretch of the assignment: an agent assigned again after someone else had it (or the owner after the request waited again) is told again; within one stretch the IDs are stable, so a retry is one notice.
+    const stretch = to === "owner" ? (r.waitingSince ?? r.createdAt) : (r.assignedAt ?? r.createdAt);
     try {
-      await this.#ports.notice({ commandId: `qrr-note:${r.id}:${to}`, to, projectId: r.projectId, taskId: r.taskId, requestId: r.id, text: words.slice(0, 600) });
-      await this.#runner.command("qa.review.noticed", { commandId: `qrr-noticed:${r.id}:${to}`, actor: SERVICE }, async () => ({
+      await this.#ports.notice({ commandId: `qrr-note:${r.id}:${to}:${stretch}`, to, projectId: r.projectId, taskId: r.taskId, requestId: r.id, text: words.slice(0, 600) });
+      await this.#runner.command("qa.review.noticed", { commandId: `qrr-noticed:${r.id}:${to}:${stretch}`, actor: SERVICE }, async () => ({
         payload: { id: r.id, to },
         build: async (): Promise<Built> => {
           const found = await this.#runner.get(REQUEST, r.id);

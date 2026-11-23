@@ -635,8 +635,10 @@ export function leadInWords(minutes: number, text: string): boolean {
 
 /**
  * The model-supplied values of `qa.review.policy.set` that the general words check lets through (card Q02 review): each extra check name must stand as a whole word (or words) in the owner's message, the review
- * interval must be a length the owner said ("every 30 minutes", "every two hours", "hourly", "daily"), and the number of independent sources a number the owner said. Work classes, task IDs and the switches are
- * fixed choices or records, shown on the proposal for the owner's yes. Answers the first field not in the owner's words, or `undefined`.
+ * interval must be a length the owner said ("every 30 minutes", "every two hours", "hourly", "daily"), and the number of independent sources a number the owner said. Whether independent review gates completion
+ * (it can stop every landing of the tasks in scope) must be about landing or finishing work in the owner's message ("nothing lands without review", "do not merge until QA passed", "it need not block landing"),
+ * not only shown on the proposal (card Q02 second review). Work classes, task IDs and the trigger switches are fixed choices or records, shown on the proposal for the owner's yes. Answers the first field not in
+ * the owner's words, or `undefined`.
  */
 export function reviewPolicyForeign(args: Readonly<Record<string, unknown>>, text: string): string | undefined {
   const own = text.toLowerCase().replace(/\s+/g, " ").trim();
@@ -648,6 +650,7 @@ export function reviewPolicyForeign(args: Readonly<Record<string, unknown>>, tex
     const said = durationInWords(m * 60, t) || (m === 60 && /\b(?:hourly|(?:every|each|per|once an?) hour)\b/.test(t)) || (m === 1440 && /\b(?:daily|(?:every|each|per|once an?) day)\b/.test(t)) || (m === 10_080 && /\b(?:weekly|(?:every|each|per|once an?) week)\b/.test(t));
     if (!said) return "periodicMinutes";
   }
+  if (typeof args["gatesCompletion"] === "boolean" && !/\b(?:land\w*|merg\w*|complet\w*|finish\w*|done|ship\w*|gate[sd]?|gating|block\w*|releas\w*|integrat\w*|go(?:es)? (?:in|out|live))\b/.test(own)) return "gatesCompletion";
   const n = args["independentSources"];
   if (typeof n === "number") {
     const t = numbersOf(text);

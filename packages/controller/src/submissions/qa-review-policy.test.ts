@@ -53,9 +53,12 @@ async function world(backendOpen: () => Promise<{ storage: import("../storage/ty
   const notices: Notice[] = [];
   let pool: string[] = [];
   let failNotices = false;
+  let poolReads = 0;
+  const sent = new Set<string>();
   const review: QaReviewService = QaReviewService.withEpoch(w.storage, epoch, qa, {
-    reviewers: async (_p, workerId) => pool.filter((x) => x !== workerId),
-    notice: async (x) => { if (failNotices) throw new Error("down"); notices.push({ to: x.to, taskId: x.taskId, requestId: x.requestId, text: x.text }); },
+    reviewers: async (_p, workerId) => { poolReads++; return pool.filter((x) => x !== workerId); },
+    // Like the controller's message and notification services, a notice with a command ID already used is not sent again.
+    notice: async (x) => { if (failNotices) throw new Error("down"); if (sent.has(x.commandId)) return; sent.add(x.commandId); notices.push({ to: x.to, taskId: x.taskId, requestId: x.requestId, text: x.text }); },
   }, options);
   const mkTask = async (title: string, workClass: "P" | "PC" = "P", inProject = project): Promise<string> => {
     const id = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: inProject, title })).id;
@@ -70,7 +73,7 @@ async function world(backendOpen: () => Promise<{ storage: import("../storage/ty
   const evidence = (by: Principal, submissionId: string, checks: { name: string; result: string }[], extra: object = {}) =>
     qa.record(by, { commandId: cid("r"), submissionId, criteriaRevision: 0, environment: "linux", observedAt: new Date(now - 60_000).toISOString(), checks, ...extra } as never);
   return { w, owner, project, other, agent, plant, qa, review, notices, runner, mkTask, submit, evidence, desks,
-    advance: (ms: number) => { now += ms; }, setPool: (x: string[]) => { pool = x; }, failNotices: (x: boolean) => { failNotices = x; }, clock };
+    advance: (ms: number) => { now += ms; }, setPool: (x: string[]) => { pool = x; }, failNotices: (x: boolean) => { failNotices = x; }, clock, poolReads: () => poolReads };
 }
 
 for (const backend of backends) {
@@ -278,11 +281,13 @@ for (const backend of backends) {
       assert.deepEqual((await review.requests(owner, project)).items.map((r) => r.submissionId), [s4]);
       assert.deepEqual(await revisions(), before, "still untouched after every round");
 
-      // Periodic: every 60 minutes the newest code of each unfinished task in scope is looked at again, unless a review of it is already owed.
+      // Periodic: every 60 minutes the newest code of each unfinished task in scope is looked at again, unless a review of it is already owed. The submission trigger is switched off at the same time: its open
+      // review is closed (card Q02 second review), and the periodic trigger asks for s4.
       await review.set(owner, { commandId: cid("s"), projectId: project, onSubmission: false, periodicMinutes: 60 } as never);
       t.advance(3_600_000);
       const p1 = await review.sweep();
-      assert.equal(p1.created, 0, "s4's review is still open: it is not asked for twice");
+      assert.deepEqual([p1.superseded, p1.created], [1, 1], "the switched-off trigger's review is closed; the periodic one is asked for");
+      assert.equal((await review.sweep()).created, 0, "s4's periodic review is open: it is not asked for twice");
       await evidence(bob, s4, [{ name: "unit", result: "passed" }]);
       assert.equal((await review.sweep()).settled, 1);
       t.advance(3_600_000);
@@ -508,6 +513,99 @@ for (const backend of backends) {
       await review.set(owner, { commandId: cid("s"), projectId: project, gatesCompletion: false } as never);
       const dropped = await gate.recheck(gated);
       assert.equal(dropped.added, undefined, "a check the policy no longer adds is not read again");
+    } finally { await t.w.close(); }
+  });
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: second review of the review policy: gating asks for the review the landing needs and tells the owner when nobody can, policy changes close what no longer applies, an archived project is left alone, a reviewer assigned again is told again, the reviewer list is read once per round, and a pass contradicted by a later failure adds no source (card Q02)`, async () => {
+    const t = await world(backend.open);
+    try {
+      const { owner, project, review, qa, runner, agent, mkTask, submit, evidence, notices } = t;
+      const ann = await agent("ann", ["author"]);
+      const bob = await agent("bob", ["reviewer"]);
+      const cat = await agent("cat", ["reviewer"]);
+      const dan = await agent("dan", ["qa"]);
+      const edit = async (kind: string, id: string, change: object): Promise<void> => {
+        const found = await runner.get(kind, id);
+        await runner.command("test.edit", { commandId: cid("edit"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: false, changes: [{ type: "update" as const, ref: { kind, id }, expectedRevision: found!.revision, body: { ...(found!.body as object), ...change } as JsonObject }], detail: {} }) }));
+      };
+      // Code made BEFORE the policy, and no trigger on: gating alone asks for its review, and with nobody eligible the owner is told instead of the landing waiting silently.
+      const gated = await mkTask("Gated");
+      const gated2 = await mkTask("Gated too");
+      const reviewed = await mkTask("Already reviewed");
+      const sG = await submit(gated, ann, "1");
+      await submit(gated2, ann, "6");
+      const sR = await submit(reviewed, ann, "2");
+      await evidence(dan, sR, [{ name: "unit", result: "passed" }]);
+      t.setPool([]);
+      t.advance(1000);
+      await review.set(owner, { commandId: cid("s"), projectId: project, gatesCompletion: true } as never);
+      const g1 = await review.sweep();
+      assert.deepEqual([g1.created, g1.unassigned], [2, 2], "only the tasks without independent evidence are asked for");
+      const req = (await review.requests(owner, project)).items.find((r) => r.taskId === gated)!;
+      assert.deepEqual([req.taskId, req.submissionId, req.trigger, req.assignee], [gated, sG, "gate", undefined]);
+      const about = (taskId: string) => notices.filter((x) => x.taskId === taskId).map((x) => x.to);
+      assert.deepEqual(about(gated), ["owner"], "the owner is told nobody can review it");
+      // The reviewer list is read once per worker per round, not once per request: both waiting requests are ann's code.
+      t.setPool([bob.id, cat.id]);
+      const reads = t.poolReads();
+      const both = await review.sweep();
+      assert.equal(both.assigned, 2);
+      assert.equal(t.poolReads() - reads, 1, "one read of the reviewers for ann's code in the round");
+      assert.deepEqual((await review.requests(owner, project)).items.map((r) => r.assignee).sort(), [bob.id, cat.id].sort(), "spread over both reviewers");
+      if (req.id !== (await review.requests(owner, project)).items.find((r) => r.assignee === bob.id)?.id) {
+        // Make the walk below start from bob holding the gated task's review.
+        t.setPool([bob.id]); t.advance(1000); await review.sweep();
+      }
+      assert.equal((await review.requests(owner, project)).items.find((r) => r.taskId === gated)?.assignee, bob.id);
+      // bob drops out, cat takes it; bob comes back after cat leaves: bob is told again (a new assignment), and the owner is told again for each stretch without a reviewer.
+      t.setPool([cat.id]); t.advance(1000); await review.sweep();
+      t.setPool([]); t.advance(1000); await review.sweep();
+      t.setPool([bob.id]); t.advance(1000); await review.sweep();
+      const walk = about(gated);
+      assert.deepEqual(walk.slice(-4), [bob.id, cat.id, "owner", bob.id], "each new stretch is told: bob, then cat, then the owner, then bob again");
+      // An archived project is left alone: nothing created, assigned or told.
+      const fresh = await mkTask("Fresh");
+      await edit("project", project, { state: "archived" });
+      await submit(fresh, ann, "3");
+      const told = notices.length;
+      const arch = await review.sweep();
+      assert.deepEqual([arch.created, arch.assigned, notices.length], [0, 0, told]);
+      await edit("project", project, { state: "active" });
+      assert.equal((await review.sweep()).created, 1, "active again: the fresh code is asked for");
+      // Gating switched off with no trigger on: the requests it made are closed, nobody is asked any more.
+      await review.set(owner, { commandId: cid("s"), projectId: project, gatesCompletion: false } as never);
+      const off = await review.sweep();
+      assert.equal(off.superseded, 3);
+      assert.equal((await review.requests(owner, project)).total, 0);
+      assert.equal(((await runner.get("qa-review-request", req.id))?.body as { settledBy: string }).settledBy, "policy");
+      // A submission trigger's request is closed when its task leaves the scope; one kept by gating stays.
+      t.advance(1000);
+      await review.set(owner, { commandId: cid("s"), projectId: project, onSubmission: true } as never);
+      t.advance(1000);
+      const s4 = await submit(gated, ann, "4");
+      assert.equal((await review.sweep()).created, 1);
+      await review.set(owner, { commandId: cid("s"), projectId: project, onSubmission: false, gatesCompletion: true } as never);
+      const regated = await review.sweep();
+      assert.deepEqual([regated.superseded, regated.created], [0, 2], "the trigger is off but gating still needs the review; gating switched on again asks again for the code whose reviews it had closed");
+      await review.set(owner, { commandId: cid("s"), projectId: project, workClasses: ["PC"] } as never);
+      const narrowed = await review.sweep();
+      assert.equal(narrowed.superseded, 3, "the tasks left the scope");
+      assert.equal((await review.requests(owner, project)).total, 0);
+      void s4;
+
+      // Source counting: with two sources needed, an older pass that a newer failure contradicted adds no source to the newest pass.
+      const counted = await mkTask("Counted");
+      const sc = await submit(counted, ann, "5");
+      await review.set(owner, { commandId: cid("s"), projectId: project, workClasses: [], gatesCompletion: false, independentSources: 2 } as never);
+      await evidence(bob, sc, [{ name: "unit", result: "passed" }]);
+      await evidence(cat, sc, [{ name: "unit", result: "failed" }]);
+      await evidence(dan, sc, [{ name: "unit", result: "passed" }]);
+      const g = await qa.gate(owner, sc);
+      assert.deepEqual([g.verdict, g.shortfalls], ["failed", [{ check: "unit", sources: 1 }]], "bob's pass came before cat's failure: only dan's pass counts");
+      await evidence(cat, sc, [{ name: "unit", result: "passed" }]);
+      assert.equal((await qa.gate(owner, sc)).verdict, "passed", "cat and dan passed it after the failure: two sources");
     } finally { await t.w.close(); }
   });
 }

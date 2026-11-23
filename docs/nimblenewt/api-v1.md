@@ -2848,7 +2848,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.review.requests`
 
-The open review requests the project's policy scheduled (card Q02), oldest first, 20 at a time (`after` is how many were already shown): which task and code submission, why it started (`submission`, `periodic` or `incident`), who it was assigned to, and when. The owner sees all of them; an agent that may read the project's tasks sees the ones assigned to it.
+The open review requests the project's policy scheduled (card Q02), oldest first, 20 at a time (`after` is how many were already shown): which task and code submission, why it started (`submission`, `periodic`, `incident`, or `gate`: independent review gates completion and the code has no independent evidence yet), who it was assigned to, and when. The owner sees all of them; an agent that may read the project's tasks sees the ones assigned to it.
 
 Arguments:
 
@@ -8130,7 +8130,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.review.policy.set`
 
-The owner sets the project's review policy (owner only; fields left out stay as they were). `workClasses` (`P`, `PC`) and `taskIds` say which tasks are covered (empty lists: all); `onSubmission` starts a review of each new code submission made after it was switched on, `periodicMinutes` (15 to 43200, null to stop) reviews the newest code of every unfinished task in scope each period, `onIncident` starts a review of the newest code of tasks in scope when an incident is opened in the project; `requiredChecks` are check names the QA gate requires besides the task contract's; `gatesCompletion` makes a landing of a task in scope need the `qa` and `review` checks whatever the landing settings say; `independentSources` (1 to 5) is how many independent original sources (a copy and its original are one; one agent is one) each required check needs. A scheduled review goes to a reviewer agent that did not work on the task and never pauses, messages or takes work from the agents working on it. The chat shows it first.
+The owner sets the project's review policy (owner only; fields left out stay as they were). `workClasses` (`P`, `PC`) and `taskIds` say which tasks are covered (empty lists: all); `onSubmission` starts a review of each new code submission made after it was switched on, `periodicMinutes` (15 to 43200, null to stop) reviews the newest code of every unfinished task in scope each period, `onIncident` starts a review of the newest code of tasks in scope when an incident is opened in the project; `requiredChecks` are check names the QA gate requires besides the task contract's; `gatesCompletion` makes a landing of a task in scope need the `qa` and `review` checks whatever the landing settings say, and asks for a review of the newest code of each unfinished task in scope that has no independent evidence yet (the owner is told when nobody can review it); a request whose task left the scope, or whose trigger was switched off while review does not gate completion, is closed; `independentSources` (1 to 5) is how many independent original sources (a copy and its original are one; one agent is one) each required check needs. A scheduled review goes to a reviewer agent that did not work on the task and never pauses, messages or takes work from the agents working on it. The chat shows it first.
 
 Arguments:
 

@@ -934,9 +934,12 @@ export class QaEvidenceService {
       for (const e of newestFirst) {
         const c = e.checks.find((x) => x.name === name);
         if (c === undefined) continue;
-        // A pass counts only as many times as there are independent original sources behind it: a copy and its original, and records of one recorder, are one source.
+        // A pass counts only as many times as there are independent original sources behind it: a copy and its original, and records of one recorder, are one source. Only the passes newer than the newest
+        // record that did not pass the check count (card Q02 review): a pass that a later failure contradicted does not add a source to a newer pass.
         if (c.result === "passed" && sourceOf !== undefined) {
-          const have = sourceOf(newestFirst.filter((x) => x.checks.some((y) => y.name === name && y.result === "passed")));
+          const run: (QaEvidenceBody & { id: string })[] = [];
+          for (const x of newestFirst) { const y = x.checks.find((z) => z.name === name); if (y === undefined) continue; if (y.result !== "passed") break; run.push(x); }
+          const have = sourceOf(run);
           if (have < needed) { shortfalls.push({ check: name, sources: have }); return { name, result: "missing" as const, evidenceId: e.id }; }
         }
         return { name, result: c.result, evidenceId: e.id };

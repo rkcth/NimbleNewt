@@ -2818,12 +2818,12 @@ export class StatusService {
       const scope = `${p.scope.workClasses.length === 0 ? "every work class" : `work class ${p.scope.workClasses.join(" and ")}`}${p.scope.taskIds.length === 0 ? "" : `, only ${p.scope.taskIds.length} named task(s)`}`;
       const t = p.triggers;
       const triggers = [t.onSubmission ? "each new code submission" : "", t.periodicMinutes === null ? "" : `every ${t.periodicMinutes} minutes`, t.onIncident ? "an incident opened in the project" : ""].filter((x) => x !== "");
-      lines.push(line(`Review policy (revision ${policy.revision}): covers ${scope}. A review starts on ${triggers.length === 0 ? "nothing (no trigger is on)" : triggers.join(", ")}. Extra required checks: ${p.requiredChecks.length === 0 ? "none" : p.requiredChecks.map((c) => quoted(c, 80)).join(", ")}. Passing independent review ${p.gatesCompletion ? "gates landing (the qa and review checks are required for those tasks)" : "does not gate landing"}. Each required check needs ${p.independentSources} independent original source(s).`, cite("project", projectId)));
+      lines.push(line(`Review policy (revision ${policy.revision}): covers ${scope}. A review starts on ${triggers.length === 0 ? "nothing (no trigger is on)" : triggers.join(", ")}. Extra required checks: ${p.requiredChecks.length === 0 ? "none" : p.requiredChecks.map((c) => quoted(c, 80)).join(", ")}. Passing independent review ${p.gatesCompletion ? "gates landing (the qa and review checks are required for those tasks, and the newest code of each unfinished one is sent for review)" : "does not gate landing"}. Each required check needs ${p.independentSources} independent original source(s).`, cite("project", projectId)));
     }
     if (reqs.total === 0) lines.push(line(after > 0 ? "No more scheduled reviews are open." : "No scheduled review is open.", cite("project", projectId)));
     else {
       lines.push(line(`${reqs.total} scheduled review(s) open${after > 0 ? `, from number ${after + 1}` : ""}.`, cite("project", projectId)));
-      const why = { submission: "a new code submission", periodic: "the periodic review", incident: "an incident" } as const;
+      const why = { submission: "a new code submission", periodic: "the periodic review", incident: "an incident", gate: "independent review is required before it may land" } as const;
       for (const r of reqs.items) lines.push(line(`Task ${r.taskId}, code ${r.submissionId} (tree ${r.tree.slice(0, 12)}): ${why[r.trigger]}, ${r.assignee === undefined ? "waiting for a reviewer that did not work on the task" : `assigned to ${shown(r.assignee, 80)}`}, since ${r.createdAt}.`, cite("task", r.taskId), cite("submission", r.submissionId)));
       if (reqs.next !== undefined) lines.push(line(`More reviews follow: ask again with after ${reqs.next}.`, cite("project", projectId)));
     }

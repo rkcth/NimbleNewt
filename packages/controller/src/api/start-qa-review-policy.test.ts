@@ -49,9 +49,9 @@ test("the owner sets the review policy by chat, reads it back, and the controlle
     assert.equal((await call(ann.token, "qa.review.policy.set", { projectId: project, onSubmission: true }, "x1")).error.code, "forbidden");
     assert.equal((await call(ann.token, "qa.review.policy.get", { projectId: project })).result.isDefault, true, "an agent that reads the project's tasks may read the policy");
 
-    // The model cannot add a check name, an interval or a source count the owner did not say (card Q02 review): each is refused and nothing is proposed.
+    // The model cannot add a check name, an interval, a source count or gating the owner did not say (card Q02 reviews): each is refused and nothing is proposed.
     const loose = "have QA look at the code regularly";
-    for (const [k, args] of [{ requiredChecks: ["security"] }, { periodicMinutes: 60 }, { independentSources: 2 }].entries()) {
+    for (const [k, args] of [{ requiredChecks: ["security"] }, { periodicMinutes: 60 }, { independentSources: 2 }, { onSubmission: true, gatesCompletion: true }].entries()) {
       const out = await turn(`m-loose-${k}`, loose, [{ kind: "command", op: "qa.review.policy.set", args, evidence: loose, basis: "owner" }]);
       assert.equal(out[0].status, "refused", JSON.stringify(out));
       assert.equal(out[0].code, "unsupported_value", JSON.stringify(out));
