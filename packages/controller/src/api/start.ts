@@ -975,6 +975,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
       approvalOf: (submissionId) => submissions.approvalOf(submissionId),
       // Card P09: a landing is made only when the project's required checks (its integration policy) passed on the exact tree it would make; a refusal goes back to the author with the results.
       landingGate: (call) => landingGate.evaluate(call),
+      // Card P09 (read-once windows): the judged records are read again as the very last step before the host is asked to land.
+      landingRecheck: (record) => landingGate.recheck(record),
       tellAuthor: async (n) => { await messages.noticeFromController({ commandId: n.commandId, taskId: n.taskId, to: n.to.startsWith("agent:") ? n.to : `agent:${n.to}`, purpose: "your landing was refused by the required checks", text: n.text }); },
     });
     const landingGate = new LandingGate({
