@@ -786,4 +786,110 @@ for (const backend of backends) {
     const rows = await c.storage.listAggregates("toolbox-proposer", { limit: 5 });
     assert.equal((rows[0]!.body.accepted as string[]).length, limit);
   });
+
+  suite("slice 7 re-check: rejecting an accepted proposal not yet released: only a decider other than the author, never revived, audited, a replay answered from its record; a rejection and a release of it at the same moment: exactly one goes through", async (c) => {
+    const { cody, maya, pat } = await cast(c);
+    let k = 0;
+    const propose = async (extra: Record<string, unknown> = {}) => (await c.props.propose(cody.p, { commandId: cid("pp"), name: "lint", executableRecordId: await c.note(cody.p, `console.log('lint ${k += 1}')`), rationale: "faster", tests: "ran it", ...extra } as never)).proposalId;
+    const indexBody = async () => (await c.storage.listAggregates("toolbox-proposer", { limit: 5 }))[0]!.body as { accepted?: string[]; settled?: string[] };
+    const state = async (id: string) => (await c.storage.getAggregate({ kind: PROPOSAL_KIND, id }))!.body as { state: string; released?: { version: string } };
+    // Before the next write touching the record `kind`/`id` goes to storage, `before` runs once (another decider's command, carried out in full): the write then meets the record changed.
+    const race: { kind: string; id: string; before?: (() => Promise<unknown>) | undefined } = { kind: PROPOSAL_KIND, id: "" };
+    const store = new Proxy(c.storage, {
+      get(target, key) {
+        if (key === "applyOperation") {
+          return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => {
+            if (race.before !== undefined && input.changes.some((ch) => ch.ref.kind === race.kind && ch.ref.id === race.id)) { const run = race.before; race.before = undefined; await run(); }
+            return target.applyOperation(input);
+          };
+        }
+        const value = Reflect.get(target, key, target) as unknown;
+        return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const cat = CatalogService.withEpoch(store, c.epoch, c.desks, options);
+    const props = ToolboxProposalService.withEpoch(store, c.epoch, cat, c.desks, options, async () => undefined);
+
+    // Who may reject an accepted one: not its author, not a maintainer whose grant does not cover the tool (it does not exist for it); the owner or a covering maintainer.
+    const a1 = await propose({ taskId: c.ta });
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: a1, decision: "accept" });
+    await refuses("forbidden", () => c.props.decide(cody.p, { commandId: cid("d"), proposalId: a1, decision: "reject", reason: "mine" }));
+    await refuses("not_found", () => c.props.decide(pat.p, { commandId: cid("d"), proposalId: a1, decision: "reject", reason: "not mine to decide" }));
+    assert.equal((await state(a1)).state, "accepted");
+    // A rejection, and the same command sent again: answered from its record (the same answer, nothing applied twice, one notice).
+    const rejectA1 = { commandId: cid("d"), proposalId: a1, decision: "reject" as const, reason: "its base moved on" };
+    const noticesBefore = (await c.cat.notices(cody.p, { limit: 100 })).items.length;
+    assert.equal((await c.props.decide(c.owner, rejectA1)).state, "rejected");
+    const revAfter = (await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: a1 }))!.revision;
+    const toldBefore = c.told.length;
+    assert.equal((await c.props.decide(c.owner, rejectA1)).state, "rejected", "the replay is answered from its record");
+    // The notice on the task says the same for the replay (judged from the stored history, not from a build, which does not run again).
+    assert.equal(c.told.at(-1)!.text, c.told.at(toldBefore - 1)!.text);
+    assert.equal((await c.storage.getAggregate({ kind: PROPOSAL_KIND, id: a1 }))!.revision, revAfter, "nothing applied twice");
+    const notices = (await c.cat.notices(cody.p, { limit: 100 })).items;
+    assert.equal(notices.length, noticesBefore + 1, "one notice");
+    const said = /^The owner rejected your proposal tpp-\S+ for toolbox\.lint \(accepted earlier and not released; that acceptance no longer stands and it will not be released\): its base moved on\.$/;
+    assert.match(notices.at(-1)!.text, said, "the inbox says the earlier acceptance no longer stands");
+    assert.match(c.told.at(-1)!.text, said, "and so does the task");
+    // A rejection of a proposal never accepted says nothing of an acceptance.
+    const r1 = await propose({ taskId: c.ta });
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: r1, decision: "reject", reason: "duplicates fmt" });
+    assert.doesNotMatch((await c.cat.notices(cody.p, { limit: 100 })).items.at(-1)!.text, /acceptance/);
+    assert.doesNotMatch(c.told.at(-1)!.text, /acceptance/);
+    // Never revived: no decision takes a rejected proposal (the author's revision and rebase neither).
+    for (const decision of ["accept", "request_changes", "defer", "reopen"] as const) {
+      await refuses("invalid_command", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: a1, decision, ...(decision === "accept" || decision === "reopen" ? {} : { reason: "again" }) }), /the proposal is rejected/);
+    }
+    await refuses("invalid_command", () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: a1, decision: "accept", version: "1.4.0" }), /the proposal is rejected/);
+    await assert.rejects(() => c.props.rebase(cody.p, { commandId: cid("rb"), proposalId: a1 }));
+    await assert.rejects(() => c.props.withdraw(cody.p, { commandId: cid("wd"), proposalId: a1 }));
+    assert.equal((await state(a1)).state, "rejected");
+    // Audited: the decision with its state, and the kept text's removal (no proposal text in the log).
+    const audit: { type: string; subject?: { kind: string; id: string }; detail: Record<string, unknown> }[] = [];
+    for (let after = 0; ;) { const page = await c.storage.listAudit({ afterSeq: after, limit: 500 }); audit.push(...page); if (page.length < 500) break; after = page.at(-1)!.seq; }
+    const onA1 = audit.filter((x) => x.subject?.id === a1);
+    assert.deepEqual(onA1.filter((x) => x.type === "toolbox.proposal.decide").map((x) => x.detail["state"]), ["accepted", "rejected"]);
+    assert.ok(onA1.some((x) => x.type === "toolbox.proposal.text.remove"), "the kept text's removal is audited");
+    assert.doesNotMatch(JSON.stringify(audit), /console\.log\('lint 1'\)/, "no proposal text in the audit log");
+
+    // A rejection lands just before a release of the same accepted proposal is stored: the release is refused, nothing is published, and sent again it is refused for the rejection.
+    const a2 = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: a2, decision: "accept" });
+    Object.assign(race, { id: a2, before: () => c.props.decide(maya.p, { commandId: cid("d"), proposalId: a2, decision: "reject", reason: "no longer wanted" }) });
+    await refuses("stale_revision", () => props.decide(c.owner, { commandId: cid("d"), proposalId: a2, decision: "accept", version: "1.1.0" }));
+    assert.equal(race.before, undefined, "the rejection ran first");
+    assert.equal((await state(a2)).state, "rejected");
+    assert.equal((await state(a2)).released, undefined);
+    assert.equal(await c.cat.get(c.owner, "toolbox.lint", "1.1.0"), undefined, "nothing published");
+    await refuses("invalid_command", () => props.decide(c.owner, { commandId: cid("d"), proposalId: a2, decision: "accept", version: "1.1.0" }), /the proposal is rejected/);
+    assert.ok(!(await indexBody()).accepted?.includes(a2));
+    assert.equal((await indexBody()).settled?.filter((x) => x === a2).length, 1);
+
+    // A release lands just before a rejection of it is stored: the rejection is refused and, sent again, is refused as released; the release stands.
+    const a3 = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: a3, decision: "accept" });
+    Object.assign(race, { id: a3, before: () => c.props.decide(c.owner, { commandId: cid("d"), proposalId: a3, decision: "accept", version: "1.1.0" }) });
+    await refuses("stale_revision", () => props.decide(maya.p, { commandId: cid("d"), proposalId: a3, decision: "reject", reason: "no longer wanted" }));
+    assert.equal(race.before, undefined, "the release ran first");
+    assert.equal((await state(a3)).state, "accepted");
+    assert.equal((await state(a3)).released?.version, "1.1.0");
+    assert.ok(await c.cat.get(c.owner, "toolbox.lint", "1.1.0"), "the release stands");
+    await refuses("invalid_command", () => props.decide(maya.p, { commandId: cid("d"), proposalId: a3, decision: "reject", reason: "no longer wanted" }), /accepted and released as 1\.1\.0/);
+    assert.ok(!(await indexBody()).accepted?.includes(a3));
+    assert.equal((await indexBody()).settled?.filter((x) => x === a3).length, 1);
+
+    // Both sent at the same moment: exactly one goes through, and the stored state is the winner's.
+    const a4 = await propose();
+    await c.props.decide(maya.p, { commandId: cid("d"), proposalId: a4, decision: "accept" });
+    const [rel, rej] = await Promise.allSettled([
+      c.props.decide(c.owner, { commandId: cid("d"), proposalId: a4, decision: "accept", version: "1.2.0" }),
+      c.props.decide(maya.p, { commandId: cid("d"), proposalId: a4, decision: "reject", reason: "no longer wanted" }),
+    ]);
+    assert.equal([rel, rej].filter((r) => r.status === "fulfilled").length, 1, JSON.stringify([rel.status, rej.status]));
+    const end = await state(a4);
+    if (rel.status === "fulfilled") { assert.equal(end.state, "accepted"); assert.equal(end.released?.version, "1.2.0"); assert.ok(await c.cat.get(c.owner, "toolbox.lint", "1.2.0")); }
+    else { assert.equal(end.state, "rejected"); assert.equal(end.released, undefined); assert.equal(await c.cat.get(c.owner, "toolbox.lint", "1.2.0"), undefined); }
+    assert.ok(!(await indexBody()).accepted?.includes(a4));
+    assert.equal((await indexBody()).settled?.filter((x) => x === a4).length, 1);
+  });
 }

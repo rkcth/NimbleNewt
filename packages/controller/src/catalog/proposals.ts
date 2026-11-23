@@ -299,13 +299,14 @@ export class ToolboxProposalService {
     };
     // The state is judged inside the write (so a repeat of a decision that was carried out is answered from its record).
     const to: ProposalState = decision === "accept" ? "accepted" : decision === "request_changes" ? "changes_requested" : decision === "defer" ? "deferred" : decision === "reject" ? "rejected" : "open";
-    const noticeText = (released?: string): string => `${by.kind === "owner" ? "The owner" : by.id} ${decision === "accept" ? `accepted your proposal ${found.id} for ${p.target}${released === undefined ? " (not released yet)" : ` and released it as ${released}`}. ${ACCEPTANCE_LIMIT}` : decision === "request_changes" ? `asked for changes to your proposal ${found.id} for ${p.target}: ${reason}. Revise it with toolbox.proposal.revise.` : decision === "defer" ? `deferred your proposal ${found.id} for ${p.target}: ${reason}. It is set aside and not listed as available until it is reopened.` : decision === "reject" ? `rejected your proposal ${found.id} for ${p.target}: ${reason}.` : `reopened your proposal ${found.id} for ${p.target}.`}`;
+    // `wasAccepted`: the proposal was accepted (not yet released) when this rejection was judged, so the author is told the earlier acceptance no longer stands.
+    const noticeText = (released?: string, wasAccepted = false): string => `${by.kind === "owner" ? "The owner" : by.id} ${decision === "accept" ? `accepted your proposal ${found.id} for ${p.target}${released === undefined ? " (not released yet)" : ` and released it as ${released}`}. ${ACCEPTANCE_LIMIT}` : decision === "request_changes" ? `asked for changes to your proposal ${found.id} for ${p.target}: ${reason}. Revise it with toolbox.proposal.revise.` : decision === "defer" ? `deferred your proposal ${found.id} for ${p.target}: ${reason}. It is set aside and not listed as available until it is reopened.` : decision === "reject" ? `rejected your proposal ${found.id} for ${p.target}${wasAccepted ? " (accepted earlier and not released; that acceptance no longer stands and it will not be released)" : ""}: ${reason}.` : `reopened your proposal ${found.id} for ${p.target}.`}`;
     // `revision` is the proposal record's revision this decision writes over: unique per write, so it keys the author's notice.
     const apply = async (cur: ToolboxProposalBody, revision: number, released?: { version: string; digest: string; versionId: string }): Promise<{ body: ToolboxProposalBody; changes: Change[] }> => {
       check(cur);
       const at = this.#runner.now();
       const body: ToolboxProposalBody = { ...cur, state: to, history: event(cur, { at, by: by.id, event: decision, ...(reason === undefined ? {} : { reason }), ...(released === undefined ? {} : { released: released.version }) }), ...(released === undefined ? {} : { released }), updatedAt: at };
-      const told = await noticeChange(this.#runner, cur.author, { key: `proposal|${found.id}|r${revision}|${decision}`, kind: "proposal", name: cur.target, ...(released === undefined ? {} : { version: released.version }), proposalId: found.id, text: noticeText(released?.version) });
+      const told = await noticeChange(this.#runner, cur.author, { key: `proposal|${found.id}|r${revision}|${decision}`, kind: "proposal", name: cur.target, ...(released === undefined ? {} : { version: released.version }), proposalId: found.id, text: noticeText(released?.version, cur.state === "accepted") });
       return { body, changes: told === undefined ? [] : [told] };
     };
     let released: { name: string; version: string; digest: string; versionId: string } | undefined;
@@ -350,7 +351,9 @@ export class ToolboxProposalService {
       // A rejected proposal's text is not kept; an accepted one keeps it until a later acceptance releases it.
       return { ...out, changes: [...out.changes, ...(to === "rejected" ? await this.#replaceText(found.id, undefined) : [])], final: to === "rejected" || to === "accepted" };
     });
-    await this.#tellOnTask(p, found.id, decision, noticeText());
+    // Judged from the stored history (the same for a repeat answered from its record): a rejection whose event follows an acceptance.
+    const history = decision === "reject" ? ((await this.#runner.get(PROPOSAL_KIND, found.id))?.body as unknown as ToolboxProposalBody | undefined)?.history : undefined;
+    await this.#tellOnTask(p, found.id, decision, noticeText(undefined, history !== undefined && history.at(-1)?.event === "reject" && history.at(-2)?.event === "accept"));
     return { proposalId: found.id, state: to, authorizes: ACCEPTANCE_LIMIT };
   }
 
