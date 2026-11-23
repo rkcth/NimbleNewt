@@ -89,6 +89,8 @@ export interface WindowBody {
   readonly reason?: string;
   /** When the owner was told the window's outcome (set once the notice was filed). */
   readonly toldAt?: string;
+  /** When the owner was told that an activated window keeps the installation quiet until NimbleNewt next starts (K07 second review: a switch with no restart would otherwise hold the pause unseen). */
+  readonly heldToldAt?: string;
   readonly history: readonly WindowEvent[];
 }
 /**
@@ -397,7 +399,7 @@ export class ReleaseWindowService {
       const took = await this.#took(w, true);
       if (took === "pending") return false;
       if (took !== undefined) { await this.#write(rev, w, this.#activated(w, took.from), "release.window.activate", cid("activated")); return true; }
-      const next = this.#next(w, "failed", `activation was refused: ${errorText(error)}`);
+      const next = this.#next(w, "failed", `activation was refused: ${recordText(error)}`);
       const saved = await this.#write(rev, w, next, "release.window.activate", cid("activate-refused"));
       await this.#tell(saved, next);
       return true;
@@ -575,7 +577,7 @@ export class ReleaseWindowService {
     if (failed !== undefined) { next = this.#next(w, "reverted", `the release failed to start (${failed.reason.slice(0, 120)}) and the launcher went back to the last known good`); quarantine = "it failed to start after a window activated it"; }
     else if (s.current?.id === w.candidateId && s.lastKnownGood?.id === w.candidateId) next = this.#next(w, "committed", "the release started and confirmed its start");
     else if (s.current?.id !== w.candidateId && s.journal === undefined) next = this.#next(w, "reverted", `another release (${s.current?.id ?? "none"}) became current before this one confirmed its start`);
-    if (next === undefined) return false;
+    if (next === undefined) { await this.#tellHeld(rev, w); return false; }
     const saved = await this.#write(rev, w, next, "release.window.outcome", `rwin:${w.windowId}:outcome`, undefined, {}, quarantine);
     await this.#tell(saved, next);
     return true;
@@ -627,6 +629,20 @@ export class ReleaseWindowService {
       if (!(error instanceof DomainError && error.code === "command_conflict")) throw error;
     }
     await this.#write(rev, w, { ...w, toldAt: this.#runner.now() }, "release.window.told", `rwin:${w.windowId}:told`);
+  }
+
+  /**
+   * An activated window keeps what it holds (its pause, its suspended attempts) until the launcher confirms or rejects the new release, which happens only when NimbleNewt next starts (a restart after
+   * activation is not in this slice). The owner is told once, so a switch that is never followed by a restart does not keep the installation paused without anyone knowing.
+   */
+  async #tellHeld(rev: number, w: WindowBody): Promise<void> {
+    const q = w.quiesce;
+    if (this.#o.notify === undefined || q === undefined || q.restoredAt !== undefined || w.heldToldAt !== undefined) return;
+    const detail = `Release ${w.candidateId} is switched in and runs at NimbleNewt's next start; until then new work stays paused and ${q.frozen.length} attempt(s) stay suspended. Restart NimbleNewt to finish.`.slice(0, 200);
+    try { await this.#o.notify({ commandId: `rwin-told-${w.windowId.slice(5)}-held`, windowId: w.windowId, level: "needs-you", label: "A maintenance window waits for a restart", detail }); } catch (error) {
+      if (!(error instanceof DomainError && error.code === "command_conflict")) throw error;
+    }
+    await this.#write(rev, w, { ...w, heldToldAt: this.#runner.now() }, "release.window.told", `rwin:${w.windowId}:held-told`);
   }
 
   async #view(by: Principal, revision: number, w: WindowBody): Promise<WindowView> {

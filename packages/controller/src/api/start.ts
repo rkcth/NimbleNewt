@@ -1773,7 +1773,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         freeze: async (attemptId: string, reason: string) => { await dispatch?.dispatcher.quiesce(dispatch.principal, attemptId, reason.slice(0, 300), { strictMs: 10_000 }); },
         release: async (attemptId: string) => { await dispatch?.dispatcher.release(dispatch.principal, attemptId); },
       },
-      ...(backups === undefined ? {} : { checkpoint: async () => checkpointOf(await backups.backUpNow("manual")) }),
+      ...(backups === undefined ? {} : { checkpoint: async () => checkpointOf(await backups.backUpFresh("manual")) }),
       notify: async (n) => { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: n.level, label: n.label, ref: { kind: "release-window", id: n.windowId }, detail: n.detail }); },
     });
     releaseWindowsLive = releaseWindows;

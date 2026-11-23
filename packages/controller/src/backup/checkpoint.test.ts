@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { MemoryStorage } from "../storage/index.js";
-import { checkpointOf, createBackup, createKeyring, manifestDigestOf } from "./index.js";
+import { BackupService, checkpointOf, createBackup, createKeyring, manifestDigestOf } from "./index.js";
 import { MANIFEST_FILE } from "./format.js";
 
 /** Card K07 review: the maintenance window's checkpoint check, on real backups (plain and sealed for everything). Storage-independent: the backup files are what is checked. */
@@ -46,5 +46,33 @@ test("K07 checkpoint: a backup sealed for everything is accepted on its manifest
     writeFileSync(file, JSON.stringify({ ...m, version: "changed" }));
     const bad = await checkpointOf(made);
     assert.equal(bad.verified, false);
+  } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("K07 second review: a backup with only its secrets sealed is checked in full and the record says its secrets and the manifest's seal were not", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nn-cp-"));
+  try {
+    const { keyring } = await createKeyring({ passcode: ["pass", "code", String(process.pid)].join("-"), scrypt: FAST });
+    const made = await createBackup(await populated(), { root, kind: "manual", version: "t", now: () => new Date(AT), encryption: keyring, scope: "secrets" });
+    assert.equal(made.manifest.encryption?.scope, "secrets");
+    const ok = await checkpointOf(made);
+    assert.equal(ok.verified, true, ok.problems.join("; "));
+    assert.match(ok.note ?? "", /only its secrets are sealed: its files were checked, its secrets and the manifest's seal were not/);
+    assert.ok((ok.note ?? "").length <= 160, "fits the status line whole");
+  } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("K07 second review: the checkpoint's backup is started after any backup already running, never that one", async () => {
+  const root = mkdtempSync(join(tmpdir(), "nn-cp-"));
+  try {
+    let clock = Date.parse(AT);
+    const service = new BackupService(await populated(), { root, version: "t", now: () => new Date(clock += 1000) });
+    const earlier = service.backUpNow("scheduled");
+    const fresh = service.backUpFresh("manual");
+    const [a, b] = await Promise.all([earlier, fresh]);
+    assert.equal(a.manifest.kind, "scheduled");
+    assert.equal(b.manifest.kind, "manual", "a new backup, not the one that was running");
+    assert.notEqual(a.path, b.path);
+    assert.equal((await checkpointOf(b)).verified, true);
   } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

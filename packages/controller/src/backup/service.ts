@@ -135,6 +135,15 @@ export class BackupService {
     return run;
   }
 
+  /**
+   * A backup started now, never one already under way (card K07 review: a maintenance window's checkpoint must be copied after the installation went quiet, so a scheduled backup that began before it is
+   * waited for and is not the answer). Waits while any backup runs, then starts its own in the same turn of the event loop.
+   */
+  async backUpFresh(kind: BackupKind = "manual"): Promise<{ path: string; manifest: BackupManifest }> {
+    while (this.#running !== undefined) await this.#running.catch(() => undefined);
+    return this.backUpNow(kind);
+  }
+
   /** The nightly run: makes a scheduled backup when the newest scheduled or manual one is older than the interval (or there is none). Returns whether one was made. */
   async runScheduled(): Promise<boolean> {
     if (this.#held) return false;

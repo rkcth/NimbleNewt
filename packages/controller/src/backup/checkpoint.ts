@@ -20,5 +20,7 @@ export async function checkpointOf(made: { readonly path: string; readonly manif
     return { name, digest, verified: true, problems: [], note: "sealed for everything: its manifest was checked, its files were not opened (the passcode is not read by the controller)" };
   }
   const check = await verifyBackup(made.path);
-  return { name, digest, verified: check.ok, problems: check.problems };
+  // A backup with only its secrets sealed: its files were checked, but its secrets and the manifest's own seal need the passcode (K07 second review: the record must not read as a full check).
+  const secretsOnly = made.manifest.encryption !== undefined && (check.notes?.length ?? 0) > 0;
+  return { name, digest, verified: check.ok, problems: check.problems, ...(secretsOnly ? { note: "only its secrets are sealed: its files were checked, its secrets and the manifest's seal were not (the passcode is not read by the controller)" } : {}) };
 }

@@ -356,6 +356,37 @@ for (const backend of backends) {
     assert.match(g.quiesce?.summary ?? "", /a pause the window did not make/);
   });
 
+  suite("second review: an activated window that keeps the installation paused tells the owner once that it waits for a restart; nothing is said when the start is already confirmed", async (c) => {
+    const { windowId, v2, w } = await c.open();
+    c.att.push({ attemptId: "att-r1", state: "running", frozen: false });
+    await w.tick();
+    assert.equal((await w.get(c.owner, windowId)).status, "activated");
+    assert.equal(c.told.length, 0, "the switch itself is not yet a notice");
+    await w.tick();
+    await w.tick();
+    const held = c.told.filter((t) => t.label === "A maintenance window waits for a restart");
+    assert.equal(held.length, 1, "told once, not at every sweep");
+    assert.equal(held[0]!.level, "needs-you");
+    assert.match(held[0]!.detail, new RegExp(`Release ${v2} is switched in and runs at NimbleNewt's next start; until then new work stays paused and 1 attempt\\(s\\) stay suspended`));
+    assert.ok((await w.get(c.owner, windowId)).heldToldAt !== undefined);
+    await c.act.confirm(c.owner, { commandId: cid("c"), releaseId: v2 });
+    await w.tick();
+    assert.equal((await w.get(c.owner, windowId)).status, "committed");
+    assert.equal(c.told.at(-1)?.label, "A maintenance window updated the installation");
+    // A second world where the start is confirmed before the next sweep: no restart notice at all.
+    const v3 = await c.ready("v3");
+    const w2 = c.qwin();
+    const { windowId: second } = await w2.set(c.owner, { commandId: cid("w2"), candidateId: v3.id, digest: v3.digest, ...at("2026-11-20", "04:00") });
+    c.clock.t = OPENS + 2 * 60 * MIN + MIN;
+    await w2.tick();
+    assert.equal((await w2.get(c.owner, second)).status, "activated");
+    await c.act.confirm(c.owner, { commandId: cid("c3"), releaseId: v3.id });
+    const before = c.told.length;
+    await w2.tick();
+    assert.equal((await w2.get(c.owner, second)).status, "committed");
+    assert.deepEqual(c.told.slice(before).map((t) => t.label), ["A maintenance window updated the installation"]);
+  });
+
   suite("review: a checkpoint failure that names a host path is recorded without the path", async (c) => {
     const { windowId } = await c.open();
     const w = c.qwin({ checkpoint: async () => { throw new Error("ENOSPC: no space left on device, write '/srv/nn-state/backups/backup-1/tasks.jsonl'"); } });
