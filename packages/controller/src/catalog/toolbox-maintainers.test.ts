@@ -222,4 +222,35 @@ for (const backend of backends) {
     assert.ok(lines.includes("There are more maintainers; ask again with after 23 to see the next ones."), "the next page starts after those already shown");
     assert.ok(lines.includes("The look stopped before it had read every agent; there may be more maintainers."));
   });
+
+  suite("the grant records are read to the end, a page at a time, whatever their number; a grant record for every action counts; a grant read that fails refuses the whole answer instead of a shorter list", async (c) => {
+    const { maya, pat } = await cast(c);
+    const grants = GrantService.withEpoch(c.storage, c.epoch, options);
+    const dot = await c.agent("Dot", worker(c.a));
+    await grants.grant(c.owner, { commandId: cid("gr"), grantee: dot.pid, action: "*", project: c.b, source: "direct", basis: "everything in Orchard" });
+    await grants.grant(c.owner, { commandId: cid("gr"), grantee: dot.pid, action: "desk.read", project: c.b, source: "direct", basis: "reads Orchard's desk" });
+    const whole = (await toolboxMaintainers(c.owner, c.ports)).items.map((x) => x.agent).sort();
+    assert.deepEqual(whole, [maya.pid, pat.pid, dot.pid].sort(), "a grant record for every action (`*`) is the right too");
+    // The same records served one per page: every page is read, so the answer is the same and no right past the first page is missed.
+    // The records that give the right come last, so a reader that stopped early would miss them.
+    const listed = (await grants.list(c.owner, { limit: 200 })).items;
+    const all = [...listed.filter((g) => g.action !== "*" && g.action !== TOOLBOX_MANAGE), ...listed.filter((g) => g.action === "*" || g.action === TOOLBOX_MANAGE)];
+    assert.equal(all.at(-1)!.action === "*" || all.at(-1)!.action === TOOLBOX_MANAGE, true);
+    assert.ok(all.length >= 2, "at least two pages, so a later page can fail");
+    let pages = 0;
+    const onePerPage = { list: async (_by: Principal, q: { afterId?: string }) => {
+      pages += 1;
+      const at = q.afterId === undefined ? 0 : all.findIndex((g) => g.id === q.afterId) + 1;
+      return { items: all.slice(at, at + 1), ...(at + 1 < all.length ? { next: all[at]!.id } : {}) };
+    } };
+    assert.deepEqual((await toolboxMaintainers(c.owner, { ...c.ports, grants: onePerPage as never })).items.map((x) => x.agent).sort(), whole);
+    assert.equal(pages, all.length, "one read per page, to the last");
+    // A failed grant read, at the first page or a later one, is an error, never a list that leaves a maintainer out.
+    const failing = (okPages: number) => { let read = 0; return { list: async (by: Principal, q: { afterId?: string }) => { if (read++ >= okPages) throw new DomainError("unavailable", "storage is not answering"); return onePerPage.list(by, q); } }; };
+    for (const okPages of [0, 1]) {
+      await refuses("unavailable", () => toolboxMaintainers(c.owner, { ...c.ports, grants: failing(okPages) as never }));
+      const status = StatusService.withEpoch(c.storage, c.epoch, { toolbox: { list: async () => ({ items: [] }), forks: async () => ({ forks: [] }), maintainers: (by: Principal, q: { name?: string; after?: number }) => toolboxMaintainers(by, { ...c.ports, grants: failing(okPages) as never }, q) } } as never, options);
+      await refuses("unavailable", () => status.ask(c.owner, { kind: "toolbox_maintainers" }));
+    }
+  });
 }
