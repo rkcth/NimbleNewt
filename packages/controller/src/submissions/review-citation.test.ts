@@ -139,6 +139,34 @@ for (const backend of backends) {
       assert.equal((await svc.approvalOf(code.id))?.approved, true);
       assert.equal("cited" in ((await svc.approvalOf(code.id)) ?? {}), false);
       assert.ok(old.id !== rejected.id && old.id !== uncitedChanges.id);
+      // A dispute the owner settles by keeping the decision (it is active again, its link never marked): the refusal clears.
+      await plant("decision", dDisputed, decision("active"));
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dDisputed, "current")], revalidations: 0, followUps: [] });
+      assert.equal(typeof (await review(rev, { verdict: "approve" })).id, "string", "a decision in force again no longer holds the approval back");
+      // A relied-on decision that cannot be read refuses the approval (fail closed); a request for changes is still allowed.
+      const gone = derivedId("dec", cid("gone"));
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(gone, "current")], revalidations: 0, followUps: [] });
+      await refuses("invalid_command", () => review(rev, { verdict: "approve" }), new RegExp(`${gone}, which cannot be read`));
+      assert.equal(typeof (await review(rev, { verdict: "changes" })).id, "string");
+      // A correction or a new link that lands between the approval's reads and its write makes the write lose; it is built again from what is now stored and refused.
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dA, "current")], revalidations: 1, followUps: [] });
+      let racing: (() => Promise<void>) | undefined;
+      const store = world.storage;
+      const hooked = new Proxy(store, { get(target, key) {
+        if (key === "applyOperation") return async (input: { audit: readonly { type: string }[] }) => { const go = racing; if (go !== undefined && input.audit[0]?.type === "submission.record") { racing = undefined; await go(); } return (target.applyOperation as (i: unknown) => Promise<unknown>).call(target, input); };
+        const v = (target as unknown as Record<PropertyKey, unknown>)[key];
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } });
+      const raced = SubmissionService.withEpoch(hooked, projects.epoch, async (id) => roles.get(id) ?? [], options);
+      const racedReview = (extra: object) => raced.record(rev, { commandId: cid("rv"), taskId: task, kind: "review", role: "reviewer", subject: code.id, ...extra } as never);
+      racing = () => plant("decision", dA, decision("superseded", project, 3, { supersededBy: dB }));
+      await refuses("invalid_command", () => racedReview({ verdict: "approve" }), new RegExp(`${dA}, which was superseded by ${dB}`));
+      assert.equal(racing, undefined, "the correction landed during the write");
+      await plant("decision", dA, decision("active", project, 3));
+      racing = () => plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dA, "current"), link(dB, "current")], revalidations: 1, followUps: [] });
+      await refuses("invalid_command", () => racedReview({ verdict: "approve", criteriaRevision: 2, decisions: [dA] }), new RegExp(`relies on decision ${dB}: name it`));
+      assert.equal(racing, undefined, "the new link landed during the write");
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [link(dA, "current")], revalidations: 1, followUps: [] });
       // The write is ordered against a contract change, a new link or a correction: the reads come back as revision checks.
       const reads = await readReviewCite(runner, { projectId: project, taskId: task }, { criteriaRevision: 2, decisions: [dA] });
       assert.deepEqual(reads.changes.map((c) => `${c.ref.kind}/${c.ref.id}`), [`task-contract/${task}`, `decision/${dA}`]);

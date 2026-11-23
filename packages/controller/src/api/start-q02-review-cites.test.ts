@@ -115,6 +115,23 @@ for (const store of stores) {
       assert.match(none[0], /^Nothing you may read has been submitted/);
       assert.equal((await record(ann, "v8", { kind: "review", role: "reviewer", subject: code, verdict: "approve", criteriaRevision: 2 })).error.code, "forbidden", "a role title the agent does not hold, and its own work, are refused as before");
       assert.equal((await call(boot.token, "submission.record", { taskId: task, kind: "review", role: "reviewer", subject: code, verdict: "approve", criteriaRevision: 2 }, "v9")).ok, false, "the owner records no submission");
+      // The task's work is linked to the decision; the owner then corrects it. Right after the correction (before propagation marks the link) every approval is refused, cited or not; a request for
+      // changes is not. Once the work is revalidated against the new decision, approvals are accepted again, and a cited one names the new decision.
+      assert.equal((await call(boot.token, "decision.link", { taskId: task, subject: { kind: "task", id: task }, decisions: [dec.result.id] }, "l1")).ok, true);
+      assert.equal((await record(rev, "v10", { kind: "review", role: "reviewer", subject: code, verdict: "approve" })).ok, true, "a link to a decision in force changes nothing");
+      const fix = await call(boot.token, "decision.record", { projectId: project, category: "decision", topic: "format", statement: "Write the new file format", wording: "write the new file format instead", basedOn: 1 }, "d2");
+      assert.equal(fix.ok, true, JSON.stringify(fix));
+      const fixId = (fix.result.decisionId ?? fix.result.id) as string;
+      const held = await record(rev, "v11", { kind: "review", role: "reviewer", subject: code, verdict: "approve" });
+      assert.equal(held.error?.code, "invalid_command", JSON.stringify(held));
+      assert.match(held.error.message, new RegExp(`relies on decision ${dec.result.id}, which was superseded by ${fixId}: an approval waits until`));
+      assert.equal((await record(rev, "v12", { kind: "review", role: "reviewer", subject: code, verdict: "approve", criteriaRevision: 2, decisions: [fixId] })).error?.code, "invalid_command");
+      assert.equal((await record(rev, "v13", { kind: "review", role: "reviewer", subject: code, verdict: "changes" })).ok, true, "a request for changes is still recorded");
+      const again = await call(boot.token, "decision.revalidate", { taskId: task, decisions: [fixId], note: "checked against the new format" }, "rv1");
+      assert.equal(again.ok, true, JSON.stringify(again));
+      assert.equal((await record(rev, "v14", { kind: "review", role: "reviewer", subject: code, verdict: "approve", criteriaRevision: 2, decisions: [dec.result.id] })).error?.code, "invalid_command", "the superseded decision is not in force");
+      assert.equal((await record(rev, "v15", { kind: "review", role: "reviewer", subject: code, verdict: "approve", criteriaRevision: 2, decisions: [fixId] })).ok, true);
+      assert.equal((await record(rev, "v16", { kind: "review", role: "reviewer", subject: code, verdict: "approve" })).ok, true);
       // The guide says what the view adds, in the words this view uses.
       const guide = readFileSync(fileURLToPath(new URL("../../../../docs/nimblenewt/user-guide.md", import.meta.url)), "utf8");
       assert.match(guide, /When the reviewer's newest verdict says what it judged against, the line adds it in brackets: the version of the task's acceptance criteria, the decisions of yours it was judged against and, for a rejection, the requirement of yours that is not met/);

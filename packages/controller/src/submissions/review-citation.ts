@@ -68,11 +68,14 @@ export async function readApprovalReliance(runner: Pick<CommandRunner, "get">, t
     const got = await runner.get("decision", l.decisionId);
     const d = got?.body as unknown as OwnerDecisionBody | undefined;
     if (got !== undefined && !seen.has(got.id)) { seen.add(got.id); changes.push({ type: "check", ref: { kind: "decision", id: got.id }, expectedRevision: got.revision }); }
-    if (l.state !== "current" || (d !== undefined && d.state !== "active")) {
-      const now = d?.state === "disputed" ? "is disputed" : `was superseded${(d?.supersededBy ?? l.supersededBy) === undefined ? "" : ` by ${d?.supersededBy ?? l.supersededBy}`}`;
-      bad("decisions", `the task relies on decision ${l.decisionId}, which ${now}: the work is revalidated against the current decision (decision.revalidate) before it can be approved`);
+    // Fail closed: a relied-on decision that cannot be read (decisions are never removed, so only damaged or partly restored data does this) refuses the approval like one no longer in force.
+    if (d === undefined) bad("decisions", `the task relies on decision ${l.decisionId}, which cannot be read: an approval waits until the owner or the task's agent revalidates the work against the current decision (decision.revalidate); a request for changes or a rejection can be recorded now`);
+    else if (d.state === "disputed") bad("decisions", `the task relies on decision ${l.decisionId}, which is disputed (the owner's instructions conflict): an approval waits until the owner settles it, and the work is revalidated (decision.revalidate) if another decision is chosen; a request for changes or a rejection can be recorded now`);
+    else if (l.state !== "current" || d.state !== "active") {
+      const by = d.supersededBy ?? l.supersededBy;
+      bad("decisions", `the task relies on decision ${l.decisionId}, which was superseded${by === undefined ? "" : ` by ${by}`}: an approval waits until the owner or the task's agent revalidates the work against the current decision (decision.revalidate); a request for changes or a rejection can be recorded now`);
     }
-    if (named !== undefined && !named.includes(l.decisionId)) bad("decisions", `the task relies on decision ${l.decisionId}: name it`);
+    if (named !== undefined && !named.includes(l.decisionId)) bad("decisions", `the task relies on decision ${l.decisionId}: name it in decisions (an approval that cites names every decision the task relies on)`);
   }
   return changes;
 }
