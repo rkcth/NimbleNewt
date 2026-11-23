@@ -48,6 +48,8 @@ test("a landing is made only when the project's required checks pass on the inte
   const credentials = new Map<string, string>();
   let local: LocalWorker | undefined;
   let landingCheckCalls = 0;
+  // A change made while the host runs the checks (after the gate read the project's required checks, before it reads the records): the landing reads the required checks again right before the host is asked.
+  let duringChecks: (() => Promise<void>) | undefined;
   const c = await startController({
     storage: { kind: "sqlite", path: join(dir, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts, filesystem: ext4, features: [], harnesses: [PI], artifacts: { directory: join(dir, "blobs") },
     dispatch: {
@@ -57,7 +59,7 @@ test("a landing is made only when the project's required checks pass on the inte
         build: () => {
           local = new LocalWorker({
             hostId: "host:w1", resources: { cpus: 1, memoryMb: 512 }, version: "w-1", capabilities: () => CAPS,
-            workspace: { run: (call) => ws.port.run(call as never) as never, landingChecks: async (call) => { landingCheckCalls++; return ws.port.landingChecks!(call); } },
+            workspace: { run: (call) => ws.port.run(call as never) as never, landingChecks: async (call) => { landingCheckCalls++; const out = await ws.port.landingChecks!(call); const f = duringChecks; duringChecks = undefined; await f?.(); return out; } },
             submitView: (scope) => ws.submitView(scope),
             stage: (scope) => ws.stageWork(scope),
             sandbox: { open: async (r) => ({ revision: r.revision, close: async () => undefined }) },
@@ -205,6 +207,17 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.equal(byCheck(blocked.result)["defects"]!.summary, `1 of 1 defect(s) of this task are not finished: ${found.result.id} (major, open)`, "the defect records were read (not 'not collected')");
     assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
     assert.equal((await api(c, rev, "defect.withdraw", { id: found.result.id, reason: "I misread the guide; the backup step is there" }, "df-2")).ok, true);
+    // Card P09 (read-once windows), through the composed controller: the project's required checks are read before the host runs the tests, so a check required while they ran was never judged; the landing reads the
+    // policy again as its last step before the host is asked, and is refused without telling the author (a removed wiring of that second reading in startController would land here).
+    assert.equal((await api(c, boot.token, "integration.set", { project, requiredChecks: ["tests", "review", "qa", "docs", "director"] }, "req-def-off")).ok, true);
+    duringChecks = async () => { assert.equal((await api(c, boot.token, "integration.set", { project, requiredChecks: ["tests", "review", "qa", "docs", "director", "defects"] }, "req-def-on")).ok, true); };
+    const moved = await land("land-pol");
+    assert.equal(moved.result?.state, "refused", JSON.stringify(moved));
+    assert.match(moved.result.summary, /the project's required checks changed while this landing was judged \(it now also requires defects, which was not judged for it\), so nothing was landed and submission \S+ stays in the landing queue/);
+    assert.equal(duringChecks, undefined, "the policy was changed while the checks ran");
+    assert.equal(moved.result.toldAuthor, undefined, "the author cannot change the policy, so it is not told");
+    assert.equal(readFileSync(join(shared, "src", "a.ts"), "utf8"), "export const a = 1;\n", "nothing was landed");
+    assert.deepEqual(await queuedNow(), [submissionId], "the submission keeps its place in the queue");
     const landed = await land("land-2");
     assert.equal(landed.result.state, "done", JSON.stringify(landed.result));
     assert.equal(landed.result.detail.landed, true, landed.result.summary);
@@ -215,7 +228,7 @@ test("a landing is made only when the project's required checks pass on the inte
     assert.equal(byCheck(landed.result)["docs"]!.result, "pass");
     assert.deepEqual([byCheck(landed.result)["director"]!.result, /^signed off by agent:/.test(byCheck(landed.result)["director"]!.summary)], ["pass", true]);
     assert.equal(byCheck(landed.result)["defects"]!.result, "pass");
-    assert.equal(landingCheckCalls, 7, "the checks ran again for the second landing: an earlier result is never reused");
+    assert.equal(landingCheckCalls, 8, "the checks ran again for the second landing: an earlier result is never reused");
     assert.deepEqual([landed.result.queued?.submissionId, await queuedNow()], [submissionId, []], "the landing took exactly its submission out of the queue");
     for (const f of finishes) f();
     await c.dispatch.dispatcher.idle();

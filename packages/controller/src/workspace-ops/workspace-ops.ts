@@ -5,7 +5,7 @@ import { onlyKnown, taskId as checkTaskId, text, type TaskBody } from "../domain
 import { CommandRunner, type RunnerOptions } from "../domain/runner.js";
 import type { QuiesceCoordinator } from "../dispatch/quiesce.js";
 import { QuiesceRefused } from "../dispatch/quiesce.js";
-import { landingChecksText, type LandingCheckHost, type LandingChecksRecord } from "../landing/landing-gate.js";
+import { landingChecksText, type LandingCheckEntry, type LandingCheckHost, type LandingChecksRecord } from "../landing/landing-gate.js";
 import { allowsExactly, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -206,6 +206,12 @@ export interface WorkspaceDeps {
    * refuses the landing. Absent: landings are not gated (unit rigs).
    */
   readonly landingGate?: (call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string; readonly author?: string; readonly host: WorkspacePort }) => Promise<LandingChecksRecord>;
+  /**
+   * Card P09 (read-once windows): asked for a landing the gate passed, as the very last step before the host is asked to land (after the lease and the queue were shown once more): the records that were judged (review, QA,
+   * documents, director, defects) are read again. It answers the checks that no longer pass and the record as it now stands, and `added`: checks the project requires since the first judgement (never judged for this
+   * landing; refused, nobody told: the author cannot change the policy). A throw (they cannot be read again) refuses the landing. Absent: not read again (unit rigs).
+   */
+  readonly landingRecheck?: (record: LandingChecksRecord) => Promise<{ readonly changed: readonly LandingCheckEntry[]; readonly record: LandingChecksRecord; readonly added?: readonly string[] }>;
   /**
    * Card P10: told after a refresh round of a task is counted (the author's own refresh moved its checkout onto a newer head), with the task's round count; the landing queue reserves the task's place at the
    * refresh-round cap and tells the director when a reserved task needs another round. Best effort: a throw is ignored. Not told on a repeat of the call.
@@ -675,6 +681,19 @@ export class WorkspaceOpService {
           // The checks may have run for a while: the lease, the approval and the queue are shown once more, so a lease that ran out or a queue that moved during the checks still lands nothing.
           if (gated.required.length > 0 && stillLeased !== undefined) {
             try { await stillLeased(); } catch (error) { return { ok: false as const, reason: error instanceof QueueMoved ? `the submission is no longer the oldest approved one in the landing queue, so nothing was landed: ${safe(error, 300)}` : `the integrator lease no longer holds, so nothing was landed: ${safe(error, 300)}` }; }
+          }
+          // The review, QA, documents, director sign-off and defects were read once while the checks were judged; they are read again as the very last step before the host is asked (card P09, read-once windows), so a
+          // review taken back, a defect reported, a document flagged or a sign-off declined in the meantime still lands nothing. The refusal keeps the queue place and reservation as every refusal of the gate does.
+          if (gated.required.length > 0 && this.#deps.landingRecheck !== undefined) {
+            let again: Awaited<ReturnType<NonNullable<WorkspaceDeps["landingRecheck"]>>>;
+            try { again = await this.#deps.landingRecheck(gated); } catch (error) { return { ok: false as const, reason: `the required checks could not be read again right before the landing, so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}: ${safe(error, 300)}` }; }
+            if (again.added !== undefined && again.added.length > 0) return { ok: false as const, reason: `the project's required checks changed while this landing was judged (it now also requires ${safe(again.added.join(", "), 120)}, which was not judged for it), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; ask for the landing again to judge it under the checks now required` };
+            if (again.changed.length > 0) {
+              gated = again.record;
+              gateRefused = true;
+              const now = again.changed.map((r) => `${r.check} ${r.result === "fail" ? "failed" : "not run"}: ${safe(r.summary, 160)}`);
+              return { ok: false as const, reason: `a required check that had passed changed before the landing was made (${now.join("; ")}), so nothing was landed${body.queued === undefined ? "" : ` and submission ${body.queued.submissionId} stays in the landing queue`}; the author was sent the results` };
+            }
           }
         }
         // The host is told both what the queue says lands (card P10: base == head, exactly that tree) and the tree the checks ran on (card P09); it lands only when both hold.
