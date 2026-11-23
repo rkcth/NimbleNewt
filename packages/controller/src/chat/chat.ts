@@ -576,6 +576,7 @@ export class ChatService {
     const pending = new Map<string, number>();
     const answeredHere = new Set<string>();
     let coordinatorRevision: number | undefined;
+    let openForAnswer: { id: string; summary: string[] }[] | undefined;
     for (const [n, { intent, text: words, trusted, quoted, from }] of work.entries()) {
       const i = items.length;
       const push = (item: PlanItem): void => { items.push(item); workOf.push(n); };
@@ -595,6 +596,14 @@ export class ChatService {
         continue;
       }
       if (intent.kind === "apply_proposal" || intent.kind === "discard_proposal") {
+        // A message that is only "yes" or "no" names no proposal: it counts only while exactly one is open. With several open the model's pick would be a guess, so the owner is asked which.
+        if (!trusted && !evidenceStrong(intent.evidence)) {
+          openForAnswer ??= [...(await this.#openProposals(owner.id)), ...(await this.#openEdits(owner))];
+          if (openForAnswer.length > 1) {
+            push({ i, kind: "asked", question: `More than one proposal is open, and a message that is only "${intent.kind === "apply_proposal" ? "yes" : "no"}" does not say which. Nothing was done. Which one do you mean? Say it in a few words (or drop the ones you no longer want).`, options: openForAnswer.slice(0, CHAT_LIMITS.options).map((p) => `${p.id}: ${quotedText(p.summary[0] ?? "", 80)}`) });
+            continue;
+          }
+        }
         push({ i, kind: intent.kind, proposalId: intent.proposalId, ...(intent.kind === "apply_proposal" && intent.lengthDays !== undefined && lengthInWords(intent.lengthDays, words) ? { lengthDays: intent.lengthDays } : {}) });
         continue;
       }

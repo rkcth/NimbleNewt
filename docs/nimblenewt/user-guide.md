@@ -109,7 +109,7 @@ NimbleNewt: Nothing is waiting for you.
 What to notice:
 
 - **You use your own words.** There are no special phrases to learn; the lines above are just one way to say it. A model reads what you mean, so if it gets you wrong, nothing has happened yet: discard the proposal and say it differently.
-- **Everything that matters is shown first.** NimbleNewt answers "Proposed, nothing has happened yet" and waits. Say yes (in any words) to go ahead, or say you do not want it to drop it. Small changes that are easy to undo, such as marking a task ready, are done at once ("Done: ...").
+- **Everything that matters is shown first.** NimbleNewt answers "Proposed, nothing has happened yet" and waits. Say yes (in any words) to go ahead, or say you do not want it to drop it. A message that is only "yes" or only "no" works while one proposal is open; when several are open, NimbleNewt asks which one you mean, so name it in a few words. Small changes that are easy to undo, such as marking a task ready, are done at once ("Done: ...").
 - **The setup list tells you what is next** after each step, so you are never left guessing. Say "help me get started" at any time to see the whole list again.
 - **Giving an agent what it needs is one sentence.** An agent can do nothing until you give it rights in a project. "Let Ann work on Garden" gives Ann every right her role (author) stands for, only in Garden, and lists each one before you say yes; rights she already has there are left out. To give fewer or other rights, say no and name them instead ("give Ann the rights task.read and desk.read in Garden").
 

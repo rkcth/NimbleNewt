@@ -125,13 +125,34 @@ test("through the running controller an unfinished defect's finding and severity
     assert.equal((await state(a)).severity, "major", "nothing applied");
     const minorTurn = await turn("m-9c", "make the backup defect minor", [{ kind: "command", op: "defect.edit", args: { id: a, severity: "minor" }, evidence: "make the backup defect minor", basis: "owner" }]);
     assert.equal(minorTurn[0].status, "proposed", JSON.stringify(minorTurn));
-    const dropped = await turn("m-9d", "No", [{ kind: "discard_proposal", proposalId: minorTurn[0].proposalId, evidence: "no", basis: "owner" }]);
+    // A message that is only "no" or only "yes" names no proposal: while more than one is open (the stale one of m-0, the critical and the minor one) the owner is asked which, and nothing is done.
+    const status = async (p: string) => (await c.chat!.getProposal(boot.token, p))?.status;
+    assert.deepEqual([await status(sevTurn[0].proposalId), await status(escTurn[0].proposalId), await status(minorTurn[0].proposalId)], ["open", "open", "open"]);
+    const unclearNo = await turn("m-9d", "No", [{ kind: "discard_proposal", proposalId: minorTurn[0].proposalId, evidence: "no", basis: "owner" }]);
+    assert.equal(unclearNo[0].status, "asked", JSON.stringify(unclearNo));
+    assert.ok(unclearNo[0].options.some((o: string) => o.startsWith(`${escTurn[0].proposalId}: `)) && unclearNo[0].options.some((o: string) => o.startsWith(`${minorTurn[0].proposalId}: `)), JSON.stringify(unclearNo));
+    assert.equal(await status(minorTurn[0].proposalId), "open", "nothing dropped");
+    const oldDropped = await turn("m-9e", "drop the old typo change", [{ kind: "discard_proposal", proposalId: sevTurn[0].proposalId, evidence: "drop the old typo change", basis: "owner" }]);
+    assert.equal(oldDropped[0].status, "discarded", JSON.stringify(oldDropped));
+    const unclearYes = await turn("m-9f", "Yes.", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "yes", basis: "owner" }]);
+    assert.equal(unclearYes[0].status, "asked", JSON.stringify(unclearYes));
+    assert.equal((await state(a)).severity, "major", "nothing applied while two are open");
+    // A message that is wholly quoted material has no words of the owner's own and is not read at all.
+    await assert.rejects(c.chat!.submit(boot.token, { messageId: "m-9q", text: "> yes" }), (e: any) => e.code === "invalid_command");
+    const dropped = await turn("m-9g", "drop the minor change", [{ kind: "discard_proposal", proposalId: minorTurn[0].proposalId, evidence: "drop the minor change", basis: "owner" }]);
     assert.equal(dropped[0].status, "discarded", JSON.stringify(dropped));
+    // With exactly one open, "Yes." agrees to it.
     const escYes = await turn("m-10", "Yes.", [{ kind: "apply_proposal", proposalId: escTurn[0].proposalId, evidence: "yes", basis: "owner" }]);
     assert.equal(escYes[0].status, "applied", JSON.stringify(escYes));
     const escalated = await state(a);
     assert.deepEqual([escalated.state, escalated.severity, escalated.cycles, escalated.checks.map((x: any) => x.verdict), escalated.edits.length], ["escalated", "critical", 1, ["not-fixed"], 3]);
     assert.equal((await call(boot.token, "status.ask", { request: { kind: "needs_you" } })).result.item.count, 1, "still on the Needs-you list");
+    // With exactly one open, a message that is only "no" drops it.
+    const lower = await turn("m-10b", "make the backup defect minor", [{ kind: "command", op: "defect.edit", args: { id: a, severity: "minor" }, evidence: "make the backup defect minor", basis: "owner" }]);
+    assert.equal(lower[0].status, "proposed", JSON.stringify(lower));
+    const no = await turn("m-10c", "no!", [{ kind: "discard_proposal", proposalId: lower[0].proposalId, evidence: "No", basis: "owner" }]);
+    assert.equal(no[0].status, "discarded", JSON.stringify(no));
+    assert.equal((await state(a)).severity, "critical");
     // Once withdrawn it is finished and no longer corrected.
     assert.ok((await call(boot.token, "defect.withdraw", { id: a, reason: "a duplicate" }, "w1")).ok);
     assert.equal((await call(boot.token, "defect.edit", { id: a, severity: "minor" }, "e7")).error.code, "invalid_transition");
