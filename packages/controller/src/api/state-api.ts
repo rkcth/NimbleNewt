@@ -9,7 +9,7 @@ import type { WatchService } from "../events/handling.js";
 import type { InquiryService } from "../inquiries/index.js";
 import type { ContractService, WaitGraphService } from "../planning/index.js";
 import type { ReleaseActivationService, ReleaseService, ReleaseWindowService } from "../release/index.js";
-import type { AcceptanceService, DefectService, DocObligationService, QaEvidenceService, SubmissionService } from "../submissions/index.js";
+import type { AcceptanceService, DefectService, DocObligationService, QaEvidenceService, QaReviewService, SubmissionService } from "../submissions/index.js";
 import type { ServiceOperations } from "../service-ops/index.js";
 import type { SimulationService } from "../simulation/index.js";
 import type { TaskArtifactPublisher } from "../artifacts/index.js";
@@ -159,6 +159,8 @@ export interface StateApiDeps {
   readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "withdraw" | "edit" | "get" | "list">;
   /** QA evidence bound to the tree, criteria and decisions it was judged on (card Q02). */
   readonly qaEvidence?: Pick<QaEvidenceService, "record" | "check" | "list" | "get" | "gate"> & { contractChanged?: QaEvidenceService["contractChanged"] };
+  /** The project review policy and its scheduler (card Q02). */
+  readonly qaReview?: Pick<QaReviewService, "get" | "set" | "requests" | "sweep">;
   /** Documentation obligations and their impact (card Q03). */
   readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "retire" | "impact" | "release" | "list" | "get">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
@@ -412,6 +414,7 @@ export class StateApi {
         ...(this.#deps.acceptance === undefined ? {} : { acceptance: this.#deps.acceptance }),
         ...(this.#deps.defects === undefined ? {} : { defects: this.#deps.defects }),
         ...(this.#deps.qaEvidence === undefined ? {} : { qaEvidence: this.#deps.qaEvidence }),
+        ...(this.#deps.qaReview === undefined ? {} : { qaReview: this.#deps.qaReview }),
         ...(this.#deps.docObligations === undefined ? {} : { docObligations: this.#deps.docObligations }),
         ...(this.#deps.taskArtifacts === undefined ? {} : { taskArtifacts: this.#deps.taskArtifacts }),
         ...(this.#deps.serviceOps === undefined ? {} : { serviceOps: this.#deps.serviceOps }),

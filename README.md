@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **292 of 364 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **294 of 364 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -107,7 +107,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | --- | --- | --- |
 | Scope and early proofs | `▓▓▓▓▓▓▓▓▓░░░` 75% | 3 of 4 |
 | Foundation: storage, configuration and builds | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
-| Pi runtime and inference caching | `▓▓▓▓▓▓░░░░░░` 50% | 12 of 24 |
+| Pi runtime and inference caching | `▓▓▓▓▓▓░░░░░░` 54% | 13 of 24 |
 | Projects, tasks and reliable work | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 11 of 11 |
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 29 of 30 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 19 of 22 |
@@ -119,7 +119,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
-| Tools and skills | `▓▓▓▓▓▓▓▓▓▓▓░` 94% | 18 of 19 |
+| Tools and skills | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
 | Projects, repositories and workspaces | `▓▓▓▓▓░░░░░░░` 44% | 8 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
@@ -170,7 +170,7 @@ The controller's transactional storage (SQLite and PostgreSQL), versioned config
 </details>
 
 <details>
-<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓▓▓░░░░░░ 12 of 24</summary>
+<summary><strong>Pi runtime and inference caching</strong> — ▓▓▓▓▓▓░░░░░░ 13 of 24</summary>
 
 The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that makes switching context cheap.
 
@@ -185,7 +185,7 @@ The pinned Pi adapter, how it is upgraded, and the per-backend cache tuning that
 - [ ] **G10** · P27 · Benchmark native backend caching and branch markers _(needs C06)_
 - [x] **G09** · P30 · Prove retained-context inquiry and mid-generation interruption _(needs C05, L05, L05b)_
 - [x] **W01** · P33 · Measure how often Pi agents finish their work: a completion eval bench with a recorded baseline _(needs H12k, C06b)_
-- [ ] **W01b** · P34 · Keep tool-call arguments in Pi's history valid Unicode JSON on the bench, and check the production serialiser for the same gap _(needs W01)_
+- [x] **W01b** · P34 · Keep tool-call arguments in Pi's history valid Unicode JSON on the bench, and check the production serialiser for the same gap _(needs W01)_
 - [x] **W02** · P34 · Tell how a Pi turn ended, from the worker to the dispatcher _(needs W01)_
 - [x] **W03** · P35 · A natural stop is not success: end the attempt stopped early and readmit it _(needs W02)_
 - [ ] **W04** · P35 · Continue a turn that stops early, a bounded number of times _(needs W02)_
@@ -519,7 +519,7 @@ Scheduling, votes and decisions, stand-ups, attendance and return to work, and f
 </details>
 
 <details>
-<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 18 of 19</summary>
+<summary><strong>Tools and skills</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 19 of 19</summary>
 
 The immutable tool and skill catalogue, review and promotion, MCP connections, the protected agent tool bridge and background jobs.
 
@@ -541,7 +541,7 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 - [x] **T02c** · P35 · Finish catalog promotion: retention of old versions, pause policy, chat view of past revocations _(needs T02b)_
 - [x] **T08** · P35 · Implement shared toolbox audiences, personal copies and patch proposals _(needs T02, T06, M02, U08)_
 - [x] **T02d** · P36 · Finish catalog promotion: revocation reaching other processes and hosts, production script launcher _(needs T02c)_
-- [ ] **W11** · P36 · Wake the task when a long job finishes, and tell the owner _(needs T07b, W03)_
+- [x] **W11** · P36 · Wake the task when a long job finishes, and tell the owner _(needs T07b, W03)_
 
 </details>
 
