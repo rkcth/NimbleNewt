@@ -31,6 +31,8 @@ for (const backend of backends) {
     const w = await buildWorld(store.storage);
     const options = { clock: w.clock.now, pause: async () => undefined };
     const approvals = new Map<string, QueueApproval>();
+    /** Submissions whose approval cannot be read. */
+    const unreadable = new Set<string>();
     const told: Told[] = [];
     const directors = new Set<string>();
     const cap = o.cap;
@@ -45,7 +47,7 @@ for (const backend of backends) {
     const tells: { taskId: string; to: string; text: string; purpose?: string }[] = [];
     const queue = LandingQueueService.withEpoch(w.storage, w.epoch, options);
     const ops = new LandingQueueOps(queue, {
-      approvalOf: async (id) => approvals.get(id),
+      approvalOf: async (id) => { if (unreadable.has(id)) throw new Error("the review could not be read"); return approvals.get(id); },
       landingBranch: async ({ taskId }) => { policyReads.count++; const b = branches.get(taskId) ?? "main"; if (b === "!") throw new Error("the landing settings could not be read"); return b === "-" ? undefined : b; },
       projectOfTask: async (t) => ((await w.storage.getAggregate({ kind: "task", id: t }))?.body as { projectId?: string } | undefined)?.projectId,
       refreshCap: typeof cap === "function" ? cap : async () => cap ?? 3,
@@ -80,7 +82,14 @@ for (const backend of backends) {
       head = oid(++commits);
       return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1, submission: s.id, base: s.base, tree: s.tree } };
     };
-    const svc = WorkspaceOpService.withEpoch(w.storage, w.epoch, {
+    /** Called after each read of a task's open-request record by the landing (the workspace service), to act at that exact moment. */
+    const hooks: { openRead?: ((taskId: string) => Promise<void>) | undefined } = {};
+    const watched = new Proxy(w.storage, { get: (target, p) => {
+      if (p === "getAggregate") return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (ref.kind === "workspace-open") await hooks.openRead?.(ref.id); return found; };
+      const v = Reflect.get(target, p, target) as unknown;
+      return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+    } });
+    const svc = WorkspaceOpService.withEpoch(watched, w.epoch, {
       quiesce: { around: async (_scope, _op, run) => run({ attempts: [] } as never) },
       portOf: async () => ({ run: host }),
       landingLease: (by, call) => leaseOps.checkLanding(by, { ...call, branch: "main" }),
@@ -98,7 +107,7 @@ for (const backend of backends) {
     };
     const list = () => ops.list(w.owner, { projectId: w.project });
     return {
-      store, w, ops, queue, holders, policyReads, retired, tells, person, task, branches, submit, takeBack, told, failing, directors, lander, list, calls,
+      store, w, ops, queue, holders, unreadable, hooks, approvals, options, policyReads, retired, tells, person, task, branches, submit, takeBack, told, failing, directors, lander, list, calls,
       head: () => head,
       queued: async () => (await list()).items.map((e) => [e.position, e.taskId]),
       close: () => store.close(),
@@ -127,6 +136,7 @@ for (const backend of backends) {
     r.branches.set(t1, branch); r.branches.set(t2, branch);
     const s1 = r.submit(t1, r.head());
     await r.ops.queueApproved(s1, `d1${tag}`);
+    r.w.clock.advance(1); // t2 is queued after t1 (a move needs newer work waiting behind)
     const s2 = r.submit(t2, r.head());
     await r.ops.queueApproved(s2, `d2${tag}`);
     return { t1, t2, s1, s2 };
@@ -237,12 +247,13 @@ for (const backend of backends) {
       const { t1, t2, s1, s2 } = await two(r);
       assert.equal(await r.ops.afterRound({ taskId: t1, projectId: r.w.project, round: 2 }), "reserved");
       const front = (await r.queue.get(r.w.project, "main")).front!;
-      const call = { projectId: r.w.project, branch: "main", taskId: t1, submissionId: s1, since: front.since, olderThanMs: 24 * HOUR };
+      const call = { projectId: r.w.project, branch: "main", taskId: t1, submissionId: s1, since: front.since, olderThanMs: 24 * HOUR, waiting: s2 };
       assert.equal(await r.queue.deferFirst(call), undefined, "the time is not up");
       r.w.clock.advance(24 * HOUR);
       assert.equal(await r.queue.deferFirst({ ...call, submissionId: s2 }), undefined, "another submission than the first entry");
       assert.equal(await r.queue.deferFirst({ ...call, taskId: t2 }), undefined, "another task than the first");
       assert.equal(await r.queue.deferFirst({ ...call, since: "2000-01-01T00:00:00.000Z" }), undefined, "a first place that is not the one judged");
+      assert.equal(await r.queue.deferFirst({ ...call, waiting: s1 }), undefined, "the waiting work named is the first task's own");
       assert.deepEqual(await r.queued(), [[1, t1], [2, t2]]);
       const moved = await r.queue.deferFirst(call);
       assert.ok(moved !== undefined);
@@ -254,11 +265,16 @@ for (const backend of backends) {
       assert.equal(q.nextSeq, moved.seq + 1);
       assert.equal(await r.queue.deferFirst(call), undefined, "a repeat of the same move moves nothing more");
       assert.deepEqual((await r.queue.get(r.w.project, "main")).entries.map((e) => e.taskId), [t2, t1]);
+      // The moved entry was queued before the new first one: named as the waiting work, the write refuses to move it back (no endless swap).
+      const back = (await r.queue.get(r.w.project, "main")).front!;
+      r.w.clock.advance(48 * HOUR);
+      assert.equal(await r.queue.deferFirst({ projectId: r.w.project, branch: "main", taskId: t2, submissionId: s2, since: back.since, olderThanMs: 24 * HOUR, waiting: s1 }), undefined, "work moved behind it does not move it back");
+      assert.deepEqual((await r.queue.get(r.w.project, "main")).entries.map((e) => e.taskId), [t2, t1]);
       // Nobody behind a first place: nothing to move.
       await r.ops.remove(r.w.owner, { commandId: "rm-t1", taskId: t1, reason: "out" });
       const f2 = (await r.queue.get(r.w.project, "main")).front!;
       r.w.clock.advance(48 * HOUR);
-      assert.equal(await r.queue.deferFirst({ projectId: r.w.project, branch: "main", taskId: t2, submissionId: s2, since: f2.since, olderThanMs: 24 * HOUR }), undefined, "nothing waits behind it");
+      assert.equal(await r.queue.deferFirst({ projectId: r.w.project, branch: "main", taskId: t2, submissionId: s2, since: f2.since, olderThanMs: 24 * HOUR, waiting: s2 }), undefined, "nothing waits behind it");
     } finally { await r.close(); }
   });
 
@@ -275,6 +291,118 @@ for (const backend of backends) {
       const rev = (await r.queue.get(r.w.project, "main")).revision;
       await r.list(); await r.list();
       assert.equal((await r.queue.get(r.w.project, "main")).revision, rev, "a read writes nothing");
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: review: two approved tasks that both do not land change places once, not every day; newer work queued later moves the first place again (card P10, twelfth slice review)`, async () => {
+    const r = await rig({ deferMs: 24 * HOUR });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2 } = await two(r);
+      r.w.clock.advance(24 * HOUR);
+      assert.equal((await r.ops.sweepBounds()).deferred, 1);
+      assert.deepEqual(await r.queued(), [[1, t2], [2, t1]]);
+      // t1 was queued before t2: it waits behind t2 now, but it does not move t2 back, however long t2 holds the branch.
+      for (let day = 0; day < 4; day++) {
+        r.w.clock.advance(24 * HOUR);
+        assert.equal((await r.ops.sweepBounds()).deferred, undefined, `day ${day}`);
+      }
+      assert.deepEqual(await r.queued(), [[1, t2], [2, t1]]);
+      assert.equal(deferred(r).length, 1, "one notice for the one move");
+      // A landing asked for by the moved task is refused as before and moves nothing.
+      const land = await r.lander(ivy, t1);
+      await refuses("invalid_transition", () => land(t1), /lands first/);
+      assert.deepEqual(await r.queued(), [[1, t2], [2, t1]]);
+      // Work queued after t2 does ask for the move: t2 goes to the back, behind it.
+      const t3 = await r.task("three");
+      r.w.clock.advance(1);
+      await r.ops.queueApproved(r.submit(t3, r.head()), "d3");
+      assert.equal((await r.ops.sweepBounds()).deferred, 1);
+      assert.deepEqual((await r.queued()).map((x) => x[1]), [t1, t3, t2]);
+      assert.deepEqual(deferred(r).map((t) => t.taskId), [t1, t2]);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: review: work behind the first place moves it only while that work is still approved for the base and tree it was queued with; an approval that cannot be read moves nothing (card P10, twelfth slice review)`, async () => {
+    const r = await rig({ deferMs: 24 * HOUR });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2, s2 } = await two(r);
+      r.w.clock.advance(24 * HOUR);
+      const approved = r.approvals.get(s2)!;
+      r.takeBack(s2);
+      assert.equal((await r.ops.sweepBounds()).deferred, undefined, "taken back");
+      r.approvals.set(s2, { ...approved, tree: oid(7) });
+      assert.equal((await r.ops.sweepBounds()).deferred, undefined, "approved for another tree");
+      r.approvals.set(s2, approved);
+      r.unreadable.add(s2);
+      assert.equal((await r.ops.sweepBounds()).deferred, undefined, "unreadable");
+      const land = await r.lander(ivy, t2);
+      await refuses("invalid_transition", () => land(t2), /lands first/);
+      assert.deepEqual(await r.queued(), [[1, t1], [2, t2]]);
+      assert.equal(deferred(r).length, 0);
+      r.unreadable.delete(s2);
+      assert.equal((await r.ops.sweepBounds()).deferred, 1, "readable and approved again");
+      assert.deepEqual(await r.queued(), [[1, t2], [2, t1]]);
+    } finally { await r.close(); }
+  });
+
+  test(`${backend.name}: review: race: a move that read the first task's open-request record before that task's landing started is built again and moves nothing; the landing goes on (card P10, twelfth slice review)`, async () => {
+    let atHost: () => void = () => undefined, release: () => void = () => undefined;
+    const reached = new Promise<void>((res) => { atHost = res; });
+    const blocked = new Promise<void>((res) => { release = res; });
+    let gated = true;
+    const r = await rig({ deferMs: 24 * HOUR, gate: async () => { if (gated) { gated = false; atHost(); await blocked; } } });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2, s1, s2 } = await two(r);
+      r.w.clock.advance(24 * HOUR);
+      // The move's first read of task one's open-request record (there is none yet) is held until the landing of task one is at the host. Each side waits for the other's step, no sleeps.
+      let readOpen!: () => void, letGo!: () => void;
+      const opened = new Promise<void>((res) => { readOpen = res; });
+      const go = new Promise<void>((res) => { letGo = res; });
+      let holding = true;
+      const held = new Proxy(r.w.storage, { get: (target, p) => {
+        if (p === "getAggregate") return async (ref: { kind: string; id: string }) => { const found = await target.getAggregate(ref); if (holding && ref.kind === "workspace-open" && ref.id === t1) { holding = false; readOpen(); await go; } return found; };
+        const v = Reflect.get(target, p, target) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      } });
+      const front = (await r.queue.get(r.w.project, "main")).front!;
+      const moving = LandingQueueService.withEpoch(held, r.w.epoch, r.options).deferFirst({ projectId: r.w.project, branch: "main", taskId: t1, submissionId: s1, since: front.since, olderThanMs: 24 * HOUR, waiting: s2 }).then((v) => v, (e: unknown) => e);
+      await opened;
+      const land = await r.lander(ivy, t1);
+      const one = land(t1);
+      await reached;
+      letGo();
+      assert.equal(await moving, undefined, "the move met the record the landing wrote, was built again and found the landing at the host");
+      assert.deepEqual(await r.queued(), [[1, t1], [2, t2]]);
+      release();
+      assert.equal((await one).state, "done");
+      assert.deepEqual(await r.queued(), [[1, t2]]);
+      assert.equal(deferred(r).length, 0);
+      assert.equal((await r.w.storage.listAudit({ afterSeq: 0, limit: 1000 })).filter((a) => a.type === "landing.queue.defer").length, 0);
+    } finally { release(); await r.close(); }
+  });
+
+  test(`${backend.name}: review: race: a move that commits while the first task's landing is being recorded wins, and the landing, its start built again, stops before the host is asked (card P10, twelfth slice review)`, async () => {
+    const r = await rig({ deferMs: 24 * HOUR });
+    try {
+      const ivy = await r.person("ivy");
+      const { t1, t2, s1, s2 } = await two(r);
+      r.w.clock.advance(24 * HOUR);
+      const front = (await r.queue.get(r.w.project, "main")).front!;
+      // The landing reads task one's open-request record twice before it writes; right after the second read the move commits (it rewrites that record).
+      let reads = 0, moved: unknown;
+      r.hooks.openRead = async (id) => { if (id === t1 && ++reads === 2) moved = await r.queue.deferFirst({ projectId: r.w.project, branch: "main", taskId: t1, submissionId: s1, since: front.since, olderThanMs: 24 * HOUR, waiting: s2 }); };
+      const land = await r.lander(ivy, t1);
+      const out = await land(t1);
+      r.hooks.openRead = undefined;
+      assert.ok(moved !== undefined, "the move went ahead (the landing was not recorded yet)");
+      assert.ok(reads >= 3, "the landing's start was built again after the move");
+      assert.equal(out.state, "refused", out.summary);
+      assert.match(out.summary ?? "", /no longer the oldest approved one in the landing queue, so nothing was landed/);
+      assert.equal(r.calls.length, 0, "no host was asked");
+      assert.deepEqual(await r.queued(), [[1, t2], [2, t1]]);
     } finally { await r.close(); }
   });
 }

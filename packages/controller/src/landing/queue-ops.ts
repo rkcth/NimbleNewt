@@ -6,7 +6,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { AggregateRef, JsonObject } from "../storage/types.js";
-import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, type LandingQueueEntry, type LandingQueueFront, type LandingReservation, type LandingReturns } from "./landing-queue.js";
+import { LANDING_QUEUE_LIMITS, LandingQueueService, frontOf, queuedAfter, type LandingQueueEntry, type LandingQueueFront, type LandingReservation, type LandingReturns } from "./landing-queue.js";
 
 /**
  * Who may put a submission in a branch's landing queue, take one out and read it, and what a landing must show about the queue before it writes (card P10). The queue service itself takes no caller; this is its door.
@@ -30,7 +30,7 @@ export const LANDING_HOLD_MS = 4 * 60 * 60 * 1000;
  */
 export const LANDING_RESERVATION_RELEASE_MS = 12 * 60 * 60 * 1000;
 /**
- * How long an APPROVED first place may hold the branch before the controller moves it to the back of the queue, when an entry of another task waits behind it (card P10, twelfth slice). Nothing is removed: the
+ * How long an APPROVED first place may hold the branch before the controller moves it to the back of the queue, when approved work of another task queued after it waits behind it (card P10, twelfth slice). Nothing is removed: the
  * work stays approved and queued and takes its turn again behind the others. ASSUMPTION: twenty-four hours, six times the time the director is given to decide (`LANDING_HOLD_MS`) and twice the release bound of a
  * reserved place with no approved work; reversible as the `deferMs` option.
  */
@@ -280,7 +280,8 @@ export class LandingQueueOps {
     // Only a queued submission waiting behind the place asks for that: a landing of a task with nothing queued (the owner's unqueued landing included) is refused as before and ends nothing.
     if (mine !== undefined && head !== undefined && head.entry === undefined && head.taskId !== call.taskId && await this.#releaseIdle(call.projectId, branch, q.front, head.taskId)) return this.checkLanding(by, call);
     // An approved first place that has held the branch for the defer bound while this task's work waits behind it is moved to the back (card P10, twelfth slice) and this landing is judged again on the queue as it is then.
-    if (mine !== undefined && head !== undefined && head.entry !== undefined && head.taskId !== call.taskId && await this.#deferFirst(call.projectId, branch, q.front, head.entry)) return this.checkLanding(by, call);
+    // Only work queued after the first entry asks for that (an entry that was itself moved behind it does not move it back), and only while this task's work is still approved as queued.
+    if (mine !== undefined && head !== undefined && head.entry !== undefined && head.taskId !== call.taskId && await this.#deferFirst(call.projectId, branch, q.front, head.entry, mine)) return this.checkLanding(by, call);
     const behind = (message: string): Promise<never> => this.#heldTooLong(call.projectId, branch, q.front, head?.entry === undefined).then(() => { throw new DomainError("invalid_transition", message); });
     const firstIs = head === undefined ? "" : head.entry === undefined ? `task ${head.taskId} holds the first place (reserved after its author reached the refresh-round cap) and waits for its approved submission (the owner, an integrator or a director may take it out with landing.queue.remove, which lets the others land)` : `the oldest (${head.entry.submissionId}, task ${head.taskId}${head.reservation === undefined ? "" : ", a reserved place"})`;
     if (mine === undefined) {
@@ -356,15 +357,23 @@ export class LandingQueueOps {
         // An approved first place past the defer bound (card P10, twelfth slice): moved to the back when approved work of another task waits behind it.
         const deferDue = head.entry !== undefined && front.taskId === head.taskId && Number.isFinite(since) && Number.isFinite(now) && now - since >= deferMs;
         if (!releaseDue && !holdDue && !deferDue) continue;
-        let behind = false;
+        let behind = false, waiting: LandingQueueEntry | undefined;
+        // Only the defer bound is due: only approved work queued after the first entry can ask for the move (card P10, twelfth slice review), so other entries are not read.
+        const onlyDefer = deferDue && !releaseDue && !holdDue;
         for (const e of q.entries) {
           if (e.taskId === head.taskId) continue;
+          if (onlyDefer && !queuedAfter(e, head.entry!)) continue;
           // The next round starts at this queue; when it was this round's first queue (more reads than the budget), at the next one, so each round moves on.
           if (reads >= budget) { partial = true; this.#sweepResumeAt = (i === 0 ? order[1]?.queueId : undefined) ?? q.queueId; break walking; }
           reads++;
           let landing: string | undefined;
           try { landing = await this.#options.landingBranch({ taskId: e.taskId, projectId: q.projectId }); } catch { continue; }
-          if (landing !== undefined && landing === q.branch) { behind = true; break; }
+          if (landing === undefined || landing !== q.branch) continue;
+          behind = true;
+          // The release and the hold need only someone waiting; the move needs approved work of another task queued after the first entry (the next entries are looked at while this one does not count).
+          if (!deferDue || head.entry === undefined) break;
+          if (await this.#waitsForDefer(head.entry, e)) { waiting = e; break; }
+          if (!onlyDefer) break;
         }
         if (!behind) continue;
         checked++;
@@ -373,7 +382,7 @@ export class LandingQueueOps {
           released++;
           continue;
         }
-        if (head.entry !== undefined && await this.#deferFirst(q.projectId, q.branch, q.front, head.entry)) {
+        if (head.entry !== undefined && waiting !== undefined && await this.#deferFirst(q.projectId, q.branch, q.front, head.entry, waiting)) {
           deferred++;
           continue;
         }
@@ -402,18 +411,19 @@ export class LandingQueueOps {
   }
 
   /**
-   * The bounded hold of an APPROVED first place (card P10, twelfth slice). An entry that is first, approved and has not landed for `deferMs` while an entry of another task waits behind it is moved to the back of the
+   * The bounded hold of an APPROVED first place (card P10, twelfth slice). An entry that is first, approved and has not landed for `deferMs` while approved work of another task queued after it waits behind it (`#waitsForDefer`) is moved to the back of the
    * queue (`LandingQueueService.deferFirst`, judged inside its own write: the same first place, the time, somebody waiting, no landing on its way to the host). Nothing is removed or changed in the work: it is still
    * approved and queued, and lands when its turn comes again (the landing still shows the approved base and tree). The task's holder (while an active agent), the director and the owner are told once. Best effort:
    * answers whether the place is no longer that first entry (this call moved it, or another call just did); a failure leaves the queue as it was.
    */
-  async #deferFirst(projectId: string, branch: string, front: LandingQueueFront | undefined, entry: LandingQueueEntry): Promise<boolean> {
+  async #deferFirst(projectId: string, branch: string, front: LandingQueueFront | undefined, entry: LandingQueueEntry, waiting: LandingQueueEntry): Promise<boolean> {
     if (front === undefined || front.taskId !== entry.taskId) return false;
     const deferMs = this.#options.deferMs ?? LANDING_DEFER_MS;
     const since = Date.parse(front.since), now = Date.parse(this.#queue.now());
     if (!Number.isFinite(since) || !Number.isFinite(now) || now - since < deferMs) return false;
+    if (waiting.taskId === entry.taskId || !(await this.#waitsForDefer(entry, waiting))) return false;
     let moved: { entry: LandingQueueEntry; seq: number } | undefined;
-    try { moved = await this.#queue.deferFirst({ projectId, branch, taskId: entry.taskId, submissionId: entry.submissionId, since: front.since, olderThanMs: deferMs }); } catch { return false; }
+    try { moved = await this.#queue.deferFirst({ projectId, branch, taskId: entry.taskId, submissionId: entry.submissionId, since: front.since, olderThanMs: deferMs, waiting: waiting.submissionId }); } catch { return false; }
     if (moved === undefined) {
       // Not moved by this call: another call may have just moved it (or it landed, was taken out, a landing is on its way or nobody waits behind it); the landing is judged again only when it is no longer first.
       try { const now2 = frontOf(await this.#queue.get(projectId, branch)); return now2 === undefined || now2.taskId !== entry.taskId || now2.entry?.submissionId !== entry.submissionId; } catch { return false; }
@@ -427,6 +437,19 @@ export class LandingQueueOps {
     } catch { /* the director and the owner are still told */ }
     try { await this.#options.escalate?.({ commandId: id, projectId, taskId: entry.taskId, branch, why: "deferred", text }); } catch { /* the work is already moved; nobody could be told */ }
     return true;
+  }
+
+  /**
+   * Whether `waiting` counts as approved work waiting behind the approved first entry `first` for the defer bound (card P10, twelfth slice review): it was queued after `first` (`queuedAfter`: an entry that was
+   * itself moved behind `first` does not move it back, so two entries that never land are swapped once and then the director's hold notice is what remains), and its submission is still approved for exactly the
+   * base and tree it was queued with. An approval that cannot be read counts as not approved (nothing is moved).
+   */
+  async #waitsForDefer(first: LandingQueueEntry, waiting: LandingQueueEntry): Promise<boolean> {
+    if (!queuedAfter(waiting, first)) return false;
+    try {
+      const a = await this.#options.approvalOf(waiting.submissionId);
+      return a !== undefined && a.approved && a.base === waiting.base && a.tree === waiting.tree;
+    } catch { return false; }
   }
 
   /**

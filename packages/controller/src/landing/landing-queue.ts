@@ -116,6 +116,14 @@ function settled(next: LandingQueueBody, now: string): LandingQueueBody {
   const sorted = [...rest.entries].sort((a, b) => a.seq - b.seq);
   return { ...rest, entries: sorted, ...(landed === undefined || landed.length === 0 ? {} : { landed }), ...(reservations === undefined || reservations.length === 0 ? {} : { reservations }), ...(away.length === 0 ? {} : { away }), ...(returned === undefined || returned.length === 0 ? {} : { returned }), ...(returns === undefined || returns.length === 0 ? {} : { returns }), ...(front === undefined ? {} : { front }) };
 }
+/**
+ * Whether `entry` was queued after `first` (card P10, twelfth slice review): its `queuedAt` is a real time later than the first entry's. A move to the back keeps `queuedAt`, so an entry that was moved behind
+ * `first` is not queued after it. Unreadable times: no (nothing is moved).
+ */
+export function queuedAfter(entry: Pick<LandingQueueEntry, "queuedAt">, first: Pick<LandingQueueEntry, "queuedAt">): boolean {
+  const a = Date.parse(first.queuedAt), b = Date.parse(entry.queuedAt);
+  return Number.isFinite(a) && Number.isFinite(b) && b > a;
+}
 /** A lost race on the queue record, built again from what is stored now (never shown to a caller). */
 const RACE = "landing queue: lost a race, build again";
 /** A command that finds nothing to write (a reservation already held, an escalation already marked): refused inside, answered outside (never shown to a caller). */
@@ -516,8 +524,10 @@ export class LandingQueueService {
    * landing request `started` or `uncertain` refuses, as a take-out does). The first entry's open-request record is read and written back unchanged in the same write, so a landing that starts at the same moment
    * loses the race or finds it moved. Answers the entry as it was and the number it now has, or undefined when the queue no longer shows that (another task is first, it landed or was taken out, the time is not up,
    * nobody waits behind it, a landing is under way, or a repeat of the same move).
+   * `waiting` is the submission of another task that the caller judged to wait behind it (approved, and queued after the first entry: see `LandingQueueOps`); it must still be queued, of another task, queued after
+   * the first entry (by `queuedAt`, which a move leaves as it was, so an entry that was itself moved behind this one never moves it back: two entries that never land are swapped once, not every day).
    */
-  async deferFirst(command: { projectId: string; branch: string; taskId: string; submissionId: string; since: string; olderThanMs: number }): Promise<{ readonly entry: LandingQueueEntry; readonly seq: number } | undefined> {
+  async deferFirst(command: { projectId: string; branch: string; taskId: string; submissionId: string; since: string; olderThanMs: number; waiting: string }): Promise<{ readonly entry: LandingQueueEntry; readonly seq: number } | undefined> {
     const queueId = LandingQueueService.queueIdOf(command.projectId, command.branch);
     let moved: { entry: LandingQueueEntry; seq: number } | undefined;
     try { if ((await retried(() => this.#runner.command("landing.queue.defer", { commandId: `lq-defer:${queueId}:${command.submissionId}:${command.since}`.slice(0, 120), actor: "service:landing-queue" }, async () => ({
@@ -529,7 +539,7 @@ export class LandingQueueService {
         const first = q === undefined ? undefined : frontOf(q);
         const since = Date.parse(command.since), now = Date.parse(this.#runner.now());
         if (q === undefined || current === undefined || first === undefined || first.entry === undefined || first.taskId !== command.taskId || first.entry.submissionId !== command.submissionId || q.front?.taskId !== command.taskId || q.front.since !== command.since
-          || !Number.isFinite(since) || !Number.isFinite(now) || now - since < command.olderThanMs || !q.entries.some((e) => e.taskId !== command.taskId)) throw new DomainError("invalid_transition", NOTHING);
+          || !Number.isFinite(since) || !Number.isFinite(now) || now - since < command.olderThanMs || !q.entries.some((e) => e.taskId !== command.taskId && e.submissionId === command.waiting && queuedAfter(e, first.entry!))) throw new DomainError("invalid_transition", NOTHING);
         // No landing may be on its way to the host: the open-request records of the entries are read here, and the first entry's is written back unchanged (a landing that starts now changes it and loses).
         let open: { revision: number; body: JsonObject } | undefined;
         for (const e of q.entries) {

@@ -50,6 +50,7 @@ test("the controller's round moves an approved first place past twenty-four hour
     };
     assert.ok((await call(O, "project.branches.change", { project, landing: "main" }, "lb1")).ok);
     const one = await submit("Fix the gate", "1");
+    now += 1; // queued after the first one (a move needs newer work waiting behind)
     const two = await submit("Water plan", "2");
     const order = async (): Promise<string[]> => (await call(O, "landing.queue.list", { projectId: project })).result.items.map((e: any) => e.taskId);
     assert.deepEqual(await order(), [one.task, two.task]);
@@ -74,7 +75,7 @@ test("the controller's round moves an approved first place past twenty-four hour
     assert.match(plan[0]!, /nothing is removed/);
 
     const round = async (): Promise<any> => { const t = await c.dispatch!.dispatcher.tick(); const loop = t.loops.find((x: any) => x.name === "landing.queue.bounds"); assert.ok(loop !== undefined); assert.equal(loop.ok, true, JSON.stringify(loop)); return loop; };
-    const told = async () => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "task" && i.ref.id === one.task && /moved to the back/.test(i.detail ?? ""));
+    const told = async () => (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "landing-move" && i.ref.id === one.task);
     // Just under the bound at a round: nothing moved.
     now = Date.parse(front.since) + 24 * 3_600_000 - 30_000;
     await round();
@@ -89,6 +90,12 @@ test("the controller's round moves an approved first place past twenty-four hour
     const items = await told();
     assert.equal(items.length, 1, JSON.stringify(items));
     assert.match(items[0]!.detail ?? "", /approved work had been first for a day without landing/);
+    assert.equal(items[0]!.level, "notice", "a notice: nothing is needed from the owner");
+    assert.match(items[0]!.detail ?? "", /moved to the back/);
+    // An open item about the same task (the hold escalation: no director could be told, so it needs the owner) keeps its own text: the move is not merged into it.
+    const same = (await NotificationService.withEpoch(c.storage, c.epoch).inbox(rob)).items.filter((i) => i.ref.kind === "task" && i.ref.id === one.task);
+    assert.ok(same.length >= 1, "the hold escalation is open");
+    assert.ok(same.every((i) => !/moved to the back|nothing is needed from you/.test(i.detail ?? "")), JSON.stringify(same));
     await round(); now += 120_000; await round(); await round();
     assert.equal((await told()).length, 1, "later rounds tell nobody again");
     const items2 = (await call(O, "landing.queue.list", { projectId: project })).result.items;
