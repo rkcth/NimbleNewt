@@ -454,6 +454,19 @@ export class WorkspaceOpService {
     return (await this.#runner.get(SUBMISSION_COMMIT, submissionId))?.body as unknown as SubmissionCommitBody | undefined;
   }
 
+  /**
+   * What became of the automatic release that a reviewer's approval asked for (card H12o, seventh slice): the recorded request of the command ID `rel-auto:<review>` under the service identity, read by the IDs the
+   * release derived (so no stored index is needed). Takes no caller, so it is not an API operation; read-only. Answers `undefined` when none was recorded (nothing was asked, or the controller refused before recording:
+   * a live attempt, a paused task, a remote host that cannot release) or the arguments are malformed.
+   */
+  async automaticRelease(submissionId: string, reviewId: string): Promise<{ readonly state: WorkspaceState; readonly at: string; readonly finishedAt?: string; readonly summary?: string } | undefined> {
+    if (typeof submissionId !== "string" || !SUBMISSION_ID.test(submissionId) || typeof reviewId !== "string" || !/^[A-Za-z0-9_.:-]{1,120}$/.test(reviewId)) return undefined;
+    const rec = await this.#get(derivedId("wsr", scopedCommandId("service:workspace-release", `rel-auto:${reviewId}`)));
+    // Only a release of this very submission: a record of another request under the same ID is not this one's answer.
+    if (rec === undefined || rec.body.operation !== "release" || rec.body.submission?.id !== submissionId) return undefined;
+    return { state: rec.body.state, at: rec.body.at, ...(rec.body.finishedAt === undefined ? {} : { finishedAt: rec.body.finishedAt }), ...(typeof rec.body.summary === "string" ? { summary: rec.body.summary } : {}) };
+  }
+
   /** How many refresh rounds the task's author has made so far (card H12p). It takes no caller, so it is not an API operation: the code that builds the services passes it to the submission. */
   async refreshRounds(taskId: string): Promise<number> {
     const n = ((await this.#runner.get(ROUNDS, checkTaskId(taskId)))?.body as unknown as { rounds?: unknown } | undefined)?.rounds;
