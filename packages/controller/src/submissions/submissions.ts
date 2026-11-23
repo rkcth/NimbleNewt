@@ -10,6 +10,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import { readReviewCite, shapeReviewCite } from "./review-citation.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -51,6 +52,11 @@ export interface SubmissionBody {
   /** The submission a review, qa report or sign-off is about. */
   readonly subject?: string;
   readonly verdict?: "approve" | "changes" | "reject";
+  /** A review only, and only when it cites (card Q02, sixth slice): the task contract version it judged against, the owner decisions it names (and the version of each when it was recorded) and, for a rejection, the owner requirement it found unmet. Absent on every earlier review. */
+  readonly criteriaRevision?: number;
+  readonly decisions?: readonly string[];
+  readonly decisionVersions?: Readonly<Record<string, number>>;
+  readonly unmet?: string;
   readonly decision?: "approve" | "decline";
   readonly report?: string;
   readonly artifactDigest?: string;
@@ -75,6 +81,8 @@ export interface SubmissionApproval {
   readonly approved: boolean;
   /** What the newest review of it says, when it has one (card P09 tells a review that asked for changes apart from one that has not been given). */
   readonly newest?: "approve" | "changes" | "reject";
+  /** What the newest review cites (the criteria version, the decisions and, for a rejection, the unmet requirement), when it cites anything (card Q02, sixth slice). */
+  readonly cited?: ReviewCited;
   readonly approvedBy?: string;
   /** The review submission that approved it, when a reviewer did. */
   readonly reviewId?: string;
@@ -86,7 +94,9 @@ export interface SubmissionApproval {
   readonly director?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string };
 }
 /** The reviews recorded about one submission, oldest first (record kind `submission-verdicts`, keyed by the subject's ID). */
-interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string }[] }
+interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string; readonly cited?: ReviewCited }[] }
+/** What a review cited, as kept with the subject's verdict list and answered by `approvalOf` (card Q02, sixth slice). */
+export interface ReviewCited { readonly criteriaRevision: number; readonly decisions: readonly { readonly id: string; readonly version: number }[]; readonly unmet?: string }
 const VERDICTS = "submission-verdicts";
 /** The director sign-offs recorded about one submission, oldest first (record kind `submission-signoffs`, keyed by the subject's ID; written in the same write as the sign-off, like the reviews). */
 interface SignoffsBody { readonly signoffs: readonly { readonly id: string; readonly decision: "approve" | "decline"; readonly by: string; readonly at: string }[] }
@@ -194,6 +204,9 @@ export interface RecordSubmission {
   readonly refreshRound?: number;
   readonly subject?: string;
   readonly verdict?: string;
+  readonly criteriaRevision?: number;
+  readonly decisions?: readonly string[];
+  readonly unmet?: string;
   readonly decision?: string;
   readonly report?: string;
   readonly artifactDigest?: string;
@@ -204,11 +217,11 @@ export interface RecordSubmission {
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const ID = /^(?:sbm|art)-[a-z2-7]{20}$/;
-const FIELDS = ["commandId", "taskId", "kind", "role", "base", "tree", "patchId", "refreshRound", "subject", "verdict", "decision", "report", "artifactDigest", "artifactId", "evidence"] as const;
+const FIELDS = ["commandId", "taskId", "kind", "role", "base", "tree", "patchId", "refreshRound", "subject", "verdict", "criteriaRevision", "decisions", "unmet", "decision", "report", "artifactDigest", "artifactId", "evidence"] as const;
 /** What each kind may carry besides taskId, kind and role (and evidence). A field outside the list is refused, so a non-code kind cannot carry a base, a tree or a patch. */
 const ALLOWED: Readonly<Record<SubmissionKind, readonly string[]>> = {
   code: ["base", "tree", "patchId", "refreshRound"],
-  review: ["subject", "verdict"],
+  review: ["subject", "verdict", "criteriaRevision", "decisions", "unmet"],
   qa: ["subject", "report"],
   document: ["artifactDigest", "artifactId", "report"],
   signoff: ["subject", "decision"],
@@ -384,8 +397,15 @@ export class SubmissionService {
           if (attempt.attemptId !== undefined) body = { ...asked, attemptId: attempt.attemptId };
           guards = attempt.guards ?? [];
         }
+        // A review that cites is read against the task as it is now (a replay above never gets here, so it keeps what the first record read).
+        let citeChecks: readonly Change[] = [];
+        if (kind === "review" && asked.criteriaRevision !== undefined) {
+          const read = await readReviewCite(this.#runner, { projectId: task.projectId, taskId }, { criteriaRevision: asked.criteriaRevision, decisions: asked.decisions ?? [] }, asked.verdict!);
+          citeChecks = read.changes;
+          body = { ...body, decisionVersions: read.versions };
+        }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -477,7 +497,8 @@ export class SubmissionService {
     const list = ((current?.body as unknown as VerdictsBody | undefined)?.reviews ?? []);
     if (list.some((r) => r.id === id)) return [];
     if (list.length >= MAX_VERDICTS) throw new DomainError("unavailable", `submission ${body.subject} already has ${MAX_VERDICTS} reviews; submit the work again for a new review`);
-    const next: VerdictsBody = { reviews: [...list, { id, verdict: body.verdict, by: body.submittedBy, at: body.submittedAt }] };
+    const cited: ReviewCited | undefined = body.criteriaRevision === undefined ? undefined : { criteriaRevision: body.criteriaRevision, decisions: (body.decisions ?? []).map((d) => ({ id: d, version: body.decisionVersions?.[d] ?? 0 })), ...(body.unmet === undefined ? {} : { unmet: body.unmet }) };
+    const next: VerdictsBody = { reviews: [...list, { id, verdict: body.verdict, by: body.submittedBy, at: body.submittedAt, ...(cited === undefined ? {} : { cited }) }] };
     return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
   }
 
@@ -599,7 +620,7 @@ export class SubmissionService {
     const signoffs = ((await this.#runner.get(SIGNOFFS, submissionId))?.body as unknown as SignoffsBody | undefined)?.signoffs ?? [];
     const lastSignoff = signoffs[signoffs.length - 1];
     const base = { submissionId, taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
-    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve" } : { ...base, approved: false, newest: newest.verdict, reason: `its newest review (${newest.id}) says ${newest.verdict}` };
+    if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }) } : { ...base, approved: false, newest: newest.verdict, ...(newest.cited === undefined ? {} : { cited: newest.cited }), reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };
   }
@@ -652,7 +673,8 @@ export class SubmissionService {
     if (kind === "review") {
       need("verdict", ["approve", "changes", "reject"].includes(c.verdict as string), "must be approve, changes or reject");
       this.#notOwn(by, s);
-      return { ...bound, verdict: c.verdict as "approve" | "changes" | "reject" };
+      const cite = shapeReviewCite(c, c.verdict);
+      return { ...bound, verdict: c.verdict as "approve" | "changes" | "reject", ...(cite === undefined ? {} : { criteriaRevision: cite.criteriaRevision, decisions: cite.decisions, ...(cite.unmet === undefined ? {} : { unmet: cite.unmet }) }) };
     }
     if (kind === "qa") {
       need("report", typeof c.report === "string" && c.report !== "" && c.report.length <= MAX_REPORT, `a report of at most ${MAX_REPORT} characters`);

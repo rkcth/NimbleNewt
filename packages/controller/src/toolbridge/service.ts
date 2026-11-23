@@ -861,7 +861,7 @@ export class ToolExecutionService {
    */
   async #submission(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
     if (this.#deps.state === undefined) return refusal("unavailable", "the state API is not available");
-    onlyKnown(args, ["kind", "subject", "verdict", "decision", "report", "artifactId"]);
+    onlyKnown(args, ["kind", "subject", "verdict", "criteriaRevision", "decisions", "unmet", "decision", "report", "artifactId"]);
     const kind = args["kind"];
     if (kind === "code") return refusal("invalid_command", "kind: code is not recorded here; end with work-end submit true and the controller reads the base, tree and patch ID from your checkout");
     const role = BRIDGE_SUBMISSION_KINDS.has(kind) ? KIND_ROLES[kind as SubmissionKind][0] : undefined;
