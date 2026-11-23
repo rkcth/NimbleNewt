@@ -2967,18 +2967,19 @@ export class ChatService {
   }
 
   async #openProposals(ownerId: string): Promise<{ id: string; summary: string[] }[]> {
+    // Every record is read until ten are found: proposals are never deleted and their IDs are hashes, so a scan that stopped early would miss open ones at random (the count of a message that is only "yes" relies on it).
     const out: { id: string; summary: string[] }[] = [];
     let after: string | undefined;
-    for (let page = 0; page < 5; page++) {
-      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
+    for (;;) {
+      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
       for (const a of chunk) {
         after = a.id;
         const b = a.body as unknown as ChatProposalBody;
-        if (b.ownerId === ownerId && b.status === "open" && out.length < 10) out.push({ id: a.id, summary: [...b.preview] });
+        if (b.ownerId === ownerId && b.status === "open") out.push({ id: a.id, summary: [...b.preview] });
+        if (out.length >= 10) return out;
       }
-      if (chunk.length < 200) break;
+      if (chunk.length < 1000) return out;
     }
-    return out;
   }
 
   async #openEdits(owner: Principal): Promise<{ id: string; summary: string[] }[]> {
@@ -2986,14 +2987,14 @@ export class ChatService {
   }
 
   async #openCount(ownerId: string): Promise<number> {
+    // Read to the end (or to the limit), for the same reason as #openProposals.
     let count = 0;
     let after: string | undefined;
-    for (let page = 0; page < 5; page++) {
-      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 200 });
-      for (const a of chunk) { after = a.id; const b = a.body as unknown as ChatProposalBody; if (b.ownerId === ownerId && b.status === "open") count++; }
-      if (chunk.length < 200) break;
+    for (;;) {
+      const chunk = await this.#runner.list("chat-proposal", { ...(after === undefined ? {} : { afterId: after }), limit: 1000 });
+      for (const a of chunk) { after = a.id; const b = a.body as unknown as ChatProposalBody; if (b.ownerId === ownerId && b.status === "open" && ++count >= CHAT_LIMITS.openProposals) return count; }
+      if (chunk.length < 1000) return count;
     }
-    return count;
   }
 }
 

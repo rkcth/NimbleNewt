@@ -325,6 +325,26 @@ for (const backend of backends) {
     assert.equal(both.outcomes[1]!.code, "invalid_command");
     assert.deepEqual((await list(w, "project.list")).map((p) => p["name"]), ["Zed"], "neither Wolf nor Fox exists");
   });
+  suite("the open proposals are all found however many proposal records the installation holds, so a message that is only \"yes\" with two open asks which (the count once read only the first 1000 records)", async (w, script) => {
+    // 1001 finished proposals of another owner whose IDs sort before every real one: a scan that stops early sees only them.
+    const at = new Date().toISOString();
+    const changes = Array.from({ length: 1001 }, (_, n) => ({ type: "create" as const, ref: { kind: "chat-proposal", id: `prop-${n.toString(16).padStart(32, "0")}` }, body: { ownerId: "owner:other", turnId: `t-${n}`, source: "chat", status: "applied", reason: "", preview: ["old"], steps: [], pins: [], notes: [], createdAt: at } }));
+    for (let k = 0; k < changes.length; k += 100) await w.world.storage.applyOperation({ operationId: cid("seed"), epoch: w.projects.epoch, actor: "owner:other", correlationId: cid("seed"), at, changes: changes.slice(k, k + 100), audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    script["draft a project Elm"] = [cmd("project.create", { ...ASKED, name: "Elm" }, "draft a project Elm")];
+    script["draft a project Oak"] = [cmd("project.create", { ...ASKED, name: "Oak" }, "draft a project Oak")];
+    const chat = w.chat();
+    const elm = only((await say(w, chat, "draft a project Elm")).outcomes).proposalId!;
+    const oak = only((await say(w, chat, "draft a project Oak")).outcomes).proposalId!;
+    script["Yes"] = [{ kind: "apply_proposal", proposalId: oak, evidence: "yes", basis: "owner" }];
+    const asked = only((await say(w, chat, "Yes")).outcomes);
+    assert.equal(asked.status, "asked", JSON.stringify(asked));
+    assert.deepEqual(w.interpreter.calls.at(-1)!.proposals.map((x) => x.id).sort(), [elm, oak].sort(), "the interpreter was shown both open proposals");
+    assert.equal((await list(w, "project.list")).length, 0, "nothing applied");
+    script["drop the Elm draft"] = [{ kind: "discard_proposal", proposalId: elm, evidence: "drop the Elm draft", basis: "owner" }];
+    assert.equal(only((await say(w, chat, "drop the Elm draft")).outcomes).status, "discarded");
+    assert.equal(only((await say(w, chat, "Yes", cid("m"))).outcomes).status, "applied", "with one open, yes agrees to it");
+    assert.deepEqual((await list(w, "project.list")).map((x) => x["name"]), ["Oak"]);
+  });
 
   suite("a drafted assignment carries explicit project and repository, is a proposal, and focus changes cannot retarget it", async (w, script) => {
     const a = await w.project("A");
