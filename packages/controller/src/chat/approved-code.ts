@@ -6,15 +6,20 @@ import type { SubmissionService } from "../submissions/index.js";
 export interface ApprovedCode {
   readonly id: string;
   readonly submittedAt: string;
+  /** The base commit and tree the submission carries (absent only when its record does not name them): two submissions with the same base and tree hold exactly the same code. */
+  readonly base?: string;
+  readonly tree?: string;
 }
 
 /**
  * What the lookup answers: the approved, uncommitted code submissions of the task (newest first); the task's newest code submission whatever its state (the one the task's checkout was last submitted
- * from: the host commits only the exact approved tree the checkout holds, so older code that newer code followed would be refused); and whether the scan stopped before it had seen every stored submission.
+ * from: the host commits only the approved tree on the approved base when the checkout holds exactly that, so older code is committed only while it is the same base and tree as the newest); and whether the scan
+ * stopped before it had seen every stored submission.
  */
 export interface ApprovedCodeFound {
   readonly items: readonly ApprovedCode[];
-  readonly newest?: ApprovedCode;
+  /** `committed`: a commit is recorded for the newest code itself (the checkout's head then moved past every submission's base). */
+  readonly newest?: ApprovedCode & { readonly committed?: boolean };
   readonly truncated: boolean;
 }
 
@@ -43,12 +48,18 @@ export function approvedCodeLookup(deps: { readonly submissions: Pick<Submission
     }
     codes.sort(newerFirst);
     const items: ApprovedCode[] = [];
+    let newest: (ApprovedCode & { committed?: boolean }) | undefined;
     for (const c of codes) {
       const a = await deps.submissions.approvalOf(c.id);
+      const known = a === undefined || a.taskId !== taskId ? c : { ...c, base: a.base, tree: a.tree };
+      if (c === codes[0]) {
+        newest = (await deps.commit(c.id)) === undefined ? known : { ...known, committed: true };
+        if (newest.committed === true) continue;
+      }
       if (a === undefined || a.taskId !== taskId || !a.approved || a.approvedBy === undefined || a.approvedBy === a.submittedBy) continue;
-      if ((await deps.commit(c.id)) !== undefined) continue;
-      items.push(c);
+      if (c !== codes[0] && (await deps.commit(c.id)) !== undefined) continue;
+      items.push(known);
     }
-    return { items, ...(codes[0] === undefined ? {} : { newest: codes[0] }), truncated: cursor !== undefined };
+    return { items, ...(newest === undefined ? {} : { newest }), truncated: cursor !== undefined };
   };
 }

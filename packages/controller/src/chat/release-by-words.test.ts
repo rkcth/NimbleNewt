@@ -16,7 +16,7 @@ const clock = (): string => new Date(now += 60_000).toISOString();
 
 for (const backend of backends) {
   const scene = (name: string, body: (c: {
-    w: Awaited<ReturnType<typeof openWorld>>; task: string; svc: SubmissionService; asked: { operation: string; taskId: string; reason: string; submissionId?: string }[];
+    w: Awaited<ReturnType<typeof openWorld>>; project: string; task: string; svc: SubmissionService; asked: { operation: string; taskId: string; reason: string; submissionId?: string }[];
     chat: ReturnType<Awaited<ReturnType<typeof openWorld>>["chat"]>; reply: (intents: unknown[]) => void;
     say: (text: string, args?: Record<string, unknown>) => Promise<{ turnId?: string; outcomes: { status: string; preview?: unknown; message?: unknown; proposalId?: string; question?: unknown; options?: unknown }[] }>;
     author: Principal; reviewer: Principal; commits: Set<string>; failing: { on: boolean }; lookups: string[];
@@ -47,7 +47,7 @@ for (const backend of backends) {
       };
       const code = async (tree: string): Promise<string> => (await svc.record(author, { commandId: cid("s"), taskId: task, kind: "code", role: "author", base: T("c"), tree, patchId: T("d") })).id;
       const approve = async (id: string): Promise<void> => { await svc.record(reviewer, { commandId: cid("r"), taskId: task, kind: "review", role: "reviewer", subject: id, verdict: "approve" }); };
-      await body({ chat, reply: (i) => { reply = i; }, w, task, svc, asked, say, author, reviewer, commits, failing, lookups, code, approve });
+      await body({ chat, reply: (i) => { reply = i; }, w, project: p, task, svc, asked, say, author, reviewer, commits, failing, lookups, code, approve });
     } finally { await w.close(); }
   });
 
@@ -109,7 +109,36 @@ for (const backend of backends) {
     assert.equal(later.outcomes[0]!.status, "refused", JSON.stringify(later.outcomes[0]));
     assert.equal(later.outcomes[0]!.proposalId, undefined);
     assert.match(String(later.outcomes[0]!.message), new RegExp(`newest code of "parser fix" \\(${n},`));
-    assert.match(String(later.outcomes[0]!.message), /2 older approved submissions are not committed, but newer code followed them/);
+    assert.match(String(later.outcomes[0]!.message), /it is not approved yet\), so nothing was proposed\. 2 older approved submissions are not committed, but different newer code followed them/);
+    assert.deepEqual(c.asked, []);
+    // Naming the older one still proposes it (the folder may hold it again), but the proposal says newer code followed it and the host refuses a folder that holds other code.
+    const warned = await c.say(`commit submission ${b} of the parser fix`, { submissionId: b });
+    assert.equal(warned.outcomes[0]!.status, "proposed", JSON.stringify(warned.outcomes[0]));
+    assert.match(JSON.stringify(warned.outcomes[0]), new RegExp(`Newer code \\(${n}, submitted [^)]+\\) was submitted on \\\\"parser fix\\\\" after it, so the working folder most likely no longer holds ${b}`));
+  });
+
+  scene("the same code submitted again and not reviewed yet: the older approval of exactly that base and tree is filled in; different newer code or committed newest code is not", async (c) => {
+    const a = await c.code(T("a")); await c.approve(a);
+    const again = await c.code(T("a"));
+    const r = await c.say("commit the approved parser fix");
+    assert.equal(r.outcomes[0]!.status, "proposed", JSON.stringify(r.outcomes[0]));
+    assert.match(String(r.outcomes[0]!.preview), new RegExp(`submissionId=${a}`));
+    assert.match(JSON.stringify(r.outcomes[0]), new RegExp(`The task's newest code \\(${again}\\) is not approved yet, but it holds exactly the same code on the same starting point`));
+    // A named ID equal in code to the newest is proposed without the warning.
+    const named = await c.say(`commit submission ${a} of the parser fix`, { submissionId: a });
+    assert.equal(named.outcomes[0]!.status, "proposed", JSON.stringify(named.outcomes[0]));
+    assert.doesNotMatch(JSON.stringify(named.outcomes[0]), /Newer code/);
+    // Once the newest itself is recorded as committed (the folder's head moved on), the older one is not filled in.
+    c.commits.add(again);
+    const after = await c.say("commit the approved parser fix now");
+    assert.equal(after.outcomes[0]!.status, "refused", JSON.stringify(after.outcomes[0]));
+    assert.match(String(after.outcomes[0]!.message), /it is already committed/);
+    c.commits.delete(again);
+    // Different newer code (another tree) is not covered by the older approval.
+    const other = await c.code(T("f"));
+    const diff = await c.say("commit the approved parser fix please");
+    assert.equal(diff.outcomes[0]!.status, "refused", JSON.stringify(diff.outcomes[0]));
+    assert.match(String(diff.outcomes[0]!.message), new RegExp(`newest code of "parser fix" \\(${other},[^]*1 older approved submission is not committed, but different newer code followed it`));
     assert.deepEqual(c.asked, []);
   });
 
@@ -132,6 +161,17 @@ for (const backend of backends) {
     assert.deepEqual(c.asked, []);
   });
 
+  scene("a task title two tasks share is asked about first, before anything is looked up", async (c) => {
+    const id = await c.code(T("a")); await c.approve(id);
+    await c.w.task(c.project, "parser fix");
+    c.lookups.length = 0;
+    const r = await c.say("commit the approved parser fix");
+    assert.equal(r.outcomes[0]!.status, "asked", JSON.stringify(r.outcomes[0]));
+    assert.match(String(r.outcomes[0]!.question), /More than one task is called "parser fix"/);
+    assert.deepEqual(c.lookups, [], "nothing is looked up before the task is known");
+    assert.deepEqual(c.asked, []);
+  });
+
   scene("an agent cannot trigger it: it is refused before any planning or lookup", async (c) => {
     const id = await c.code(T("a")); await c.approve(id);
     const agent = await c.w.agent("sneaky", [{ action: "*", project: "*" }]);
@@ -149,6 +189,9 @@ for (const backend of backends) {
     const found = await lookup(c.w.owner, c.task);
     assert.deepEqual(found.items.map((i) => i.id), [a]);
     assert.equal(found.newest?.id, b, "the newest code is named whatever its state");
+    assert.equal(found.newest?.committed, true);
+    assert.equal(found.newest?.tree, T("b"));
+    assert.equal(found.items[0]?.tree, T("a"), "the base and tree are carried");
     assert.equal(found.truncated, false);
     const other = await c.w.task((await c.w.project("Other")), "Other task");
     assert.deepEqual((await lookup(c.w.owner, other)).items, []);
