@@ -170,7 +170,13 @@ test("an approved submission is committed once through the release operation on 
     // The automatic release met the changed checkout: refused, nothing committed, no record of a commit; the request is kept.
     assert.equal(git2("rev-parse", "HEAD"), base2);
     assert.equal(await c.storage.getAggregate({ kind: "submission-commit", id: sub2 }), undefined);
-    assert.match(await viewOf(boot.token, two.task), /Commit: not made yet; it is committed only when a release request commits it\. The owner may ask for one; a reviewer's approval asks for one only at the moment it is given and does not try again\./);
+    // Seventh slice: the view now says that the release the approval asked for was refused, and what the host said (through the real wiring of `automaticRelease`), to the owner and to the author, not to the reviewer.
+    const refusedView = await viewOf(boot.token, two.task);
+    assert.match(refusedView, /Commit: not made yet; the release that this approval asked for was refused at \S+\. It said: "[^"]*no longer holds the approved work[^"]*"\. It is committed only when a release request commits it; the owner may ask for one\./);
+    assert.doesNotMatch(refusedView, /a reviewer's approval asks for one only at the moment/);
+    assert.doesNotMatch(await viewOf(rev, two.task), /Commit:|asked for/);
+    // The host's own refusal (a fixed text naming the submission): the code's author is told it with the host's words too.
+    assert.match(await viewOf((await s.principals.issueCredential(owner, `agent:${agent}`)).token, two.task), /the release that this approval asked for was refused at \S+\. It said: "[^"]*no longer holds the approved work[^"]*"\./);
     const stale = await release(two.task, sub2, "rel-3");
     assert.equal(stale.result.state, "refused");
     assert.match(stale.result.summary, /no longer holds the approved work of submission .*its files changed/);

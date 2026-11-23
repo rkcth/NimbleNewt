@@ -23,6 +23,8 @@ import type { Aggregate, AggregateRef, Change, JsonObject } from "../storage/typ
 export const WORKSPACE_OPERATIONS = ["integration", "landing", "refresh", "reapply", "release", "quarantine"] as const;
 export type WorkspaceOperation = (typeof WORKSPACE_OPERATIONS)[number];
 export type WorkspaceState = "started" | "done" | "refused" | "failed" | "uncertain";
+/** The refusal recorded when no host that can do the operation holds the task's checkout (a fixed text, so `automaticRelease` knows it is not a thrown error's). */
+const NO_HOST_SUMMARY = "no host that can do this holds the checkout of that task, so nothing was done";
 
 export const WORKSPACE_LIMITS = { reason: 500, summary: 1000, detailBytes: 4000 } as const;
 
@@ -454,6 +456,23 @@ export class WorkspaceOpService {
     return (await this.#runner.get(SUBMISSION_COMMIT, submissionId))?.body as unknown as SubmissionCommitBody | undefined;
   }
 
+  /**
+   * What became of the automatic release that a reviewer's approval asked for (card H12o, seventh slice): the recorded request of the command ID `rel-auto:<review>` under the service identity, read by the IDs the
+   * release derived (so no stored index is needed). Takes no caller, so it is not an API operation; read-only. Answers `undefined` when none was recorded (nothing was asked, or the controller refused before recording:
+   * a live attempt, a paused task, a remote host that cannot release) or the arguments are malformed.
+   */
+  async automaticRelease(submissionId: string, reviewId: string): Promise<{ readonly state: WorkspaceState; readonly at: string; readonly finishedAt?: string; readonly summary?: string; readonly hostAnswer?: boolean } | undefined> {
+    if (typeof submissionId !== "string" || !SUBMISSION_ID.test(submissionId) || typeof reviewId !== "string" || !/^[A-Za-z0-9_.:-]{1,120}$/.test(reviewId)) return undefined;
+    const rec = await this.#get(derivedId("wsr", scopedCommandId("service:workspace-release", `rel-auto:${reviewId}`)));
+    // Only a release of this very submission: a record of another request under the same ID is not this one's answer.
+    if (rec === undefined || rec.body.operation !== "release" || rec.body.submission?.id !== submissionId) return undefined;
+    // `hostAnswer`: the refusal is the host's own deliberate answer (fixed texts and, at most, a short quoted name of the task's own checkout) or the fixed "no host" text. A refusal built from an error thrown on the
+    // controller's side is not: the attempt that could not be made quiet (a checkpoint or runtime error's text) and the approval re-checked before the host is asked (any thrown error, storage included). Fail closed.
+    const summary = typeof rec.body.summary === "string" ? rec.body.summary : undefined;
+    const hostAnswer = rec.body.state === "refused" && summary !== undefined && ((summary.startsWith("the host did not do it: ") && !summary.startsWith("the host did not do it: the submission is no longer approved")) || summary === NO_HOST_SUMMARY);
+    return { state: rec.body.state, at: rec.body.at, ...(rec.body.finishedAt === undefined ? {} : { finishedAt: rec.body.finishedAt }), ...(summary === undefined ? {} : { summary }), ...(hostAnswer ? { hostAnswer } : {}) };
+  }
+
   /** How many refresh rounds the task's author has made so far (card H12p). It takes no caller, so it is not an API operation: the code that builds the services passes it to the submission. */
   async refreshRounds(taskId: string): Promise<number> {
     const n = ((await this.#runner.get(ROUNDS, checkTaskId(taskId)))?.body as unknown as { rounds?: unknown } | undefined)?.rounds;
@@ -596,7 +615,7 @@ export class WorkspaceOpService {
     }
     let port: WorkspacePort | undefined;
     try { port = await this.#deps.portOf(body.taskId); } catch (error) { return done("failed", { summary: `no host could be found: ${safe(error, WORKSPACE_LIMITS.summary)}` }); }
-    if (port === undefined) return done("refused", { summary: "no host that can do this holds the checkout of that task, so nothing was done" });
+    if (port === undefined) return done("refused", { summary: NO_HOST_SUMMARY });
     // The author's own refresh (card H12p) is asked for by the attempt itself, in the middle of its own call: nothing is made quiet or frozen, and nothing is told afterwards (the answer is the telling).
     if (body.operation === "reapply") {
       try {
