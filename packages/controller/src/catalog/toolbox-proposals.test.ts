@@ -726,6 +726,14 @@ for (const backend of backends) {
     const another = await newer();
     await c.props.decide(maya.p, { commandId: cid("d"), proposalId: another, decision: "reject", reason: "no" });
     assert.deepEqual(await held(), [late]);
+    // Review: an entry whose record names another author is not this author's to count; at the bound it frees a place and leaves the list.
+    const more: string[] = [];
+    for (let i = 1; i < limit; i += 1) { const id = await newer(); await accept(id); more.push(id); }
+    const next = await newer();
+    await refuses("unavailable", () => accept(next), /still waiting for a release/);
+    await c.poke("toolbox-proposal", late, (b) => ({ ...b, author: maya.p.id }));
+    assert.equal((await accept(next)).state, "accepted");
+    assert.deepEqual(await held(), [...more, next]);
   });
 
   suite("slice 7: two acceptances without a release at the same moment cannot both take the last place", async (c) => {

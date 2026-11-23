@@ -122,8 +122,10 @@ test("toolbox proposals (card T08): an agent proposes, a maintainer asks for cha
     assert.match(String(refused.error?.message), /accepted and still waiting for a release/);
     const bySay = "accept Cody's last lint proposal";
     const proposedAccept = (await say("m5", bySay, [{ kind: "command", op: "toolbox.proposal.decide", args: { proposalId: over.proposalId, decision: "accept" }, evidence: bySay, basis: "owner" }]))[0];
-    const appliedAccept = (await say("m6", "yes", [{ kind: "apply_proposal", proposalId: proposedAccept.proposalId, evidence: "yes", basis: "owner" }]))[0];
+    const appliedAccept = (await say("m6", "yes, go ahead with that", [{ kind: "apply_proposal", proposalId: proposedAccept.proposalId, evidence: "go ahead with that", basis: "owner" }]))[0];
     assert.notEqual(appliedAccept.status, "applied", JSON.stringify(appliedAccept));
+    assert.equal(appliedAccept.code, "unavailable", JSON.stringify(appliedAccept));
+    assert.match(String(appliedAccept.message), /accepted and still waiting for a release/, "the owner reads why in the chat");
     assert.equal((await ok(maya.token, "toolbox.proposal.get", { proposalId: over.proposalId })).state, "open", "nothing was applied");
 
     // The owner deletes the record the fmt release's executable came from: its snapshot goes too, and the text is reported removed.
