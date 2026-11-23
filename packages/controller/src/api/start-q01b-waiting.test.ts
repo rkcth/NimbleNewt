@@ -99,6 +99,10 @@ for (const store of stores) {
       assert.match(told[1]!, new RegExp(`^Task "Fix the parser" \\(${parser}\\) waits for a reviewer: submission ${first} by ${ann.id}, tree ${"b".repeat(12)}`));
       assert.match(told[2]!, new RegExp(`^Task "Fix the lexer" \\(${lexer}\\) is approved, with no director sign-off yet: submission ${second} by ${bob.id}.*approved by ${rev.id}\\.$`));
 
+      // The composed controller wrote the project's code index with each code submission, so the view above came from it, not from a scan of the table.
+      const index = (await c.storage.getAggregate({ kind: "code-submission-index", id: project }))?.body as { complete: boolean; entries: { id: string }[] } | undefined;
+      assert.equal(index?.complete, true);
+      assert.deepEqual(new Set(index?.entries.map((e) => e.id)), new Set([first, second]));
       const viewed = (await call(boot.token, "status.ask", { request: { kind: "submissions_project", projectId: project } })) as { ok: boolean; result?: { item: { lines: { text: string }[] } } };
       assert.ok(viewed.ok, JSON.stringify(viewed));
       assert.deepEqual(viewed.result!.item.lines.map((l) => l.text), told);
