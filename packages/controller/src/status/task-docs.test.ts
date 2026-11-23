@@ -208,6 +208,8 @@ for (const backend of backends) {
       for (const bad of [-1, 1.5, Number.NaN, 2 ** 60, "3" as unknown as number]) await assert.rejects(async () => status.ask(owner, { kind: "task_docs", taskId: export_, after: bad }), /after: must be a whole number from 0/);
       // Access first: a stranger asking for a later page is refused like for the first.
       assert.equal(await status.ask(nogrant, { kind: "task_docs", taskId: export_, after: 30 }), undefined);
+      // An invalid number is refused before anything is read, whoever asks (it says nothing about the task).
+      await assert.rejects(async () => status.ask(nogrant, { kind: "task_docs", taskId: export_, after: -1 }), /after: must be a whole number from 0/);
       // The project's own view pages the same way.
       const all = (await status.ask(owner, { kind: "docs", projectId: project }))!;
       const total = Number(/^(\d+) document\(s\) tracked/.exec(all.lines[0]!.text)![1]);

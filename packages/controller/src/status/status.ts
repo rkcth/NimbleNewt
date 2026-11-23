@@ -2382,6 +2382,8 @@ export class StatusService {
    */
   async taskDocLines(by: Principal, taskIdValue: string, after?: number): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     const taskId = checkTaskId(taskIdValue);
+    // A page number that is not a whole count is refused before anything is read (the same check `docLines` makes for the project view).
+    if (after !== undefined && (!Number.isSafeInteger(after) || after < 0)) invalid("after", "must be a whole number from 0");
     const task = await this.#runner.get("task", taskId);
     if (task === undefined) return undefined;
     const body = task.body as unknown as TaskBody;
