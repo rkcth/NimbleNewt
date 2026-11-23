@@ -416,7 +416,7 @@ test("with every model server down, each typed recovery order in the guide runs 
 // The views the guide's "Checking on finished work" section describes. Each is one status kind; the section's block lists the kind and a sentence to say. The test below asks every sentence of the block through the
 // real chat (a scripted stand-in plays the model, so the table below is only its "understanding") and fails when a listed kind is not a real status kind, when the chat does not answer it, or when a kind that
 // section has to cover is missing from the guide.
-const FINISHED_WORK_KINDS = ["submissions", "submissions_project", "qa", "qa_project", "defects", "defect_risks", "task_docs", "landing_queue", "landing_settings"];
+const FINISHED_WORK_KINDS = ["submissions", "submissions_project", "qa", "qa_project", "defects", "defect_risks", "docs", "task_docs", "landing_queue", "landing_settings"];
 const statusKindsInSource = (): Set<string> => {
   const source = readFileSync(join(repository, "packages", "controller", "src", "status", "status.ts"), "utf8");
   const union = /export type StatusRequest =([\s\S]*?)\n\nexport|export type StatusRequest =([\s\S]*?);\n/.exec(source)?.[0] ?? "";
@@ -441,7 +441,7 @@ test("every status view the guide's finished-work section lists is a real status
   const next = whole.indexOf("\n## ", from + 1);
   const text = whole.slice(from, next < 0 ? undefined : next);
   // The views and controls are the section's bold terms (a plain word such as "withdraw" would still be found inside "withdrawn" after the control itself was dropped).
-  for (const word of ["**Submissions**", "**Code waiting in a project.**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**Landing settings**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**committed the approved code**", "*permit commit*", "*plain commit*", "*not made yet*", "*could not be read just now*", "commit the approved parser fix", "when the task's newest code is approved and not committed yet", "proposes nothing", "(in task \"<the task's title>\")", "**release**", "no longer count"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
+  for (const word of ["**Submissions**", "**Code waiting in a project.**", "**QA**", "**Defects**", "**unfinished defects**", "**Documents of a task.**", "**The landing queue**", "**Landing settings**", "**reserved place**", "**escalated to you**", "**accept it as is**", "**let the repair go on**", "**withdraw**", "**A director's check before landing.**", "**Release after a reviewer's approval.**", "**committed the approved code**", "*permit commit*", "*plain commit*", "*not made yet*", "*could not be read just now*", "commit the approved parser fix", "when the task's newest code is approved and not committed yet", "proposes nothing", "(in task \"<the task's title>\")", "**release**", "no longer count", "**Documents of a project.**", "**stale**", "**unverified**", "No documentation obligations are recorded for this project", "To verify:", "**Who reviews, and how approvals are counted.**", "**Keeping a tool for yourself.**", "**review policy**", "*independence required*", "`review.repairCycles`", "always ask me before git-push in Garden", "reserve git-commit for me in this project"]) assert.ok(text.includes(word), `the guide's finished-work section does not mention "${word}"`);
 
   const dir = mkdtempSync(join(tmpdir(), "nn-d01-work-"));
   // The stand-in reads the owner's words the way the interpreter prompt asks a model to: a task view names the task by its title (the chat finds it in the project in focus), and a project view
@@ -482,6 +482,47 @@ test("every status view the guide's finished-work section lists is a real status
       assert.ok(printed.includes(viewLines[0]!.replace(/\s+/g, " ")), `${row.kind}: the chat did not print the view's answer "${viewLines[0]}":\n${printed}`);
     }
     // The views answer differently on this project (so a sentence routed to the wrong kind could not pass by printing another view's words).
-    assert.equal(new Set(firstLines.values()).size, FINISHED_WORK_KINDS.length, `the views' answers are told apart: ${JSON.stringify([...firstLines])}`);
+    // The words the guide quotes for the project documents view are the first line the view prints on a project that tracks none.
+    assert.ok(firstLines.get("docs")!.startsWith("No documentation obligations are recorded for this project"), `docs first line: ${firstLines.get("docs")}`);
+    // On a project with no documents the project view and the task view read the same empty list and say the same sentence; every other pair differs.
+    assert.equal(firstLines.get("task_docs"), firstLines.get("docs"));
+    assert.equal(new Set(firstLines.values()).size, FINISHED_WORK_KINDS.length - 1, `the views' answers are told apart: ${JSON.stringify([...firstLines])}`);
+  } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+// The review policy paragraph of the guide (card D01, sixth slice): the owner's sentences for keeping a tool for themselves are asked through the real chat (a scripted stand-in plays the model, as above), and what the
+// guide says about it is true of what the chat does: the reply says the tool will always ask the owner, asking again changes nothing, and releasing it from chat is refused.
+test("the guide's review policy sentences keep a tool for the owner through the chat, once, and the chat never gives it back (card D01)", async () => {
+  const whole = guide();
+  const from = whole.indexOf("- **Keeping a tool for yourself.**");
+  assert.ok(from >= 0, "the guide has the paragraph");
+  const para = whole.slice(from, whole.indexOf("\n- ", from + 3));
+  const said = [...para.matchAll(/"((?:always ask me|reserve)[^"]+)"/g)].map((m) => m[1]!);
+  assert.deepEqual(said, ["always ask me before git-push in Garden", "reserve git-commit for me in this project"]);
+  const release = "Stop reserving git-push, give it back to the agents";
+  const dir = mkdtempSync(join(tmpdir(), "nn-d01-rev-"));
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { messages: { role: string; content: string }[] };
+    const text = /OWNER:\n<<<\n([\s\S]*?)\n>>>/.exec(body.messages.find((m) => m.role === "user")!.content)?.[1] ?? "";
+    const tool = text.includes("git-push") ? "git-push" : "git-commit";
+    const change = { type: text === release ? "unreserve" : "reserve", tool, ...(text.includes("in Garden") ? { projectName: "Garden" } : {}) };
+    const intents = text === release || said.includes(text) ? [...(text.includes("in Garden") ? [{ kind: "switch_focus", projectName: "Garden", evidence: "in Garden", basis: "owner" }] : []), { kind: "policy_edit", change, evidence: text === release ? "Stop reserving git-push" : text.replace(/ in Garden| in this project/, ""), basis: "owner" }] : [{ kind: "none", reason: "not in the guide" }];
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(intents) } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  let l: Awaited<ReturnType<typeof launch>> | undefined;
+  try {
+    l = await launch({ config: await installFromGuide(dir), secrets: memorySecrets({ "backup-key": "backup-secret-value" }), argv: [], env: {}, print: () => undefined, start, fetch });
+    const live = l;
+    await call(live, "project.create", { name: "Garden" }, "p1");
+    const ask = async (text: string): Promise<string> => { const out: string[] = []; await runTerminalChat({ controller: live.controller, ownerToken: live.ownerToken, input: lines([text]), write: (t) => out.push(t) }); return out.join("").replace(/\s+/g, " "); };
+    const first = await ask(said[0]!);
+    assert.match(first, /git-push will always ask you/, first);
+    assert.ok(!/refused|not applied|not in the guide/i.test(first), first);
+    const again = await ask(said[0]!);
+    assert.match(again, /reserved for you already/, `asking again changes nothing:\n${again}`);
+    const second = await ask(said[1]!);
+    assert.match(second, /git-commit will always ask you/, `the project in focus is used:\n${second}`);
+    const back = await ask(release);
+    assert.match(back, /only lowered by you directly/, `the chat does not give a reserved tool back:\n${back}`);
   } finally { await l?.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
