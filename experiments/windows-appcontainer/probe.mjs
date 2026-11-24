@@ -7,8 +7,8 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import net from "node:net";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const PROBE_SCHEMA = "nn-appc-probe-1";
 export const REPORT_PREFIX = "NN-PROBE-REPORT:";
@@ -172,7 +172,14 @@ export async function runProbes(cfg) {
   };
 }
 
-const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+/** Whether this file is the entry point. Compared as paths, and without case on Windows (a drive letter or an 8.3 name in another case must not silence the probe). */
+export function isEntryPoint(argv1, moduleUrl, platform = process.platform) {
+  if (argv1 === undefined) return false;
+  const a = resolve(argv1);
+  const b = fileURLToPath(moduleUrl);
+  return platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+const isMain = isEntryPoint(process.argv[1], import.meta.url);
 if (isMain) {
   try {
     const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));

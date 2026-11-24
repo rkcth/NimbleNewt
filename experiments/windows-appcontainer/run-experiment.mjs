@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_LIMITS, PROFILE_NAME, buildChildEnv, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness, createFixtures, extractProbeReport,
-  judgeCell, matrixCells, parseLauncherLine, pickOutboundHost, removeTree, renderMarkdown, scrubText, selectCells, validateReport,
+  judgeCell, matrixCells, parseLauncherLine, pickOutboundHost, removeTree, renderMarkdown, scrubText, selectCells, stderrHead, validateReport,
 } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -91,6 +91,7 @@ export async function runExperiment(opts) {
       let results;
       let probeReport = "missing";
       let startupDenials = [];
+      let errHead = [];
       let args = [];
       try {
         const sysRoot = platform === "win32" ? (process.env.SystemRoot ?? "C:\\Windows") : undefined;
@@ -119,6 +120,7 @@ export async function runExperiment(opts) {
         const rep = extractProbeReport(stdoutText);
         probeReport = rep === undefined ? "missing" : rep.fatal ? `fatal: ${rep.fatal}` : "ok";
         startupDenials = rep?.startupDenials ?? [];
+        if (probeReport !== "ok") errHead = stderrHead(safe(() => readFileSync(join(plan.outDir, "stderr.txt"), "utf8")) ?? "");
         results = judgeCell(rep, collectWitness(plan, ctx));
       } catch (error) {
         launch = { ...launch, error: `${launch.error}; harness error: ${error?.code ?? error?.name ?? "error"}` };
@@ -135,7 +137,7 @@ export async function runExperiment(opts) {
       resultsCells.push({
         id: cell.id, sameAs: cell.sameAs, dims: { lpac: cell.lpac, win32kDisabled: cell.win32kDisabled, aapOptOut: cell.aapOptOut, aapPolicy: cell.aapPolicy, protect: cell.protect },
         launch, softGrantFailures: (launch.grants ?? []).filter((g) => g.soft && !g.applied).map((g) => ({ path: g.path, mode: g.mode, errorCode: g.errorCode })),
-        plantNotes, probeReport, results, startupDenials,
+        plantNotes, probeReport, results, startupDenials, stderrHead: errHead,
       });
     }
   } finally {

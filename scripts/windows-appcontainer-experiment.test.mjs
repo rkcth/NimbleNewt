@@ -8,9 +8,9 @@ import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { classifyError, runProbes, summarize, REPORT_PREFIX } from "../experiments/windows-appcontainer/probe.mjs";
+import { classifyError, isEntryPoint, runProbes, summarize, REPORT_PREFIX } from "../experiments/windows-appcontainer/probe.mjs";
 import {
-  ALL_PROBE_IDS, CASE_IDS, SECRETS, adminNeeded, buildChildEnv, buildCommandLine, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness,
+  ALL_PROBE_IDS, CASE_IDS, PROBE_NODE_OPTIONS, SECRETS, stderrHead, adminNeeded, buildChildEnv, buildCommandLine, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness,
   createFixtures, extractProbeReport, judgeCell, judgeProbe, makeTarball, matrixCells, parseLauncherLine, pickOutboundHost, quoteWindowsArg, removeTree, renderMarkdown,
   scrubText, selectCells, tally, validateReport, witnessProblem,
 } from "../experiments/windows-appcontainer/lib.mjs";
@@ -62,7 +62,8 @@ test("launcher arguments: grants in order, deny entry only when protecting, soft
   assert.deepEqual(pairs("--active-processes"), ["64"]);
   assert.ok(a.includes("--ui-limits"));
   assert.deepEqual(pairs("--env"), ["A=1", "B=two words"]);
-  assert.equal(pairs("--cmdline")[0], 'C:\\node\\node.exe C:\\fx\\probe\\probe.mjs C:\\fx\\probe\\probe-config.json');
+  // Node keeps the given path for its entry file (no lstat of every ancestor folder at start-up, which a container is refused on).
+  assert.equal(pairs("--cmdline")[0], 'C:\\node\\node.exe --preserve-symlinks --preserve-symlinks-main C:\\fx\\probe\\probe.mjs C:\\fx\\probe\\probe-config.json');
   const plain = buildLauncherArgs(matrixCells().find((c) => c.id === "lpac-off_win32k-enabled_aapoptout-on"), plan, sampleCtx(plan));
   assert.deepEqual(plain.flatMap((x, i) => (x === "--aap-policy" ? [plain[i + 1]] : [])), ["none"]);
   assert.ok(!plain.includes("--win32k-off"));
@@ -388,13 +389,71 @@ test("the launcher source: every Win32 call it makes is documented in the README
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   const calls = ["CreateAppContainerProfile", "DeriveAppContainerSidFromAppContainerName", "DeleteAppContainerProfile", "ConvertSidToStringSidW", "GetNamedSecurityInfoW", "SetEntriesInAclW", "SetNamedSecurityInfoW",
     "CreateJobObjectW", "SetInformationJobObject", "QueryInformationJobObject", "TerminateJobObject", "InitializeProcThreadAttributeList", "UpdateProcThreadAttribute", "DeleteProcThreadAttributeList",
-    "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess", "CreateFileW", "OpenProcessToken", "GetTokenInformation", "ProcessIdToSessionId", "CloseHandle", "FreeSid", "LocalFree"];
+    "CreateProcessW", "WaitForSingleObject", "GetExitCodeProcess", "CreateFileW", "OpenProcessToken", "GetTokenInformation", "ProcessIdToSessionId", "CloseHandle", "FreeSid", "LocalFree", "GetAce", "EqualSid"];
   for (const c of calls) { assert.ok(src.includes(`${c}(`), `${c} not used in win.rs`); assert.ok(readme.includes(c), `${c} missing in README`); }
   for (const banned of ["CreateProcessAsUser", "CreateProcessWithLogon", "CreateProcessWithToken", "LogonUser", "ShellExecute", "ImpersonateLoggedOnUser", "WinExec"]) assert.ok(!src.includes(banned), banned);
   // the process is created in one place only, with the container attributes
   assert.equal(src.match(/CreateProcessW\(/g).length, 1);
   assert.ok(src.includes("ATTR_SECURITY_CAPABILITIES") && src.includes("ATTR_JOB_LIST"));
   assert.ok(src.includes('"container"') && src.includes('Err(e) => return fail(j, "container"'));
+  // A revoke is read back (an entry still there is an error, never "revoked"); a revoke with nothing to remove writes nothing.
+  assert.match(src, /if revoke \{ match explicit_count\(path, sid\) \{ Ok\(0\) => \{\} Ok\(_\) => return Err\(ERR_STILL_PRESENT\)/);
+  assert.match(src, /if revoke && explicit_aces\(old, sid\) == 0 \{ LocalFree\(sd as \*mut c_void\); return Ok\(\(\)\); \}/);
+  // The attribute list's buffer is pointer-aligned, and a failed step after the start keeps childStarted.
+  assert.ok(!/vec!\[0u8; size\]/.test(src));
+  assert.match(src, /vec!\[0usize; size\.div_ceil\(size_of::<usize>\(\)\)\]/);
+  assert.match(src, /if !j\.0\.iter\(\)\.any\(\|\(k, _\)\| k == "childStarted"\)/);
+});
+
+test("the probe's entry check compares paths, without case on Windows", () => {
+  const here = join(exp, "probe.mjs");
+  const url = new URL(`file://${here}`).href;
+  assert.equal(isEntryPoint(here, url, "linux"), true);
+  assert.equal(isEntryPoint(undefined, url, "linux"), false);
+  assert.equal(isEntryPoint(join(exp, "other.mjs"), url, "linux"), false);
+  assert.equal(isEntryPoint(here.toUpperCase(), url, "linux"), false);
+  assert.equal(isEntryPoint(here.toUpperCase(), url, "win32"), true);
+});
+
+test("the real probe starts as an entry point with the container's Node options and prints its one report line", async () => {
+  const dir = tmp();
+  const loop = net.createServer((s) => s.destroy());
+  await new Promise((r) => loop.listen(0, "127.0.0.1", r));
+  try {
+    const plan = buildFixturePlan(join(dir, "fx"), { join, dirname, basename: (p) => p });
+    const { planted } = createFixtures(plan, { probeSource: join(exp, "probe.mjs") });
+    const ctx = { systemPaths: [], planted, loopbackPort: loop.address().port, outbound: { host: "127.0.0.1" }, outboundPort: loop.address().port, ownerProfile: dir, systemFolder: dir, gitExe: "git-not-installed-here", npmCli: undefined, networkTimeoutMs: 2000 };
+    writeFileSync(plan.configFile, JSON.stringify(buildProbeConfig(plan, ctx)));
+    const r = spawnSync(process.execPath, [...PROBE_NODE_OPTIONS, plan.probeFile, plan.configFile], { encoding: "utf8", timeout: 120_000, cwd: plan.workspace });
+    assert.equal(r.status, 0, r.stderr);
+    const rep = extractProbeReport(r.stdout);
+    assert.equal(rep?.schema, "nn-appc-probe-1");
+    assert.equal(rep.probes.length, ALL_PROBE_IDS.length);
+  } finally { loop.close(); removeTree(dir); }
+});
+
+test("when the probe says nothing, the first lines of its error output are kept, cut short, and shown", async () => {
+  assert.deepEqual(stderrHead("\n  a  \r\n\nb\n" + "x".repeat(500), 6, 10), ["a", "b", "xxxxxxxxxx"]);
+  assert.equal(stderrHead(undefined).length, 0);
+  assert.equal(stderrHead(Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n")).length, 6);
+  const base = tmp();
+  const calls = [];
+  try {
+    const inner = fakeLauncher("good", calls);
+    const exec = (p, a) => {
+      if (a[0] !== "run") return inner(p, a);
+      const flag = (f) => a[a.indexOf(f) + 1];
+      writeFileSync(flag("--stdout"), "");
+      writeFileSync(flag("--stderr"), "Error: EPERM: operation not permitted, lstat 'C:\\Users\\someone'\n    at Object.realpathSync\n");
+      return { status: 0, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: true, childStarted: true, childExitCode: 1, timedOut: false, leftoverProcesses: 0, elapsedMs: 5, allGrantsRevoked: true, grants: [] })}\n`, stderr: "" };
+    };
+    const r = await runExperiment({ launcherPath: "fake", exec, tmpBase: base, tools, cellSpec: "baseline-no-protect", systemPaths: [], systemFolder: base, outbound: { host: "192.0.2.1", local: false } });
+    const c = r.report.cells[0];
+    assert.equal(c.probeReport, "missing");
+    assert.match(c.stderrHead[0], /EPERM: operation not permitted, lstat/);
+    assert.match(r.markdown, /First lines the program wrote to its error output: `Error: EPERM/);
+    assert.ok(c.results.every((x) => x.verdict === "inconclusive"));
+  } finally { removeTree(base); }
 });
 
 test("the workflow runs only by hand, pins its actions, gates the own-runner job on an input defaulting to false with a 45 minute limit, and redacts logs", () => {
@@ -407,6 +466,8 @@ test("the workflow runs only by hand, pins its actions, gates the own-runner job
   assert.match(wf, /runs-on: \[self-hosted, nimblenewt-windows\]/);
   assert.equal([...wf.matchAll(/timeout-minutes: 45/g)].length >= 1, true);
   assert.ok(wf.includes("scripts/redact-log.mjs"));
+  // Both run steps keep the harness's exit code through the redaction pipe and still write the summary.
+  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out" 2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 2);
   assert.ok(!/secrets\./.test(wf));
   assert.ok(wf.includes("actions/upload-artifact@"));
   assert.ok(CASE_IDS.length === 10);

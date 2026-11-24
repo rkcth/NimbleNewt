@@ -42,8 +42,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
-          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" 2>&1 | node scripts/redact-log.mjs
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/results.md" ]; then cat "$RUNNER_TEMP/appc-out/results.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -90,8 +93,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
-          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" 2>&1 | node scripts/redact-log.mjs
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/results.md" ]; then cat "$RUNNER_TEMP/appc-out/results.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

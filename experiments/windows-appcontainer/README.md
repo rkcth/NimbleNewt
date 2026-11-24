@@ -83,6 +83,8 @@ them after the fact, and has no cap on their size; the job's memory limit does n
 on every path out (a drop guard also covers a panic); `revoke` repeats it for a launcher that died. Exit code: the child's, 124 when the
 timeout killed the job, 125 when the launcher itself failed; the JSON line is authoritative (`ok`, `childStarted`, `stage`, `error`).
 
+The attribute-list buffer is pointer-aligned, and a key set twice in the JSON line keeps one value (a wait that fails after the child started still says `childStarted: true`).
+
 It fails closed: no container, no run. There is no other process-creation call in the source and the unit tests check that.
 
 ### Every Win32 call, and why
@@ -96,6 +98,7 @@ It fails closed: no container, no run. There is no other process-creation call i
 | `GetNamedSecurityInfoW` | Read a folder's current DACL before changing it. |
 | `SetEntriesInAclW` | Merge one explicit entry (grant, deny, or revoke) for the container SID into that DACL. |
 | `SetNamedSecurityInfoW` | Write the new DACL back (inheritable to children). |
+| `GetAce`, `EqualSid` | Count the container's explicit (non-inherited) entries: a revoke with none to remove writes nothing (no rights needed, idempotent), and a revoke that wrote is read back; an entry still there is reported as an error (code 0x20000001), never as revoked. |
 | `CreateJobObjectW`, `SetInformationJobObject` | The job: kill on close, memory limit, active-process limit, UI limits. |
 | `QueryInformationJobObject` | Count processes still in the job when the program ended. |
 | `TerminateJobObject` | The timeout, and stragglers. |
@@ -114,6 +117,14 @@ Attribute numbers used: security capabilities 0x20009, all-application-packages 
 
 The launcher type-checks for Windows from Linux with `cargo check --target x86_64-pc-windows-gnu` (needs `rustup target add`). It cannot be linked or run
 there. CI builds it with `cargo build --release --locked` on `windows-latest`. The launcher has no unit tests of its own: its behaviour is judged by the Windows run.
+
+## Starting Node inside the container
+
+The probe is started as `node --preserve-symlinks --preserve-symlinks-main probe.mjs config.json`. Without these options Node canonicalizes the entry
+file's path at start-up by calling `lstat` on every ancestor folder, and a sandbox granted only its own folders is refused on those ancestors (EPERM on the
+account's profile folder). That is a community report for a different Windows sandbox (https://github.com/openai/codex/issues/34872), unverified for
+AppContainer. The probe imports only `node:` modules, so nothing else changes. Tools the probe starts (`npm`) do NOT get the options: whether they start is
+part of the result. When the probe's report is missing, the first lines of the child's error output are kept (`stderrHead`, scrubbed with the rest).
 
 ## What only a Windows run shows
 

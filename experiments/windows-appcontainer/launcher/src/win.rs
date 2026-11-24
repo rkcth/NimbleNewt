@@ -55,7 +55,10 @@ fn json_str(s: &str) -> String {
 struct Json(Vec<(String, String)>);
 impl Json {
     fn new() -> Self { Json(Vec::new()) }
-    fn raw(&mut self, k: &str, v: String) { self.0.push((k.to_string(), v)); }
+    /// Sets a key; a key set twice keeps its last value in its first place, so the line never carries duplicate keys.
+    fn raw(&mut self, k: &str, v: String) {
+        match self.0.iter_mut().find(|(key, _)| key == k) { Some(slot) => slot.1 = v, None => self.0.push((k.to_string(), v)) }
+    }
     fn s(&mut self, k: &str, v: &str) { self.raw(k, json_str(v)); }
     fn b(&mut self, k: &str, v: bool) { self.raw(k, if v { "true".into() } else { "false".into() }); }
     fn n(&mut self, k: &str, v: i64) { self.raw(k, v.to_string()); }
@@ -215,7 +218,47 @@ fn session_id() -> i64 {
 
 // ---------------------------------------------------------------------------------------------------------------- ACL grants
 
+// ACE_HEADER.AceType values and the ACE_HEADER.AceFlags bit (winnt.h), written out so their integer types are fixed here.
+const ACE_TYPE_ALLOWED: u8 = 0; // ACCESS_ALLOWED_ACE_TYPE
+const ACE_TYPE_DENIED: u8 = 1; // ACCESS_DENIED_ACE_TYPE
+const ACE_FLAG_INHERITED: u8 = 0x10; // INHERITED_ACE
+/// Returned by a revoke when the DACL still names the container after the write (a private code, outside the Win32 range used here).
+pub const ERR_STILL_PRESENT: u32 = 0x2000_0001;
+
+/// How many NON-inherited allow/deny entries of the DACL name this SID (a NULL DACL has none).
+unsafe fn explicit_aces(acl: *const ACL, sid: PSID) -> u32 {
+    if acl.is_null() { return 0; }
+    let mut n = 0;
+    for i in 0..(*acl).AceCount as u32 {
+        let mut ace: *mut c_void = null_mut();
+        if GetAce(acl, i, &mut ace) == 0 || ace.is_null() { continue; }
+        let header = &*(ace as *const ACE_HEADER);
+        if header.AceType != ACE_TYPE_ALLOWED && header.AceType != ACE_TYPE_DENIED { continue; }
+        if header.AceFlags & ACE_FLAG_INHERITED != 0 { continue; }
+        // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share one layout: header, mask, then the SID starting at SidStart.
+        let ace_sid = &(*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as *const u32 as PSID;
+        if EqualSid(ace_sid, sid) != 0 { n += 1; }
+    }
+    n
+}
+
+/// The number of explicit entries for the SID on a path (Err: the Win32 error of GetNamedSecurityInfoW).
+fn explicit_count(path: &str, sid: PSID) -> Result<u32, u32> {
+    unsafe {
+        let wpath = wide(path);
+        let mut acl: *mut ACL = null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        let rc = GetNamedSecurityInfoW(wpath.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut acl, null_mut(), &mut sd);
+        if rc != 0 { return Err(rc); }
+        let n = explicit_aces(acl, sid);
+        LocalFree(sd as *mut c_void);
+        Ok(n)
+    }
+}
+
 /// Adds (GRANT_ACCESS / DENY_ACCESS) or removes (REVOKE_ACCESS) the container's explicit entry on a folder or file. Returns a Win32 error code.
+/// A revoke on a path whose DACL holds no explicit entry for the container writes nothing (so it needs no rights and is idempotent), and a revoke
+/// that wrote is checked by reading the DACL back: an entry still there is an error, never a success.
 fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32> {
     unsafe {
         let wpath = wide(path);
@@ -223,6 +266,7 @@ fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         let rc = GetNamedSecurityInfoW(wpath.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut old, null_mut(), &mut sd);
         if rc != 0 { return Err(rc); }
+        if revoke && explicit_aces(old, sid) == 0 { LocalFree(sd as *mut c_void); return Ok(()); }
         let mut ea: EXPLICIT_ACCESS_W = zeroed();
         ea.grfAccessPermissions = mode.mask();
         ea.grfAccessMode = if revoke { REVOKE_ACCESS } else if mode == Mode::DenyWrite { DENY_ACCESS } else { GRANT_ACCESS };
@@ -236,7 +280,9 @@ fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32
         let rc = SetNamedSecurityInfoW(wpath.as_ptr() as *mut u16, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), new, null_mut());
         LocalFree(new as *mut c_void);
         LocalFree(sd as *mut c_void);
-        if rc != 0 { Err(rc) } else { Ok(()) }
+        if rc != 0 { return Err(rc); }
+        if revoke { match explicit_count(path, sid) { Ok(0) => {} Ok(_) => return Err(ERR_STILL_PRESENT), Err(e) => return Err(e) } }
+        Ok(())
     }
 }
 
@@ -333,7 +379,9 @@ fn env_block(env: &[(String, String)]) -> Vec<u16> {
 struct Outcome { j: Json, code: i32 }
 
 fn fail(mut j: Json, stage: &str, msg: &str) -> Outcome {
-    j.b("ok", false); j.b("childStarted", false); j.s("stage", stage); j.s("error", msg);
+    // childStarted stays true when the child did start (for example a failed wait): only a missing value becomes false.
+    if !j.0.iter().any(|(k, _)| k == "childStarted") { j.b("childStarted", false); }
+    j.b("ok", false); j.s("stage", stage); j.s("error", msg);
     Outcome { j, code: EXIT_LAUNCHER_FAILED }
 }
 
@@ -386,7 +434,8 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
     unsafe {
         InitializeProcThreadAttributeList(null_mut(), count as u32, 0, &mut size); // the first call only reports the size
         if size == 0 { return Err(("attributes", format!("InitializeProcThreadAttributeList size query failed: {}", GetLastError()))); }
-        let mut buf = vec![0u8; size];
+        // usize elements: the opaque list holds pointer-sized fields, so its buffer is pointer-aligned (a Vec<u8> promises only 1-byte alignment).
+        let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
         let list = buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
         if InitializeProcThreadAttributeList(list, count as u32, 0, &mut size) == 0 { return Err(("attributes", format!("InitializeProcThreadAttributeList failed: {}", GetLastError()))); }
         let update = |attr: usize, p: *mut c_void, len: usize, what: &str| -> Result<(), (&'static str, String)> {

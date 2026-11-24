@@ -217,6 +217,15 @@ export function buildChildEnv(plan, ctx, delimiter = ";") {
 
 export const DEFAULT_LIMITS = { memoryMb: 4096, activeProcesses: 64, timeoutMs: 300_000 };
 
+/**
+ * Node options for the probe's own start. Without them Node canonicalizes the entry file's path at start-up by calling lstat on every ancestor
+ * folder (fs.realpathSync), and a container granted only its fixture folders is refused on those ancestors (EPERM on the account's profile folder;
+ * community report: https://github.com/openai/codex/issues/34872, unverified for AppContainer), so the probe would die before testing anything.
+ * The probe imports only `node:` modules, so keeping the given path changes nothing else. Tools the probe starts (npm) do not get them on purpose:
+ * whether they start is part of what the experiment measures.
+ */
+export const PROBE_NODE_OPTIONS = ["--preserve-symlinks", "--preserve-symlinks-main"];
+
 /** The launcher's argument list for one cell. Pure; the tests compare it with fixed expectations. */
 export function buildLauncherArgs(cell, plan, ctx, limits = DEFAULT_LIMITS) {
   const args = ["run", "--name", ctx.profileName ?? PROFILE_NAME];
@@ -230,7 +239,7 @@ export function buildLauncherArgs(cell, plan, ctx, limits = DEFAULT_LIMITS) {
   args.push("--memory-mb", String(limits.memoryMb), "--active-processes", String(limits.activeProcesses), "--ui-limits", "--timeout-ms", String(limits.timeoutMs));
   args.push("--stdout", join(plan.outDir, "stdout.txt"), "--stderr", join(plan.outDir, "stderr.txt"), "--cwd", plan.workspace);
   for (const [k, v] of Object.entries(ctx.childEnv)) args.push("--env", `${k}=${v}`);
-  args.push("--exe", ctx.nodeExe, "--cmdline", buildCommandLine(ctx.nodeExe, [plan.probeFile, plan.configFile]));
+  args.push("--exe", ctx.nodeExe, "--cmdline", buildCommandLine(ctx.nodeExe, [...PROBE_NODE_OPTIONS, plan.probeFile, plan.configFile]));
   return args;
 }
 
@@ -395,6 +404,7 @@ export function renderMarkdown(report) {
     if (c.softGrantFailures.length > 0) L.push(`- Soft grants refused: ${c.softGrantFailures.map((g) => `${g.mode} ${g.path} (error ${g.errorCode})`).join("; ")}.`);
     if (c.plantNotes.length > 0) L.push(`- Fixture notes: ${c.plantNotes.join("; ")}.`);
     if (c.probeReport !== "ok") L.push(`- Probe report: ${c.probeReport}.`);
+    if ((c.stderrHead ?? []).length > 0) L.push(`- First lines the program wrote to its error output: ${c.stderrHead.map((s) => `\`${s.replaceAll("`", "'")}\``).join(" | ")}`);
     for (const r of c.results.filter((x) => x.verdict === "fail" || x.verdict === "weak")) L.push(`- ${r.verdict.toUpperCase()} ${r.id}: ${r.detail}`);
     if (c.startupDenials.length > 0) L.push(`- Access-denied lines seen at tool start-up (${c.startupDenials.length}): ${c.startupDenials.slice(0, 6).map((d) => `${d.tool}: ${d.line}`).join(" | ")}`);
     L.push("");
@@ -402,6 +412,11 @@ export function renderMarkdown(report) {
   L.push("## Clean-up", "", `- Profile deleted: ${report.cleanup.profileDeleted}; folders removed: ${report.cleanup.foldersRemoved}; grants left: ${report.cleanup.grantsLeft}.`);
   for (const n of report.notes) L.push(`- ${n}`);
   return `${L.join("\n")}\n`;
+}
+
+/** The first few non-empty lines of the child's error output, each cut short (kept only when the probe's report is missing, to say why). */
+export function stderrHead(text, lines = 6, width = 200) {
+  return String(text ?? "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "").slice(0, lines).map((l) => l.slice(0, width));
 }
 
 /** Replaces names a public log must not carry (fixture root, home, temp, account, machine) with fixed words. */
