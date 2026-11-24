@@ -320,7 +320,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
   const log = (m) => ctx.log?.(`[${runId}] ${m}`);
   const mark = { [RUN_MARK]: dir };
   ctx.activeDirs?.add(dir);
-  let iso = null;
+  let iso = null, outCollected = false;
   try {
     log(`preparing ${dir} at ${task.base.slice(0, 8)}`);
     await prepareCheckout({ repo: ctx.repo, commit: task.base, dir, copy: task.copy, depsFrom: ctx.depsFrom, forbidden: [task.solution] });
@@ -386,9 +386,11 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     record.endedAt = new Date().toISOString();
     record.exitCode = a.code;
     record.timedOut = a.timedOut;
-    collectAgentOutput(iso.out, artifacts);
     const stragglers = await killProcessesIn(dir);
     if (stragglers.length > 0) record.stragglersKilled = stragglers.length;
+    // After the stragglers are stopped: what they wrote (a git refusal of a leftover process) is in the copy too.
+    collectAgentOutput(iso.out, artifacts);
+    outCollected = true;
     log(`agent ended after ${(record.wallMs / 60000).toFixed(1)} min (exit ${a.code}${a.timedOut ? ", timed out" : ""})`);
     const summary = await summarizeLogFile(join(artifacts, "agent.jsonl"));
     const argClean = readArgClean(join(artifacts, "arg-clean.json"));
@@ -459,6 +461,8 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     Object.assign(record, { outcome: "error", reason: `bench error: ${String(e?.message ?? e).slice(0, 500)}`, benchError: true });
   } finally {
     await killProcessesIn(dir).catch(() => {});
+    // A bench error after the agent started: its log and counts are still kept with the run (the output folder goes below).
+    if (iso && !outCollected) collectAgentOutput(iso.out, artifacts);
     // The agent's home and temporary folder go whatever --keep says (they held the agent's Pi configuration).
     if (iso) { await iso.close(); ctx.isoDirs?.delete(iso.base); }
     if (!ctx.keep) await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -469,7 +473,7 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
 }
 
 /** Files the runner itself wrote into the artifacts, which an agent's output of the same name never replaces. */
-const RUNNER_OWNED = new Set(["prompt.md", "continuation-config.json", "diffstat.txt"]);
+const RUNNER_OWNED = new Set(["prompt.md", "continuation-config.json", "diffstat.txt", "setup.log", "agent-stderr.log"]);
 
 /** Copies what the agent wrote in its output folder (its log, counts, guard log, anything else) into the run's artifacts. Never throws. */
 export function collectAgentOutput(outDir, artifacts) {

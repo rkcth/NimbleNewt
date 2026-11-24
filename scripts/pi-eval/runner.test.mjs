@@ -443,7 +443,9 @@ test("W04 nudge fix: the agent's output is copied into the artifacts; the runner
   writeFileSync(join(out, "continuation-config.json"), "AGENT'S CONFIG");
   writeFileSync(join(out, "half.json.tmp"), "partial");
   writeFileSync(join(art, "prompt.md"), "the runner's prompt");
+  for (const n of ["setup.log", "agent-stderr.log"]) { writeFileSync(join(out, n), "AGENT'S"); writeFileSync(join(art, n), "runner's"); }
   collectAgentOutput(out, art);
+  for (const n of ["setup.log", "agent-stderr.log"]) assert.equal(readFileSync(join(art, n), "utf8"), "runner's", n);
   assert.equal(readFileSync(join(art, "agent.jsonl"), "utf8"), "log");
   assert.equal(readFileSync(join(art, "sub", "x.txt"), "utf8"), "deep");
   assert.equal(readFileSync(join(art, "prompt.md"), "utf8"), "the runner's prompt");

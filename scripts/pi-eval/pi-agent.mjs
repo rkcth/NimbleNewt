@@ -45,6 +45,9 @@ if (configFile) {
   let used;
   try {
     used = commandLineConfig(checkConfig(JSON.parse(readFileSync(configFile, "utf8"))));
+    // The runner's copy holds the worker's words (they name nimblenewt__work-end) and sits in the agent's own output folder,
+    // which the agent can list (its home's parent): it goes once read. The run's record keeps the runner's own copy.
+    rmSync(configFile, { force: true });
     const usedFile = join(dirname(logFile), "continuation-used.json");
     writeFileSync(`${usedFile}.tmp`, `${JSON.stringify({ wording: used.wording, max: used.max, mark: used.mark, nudge: used.nudge, lengthNudge: used.lengthNudge })}\n`);
     renameSync(`${usedFile}.tmp`, usedFile);

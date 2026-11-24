@@ -190,3 +190,50 @@ test("the settings arrive on a descriptor: a regular file with the bench's kind 
   assert.equal(readChannel(987654), null, "a descriptor that is not open");
   assert.equal(readChannel(dir === "" ? 0 : 1), null, "a descriptor that is not a regular file of ours");
 });
+
+// Review of the nudge fix: what pi-agent.mjs hands the real Pi, seen by a fake Pi (no model, no sandbox). On Linux and macOS the
+// settings arrive on descriptor 3 (read here as the extension does) and Pi's environment names no continuation file; on
+// Windows they come through the environment. The runner's copy of the worker's words (it names the tool) is gone from the
+// agent's output folder once read; a worker text the command-line wording cannot replace starts nothing (exit 2).
+test("pi-agent.mjs: the settings reach Pi on descriptor 3 (environment on Windows), the worker-worded copy is removed, drift starts nothing", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const out = join(dir, "pa-out");
+  rmSync(out, { recursive: true, force: true });
+  (await import("node:fs")).mkdirSync(out, { recursive: true });
+  const seenFile = join(dir, "pa-seen.json");
+  const fakePi = join(dir, "pa-fake-pi.mjs");
+  const ext = new URL("./continuation-extension.mjs", import.meta.url).href;
+  writeFileSync(fakePi, `import { writeFileSync } from "node:fs";\nimport { readChannel } from ${JSON.stringify(ext)};\nconst c = process.platform === "win32" ? null : readChannel(3);\nwriteFileSync(${JSON.stringify(seenFile)}, JSON.stringify({ channel: c, env: Object.keys(process.env).filter((k) => k.startsWith("PI_EVAL_CONTINUATION")), cfgEnv: process.env.PI_EVAL_CONTINUATION_CONFIG ?? null }));\n`);
+  const worker = "Go on. When every step is done, end with nimblenewt__work-end as your last call. If you cannot go on, end with nimblenewt__work-end with result blocked or partial and say why in the report. A reply without a tool call does not end the work.";
+  const cfgFile = join(out, "continuation-config.json");
+  const start = (cfg) => {
+    writeFileSync(cfgFile, JSON.stringify(cfg));
+    rmSync(seenFile, { force: true });
+    writeFileSync(join(out, "prompt.md"), "hello\n");
+    return spawnSync(process.execPath, [fileURLToPath(new URL("./pi-agent.mjs", import.meta.url)), dir, join(out, "prompt.md"), join(out, "agent.jsonl")], {
+      env: { PATH: process.env.PATH, PI_EVAL_PI_BIN: fakePi, PI_EVAL_CONTINUATION_CONFIG: cfgFile, PI_EVAL_CONTINUATION_FILE: join(out, "continuation.json") }, encoding: "utf8",
+    });
+  };
+  const r = start({ max: 3, mark: "[M]", nudge: worker, lengthNudge: `Cut off. ${worker}` });
+  assert.equal(r.status, 0, r.stderr);
+  const seen = JSON.parse(readFileSync(seenFile, "utf8"));
+  assert.equal(existsSync(cfgFile), false, "the worker-worded copy is not left where the agent can list it");
+  const used = JSON.parse(readFileSync(join(out, "continuation-used.json"), "utf8"));
+  assert.equal(used.wording, "command-line");
+  assert.doesNotMatch(JSON.stringify(used), /work[-._]end/i);
+  if (process.platform === "win32") {
+    assert.equal(seen.cfgEnv, join(out, "continuation-used.json"));
+  } else {
+    assert.deepEqual(seen.env, [], "no continuation variable reaches Pi");
+    assert.equal(seen.channel?.kind, CHANNEL_KIND);
+    assert.equal(seen.channel.file, join(out, "continuation.json"));
+    assert.equal(seen.channel.config.nudge, used.nudge);
+    assert.doesNotMatch(JSON.stringify(seen.channel), /work[-._]end/i);
+    assert.deepEqual((await import("node:fs")).readdirSync(out).filter((n) => n.startsWith(".channel")), [], "the hand-over file is unlinked");
+  }
+  // Drift: the worker's text lost a phrase the wording replaces. Nothing starts.
+  const d = start({ max: 3, mark: "[M]", nudge: "Make the next tool call now.", lengthNudge: "Cut off." });
+  assert.equal(d.status, 2, d.stderr);
+  assert.match(d.stderr, /nothing was started/);
+  assert.equal(existsSync(seenFile), false, "Pi was not started");
+});

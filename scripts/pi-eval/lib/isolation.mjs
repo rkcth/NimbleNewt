@@ -597,10 +597,14 @@ function commandKinds(c, found, cut = false) {
  * A text with the agent's own home named by its real path: a leading `~`, `$HOME` or `${HOME}` (before a separator or the end)
  * becomes the sandbox home, then the sandbox home's own dot-folders (`<home>/.pi`, `<home>/.ssh`, ...) are renamed so the key
  * patterns no longer match them. The owner's home (`/home/u/.ssh`) and everything else is left as it was. Without a sandbox
- * home (an agent run without isolation) the text is unchanged.
+ * home (an agent run without isolation) the text is unchanged. So is a text that sets HOME (`HOME=/home/u cat ~/.ssh/x`,
+ * `env HOME=...`, `export HOME=...`) or runs as another user (sudo, su, runuser, doas, pkexec, machinectl): there `~` and
+ * `$HOME` may be the owner's, so they are read as the owner's.
  */
+const HOME_CHANGED = /(?<![\w-])HOME=|(?<![\w.\/-])(?:sudo|su|runuser|doas|pkexec|machinectl)(?![\w.-])/;
 export function ownHomeText(text, sandboxHome) {
   if (typeof sandboxHome !== "string" || sandboxHome === "" || typeof text !== "string") return text;
+  if (HOME_CHANGED.test(text)) return text;
   const home = sandboxHome.replace(/[/\\]+$/, "");
   const esc = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return text
