@@ -34,6 +34,8 @@ async function rig(clock: () => string, dir?: string) {
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     chat: { interpreter: new ScriptedInterpreter(() => []) },
+    // The notification service reads the same fake clock as the dispatcher: left on the real clock it closed any notice older than its seven-day retention by the real date, so these tests passed only while the fake date was within a week of the real one.
+    notifications: { clock },
     dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock, route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }), remote: { blobDirectory: join(d, "blobs"), hosts: [] } },
   } as never);
   assert.ok(c.dispatch?.workerUrl !== undefined, c.dispatchProblem);
@@ -233,5 +235,21 @@ test("the timed-out notice shows a host name with control or bidirectional chara
     const detail = (told[0] as unknown as { detail: string }).detail;
     assert.ok(detail.includes("Host: lab\\u202egpj.exe\\u0085box"), detail);
     assert.doesNotMatch(detail, /[\u202e\u0085]/);
+  } finally { await w.close(); }
+});
+
+test("the timed-out notice reaches the owner whatever date the controller's clock shows, even one months before the machine's own date (a fixed fake date went stale a week after it was written)", async () => {
+  // A clock thirty days behind the real one: the notice retention (seven days) is counted on the controller's own clock, so the notice is not closed as old.
+  let now = Date.now() - 30 * 24 * 60 * MIN;
+  const w = await rig(() => new Date(now).toISOString());
+  try {
+    const manifest = { sourceCommit: COMMIT, suiteRevision: "suite-7", artifacts: { "nimblenewt.tgz": h("1") }, dependencyLocks: { "package-lock.json": h("2") }, matrix: [linux] };
+    const candidateId = (await w.call("release.submit", { manifest }, "sub1")).result.candidateId as string;
+    assert.ok((await w.call("release.host", { hostId: "host:rig", os: "linux", arch: "x64" }, "hst1")).ok);
+    const attemptId = (await w.call("release.start", { candidateId, cell: linux, hostId: "host:rig", timeoutSeconds: 60 }, "go1")).result.attemptId as string;
+    now += (60 + RELEASE_LIMITS.graceSeconds) * 1000 + MIN;
+    await w.c.dispatch!.dispatcher.tick();
+    await w.c.dispatch!.dispatcher.tick();
+    assert.equal((await w.inbox(attemptId)).length, 1);
   } finally { await w.close(); }
 });
