@@ -5,7 +5,7 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, revision as checkRevision, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/types.js";
-import { ACTIONS, allows, covers, mayHold } from "./access.js";
+import { ACTIONS, allows, covers, judgedBy, mayHold } from "./access.js";
 import { scopedCommandId } from "./credentials.js";
 import type { Grant, NoActor, Principal, Restriction } from "./principals.js";
 import { redactText } from "./redact.js";
@@ -709,7 +709,9 @@ export async function archivedAmong(runner: CommandRunner, ids: readonly string[
 
 /** Takes the snapshot described at `GrantService.effective`. Shared with authentication so that no authenticated principal is ever without its restrictions. */
 export async function effectiveOf(runner: CommandRunner, principal: Principal, now: string): Promise<Principal> {
-  if (principal.kind === "owner") return { ...principal, asOf: now };
+  // Each snapshot keeps the clock of the controller that took it: a check made later without a time is judged at that clock then, not at `now` (see `expiryTime`).
+  const clock = (): string => runner.now();
+  if (principal.kind === "owner") return judgedBy({ ...principal, asOf: now }, clock);
   const grants = [...principal.grants];
   // An agent may always run the tools it made itself: the grant for its own tool namespace is part of what an agent is (card T06b), in every project; the tool gate still judges each call in the project of its task. It is derived here, not stored, so an owner who replaces the agent's grants cannot take it away by mistake and agents enrolled earlier have it too.
   if (principal.kind === "agent") {
@@ -745,7 +747,7 @@ export async function effectiveOf(runner: CommandRunner, principal: Principal, n
     .map((g) => ({ ...g, project: scope.projectId }));
   // A task credential's grants for every project now name its task's project: when that project is archived they stop working too (one read of that project; review of card P06).
   const fenced = scope === undefined ? kept : await fenceArchived(runner, kept);
-  return { ...principal, grants: fenced, restrictions, asOf: now };
+  return judgedBy({ ...principal, grants: fenced, restrictions, asOf: now }, clock);
 }
 
 /**

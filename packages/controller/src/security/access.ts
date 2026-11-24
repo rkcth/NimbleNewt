@@ -48,10 +48,32 @@ export const mayHold = (kind: string, action: string): boolean => (kind === "cli
 export const covers = (grantAction: string, action: string): boolean =>
   grantAction === "*" || grantAction === action || (grantAction.endsWith(".*") && action.startsWith(grantAction.slice(0, -1)));
 
-/** What an access check may add: the resource the action is on (a narrow grant matches only that resource) and the time to judge expiry by (default: the time the principal's rights were loaded as of, `asOf`, which is the controller's own clock: never the machine's). */
+/** What an access check may add: the resource the action is on (a narrow grant matches only that resource) and the time to judge expiry by (default: `expiryTime`). */
 export interface CheckOptions {
   readonly resource?: { readonly kind: string; readonly id: string };
   readonly now?: string;
+}
+
+/** The controller clock of the loader that took each principal's snapshot (`effectiveOf`): kept beside the object, not on it, so the principal stays plain data. A copy made with a spread is not registered. */
+const clocks = new WeakMap<object, () => string>();
+
+/** Registers the clock an access check reads when it is given no time (see `expiryTime`). Returns the principal itself. */
+export function judgedBy<P extends Principal>(principal: P, clock: () => string): P {
+  clocks.set(principal, clock);
+  return principal;
+}
+
+/**
+ * The time a grant's expiry is judged at when the caller gives none: the controller's clock at the moment of the check (the clock of the loader that took the snapshot, so a rig's fake clock is
+ * respected), and never earlier than the snapshot's `asOf`. A principal held for long (the dispatcher's own, taken at start) therefore loses a grant when it ends, not at the next restart. A principal
+ * with no registered clock (built by hand, or copied with a spread) is judged at the later of its `asOf` and the machine's clock. Later is always the stricter answer: a snapshot's grants carry an end only (a record's `notBefore` is applied when the snapshot is taken, so a grant not yet valid then is not in it).
+ */
+export function expiryTime(principal: Principal, options: CheckOptions = {}): string {
+  if (options.now !== undefined) return options.now;
+  const clock = clocks.get(principal);
+  const at = clock === undefined ? new Date().toISOString() : clock();
+  const asOf = principal.asOf ?? at;
+  return at > asOf ? at : asOf;
 }
 
 const sameResource = (a: { kind: string; id: string }, b: { kind: string; id: string }): boolean => a.kind === b.kind && a.id === b.id;
@@ -88,7 +110,7 @@ export function allows(principal: Principal, action: string, project: string | u
   if (outsideTask(principal, project, options) || outsideLimit(principal, action)) return false;
   // A principal that did not come from authentication (or `GrantService.effective`) has not had its restrictions loaded: it is refused rather than trusted.
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
-  const now = options.now ?? principal.asOf;
+  const now = expiryTime(principal, options);
   return principal.grants.some((g) => covers(g.action, action) && projectMatches(g.project, project)
     && (g.expiresAt === undefined || g.expiresAt > now) && (g.resource === undefined || (options.resource !== undefined && sameResource(g.resource, options.resource))));
 }
@@ -98,7 +120,7 @@ export function allowsExactly(principal: Principal, action: string, project: str
   if (principal.kind === "owner") return true;
   if (outsideTask(principal, project, options) || outsideLimit(principal, action)) return false;
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
-  const now = options.now ?? principal.asOf;
+  const now = expiryTime(principal, options);
   return principal.grants.some((g) => g.action === action && projectMatches(g.project, project)
     && (g.expiresAt === undefined || g.expiresAt > now) && (g.resource === undefined || (options.resource !== undefined && sameResource(g.resource, options.resource))));
 }
