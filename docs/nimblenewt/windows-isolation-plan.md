@@ -1,0 +1,440 @@
+# Windows isolation without Windows Sandbox: options and a plan
+
+Status: PLAN ONLY (2026-11-24, Claude agent). No code was written or run. No card is flipped. Nothing here changes the implementation plan's statuses.
+
+Why this exists. The owner decided on 2026-11-24 that the Windows Sandbox (`wsb`) route is not enough: it needs a signed-in interactive console session, `wsb start` was refused (access denied, 0x80070005) even in the owner's own elevated console session on Windows 11 Pro, its unattended and UAC story is unproven, and it exists only on Pro, Enterprise and Education, not Home. The owner wants a plan for Windows isolation that works **unattended** (a service; nobody signed in or at the keyboard; no UAC prompt at run time; at most one admin approval at install) and, if possible, on **Windows Home** too.
+
+## 1. How to read the evidence labels
+
+| Label | Meaning |
+| --- | --- |
+| verified in repo | I read it in this repository at origin/main `7c9d6c75`; file named. |
+| cited from URL | A public page I fetched or searched on 2026-11-24; the URL is in section 15. |
+| community | A forum or blog statement, not Microsoft or the project itself. Treat as a lead. |
+| unverified | I could not check it. It is a guess or a design idea, and it is listed as an experiment where it matters. |
+
+## 2. What the product needs from a backend (verified in repo)
+
+- A backend implements `SandboxBackend` (`packages/worker/src/sandbox/backend.ts`): `health()` must prove confinement by really starting a confined probe; `plan()` says how to start one confined process; `guestView()` says which paths the agent sees; optional `descendants`, `startTimes`, `release`, `auditDetails`; and `privateNetwork`.
+- `privateNetwork` is true only for bubblewrap. A backend without it refuses any recipe that has a network route (`launcher.ts` line 245; card H12i). Seatbelt on macOS is in that group today.
+- The launcher already supports a clearly labelled **trusted-host** mode: it runs unconfined, is refused unless the owner configured an authority, is written into the audit record, and is exercised by the containment suite as "the exception" (`launcher.ts` lines 236-239, `containment.ts`).
+- Resource limits: on Windows today no per-agent limit is enforced; the limits code says the Sandbox guest's processes cannot be seen from the host and that a host-side Job Object does not bound a virtual machine (`limits.ts` lines 142-150). Card A08c is the card that closes this.
+- Windows today: the only Windows backend is Windows Sandbox (`windows*.ts`; card A03b). It reports `sessionDependent: true`, has an opt-in autologon-and-lock mode, and records "VM fallback not qualified and not implemented" (`windows-plan.ts` line 38-39). The owner's earlier research (`implementation-plan/windows-unattended-findings.md`) found a fresh Sandbox launch before any user signs in fails with 0x8000401A, and that only an owner session or automatic login plus lock worked.
+- The security guide already says tasks on macOS and Windows wait for a host that can confine them (`security-guide.md` line 36). `portability-and-configuration.md` line 21 says containers, VMs, WSL and remote workers may be execution backends "with disclosed prerequisites" but are not substitutes for qualifying the Windows product itself.
+
+### The ten containment cases (verified in repo: `containment.ts`, run by `scripts/containment-evidence.mjs`)
+
+| # | Case | What it tries |
+| --- | --- | --- |
+| 1 | control-write-own-directories | The agent can write its own work, home and scratch folders. |
+| 2 | control-read-own-decoy | The agent can read a file in its own checkout. |
+| 3 | deny-write-system | Create files in system folders (Windows, System32, `C:\`, Program Files). |
+| 4 | deny-write-host-path | Overwrite or create files in host folders outside the workspace, the controller's folder and the service home `.ssh`. |
+| 5 | deny-symlink-read | Read the controller database and a key through file links, a junction and a relative link in the checkout. |
+| 6 | deny-symlink-write | Write a host file and a host folder through a link and a junction. |
+| 7 | deny-credential-read | Read a planted key under the service home, list `.ssh`, print the environment. |
+| 8 | deny-controller-data-read | Read and list the controller's data folder. |
+| 9 | deny-network-loopback | Connect to a host service on `127.0.0.1`; on Windows it also lists network adapters and fails if one is up. |
+| 10 | deny-write-protected-name | Change, add to and delete inside `.git` in the checkout. |
+
+Every denial is first run without the sandbox and must succeed there, so a typo cannot pass as a denial. The gate (`assessRelease`) needs all ten on Linux, macOS and Windows for the same commit.
+
+Two honest notes on the suite itself, both verified in repo:
+- Case 9 on Windows judges the confined program's **network adapter list** (written for a VM guest that has none). A native confinement leaves the host's adapters visible, so that case needs a native variant that relies on the refused connection, as the macOS case does. This is a small change to the test, not to what it protects, and it must be reviewed as such.
+- Case 10 uses a bind mount on Linux. On Windows it would be file permissions (section 5), which have a known gap (rename or replace of `.git` itself).
+
+## 3. The options in one table
+
+| | A. WSL2 hosting the Linux backend | B. Native Windows, Chromium and Firefox style | C. Containers: C1 whole product in an image, C2 per-task worker containers (Docker, Podman) | D. Trusted-host (no isolation) |
+| --- | --- | --- | --- | --- |
+| Mechanism | bubblewrap inside a dedicated WSL2 distro | Restricted token, low or untrusted integrity, Job Object, alternate desktop, optional AppContainer, file permissions, no network capability | Container runtime: namespaces, cgroups, dropped capabilities, seccomp, read-only root, no network, workspace-only mount | Run as the service account, no confinement |
+| Windows Home | Yes (WSL2 is on Home; cited) | Yes (no optional feature needed; unverified that nothing is edition-gated, see E1) | Docker Desktop: its current page lists Pro, Enterprise, Education, not Home (cited; conflicts with older material). Docker Engine or Podman inside WSL2: yes if WSL2 works. Windows containers: Pro or Enterprise only (cited). A container removes no WSL2 or Hyper-V requirement | Yes |
+| Unattended | Unproven; the owning account must start the VM | Likely, unproven from a service (E6) | Linux: yes (system service, or rootless with linger; cited). macOS and Windows desktop products: unproven | Yes |
+| Admin at install | Yes: enable two features, restart; plus a service account | One-time only if we want a dedicated account, a service, or a firewall rule; none for AppContainer alone | Linux: root once. Windows: WSL2 enable needs admin once (cited) | None |
+| UAC at run time | Should be none (unproven) | None expected | None expected (unproven on Windows) | None |
+| Strength vs Linux | Same as Linux if bubblewrap runs there; the VM is an extra wall | Weaker: shared kernel, no private view of the filesystem, same family as Seatbelt | C2: about the same as bubblewrap on a Linux host; a VM wall extra on macOS and Windows; adds a root-equivalent daemon. C1 alone: no agent isolation | None |
+| Cases it can pass (of 10) | All 10 plausibly (E8) | 10 with one test variant for case 9; case 10 partial | C2: all 10 plausibly; C1 alone: fails 5 to 8 | 2 controls only; 8 denials fail by design |
+| Resource limits (A08c) | Inside the Linux distro: kernel groups available | Job Object: real limits, including kill-on-close | cgroups through the runtime | None |
+| Network route (H12i) | Yes (private network as on Linux) | No at first (loopback is not private); a pipe relay is a design idea | Design needed (internal network with a relay container; unverified) | Not applicable |
+| Effort (cards, rough) | 6 to 9 | 5 to 7 | C1 4 to 6; C2 5 to 8 plus 1 to 2 for safe daemon access | 1 to 2 |
+| Removes a Windows requirement? | No (it is the requirement) | Yes: no VM, no feature, no restart | **No**: still needs WSL2 or Hyper-V | Yes (but no isolation) |
+
+## 4. Option A: WSL2 hosting the existing Linux backend
+
+What it is: a dedicated, locked-down Linux distro in WSL2 that runs the existing bubblewrap backend. The Windows service starts a command inside it.
+
+Facts:
+- WSL2 is available on Windows Home and Pro. It needs two optional features (Virtual Machine Platform and Windows Subsystem for Linux), hardware virtualization turned on, and a restart; installing them needs administrator rights once (cited: WSL FAQ, manual install).
+- A distro can be imported from a tarball without the Microsoft Store (`wsl --import`, cited FAQ), so no Store account is needed.
+- The distro belongs to the Windows user who registered it. Distro registration is per user (community). So a service must start `wsl.exe` as that same user.
+- Whether a Windows service or a "run whether the user is logged on or not" task can start WSL for a service account is **not documented by Microsoft**. The GitHub discussion on exactly this has no maintainer answer (cited). Community reports say a startup scheduled task under the owning user works, others say session 0 causes trouble, and one Microsoft Q&A thread reports the task only worked for an administrator (all community). **This is the key unknown for option A.** It is unverified.
+- WSL is built for inner-loop development, and Microsoft says so: the utility VM starts and stops itself, shuts down when nothing holds it, gives file access to Windows files, appends Windows paths, and can run Windows programs (cited FAQ). Each of these is turned off or tamed by settings: automount off, interop off, `appendWindowsPath` off (cited wsl-config), `vmIdleTimeout` and `instanceIdleTimeout` (cited), a long-running process inside to hold the VM. The same page says the user has full access to the distro and can change those settings, so the service account, not the agent, must own them.
+- Microsoft recommends the new **WSL container API / `wslc.exe`** for production apps that need Linux runtimes (cited FAQ; it needs WSL 2.9.3 or later, cited). Its settings are per user (`%LOCALAPPDATA%\wslc\settings.yaml`, cited). Whether a service can create a session, and what isolation a session gives, I could not confirm: unverified. It is worth one experiment (E7) because it is the supported programmatic route.
+- Files: host workspace to Linux. Mounted Windows drives (DrvFs) are slow for many small files and have different permission and case semantics (cited FAQ describes the differences; the speed claim is common knowledge, unverified here). Practical design: the checkout lives inside the distro's own disk and moves in and out with git, never a live shared folder. That fits NimbleNewt (the agent works on a checkout and submits a result).
+- Network: default NAT; the distro can be made network-less (`networkingMode=none`, Windows 11 only, cited). Inside bubblewrap the agent already has a private network. Reaching Windows host services from the distro depends on mirrored/NAT settings and the Windows firewall (`firewall=true`, cited); the case 9 test would prove it.
+- Credentials: the Windows user's secrets are not visible inside the distro if automount and interop are off. The Linux side gets only what we copy in. Unverified until E8 shows it.
+- Cost: needs virtualization (not every PC, not nested hosted runners), reboot at install, a Linux image to ship and patch, WSL itself updated by Microsoft (cited FAQ), memory taken from the machine (50 percent by default, cited), and the VM idle shutdown to manage.
+
+Strength: highest of the unattended candidates, if it works, because case results should be identical to Linux and the VM is an extra wall. Risk: the unattended start of the VM.
+
+## 5. Option B: native Windows containment (the Chromium and Firefox family)
+
+This is the option the owner pointed at: Chrome and Firefox run isolated child processes on Windows Home, unattended, with no UAC at run time.
+
+### 5.1 What the browsers actually use (cited)
+
+Chromium's Windows sandbox is a user-mode library with a privileged **broker** and sandboxed **targets** (design document, `docs/design/sandbox.md`; library in `sandbox/win`). Its layers:
+
+| Layer | What Chromium does | Notes |
+| --- | --- | --- |
+| Restricted token | Keeps few groups, denies the rest, removes privileges, adds an Untrusted integrity label | Chromium says it is "near impossible to find an existing resource that the OS will grant access with such a token" |
+| Job Object | One job per target; blocks system settings changes, desktop switching, clipboard, global hooks, atoms, child process creation | CPU, memory and I/O limits are possible but the doc says not yet used |
+| Alternate desktop | Target runs on a hidden desktop, so it cannot send window messages to real windows | About 4 MB |
+| Integrity level | Untrusted | The doc calls this defence in depth, not a strict boundary |
+| Process mitigations | Win32k lockdown, no extension points, control-flow guard, code-integrity guard, child-process policy | Win32k lockdown cuts the kernel graphics attack surface |
+| AppContainer / LPAC | Low box token with no capabilities; network refused for lack of the network capability; LPAC (Windows 10 RS2 and later) only grants what is explicitly marked | The doc says file and registry ACLs must be set up for LPAC to work |
+| Broker | The privileged process performs file, registry and pipe access on behalf of the target by policy | Compatibility and policy, not extra security |
+
+Firefox uses the same family on Windows for its content processes: a restricted access token (`USER_RESTRICTED` shipped in release 134), an untrusted integrity level (in progress), a locked-down job, an alternate desktop and window station (all cited through Bugzilla and the Mozilla wiki; I could not load Mozilla's sandbox documentation page, it returned 404, and I did not verify that Firefox shares Chromium's library, though the level names match). Honest escape history (cited): Project Zero's CVE-2020-12388 (a restricted-SID rule that did not hold) and Bugzilla 1618911 (a default process DACL let one content process open its sibling content processes). Chromium also lists its known limits: unlabelled objects such as anonymous shared memory can be reached, any bug in an OS service call can escape, injected third-party DLLs weaken it, and leaked handles are an escape.
+
+Do they run with no UAC and no one signed in? Browsers run in the user's own session as the user, so they do not show this. Nothing in these documents says a **service in session 0** can launch such a child; one Microsoft Q&A thread describes a LocalSystem service in session 0 that could not start an AppContainer process through `CreateProcessAsUser` while the same call with a logged-in user's token worked (cited; no confirmed resolution). That is the second key unknown (E6).
+
+### 5.2 What carries over to a coding agent, and what does not
+
+A browser renderer is a narrow program. It needs almost nothing from the OS; a broker does the rest. A coding agent runs arbitrary toolchains: `git`, `node`, `npm`, package managers, compilers, test runners, shells, other child processes. That changes the answer.
+
+| Chromium feature | Carries over? | Why |
+| --- | --- | --- |
+| Restricted token | Yes | Core of the file-access denial. Restricting SIDs must include the workspace SID and groups that Program Files and Windows allow, so tools can run |
+| Low or untrusted integrity | Low: yes; Untrusted: probably not | Untrusted breaks many ordinary tools (cannot write normal temp, reads limited). Use Low or the AppContainer's Low |
+| Job Object | Yes, but different policy | Do not block child processes (git and npm need them). Use active-process limit, memory, CPU rate, kill-on-close. This is also exactly A08c |
+| Alternate desktop | Yes | Cheap; agents need no GUI. Console programs need a console host; unverified (E3) |
+| Win32k lockdown | Probably not for general tools | Console and shell tools may need the console host; unverified (E3). Not a core need for our agent |
+| AppContainer (no capabilities) | Yes for the network cut; partial for toolchains | Cuts network and most file access by default. Many tools expect registry keys, COM, or per-user profile folders that an AppContainer cannot read; LPAC is stricter still. Toolchain compatibility is the big risk (E4) |
+| Broker policy for files | Not practical | The browser has a narrow, known set of calls. An agent's tools open arbitrary paths. So file access is controlled by ACLs on the real files rather than by a broker |
+| Mitigation flags | Mixed | Child-process and code-integrity policies would break node, npm and compilers. Use the ones that do not |
+
+Bottom line: the browser design is a strong **model for the layers**, but an agent sandbox built from it will be a **permissive** version of it, closer to Seatbelt's "deny by default, allow the workspace and the toolchain" than to a renderer. Its strength is access control on files and the network cut, plus a kill-and-limit job. It is not a private view of the filesystem and not a separate kernel.
+
+### 5.3 Design sketch (all unverified until experiments run)
+
+Who launches. The NimbleNewt Windows service runs as a **dedicated low-privilege account** (a virtual service account or a local user created at install), not LocalSystem. Agent tokens are made from that account's own token, so the service identity is never SYSTEM. This also gives a clean owner of the controller data, which the cases check (case 8). A service started as SYSTEM that derives restricted tokens would carry the SYSTEM user SID, which is the wrong base.
+
+How a confined agent is started (per run):
+1. Create (or reuse by name) a per-run AppContainer profile: `CreateAppContainerProfile`, no admin needed (cited: Microsoft "Launch an AppContainer"). The package SID is derived from a moniker we choose, such as `nn-<runId>`; AppContainers have separate identities, so two agents cannot read each other (cited: "unique Package SID ensures their own resources are protected from other applications").
+2. Grant that SID file permissions only where the recipe says (see 5.4).
+3. Start the process with `CreateProcess` and the `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` attribute, no capabilities (cited). Optionally an LPAC (an additional attribute, cited).
+4. Put it in a Job Object with limits and kill-on-close (cited: Job Objects page), and on an alternate desktop.
+5. On the way out: remove the grants and the profile (`DeleteAppContainerProfile`). A leftover sweep (as `windows-cleanup.ts` does for Sandbox) removes crashed runs' grants.
+
+Variants to compare in the first experiments:
+- **B1 AppContainer** (Low box, no capabilities). Network cut and file default-deny come from the token itself.
+- **B2 restricted token plus Low integrity plus job plus alternate desktop** (the Chromium token without AppContainer). Needs a separate way to cut the network.
+- **B3 dedicated local account** (a standard user created at install, agents started with its token). Files under the controller and service-home folders are denied because those ACLs do not include it. Needs admin once to create the account. Network still needs a cut.
+
+### 5.4 ACL grants for the AppContainer SID
+
+For a run with recipe (workdir, home, scratch, tmp, read-only inputs, protected names):
+
+| Place | Grant to the AppContainer SID | Reason |
+| --- | --- | --- |
+| workdir, home, scratch, tmp | Modify, inherited to children | The agent's own folders (cases 1, 2) |
+| Read-only inputs (Node install, tool folders) | Read and execute, inherited | Tools it may run |
+| `.git` and other protected names under workdir | Explicit deny of write, delete and add on the name | Case 10; deny must also stop rename or replacement of the name itself, which needs delete denied on the name and the parent's delete-child right not granted: this conflicts with agents deleting files in the checkout root, so it needs a design and a test (E2) |
+| Parent folders of the above | Traverse only, if the system does not already allow it | Unverified whether an AppContainer needs it; part of E2 |
+| Everything else (user profile, controller folder, other drives, `.ssh`) | Nothing (this is the denial) | Cases 3 to 8. Legacy ACLs deny AppContainers unless a SID is in the list (cited: Microsoft, "all legacy, unmodified ACL objects block access requests from AppContainer processes by default") |
+| Program Files, Windows | Already readable by the "All application packages" group (cited, community for the exact folders) | Tools and system DLLs; the LPAC variant opts out of this and needs explicit grants |
+
+Honest limits: the permitted access is the intersection of what the user and the AppContainer SIDs are granted (cited). Anything the group "All application packages" or "Everyone" can read stays readable (for example parts of `C:\Users\Public` and `C:\ProgramData`, the registry hives that allow it, readable system files); a deny ACE can narrow that for places we know. File systems without ACLs (FAT, exFAT, network mounts) are not protected (cited, Chromium doc). Workspaces must be on NTFS.
+
+### 5.5 How the network is cut
+
+- **AppContainer without the network capabilities**: no network access, "without the network capability an AppContainer cannot access the network" (cited). Loopback is blocked by default for AppContainers and only lifted by an exemption (cited, `CheckNetIsolation LoopbackExempt`); we never add one, so case 9 should hold. The exemption would be machine configuration needing admin and would open **all** host loopback listeners to that container, so it must not be used to reach a relay.
+- **Restricted token or dedicated account without AppContainer**: there is no built-in network cut. It needs Windows Firewall or Windows Filtering Platform filters keyed on the account's SID or the AppContainer, created by an administrator at install (once). Whether a per-user outbound block works on Home with the built-in firewall is unverified (E5).
+- **Job Objects**: no network control at all (cited: job limits are about CPU, memory, processes, UI).
+- Consequence for H12i: with AppContainer and no loopback exemption there is no private route to the worker's relay, so the backend would keep `privateNetwork` false and refuse routes, like Seatbelt. A named-pipe relay (a pipe whose ACL names the AppContainer SID, plus a tiny in-sandbox shim that turns pipe traffic into the HTTP the agent expects) is a design idea only; unverified.
+
+### 5.6 Known escape classes, honestly (cited unless marked)
+
+| Class | Effect | Mitigation here |
+| --- | --- | --- |
+| Windows kernel or service bugs reachable from the confined process | Full escape; no sandbox on a shared kernel prevents it (Chromium: "no practical way to prevent code in the sandbox from calling a system service") | Accepted, as for Seatbelt; keep Windows updated; say so in the product |
+| Leaked or inherited handles | Escape | Start with explicit handle lists (no inheritance) |
+| Objects with no or weak security descriptors (anonymous shared memory, named objects, some pipes) | Read or change what other processes share | AppContainer's private object namespace helps; test (E3) |
+| Third-party code injected into the process (some security software) | Backdoor around the sandbox | Disclose; detect by a health probe |
+| Default DACL on the confined processes (Firefox 1618911) | One confined process opens another | Per-run AppContainer SID; set a tight default DACL |
+| Registry reads | A restricted token or AppContainer still reads much of `HKLM` | Accept; no secrets belong there |
+| Named pipes labelled low integrity | Reachable from low integrity | Review pipes the service exposes; use a per-run pipe name and ACL |
+| Spawning a process as a different, more powerful identity via a service the user can reach (scheduler, COM) | Escape | Low-box tokens limit this; test that the Task Scheduler and service control managers refuse (E3) |
+| Other users' data on a shared PC | Denied only where ACLs deny | Use per-user install; do not claim multi-user safety |
+
+## 6. Option C: containers (Docker and Podman), and Hyper-V
+
+The owner also likes releasing NimbleNewt to run in Docker, which is the usual form on Linux. Repo fact (verified in repo): the plan has no Docker, Podman or container-image card today; searches of `docs/nimblenewt/*.md` and `task-plan.md` found none (the word "compose" in card titles means wiring code, not Docker Compose). So everything below is new scope.
+
+There are two different things people mean by "run it in Docker". They have different isolation and different costs, so they are kept apart.
+
+- **C1. The whole product in a container image** (controller, UI and the local worker host in one or two images, started by Compose or a service manager). This is a **packaging and deployment** choice. It does not by itself confine an agent's tools from the rest of the container.
+- **C2. Per-task worker containers created by the controller**: each agent run gets its own short-lived container, the container runtime does what bubblewrap does today. This is an **isolation backend** (a new `SandboxBackend`), and it is the one that competes with options A and B.
+
+### 6.1 Which container runtime, on which system
+
+| System | Runtime | Facts | Admin, edition, licence, unattended |
+| --- | --- | --- | --- |
+| Linux | Docker Engine (daemon as root) | Namespaces, cgroups, a restricted default capability set (cited: Docker security page). The daemon needs root unless rootless; "only trusted users should be allowed to control your Docker daemon"; a container started with a bind mount "can alter your host filesystem without any restriction" (cited). Reading that, socket or `docker` group access is root-equivalent (my reading of the cited text; Docker's page does not use those words). | Install needs root once. A system service starts at boot: unattended yes (unverified on this repo's CI; ordinary behaviour) |
+| Linux | Docker rootless | Daemon and containers run as a normal user in a user namespace; needs `newuidmap`, `newgidmap` and at least 65,536 subordinate ids (cited). Starts at boot without login with `loginctl enable-linger` (cited). Its limits (ports, cgroups, network, storage drivers) are in the full page, which I did not retrieve: unverified | One-time root for packages and subuid; then no root; unattended with linger |
+| Linux | Podman | Daemonless, rootless by default (community knowledge; the pages I fetched do not cover rootless): unverified | No daemon socket to guard; a different CLI (mostly compatible) |
+| macOS | Docker Desktop | Runs Linux containers inside a VM (general knowledge; I did not retrieve the macOS page): unverified. The VM is a second wall between the agent and macOS, but the product's workers would be inside it, away from macOS files unless mounted | Licence as below; a per-user desktop app: unattended unverified |
+| macOS | Podman machine | Also a VM (cited by analogy from Red Hat and the Podman blog: "Podman on Windows works similar to macOS, running Linux containers inside a virtual machine") | unverified |
+| Windows | Docker Desktop, WSL 2 backend | Needs WSL 2.1.5 or later; Windows 10 22H2 or Windows 11 23H2 or later; the page lists **Enterprise, Pro or Education** and does **not list Home**; 64-bit SLAT processor, 8 GB RAM, virtualization on (cited: Docker install page). Older Docker material said the WSL 2 backend works on Home; the current page's table does not list it, so **Home support is in conflict and unverified**: E10 settles it on a real Home PC if one is available, otherwise treat as unsupported | Per-user install needs no admin; the first WSL 2 enable needs admin once per machine; it does not start automatically after installation and the page does not say whether it starts at sign-in (all cited). **Unattended with nobody signed in is not documented**: unverified. `--always-run-service` starts `com.docker.service` automatically (cited) but Docker Desktop's UI/VM start in a user session is not shown to follow |
+| Windows | Docker Desktop, Hyper-V backend | Same editions plus Hyper-V and Containers features on; admin; Windows containers need Pro or Enterprise, Home and Education run Linux containers only (cited) | All-users install needs admin (cited) |
+| Windows | Docker Engine installed **inside a WSL 2 distro** (no Docker Desktop) | This is option A with a Docker daemon in the distro. WSL 2 prerequisites and unattended-start unknowns of section 4 all still apply. Docker Engine itself is free software (general knowledge: unverified here); the Docker Desktop licence below does not apply to it | Same as option A: unproven service start |
+| Windows | Podman (machine on WSL 2 or Hyper-V) | WSL 2 is the default provider and the only one on Home; Hyper-V needs the feature and an administrator; 6 GB RAM minimum for the machine (cited: Red Hat and Podman blog) | Per user; unattended unverified |
+
+**Docker Desktop licence (cited: Docker's licence page).** Free for personal use, education, non-commercial open source and small businesses: "fewer than 250 employees AND less than $10 million in annual revenue". Larger organizations and government entities need a paid subscription (Pro, Team or Business). I did not retrieve the exact legal wording; owners who are above the thresholds must check it. Docker Engine on Linux, and Podman, are separate products: their terms were not checked (unverified).
+
+### 6.2 What a container gives compared with bubblewrap and Seatbelt
+
+| Aspect | Container (Docker or Podman) | bubblewrap (Linux backend, verified in repo `linux.ts`) | Seatbelt (macOS, verified in repo `seatbelt.ts`) |
+| --- | --- | --- | --- |
+| Kernel | Shared with the host on Linux; shared with the runtime's VM on macOS and Windows (the VM kernel, not the OS's) | Shared | Shared |
+| View of the filesystem | Private root from the image; only chosen mounts | Private root; only chosen binds | None; deny-by-default profile |
+| Network | Private by default network stack (cited); `--network none` removes it (general knowledge: unverified here) | `--unshare-all` private network; privateNetwork true | Deny; shares host loopback |
+| Capabilities | Restricted default set (cited); can drop all | `--cap-drop ALL` | Not applicable |
+| Syscall filter | Default seccomp profile (cited by the Docker Labs lab found in search; I did not fetch the profile) | The launcher's own flags; no extra filter in the code I read | Profile |
+| Read-only root | `--read-only` (general knowledge: unverified here) | `--remount-ro /` | Profile |
+| User | Root in the container by default; rootless or `--user` possible | Unprivileged, `--unshare-user --disable-userns` | Normal user |
+| Resource limits | cgroups through the runtime (cited: "fair share of memory, CPU, disk I/O"; cgroups do not isolate data) | Linux groups (card A08b, implemented) | Sampling monitor |
+| Attack surface added | A **daemon** (Docker Engine) with root or a socket that is root-equivalent; rootless and Podman reduce it | None beyond the kernel | None |
+| Startup cost | About a second or more per container; image to pull and keep patched | Milliseconds | Milliseconds |
+
+Honest summary: with the right flags a container is **about as strong as bubblewrap** on a Linux host (both are namespaces, cgroups and capability drops on a shared kernel) and gets a **second wall on macOS and Windows** only because the container engine lives in a VM. It is not a stronger boundary than bubblewrap on Linux. Its extra weight is the daemon: whoever can talk to the daemon can mount the whole host (cited), so the controller must hold that power and never pass it on.
+
+### 6.3 C1: the whole product in a container
+
+- What it is: an image (or two: controller and UI/worker host), a Compose file, persistent volumes for the data folder (database files, durable storage) and the workspace checkouts, and the secrets passed as runtime secrets, not baked into the image.
+- It helps deployment: one command, a pinned Node version and tools, the same everywhere, updates by image. It fits Linux servers, NAS and the owner's remote hosts (card family H02 subordinate remote workers, K02 release staging).
+- It does **not** by itself isolate an agent from the controller: if the agent's tools run as processes in the same container as the controller, they see the controller's data and secrets (case 8 fails). The controller and the agent tools must be in **different containers**, or the agent must be confined inside the container (next point).
+- **Nested sandbox problem.** If the worker host runs bubblewrap inside a container, bubblewrap needs to create new user and mount namespaces. Docker's default seccomp profile blocks `unshare`-style namespace creation, so `bwrap` fails with "creating new namespace failed: Operation not permitted" unless the container is started with a relaxed seccomp profile, a custom profile that allows those syscalls, or `--privileged`; AppArmor on the host can also block it (cited: Docker Labs seccomp lab, Flathub forum, Launchpad apparmor bug, all found by search; I did not verify the exact blocked syscalls). Relaxing the seccomp profile removes one of the container's own protections, so the net result is not obviously better than bubblewrap on the host. This product's Linux health check already refuses capacity when unprivileged user namespaces are unavailable (verified in repo, A03 text); in a container it would simply report unhealthy unless the operator opted in. Practical choices: (a) run the whole product on the host with bubblewrap and no container (today); (b) run the controller in a container and workers as **sibling** containers (C2); (c) allow bubblewrap in the container with a documented custom seccomp profile and call it the "nested" tier, unproven.
+- Credentials and mounts: mount only the data volume and the checkouts; the model provider keys stay in the controller container (the repo's own design keeps the worker free of provider keys: H12b, verified in repo); never mount the host's home, `.ssh`, or the container runtime's socket into any container that runs an agent.
+- Unattended: Compose with `restart: unless-stopped` (general knowledge) under a Linux service manager starts at boot with no login. On macOS and Windows it depends on the desktop product starting at boot (unverified, above).
+
+### 6.4 C2: per-task worker containers created by the controller
+
+- The controller (or a small root-owned helper) asks the runtime for a container per run with: no capabilities, a read-only root, `--network none`, the workspace as the only writable bind mount, `.git` mounted read-only over it, a non-root user, a memory/CPU/process limit, and kill-on-stop. That maps one to one onto the existing recipe fields (workdir, home, scratch, readOnly, network none, protectedSubpaths); `guestView` and `plan` would translate them into runtime options (design, unverified).
+- **The socket is the whole security question.** Anything that reaches the Docker daemon can start a container with the host's root mounted, so (a) the daemon must never be reachable from an agent container (no socket mount, no TCP), (b) the controller process that holds it becomes a high-value target, so it should be rootless Docker or Podman, or a small separate launcher process that accepts only the recipe's fields and nothing else, as the current launcher already does with its own fixed arguments for bubblewrap. A bug in that translation is a host escape. Compared with bubblewrap, which needs no daemon, this is a **larger trusted component**.
+- Health check: the backend must really start a confined probe container and see the writes, the network and the `.git` protections hold, as the present backends do (verified in repo, backend interface), and refuse capacity if the runtime is missing or broken.
+- Image supply: a base image with Node, git and the supported toolchains, pinned by digest, built reproducibly (the repo already rejects unpinned inputs in other places: F03 install-scripts rule, verified in repo `.npmrc`); an image pull on first use needs the network. Offline guard rules for tests apply (verified in repo, `offline-guard.mjs`).
+- Windows: a container on Windows **still needs WSL 2 or Hyper-V underneath**. It removes no Windows requirement; it adds the same prerequisites as option A (virtualization, features, a restart, admin once) and then a container engine on top. It also adds Docker Desktop's edition limits and licence if Docker Desktop is the runtime. It does not make the unattended question easier: the unattended start of the VM is still the unknown (E9, E10).
+
+### 6.5 The ten containment cases for containers
+
+Predictions only; none was run (unverified). "Per-task" means C2 with the flags above. "Whole product" means C1 with the agent tools in the same container as the controller.
+
+| Case | C2 per-task container (Linux host, rootless or Podman) | C2 on macOS or Windows (VM-backed) | C1 whole product, tools in the controller's container |
+| --- | --- | --- | --- |
+| 1 and 2 controls | pass | pass | pass |
+| 3 deny write system | pass (read-only root; non-root) | pass | pass | pass only with a read-only root and non-root user |
+| 4 deny write host path | pass: only the workspace is mounted | pass | pass | partial: the volumes the controller uses are writable by the tools unless split |
+| 5 and 6 symlinks | pass: the link target is not in the container | pass | no: targets inside the same container are reachable |
+| 7 credentials | pass if no host home is mounted and the environment is built by the controller | pass | no if secrets are in the container's environment or files |
+| 8 controller data | pass: not mounted | pass | **no**: same filesystem |
+| 9 network | pass with `--network none`; the "adapters" check as written for Windows would need the same variant as B | pass | no unless the container itself has no network, which the controller needs |
+| 10 protected name | pass with a read-only bind of `.git` over the workspace | pass | partial |
+
+So C2 can pass all ten on Linux, where it is the same class as bubblewrap, and C1 alone cannot pass the isolation cases at all; it needs an inner confinement (bubblewrap, nested) or sibling containers.
+
+### 6.6 What it would take, and which cards change
+
+Rough size, in cards (my estimate, unverified):
+
+| Piece | Cards | Notes |
+| --- | --- | --- |
+| C1 image, Compose file, volumes, secrets, health, update path, docs (Linux and macOS first) | 4 to 6 | New cards under installation and release (D01, K02, X05 are the nearest existing ones, none covers images) |
+| C2 container backend (launcher plan, probe, limits, image, cleanup, containment dialect) | 5 to 8 | Replaces nothing on Linux or macOS (bubblewrap and Seatbelt stay); for Windows it replaces A03b only if the owner accepts WSL 2 as a requirement |
+| Safe daemon access design (rootless or Podman, helper) | 1 to 2 | The security-critical card |
+| Real-hardware evidence (G05, G06, Y02 on Windows with WSL-backed runtime) | Same as option A | No saving over A |
+
+Cards that change if C is adopted: **A03b** (an alternative to the Windows launcher, not a replacement unless WSL 2 is accepted); **A03** (a third backend family); **G05, G06, Y02, H12r, X06** (the containment suite and the worker proofs would need the container backend as a platform variant; a Windows PC would need WSL 2 or Hyper-V proof as in option A); **H12i** (a container network `none` gives a private network only if the route proxy is another container on an internal network: design, unverified); **A08c** (cgroup limits through the runtime, so the Windows Job Object part is not needed for containers); **D01, K02, X04, X05, X06** (packaging and fresh-install qualification, which the plan does not cover for images); **H02 family** (remote workers could be images). **P02, P03, Q01 and Y01 do not change** apart from waiting on Y02.
+
+### 6.7 Does Docker change the Windows story?
+
+Plainly: **no, it removes no Windows requirement.** Docker Desktop and Podman on Windows run Linux containers inside WSL 2 or a Hyper-V VM (cited), so a PC without virtualization, a PC where the unattended VM start fails, and a Home PC where Docker Desktop's edition list excludes Home all remain outside it. Docker Engine inside WSL 2 is option A plus a daemon. Docker adds no way to satisfy the owner's "unattended, no one signed in, no UAC, Home" requirement that option B (native) or option A do not already face; if anything it adds the Docker Desktop licence and edition limits. For Windows it is a heavier route to the same VM as option A. Windows containers (native Windows images) need Pro or Enterprise (cited) and are not recommended here (section 6.8).
+
+For Linux and macOS, Docker is useful on its own terms: a one-command **deployment** of the product (C1), and an optional **isolation backend** (C2) for hosts where bubblewrap is not usable (for example where user namespaces are restricted but a container runtime is allowed). It is a good packaging card family; it does not replace bubblewrap or Seatbelt as the primary confinement.
+
+### 6.8 Other container-adjacent options
+
+- **Windows containers** (native Windows images): Pro or Enterprise only, Home and Education run Linux containers (cited). Hyper-V isolation on client editions and unattended behaviour were not verified here. Not recommended.
+- **Own Hyper-V VM with a second Windows**: needs Pro or higher and a second Windows licence or evaluation media; the owner declined evaluation media (verified in repo, `windows-unattended-findings.md`). Strong and unattended-capable but heavy and excludes Home. Parked.
+- **The WSL container API** (`wslc`, `Microsoft.WSL.Containers`): a supported programmatic way to run Linux containers on Windows without Docker Desktop, WSL 2.9.3 or later (cited). It needs WSL 2, so it removes no Windows requirement either. Treated as part of A (E7).
+
+## 7. Option D: trusted-host mode as a last resort (no isolation)
+
+What exists (verified in repo): trusted-host is refused unless the owner configured an authority; the launch record says the mode; the containment report records "refused without authority" and "reaches host files" as the shown exception; the launcher health notes can carry a standing warning. The Windows backend already says plainly that it depends on the session.
+
+What the product must show if this is the only mode on a PC:
+1. A persistent, unmissable banner in the owner's chat and the status pages: "Agents run with this PC's full user rights. They can read and change everything this account can, including files and saved credentials. Use a dedicated Windows account on a machine with nothing you cannot lose."
+2. The mode in every task's audit record, in the plan card, and in the owner's task view.
+3. Explicit configuration by the owner by name; never an automatic fallback when a stronger backend fails.
+4. Recommended dedicated Windows user with a restricted profile; no browser sign-ins, no stored keys.
+5. No claim anywhere that Windows is "isolated" or "qualified" for it; the release gate keeps treating it as an exception, not a pass.
+
+It passes only the two controls; it fails the eight denial cases by definition.
+
+## 8. Combinations
+
+| Combination | What it gives | Cost |
+| --- | --- | --- |
+| Combo 1: Native (B) as the baseline everywhere; WSL2 (A) as an optional stronger tier when the PC supports it | Every Windows PC, Home included, gets real file and network confinement; owners who accept a virtualization and reboot step get Linux-level isolation | Two backends to maintain and qualify; the product must show which tier is active |
+| Combo 2: B plus Windows Sandbox kept as an optional Pro tier | Reuses the work already built (A03b) for the owners who have Pro and an owner session | Third backend; the session-dependent warning stays; probably not worth more investment |
+| Combo 3: A only | One mechanism, same as Linux | If the unattended start fails, there is no Windows isolation at all; excludes PCs without virtualization |
+| Combo 4: B only | Smallest, works everywhere | Weaker than Linux; toolchain compatibility risk; no private network for routes |
+
+## 9. Case-by-case: which of the 10 each option could pass
+
+Legend: pass (expected), partial, no. All entries are predictions; none were run (unverified). "E#" names the experiment in section 11 that settles it.
+
+| Case | A WSL2 | B1 AppContainer | B2 restricted token | B3 dedicated account | C2 per-task container | D trusted-host |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 control write own dirs | pass | pass if grants work (E2) | pass | pass | pass | pass |
+| 2 control read own file | pass | pass (E2) | pass | pass | pass | pass |
+| 3 deny write system | pass | pass | pass (not admin; low IL) | pass | pass | no |
+| 4 deny write host path | pass | pass (no grant) | pass if the restricting SIDs exclude the owner SID | pass | pass | no |
+| 5 deny symlink read | pass | pass: the target's ACL decides (E2) | pass: same | pass | pass | no |
+| 6 deny symlink write | pass | pass | pass | pass | pass | no |
+| 7 deny credential read | pass | pass for files; the environment is ours to clear | pass for files | pass for files | pass | no |
+| 8 deny controller data read | pass | pass (no grant) | pass | pass | pass | no |
+| 9 deny network loopback | pass (test judges adapters in a private network) | pass for connections; test variant needed (adapters still visible) | no without a firewall or WFP rule (E5) | no without a rule (E5) | pass with network none (test variant as B) | no |
+| 10 deny write protected name | pass (bind mount) | partial: deny ACE plus rename/replace gap (E2) | partial: same | partial: same | pass (read-only bind of .git) | no |
+
+C2 assumes the flags in section 6.4 on a Linux host and that the daemon is not reachable from the container; on macOS and Windows the same results hold inside the runtime's VM. C1 alone (agent tools in the controller's container) fails cases 5 to 8 and is not shown. Linux and macOS today pass all ten (verified in repo as the plan's claim; I did not re-run them here).
+
+## 10. What each card would change (verified in repo: `task-plan.json`)
+
+| Card | Today | If A (WSL2) | If B (native) |
+| --- | --- | --- | --- |
+| A03b Windows Sandbox launcher (planned; depends on A03) | The Windows backend; session-dependent | Replaced by a "WSL distro" launcher that reuses the Linux plan; scope shrinks to a service-account WSL start plus health | Replaced by a native launcher (token, AppContainer, ACLs, job, cleanup, health probe). The Sandbox launcher code stays as an optional Pro tier or is retired by owner decision |
+| G05 isolation evidence per OS (planned) | Needs unattended service identity after logout and reboot | Same wording; WSL start must be shown after logout and reboot | Same wording; the native launcher is easier to run in hosted CI. Case 9 gets a native variant |
+| G06 qualify actual Windows (planned) | Real Windows host | Unchanged; WSL adds "reboot with nobody signed in" evidence | Unchanged; path cases (Unicode, junctions, 260 chars) matter more because the agent works on real NTFS |
+| Y02 QA checkpoint 2 (planned; blocks P02 and P03) | Needs Windows launcher on real Windows | Needs WSL path on real Windows | Needs the native launcher on real Windows and hosted CI |
+| A08c per-agent limits on macOS and Windows (planned; needs A03b) | Windows: none enforced; Job Object does not bound a VM | Limits come from Linux groups inside the distro plus WSL memory and processor settings | The Job Object becomes the real mechanism: card scope gets simpler |
+| H12r worker under Seatbelt and Windows Sandbox (planned) | Windows Sandbox | Worker inside the distro; Node installed there | Worker under the native launcher; Node install read-only |
+| H12i controlled network routes (planned; needs A03b) | Sandbox networking "not proven private" | Works (private network) | No at first: `privateNetwork` false means routes refused on Windows; pipe relay is a later card |
+| P02 isolated coding workspaces, P03 non-code adapters, Q01 deliverables (planned) | Wait on Y02 | Wait on Y02 | Wait on Y02 |
+| Y01 QA checkpoint 1 (implemented) | No isolation dependency | No change | No change |
+| Docker (C1, C2) | No card exists (verified in repo) | A WSL2-based container route has the same costs as A | Docker does not replace B; see section 6.6 for the cards that change (A03, A03b, A08c, G05, G06, Y02, H12r, H12i, D01, K02, X04 to X06) |
+| X02, X06, K07, D03, D05 (planned) | Depend on G05, G06 or H12r | Windows release candidate must include the chosen backend | Same |
+
+Rough effort, in cards of roughly one coder session each (my estimate, unverified):
+
+| Option | Rough size | Adds |
+| --- | --- | --- |
+| B first slice (launcher, ACL grant and cleanup, job limits, health probe, case 9 variant) | 5 to 7 cards | N1 native launcher, N2 ACL manager and leftover sweep, N3 job limits (replaces the Windows half of A08c), N4 containment dialect, N5 installer and service account, N6 docs, N7 CI cell; replaces A03b |
+| A (WSL tier) | 6 to 9 cards | W1 installer and distro image, W2 service-account start and keep-alive, W3 workspace move in and out, W4 lockdown settings, W5 backend plus health, W6 evidence, plus the unknown unattended start; replaces A03b |
+| E1 (B then A) | B's cards, then A's, in that order | A decision point after B's first slice |
+| D (warning mode only) | 1 to 2 cards | Banner, status, config, tests; no replacement |
+
+## 11. What can be proven where
+
+| Question | Owner's PC, with Pi (no UAC) | Needs one approval or a real service/boot | Hosted CI only |
+| --- | --- | --- | --- |
+| Create an AppContainer profile and start a child as non-admin | Yes | | Yes, probably (unverified) |
+| ACL grants and the ten cases as a normal user | Yes | | Yes, probably |
+| Job Object limits and kill-on-close | Yes | | Yes |
+| AppContainer from a service in session 0, nobody signed in | | Yes: register a test service or startup task once, restart | Partly (a hosted runner is not a real boot) |
+| Per-user firewall or WFP filter | | Yes: admin at install | Probably |
+| WSL present, virtualization on, `wsl --status` | Yes (reading only) | | No (nested virtualization generally missing on hosted runners; unverified) |
+| WSL start from a service and after reboot with nobody signed in | | Yes | No |
+| Docker Desktop, Docker Engine or Podman already installed on the owner's PC; `docker info`; Home edition support | Yes (reading only; installing is a change and needs approval) | Install, if absent | No |
+| Container backend cases (C2) on Linux and macOS, nested bubblewrap in a container | Not Windows | | Linux CI cell for Docker, yes; macOS runner has no Docker by default (unverified) |
+| bubblewrap runs in the WSL kernel; the ten cases | Only after WSL is installed | Yes if WSL is not installed (admin, restart) | No |
+
+The Windows-box agent instructions already tell the agent to be read-only and ask before any change (`windows-box-agent-instructions.md`), so the experiments below follow that: each says whether it changes anything.
+
+## 12. Recommendation
+
+**Choose combination 1, built in this order: B (native, Chromium-style) first, A (WSL2) later as an optional stronger tier.** Do not invest further in Windows Sandbox beyond keeping it as a documented Pro option.
+
+Reasons:
+1. B is the only candidate whose pieces are all documented to work for ordinary, non-admin, session-less code paths: AppContainer profiles need no admin, tokens and jobs are standard process APIs, and browsers ship this on Home (cited). The unattended-from-a-service question (E6) is the one gap, and it is cheap to test.
+2. B needs no virtualization, no restart, no Linux image, and works on Home; the owner's requirement ("ideally Home") is met by B and met by A only on PCs with virtualization and a restart.
+3. B gives a real Windows Job Object, which also finishes the Windows half of the resource-limits card honestly, something Windows Sandbox cannot do (verified in repo).
+4. B's weakness is stated honestly: a shared kernel and ACL-based, not view-based, file control, in the same class as the macOS Seatbelt backend, which the product already ships with disclosed differences (verified in repo).
+5. A keeps the strongest result but its unattended start is undocumented (cited gap), so it should be proven separately, not made the foundation.
+6. **Docker does not change this choice for Windows** (section 6.7): a container on Windows still needs WSL 2 or Hyper-V underneath, so it removes no Windows requirement, adds Docker Desktop's edition list and licence if that is the runtime, and leaves the unattended-VM unknown in place. Docker Desktop's current page does not list Home.
+
+**Docker, as a separate recommendation for Linux and macOS.** Package the product as a container image with Compose (C1) as a deployment option, as its own card family after the first release or alongside the Linux release candidate (X05). Keep bubblewrap and Seatbelt as the primary confinement. Treat per-task worker containers (C2) as an optional extra backend for hosts where bubblewrap is unusable, built only with rootless Docker or Podman or a minimal launcher helper, and never with a socket reachable from an agent. Do not run bubblewrap inside the same container as an agent unless the operator accepts a relaxed seccomp profile (nested tier, unproven).
+
+Decision gate. After experiments E1 to E6, if B1 or B2 passes cases 1 to 9 with case 10 handled, build B. If B fails on toolchain compatibility (E4) or cannot be started from a service (E6), the fallback order is A (if E7 or E8 shows an unattended start), then D with the warnings in section 7.
+
+### Smallest first slice: the experiment list for the Windows-box agent
+
+Run order matters; each one is small. "Changes" says what the agent touches. None needs a UAC prompt except E6 and E9 (and an install in E10 if the owner wants one), which need one explicit owner approval each and are marked. Use PowerShell with `Add-Type` P/Invoke (the repo's Windows helpers already do this; verified in repo, `windows.ts`) so no compiler or addon is needed. Work only under `C:\nn-diag`, and never run as administrator.
+
+| # | Experiment | Changes | Question it answers |
+| --- | --- | --- | --- |
+| E1 | Read facts: Windows edition and build, `wsl --status`, whether Virtual Machine Platform and WSL features are on, CPU virtualization, whether Pi runs at medium integrity, the user's own ACL on `C:\Users\<user>` and its parents | Nothing | What the PC already has; whether A is even possible without an install |
+| E2 | As a normal user: `CreateAppContainerProfile` with no capabilities; make a scratch folder you own; grant the profile SID Modify on `work`, `home`, `scratch`; run `cmd /c` as the AppContainer in that work folder; try a read of a file outside, a write outside, a junction out, `.git` deny ACE with write, add, delete and rename attempts; then remove grants and the profile | Creates and removes one profile and folders under `C:\nn-diag` | Does B1 pass cases 1 to 8 and 10 (partial) with an ordinary process? Does the profile need traverse rights on parents? |
+| E3 | The same as E2 for B2 (restricted token plus Low integrity) with a job, kill-on-close and an alternate desktop; plus: can the confined `cmd` or PowerShell see other processes' objects, open the Task Scheduler or Service Control Manager, and start a process as another identity? | Same | B2's case results and the "escape" probes in section 5.6; does a console program work on an alternate desktop |
+| E4 | Toolchain check inside B1 and B2: run `node --version`, `git --version` and `git status` on a prepared checkout, `npm ci --ignore-scripts` and the repository's own tests with a recipe-style grant list; list every access-denied found | Writes inside the test folders only | How permissive the grants must be for real tools: the main compatibility risk |
+| E5 | Network: confirm case 9 from B1 (connect refused to a local test listener; adapters still listed); show that B2 can connect (expected); check whether a per-account outbound block can be created without admin (expected: no); record exactly what admin would be needed | Nothing permanent | The network cut for B1, and the install-time cost for B2 and B3 |
+| E6 (one approval) | Real service: owner approves one test Windows service or startup task that runs a small program as a dedicated low-privilege account (or LocalSystem for comparison); the program runs the E2 launch and writes a result file; restart the PC and sign in nothing; later read the file. Remove the service afterwards | Registers and removes one service or task; needs one admin approval, once | Can a service in session 0 launch B1 or B2 unattended? Which token works (the Q&A thread's failure case)? |
+| E7 | If WSL is present (E1): in the owner's own user, `wsl --import` a tiny distro into `C:\nn-diag`, check `bwrap`, user namespaces and the ten cases' key ones; set automount, interop and path settings in its `wsl.conf`; test `wslc` if version 2.9.3 or later | Registers and unregisters one distro | Does A work as a user, and is `wslc` usable |
+| E8 | If E7 passed: run the repository's containment suite pieces against the distro | Same | Case results for A |
+| E10 | Read-only container facts on the owner's PC: is Docker Desktop, Docker Engine in WSL, or Podman installed; `docker info` or `podman info` output (names and versions only); the edition; is virtualization on. If a Windows Home PC is available, check whether Docker Desktop's WSL 2 backend installs there (installing needs owner approval and is a change) | Nothing unless the owner approves an install | Settles the Docker Desktop Home conflict; shows whether a container route would add anything on this PC |
+| E11 (any Linux host, not the Windows box) | On the Linux dev server or a CI cell: run a container with the default seccomp profile and try `bwrap` inside it; then with a relaxed profile and rootless Docker or Podman; run the ten cases against a per-task container with the flags of section 6.4 | Starts and removes test containers | Proves the nested-sandbox failure, and whether C2 passes all ten on Linux |
+| E9 (one approval, only if E7 and E8 passed) | Real service start of `wsl.exe` as a dedicated account after a restart with nobody signed in | Same as E6 | The unattended start for A: the key unknown for A |
+
+Report format: for each, "observed" or "not tested", exit codes, durations, the first 20 lines of any error, and the exact access-denied paths. Never print tokens or secrets.
+
+## 13. What we would tell users
+
+On **Windows Home**: "NimbleNewt isolates agents on Home with Windows's built-in app sandbox features (a restricted account and file permissions). It is weaker than the Linux isolation, because Windows has no separate private view of your files, so agents can only be kept out of places Windows permissions protect. The Windows Sandbox feature is not available on Home. If you want Linux-level isolation, turn on WSL 2 (needs virtualization and a restart). Until a confined start works on this PC, agents will not run unless you choose the clearly labelled no-isolation mode, which runs them with this account's full rights."
+
+On **Windows Pro, Enterprise, Education**: the same default as Home. Windows Sandbox is available there but needs an owner session or automatic login and is not recommended as the main route; WSL 2 gives the stronger tier. Pro and above also allow Hyper-V virtual machines if the owner wants to supply their own Windows guest, but NimbleNewt does not require one.
+
+On **Linux and macOS with Docker**: "You can run NimbleNewt from a container image. The agents' tools are still confined by bubblewrap (Linux) or Seatbelt (macOS), or by a separate per-task container, not by the image itself. On macOS, Docker Desktop runs containers in a virtual machine and its licence terms apply to larger organizations. A container does not make Windows isolation unnecessary: on Windows it needs WSL 2 or Hyper-V underneath."
+
+The statement of what is and is not protected (both editions): files outside the agent's folders, the controller's data, saved credentials and the network are protected as tested by the ten containment cases for the commit in use; a Windows bug could still escape a native sandbox, because the PC's kernel is shared; the report names the tier in use.
+
+## 14. Decisions the owner must make
+
+Only true product and security tradeoffs; everything else is my call (ASSUMPTION lines follow).
+
+1. **Is a weaker-than-Linux native baseline acceptable as the default on Windows**, labelled as such, with WSL 2 as the optional stronger tier? (Recommended: yes.) If no, Windows needs a VM and Home is excluded.
+2. **Is one administrator approval at install acceptable** for a dedicated service account, service registration and a firewall rule? (Recommended: yes, once; AppContainer alone needs none.)
+3. **Is no network route for Windows agents acceptable at first release**, so tasks that need web or local-server access wait for a Linux or macOS host until a pipe relay is built? (Recommended: yes for first release.)
+4. **May the no-isolation trusted-host mode be offered on Windows**, on the condition that it is never automatic and is shown as in section 7? (Recommended: yes, off by default.)
+5. **Retire the Windows Sandbox route as the main plan** (keep it as an optional Pro tier, stop the autologon work)? (Recommended: yes.)
+6. **Release a Docker image (C1) as a supported deployment on Linux and macOS, after the first release, and is a per-task container backend (C2) wanted at all?** Product scope and security tradeoff: C2 adds a root-equivalent daemon. (Recommended: C1 yes, as a deployment option; C2 only as an optional backend later; neither for Windows isolation.)
+7. **Docker Desktop licence**: the owner's own use is below Docker's thresholds only if the organization has fewer than 250 employees and under 10 million USD revenue (cited). Is a Docker Desktop dependency acceptable for users who may be above them, or should the docs name Docker Engine, rootless Docker and Podman only? (Recommended: name Engine and Podman; mention Desktop only as the user's own choice.)
+
+ASSUMPTION: for a Docker release I took the smallest reversible scope: image-based deployment first, no per-task container backend and no daemon socket exposure to any agent container. I did not need an owner answer for the rest of these, and took the smallest reversible choice. The native option runs under a dedicated low-privilege service account, not LocalSystem. Workspaces on Windows must be on NTFS. No loopback exemption is ever added. WSL work is deferred until the native slice results are in. The containment suite's case 9 gets a native variant only through a reviewed card, not as part of this plan.
+
+## 15. Sources
+
+Cited on 2026-11-24 (Microsoft Learn unless noted):
+- Windows Sandbox overview and editions: https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/
+- WSL FAQ (Home support, production caveats, import/export, WSL container API recommendation): https://learn.microsoft.com/en-us/windows/wsl/faq
+- WSL manual install (features, virtualization, restart, admin): https://learn.microsoft.com/en-us/windows/wsl/install-manual
+- WSL configuration (`wsl.conf`, `.wslconfig`: automount, interop, boot, networkingMode, idle timeouts, memory): https://learn.microsoft.com/en-us/windows/wsl/wsl-config
+- WSL container (`wslc`, API, WSL 2.9.3): https://learn.microsoft.com/en-us/windows/wsl/wsl-container and settings https://learn.microsoft.com/en-us/windows/wsl/wsl-container-settings
+- WSL in production on Windows Server 2025, unanswered discussion: https://github.com/microsoft/WSL/discussions/14261
+- Unable to start WSL from a Scheduled Task (Microsoft Q&A, community): https://learn.microsoft.com/en-us/answers/questions/1184579/unable-to-start-wsl-from-a-scheduled-task
+- AppContainer isolation: https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation
+- AppContainer for legacy apps: https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-for-legacy-applications-
+- Launch an AppContainer (profiles, capabilities, LPAC): https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer
+- Starting an AppContainer process from a service (Microsoft Q&A, community, unresolved): https://learn.microsoft.com/en-us/answers/questions/556403/starting-a-process-in-an-appcontainer-from-a-servi
+- Loopback and network isolation: https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall
+- Job Objects: https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+- Chromium Windows sandbox design: https://chromium.googlesource.com/chromium/src/+/main/docs/design/sandbox.md (library: `sandbox/win`)
+- Firefox: Mozilla sandbox architecture https://wiki.mozilla.org/Security/Sandbox/Architecture; USER_RESTRICTED, Bugzilla 1403931 https://bugzilla.mozilla.org/show_bug.cgi?id=1403931; untrusted integrity, Bugzilla 1831036 https://bugzilla.mozilla.org/show_bug.cgi?id=1831036; default DACL escape, Bugzilla 1618911 https://bugzilla.mozilla.org/show_bug.cgi?id=1618911; Project Zero on CVE-2020-12388 https://projectzero.google/2020/06/ff-sandbox-escape-cve-2020-12388.html
+- Docker Desktop on Windows (editions listed, WSL 2.1.5, admin, per-user install, no automatic start, `--always-run-service`): https://docs.docker.com/desktop/setup/install/windows-install/
+- Docker Desktop licence (250 employees and 10 million USD thresholds): https://docs.docker.com/subscription/desktop-license/
+- Docker rootless mode (subordinate ids, systemd user service, linger): https://docs.docker.com/engine/security/rootless/
+- Docker Engine security (namespaces, cgroups, default capabilities, daemon attack surface): https://docs.docker.com/engine/security/
+- bubblewrap inside containers (community and bug reports): https://discourse.flathub.org/t/error-running-flatpack-in-dockerfile/1636, https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/2069526, https://github.com/docker/labs/blob/master/security/seccomp/README.md
+- Podman on Windows (WSL 2 or Hyper-V machine; WSL 2 only on Home): https://podman-desktop.io/docs/installation/windows-install and https://blog.podman.io/2024/06/the-new-hyper-v-option-in-podman-windows-installer/
+
+Not retrieved and therefore not claimed: Docker's full licence wording, Docker rootless known-limits section, Docker Desktop on macOS pages, Podman rootless pages, Docker's default seccomp profile contents, Hyper-V isolation of Windows containers on client editions, Mozilla's own sandbox documentation page (404), the speed of DrvFs shares, and anything about the current behaviour of `wsl.exe` under a service account.
