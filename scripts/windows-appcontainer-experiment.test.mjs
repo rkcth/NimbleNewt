@@ -205,7 +205,7 @@ test("a cell without a report is inconclusive everywhere; the report schema acce
   const results = judgeCell(undefined, undefined);
   assert.equal(results.length, ALL_PROBE_IDS.length);
   assert.ok(results.every((r) => r.verdict === "inconclusive"));
-  assert.deepEqual(tally(results), { pass: 0, weak: 0, fail: 0, inconclusive: ALL_PROBE_IDS.length });
+  assert.deepEqual(tally(results), { pass: 0, weak: 0, fail: 0, inconclusive: ALL_PROBE_IDS.length, info: 0 });
   const cell = { id: "c", sameAs: undefined, dims: { lpac: true, win32kDisabled: false, aapOptOut: true, aapPolicy: "optout", protect: true }, launch: { ok: false, childStarted: false, stage: "container", error: "e", grants: [] }, softGrantFailures: [], plantNotes: [], probeReport: "missing", results, startupDenials: [] };
   const report = buildReport({ now: "2026-11-24T00:00:00.000Z", host: { platform: "win32", elevated: false, sessionId: 0 }, cells: [cell], profile: { name: "P" }, cleanup: { profileDeleted: true, foldersRemoved: 1, grantsLeft: 0 } });
   assert.deepEqual(validateReport(report), []);
@@ -521,9 +521,9 @@ test("the workflow runs only by hand, pins its actions, gates the own-runner job
   assert.equal([...wf.matchAll(/timeout-minutes: 45/g)].length >= 1, true);
   assert.ok(wf.includes("scripts/redact-log.mjs"));
   // Both run steps keep the harness's exit code through the redaction pipe and still write the summary.
-  // three hosted steps (ladder, firewall, matrix) and the own-runner step; each keeps the harness's exit code and writes its summary
-  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 4);
-  for (const mode of ["ladder", "firewall", "matrix"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (45000|60000)`));
+  // six hosted steps (round 3: ladder, git, cases, links, timing, firewall) and two own-runner steps; each keeps the harness's exit code and writes its summary
+  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 8);
+  for (const mode of ["ladder", "git", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (45000|90000|120000)`));
   assert.match(wf, /own_runner:\n\s+description:[^\n]*\n\s+type: boolean\n\s+default: false/);
   assert.ok(!/secrets\./.test(wf));
   assert.ok(wf.includes("actions/upload-artifact@"));
@@ -793,7 +793,9 @@ function firewallFake({ addFails = false, containerOnly = true } = {}) {
     }
     const flag = (f) => args[args.indexOf(f) + 1];
     writeFileSync(flag("--stdout"), ""); writeFileSync(flag("--stderr"), "");
-    return line({ ok: true, childStarted: true, childExitCode: 0, timedOut: false, leftoverProcesses: 0, elapsedMs: 9, allGrantsRevoked: true, grants: [] });
+    // The launcher names the capabilities it applied (round 3: the firewall verdict needs them).
+    const capabilities = args.flatMap((a, i) => (a === "--capability" ? [{ name: args[i + 1], sid: "S-1-15-3-1" }] : []));
+    return line({ ok: true, childStarted: true, childExitCode: 0, timedOut: false, leftoverProcesses: 0, elapsedMs: 9, allGrantsRevoked: true, grants: [], capabilities });
   };
   return { ps, exec, state };
 }
@@ -885,4 +887,520 @@ test("the firewall's node client really connects to the listeners it is given (a
     assert.ok(curl.exe.endsWith("curl.exe"));
     assert.equal(curl.args.filter((x) => x.startsWith("http://127.0.0.1:")).length, 2);
   } finally { await Promise.all(servers.map((sv) => new Promise((res) => sv.close(res)))); }
+});
+
+// ------------------------------------------------------------------------------------------------ round 3
+
+import {
+  DEFAULT_LIMITS, DIAG_IDS, configCells, npmFixtureFiles, writeNpmProject,
+} from "../experiments/windows-appcontainer/lib.mjs";
+import { DEFAULT_BUDGET_MS, DEFAULT_WATCHDOG_MS, connectOnce } from "../experiments/windows-appcontainer/probe.mjs";
+import { loopbackCommands, netSetup, netTeardown } from "../experiments/windows-appcontainer/ladder.mjs";
+import {
+  NUL_ACL_SCRIPT, analyzeSddl, gitProgram, gitStepFor, gitVariants, parseNulOpen, renderGitMarkdown, renderLinksMarkdown, renderTimingMarkdown, runGitLadder, runLinks, runTiming, selectGitVariants,
+} from "../experiments/windows-appcontainer/round3.mjs";
+import { MODES } from "../experiments/windows-appcontainer/run-experiment.mjs";
+
+const posix = { join, dirname, basename: (p) => p };
+const probeWorld = (extra = {}) => {
+  const dir = tmp();
+  const plan = buildFixturePlan(join(dir, "fx"), posix);
+  const { planted } = createFixtures(plan, { probeSource: join(exp, "probe.mjs") });
+  const ctx = { systemPaths: [], planted, loopbackPort: 9, outbound: { host: "127.0.0.1" }, outboundPort: 9, ownerProfile: dir, systemFolder: dir, gitExe: "git-not-installed-here", npmCli: undefined, networkTimeoutMs: 400, ...extra };
+  return { dir, plan, cfg: buildProbeConfig(plan, ctx) };
+};
+
+test("the hard limits: 90 s per cell for the harness, a 60 s watchdog and a shorter budget inside the probe, 3 s per network attempt", () => {
+  assert.equal(DEFAULT_LIMITS.timeoutMs, 90_000);
+  assert.ok(DEFAULT_WATCHDOG_MS === 60_000 && DEFAULT_BUDGET_MS < DEFAULT_WATCHDOG_MS && DEFAULT_WATCHDOG_MS < DEFAULT_LIMITS.timeoutMs);
+  const { cfg, dir } = probeWorld();
+  try {
+    assert.equal(cfg.watchdogMs, 60_000);
+    assert.equal(cfg.budgetMs, DEFAULT_BUDGET_MS);
+    assert.match(cfg.progressFile, /probe-progress\.txt$/);
+    const a = buildLauncherArgs(matrixCells()[0], buildFixturePlan("C:\\fx"), { ...sampleCtx(buildFixturePlan("C:\\fx")) });
+    assert.equal(a[a.indexOf("--timeout-ms") + 1], "90000");
+  } finally { removeTree(dir); }
+  const src = readFileSync(join(exp, "probe.mjs"), "utf8");
+  assert.match(src, /timeoutMs = 3000\) => new Promise/);
+  assert.ok(!/120_000|180_000/.test(src), "no tool limit of two or three minutes is left in the probe");
+});
+
+test("a network attempt always ends: the socket's own timeout and a hard timer both end it, the socket is destroyed, and a throw is an outcome", async () => {
+  const original = net.connect;
+  let destroyed = 0;
+  try {
+    // a connect that never says anything: neither connect nor error nor its own idle timeout
+    net.connect = () => ({ setTimeout() {}, once() {}, destroy() { destroyed++; } });
+    const t = Date.now();
+    const r = await connectOnce("silent", "192.0.2.1", 9, 120);
+    assert.equal(r.outcome, "blocked-other");
+    assert.equal(r.code, "TIMEOUT");
+    assert.ok(Date.now() - t < 3000);
+    assert.equal(destroyed, 1);
+    // the socket's own timeout fires
+    net.connect = () => { const s = { setTimeout(_ms, cb) { setTimeout(cb, 10); }, once() {}, destroy() { destroyed++; } }; return s; };
+    assert.equal((await connectOnce("idle", "h", 1, 5000)).code, "TIMEOUT");
+    assert.equal(destroyed, 2);
+    net.connect = () => { throw Object.assign(new Error("x"), { code: "EACCES" }); };
+    assert.equal((await connectOnce("throws", "h", 1, 100)).outcome, "denied");
+  } finally { net.connect = original; }
+});
+
+test("the probe announces every step in a progress file before and after it, and a watchdog hands over a partial report naming the step it was in", async () => {
+  const { cfg, dir, plan } = probeWorld({ networkTimeoutMs: 800 });
+  const original = net.connect;
+  try {
+    // the loopback attempt hangs for 600 ms; the watchdog (150 ms) fires first and sees the step name
+    net.connect = () => { const handlers = {}; const s = { setTimeout() {}, once(e, f) { handlers[e] = f; }, destroy() {} }; setTimeout(() => handlers.error?.(Object.assign(new Error("x"), { code: "ECONNREFUSED" })), 600); return s; };
+    cfg.watchdogMs = 150;
+    let partial;
+    const report = await runProbes(cfg, { onWatchdog: (rep) => { partial ??= rep; } });
+    assert.ok(partial, "the watchdog fired");
+    assert.equal(partial.partial, true);
+    assert.equal(partial.watchdog.step, "deny-network-loopback");
+    assert.ok(partial.probes.length >= 8 && partial.probes.every((p) => typeof p.ms === "number"));
+    const lines = readFileSync(plan.progressFile, "utf8").trim().split(/\r?\n/);
+    assert.ok(lines.some((l) => / start deny-network-loopback$/.test(l)));
+    assert.ok(lines.some((l) => / WATCHDOG deny-network-loopback$/.test(l)));
+    // the run that finished kept going and wrote its end lines
+    for (const id of ALL_PROBE_IDS) { assert.ok(lines.some((l) => l.endsWith(` start ${id}`)), `start ${id}`); assert.ok(lines.some((l) => l.endsWith(` end ${id}`)), `end ${id}`); }
+    assert.equal(report.probes.length, ALL_PROBE_IDS.length);
+  } finally { net.connect = original; removeTree(dir); }
+});
+
+test("a tool never runs past the probe's budget, and a step that throws is an error outcome, not a hang", async () => {
+  const { cfg, dir } = probeWorld();
+  try {
+    cfg.budgetMs = 1; // nothing is left for tools
+    const report = await runProbes(cfg);
+    const by = Object.fromEntries(report.probes.map((p) => [p.id, p]));
+    assert.equal(by["tool-node-version"].attempts[0].outcome, "skipped");
+    assert.equal(by["tool-node-version"].attempts[0].code, "budget");
+    assert.equal(report.probes.length, ALL_PROBE_IDS.length);
+  } finally { removeTree(dir); }
+});
+
+test("the real probe leaves the fixtures as it found them after the protected-name operations, and tools use files, not pipes", async () => {
+  const { cfg, dir, plan } = probeWorld();
+  try {
+    const report = await runProbes(cfg);
+    // unconfined, every operation succeeds (that is the control) and each is undone at once
+    const by = Object.fromEntries(report.probes.map((p) => [p.id, p]));
+    for (const id of ["extra-protect-rename-dir", "extra-protect-delete-dir", "extra-protect-replace-junction", "extra-protect-rename-parent", "extra-junction-self-made", "extra-hardlink-read"]) assert.ok(by[id], id);
+    assert.equal(by["extra-protect-rename-dir"].actual, "allowed");
+    assert.ok(existsSync(plan.workspace) && existsSync(plan.protectedDir));
+    assert.ok(!existsSync(`${plan.protectedDir}-renamed`) && !existsSync(`${plan.workspace}-renamed`) && !existsSync(`${plan.protectedDir}-away`));
+    assert.ok(by["diag-spawn-modes"].attempts.length === 3 && by["diag-spawn-modes"].attempts.every((a) => a.outcome === "allowed"));
+    assert.equal(by["diag-nul-open"].attempts[0].outcome, "skipped"); // not Windows
+    // the tool outputs went to files that were removed again
+    assert.deepEqual(readdirSync(plan.scratch).filter((f) => f.startsWith("tool-")), []);
+    assert.ok(readFileSync(join(exp, "probe.mjs"), "utf8").includes('stdio: fdOut === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", fdOut, fdErr]'));
+  } finally { removeTree(dir); }
+});
+
+test("diagnostics have no verdict; the protected-name operations, the own junctions and the hard link are judged by the host's own view", () => {
+  const p = { id: "diag-nul-open", group: "diag", expect: "allowed", attempts: [{ name: "open NUL r+", outcome: "denied", code: "EACCES" }, { name: "open NUL r", outcome: "allowed" }] };
+  const j = judgeProbe(p, calm, true);
+  assert.equal(j.verdict, "info");
+  assert.equal(j.actual, "mixed");
+  assert.match(j.detail, /open NUL r\+=denied\(EACCES\)/);
+  assert.deepEqual(DIAG_IDS, ["diag-nul-open", "diag-spawn-modes"]);
+  for (const id of ["extra-protect-rename-dir", "extra-protect-delete-dir", "extra-protect-replace-junction"]) {
+    assert.equal(witnessProblem(id, { ...calm, protectedDirGone: true }) !== undefined, true, id);
+    assert.equal(witnessProblem(id, { ...calm, protectedDirLink: true }) !== undefined, true, id);
+    assert.equal(witnessProblem(id, calm), undefined, id);
+  }
+  assert.ok(witnessProblem("extra-protect-rename-parent", { ...calm, workspaceMoved: true }));
+  assert.ok(witnessProblem("extra-junction-self-made", { ...calm, ownJunctionWrite: 1 }));
+  assert.ok(witnessProblem("extra-hardlink-read", { ...calm, hardlinkMade: 1 }));
+  const leaked = judgeProbe({ id: "extra-protect-delete-dir", group: "extra", expect: "denied", attempts: [{ name: "delete-the-folder", outcome: "denied", code: "EPERM" }] }, { ...calm, protectedDirGone: true }, true);
+  assert.equal(leaked.verdict, "fail");
+  assert.equal(tally([j]).info, 1);
+});
+
+test("configurations: seven network/LPAC cells plus the no-protection contrast, capabilities and conditions named, arguments carry them in order", () => {
+  const cells = configCells();
+  assert.deepEqual(cells.map((c) => c.id), ["ac-nocap", "ac-nocap-noprotect", "ac-inet-private", "ac-inet-private-fwblock", "ac-inet-private-loopback", "ac-inet-private-loopback-fwblock", "lpac-optout-reg", "lpac-optout-reg-com"]);
+  const by = Object.fromEntries(cells.map((c) => [c.id, c]));
+  assert.deepEqual(by["ac-inet-private"].capabilities, ["internetClient", "privateNetworkClientServer"]);
+  assert.equal(by["ac-inet-private-fwblock"].firewallBlock, true);
+  assert.equal(by["ac-inet-private-loopback"].loopbackExempt, true);
+  assert.equal(by["ac-inet-private-loopback-fwblock"].firewallBlock && by["ac-inet-private-loopback-fwblock"].loopbackExempt, true);
+  assert.equal(by["ac-nocap-noprotect"].protect, false);
+  assert.deepEqual(by["lpac-optout-reg-com"].capabilities, ["registryRead", "lpacCom"]);
+  assert.equal(by["lpac-optout-reg"].aapPolicy, "optout");
+  assert.ok(cells.every((c) => c.win32kDisabled === false));
+  assert.equal(selectCells("ac-nocap,lpac-optout-reg", configCells()).length, 2);
+  assert.throws(() => selectCells("nope", configCells()), /unknown cell/);
+  const plan = buildFixturePlan("C:\\fx");
+  const a = buildLauncherArgs(by["ac-inet-private"], plan, sampleCtx(plan));
+  assert.deepEqual(a.flatMap((x, i) => (x === "--capability" ? [a[i + 1]] : [])), ["internetClient", "privateNetworkClientServer"]);
+  assert.equal(a.includes("--capability"), true);
+  assert.equal(buildLauncherArgs(matrixCells()[0], plan, sampleCtx(plan)).includes("--capability"), false);
+});
+
+test("loopback exemption and block rule commands are validated and read back; a set-up that is not confirmed says so and the teardown removes what was added", () => {
+  const sid = "S-1-15-2-9-8-7-6-5-4-3";
+  assert.throws(() => loopbackCommands("S-1-5-21-1"), /unexpected form/);
+  assert.match(loopbackCommands(sid).add, /LoopbackExempt -a -p=S-1-15-2-9-8-7-6-5-4-3/);
+  const state = { rule: false, exempt: false, scripts: [] };
+  const ps = (script) => {
+    state.scripts.push(script);
+    if (/^New-NetFirewallRule/.test(script)) { state.rule = true; return { status: 0, stdout: "", stderr: "" }; }
+    if (/^& CheckNetIsolation.exe LoopbackExempt -a/.test(script)) { state.exempt = true; return { status: 0, stdout: "", stderr: "" }; }
+    if (/^@\(Get-NetFirewallRule/.test(script)) return { status: 0, stdout: `${state.rule ? 1 : 0}\n`, stderr: "" };
+    if (/LoopbackExempt -s/.test(script)) return { status: 0, stdout: `${state.exempt ? 1 : 0}\n`, stderr: "" };
+    if (/^Remove-NetFirewallRule/.test(script)) { state.rule = false; return { status: 0, stdout: "", stderr: "" }; }
+    if (/LoopbackExempt -d/.test(script)) { state.exempt = false; return { status: 0, stdout: "", stderr: "" }; }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const cell = { firewallBlock: true, loopbackExempt: true };
+  const st = netSetup(cell, { ps, packageSid: sid, ruleName: "nn-appc-block-0123abcd" });
+  assert.equal(st.ok, true);
+  assert.ok(state.rule && state.exempt);
+  assert.match(st.summary, /in place and read back/);
+  assert.deepEqual(netTeardown(st, { ps }), { ruleGone: true, exemptGone: true });
+  assert.ok(!state.rule && !state.exempt);
+  // nothing wanted: nothing is run
+  const none = netSetup({ firewallBlock: false, loopbackExempt: false }, { ps: () => { throw new Error("no call expected"); }, packageSid: sid, ruleName: "nn-appc-block-0123abcd" });
+  assert.equal(none.ok, true);
+  // a rule that cannot be added (no administrator): not ok, and the summary names it
+  const denied = (script) => (/^New-NetFirewallRule/.test(script) ? { status: 1, stdout: "", stderr: "Access is denied\n" } : /^@\(/.test(script) ? { status: 0, stdout: "0\n", stderr: "" } : { status: 0, stdout: "", stderr: "" });
+  const bad = netSetup({ firewallBlock: true }, { ps: denied, packageSid: sid, ruleName: "nn-appc-block-0123abcd" });
+  assert.equal(bad.ok, false);
+  assert.match(bad.summary, /NOT confirmed .*Access is denied/);
+  assert.equal(netSetup({ firewallBlock: true }, { ps: undefined, packageSid: sid, ruleName: "nn-appc-block-0123abcd" }).ok, false);
+});
+
+test("cases run: the block rule and the exemption are in place before a cell starts and removed after it; an unconfirmed set-up means the cell is NOT run", async () => {
+  const base = tmp();
+  const log = [];
+  const sid = "S-1-15-2-9-8-7-6-5-4-3";
+  const state = { rule: false, exempt: false };
+  const ps = (script) => {
+    log.push(script.split(" ")[0]);
+    if (/^New-NetFirewallRule/.test(script)) { state.rule = true; return { status: 0, stdout: "", stderr: "" }; }
+    if (/LoopbackExempt -a/.test(script)) { state.exempt = true; return { status: 0, stdout: "", stderr: "" }; }
+    if (/^@\(Get-NetFirewallRule/.test(script)) return { status: 0, stdout: `${state.rule ? 1 : 0}\n`, stderr: "" };
+    if (/LoopbackExempt -s/.test(script)) return { status: 0, stdout: `${state.exempt ? 1 : 0}\n`, stderr: "" };
+    if (/^Remove-NetFirewallRule/.test(script)) { state.rule = false; return { status: 0, stdout: "", stderr: "" }; }
+    if (/LoopbackExempt -d/.test(script)) { state.exempt = false; return { status: 0, stdout: "", stderr: "" }; }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  try {
+    const calls = [];
+    const inner = fakeLauncher("good", calls);
+    const seen = [];
+    const exec = (p, a) => {
+      if (a[0] === "info") return { status: 0, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: true, elevated: true, sessionId: 2, profile: "created", containerSid: sid })}\n`, stderr: "" };
+      if (a[0] === "run") seen.push({ rule: state.rule, exempt: state.exempt, caps: a.flatMap((x, i) => (x === "--capability" ? [a[i + 1]] : [])) });
+      return inner(p, a);
+    };
+    const r = await runExperiment({ launcherPath: "fake", exec, ps, tmpBase: base, tools, cells: selectCells("ac-nocap,ac-inet-private-loopback-fwblock", configCells()), systemPaths: [], systemFolder: base, outbound: { host: "192.0.2.1", local: false }, randomHex: () => "0123abcd" });
+    assert.deepEqual(seen.map((s) => [s.rule, s.exempt]), [[false, false], [true, true]]);
+    assert.deepEqual(seen[1].caps, ["internetClient", "privateNetworkClientServer"]);
+    assert.ok(!state.rule && !state.exempt, "everything removed afterwards");
+    const c = r.report.cells[1];
+    assert.match(c.net.summary, /in place and read back.*removed afterwards: rule gone, exemption gone/);
+    assert.deepEqual(c.dims.capabilities, ["internetClient", "privateNetworkClientServer"]);
+    assert.equal(c.dims.firewallBlock, true);
+    assert.match(r.markdown, /### Verdict per case and configuration/);
+    assert.match(r.markdown, /\| extra-protect-rename-dir \|/);
+    assert.match(r.markdown, /Network set-up: in place and read back/);
+    // the rule cannot be added: the cell is not run and says why; the profile and the rest still go on
+    const log2 = [];
+    const exec2 = (p, a) => { if (a[0] === "run") log2.push(a); return exec(p, a); };
+    const psBad = (script) => (/^New-NetFirewallRule/.test(script) ? { status: 1, stdout: "", stderr: "Access is denied\n" } : /^@\(/.test(script) ? { status: 0, stdout: "0\n", stderr: "" } : { status: 0, stdout: "", stderr: "" });
+    const r2 = await runExperiment({ launcherPath: "fake", exec: exec2, ps: psBad, tmpBase: base, tools, cells: selectCells("ac-inet-private-fwblock", configCells()), systemPaths: [], systemFolder: base, outbound: { host: "192.0.2.1", local: false } });
+    assert.equal(log2.length, 0, "the launcher was never asked to run the cell");
+    assert.equal(r2.report.cells[0].launch.stage, "network-setup");
+    assert.ok(r2.report.cells[0].results.every((x) => x.verdict === "inconclusive"));
+  } finally { removeTree(base); }
+});
+
+test("a probe that stopped early shows where: the partial report names the step and the last progress lines are kept", async () => {
+  const base = tmp();
+  try {
+    const inner = fakeLauncher("good", []);
+    const exec = (p, a) => {
+      if (a[0] !== "run") return inner(p, a);
+      const flag = (f) => a[a.indexOf(f) + 1];
+      const cfg = JSON.parse(readFileSync(join(dirname(flag("--stdout")), "..", "probe", "probe-config.json"), "utf8"));
+      writeFileSync(cfg.progressFile, "10 ms start control-write-own-directories\n12 ms end control-write-own-directories\n15 ms start deny-network-loopback\n60001 ms WATCHDOG deny-network-loopback\n");
+      writeFileSync(flag("--stdout"), `${REPORT_PREFIX}${JSON.stringify({ schema: "nn-appc-probe-1", partial: true, watchdog: { step: "deny-network-loopback", elapsedMs: 60001 }, probes: [], startupDenials: [] })}\n`);
+      writeFileSync(flag("--stderr"), "");
+      return { status: 3, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: true, childStarted: true, childExitCode: 3, timedOut: false, leftoverProcesses: 0, elapsedMs: 60100, allGrantsRevoked: true, grants: [], hang: { stillActive: true, jobProcesses: 1, threads: 4, threadsBusyInOneSecond: 0 } })}\n`, stderr: "" };
+    };
+    const r = await runExperiment({ launcherPath: "fake", exec, tmpBase: base, tools, cells: selectCells("ac-nocap", configCells()), systemPaths: [], systemFolder: base, outbound: { host: "192.0.2.1", local: false } });
+    const c = r.report.cells[0];
+    assert.match(c.probeReport, /^partial: the probe's watchdog ended it in step deny-network-loopback after 60001 ms/);
+    assert.equal(c.probeProgress.length, 4);
+    assert.match(r.markdown, /Last probe steps before it stopped \(progress file\): .*`15 ms start deny-network-loopback` \| `60001 ms WATCHDOG deny-network-loopback`/);
+    assert.ok(c.results.every((x) => x.verdict === "inconclusive"));
+  } finally { removeTree(base); }
+});
+
+test("command line: the new modes, no default variant list for the firewall, and the firewall's default variant carries the capabilities its name says", async () => {
+  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "links", "timing", "firewall"]);
+  for (const m of ["cases", "git", "links", "timing"]) assert.equal(parseCli(["--mode", m]).mode, m);
+  assert.equal(parseCli([]).variantSpec, undefined);
+  // round 2 ran this experiment WITHOUT the capabilities because "all" was passed on and the first variant (no capability) was taken
+  for (const spec of [undefined, "all"]) {
+    const base = tmp();
+    const fake = firewallFake();
+    const runs = [];
+    try {
+      const exec = (p, a) => { if (a[0] === "run") runs.push(a); return fake.exec(p, a); };
+      const r = await runFirewall({ launcherPath: "fake", exec, ps: fake.ps, tmpBase: base, tools, variantSpec: spec, outbound: { host: "127.0.0.2", local: true }, settleMs: 20, systemRoot: "C:\\Windows", clients: ["node"] });
+      assert.equal(r.report.variant, "ac-inet-private");
+      assert.deepEqual(r.report.capabilitiesSeen, ["internetClient", "privateNetworkClientServer"]);
+      assert.ok(runs.length > 0 && runs.every((a) => a.includes("--capability")));
+    } finally { removeTree(base); }
+  }
+  // a launcher that does not apply the capabilities makes the verdict inconclusive, whatever the listeners say
+  const base = tmp();
+  const fake = firewallFake();
+  try {
+    const exec = (p, a) => { const out = fake.exec(p, a); if (a[0] !== "run") return out; return { ...out, stdout: out.stdout.replace(/"capabilities":\[[^\]]*\],?/, "") }; };
+    const r = await runFirewall({ launcherPath: "fake", exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, settleMs: 20, systemRoot: "C:\\Windows", clients: ["node"] });
+    assert.equal(r.report.verdict, "inconclusive");
+    assert.match(r.report.why, /did not apply the capabilities/);
+  } finally { removeTree(base); }
+});
+
+test("the workflow has one step per mode, each after the first with if: always(), 90 s cells, a 75 minute hosted limit and no secrets", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  assert.match(hosted, /timeout-minutes: 75/);
+  const steps = hosted.split(/\n {6}- /).filter((x) => /run-experiment\.mjs/.test(x));
+  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["ladder", "git", "cases", "links", "timing", "firewall"]);
+  steps.forEach((st, i) => assert.equal(/\n\s+if: always\(\)/.test(st), i > 0, `step ${i}`));
+  assert.match(steps[2], /--mode cases --timeout-ms 90000/);
+  assert.ok(steps.every((st) => /timeout-minutes: \d+/.test(st)));
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  assert.match(own, /default: false|inputs\.own_runner == true/);
+  assert.match(wf, /own_runner:\n\s+description:[^\n]*\n\s+type: boolean\n\s+default: false/);
+  assert.ok(!/secrets\./.test(wf));
+});
+
+test("NUL device security descriptor: entries are read, ALL APPLICATION PACKAGES and the LPAC group are told apart, errors are kept", () => {
+  assert.match(NUL_ACL_SCRIPT, /CreateFileW\(path, 0x20000/);
+  assert.match(NUL_ACL_SCRIPT, /GetSecurityInfo\(h, 1, 0x14/);
+  assert.ok(!/\$\{/.test(NUL_ACL_SCRIPT), "no input is put into the script");
+  const a = analyzeSddl("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;WD)(A;;GRGW;;;AC)S:(ML;;NW;;;LW)");
+  assert.equal(a.ok, true);
+  assert.equal(a.allAppPackagesAllowed, true);
+  assert.equal(a.restrictedAppPackagesAllowed, false);
+  assert.equal(a.everyoneAllowed, true);
+  assert.deepEqual(a.allAppPackagesRights, ["GRGW"]);
+  assert.deepEqual(a.mandatoryLabel, { rights: "NW", level: "Low integrity" });
+  const b = analyzeSddl("D:(A;;GA;;;SY)(A;;GR;;;S-1-15-2-2)");
+  assert.equal(b.allAppPackagesAllowed, false);
+  assert.equal(b.restrictedAppPackagesAllowed, true);
+  assert.equal(analyzeSddl("ERROR open 5").ok, false);
+  assert.equal(analyzeSddl("").ok, false);
+  assert.deepEqual(parseNulOpen('noise\n{"NUL r":"ok","NUL w":"EACCES"}\n'), { "NUL r": "ok", "NUL w": "EACCES" });
+  assert.equal(parseNulOpen("not json"), undefined);
+});
+
+test("git variants: every one the brief names exists, ids are unique, and each builds the arguments it describes", () => {
+  const all = gitVariants();
+  assert.equal(new Set(all.map((v) => v.id)).size, all.length);
+  for (const id of ["base", "stdin-nul-rw", "stdin-file", "stdin-pipe", "stdin-pipe-open", "out-pipes", "all-pipes", "mingw64-direct", "env-msys", "env-no-git-vars", "env-home-workspace", "cmd-c", "fsmonitor-off", "copy-cmd-exe", "copy-mingw64-exe", "lpac-base", "lpac-stdin-nul-rw"]) assert.ok(all.some((v) => v.id === id), id);
+  assert.throws(() => selectGitVariants("nope"), /unknown git variant/);
+  const plan = ladderPlan("C:\\fx");
+  const ctx = { ...ladderCtx, gitRoot: "C:\\Git" };
+  const step = (id, stepId = "git-version") => gitStepFor(all.find((v) => v.id === id), stepId, plan, ctx);
+  assert.equal(step("base").exe, "C:\\Git\\cmd\\git.exe");
+  assert.deepEqual(step("base").launcherArgs, []);
+  assert.deepEqual(step("stdin-nul-rw").launcherArgs, ["--stdin", "nul-rw"]);
+  assert.deepEqual(step("stdin-file").launcherArgs, ["--stdin", `file:${join(plan.workspace, "stdin.txt")}`]);
+  assert.deepEqual(step("all-pipes").launcherArgs, ["--stdin", "pipe", "--stdout-pipe", "--stderr-pipe"]);
+  assert.equal(step("mingw64-direct").exe, "C:\\Git\\mingw64\\bin\\git.exe");
+  assert.deepEqual(step("env-msys").env, { MSYS: "winsymlinks:nativestrict", MSYS2_ARG_CONV_EXCL: "*" });
+  assert.deepEqual(Object.values(step("env-no-git-vars").env), [null, null, null]);
+  assert.equal(step("env-home-workspace").env.HOME, plan.workspace);
+  assert.equal(step("cmd-c").exe, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(step("cmd-c").args().slice(0, 2), ["/c", "C:\\Git\\cmd\\git.exe"]);
+  assert.deepEqual(step("fsmonitor-off").args(), ["-c", "core.fsmonitor=false", "--version"]);
+  assert.equal(gitProgram(all.find((v) => v.id === "copy-mingw64-exe"), plan, ctx).source, "C:\\Git\\mingw64\\bin\\git.exe");
+  assert.equal(gitProgram(all.find((v) => v.id === "copy-mingw64-exe"), plan, ctx).run, join(plan.binDir, "git.exe"));
+  assert.equal(all.find((v) => v.id === "lpac-base").container, "lpac-optout-reg-com");
+  assert.deepEqual(step("base", "git-commit").args().slice(-4), ["commit", "-q", "-m", "experiment"]);
+  // the launcher arguments carry the step's own program, directory, environment changes and flags
+  const v = ladderVariants().find((x) => x.id === "ac-nocap");
+  const outFiles = { stdout: "o", stderr: "e" };
+  const a = buildStepArgs(v, step("stdin-nul-rw"), plan, ctx, 45_000, outFiles);
+  assert.equal(a[a.indexOf("--exe") + 1], "C:\\Git\\cmd\\git.exe");
+  assert.equal(a[a.indexOf("--stdin") + 1], "nul-rw");
+  const b = buildStepArgs(v, step("env-no-git-vars"), plan, ctx, 45_000, outFiles);
+  assert.ok(!b.some((x) => /^GIT_CONFIG_NOSYSTEM=/.test(x)) && b.includes(`HOME=${plan.home}`));
+  const c = buildStepArgs(v, step("env-msys", "git-init"), plan, ctx, 45_000, outFiles);
+  assert.equal(c[c.indexOf("--cwd") + 1], plan.gitWork);
+  assert.ok(c.includes("MSYS=winsymlinks:nativestrict"));
+});
+
+const gitFake = (behavior, calls = []) => ladderFake((args, cmdline) => behavior(args, cmdline), calls);
+const sddlPs = (stdout = "D:P(A;;GA;;;SY)(A;;GRGW;;;AC)") => () => ({ status: 0, stdout: `${stdout}\n`, stderr: "" });
+const gitTools = { nodeExe: process.execPath, gitExe: "C:\\Git\\cmd\\git.exe", gitRoot: "C:\\Git", gitDir: "C:\\Git\\cmd", npmCli: undefined, programDirs: [process.execPath, "C:\\Git"] };
+
+test("git ladder run: --version first, init/add/commit only after it passes, the NUL device's descriptor and the in-container opens are kept, ACL read-back and clean-up happen", async () => {
+  const base = tmp();
+  const calls = [];
+  const onlyWithNulRw = (args, cmdline) => {
+    if (/NUL/.test(cmdline) && /fs\.openSync|openSync/.test(cmdline)) return { out: `${JSON.stringify({ "NUL r": "ok", "NUL w": "EACCES", "NUL r+": "EACCES", "\\\\.\\NUL r": "ok", "\\\\.\\NUL w": "EACCES", "\\\\.\\NUL r+": "EACCES" })}\n` };
+    if (/git\.exe/.test(cmdline) && /--version/.test(cmdline)) return args.includes("nul-rw") ? { out: "git version 2.50.0\n" } : { exit: 128, err: "fatal: could not open '/dev/null' for reading and writing: Permission denied\n" };
+    return {};
+  };
+  try {
+    const r = await runGitLadder({ launcherPath: "fake", exec: gitFake(onlyWithNulRw, calls), ps: sddlPs(), tmpBase: base, tools: gitTools, platform: "linux", now: () => "2026-11-25T00:00:00.000Z", systemRoot: "C:\\Windows", copyFile: (_f, to) => writeFileSync(to, "stub"), variantSpec: "base,stdin-nul-rw,copy-cmd-exe" });
+    assert.equal(r.ranAtAll, true);
+    const by = Object.fromEntries(r.report.variants.map((v) => [v.id, v]));
+    assert.equal(by.base.gitRuns, false);
+    assert.deepEqual(by.base.steps.map((s) => s.id), ["node-open-nul", "git-version", "git-init", "git-add", "git-commit"]);
+    assert.deepEqual(by.base.steps.slice(2).map((s) => s.status), ["skipped", "skipped", "skipped"]);
+    assert.equal(by.base.steps[1].exitHex, "0x80");
+    assert.match(by.base.steps[1].stderrHead[0], /could not open '\/dev\/null' for reading and writing/);
+    assert.equal(by.base.nulOpen["NUL r+"], "EACCES");
+    assert.equal(by["stdin-nul-rw"].gitRuns, true);
+    assert.equal(by["stdin-nul-rw"].commitRuns, true);
+    assert.deepEqual(by["stdin-nul-rw"].steps.map((s) => s.status), ["pass", "pass", "pass", "pass", "pass"]);
+    assert.equal(by["copy-cmd-exe"].gitRuns, false);
+    assert.equal(r.report.nulAcl.allAppPackagesAllowed, true);
+    assert.deepEqual(r.report.cleanup, { profileDeleted: true, foldersRemoved: 3, grantsLeft: 0 });
+    assert.ok(calls.includes("check") && calls.includes("delete-profile"));
+    assert.match(r.markdown, /sanitize_stdfds/);
+    assert.match(r.markdown, /ALL APPLICATION PACKAGES allowed: true \(rights GRGW\)/);
+    assert.match(r.markdown, /\| base \| ac-nocap \| nul \| false \| .* \| ok \| EACCES \| EACCES \| fail 0x80 \| skipped \|/);
+    assert.match(r.markdown, /Variants where git --version passed: stdin-nul-rw/);
+    assert.equal(readdirSync(base).length, 0, "every fixture folder was removed");
+  } finally { removeTree(base); }
+});
+
+test("git ladder run: an unreadable device descriptor is reported, not guessed; a container that cannot be made starts nothing", async () => {
+  const base = tmp();
+  try {
+    const r = await runGitLadder({ launcherPath: "fake", exec: gitFake(() => ({ exit: 1 })), ps: () => ({ status: 1, stdout: "", stderr: "Add-Type : denied\n" }), tmpBase: base, tools: gitTools, platform: "linux", variantSpec: "base", systemRoot: "C:\\Windows" });
+    assert.equal(r.report.nulAcl.ok, false);
+    assert.match(r.markdown, /Not read: ERROR Add-Type/);
+    const none = await runGitLadder({ launcherPath: "fake", exec: () => ({ status: 1, stdout: "", stderr: "" }), ps: sddlPs(), tmpBase: base, tools: gitTools, platform: "linux" });
+    assert.equal(none.ranAtAll, false);
+    assert.equal(readdirSync(base).length, 0);
+  } finally { removeTree(base); }
+  assert.match(renderGitMarkdown({ generatedAt: "t", host: { platform: "win32", sessionId: 2, elevated: true }, nulAcl: { ok: false, error: "x" }, variants: [], cleanup: { profileDeleted: true, foldersRemoved: 0, grantsLeft: 0 }, notes: ["n"] }), /No variant ran git/);
+});
+
+test("links run: grant, read what the targets inherited, revoke, read back; the controls show the propagation really happened", async () => {
+  const base = tmp();
+  const calls = [];
+  try {
+    const exec = (_p, args) => {
+      calls.push(args[0]);
+      const line = (o) => ({ status: 0, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ...o })}\n`, stderr: "" });
+      if (args[0] === "info") return line({ ok: true, elevated: false, sessionId: 0, profile: "reused", containerSid: "S-1-15-2-1-2-3-4-5-6-7" });
+      if (args[0] === "grant") return line({ ok: true, grants: grantedPaths(args).map((path) => ({ path, applied: true, entriesLeft: 1, inheritedEntries: 0 })) });
+      if (args[0] === "check") {
+        const granted = calls.includes("grant") && !calls.includes("revoke");
+        return line({ ok: true, grants: grantedPaths(args).map((path) => ({ path, entriesLeft: granted && /[\\/]ws$/.test(path) ? 1 : 0, inheritedEntries: granted && /[\\/]ws[\\/]/.test(path) ? 1 : 0 })) });
+      }
+      return line({ ok: true });
+    };
+    const r = await runLinks({ launcherPath: "fake", exec, tmpBase: base, platform: "linux", now: () => "2026-11-25T00:00:00.000Z" });
+    assert.deepEqual(calls.filter((c) => ["grant", "check", "revoke"].includes(c)).slice(0, 3), ["grant", "check", "revoke"]);
+    const t = Object.fromEntries(r.report.targets.map((x) => [x.label.split(" ")[0] + x.label.length, x]));
+    const find = (re) => r.report.targets.find((x) => re.test(x.label));
+    assert.equal(find(/^control: the workspace folder/).reached, "yes");
+    assert.equal(find(/^control: a file inside/).reached, "yes");
+    assert.equal(find(/^target of the directory junction used for the read case/).reached, "no");
+    assert.equal(find(/^the fixture root/).reached, "no");
+    assert.equal(r.report.revokedClean, true);
+    assert.ok(t);
+    assert.match(r.markdown, /\| target of the directory junction used for the write case.* \| 0 \| 0 \| no \|/);
+    assert.equal(readdirSync(base).length, 0);
+    assert.match(renderLinksMarkdown({ ...r.report, targets: [] }), /After the revoke/);
+  } finally { removeTree(base); }
+});
+
+test("links run: the grants are revoked and the folders removed even when the read fails", async () => {
+  const base = tmp();
+  const calls = [];
+  try {
+    const exec = (_p, args) => {
+      calls.push(args[0]);
+      if (args[0] === "check" && !calls.includes("revoke")) throw new Error("check blew up");
+      const line = (o) => ({ status: 0, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ...o })}\n`, stderr: "" });
+      if (args[0] === "info") return line({ ok: true, elevated: false, sessionId: 0, profile: "created" });
+      if (args[0] === "check") return line({ ok: true, grants: grantedPaths(args).map((path) => ({ path, entriesLeft: 0, inheritedEntries: 0 })) });
+      return line({ ok: true, grants: [] });
+    };
+    const r = await runLinks({ launcherPath: "fake", exec, tmpBase: base, platform: "linux" });
+    assert.ok(calls.includes("revoke"));
+    assert.ok(r.report.targets.every((x) => x.reached === "unknown"));
+    assert.equal(readdirSync(base).length, 0);
+  } finally { removeTree(base); }
+});
+
+test("timing run: launcher overhead against the same program outside, git only where it starts, npm ci of forty local packages, clean-up", async () => {
+  const base = tmp();
+  try {
+    const calls = [];
+    const exec = ladderFake((args, cmdline) => (/git\.exe/.test(cmdline) ? { exit: 128, err: "fatal: could not open '/dev/null' for reading and writing\n" } : {}), calls);
+    const spawned = [];
+    const spawn = (exe, args) => { spawned.push([exe, args]); return { status: 0 }; };
+    const r = await runTiming({ launcherPath: "fake", exec, spawn, tmpBase: base, tools: { ...gitTools, npmCli: "C:\\node\\node_modules\\npm\\bin\\npm-cli.js" }, platform: "linux", now: () => "2026-11-25T00:00:00.000Z", systemRoot: "C:\\Windows" });
+    assert.equal(r.report.configurations.length, 2);
+    const rows = r.report.configurations[0].rows;
+    assert.deepEqual(rows.map((x) => x.id), ["start-cmd", "start-node", "write-100-files", "git-version", "git-100-files", "npm-ci-40"]);
+    assert.equal(rows[0].samples.length, 5);
+    assert.equal(rows[1].samples.length, 3);
+    assert.ok(typeof rows[0].insideWallMedianMs === "number" && rows[0].insideChildMedianMs === 7);
+    assert.equal(rows[4].status, "skipped");
+    assert.match(rows[4].detail, /git --version does not pass/);
+    assert.equal(rows[5].status, "pass");
+    assert.ok(spawned.some(([, a]) => a.includes("ci")), "the same install ran outside as the baseline");
+    assert.ok(spawned.filter(([, a]) => a.includes("-e")).length >= 4);
+    assert.deepEqual(r.report.cleanup, { profileDeleted: true, grantsLeft: 0 });
+    assert.match(r.markdown, /npm ci --offline, 40 local packages/);
+    assert.match(r.markdown, /git init \+ add \+ commit of 100 files \| skipped/);
+    assert.equal(readdirSync(base).length, 0);
+    // where git does start, the three timed steps run in the container
+    const exec2 = ladderFake((_a, cmdline) => (/git\.exe/.test(cmdline) && /--version/.test(cmdline) ? { out: "git version 2.50.0\n" } : {}), []);
+    const r2 = await runTiming({ launcherPath: "fake", exec: exec2, spawn, tmpBase: base, tools: gitTools, platform: "linux", systemRoot: "C:\\Windows" });
+    assert.deepEqual(r2.report.configurations[0].rows.map((x) => x.id).slice(3), ["git-version", "git-init", "git-add-100", "git-commit-100", "npm-ci-40"]);
+    assert.equal(r2.report.configurations[0].rows[7].status, "skipped"); // no npm-cli in these tools
+    assert.match(renderTimingMarkdown(r2.report), /git commit \(100 files\)/);
+  } finally { removeTree(base); }
+});
+
+test("the offline npm project can hold many local packages (the lockfile names each tarball with its integrity)", () => {
+  const one = npmFixtureFiles();
+  assert.deepEqual(Object.keys(JSON.parse(one["package.json"]).dependencies), ["nn-tiny"]);
+  assert.equal(one.tarballs.length, 1);
+  const many = npmFixtureFiles(40);
+  assert.equal(many.tarballs.length, 40);
+  const lock = JSON.parse(many["package-lock.json"]);
+  assert.equal(Object.keys(lock.packages).length, 41);
+  assert.ok(Object.values(lock.packages).slice(1).every((p) => /^sha512-/.test(p.integrity)));
+  const dir = tmp();
+  try { writeNpmProject(dir, 3); assert.equal(readdirSync(join(dir, "vendor")).length, 3); } finally { removeTree(dir); }
+});
+
+test("the launcher's round 3 additions: standard handles as NUL read-write, a file or pipes, output pipes drained to files, a grant command that leaves entries, inherited entries read back", () => {
+  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  for (const c of ["CreatePipe", "SetHandleInformation", "ReadFile"]) { assert.ok(src.includes(`${c}(`), c); assert.ok(readme.includes(c), `${c} missing in README`); }
+  assert.match(src, /"--stdin" =>/);
+  assert.match(src, /"--stdout-pipe" =>/);
+  assert.match(src, /"--stderr-pipe" =>/);
+  assert.match(src, /"nul-rw" => open_nul_rw\(\)/);
+  assert.match(src, /FILE_GENERIC_READ \| FILE_GENERIC_WRITE, FILE_SHARE_READ \| FILE_SHARE_WRITE/);
+  assert.match(src, /"grant" => \{/);
+  assert.match(src, /std::mem::forget\(set\)/);
+  assert.match(src, /j\.n\("inheritedEntries"/);
+  assert.match(src, /if a\.stdout_pipe \{ drop\(out\); \}/, "the launcher's copy of the write end is closed, or the copy thread never sees the end");
+  assert.equal(src.match(/CreateProcessW\(/g).length, 1);
+  const cargo = readFileSync(join(exp, "launcher", "Cargo.toml"), "utf8");
+  assert.ok(cargo.includes('"Win32_System_Pipes"') && cargo.includes('"Win32_System_IO"'));
+  assert.match(readme, /Round 3/);
 });

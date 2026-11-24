@@ -125,9 +125,13 @@ export function buildStepArgs(variant, step, plan, ctx, timeoutMs = STEP_TIMEOUT
   for (const c of variant.capabilities) args.push("--capability", c);
   if (variant.limits) args.push("--memory-mb", "4096", "--active-processes", "64", "--ui-limits");
   args.push("--timeout-ms", String(timeoutMs));
-  args.push("--stdout", outFiles.stdout, "--stderr", outFiles.stderr, "--cwd", plan.workspace);
-  for (const [k, v] of Object.entries(ladderEnv(variant, plan, ctx))) args.push("--env", `${k}=${v}`);
-  const exe = stepExecutable(step, variant, plan, ctx);
+  // Round 3: a step may name its own program (`exe`), working directory, extra environment (a null value removes a name) and launcher flags (stdin and output modes).
+  args.push("--stdout", outFiles.stdout, "--stderr", outFiles.stderr, "--cwd", step.cwd ?? plan.workspace);
+  const env = { ...ladderEnv(variant, plan, ctx) };
+  for (const [k, v] of Object.entries(step.env ?? {})) { if (v === null) delete env[k]; else env[k] = v; }
+  for (const [k, v] of Object.entries(env)) args.push("--env", `${k}=${v}`);
+  args.push(...(step.launcherArgs ?? []));
+  const exe = step.exe ?? stepExecutable(step, variant, plan, ctx);
   const flags = step.program === "node" ? variant.nodeFlags : [];
   args.push("--exe", exe, "--cmdline", buildCommandLine(exe, [...flags, ...step.args()]));
   return args;
@@ -313,6 +317,53 @@ export function renderLadderMarkdown(report) {
 export const SID_PATTERN = /^S-1-15-2(?:-\d+){1,}$/;
 export const RULE_PATTERN = /^nn-appc-block-[0-9a-f]{8}$/;
 
+/** The loopback exemption of a package (CheckNetIsolation, administrator): an AppContainer cannot reach the host's own loopback addresses without one. */
+export function loopbackCommands(packageSid) {
+  if (!SID_PATTERN.test(packageSid)) throw new Error("package SID has an unexpected form");
+  return {
+    add: `& CheckNetIsolation.exe LoopbackExempt -a -p=${packageSid} | Out-Null; if ($LASTEXITCODE -ne 0) { throw "CheckNetIsolation add exit $LASTEXITCODE" }; 'added'`,
+    exists: `@((& CheckNetIsolation.exe LoopbackExempt -s) | Select-String -SimpleMatch '${packageSid}').Count`,
+    remove: `& CheckNetIsolation.exe LoopbackExempt -d -p=${packageSid} | Out-Null; 'removed'`,
+  };
+}
+
+const psCount = (ps, script) => { const n = Number(String(safe(() => ps(script).stdout) ?? "NaN").trim()); return Number.isNaN(n) ? null : n; };
+
+/**
+ * Puts a cell's network conditions in place (an outbound BLOCK rule for the package SID, a loopback exemption) and reads each back. `ok` is false when something asked for is not
+ * confirmed, and the cell is then not run (its results would not mean what its name says). Call `netTeardown` in a finally path whatever happens.
+ */
+export function netSetup(cell, { ps, packageSid, ruleName }) {
+  const st = { wanted: { rule: cell.firewallBlock === true, exempt: cell.loopbackExempt === true }, ruleName, packageSid, ruleAdded: false, exemptAdded: false, ok: true, errors: [] };
+  if (!st.wanted.rule && !st.wanted.exempt) return { ...st, summary: "none needed" };
+  if (typeof ps !== "function") return { ...st, ok: false, errors: ["no PowerShell available"], summary: "NOT put in place: no PowerShell available" };
+  const fw = firewallCommands(ruleName, packageSid);
+  const lb = loopbackCommands(packageSid);
+  if (st.wanted.exempt) {
+    const r = safe(() => ps(lb.add));
+    st.exemptAdded = r?.status === 0 && (psCount(ps, lb.exists) ?? 0) >= 1;
+    if (!st.exemptAdded) { st.ok = false; st.errors.push(`loopback exemption: ${String(r?.stderr ?? "no answer").trim().split(/\r?\n/)[0]?.slice(0, 160)}`); }
+  }
+  if (st.wanted.rule) {
+    const r = safe(() => ps(fw.add));
+    st.ruleAdded = r?.status === 0 && (psCount(ps, fw.exists) ?? 0) >= 1;
+    if (!st.ruleAdded) { st.ok = false; st.errors.push(`block rule: ${String(r?.stderr ?? "no answer").trim().split(/\r?\n/)[0]?.slice(0, 160)}`); }
+  }
+  st.summary = st.ok ? `in place and read back (block rule ${st.wanted.rule ? "yes" : "no"}, loopback exemption ${st.wanted.exempt ? "yes" : "no"})` : `NOT confirmed (${st.errors.join("; ")}); the cell was not run`;
+  return st;
+}
+
+/** Removes what `netSetup` added and reads the absence back. Never throws. */
+export function netTeardown(st, { ps }) {
+  const out = { ruleGone: true, exemptGone: true };
+  if (typeof ps !== "function" || (!st.wanted?.rule && !st.wanted?.exempt)) return out;
+  const fw = firewallCommands(st.ruleName, st.packageSid);
+  const lb = loopbackCommands(st.packageSid);
+  if (st.wanted.rule) { safe(() => ps(fw.remove)); out.ruleGone = psCount(ps, fw.exists) === 0; }
+  if (st.wanted.exempt) { safe(() => ps(lb.remove)); out.exemptGone = psCount(ps, lb.exists) === 0; }
+  return out;
+}
+
 export function firewallCommands(ruleName, packageSid) {
   if (!RULE_PATTERN.test(ruleName)) throw new Error("rule name has an unexpected form");
   if (!SID_PATTERN.test(packageSid)) throw new Error("package SID has an unexpected form");
@@ -371,7 +422,8 @@ export async function runFirewall(opts) {
   const tmpBase = opts.tmpBase ?? os.tmpdir();
   const log = opts.log ?? (() => {});
   const now = (opts.now ?? (() => new Date().toISOString()))();
-  const variant = selectVariants(opts.variantSpec ?? "ac-inet-private")[0];
+  // Round 2 ran this with the first variant of the list (no capability) because the command line's default "all" was passed through. The default is the variant the text names.
+  const variant = selectVariants(opts.variantSpec === undefined || opts.variantSpec === "all" ? "ac-inet-private" : opts.variantSpec)[0];
   const names = { root: undefined, home: os.homedir(), tmp: tmpBase, user: safe(() => os.userInfo().username), host: os.hostname() };
   const notes = [];
   const info = parseLauncherLine(safe(() => exec(opts.launcherPath, ["info", "--name", profileName], { timeoutMs: 60_000 }).stdout) ?? "");
@@ -419,8 +471,8 @@ export async function runFirewall(opts) {
       // A client that was started is judged by the listeners; one that never started proves nothing about the network.
       await new Promise((res) => setTimeout(res, opts.settleMs ?? 300));
       return {
-        phase: label, client, started: line?.childStarted === true, exitHex: line?.childStarted ? hex(line.childExitCode) : undefined, timedOut: line?.timedOut === true,
-        loopbackConnections: loop.count() - before[0], outboundConnections: wide.count() - before[1], stderrHead: stderrHead(safe(() => readFileSync(outFiles.stderr, "utf8")) ?? "", 3, 160), launcherStage: line?.childStarted === true ? undefined : (line?.stage ?? "no-launcher-answer"),
+        phase: label, client, started: line?.childStarted === true, capabilitiesSeen: Array.isArray(line?.capabilities) ? line.capabilities.map((c) => c.name) : undefined, exitHex: line?.childStarted ? hex(line.childExitCode) : undefined, timedOut: line?.timedOut === true,
+        loopbackConnections: loop.count() - before[0], outboundConnections: wide.count() - before[1], stderrHead: stderrHead(safe(() => readFileSync(outFiles.stderr, "utf8")) ?? "", 3, 160), stdoutHead: stderrHead(safe(() => readFileSync(outFiles.stdout, "utf8")) ?? "", 3, 160), launcherStage: line?.childStarted === true ? undefined : (line?.stage ?? "no-launcher-answer"),
       };
     };
     const outsideControl = async (label) => {
@@ -457,8 +509,12 @@ export async function runFirewall(opts) {
   let profileDeleted = false;
   if (!opts.dryRun && profile.createdNow) profileDeleted = parseLauncherLine(safe(() => exec(opts.launcherPath, ["delete-profile", "--name", profileName], { timeoutMs: 60_000 }).stdout) ?? "")?.ok === true;
   else if (!profile.createdNow) notes.push("the container profile existed before this run, so it was left in place");
-  const verdict = judgeFirewall(phases, rule);
-  const report = { schema: FIREWALL_SCHEMA, generatedAt: now, host, variant: variant.id, capabilities: variant.capabilities, firewallProfiles, rule, phases, verdict: verdict.verdict, why: verdict.why, cleanup: { profileDeleted, ruleRemoved: rule.removed && rule.existsAfterRemoval === 0 }, notes };
+  // The capabilities the launcher says it gave the container (round 2 ran with none although the variant named two): what the clients saw is only meaningful with them.
+  const seen = phases.find((p) => p.capabilitiesSeen !== undefined)?.capabilitiesSeen ?? [];
+  const missing = variant.capabilities.filter((c) => !seen.includes(c));
+  let verdict = judgeFirewall(phases, rule);
+  if (missing.length > 0 && phases.some((p) => p.started)) verdict = { verdict: "inconclusive", why: `the launcher did not apply the capabilities the variant names (missing: ${missing.join(", ")})` };
+  const report = { schema: FIREWALL_SCHEMA, generatedAt: now, host, variant: variant.id, capabilities: variant.capabilities, capabilitiesSeen: seen, firewallProfiles, rule, phases, verdict: verdict.verdict, why: verdict.why, cleanup: { profileDeleted, ruleRemoved: rule.removed && rule.existsAfterRemoval === 0 }, notes };
   return { report, markdown: renderFirewallMarkdown(report), ranAtAll: true, names };
 }
 
@@ -490,7 +546,7 @@ export function renderFirewallMarkdown(report) {
   L.push("Commands run (PowerShell, administrator):", "", "```", report.rule.commandAdd, report.rule.commandRemove, "```", "");
   L.push(`Rule added and confirmed: ${report.rule.added}; removed: ${report.rule.removed}; rules still named like it after removal: ${report.rule.existsAfterRemoval}.`, "");
   L.push("| phase | client | started | loopback listener connections | outbound listener connections | notes |", "| --- | --- | --- | --- | --- | --- |");
-  for (const p of report.phases) L.push(`| ${p.phase} | ${p.client} | ${p.started}${p.exitHex ? ` (exit ${p.exitHex}${p.timedOut ? ", timed out" : ""})` : ""} | ${p.loopbackConnections} | ${p.outboundConnections} | ${[p.launcherStage ? `launcher: ${p.launcherStage}` : "", ...(p.stderrHead ?? []).map((x) => `\`${x.replaceAll("`", "'").replaceAll("|", "/")}\``)].filter(Boolean).join(" ")} |`);
+  for (const p of report.phases) L.push(`| ${p.phase} | ${p.client} | ${p.started}${p.exitHex ? ` (exit ${p.exitHex}${p.timedOut ? ", timed out" : ""})` : ""} | ${p.loopbackConnections} | ${p.outboundConnections} | ${[p.launcherStage ? `launcher: ${p.launcherStage}` : "", ...(p.stderrHead ?? []).map((x) => `\`${x.replaceAll("`", "'").replaceAll("|", "/")}\``), ...(p.stdoutHead ?? []).map((x) => `out: \`${x.replaceAll("`", "'").replaceAll("|", "/")}\``)].filter(Boolean).join(" ")} |`);
   L.push("", "Connections are what the host's own listeners counted, not what a client printed.", "");
   L.push(`- Container profile deleted: ${report.cleanup.profileDeleted}; rule removed and gone: ${report.cleanup.ruleRemoved}.`);
   for (const n of report.notes) L.push(`- ${n}`);
