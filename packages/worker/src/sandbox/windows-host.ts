@@ -172,3 +172,9 @@ export interface WindowsHost {
 /** The call every `wsb` command goes through: the host's own launch strategy when it has one, otherwise its plain `run`. */
 export const runWsbCommand = (host: WindowsHost, file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult> =>
   host.runWsb !== undefined ? host.runWsb(file, args, options) : host.run(file, args, options);
+
+/**
+ * A copy of a host whose program calls, `wsb` commands included, all go to `run`. A copy made with a plain spread keeps the original's `runWsb`, so a replaced `run` is never asked
+ * about `wsb` and the real scheduled-task launch runs instead (this is how the CI run of 7c9d6c75 failed on Windows). Tests that stand in for the Windows Sandbox client use this.
+ */
+export const withRun = (host: WindowsHost, run: WindowsHost["run"]): WindowsHost => ({ ...host, run, runWsb: (file, args, options) => run(file, args, options) });

@@ -1,0 +1,128 @@
+name: Windows AppContainer experiment
+
+# An EXPERIMENT, not product code (experiments/windows-appcontainer/README.md; notes: "Windows AppContainer experiment" in docs/nimblenewt/implementation-plan/implementation-notes.md).
+# It asks whether a low-privilege AppContainer (no network capability) inside a Job Object, with ACL grants for the container only, can confine an agent's tools on Windows
+# without a virtual machine, without UAC at run time and without anyone signed in. Started by hand from the Actions tab only; it never runs on a push or a pull request.
+#   job `hosted`:     a GitHub-hosted Windows machine (the runner account is an administrator and a session is open: the cheapest first answer).
+#   job `own-runner`: the owner's self-hosted Windows runner, which runs as a service (no interactive session). It starts only when the input `own_runner` is ticked (default off)
+#                     and only from main, so it is not run by accident. This is the run that answers the "no one signed in" and "no administrator" questions.
+# No secrets are used. The results (markdown and JSON, with names, paths and SIDs replaced) are uploaded as artifacts; job logs go through scripts/redact-log.mjs.
+on:
+  workflow_dispatch:
+    inputs:
+      own_runner:
+        description: "Also run on the owner's own Windows runner (a service with no signed-in user). Leave off unless you mean it."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  hosted:
+    name: Hosted Windows
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.19.0"
+      # Install scripts are disabled by .npmrc; the lockfile is authoritative. The build is needed only for the log redaction (scripts/redact-log.mjs).
+      - run: npm ci
+      - run: npm run build
+      - name: Build the launcher (locked dependencies)
+        shell: bash
+        working-directory: experiments/windows-appcontainer/launcher
+        run: cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
+      # Round 2 (see experiments/windows-appcontainer/README.md): the smoke ladder first, then the firewall mini-experiment, then round 1's matrix with a 60 s limit per cell
+      # (round 1's 300 s per cell was spent on hangs). Each later step runs even when an earlier one failed.
+      - name: Run the smoke ladder (45 s per step)
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode ladder --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/ladder.md" ]; then cat "$RUNNER_TEMP/appc-out/ladder.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Run the firewall mini-experiment
+        shell: bash
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode firewall --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/firewall.md" ]; then cat "$RUNNER_TEMP/appc-out/firewall.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Run the containment matrix (60 s per cell)
+        shell: bash
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode matrix --timeout-ms 60000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/results.md" ]; then cat "$RUNNER_TEMP/appc-out/results.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-appcontainer-hosted
+          path: ${{ runner.temp }}/appc-out
+          if-no-files-found: warn
+          retention-days: 90
+
+  own-runner:
+    name: Own Windows runner (service)
+    if: ${{ inputs.own_runner == true && github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, nimblenewt-windows]
+    timeout-minutes: 45
+    concurrency:
+      group: windows-appcontainer-own-runner
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Same Git Bash step as own-hardware.yml (a plain `shell: bash` can resolve to the WSL launcher on this runner).
+      - name: Use Git Bash for bash steps
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @()
+          $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($git) { $root = Split-Path (Split-Path $git.Source -Parent) -Parent; foreach ($r in @($root, (Split-Path $root -Parent))) { if ($r) { $candidates += Join-Path $r 'bin' } } }
+          $candidates += Join-Path $env:ProgramFiles 'Git\bin'
+          $dir = $candidates | Where-Object { Test-Path -LiteralPath (Join-Path $_ 'bash.exe') } | Select-Object -First 1
+          if (-not $dir) { Write-Output "::error::Git Bash (Git for Windows bin\bash.exe) was not found; install Git for Windows (docs/nimblenewt/own-hardware-runners.md)"; exit 1 }
+          & (Join-Path $dir 'bash.exe') --noprofile --norc -c 'echo bash for this job: $BASH $BASH_VERSION'
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
+      - run: npm ci
+      - run: npm run build
+      - name: Build the launcher (needs Rust on this machine)
+        shell: bash
+        working-directory: experiments/windows-appcontainer/launcher
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then echo "::error::cargo is not installed on this runner (install Rust with rustup)"; exit 1; fi
+          cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
+      - name: Run the experiment as the runner service (no window, no prompt)
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/results.md" ]; then cat "$RUNNER_TEMP/appc-out/results.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: windows-appcontainer-own-runner
+          path: ${{ runner.temp }}/appc-out
+          if-no-files-found: warn
+          retention-days: 90
