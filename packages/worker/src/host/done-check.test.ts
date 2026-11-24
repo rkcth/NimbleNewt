@@ -103,7 +103,7 @@ test("a check still running when the attempt's sandbox is closed is ended with i
 });
 
 test("doneVerifier looks at the checkout again after the checks: a check or parallel call that removes evidence or the change does not pass, an unreadable second look is not verified, build output does not fail it (W05 follow-up)", async () => {
-  const state = (over: { changed?: number; ahead?: number; xPresent?: boolean; uncommittedCount?: number }) => ({ uncommitted: [] as string[], uncommittedCount: over.uncommittedCount ?? 0, ahead: over.ahead ?? 1, changed: over.changed ?? 2, agentCommits: true, evidence: [{ path: "x", present: over.xPresent ?? true }] });
+  const state = (over: { changed?: number; ahead?: number; xPresent?: boolean; uncommittedCount?: number }) => ({ uncommitted: [] as string[], uncommittedCount: over.uncommittedCount ?? 0, ahead: over.ahead ?? 1, changed: over.changed ?? 2, agentCommits: true, evidence: [{ path: "x", present: over.xPresent ?? true }] as { path: string; present: boolean; why?: string }[] });
   const looks: (ReturnType<typeof state> | "throw")[] = [];
   const verify = doneVerifier({
     workspaces: { doneState: async () => { const l = looks.shift(); if (l === "throw" || l === undefined) throw new Error("no look"); return l; } },
@@ -123,10 +123,18 @@ test("doneVerifier looks at the checkout again after the checks: a check or para
   looks.push(state({}), state({ changed: 9, uncommittedCount: 7 }));
   const added = await verify("a", scope, one);
   assert.equal(added.evidence?.[0]?.present, true); assert.equal(added.tree?.changed, 2); assert.equal(added.tree?.uncommittedCount, 0);
-  // The second look fails: a passed check is not-run, the evidence is not present.
+  // The second look fails: a passed check is not-run; evidence found by the first look is left out (the controller says it could not be looked at), evidence the first look did not find stays not present.
   looks.push(state({}), "throw");
   const blind = await verify("a", scope, one);
-  assert.equal(blind.checks[0]?.state, "not-run"); assert.equal(blind.evidence?.[0]?.present, false);
+  assert.equal(blind.checks[0]?.state, "not-run"); assert.deepEqual(blind.evidence, []);
+  looks.push(state({ xPresent: false }), "throw");
+  assert.deepEqual((await verify("a", scope, one)).evidence, [{ path: "x", present: false }]);
+  // The second look does not name a path the first found: not known to be there, so left out; a path it names elsewhere in its list is still matched.
+  looks.push(state({}), { ...state({}), evidence: [{ path: "y", present: true }] });
+  assert.deepEqual((await verify("a", scope, one)).evidence, []);
+  const two = { ...one, evidence: ["x", "z"] };
+  looks.push({ ...state({}), evidence: [{ path: "x", present: true }, { path: "z", present: true }] }, { ...state({}), evidence: [{ path: "z", present: true }, { path: "x", present: false, why: "empty" }] });
+  assert.deepEqual((await verify("a", scope, two)).evidence, [{ path: "x", present: false, why: "empty" }, { path: "z", present: true }]);
   // No checks: one look only (nothing ran in between).
   looks.push(state({}));
   assert.equal((await verify("a", scope, { ...one, checks: [] })).checkout, true);

@@ -700,11 +700,20 @@ export function doneVerifier(parts: {
     let last = state;
     if (request.checks.length > 0) {
       const again = await parts.workspaces.doneState(scope, request.evidence).catch(() => undefined);
+      // An evidence file the first look found but the second could not say about is left out of the report: the controller then says it could not be looked at (never present, and never "not there, write it again", which would be untrue).
       if (again === undefined) {
         const reason = "the checkout could not be looked at again after the checks ran";
-        return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence.map((e) => ({ path: e.path, present: false, why: reason })), checks: ran.map((c) => (c.state === "passed" ? { name: c.name, state: "not-run" as const, reason } : c)) };
+        return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence.filter((e) => !e.present), checks: ran.map((c) => (c.state === "passed" ? { name: c.name, state: "not-run" as const, reason } : c)) };
       }
-      last = { ...state, ahead: Math.min(state.ahead, again.ahead), changed: Math.min(state.changed, again.changed), evidence: state.evidence.map((e, i) => { const l = again.evidence[i]; return e.present && l !== undefined && l.path === e.path && !l.present ? { path: e.path, present: false, why: l.why ?? "gone after the checks ran" } : e; }) };
+      // Matched by path, not by place in the list: an entry the second look does not name is not known to be there now.
+      const evidence: { path: string; present: boolean; why?: string }[] = [];
+      for (const e of state.evidence) {
+        if (!e.present) { evidence.push(e); continue; }
+        const l = again.evidence.find((x) => x.path === e.path);
+        if (l === undefined) continue;
+        evidence.push(l.present === true ? e : { path: e.path, present: false, why: l.why ?? "gone after the checks ran" });
+      }
+      last = { ...state, ahead: Math.min(state.ahead, again.ahead), changed: Math.min(state.changed, again.changed), evidence };
     }
     return { checkout: true, tree: { uncommitted: last.uncommitted, uncommittedCount: last.uncommittedCount, ahead: last.ahead, changed: last.changed, ...(last.agentCommits === undefined ? {} : { agentCommits: last.agentCommits }) }, evidence: last.evidence, checks: ran };
   };

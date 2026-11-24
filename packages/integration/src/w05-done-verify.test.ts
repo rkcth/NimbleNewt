@@ -41,3 +41,29 @@ test("a done before the work is written is refused with what failed, in the same
     assert.match(x.answer.seen[1]!, /Check \\"has b\\" failed: it exited with code 3\. The end of its output \(quoted\): \\"\/work missing src\/b\.ts\\"/, "the check ran in the sandbox (its working directory is the checkout at /work) and its output is quoted");
   } finally { await x.close(); }
 });
+
+// W05 follow-up, end to end: the check runs in the agent's own checkout, so a check (agent-written test code, a clean step) can remove what the host's first look saw. Here the only check deletes the evidence file, which is
+// also the whole change, and exits 0. The host looks again after the check: the done is refused for the missing evidence and for no change, although the check passed and the first look saw both.
+test("a check that removes the evidence and the change after the host's first look does not let the done pass (W05 follow-up)", async (t) => {
+  const launcher = await sandbox(t);
+  if (launcher === undefined) return;
+  const holder: { write?: () => void } = {};
+  const x = await rig(launcher, [
+    { before: async () => holder.write!(), call: { name: "nimblenewt__work-end", args: { report: "Done as the task asked.", result: "done", note: "b added", evidence: [{ item: "the new module", path: "src/b.ts" }] } } },
+    { text: "Ended." },
+  ]);
+  try {
+    await x.c.services.contracts.setContract(x.owner, { commandId: "ct", taskId: x.taskId, expectedVersion: 0, requiredEvidence: ["the new module"], checks: [{ name: "cleans", run: ["/bin/sh", "-c", "rm -f src/b.ts; exit 0"], timeoutSeconds: 60 }] } as never);
+    holder.write = () => {
+      const where = x.ws.locate({ taskId: x.taskId, projectId: x.project })!;
+      writeFileSync(join(where.checkout, "src", "b.ts"), "export const b = 2;\n");
+    };
+    await x.run();
+    const d = await x.get();
+    assert.deepEqual(d.verifications?.map((v) => [v.state, v.counted]), [["failed", true]]);
+    assert.deepEqual(d.verifications?.[0]?.checks.map((c) => [c.name, c.state]), [["cleans", "passed"]], "the check itself passed");
+    assert.match(x.answer.seen[1]!, /Your checkout holds no change against the task's base/);
+    assert.match(x.answer.seen[1]!, /Required evidence \\"the new module\\": \\"src\/b\.ts\\" is not a plain, non-empty file of your checkout/);
+    assert.doesNotMatch(x.answer.seen[1]!, /\/srv\/|\/tmp\/|nn-check-/, "no host path in the refusal");
+  } finally { await x.close(); }
+});
