@@ -10,6 +10,7 @@ use windows_sys::Win32::Security::Authorization::*;
 use windows_sys::Win32::Security::Isolation::*;
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
 use windows_sys::Win32::System::JobObjects::*;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::*;
@@ -27,6 +28,7 @@ const AAP_OPT_IN: u32 = 0x0;
 // PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON (1 << 28)
 const WIN32K_DISABLE_ALWAYS_ON: u64 = 1u64 << 28;
 const HR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32; // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
+const SE_GROUP_ENABLED_BIT: u32 = 0x4; // SE_GROUP_ENABLED: the attribute of a capability SID in SECURITY_CAPABILITIES
 const EXIT_LAUNCHER_FAILED: i32 = 125;
 const EXIT_TIMED_OUT: i32 = 124;
 
@@ -112,12 +114,13 @@ struct Args {
     ui_limits: bool,
     timeout_ms: u32,
     keep_profile: bool,
+    capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
 }
 
 fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut a = Args { name: "NimbleNewtExperiment".into(), kill_on_close: true, timeout_ms: 120_000, ..Default::default() };
     let mut it = raw.iter().skip(1);
-    a.command = it.next().cloned().ok_or("no command (run, info, revoke, delete-profile)")?;
+    a.command = it.next().cloned().ok_or("no command (run, info, revoke, check, delete-profile)")?;
     while let Some(flag) = it.next() {
         let mut value = |what: &str| -> Result<String, String> { it.next().cloned().ok_or(format!("{what} needs a value")) };
         match flag.as_str() {
@@ -148,6 +151,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--ui-limits" => a.ui_limits = true,
             "--timeout-ms" => a.timeout_ms = value("--timeout-ms")?.parse().map_err(|_| "--timeout-ms is not a number")?,
             "--keep-profile" => a.keep_profile = true,
+            "--capability" => { let c = value("--capability")?; if c.is_empty() { return Err("--capability is empty".into()); } a.capabilities.push(c); }
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -216,6 +220,59 @@ fn session_id() -> i64 {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------- capabilities
+
+/// The three network capabilities have fixed, well-known SIDs (Microsoft: "Well-known SIDs"): internetClient S-1-15-3-1, internetClientServer S-1-15-3-2,
+/// privateNetworkClientServer S-1-15-3-3. Matching is by lower-case name.
+fn well_known_capability(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "internetclient" => Some("S-1-15-3-1"),
+        "internetclientserver" => Some("S-1-15-3-2"),
+        "privatenetworkclientserver" => Some("S-1-15-3-3"),
+        _ => None,
+    }
+}
+
+/// Capability SIDs held until the process is created (freed with LocalFree), plus what each one was asked as and resolved to (for the JSON line).
+struct CapabilitySids { sids: Vec<PSID>, described: Vec<(String, String)> }
+impl Drop for CapabilitySids {
+    fn drop(&mut self) { for s in &self.sids { if !s.is_null() { unsafe { LocalFree(*s as *mut c_void) }; } } }
+}
+
+/// Resolves each --capability: a string SID (S-1-...) as it is, one of the three well-known network names, or any other name through
+/// DeriveCapabilitySidsFromName (the named capabilities, for example registryRead or lpacCom). An unknown form fails the run before anything starts.
+fn resolve_capabilities(specs: &[String]) -> Result<CapabilitySids, String> {
+    let mut out = CapabilitySids { sids: Vec::new(), described: Vec::new() };
+    for spec in specs {
+        unsafe {
+            let as_text = if spec.starts_with("S-1-") { Some(spec.as_str()) } else { well_known_capability(spec) };
+            if let Some(text) = as_text {
+                let mut sid: PSID = null_mut();
+                if ConvertStringSidToSidW(wide(text).as_ptr(), &mut sid) == 0 { return Err(format!("capability {spec}: ConvertStringSidToSidW failed: {}", GetLastError())); }
+                out.sids.push(sid);
+                out.described.push((spec.clone(), sid_string(sid)));
+                continue;
+            }
+            let mut group_sids: *mut PSID = null_mut();
+            let mut group_count = 0u32;
+            let mut cap_sids: *mut PSID = null_mut();
+            let mut cap_count = 0u32;
+            if DeriveCapabilitySidsFromName(wide(spec).as_ptr(), &mut group_sids, &mut group_count, &mut cap_sids, &mut cap_count) == 0 || cap_count == 0 {
+                return Err(format!("capability {spec}: DeriveCapabilitySidsFromName failed: {}", GetLastError()));
+            }
+            // The first capability SID is the one that names the capability; the arrays and the group SIDs are released here.
+            let first = *cap_sids;
+            out.described.push((spec.clone(), sid_string(first)));
+            out.sids.push(first);
+            for i in 1..cap_count as usize { LocalFree(*cap_sids.add(i) as *mut c_void); }
+            LocalFree(cap_sids as *mut c_void);
+            for i in 0..group_count as usize { LocalFree(*group_sids.add(i) as *mut c_void); }
+            if !group_sids.is_null() { LocalFree(group_sids as *mut c_void); }
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------------------------------------------- ACL grants
 
 // ACE_HEADER.AceType values and the ACE_HEADER.AceFlags bit (winnt.h), written out so their integer types are fixed here.
@@ -256,7 +313,36 @@ fn explicit_count(path: &str, sid: PSID) -> Result<u32, u32> {
     }
 }
 
-/// Adds (GRANT_ACCESS / DENY_ACCESS) or removes (REVOKE_ACCESS) the container's explicit entry on a folder or file. Returns a Win32 error code.
+/// Removes EVERY explicit (non-inherited) allow or deny entry that names the SID from the DACL, by building a copy of the ACL and deleting those entries
+/// from it (DeleteAce, highest index first). The first round used SetEntriesInAcl with REVOKE_ACCESS, which left the container's deny entry on the
+/// protected `.git` folder in place on the hosted runner (read-back: still present, error 0x20000001); removing entries by hand does not depend on the mode.
+/// Returns Ok(true) when something was written.
+unsafe fn remove_explicit(wpath: &[u16], old: *const ACL, sid: PSID) -> Result<bool, u32> {
+    let size = (*old).AclSize as usize;
+    // usize elements: an ACL is DWORD-aligned and the buffer is pointer-aligned.
+    let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
+    std::ptr::copy_nonoverlapping(old as *const u8, buf.as_mut_ptr() as *mut u8, size);
+    let copy = buf.as_mut_ptr() as *mut ACL;
+    let mut removed = false;
+    for i in (0..(*copy).AceCount as u32).rev() {
+        let mut ace: *mut c_void = null_mut();
+        if GetAce(copy, i, &mut ace) == 0 || ace.is_null() { continue; }
+        let header = &*(ace as *const ACE_HEADER);
+        if header.AceType != ACE_TYPE_ALLOWED && header.AceType != ACE_TYPE_DENIED { continue; }
+        if header.AceFlags & ACE_FLAG_INHERITED != 0 { continue; }
+        let ace_sid = &(*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as *const u32 as PSID;
+        if EqualSid(ace_sid, sid) != 0 {
+            if DeleteAce(copy, i) == 0 { return Err(GetLastError()); }
+            removed = true;
+        }
+    }
+    if !removed { return Ok(false); }
+    let rc = SetNamedSecurityInfoW(wpath.as_ptr() as *mut u16, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), copy, null_mut());
+    if rc != 0 { return Err(rc); }
+    Ok(true)
+}
+
+/// Adds (GRANT_ACCESS / DENY_ACCESS) or removes (a revoke) the container's explicit entries on a folder or file. Returns a Win32 error code.
 /// A revoke on a path whose DACL holds no explicit entry for the container writes nothing (so it needs no rights and is idempotent), and a revoke
 /// that wrote is checked by reading the DACL back: an entry still there is an error, never a success.
 fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32> {
@@ -266,10 +352,16 @@ fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         let rc = GetNamedSecurityInfoW(wpath.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut old, null_mut(), &mut sd);
         if rc != 0 { return Err(rc); }
-        if revoke && explicit_aces(old, sid) == 0 { LocalFree(sd as *mut c_void); return Ok(()); }
+        if revoke {
+            let none = old.is_null() || explicit_aces(old, sid) == 0;
+            let written = if none { Ok(false) } else { remove_explicit(&wpath, old, sid) };
+            LocalFree(sd as *mut c_void);
+            written?;
+            return match explicit_count(path, sid) { Ok(0) => Ok(()), Ok(_) => Err(ERR_STILL_PRESENT), Err(e) => Err(e) };
+        }
         let mut ea: EXPLICIT_ACCESS_W = zeroed();
         ea.grfAccessPermissions = mode.mask();
-        ea.grfAccessMode = if revoke { REVOKE_ACCESS } else if mode == Mode::DenyWrite { DENY_ACCESS } else { GRANT_ACCESS };
+        ea.grfAccessMode = if mode == Mode::DenyWrite { DENY_ACCESS } else { GRANT_ACCESS };
         ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
         ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
         ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
@@ -281,7 +373,6 @@ fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32
         LocalFree(new as *mut c_void);
         LocalFree(sd as *mut c_void);
         if rc != 0 { return Err(rc); }
-        if revoke { match explicit_count(path, sid) { Ok(0) => {} Ok(_) => return Err(ERR_STILL_PRESENT), Err(e) => return Err(e) } }
         Ok(())
     }
 }
@@ -303,6 +394,8 @@ impl GrantSet {
             let mut j = Json::new();
             j.s("path", &g.spec.path); j.s("mode", g.spec.mode.name()); j.b("soft", g.spec.soft); j.b("applied", g.applied); j.b("revoked", g.revoked);
             if let Some(e) = g.error { j.n("errorCode", e as i64); }
+            // The read-back after the revoke: how many explicit entries for the container are still on the path (-1: the DACL could not be read).
+            j.n("entriesLeft", match explicit_count(&g.spec.path, self.sid) { Ok(n) => n as i64, Err(_) => -1 });
             j.render()
         }).collect();
         format!("[{}]", parts.join(","))
@@ -424,7 +517,10 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
 
     // 3. The attribute list: security capabilities (the container, no capability), the all-application-packages policy, the
     //    mitigation policy, the job list, and the list of handles the child may inherit. The values must outlive CreateProcessW.
-    let mut caps = SECURITY_CAPABILITIES { AppContainerSid: sid.0, Capabilities: null_mut(), CapabilityCount: 0, Reserved: 0 };
+    let cap_sids = resolve_capabilities(&a.capabilities).map_err(|e| ("capability", e))?;
+    let mut cap_list: Vec<SID_AND_ATTRIBUTES> = cap_sids.sids.iter().map(|s| SID_AND_ATTRIBUTES { Sid: *s, Attributes: SE_GROUP_ENABLED_BIT }).collect();
+    j.raw("capabilities", format!("[{}]", cap_sids.described.iter().map(|(n, s)| { let mut c = Json::new(); c.s("name", n); c.s("sid", s); c.render() }).collect::<Vec<_>>().join(",")));
+    let mut caps = SECURITY_CAPABILITIES { AppContainerSid: sid.0, Capabilities: if cap_list.is_empty() { null_mut() } else { cap_list.as_mut_ptr() }, CapabilityCount: cap_list.len() as u32, Reserved: 0 };
     let mut aap: u32 = a.aap.unwrap_or(AAP_OPT_IN);
     let mut mitigation: u64 = WIN32K_DISABLE_ALWAYS_ON;
     let mut job_list: [HANDLE; 1] = [job.0];
@@ -472,7 +568,7 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
 
         let waited = WaitForSingleObject(process.0, a.timeout_ms);
         let timed_out = waited == WAIT_TIMEOUT;
-        if timed_out { TerminateJobObject(job.0, 1); WaitForSingleObject(process.0, 5000); }
+        if timed_out { j.raw("hang", hang_report(process.0, job.0, pi.dwProcessId)); TerminateJobObject(job.0, 1); WaitForSingleObject(process.0, 5000); }
         let leftover = active_processes(job.0);
         let mut code = 0u32;
         GetExitCodeProcess(process.0, &mut code);
@@ -485,6 +581,56 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         j.n("stderrBytes", file_size(err_path));
         if waited != WAIT_OBJECT_0 && !timed_out { return Err(("wait", format!("WaitForSingleObject returned {waited}"))); }
         Ok(if timed_out { EXIT_TIMED_OUT } else { code as i32 })
+    }
+}
+
+/// FILETIME pairs of a process or thread as milliseconds of kernel and user CPU time.
+fn cpu_ms(kernel: FILETIME, user: FILETIME) -> (i64, i64) {
+    let ms = |f: FILETIME| (((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) / 10_000) as i64;
+    (ms(kernel), ms(user))
+}
+
+/// A short diagnosis of a child that did not end in time, taken BEFORE the job is ended: is it still alive, how many processes does the job hold, how much CPU
+/// time did the process and each of its threads use, and did any thread use CPU in the one second between two samples (busy) or none (waiting). It cannot
+/// name what a thread waits on (that needs a debugger or the system information calls this launcher does not use); no CPU in a second means it is waiting.
+fn hang_report(process: HANDLE, job: HANDLE, pid: u32) -> String {
+    unsafe {
+        let mut h = Json::new();
+        let mut code = 0u32;
+        h.b("stillActive", GetExitCodeProcess(process, &mut code) != 0 && code == 259 /* STILL_ACTIVE */);
+        h.n("jobProcesses", active_processes(job));
+        let sample = || -> Vec<(u32, i64)> {
+            let mut out = Vec::new();
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE { return out; }
+            let _g = Handle(snap);
+            let mut e: THREADENTRY32 = zeroed();
+            e.dwSize = size_of::<THREADENTRY32>() as u32;
+            let mut more = Thread32First(snap, &mut e) != 0;
+            while more {
+                if e.th32OwnerProcessID == pid {
+                    let t = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, e.th32ThreadID);
+                    if !t.is_null() {
+                        let _t = Handle(t);
+                        let (mut c, mut x, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = (zeroed(), zeroed(), zeroed(), zeroed());
+                        if GetThreadTimes(t, &mut c, &mut x, &mut k, &mut u) != 0 { let (kk, uu) = cpu_ms(k, u); out.push((e.th32ThreadID, kk + uu)); }
+                    }
+                }
+                more = Thread32Next(snap, &mut e) != 0;
+            }
+            out
+        };
+        let (mut c, mut x, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = (zeroed(), zeroed(), zeroed(), zeroed());
+        if GetProcessTimes(process, &mut c, &mut x, &mut k, &mut u) != 0 { let (kk, uu) = cpu_ms(k, u); h.n("processKernelMs", kk); h.n("processUserMs", uu); }
+        let first = sample();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let second = sample();
+        h.n("threads", second.len() as i64);
+        let busy = second.iter().filter(|(id, ms)| first.iter().any(|(i, m)| i == id && ms > m)).count();
+        h.n("threadsBusyInOneSecond", busy as i64);
+        let top: Vec<String> = second.iter().take(8).map(|(id, ms)| format!("{id}:{ms}ms")).collect();
+        h.s("threadCpu", &top.join(" "));
+        h.render()
     }
 }
 
@@ -535,6 +681,21 @@ pub fn main() {
                     let all = set.items.iter().all(|g| g.revoked);
                     j.b("ok", all);
                     Outcome { j, code: if all { 0 } else { EXIT_LAUNCHER_FAILED } }
+                }
+            }
+        }
+        "check" => {
+            // Read-only: how many explicit entries for the container remain on each --grant path (the read-back used after a run).
+            let mut j = j;
+            match container_sid(&a.name) {
+                Err(e) => fail(j, "container", &e),
+                Ok((sid, _)) => {
+                    let set = GrantSet { sid: sid.0, items: a.grants.iter().map(|s| GrantRecord { spec: s.clone(), applied: false, revoked: false, error: None }).collect() };
+                    j.raw("grants", set.json());
+                    let clean = a.grants.iter().all(|s| matches!(explicit_count(&s.path, sid.0), Ok(0)));
+                    j.b("ok", true);
+                    j.b("clean", clean);
+                    Outcome { j, code: 0 }
                 }
             }
         }

@@ -15,6 +15,7 @@ service, it needs UAC and it is Pro-only.
 | --- | --- |
 | `launcher/` | A small Rust program (`nn-appc-launcher`, one dependency: `windows-sys`) that creates or reuses the container profile, grants and later revokes ACL entries, starts one program in the container and the job, and prints one JSON line. |
 | `probe.mjs` | The script that runs **inside** the container (Node's own modules only). It attempts the ten containment cases and the tool and network checks. |
+| `ladder.mjs` | Round 2: the smoke ladder (variants of the container and the programs tried in each) and the firewall mini-experiment. Tested on Linux with fakes. |
 | `lib.mjs` | The harness's pure logic (argument building, fixtures, verdicts, report schema, markdown). Tested on Linux. |
 | `run-experiment.mjs` | The harness: builds fixtures, runs the launcher once per matrix cell, judges the results, cleans up. |
 | `../../scripts/windows-appcontainer-experiment.test.mjs` | Unit tests (run on Linux in CI with a fake launcher). |
@@ -71,9 +72,9 @@ the link is recorded as not planted and its attempts are skipped, so the case is
 ```
 nn-appc-launcher run --exe PATH --cmdline "TEXT" --cwd PATH --stdout FILE --stderr FILE
     [--name PROFILE] [--grant MODE:PATH]... [--grant-soft MODE:PATH]... [--env NAME=VALUE]...
-    [--aap-policy none|optout|optin] [--win32k-off] [--no-kill-on-close]
+    [--aap-policy none|optout|optin] [--capability SID-or-NAME]... [--win32k-off] [--no-kill-on-close]
     [--memory-mb N] [--active-processes N] [--ui-limits] [--timeout-ms N]
-nn-appc-launcher info | revoke --grant MODE:PATH... | delete-profile      (all take --name)
+nn-appc-launcher info | revoke --grant MODE:PATH... | check --grant MODE:PATH... | delete-profile      (all take --name)
 ```
 
 Modes: `ro`, `rx`, `modify`, `deny-write`. A `--grant` that fails stops the run before anything starts; a `--grant-soft` (program install
@@ -96,9 +97,13 @@ It fails closed: no container, no run. There is no other process-creation call i
 | `DeleteAppContainerProfile` | `delete-profile`, at the end of the harness. |
 | `ConvertSidToStringSidW` | Print the container SID in the JSON line. |
 | `GetNamedSecurityInfoW` | Read a folder's current DACL before changing it. |
-| `SetEntriesInAclW` | Merge one explicit entry (grant, deny, or revoke) for the container SID into that DACL. |
+| `SetEntriesInAclW` | Merge one explicit entry (grant or deny) for the container SID into that DACL. |
+| `DeleteAce` | A revoke: remove every explicit entry that names the container from a copy of the DACL (round 1 used `SetEntriesInAclW` with `REVOKE_ACCESS`, which left the deny entry on `.git`). |
 | `SetNamedSecurityInfoW` | Write the new DACL back (inheritable to children). |
 | `GetAce`, `EqualSid` | Count the container's explicit (non-inherited) entries: a revoke with none to remove writes nothing (no rights needed, idempotent), and a revoke that wrote is read back; an entry still there is reported as an error (code 0x20000001), never as revoked. |
+| `ConvertStringSidToSidW` | A `--capability` given as a SID string, and the three well-known network capabilities (internetClient S-1-15-3-1, internetClientServer S-1-15-3-2, privateNetworkClientServer S-1-15-3-3). |
+| `DeriveCapabilitySidsFromName` | Any other `--capability` NAME (for example `registryRead`, `lpacCom`): the capability's SID. |
+| `CreateToolhelp32Snapshot`, `Thread32First`, `Thread32Next`, `OpenThread`, `GetThreadTimes`, `GetProcessTimes` | The diagnosis of a program that hung (read before the job is ended): CPU time of the process and of each thread, over two samples one second apart. |
 | `CreateJobObjectW`, `SetInformationJobObject` | The job: kill on close, memory limit, active-process limit, UI limits. |
 | `QueryInformationJobObject` | Count processes still in the job when the program ended. |
 | `TerminateJobObject` | The timeout, and stragglers. |
@@ -109,6 +114,12 @@ It fails closed: no container, no run. There is no other process-creation call i
 | `OpenProcessToken`, `GetTokenInformation` | Whether the launcher itself is elevated (reported, never required). |
 | `ProcessIdToSessionId` (with `GetCurrentProcessId`) | The session (0 = services session), reported. |
 | `CloseHandle`, `FreeSid`, `LocalFree` | Release what was acquired. |
+
+Capabilities go into the security-capabilities attribute (`SE_GROUP_ENABLED` each, in the order given). A name that cannot be resolved stops the run before anything starts (stage `capability`).
+
+`check` is read-only: it reads the DACL of each `--grant` path and reports `entriesLeft` (explicit entries for the container, 0 when clean, -1 when the DACL cannot be read). Every run and every revoke reports the same `entriesLeft` per grant after its own revoke.
+
+When a run times out, its JSON line carries `hang` (alive or not, processes in the job, CPU of the process and of each thread, how many threads used CPU during one second). It cannot name what a thread waits on; no CPU over a second means waiting.
 
 Attribute numbers used: security capabilities 0x20009, all-application-packages policy 0x2000F (value 1 = opt out, 0 = opt in), mitigation policy 0x20007
 (Win32k disable = bit 28), job list 0x2000D, handle list 0x20002.
@@ -130,3 +141,39 @@ part of the result. When the probe's report is missing, the first lines of the c
 
 See "Windows AppContainer experiment" in `docs/nimblenewt/implementation-plan/implementation-notes.md`: whether git, node and npm start under LPAC with
 the grants given, whether each case holds, junction behaviour, Win32k, and what needed administrator rights or a signed-in session.
+
+## Round 2: the smoke ladder and the firewall mini-experiment
+
+Round 1 on a hosted runner (run 45499098682): the launcher built, created the profile and started the child, so the profile, the attribute list, the job and the ACL grants work there. Node never produced a
+report: with LPAC it ended in 40 ms with exit 0x80000003 and `WSAStartup: (10107) A system call has failed.`; with a plain AppContainer it did not end within 300 s; with Win32k disabled it ended with 0xC0000142 (DLL
+initialisation failed) in every cell, so Win32k lockdown cannot be used with Node. Eight cells also left the deny entry on `.git` (error 0x20000001); round 2 fixes that (see `DeleteAce` above) and reports a read-back per cell.
+
+```
+node experiments/windows-appcontainer/run-experiment.mjs --mode ladder   --out out [--variants id,id] [--timeout-ms 45000]
+node experiments/windows-appcontainer/run-experiment.mjs --mode firewall --out out [--variants ac-inet-private]
+```
+
+**Ladder.** For each variant the harness starts, one launcher run per step (a fresh timeout of 45 s each; after two timeouts the rest of that variant is skipped): `cmd.exe /c echo hi`, `hostname.exe`, `node.exe -e "0"`,
+`node.exe --version`, `node -e "require('net')"`, `node -e "process.stdout.write('x')"`, `node -e` writing a file in the workspace, `git.exe --version`. Each is recorded with its exit code (hex), time, the first lines of its output and
+error output, and, for a timeout, the hang diagnosis. Variants (`ladderVariants()` in `ladder.mjs`): a plain AppContainer with no capability (round 1's) and its variations (program folders not granted; TEMP and the working directory in the workspace;
+no job limits; `node --jitless`; NODE_OPTIONS set; node.exe and git.exe copied into the workspace); plus internetClient; plus internetClient and privateNetworkClientServer; the LPAC (policy attribute optout) with no capability,
+with registryRead, with registryRead and lpacCom, with the wide set (registryRead, lpacCom, lpacIdentityServices, lpacPnpNotifications, lpacCryptoServices, lpacAppExperience), the policy attribute with the opt-in value, LPAC with internetClient,
+and an LPAC with the tools copied into the workspace. The three network capability SIDs are the documented well-known ones; the named ones are derived with `DeriveCapabilitySidsFromName`. After each variant the launcher reads the container's
+entries back from every granted path (`check`); entries found are revoked and read again, and both results are reported. `NODE_OPTIONS` is never inherited; it is set only by the `ac-nocap-nodeopts` variant.
+
+**What the ladder answers.** Which smallest container lets a console program start (cmd, hostname), whether node starts and which step first fails (start-up, `require('net')` for Winsock, stdout, file write), whether git starts, and what the
+hang is (CPU in the stuck process, or waiting).
+
+**Firewall.** A capability that allows outbound networking (default variant `ac-inet-private`: internetClient and privateNetworkClientServer) is given, then an outbound BLOCK rule scoped to the container's package SID is added. The exact commands (PowerShell,
+administrator, the rule name `nn-appc-block-<8 hex>` and the container's package SID are validated before they are used):
+
+```
+New-NetFirewallRule -DisplayName 'nn-appc-block-xxxxxxxx' -Direction Outbound -Action Block -Package 'S-1-15-2-...' -Protocol Any -Profile Any -Enabled True
+Get-NetFirewallRule -DisplayName 'nn-appc-block-xxxxxxxx'                (read back: the rule exists / is gone)
+Remove-NetFirewallRule -DisplayName 'nn-appc-block-xxxxxxxx'
+```
+
+Phases (a client inside the container tries a loopback listener and a listener on the machine's own non-loopback address; the host's listeners count what arrived, so a client's own words are never the evidence): control outside the container without the rule,
+inside without the rule, the rule is added and read back, inside with the rule, control outside with the rule, the rule is removed, inside again. Clients: `curl.exe` from System32 and node (when it starts). The verdict is `pass` only when the container reached
+the outbound listener before the rule, nothing reached either listener with it, and the control outside the container still reached both. Without administrator rights, or when the capability alone did not allow the connection, it is `inconclusive` and says why.
+The rule is removed in a finally path and its absence is read back.

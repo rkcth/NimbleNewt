@@ -265,6 +265,31 @@ export function extractProbeReport(text) {
   return undefined;
 }
 
+// ---------------------------------------------------------------------------------------------------------------- ACL read-back
+
+/** The granted paths named in a launcher argument list (--grant and --grant-soft), without their modes, each once. */
+export function grantedPaths(args) {
+  const out = [];
+  args.forEach((a, i) => { if (a === "--grant" || a === "--grant-soft") { const spec = args[i + 1] ?? ""; const path = spec.slice(spec.indexOf(":") + 1); if (!out.includes(path)) out.push(path); } });
+  return out;
+}
+
+/**
+ * Reads the container's explicit entries back from every granted path with the launcher's `check` command. When any is left, asks the launcher to revoke on those paths
+ * and reads again. Returns `first` (what the first read-back found: [{path, entriesLeft}], entriesLeft null when unreadable) and `final` (after the second revoke);
+ * a launcher that says nothing counts as every path unknown. Never throws.
+ */
+export function aclReadBack(exec, launcherPath, profileName, paths) {
+  if (paths.length === 0) return { first: [], final: [] };
+  const grantArgs = paths.flatMap((p) => ["--grant", `ro:${p}`]);
+  const run = (cmd) => { try { return parseLauncherLine(exec(launcherPath, [cmd, "--name", profileName, ...grantArgs], { timeoutMs: 120_000 }).stdout); } catch { return undefined; } };
+  const left = (line) => (line === undefined ? [{ path: "(all)", entriesLeft: null }] : (line.grants ?? []).filter((g) => g.entriesLeft !== 0).map((g) => ({ path: g.path, entriesLeft: g.entriesLeft ?? null })));
+  const first = left(run("check"));
+  if (first.length === 0) return { first, final: [] };
+  run("revoke");
+  return { first, final: left(run("check")) };
+}
+
 // ---------------------------------------------------------------------------------------------------------------- the host's witnesses and the verdicts
 
 const readText = (path) => { try { return readFileSync(path, "utf8"); } catch { return undefined; } };
@@ -401,6 +426,8 @@ export function renderMarkdown(report) {
     const l = c.launch;
     if (!l.childStarted) L.push(`- The launcher refused to start the program: stage ${l.stage ?? "?"}, ${l.error ?? "no message"}.`);
     else L.push(`- Program ${l.timedOut ? "timed out" : `ended with ${l.exitCode}`} after ${l.elapsedMs ?? "?"} ms; leftover processes: ${l.leftoverProcesses ?? "?"}; all grants revoked: ${l.allGrantsRevoked}.`);
+    if ((c.aclFirstReadBack ?? []).length > 0) L.push(`- ACL read-back after the run found entries left on: ${c.aclFirstReadBack.map((x) => `${x.path} (${x.entriesLeft})`).join("; ")}; after a second revoke: ${(c.aclLeft ?? []).length === 0 ? "none left" : c.aclLeft.map((x) => `${x.path} (${x.entriesLeft})`).join("; ")}.`);
+    else if (c.aclLeft !== undefined) L.push("- ACL read-back of every granted path after the run: no entry left.");
     if (c.softGrantFailures.length > 0) L.push(`- Soft grants refused: ${c.softGrantFailures.map((g) => `${g.mode} ${g.path} (error ${g.errorCode})`).join("; ")}.`);
     if (c.plantNotes.length > 0) L.push(`- Fixture notes: ${c.plantNotes.join("; ")}.`);
     if (c.probeReport !== "ok") L.push(`- Probe report: ${c.probeReport}.`);
@@ -427,5 +454,6 @@ export function scrubText(text, names = {}) {
     if (typeof value !== "string" || value.length < 3) continue;
     for (const v of new Set([value, value.replaceAll("\\", "/"), value.replaceAll("\\", "\\\\")])) out = out.split(v).join(word);
   }
-  return out.replace(/S-1-\d+(?:-\d+){2,}/g, "<sid>");
+  // Capability SIDs (S-1-15-3-...) are fixed public values and stay readable; every other SID (accounts, the container) is replaced.
+  return out.replace(/S-1-\d+(?:-\d+){2,}/g, (sid) => (sid.startsWith("S-1-15-3-") ? sid : "<sid>"));
 }

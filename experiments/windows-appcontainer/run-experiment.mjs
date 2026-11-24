@@ -1,6 +1,8 @@
 // NimbleNewt experiment (not product code): the harness. It builds fresh fixtures for each cell of the matrix, starts the launcher (which runs probe.mjs inside
 // a low-privilege AppContainer), judges what came back with the host's own witnesses, and writes results.json and results.md.
-//   node run-experiment.mjs [--out DIR] [--launcher PATH] [--cells all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
+//   node run-experiment.mjs [--mode matrix|ladder|firewall] [--out DIR] [--launcher PATH] [--cells all|id,id] [--variants all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
+//   --mode matrix (default): round 1's containment matrix. --mode ladder: round 2's smoke ladder (which programs start in which container variant). --mode firewall: round 2's
+//   "network cut by firewall" mini-experiment (needs administrator rights for the firewall rule). --timeout-ms is the per-cell (matrix) or per-step (ladder, firewall) limit.
 // Needs no prompt, no window and no UAC: it can be started from a Windows service or a scheduled task. It never asks for administrator rights; what needed them is recorded.
 // Everything it creates (fixture folders, ACL entries, the container profile) is removed in a finally path. Verdicts are results, not failures: the exit code is 0 when the
 // experiment ran to its end, 2 when it could not run at all (no launcher, no container).
@@ -11,9 +13,10 @@ import os from "node:os";
 import { basename, dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_LIMITS, PROFILE_NAME, buildChildEnv, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness, createFixtures, extractProbeReport,
+  DEFAULT_LIMITS, PROFILE_NAME, aclReadBack, grantedPaths, buildChildEnv, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness, createFixtures, extractProbeReport,
   judgeCell, matrixCells, parseLauncherLine, pickOutboundHost, removeTree, renderMarkdown, scrubText, selectCells, stderrHead, validateReport,
 } from "./lib.mjs";
+import { STEP_TIMEOUT_MS, runFirewall, runLadder } from "./ladder.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +24,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 export function execLauncher(launcherPath, args, { timeoutMs }) {
   const r = spawnSync(launcherPath, args, { encoding: "utf8", timeout: timeoutMs, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 8 * 1024 * 1024 });
   return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error?.code };
+}
+
+/** The real PowerShell call of the firewall mini-experiment (a fixed script text; the package SID and rule name are validated by the caller). */
+export function execPowerShell(script, { timeoutMs = 120_000 } = {}) {
+  const r = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { encoding: "utf8", timeout: timeoutMs, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
 function listener(host) {
@@ -93,6 +102,8 @@ export async function runExperiment(opts) {
       let startupDenials = [];
       let errHead = [];
       let args = [];
+      let aclFirstReadBack = [];
+      let aclLeft;
       try {
         const sysRoot = platform === "win32" ? (process.env.SystemRoot ?? "C:\\Windows") : undefined;
         const systemPaths = opts.systemPaths ?? (platform === "win32" ? [win32.join(sysRoot, "nn-appc-x"), win32.join(sysRoot, "System32", "nn-appc-x"), "C:\\nn-appc-x", win32.join(process.env.ProgramFiles ?? "C:\\Program Files", "nn-appc-x")] : []);
@@ -126,18 +137,19 @@ export async function runExperiment(opts) {
         launch = { ...launch, error: `${launch.error}; harness error: ${error?.code ?? error?.name ?? "error"}` };
         results = judgeCell(undefined, undefined);
       } finally {
-        // A launcher that died may have left entries: ask it to remove them from every path it granted (idempotent), then delete the fixtures.
-        if (!opts.dryRun && launch.allGrantsRevoked !== true && args.length > 0) {
-          const grants = args.flatMap((a, i) => (a === "--grant" || a === "--grant-soft" ? [a, args[i + 1]] : []));
-          const rv = parseLauncherLine(safe(() => exec(opts.launcherPath, ["revoke", "--name", profileName, ...grants], { timeoutMs: 120_000 }).stdout) ?? "");
-          if (rv?.ok !== true) grantsLeft++;
+        // A launcher that died may have left entries: whatever it reports, read the container's entries back from every granted path; remove what is left and read again.
+        if (!opts.dryRun && args.length > 0) {
+          const rb = aclReadBack(exec, opts.launcherPath, profileName, grantedPaths(args));
+          aclFirstReadBack = rb.first;
+          aclLeft = rb.final;
+          grantsLeft += aclLeft.length;
         }
         try { removeTree(root); foldersRemoved++; } catch { notes.push("a fixture folder could not be removed"); }
       }
       resultsCells.push({
         id: cell.id, sameAs: cell.sameAs, dims: { lpac: cell.lpac, win32kDisabled: cell.win32kDisabled, aapOptOut: cell.aapOptOut, aapPolicy: cell.aapPolicy, protect: cell.protect },
         launch, softGrantFailures: (launch.grants ?? []).filter((g) => g.soft && !g.applied).map((g) => ({ path: g.path, mode: g.mode, errorCode: g.errorCode })),
-        plantNotes, probeReport, results, startupDenials, stderrHead: errHead,
+        plantNotes, probeReport, results, startupDenials, stderrHead: errHead, aclFirstReadBack, aclLeft,
       });
     }
   } finally {
@@ -157,13 +169,15 @@ export async function runExperiment(opts) {
 function safe(fn) { try { return fn(); } catch { return undefined; } }
 
 export function parseCli(argv) {
-  const o = { out: resolve("nn-appc-results"), launcherPath: join(here, "launcher", "target", "release", `nn-appc-launcher${process.platform === "win32" ? ".exe" : ""}`), cellSpec: "all", dryRun: false };
+  const o = { mode: "matrix", variantSpec: "all", out: resolve("nn-appc-results"), launcherPath: join(here, "launcher", "target", "release", `nn-appc-launcher${process.platform === "win32" ? ".exe" : ""}`), cellSpec: "all", dryRun: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = () => { if (i + 1 >= argv.length) throw new Error(`${a} needs a value`); return argv[++i]; };
     if (a === "--out") o.out = resolve(v());
     else if (a === "--launcher") o.launcherPath = resolve(v());
     else if (a === "--cells") o.cellSpec = v();
+    else if (a === "--mode") { o.mode = v(); if (!["matrix", "ladder", "firewall"].includes(o.mode)) throw new Error("--mode: matrix, ladder or firewall"); }
+    else if (a === "--variants") o.variantSpec = v();
     else if (a === "--profile") o.profileName = v();
     else if (a === "--timeout-ms") o.limits = { ...(o.limits ?? {}), timeoutMs: Number(v()) };
     else if (a === "--dry-run") o.dryRun = true;
@@ -176,11 +190,19 @@ async function main() {
   const o = parseCli(process.argv.slice(2));
   mkdirSync(o.out, { recursive: true });
   if (!existsSync(o.launcherPath) && !o.dryRun) { console.error("the launcher binary was not found; build it first (see README.md)"); process.exitCode = 2; return; }
-  const { report, markdown, ranAtAll, names } = await runExperiment({ ...o, log: (m) => console.log(m) });
+  const common = { ...o, log: (m) => console.log(m), tools: discoverTools(), timeoutMs: o.limits?.timeoutMs };
+  let result;
+  let stem = "results";
+  if (o.mode === "ladder") { stem = "ladder"; result = await runLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher }); }
+  else if (o.mode === "firewall") {
+    stem = "firewall";
+    result = await runFirewall({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell, outbound: pickOutboundHost(os.networkInterfaces()) });
+  } else result = await runExperiment(common);
+  const { report, markdown, ranAtAll, names } = result;
   const clean = (text) => scrubText(text, { ...names, root: undefined });
-  writeFileSync(join(o.out, "results.json"), clean(`${JSON.stringify(report, null, 2)}\n`));
-  writeFileSync(join(o.out, "results.md"), clean(markdown === "" ? `# Windows AppContainer experiment: results\n\nThe experiment could not start: ${report.notes.join("; ")}\n` : markdown));
-  console.log(`wrote ${join(o.out, "results.md")}`);
+  writeFileSync(join(o.out, `${stem}.json`), clean(`${JSON.stringify(report, null, 2)}\n`));
+  writeFileSync(join(o.out, `${stem}.md`), clean(markdown === "" ? `# Windows AppContainer experiment: ${stem}\n\nThe experiment could not start: ${(report.notes ?? []).join("; ") || report.why}\n` : markdown));
+  console.log(`wrote ${join(o.out, `${stem}.md`)}`);
   if (!ranAtAll) process.exitCode = 2;
 }
 
