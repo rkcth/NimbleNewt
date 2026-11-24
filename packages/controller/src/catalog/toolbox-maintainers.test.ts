@@ -144,7 +144,7 @@ for (const backend of backends) {
     const ann = await c.agent("Ann2", worker(c.a));
     const bea = await c.agent("Bea", worker(c.a));
     const cal = await c.agent("Cal", [...worker(c.a), { action: "toolbox.*", project: c.b }]);
-    await grants.grant(c.owner, { commandId: cid("gr"), grantee: ann.pid, action: TOOLBOX_MANAGE, project: "*", source: "direct", basis: "until December", expiresAt: "2026-12-01T00:00:00.000Z" });
+    await grants.grant(c.owner, { commandId: cid("gr"), grantee: ann.pid, action: TOOLBOX_MANAGE, project: "*", source: "direct", basis: "until tomorrow", expiresAt: "2026-11-23T00:00:00.000Z" /* a day after the rig's fixed clock and before any real run of this test: the rig, not the machine, says it still holds today */ });
     await grants.grant(c.owner, { commandId: cid("gr"), grantee: bea.pid, action: TOOLBOX_MANAGE, project: c.a, source: "direct", basis: "while in use", idleDays: 3 });
     assert.deepEqual(await names(c), [maya.pid, pat.pid, ann.pid, bea.pid, cal.pid].sort(), "all five hold it today");
     // Judged ten days later: Ann's right has ended and Bea's has lapsed from non-use; the rights on the agents' own records still hold.

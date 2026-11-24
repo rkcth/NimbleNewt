@@ -48,7 +48,7 @@ export const mayHold = (kind: string, action: string): boolean => (kind === "cli
 export const covers = (grantAction: string, action: string): boolean =>
   grantAction === "*" || grantAction === action || (grantAction.endsWith(".*") && action.startsWith(grantAction.slice(0, -1)));
 
-/** What an access check may add: the resource the action is on (a narrow grant matches only that resource) and the time to judge expiry by (default: now). */
+/** What an access check may add: the resource the action is on (a narrow grant matches only that resource) and the time to judge expiry by (default: the time the principal's rights were loaded as of, `asOf`, which is the controller's own clock: never the machine's). */
 export interface CheckOptions {
   readonly resource?: { readonly kind: string; readonly id: string };
   readonly now?: string;
@@ -88,7 +88,7 @@ export function allows(principal: Principal, action: string, project: string | u
   if (outsideTask(principal, project, options) || outsideLimit(principal, action)) return false;
   // A principal that did not come from authentication (or `GrantService.effective`) has not had its restrictions loaded: it is refused rather than trusted.
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
-  const now = options.now ?? new Date().toISOString();
+  const now = options.now ?? principal.asOf;
   return principal.grants.some((g) => covers(g.action, action) && projectMatches(g.project, project)
     && (g.expiresAt === undefined || g.expiresAt > now) && (g.resource === undefined || (options.resource !== undefined && sameResource(g.resource, options.resource))));
 }
@@ -98,7 +98,7 @@ export function allowsExactly(principal: Principal, action: string, project: str
   if (principal.kind === "owner") return true;
   if (outsideTask(principal, project, options) || outsideLimit(principal, action)) return false;
   if (principal.asOf === undefined || restricted(principal, action, project, options)) return false;
-  const now = options.now ?? new Date().toISOString();
+  const now = options.now ?? principal.asOf;
   return principal.grants.some((g) => g.action === action && projectMatches(g.project, project)
     && (g.expiresAt === undefined || g.expiresAt > now) && (g.resource === undefined || (options.resource !== undefined && sameResource(g.resource, options.resource))));
 }

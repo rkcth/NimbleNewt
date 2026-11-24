@@ -79,7 +79,7 @@ test("QA evidence through the state API: bound to the tree, the criteria and the
     assert.equal((await call(qa.token, "qa.evidence.record", { ...ev, decisions: [] }, "q0")).error.code, "invalid_command", "every decision the task relies on is named");
     assert.equal((await call(qa.token, "qa.evidence.record", { ...ev, checks: [{ name: "unit", result: "pass" }] }, "q0")).error.code, "invalid_command", "only the four results");
     assert.equal((await call(qa.token, "qa.evidence.record", { ...ev, checks: [{ name: "unit", result: "passed" }, { name: "unit", result: "failed" }] }, "q0")).error.code, "invalid_command", "a check is listed once");
-    assert.equal((await call(qa.token, "qa.evidence.record", { ...ev, observedAt: "2027-01-01T00:00:00.000Z" }, "q0")).error.code, "invalid_command", "not in the future");
+    assert.equal((await call(qa.token, "qa.evidence.record", { ...ev, observedAt: new Date(Date.now() + 2 * 86_400_000).toISOString() }, "q0")).error.code, "invalid_command", "not in the future");
     assert.equal((await call(qa.token, "qa.evidence.record", ev)).error.code, "invalid_command", "a command ID is required");
 
     // The author's self-check is kept, never counted.
