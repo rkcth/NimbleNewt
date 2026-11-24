@@ -1699,6 +1699,8 @@ for (const backend of backends) {
       recall, isLocalHost: () => true, activity: async (step) => { steps.push(step); },
     });
     const bare = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, isLocalHost: () => true });
+    // W13 second review: a bridge that no longer remembers the attempt's call IDs (it keeps 256 attempts and 5000 IDs each), over the same memory tool.
+    const forgetful = new ToolExecutionService({ principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, recall, isLocalHost: () => true });
     const out: Record<string, BridgeResponse> = {};
     let attemptId = "";
     c.worker.script = c.session(async (s) => {
@@ -1715,6 +1717,8 @@ for (const backend of backends) {
       out["paused"] = await send({ part: "decisions" }, "rc3");
       out["limit"] = await send({ part: "anchor" }, "rc4");
       out["answered-after-cap"] = await send({ part: "decisions" }, "rc3");
+      out["reused-id-other-question"] = await forgetful.handle(s.token, s.gateway, { op: "task.recall", callId: "rc3", args: { part: "archives" } });
+      out["reused-id-same-question"] = await forgetful.handle(s.token, s.gateway, { op: "task.recall", callId: "rc3", args: { part: "decisions" } });
       await c.pauses.resume(c.owner, { commandId: uid("rs"), scope: { kind: "task", id: taskId }, reason: "go" });
       on = false;
       out["off"] = await send({ part: "anchor" }, "rc5");
@@ -1732,6 +1736,8 @@ for (const backend of backends) {
     assert.equal(refused.code, "recall_limit");
     assert.match(refused.message, /used its 3 calls/);
     good(out["answered-after-cap"]!);
+    assert.equal(bad(out["reused-id-other-question"]!).code, "recall_limit", "a call ID used again for another question is a new call, even where the bridge forgot the ID");
+    good(out["reused-id-same-question"]!);
     assert.equal(bad(out["off"]!).code, "recall_off");
     assert.ok(reads.length > 0 && reads.every((r) => r === attemptId), "the attempt read is the one the credential is bound to");
     // The owner sees that it was used, by counts only: one step per answered call (not per repeat), none for a refusal, and no content.
@@ -1739,7 +1745,7 @@ for (const backend of backends) {
     // A repeat of a call has the same command ID, which the activity record keeps once.
     assert.equal(new Set(recalls.map((x) => x.commandId)).size, 3, JSON.stringify(recalls));
     assert.ok(recalls.every((x) => x.taskId === taskId && !/Recall me/.test(x.summary) && /\d+ characters/.test(x.summary)), JSON.stringify(recalls));
-    svc.dispose(); bare.dispose();
+    svc.dispose(); bare.dispose(); forgetful.dispose();
   });
 
   suite("job-start under a used call ID answers the same job only for the same request, also after a restart that forgot the call IDs; job output, status and labels carry no control or invisible format characters (card T07b review)", async (c) => {

@@ -14,6 +14,7 @@ import { DifficultyService } from "../routing/index.js";
 import type { BridgeResponse } from "../toolbridge/index.js";
 import { startController } from "./index.js";
 import type { DispatchStartOptions } from "./dispatch-compose.js";
+import { OPERATIONS } from "./operations.js";
 
 // Card W13 through the composed controller and its real tool bridge: attempt one ends and the controller writes a hand-off note too long to keep whole (card C07p); attempt two, after its own notes, calls task.recall exactly as a worker
 // process does (its task credential and a request) and gets its own task's notes, the hand-off, the cut note's whole text and the activity digest back. Another task's IDs read as missing. The owner's switch and the call cap, set through the
@@ -149,4 +150,8 @@ test("an attempt calls task.recall through the real bridge with its task credent
     await ended();
     assert.ok(prompt.length > 0 && !/task\.recall/.test(prompt), `attempt ${third}: with the switch off the anchor says nothing about the tool`);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});
+
+test("W13 second review: the MCP door for outside agents does not offer task.recall (its tools are the state API's operations, and an outside caller has no attempt for the read to be bound to)", () => {
+  assert.ok(!OPERATIONS.some((o) => /recall/i.test(o.name)), OPERATIONS.filter((o) => /recall/i.test(o.name)).map((o) => o.name).join(", "));
 });
