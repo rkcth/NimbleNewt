@@ -1,7 +1,7 @@
 name: Windows AppContainer experiment
 
 # An EXPERIMENT, not product code (experiments/windows-appcontainer/README.md; notes: "Windows AppContainer experiment" in docs/nimblenewt/implementation-plan/implementation-notes.md).
-# It asks whether a low-privilege AppContainer (no network capability) inside a Job Object, with ACL grants for the container only, can confine an agent's tools on Windows
+# It asks whether a low-privilege AppContainer (no network capability by default) inside a Job Object, with ACL grants for the container only, can confine an agent's tools on Windows
 # without a virtual machine, without UAC at run time and without anyone signed in. Started by hand from the Actions tab only; it never runs on a push or a pull request.
 #   job `hosted`:     a GitHub-hosted Windows machine (the runner account is an administrator and a session is open: the cheapest first answer).
 #   job `own-runner`: the owner's self-hosted Windows runner, which runs as a service (no interactive session). It starts only when the input `own_runner` is ticked (default off)
@@ -37,10 +37,11 @@ jobs:
         shell: bash
         working-directory: experiments/windows-appcontainer/launcher
         run: cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
-      # Round 2 (see experiments/windows-appcontainer/README.md): the smoke ladder first, then the firewall mini-experiment, then round 1's matrix with a 60 s limit per cell
-      # (round 1's 300 s per cell was spent on hangs). Each later step runs even when an earlier one failed.
-      - name: Run the smoke ladder (45 s per step)
+      # Round 3 (see experiments/windows-appcontainer/README.md): one step per mode, each runs even when an earlier one failed, each has its own limit.
+      # Every probe cell has a 90 s hard limit (the probe ends itself after 60 s), every ladder step 45 s.
+      - name: Smoke ladder (45 s per step)
         shell: bash
+        timeout-minutes: 20
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
           # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
@@ -48,25 +49,60 @@ jobs:
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode ladder --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/ladder.md" ]; then cat "$RUNNER_TEMP/appc-out/ladder.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
-      - name: Run the firewall mini-experiment
+      - name: Git ladder (45 s per step)
         shell: bash
         if: always()
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode git --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/git.md" ]; then cat "$RUNNER_TEMP/appc-out/git.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Containment cases in seven configurations (90 s per cell)
+        shell: bash
+        if: always()
+        timeout-minutes: 25
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode cases --timeout-ms 90000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/cases.md" ]; then cat "$RUNNER_TEMP/appc-out/cases.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Junction targets and ACL propagation
+        shell: bash
+        if: always()
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode links --timeout-ms 90000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/links.md" ]; then cat "$RUNNER_TEMP/appc-out/links.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Timing (start-up, 100-file git commit, offline npm ci)
+        shell: bash
+        if: always()
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode timing --timeout-ms 120000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/timing.md" ]; then cat "$RUNNER_TEMP/appc-out/timing.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Firewall mini-experiment (45 s per step)
+        shell: bash
+        if: always()
+        timeout-minutes: 10
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
           # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
           rc=0
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode firewall --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/firewall.md" ]; then cat "$RUNNER_TEMP/appc-out/firewall.md" >> "$GITHUB_STEP_SUMMARY"; fi
-          exit "$rc"
-      - name: Run the containment matrix (60 s per cell)
-        shell: bash
-        if: always()
-        run: |
-          mkdir -p "$RUNNER_TEMP/appc-out"
-          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
-          rc=0
-          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode matrix --timeout-ms 60000 2>&1 | node scripts/redact-log.mjs || rc=$?
-          if [ -f "$RUNNER_TEMP/appc-out/results.md" ]; then cat "$RUNNER_TEMP/appc-out/results.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -110,14 +146,24 @@ jobs:
         run: |
           if ! command -v cargo >/dev/null 2>&1; then echo "::error::cargo is not installed on this runner (install Rust with rustup)"; exit 1; fi
           cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
-      - name: Run the experiment as the runner service (no window, no prompt)
+      - name: Containment cases as the runner service (no window, no prompt)
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
           # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
           rc=0
-          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" 2>&1 | node scripts/redact-log.mjs || rc=$?
-          if [ -f "$RUNNER_TEMP/appc-out/results.md" ]; then cat "$RUNNER_TEMP/appc-out/results.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode cases --timeout-ms 90000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/cases.md" ]; then cat "$RUNNER_TEMP/appc-out/cases.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Git ladder as the runner service
+        shell: bash
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode git --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/git.md" ]; then cat "$RUNNER_TEMP/appc-out/git.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

@@ -12,7 +12,9 @@ use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
 use windows_sys::Win32::System::JobObjects::*;
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Threading::*;
 
 // Attribute numbers (the ProcThreadAttributeValue results documented for each PROC_THREAD_ATTRIBUTE_*), written out so a header
@@ -114,11 +116,14 @@ struct Args {
     ui_limits: bool,
     timeout_ms: u32,
     keep_profile: bool,
+    stdin: String, // nul (read-only NUL, the default), nul-rw, file:PATH, pipe (an empty pipe: end of input at once), pipe-open (a pipe whose write end stays open until the child ends)
+    stdout_pipe: bool, // the child's output goes through an anonymous pipe that the launcher copies into the file
+    stderr_pipe: bool,
     capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
 }
 
 fn parse_args(raw: &[String]) -> Result<Args, String> {
-    let mut a = Args { name: "NimbleNewtExperiment".into(), kill_on_close: true, timeout_ms: 120_000, ..Default::default() };
+    let mut a = Args { name: "NimbleNewtExperiment".into(), kill_on_close: true, timeout_ms: 120_000, stdin: "nul".into(), ..Default::default() };
     let mut it = raw.iter().skip(1);
     a.command = it.next().cloned().ok_or("no command (run, info, revoke, check, delete-profile)")?;
     while let Some(flag) = it.next() {
@@ -151,6 +156,9 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--ui-limits" => a.ui_limits = true,
             "--timeout-ms" => a.timeout_ms = value("--timeout-ms")?.parse().map_err(|_| "--timeout-ms is not a number")?,
             "--keep-profile" => a.keep_profile = true,
+            "--stdin" => { let v = value("--stdin")?; if !(matches!(v.as_str(), "nul" | "nul-rw" | "pipe" | "pipe-open") || v.starts_with("file:")) { return Err("--stdin: nul, nul-rw, file:PATH, pipe or pipe-open".into()); } a.stdin = v; }
+            "--stdout-pipe" => a.stdout_pipe = true,
+            "--stderr-pipe" => a.stderr_pipe = true,
             "--capability" => { let c = value("--capability")?; if c.is_empty() { return Err("--capability is empty".into()); } a.capabilities.push(c); }
             other => return Err(format!("unknown option {other}")),
         }
@@ -283,7 +291,10 @@ const ACE_FLAG_INHERITED: u8 = 0x10; // INHERITED_ACE
 pub const ERR_STILL_PRESENT: u32 = 0x2000_0001;
 
 /// How many NON-inherited allow/deny entries of the DACL name this SID (a NULL DACL has none).
-unsafe fn explicit_aces(acl: *const ACL, sid: PSID) -> u32 {
+unsafe fn explicit_aces(acl: *const ACL, sid: PSID) -> u32 { count_aces(acl, sid, false) }
+
+/// How many allow/deny entries of the DACL name this SID, counting the explicit ones (`inherited` false) or the inherited ones (true).
+unsafe fn count_aces(acl: *const ACL, sid: PSID, inherited: bool) -> u32 {
     if acl.is_null() { return 0; }
     let mut n = 0;
     for i in 0..(*acl).AceCount as u32 {
@@ -291,7 +302,7 @@ unsafe fn explicit_aces(acl: *const ACL, sid: PSID) -> u32 {
         if GetAce(acl, i, &mut ace) == 0 || ace.is_null() { continue; }
         let header = &*(ace as *const ACE_HEADER);
         if header.AceType != ACE_TYPE_ALLOWED && header.AceType != ACE_TYPE_DENIED { continue; }
-        if header.AceFlags & ACE_FLAG_INHERITED != 0 { continue; }
+        if (header.AceFlags & ACE_FLAG_INHERITED != 0) != inherited { continue; }
         // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share one layout: header, mask, then the SID starting at SidStart.
         let ace_sid = &(*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as *const u32 as PSID;
         if EqualSid(ace_sid, sid) != 0 { n += 1; }
@@ -300,14 +311,19 @@ unsafe fn explicit_aces(acl: *const ACL, sid: PSID) -> u32 {
 }
 
 /// The number of explicit entries for the SID on a path (Err: the Win32 error of GetNamedSecurityInfoW).
-fn explicit_count(path: &str, sid: PSID) -> Result<u32, u32> {
+fn explicit_count(path: &str, sid: PSID) -> Result<u32, u32> { entry_count(path, sid, false) }
+
+/// The same for entries the path INHERITED from its parent (does a grant on a folder reach the target of a junction inside it?).
+fn inherited_count(path: &str, sid: PSID) -> Result<u32, u32> { entry_count(path, sid, true) }
+
+fn entry_count(path: &str, sid: PSID, inherited: bool) -> Result<u32, u32> {
     unsafe {
         let wpath = wide(path);
         let mut acl: *mut ACL = null_mut();
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         let rc = GetNamedSecurityInfoW(wpath.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut acl, null_mut(), &mut sd);
         if rc != 0 { return Err(rc); }
-        let n = explicit_aces(acl, sid);
+        let n = count_aces(acl, sid, inherited);
         LocalFree(sd as *mut c_void);
         Ok(n)
     }
@@ -396,6 +412,8 @@ impl GrantSet {
             if let Some(e) = g.error { j.n("errorCode", e as i64); }
             // The read-back after the revoke: how many explicit entries for the container are still on the path (-1: the DACL could not be read).
             j.n("entriesLeft", match explicit_count(&g.spec.path, self.sid) { Ok(n) => n as i64, Err(_) => -1 });
+            // Entries the path inherited for the container (-1: unreadable); a grant on a parent folder may or may not reach a junction's target.
+            j.n("inheritedEntries", match inherited_count(&g.spec.path, self.sid) { Ok(n) => n as i64, Err(_) => -1 });
             j.render()
         }).collect();
         format!("[{}]", parts.join(","))
@@ -449,6 +467,47 @@ fn open_inheritable(path: &str, write: bool) -> Result<Handle, String> {
         };
         if h == INVALID_HANDLE_VALUE { Err(format!("CreateFileW({}) failed: {}", if write { "output" } else { "NUL" }, GetLastError())) } else { Ok(Handle(h)) }
     }
+}
+
+/// NUL opened for reading AND writing (what git for Windows does at start-up: open("/dev/null", O_RDWR) becomes _wopen("nul", O_RDWR)).
+fn open_nul_rw() -> Result<Handle, String> {
+    unsafe {
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: null_mut(), bInheritHandle: 1 };
+        let w = wide("NUL");
+        let h = CreateFileW(w.as_ptr(), FILE_GENERIC_READ | FILE_GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null_mut());
+        if h == INVALID_HANDLE_VALUE { Err(format!("CreateFileW(NUL read-write) failed: {}", GetLastError())) } else { Ok(Handle(h)) }
+    }
+}
+
+/// An anonymous pipe. Both ends are created inheritable; the end the launcher keeps is then made non-inheritable. Returns (read end, write end).
+fn make_pipe(keep_read: bool) -> Result<(Handle, Handle), String> {
+    unsafe {
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: null_mut(), bInheritHandle: 1 };
+        let (mut r, mut w): (HANDLE, HANDLE) = (null_mut(), null_mut());
+        if CreatePipe(&mut r, &mut w, &sa, 0) == 0 { return Err(format!("CreatePipe failed: {}", GetLastError())); }
+        let (r, w) = (Handle(r), Handle(w));
+        let ours = if keep_read { r.0 } else { w.0 };
+        if SetHandleInformation(ours, 1 /* HANDLE_FLAG_INHERIT */, 0) == 0 { return Err(format!("SetHandleInformation failed: {}", GetLastError())); }
+        Ok((r, w))
+    }
+}
+
+/// Copies everything that arrives on the read end of a pipe into a file, until every write end is closed. The handle travels as an integer so the thread may own it.
+fn drain_pipe(read_end: Handle, path: String) -> std::thread::JoinHandle<()> {
+    let raw = read_end.0 as usize;
+    std::mem::forget(read_end);
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let h = Handle(raw as HANDLE);
+        let Ok(mut f) = std::fs::File::create(&path) else { return };
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let mut got = 0u32;
+            let ok = unsafe { ReadFile(h.0, buf.as_mut_ptr() as *mut _, buf.len() as u32, &mut got, null_mut::<OVERLAPPED>()) };
+            if ok == 0 || got == 0 { break; }
+            if f.write_all(&buf[..got as usize]).is_err() { break; }
+        }
+    })
 }
 
 fn file_size(path: &str) -> i64 { std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(-1) }
@@ -510,9 +569,24 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
     }
     // 2. The job, the three standard handles, the environment.
     let job = make_job(a).map_err(|e| ("job", e))?;
-    let nul = open_inheritable("NUL", false).map_err(|e| ("stdio", e))?;
-    let out = open_inheritable(out_path, true).map_err(|e| ("stdio", e))?;
-    let err = open_inheritable(err_path, true).map_err(|e| ("stdio", e))?;
+    // Standard input: NUL read-only (default), NUL read-write, a real file, an empty pipe (end of input at once) or a pipe held open until the child ends.
+    let mut _stdin_keep: Option<Handle> = None;
+    let nul = match a.stdin.as_str() {
+        "nul" => open_inheritable("NUL", false),
+        "nul-rw" => open_nul_rw(),
+        "pipe" | "pipe-open" => make_pipe(false).map(|(r, w)| { if a.stdin == "pipe-open" { _stdin_keep = Some(w); } r }),
+        other => open_inheritable(other.trim_start_matches("file:"), false),
+    }.map_err(|e| ("stdio", e))?;
+    // Standard output and error: the file itself, or an anonymous pipe that a launcher thread copies into the file.
+    let mut drains: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let mut open_output = |path: &str, piped: bool| -> Result<Handle, String> {
+        if !piped { return open_inheritable(path, true); }
+        let (r, w) = make_pipe(true)?;
+        drains.push(drain_pipe(r, path.to_string()));
+        Ok(w)
+    };
+    let out = open_output(out_path, a.stdout_pipe).map_err(|e| ("stdio", e))?;
+    let err = open_output(err_path, a.stderr_pipe).map_err(|e| ("stdio", e))?;
     let env = env_block(&a.env);
 
     // 3. The attribute list: security capabilities (the container, no capability), the all-application-packages policy, the
@@ -563,6 +637,9 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         if ok == 0 { return Err(("create-process", format!("CreateProcessW failed: {create_error}"))); }
         let process = Handle(pi.hProcess);
         let _thread = Handle(pi.hThread);
+        // The launcher's copies of the output pipes' write ends must go now, or the drain threads would never see the end of the output.
+        if a.stdout_pipe { drop(out); }
+        if a.stderr_pipe { drop(err); }
         j.b("childStarted", true);
         j.n("childPid", pi.dwProcessId as i64);
 
@@ -573,6 +650,10 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         let mut code = 0u32;
         GetExitCodeProcess(process.0, &mut code);
         if leftover != 0 { TerminateJobObject(job.0, 1); } // the program ended but left processes behind: end them too
+        for d in drains.drain(..) { let _ = d.join(); } // every write end is closed by now (the job is ended), so the copies finish
+        j.s("stdin", &a.stdin);
+        j.b("stdoutPipe", a.stdout_pipe);
+        j.b("stderrPipe", a.stderr_pipe);
         j.n("elapsedMs", started.elapsed().as_millis() as i64);
         j.b("timedOut", timed_out);
         j.n("leftoverProcesses", leftover);
@@ -680,6 +761,25 @@ pub fn main() {
                     j.raw("grants", set.json());
                     let all = set.items.iter().all(|g| g.revoked);
                     j.b("ok", all);
+                    Outcome { j, code: if all { 0 } else { EXIT_LAUNCHER_FAILED } }
+                }
+            }
+        }
+        "grant" => {
+            // Applies each --grant and LEAVES the entries in place (for the junction experiment: grant, check what the targets inherited, then revoke). A failed grant is reported.
+            let mut j = j;
+            match container_sid(&a.name) {
+                Err(e) => fail(j, "container", &e),
+                Ok((sid, _)) => {
+                    let mut set = GrantSet { sid: sid.0, items: Vec::new() };
+                    for spec in &a.grants {
+                        let r = change_ace(&spec.path, sid.0, spec.mode, false);
+                        set.items.push(GrantRecord { spec: spec.clone(), applied: r.is_ok(), revoked: false, error: r.err() });
+                    }
+                    j.raw("grants", set.json());
+                    let all = set.items.iter().all(|g| g.applied);
+                    j.b("ok", all);
+                    std::mem::forget(set); // no revoke on the way out: that is the point of this command
                     Outcome { j, code: if all { 0 } else { EXIT_LAUNCHER_FAILED } }
                 }
             }

@@ -1,7 +1,7 @@
 // NimbleNewt experiment (not product code): the harness's pure logic. Nothing here starts the launcher or needs Windows, so the unit tests
 // (scripts/windows-appcontainer-experiment.test.mjs) run on Linux with fakes. run-experiment.mjs is the part that does the real work.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, win32 } from "node:path";
 import { gzipSync } from "node:zlib";
 import { REPORT_PREFIX, summarize } from "./probe.mjs";
@@ -14,9 +14,14 @@ export const CASE_IDS = [
   "control-write-own-directories", "control-read-own-decoy", "deny-write-system", "deny-write-host-path", "deny-symlink-read",
   "deny-symlink-write", "deny-credential-read", "deny-controller-data-read", "deny-network-loopback", "deny-write-protected-name",
 ];
-export const EXTRA_IDS = ["extra-outbound-connect", "extra-read-owner-profile", "extra-write-system-folder"];
+export const EXTRA_IDS = [
+  "extra-outbound-connect", "extra-read-owner-profile", "extra-write-system-folder", "extra-junction-self-made", "extra-hardlink-read",
+  "extra-protect-rename-dir", "extra-protect-delete-dir", "extra-protect-replace-junction", "extra-protect-rename-parent",
+];
+/** Information only (no verdict): the NUL device and how the probe may start children. */
+export const DIAG_IDS = ["diag-nul-open", "diag-spawn-modes"];
 export const TOOL_IDS = ["tool-node-version", "tool-git-version", "tool-git-init-commit", "tool-npm-version", "tool-npm-ci-offline"];
-export const ALL_PROBE_IDS = [...CASE_IDS, ...EXTRA_IDS, ...TOOL_IDS];
+export const ALL_PROBE_IDS = [...CASE_IDS, ...EXTRA_IDS, ...DIAG_IDS, ...TOOL_IDS];
 export const CONTROL_IDS = ["control-write-own-directories", "control-read-own-decoy"];
 
 export const SECRETS = { controller: "NN-FIXED-TEXT-CONTROLLER-DATA", credential: "NN-FIXED-TEXT-CREDENTIAL", decoy: "NN-FIXED-TEXT-OWN-DECOY", original: "NN-FIXED-TEXT-ORIGINAL", git: "[core]\n\tbare = false\n" };
@@ -55,11 +60,37 @@ export function matrixCells() {
   for (const lpac of [true, false]) for (const win32kDisabled of [false, true]) for (const aapOptOut of [true, false]) {
     const aapPolicy = !lpac ? "none" : aapOptOut ? "optout" : "optin";
     const id = `lpac-${lpac ? "on" : "off"}_win32k-${win32kDisabled ? "disabled" : "enabled"}_aapoptout-${aapOptOut ? "on" : "off"}`;
-    cells.push({ id, lpac, win32kDisabled, aapOptOut, aapPolicy, protect: true, sameAs: undefined });
+    cells.push({ id, lpac, win32kDisabled, aapOptOut, aapPolicy, protect: true, sameAs: undefined, capabilities: [], firewallBlock: false, loopbackExempt: false });
   }
   for (const c of cells) if (!c.lpac && !c.aapOptOut) c.sameAs = `lpac-off_win32k-${c.win32kDisabled ? "disabled" : "enabled"}_aapoptout-on`;
-  cells.push({ id: "baseline-no-protect", lpac: true, win32kDisabled: false, aapOptOut: true, aapPolicy: "optout", protect: false, sameAs: undefined });
+  cells.push({ id: "baseline-no-protect", lpac: true, win32kDisabled: false, aapOptOut: true, aapPolicy: "optout", protect: false, sameAs: undefined, capabilities: [], firewallBlock: false, loopbackExempt: false });
   return cells;
+}
+
+/**
+ * Round 3: the configurations the ten cases (and the tools and the protected-name operations) are run in. Win32k stays enabled (round 2: disabling it stops Node).
+ *   ac-nocap                  a plain AppContainer, no capability.
+ *   ac-nocap-noprotect        the same without the deny entry on `.git`: the contrast that shows what the protection (not the container) stops.
+ *   ac-inet-private           + internetClient + privateNetworkClientServer: the container may use the network, so the network cases show what a capability alone allows.
+ *   ac-inet-private-fwblock   the same, with an outbound BLOCK firewall rule scoped to the container's package SID (needs administrator rights).
+ *   ac-inet-private-loopback  the same, plus a loopback exemption for the package (CheckNetIsolation): the container may reach the host's loopback listener.
+ *   ac-inet-private-loopback-fwblock  the loopback exemption AND the block rule: does the rule stop what the capabilities and the exemption allow?
+ *   lpac-optout-reg           LPAC (policy optout) + registryRead (the smallest LPAC that runs Node).
+ *   lpac-optout-reg-com       LPAC + registryRead + lpacCom.
+ */
+export function configCells() {
+  const c = (id, o) => ({ id, lpac: false, win32kDisabled: false, aapOptOut: false, aapPolicy: "none", protect: true, sameAs: undefined, capabilities: [], firewallBlock: false, loopbackExempt: false, ...o });
+  const net = ["internetClient", "privateNetworkClientServer"];
+  return [
+    c("ac-nocap", {}),
+    c("ac-nocap-noprotect", { protect: false }),
+    c("ac-inet-private", { capabilities: net }),
+    c("ac-inet-private-fwblock", { capabilities: net, firewallBlock: true }),
+    c("ac-inet-private-loopback", { capabilities: net, loopbackExempt: true }),
+    c("ac-inet-private-loopback-fwblock", { capabilities: net, loopbackExempt: true, firewallBlock: true }),
+    c("lpac-optout-reg", { lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead"] }),
+    c("lpac-optout-reg-com", { lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead", "lpacCom"] }),
+  ];
 }
 
 export function selectCells(spec, cells = matrixCells()) {
@@ -88,7 +119,7 @@ export function buildFixturePlan(root, pathApi = win32) {
       readFile: pathApi.join(ws, "link-read-file"), readDir: pathApi.join(ws, "link-read-dir"),
       writeFile: pathApi.join(ws, "link-write-file"), writeDir: pathApi.join(ws, "link-write-dir"),
     },
-    probeFile: j("probe", "probe.mjs"), configFile: j("probe", "probe-config.json"),
+    probeFile: j("probe", "probe.mjs"), configFile: j("probe", "probe-config.json"), progressFile: j("scratch", "probe-progress.txt"),
   };
 }
 
@@ -118,22 +149,38 @@ export function makeTarball(files) {
   return gzipSync(Buffer.concat(blocks), { level: 9 });
 }
 
-/** The files of the tiny offline npm project: package.json, a lockfile naming the local tarball with its integrity, and the tarball. */
-export function npmFixtureFiles() {
-  const tgz = makeTarball({
-    "package/package.json": JSON.stringify({ name: "nn-tiny", version: "1.0.0", main: "index.js" }),
-    "package/index.js": "module.exports = 'nn-tiny';\n",
+/**
+ * The files of the tiny offline npm project: package.json, a lockfile naming the local tarballs with their integrity, and the tarballs.
+ * `count` 1 (the default) is the one-package project of rounds 1 and 2 (`nn-tiny`); a larger count makes `nn-tiny-0` ... (round 3's timing of a bigger install).
+ */
+export function npmFixtureFiles(count = 1) {
+  const names = count === 1 ? ["nn-tiny"] : Array.from({ length: count }, (_, i) => `nn-tiny-${i}`);
+  const entries = names.map((name) => {
+    const tgz = makeTarball({
+      "package/package.json": JSON.stringify({ name, version: "1.0.0", main: "index.js" }),
+      "package/index.js": `module.exports = '${name}';\n`,
+    });
+    return { name, tgz, dep: `file:vendor/${name}-1.0.0.tgz`, integrity: `sha512-${createHash("sha512").update(tgz).digest("base64")}` };
   });
-  const integrity = `sha512-${createHash("sha512").update(tgz).digest("base64")}`;
-  const dep = "file:vendor/nn-tiny-1.0.0.tgz";
+  const dependencies = Object.fromEntries(entries.map((e) => [e.name, e.dep]));
   return {
-    tgz,
-    "package.json": JSON.stringify({ name: "nn-appc-fixture", version: "1.0.0", private: true, dependencies: { "nn-tiny": dep } }, null, 2),
+    tgz: entries[0].tgz,
+    tarballs: entries.map((e) => ({ file: `${e.name}-1.0.0.tgz`, data: e.tgz })),
+    "package.json": JSON.stringify({ name: "nn-appc-fixture", version: "1.0.0", private: true, dependencies }, null, 2),
     "package-lock.json": JSON.stringify({
       name: "nn-appc-fixture", version: "1.0.0", lockfileVersion: 3, requires: true,
-      packages: { "": { name: "nn-appc-fixture", version: "1.0.0", dependencies: { "nn-tiny": dep } }, "node_modules/nn-tiny": { version: "1.0.0", resolved: dep, integrity } },
+      packages: { "": { name: "nn-appc-fixture", version: "1.0.0", dependencies }, ...Object.fromEntries(entries.map((e) => [`node_modules/${e.name}`, { version: "1.0.0", resolved: e.dep, integrity: e.integrity }])) },
     }, null, 2),
   };
+}
+
+/** Writes an offline npm project of `count` local packages into `dir` (package.json, lockfile, vendor/*.tgz). */
+export function writeNpmProject(dir, count = 1) {
+  const npm = npmFixtureFiles(count);
+  mkdirSync(join(dir, "vendor"), { recursive: true });
+  writeFileSync(join(dir, "package.json"), npm["package.json"]);
+  writeFileSync(join(dir, "package-lock.json"), npm["package-lock.json"]);
+  for (const t of npm.tarballs) writeFileSync(join(dir, "vendor", t.file), t.data);
 }
 
 const tryLink = (target, path, type, notes, label) => {
@@ -154,10 +201,7 @@ export function createFixtures(plan, { platform = process.platform, probeSource 
   writeFileSync(plan.linkTargetFile, SECRETS.original);
   writeFileSync(plan.controllerFile, SECRETS.controller);
   writeFileSync(plan.credentialFile, SECRETS.credential);
-  const npm = npmFixtureFiles();
-  writeFileSync(join(plan.npmProject, "package.json"), npm["package.json"]);
-  writeFileSync(join(plan.npmProject, "package-lock.json"), npm["package-lock.json"]);
-  writeFileSync(join(plan.npmProject, "vendor", "nn-tiny-1.0.0.tgz"), npm.tgz);
+  writeNpmProject(plan.npmProject, 1);
   if (probeSource !== undefined) writeFileSync(plan.probeFile, readFileSync(probeSource));
   const dirType = platform === "win32" ? "junction" : "dir";
   const planted = {
@@ -199,6 +243,8 @@ export function buildProbeConfig(plan, ctx) {
     ownerProfile: ctx.ownerProfile,
     systemFolder: ctx.systemFolder,
     tools: { git: ctx.gitExe, gitWork: plan.gitWork, npmCli: ctx.npmCli, npmProject: plan.npmProject },
+    // The probe ends itself: its budget for the tool steps, a watchdog for the whole run, and a progress file that names the step it was in.
+    progressFile: plan.progressFile, budgetMs: ctx.probeBudgetMs ?? 52_000, watchdogMs: ctx.probeWatchdogMs ?? 60_000,
   };
 }
 
@@ -215,7 +261,8 @@ export function buildChildEnv(plan, ctx, delimiter = ";") {
   return env;
 }
 
-export const DEFAULT_LIMITS = { memoryMb: 4096, activeProcesses: 64, timeoutMs: 300_000 };
+/** The hard limit per cell: the probe ends itself after 60 s at most, so 90 s means something is wrong (round 1 spent 300 s per cell on hangs). */
+export const DEFAULT_LIMITS = { memoryMb: 4096, activeProcesses: 64, timeoutMs: 90_000 };
 
 /**
  * Node options for the probe's own start. Without them Node canonicalizes the entry file's path at start-up by calling lstat on every ancestor
@@ -235,6 +282,7 @@ export function buildLauncherArgs(cell, plan, ctx, limits = DEFAULT_LIMITS) {
   if (cell.protect) grant("deny-write", plan.protectedDir);
   for (const dir of ctx.programDirs) grant("rx", dir, true);
   args.push("--aap-policy", cell.aapPolicy);
+  for (const c of cell.capabilities ?? []) args.push("--capability", c);
   if (cell.win32kDisabled) args.push("--win32k-off");
   args.push("--memory-mb", String(limits.memoryMb), "--active-processes", String(limits.activeProcesses), "--ui-limits", "--timeout-ms", String(limits.timeoutMs));
   args.push("--stdout", join(plan.outDir, "stdout.txt"), "--stderr", join(plan.outDir, "stderr.txt"), "--cwd", plan.workspace);
@@ -292,6 +340,7 @@ export function aclReadBack(exec, launcherPath, profileName, paths) {
 
 // ---------------------------------------------------------------------------------------------------------------- the host's witnesses and the verdicts
 
+const isLink = (path) => { try { return lstatSync(path).isSymbolicLink(); } catch { return false; } };
 const readText = (path) => { try { return readFileSync(path, "utf8"); } catch { return undefined; } };
 
 /** What the host sees after a run: files that must not have changed, files that must not exist, connections the listeners counted. */
@@ -303,7 +352,12 @@ export function collectWitness(plan, ctx) {
     hostDirsCreated: [plan.outsideDir, plan.controllerDir, plan.credentialDir].filter((d) => created(d, "nn-created")).length,
     linkFileChanged: readText(plan.linkTargetFile) !== SECRETS.original,
     linkDirCreated: created(plan.linkTargetDir, "nn-via-link") ? 1 : 0,
-    protectedChanged: readText(plan.protectedConfig) !== SECRETS.git || created(plan.protectedDir, "nn-hook"),
+    protectedChanged: readText(plan.protectedConfig) !== SECRETS.git || created(plan.protectedDir, "nn-hook") || created(plan.protectedDir, "nn-hook-via-junction"),
+    protectedDirGone: !existsSync(plan.protectedDir) || existsSync(`${plan.protectedDir}-renamed`) || existsSync(`${plan.protectedDir}-away`),
+    protectedDirLink: isLink(plan.protectedDir),
+    workspaceMoved: !existsSync(plan.workspace) || existsSync(`${plan.workspace}-renamed`),
+    ownJunctionWrite: created(plan.outsideDir, "nn-via-own-junction") ? 1 : 0,
+    hardlinkMade: existsSync(join(plan.workspace, "own-hardlink")) ? 1 : 0,
     loopbackConnections: ctx.loopbackConnections(),
     outboundConnections: ctx.outboundConnections(),
   };
@@ -318,6 +372,10 @@ export function witnessProblem(id, w) {
     case "deny-network-loopback": return w.loopbackConnections > 0 ? "the host's loopback listener received a connection" : undefined;
     case "extra-outbound-connect": return w.outboundConnections > 0 ? "the host's non-loopback listener received a connection" : undefined;
     case "deny-write-protected-name": return w.protectedChanged ? "a protected name under the workspace was changed" : undefined;
+    case "extra-protect-rename-dir": case "extra-protect-delete-dir": case "extra-protect-replace-junction": return w.protectedDirGone || w.protectedDirLink ? "the protected folder was moved, deleted or replaced by a link" : undefined;
+    case "extra-protect-rename-parent": return w.workspaceMoved ? "the workspace folder itself was moved" : undefined;
+    case "extra-junction-self-made": return w.ownJunctionWrite > 0 ? "a write through a junction the container made reached a host folder" : undefined;
+    case "extra-hardlink-read": return w.hardlinkMade > 0 ? "a hard link to the controller's file exists in the workspace" : undefined;
     default: return undefined;
   }
 }
@@ -328,6 +386,8 @@ const detailOf = (probe) => probe.attempts.map((a) => `${a.name}=${a.outcome}${a
 export function judgeProbe(probe, witness, controlsOk) {
   const actual = summarize(probe.expect, probe.attempts);
   const detail = detailOf(probe);
+  // A diagnostic has no verdict: what happened is the result.
+  if (probe.group === "diag") return { id: probe.id, group: probe.group, expect: probe.expect, actual: probe.attempts.every((a) => a.outcome === "allowed") ? "allowed" : "mixed", verdict: "info", detail, attempts: probe.attempts.map(({ name, outcome, code, note }) => ({ name, outcome, ...(code ? { code } : {}), ...(note ? { note } : {}) })), ms: probe.ms };
   const problem = witness === undefined ? undefined : witnessProblem(probe.id, witness);
   let verdict;
   if (problem !== undefined) verdict = "fail";
@@ -338,7 +398,7 @@ export function judgeProbe(probe, witness, controlsOk) {
   else verdict = "inconclusive";
   if (verdict === "pass" && probe.expect === "denied" && !controlsOk) verdict = "weak";
   if (probe.expect === "denied" && probe.attempts.some((a) => a.note === "content-visible") && verdict !== "fail") verdict = "fail";
-  return { id: probe.id, group: probe.group, expect: probe.expect, actual, verdict, detail: problem ? `${detail}; ${problem}` : detail, attempts: probe.attempts.map(({ name, outcome, code }) => ({ name, outcome, ...(code ? { code } : {}) })) };
+  return { id: probe.id, group: probe.group, expect: probe.expect, actual, verdict, detail: problem ? `${detail}; ${problem}` : detail, attempts: probe.attempts.map(({ name, outcome, code, note }) => ({ name, outcome, ...(code ? { code } : {}), ...(typeof note === "string" && probe.group === "tool" ? { note } : {}) })), ...(typeof probe.ms === "number" ? { ms: probe.ms } : {}) };
 }
 
 /** All verdicts of a cell. A probe the child never reported is inconclusive; controls that failed make every denial only "weak". */
@@ -347,15 +407,15 @@ export function judgeCell(probeReport, witness) {
   const controlsOk = CONTROL_IDS.every((id) => { const p = byId.get(id); return p !== undefined && summarize(p.expect, p.attempts) === "allowed"; });
   return ALL_PROBE_IDS.map((id) => {
     const p = byId.get(id);
-    if (p === undefined) return { id, group: groupOf(id), expect: id.startsWith("tool-") || id.startsWith("control-") ? "allowed" : "denied", actual: "no-report", verdict: "inconclusive", detail: "the probe did not report this item", attempts: [] };
+    if (p === undefined) return { id, group: groupOf(id), expect: id.startsWith("tool-") || id.startsWith("control-") || id.startsWith("diag-") ? "allowed" : "denied", actual: "no-report", verdict: "inconclusive", detail: "the probe did not report this item", attempts: [] };
     return judgeProbe(p, witness, controlsOk);
   });
 }
 
-export const groupOf = (id) => (CASE_IDS.includes(id) ? "case" : TOOL_IDS.includes(id) ? "tool" : "extra");
+export const groupOf = (id) => (CASE_IDS.includes(id) ? "case" : TOOL_IDS.includes(id) ? "tool" : DIAG_IDS.includes(id) ? "diag" : "extra");
 
 export function tally(results) {
-  const t = { pass: 0, weak: 0, fail: 0, inconclusive: 0 };
+  const t = { pass: 0, weak: 0, fail: 0, inconclusive: 0, info: 0 };
   for (const r of results) t[r.verdict]++;
   return t;
 }
@@ -394,14 +454,14 @@ export function validateReport(r) {
     for (const x of c.results ?? []) {
       need(ALL_PROBE_IDS.includes(x.id), `cell ${c.id}: unknown probe ${x.id}`);
       need(["allowed", "denied"].includes(x.expect), `cell ${c.id}/${x.id}: expect`);
-      need(["pass", "weak", "fail", "inconclusive"].includes(x.verdict), `cell ${c.id}/${x.id}: verdict`);
+      need(["pass", "weak", "fail", "inconclusive", "info"].includes(x.verdict), `cell ${c.id}/${x.id}: verdict`);
       need(typeof x.actual === "string" && Array.isArray(x.attempts), `cell ${c.id}/${x.id}: actual/attempts`);
     }
   }
   return p;
 }
 
-const MARK = { pass: "pass", weak: "weak", fail: "FAIL", inconclusive: "inc" };
+const MARK = { pass: "pass", weak: "weak", fail: "FAIL", inconclusive: "inc", info: "info" };
 
 /** The results table (markdown). One row per cell, one column per probe; a legend and per-cell notes follow. */
 export function renderMarkdown(report) {
@@ -409,7 +469,7 @@ export function renderMarkdown(report) {
   L.push("# Windows AppContainer experiment: results", "");
   L.push(`Generated ${report.generatedAt}. Host: ${report.host.platform} ${report.host.release ?? ""} (node ${report.host.node ?? "?"}); session id ${report.host.sessionId}; elevated: ${report.host.elevated}.`, "");
   L.push(`Anything that needed administrator rights: ${report.needsAdmin.observed ? "YES" : "no"} (run elevated: ${report.needsAdmin.runIsElevated}; soft grants refused: ${report.needsAdmin.softGrantsRefused.length}).`, "");
-  L.push("Legend: pass = held (or worked) as expected; weak = nothing got through, but a refusal was not an access-denied code (or the controls failed); FAIL = the opposite of expected; inc = no verdict (not reported, skipped, launcher refused).", "");
+  L.push("Legend: pass = held (or worked) as expected; weak = nothing got through, but a refusal was not an access-denied code (or the controls failed); FAIL = the opposite of expected; inc = no verdict (not reported, skipped, launcher refused); info = a diagnostic, no verdict.", "");
   const ids = ALL_PROBE_IDS;
   L.push(`| cell | started | ${ids.map((i) => i.replace(/^(control|deny|extra|tool)-/, "$1:")).join(" | ")} | tally |`);
   L.push(`|${" --- |".repeat(ids.length + 3)}`);
@@ -419,9 +479,21 @@ export function renderMarkdown(report) {
     L.push(`| ${c.id}${c.sameAs ? ` (same as ${c.sameAs})` : ""} | ${started} | ${c.results.map((r) => MARK[r.verdict]).join(" | ")} | ${t.pass}/${t.weak}/${t.fail}/${t.inconclusive} |`);
   }
   L.push("", "Tally = pass/weak/FAIL/inc.", "");
+  // The same data turned around: one row per case, one column per configuration (the verdict table of round 3).
+  L.push("### Verdict per case and configuration", "");
+  L.push(`| case | ${report.cells.map((c) => c.id).join(" | ")} |`, `|${" --- |".repeat(report.cells.length + 1)}`);
+  for (const id of ids) L.push(`| ${id} | ${report.cells.map((c) => { const r = c.results.find((x) => x.id === id); return r ? MARK[r.verdict] : "-"; }).join(" | ")} |`);
+  L.push("");
+  const timed = report.cells.filter((c) => c.results.some((r) => typeof r.ms === "number"));
+  if (timed.length > 0) {
+    L.push("### Time per probe step (ms)", "", `| step | ${timed.map((c) => c.id).join(" | ")} |`, `|${" --- |".repeat(timed.length + 1)}`);
+    for (const id of ids) L.push(`| ${id} | ${timed.map((c) => c.results.find((x) => x.id === id)?.ms ?? "-").join(" | ")} |`);
+    L.push("");
+  }
   for (const c of report.cells) {
     L.push(`## ${c.id}`, "");
-    L.push(`- Settings: LPAC ${c.dims.lpac ? "on" : "off"}, Win32k ${c.dims.win32kDisabled ? "disabled" : "enabled"}, AAP opt-out flag ${c.dims.aapOptOut ? "on" : "off"} (policy attribute: ${c.dims.aapPolicy}), protected-name deny ${c.dims.protect ? "on" : "off"}.`);
+    L.push(`- Settings: LPAC ${c.dims.lpac ? "on" : "off"}, Win32k ${c.dims.win32kDisabled ? "disabled" : "enabled"}, AAP opt-out flag ${c.dims.aapOptOut ? "on" : "off"} (policy attribute: ${c.dims.aapPolicy}), protected-name deny ${c.dims.protect ? "on" : "off"}; capabilities ${(c.dims.capabilities ?? []).join(", ") || "none"}; outbound block rule ${c.dims.firewallBlock ? "yes" : "no"}; loopback exemption ${c.dims.loopbackExempt ? "yes" : "no"}.`);
+    if (c.net) L.push(`- Network set-up: ${c.net.summary}`);
     if (c.sameAs) L.push(`- Same configuration as ${c.sameAs} (no policy attribute); kept as a repeat.`);
     const l = c.launch;
     if (!l.childStarted) L.push(`- The launcher refused to start the program: stage ${l.stage ?? "?"}, ${l.error ?? "no message"}.`);
@@ -431,8 +503,9 @@ export function renderMarkdown(report) {
     if (c.softGrantFailures.length > 0) L.push(`- Soft grants refused: ${c.softGrantFailures.map((g) => `${g.mode} ${g.path} (error ${g.errorCode})`).join("; ")}.`);
     if (c.plantNotes.length > 0) L.push(`- Fixture notes: ${c.plantNotes.join("; ")}.`);
     if (c.probeReport !== "ok") L.push(`- Probe report: ${c.probeReport}.`);
+    if (c.probeReport !== "ok" && (c.probeProgress ?? []).length > 0) L.push(`- Last probe steps before it stopped (progress file): ${c.probeProgress.map((x) => `\`${x}\``).join(" | ")}`);
     if ((c.stderrHead ?? []).length > 0) L.push(`- First lines the program wrote to its error output: ${c.stderrHead.map((s) => `\`${s.replaceAll("`", "'")}\``).join(" | ")}`);
-    for (const r of c.results.filter((x) => x.verdict === "fail" || x.verdict === "weak")) L.push(`- ${r.verdict.toUpperCase()} ${r.id}: ${r.detail}`);
+    for (const r of c.results.filter((x) => x.verdict === "fail" || x.verdict === "weak" || x.verdict === "info")) L.push(`- ${r.verdict.toUpperCase()} ${r.id}: ${r.detail}`);
     if (c.startupDenials.length > 0) L.push(`- Access-denied lines seen at tool start-up (${c.startupDenials.length}): ${c.startupDenials.slice(0, 6).map((d) => `${d.tool}: ${d.line}`).join(" | ")}`);
     L.push("");
   }
