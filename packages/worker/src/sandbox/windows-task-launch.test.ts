@@ -5,9 +5,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, describe, test } from "node:test";
 import type { ProcessResult, WindowsHost } from "./windows-host.js";
-import { runWsbCommand } from "./windows-host.js";
+import { runWsbCommand, withRun } from "./windows-host.js";
 import { listSandboxes } from "./windows-list.js";
 import { main as childMain, readRequest } from "./windows-task-child.js";
 import { CHECK_MS, CHILD_MARGIN_MS, HELPER_OVERHEAD_MS, MAX_REQUEST_MS, wsbTaskBase, HELPER_SCRIPT, START_GRACE_MS, launchWsb, parseMode, runViaScheduledTask, type TaskLaunchDeps, type TaskOutcome } from "./windows-task-launch.js";
@@ -331,6 +332,27 @@ describe("the strategy: when each launch is chosen", () => {
     await runWsbCommand(base, "wsb", ["list"], { timeoutMs: 1 });
     await runWsbCommand({ ...base, runWsb: async () => { calls.push("runWsb"); return direct(); } } as unknown as WindowsHost, "wsb", ["list"], { timeoutMs: 1 });
     assert.deepEqual(calls, ["run", "runWsb"]);
+  });
+
+  test("a host copy made with withRun sends wsb commands to the replaced run, never to the original's scheduled-task launch (the 7c9d6c75 Windows CI failure)", async () => {
+    const calls: string[] = [];
+    const real = { run: async () => { calls.push("real run"); return direct(); }, runWsb: async () => { calls.push("real task launch"); throw new Error("the real launch must not be reached"); } } as unknown as WindowsHost;
+    const fake = withRun(real, async (_f, a) => { calls.push(`fake ${String(a[0])}`); return direct(); });
+    await runWsbCommand(fake, "wsb", ["start"], { timeoutMs: 1 });
+    await runWsbCommand(fake, "wsb", ["exec"], { timeoutMs: 1 });
+    assert.deepEqual(calls, ["fake start", "fake exec"]);
+    // The plain spread this replaces keeps the real launch: the failure being guarded against.
+    const spread = { ...real, run: async () => { calls.push("spread run"); return direct(); } } as unknown as WindowsHost;
+    await assert.rejects(runWsbCommand(spread, "wsb", ["start"], { timeoutMs: 1 }), /must not be reached/);
+  });
+
+  test("no test builds a stand-in from the real Windows host with a plain spread and a replaced run (it would keep the real scheduled-task launch)", () => {
+    const dir = fileURLToPath(new URL(".", import.meta.url));
+    const offenders = readdirSync(dir).filter((f) => f.endsWith(".test.js")).filter((f) => {
+      const text = readFileSync(join(dir, f), "utf8");
+      return text.includes("windowsRealHost(") && /\.\.\.host,[^;]{0,1200}?\brun:/s.test(text);
+    });
+    assert.deepEqual(offenders, []);
   });
 
   test("wsb list may be called again by its caller (up to three calls, each through the strategy); the via note is kept in the record", async () => {

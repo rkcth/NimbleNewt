@@ -9,7 +9,7 @@ import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import { windowsSandboxBackend, type WindowsSandboxOptions } from "./windows.js";
 import { createRecordedFolder } from "./windows-records.js";
-import type { ProcessResult, WindowsHost } from "./windows-host.js";
+import { withRun, type ProcessResult, type WindowsHost } from "./windows-host.js";
 import { EXIT_REFUSED, jobDirFor, lockFile, runWindowsJob, type WindowsJob } from "./windows-job.js";
 import { checkWindowsHostPath, entryTokens, entryWrites, packageFamilyName, SANDBOX_PACKAGES, TRUSTED_OWNER_SIDS, VM_FALLBACK_DECISION, WINDOWS_PUBLISHER_ID, type WindowsSettings } from "./windows-plan.js";
 import { windowsRealHost } from "./windows-real.js";
@@ -244,24 +244,24 @@ describe("Windows launcher parts on a real Windows host (no Windows Sandbox need
     const writable: Record<string, readonly string[]> = {};
     let launchScriptSeen = false;
     const id = randomUUID();
+    const standRun = async (file: string, args: readonly string[], opts: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult> => {
+      if (!lower(file).endsWith("\\wsb.exe")) return host.run(file, args, opts);
+      wsb.push([...args]);
+      if (args[0] === "start") return { code: 0, stdout: `{"Id":"${id}"}\r\n`, stderr: "", timedOut: false };
+      if (args[0] === "exec") {
+        for (const p of [...watched, join(jobDir, "guest")]) during[p] = icaclsText(p);
+        for (const p of [r.workdir, input, controlDir, runnerDir]) writable[p] = await host.writableBy(p);
+        launchScriptSeen = existsSync(join(jobDir, "guest", "launch.cmd"));
+        return { code: 0, stdout: "guest-ok\r\n", stderr: "", timedOut: false };
+      }
+      return { code: 0, stdout: "", stderr: "", timedOut: false };
+    };
     const stand: WindowsHost = {
-      ...host,
+      ...withRun(host, (file, args, opts) => standRun(file, args, opts)),
       exists: (p) => fakeFiles.has(lower(p)) || host.exists(p),
       findPackage: async () => ({ name: SANDBOX_PACKAGES[0]!.name, publisherId: SANDBOX_PACKAGES[0]!.publisherId, familyName: packageFamilyName(SANDBOX_PACKAGES[0]!), version: "0.8.107.0", installLocation: install }),
       signature: async () => ({ valid: true, subject: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" }),
       session: async () => ({ consoleUser: OWNER, locked: false, processInConsoleSession: true, processIsConsoleUser: true }),
-      run: async (file, args, opts): Promise<ProcessResult> => {
-        if (!lower(file).endsWith("\\wsb.exe")) return host.run(file, args, opts);
-        wsb.push([...args]);
-        if (args[0] === "start") return { code: 0, stdout: `{"Id":"${id}"}\r\n`, stderr: "", timedOut: false };
-        if (args[0] === "exec") {
-          for (const p of [...watched, join(jobDir, "guest")]) during[p] = icaclsText(p);
-          for (const p of [r.workdir, input, controlDir, runnerDir]) writable[p] = await host.writableBy(p);
-          launchScriptSeen = existsSync(join(jobDir, "guest", "launch.cmd"));
-          return { code: 0, stdout: "guest-ok\r\n", stderr: "", timedOut: false };
-        }
-        return { code: 0, stdout: "", stderr: "", timedOut: false };
-      },
     };
     const job: WindowsJob = { version: 1, settings, recipe, command: ["/windows/system32/cmd.exe", "/d", "/c", "exit 0"] };
     const out = await runWindowsJob(stand, job, [runnerDir], jobDir);
