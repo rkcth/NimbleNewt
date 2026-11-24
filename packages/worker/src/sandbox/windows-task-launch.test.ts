@@ -281,6 +281,14 @@ describe("the scheduled-task launch: second review", () => {
     assert.equal(wsbTaskBase(env({ NIMBLENEWT_WSB_TASK_DIR: "", LOCALAPPDATA: "C:\\L" })), "C:\\L\\NimbleNewt\\wsb-task");
     assert.equal(wsbTaskBase(env({})), undefined);
   });
+
+  test("the base folder is normalised like the shared folders (so admit compares like with like), and only a folder below a drive's root or a UNC share is taken", () => {
+    const base = (v: string): string | undefined => wsbTaskBase((n) => (n === "NIMBLENEWT_WSB_TASK_DIR" ? v : undefined));
+    for (const v of ["D:/nn/task", "D:\\nn\\.\\task", "D:\\nn\\task\\", "D:\\nn\\x\\..\\task", "D:\\nn\\\\task"]) assert.equal(base(v), "D:\\nn\\task", v);
+    assert.equal(base("\\\\srv\\share\\nn"), "\\\\srv\\share\\nn");
+    assert.equal(wsbTaskBase((n) => (n === "LOCALAPPDATA" ? "C:/Users/u/AppData/Local/" : undefined)), "C:\\Users\\u\\AppData\\Local\\NimbleNewt\\wsb-task");
+    for (const v of ["D:\\", "D:", "D:/", "nn\\task", "\\nn\\task", "\\\\srv\\share", "\\\\?\\D:\\nn", "\\\\.\\D:\\nn", "D:\\nn\0x"]) assert.equal(base(v), undefined, JSON.stringify(v));
+  });
 });
 
 describe("the strategy: when each launch is chosen", () => {

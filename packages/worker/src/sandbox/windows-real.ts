@@ -376,7 +376,7 @@ export function windowsRealHost(): WindowsHost {
       const mode = parseMode(process.env[MODE_VARIABLE]);
       if (mode === "direct" || process.platform !== "win32") return direct();
       const base = wsbTaskBase((n) => process.env[n]);
-      if (base === undefined) return launchWsb(mode, () => Promise.resolve({ kind: "unavailable" as const, why: "no private folder is configured (LOCALAPPDATA and NIMBLENEWT_WSB_TASK_DIR are unset)" }), direct);
+      if (base === undefined) return launchWsb(mode, () => Promise.resolve({ kind: "unavailable" as const, why: "no private folder is configured (LOCALAPPDATA and NIMBLENEWT_WSB_TASK_DIR are unset, or not a folder below a drive's root or a UNC share)" }), direct);
       return launchWsb(mode, () => runViaScheduledTask({
         sysRoot: sysRoot(), nodePath: process.execPath, childScript: fileURLToPath(new URL("./windows-task-child.js", import.meta.url)), baseDir: base,
         randomHex: (n) => randomBytes(Math.ceil(n / 2)).toString("hex").slice(0, n),

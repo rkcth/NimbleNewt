@@ -1,3 +1,4 @@
+import { win32 } from "node:path";
 import type { ProcessResult } from "./windows-host.js";
 
 /**
@@ -42,9 +43,15 @@ const READ_CAP = 16 * 1024 * 1024;
 /** The folder the private call folders are made in: NIMBLENEWT_WSB_TASK_DIR, else `%LOCALAPPDATA%\\NimbleNewt\\wsb-task`, else none. No shared folder of a job may reach it (windows-job.ts admit). */
 export const wsbTaskBase = (env: (name: string) => string | undefined): string | undefined => {
   const set = env(DIR_VARIABLE);
-  if (set !== undefined && set !== "") return set;
   const local = env("LOCALAPPDATA");
-  return local === undefined || local === "" ? undefined : `${local}\\NimbleNewt\\wsb-task`;
+  const raw = set !== undefined && set !== "" ? set : local === undefined || local === "" ? undefined : `${local}\\NimbleNewt\\wsb-task`;
+  if (raw === undefined || raw.includes("\0")) return undefined;
+  // In the same form as the (normalised) shared folders, so admit's overlap check is not missed for `D:/x`, `D:\x\.\y` or a trailing separator. Only a folder below a drive's
+  // root or below a UNC share (never the root itself, which would overlap every share there, nor a `\\?\` or `\\.\` device path); anything else gives no base, and then the
+  // task launch is not used at all (windows-real.ts says why).
+  let p = win32.normalize(raw);
+  while (p.length > 1 && p.endsWith("\\")) p = p.slice(0, -1);
+  return /^(?:[A-Za-z]:\\[^\\]|\\\\[^\\?.][^\\]*\\[^\\]+\\[^\\])/.test(p) ? p : undefined;
 };
 
 export const parseMode = (value: string | undefined): LaunchMode => (value !== undefined && (MODES as readonly string[]).includes(value.trim().toLowerCase()) ? (value.trim().toLowerCase() as LaunchMode) : "auto");

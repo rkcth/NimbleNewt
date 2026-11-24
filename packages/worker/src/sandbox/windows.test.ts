@@ -1133,7 +1133,7 @@ describe("Windows launcher: running a job", () => {
   });
 
   test("card wsb-repair second review: a shared folder that reaches the scheduled-task launch's private folder (or holds it) is refused at the start, before any wsb command", async () => {
-    for (const [vars, workdir] of [[{ LOCALAPPDATA: "C:\\Users\\robert\\AppData\\Local" }, "C:\\Users\\robert\\AppData\\Local\\NimbleNewt"], [{ NIMBLENEWT_WSB_TASK_DIR: "D:\\nn\\task" }, "D:\\nn\\task\\call-0123456789ab"]] as const) {
+    for (const [vars, workdir] of [[{ LOCALAPPDATA: "C:\\Users\\robert\\AppData\\Local" }, "C:\\Users\\robert\\AppData\\Local\\NimbleNewt"], [{ NIMBLENEWT_WSB_TASK_DIR: "D:\\nn\\task" }, "D:\\nn\\task\\call-0123456789ab"], [{ NIMBLENEWT_WSB_TASK_DIR: "D:/nn/task" }, "D:\\nn\\task"], [{ NIMBLENEWT_WSB_TASK_DIR: "D:\\nn\\.\\task\\" }, "D:\\nn"]] as const) {
       const host = new SimHost();
       Object.assign(host.envMap, vars);
       const { job, jobDir } = prepared(host);
