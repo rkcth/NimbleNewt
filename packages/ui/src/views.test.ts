@@ -751,3 +751,59 @@ test("second review: the page's clip is unchanged for text without a pair and ne
   }
   assert.deepEqual([clip(null, 10), clip(undefined, 10), clip(0, 10), clip("", 10), clip("a", 10)], ["", "", "0", "", "a"]);
 });
+
+// Card W08 (browser side): the Status page draws the lines of an `attempt_endings` status answer as plain text, as the chat and status.ask give them.
+// The lines below are the controller's own wording (packages/controller/src/dispatch/attempt-endings.test.ts and api/start-attempt-endings.test.ts).
+const ATTEMPT_ID = "att-0123456789abcdef";
+const endingLines = (blockerLast: string): { text: string; cites: { kind: string; id: string }[] }[] => [
+  "2 attempt(s) of Fix the parser on record, newest first.",
+  `Attempt 2 (${ATTEMPT_ID}), agent agt-ann on route local/model as coder: started 2026-11-10T09:00:00.000Z; it ended stopped early: the agent kept stopping before it said its work was done`,
+  "Its last turn: it ended with prose and no work.end (40 visible characters).",
+  "Nudges to go on: 9 (3 in its last turn).",
+  "Plan: 1 of 3 step(s) checked.",
+  "It stopped before saying its work was done 3 time(s) (the model ran out of length; it announced a step but made no call; it ended with prose and no work.end).",
+  "Attempt 1 (att-aaaaaaaaaaaaaaaa), agent agt-bob on route local/model as coder: started 2026-11-09T09:00:00.000Z; it ended normally.",
+  `Open blocker agent_stopped_early since 2026-11-10T10:00:00.000Z: The agent stopped before it said its work was done, 3 time(s) in a row. Last visible text (quoted): "${blockerLast}" The way out: the lead looks at it.`,
+].map((t) => ({ text: t, cites: [{ kind: "task", id: "tsk-1" }] }));
+
+test("the Status page shows every line of an attempt-endings answer as its own plain line, in order, and a quoted last text with markup stays text (card W08)", async () => {
+  const last = `<b onclick="x()">Now I will run & the tests</b> <script>alert(1)</script> ${"$"}{a} 'q' "z"`;
+  const lines = endingLines(last);
+  const page = boot({ status: { attempts: { item: { observedAt: "2026-11-10T10:00:00Z", lines } } } });
+  const view = await open(page, "status");
+  const shown = view.find((e) => e.className === "card-line").map((e) => e.textContent);
+  assert.deepEqual(shown, ["item:", ...lines.map((l) => "  " + l.text)], "one line per controller line, none merged, none dropped, none reordered");
+  assert.ok(shown.some((s) => s.includes(`Last visible text (quoted): "${last}"`)), "the blocker's quoted text is shown whole, markup characters and all, as text");
+  assert.ok(shown.some((s) => /^ {2}Attempt 2 \(att-0123456789abcdef\).*stopped early/.test(s)) && shown.some((s) => /^ {2}Attempt 1 /.test(s)), "several attempts each have their line");
+  assert.ok(shown.some((s) => s === "  Nudges to go on: 9 (3 in its last turn).") && shown.some((s) => s === "  Plan: 1 of 3 step(s) checked."));
+  const drawn = view.find(() => true);
+  assert.deepEqual([...new Set(drawn.map((e) => e.tag))].filter((t) => !["div", "section", "h2", "h3", "p", "button"].includes(t)), [], "only plain tags are drawn: no b, no script");
+  for (const e of drawn) for (const [k, v] of e.attrs) assert.ok(!/^on/i.test(k) && !v.includes("onclick"), `attribute ${k}`);
+  assert.deepEqual(page.doc.violations, []);
+});
+
+test("an attempt-endings answer for a task with no attempt shows the controller's one line; an empty answer is 'Nothing to show' (card W08)", async () => {
+  const none = [{ text: "No attempt of Fix the parser is on record yet.", cites: [{ kind: "task", id: "tsk-1" }] }];
+  const one = await open(boot({ status: { attempts: { item: { observedAt: "x", lines: none } } } }), "status");
+  assert.deepEqual(one.find((e) => e.className === "card-line").map((e) => e.textContent), ["item:", "  No attempt of Fix the parser is on record yet."]);
+  const empty = await open(boot({ status: { attempts: { item: { observedAt: "x", lines: [] } } } }), "status");
+  assert.match(text(empty), /Nothing to show/);
+  assert.equal(empty.find((e) => e.className === "card").length, 0, "no empty card is drawn");
+});
+
+test("the chat shows an attempt-endings answer line by line as text (card W08)", async () => {
+  const last = `<img src=x onerror=alert(1)> "q"`;
+  const reply = endingLines(last).map((l) => l.text);
+  const turn = { turnId: "turn-2", replayed: false, text: "why did the last attempt stop", reply, outcomes: [{ status: "answered" }] };
+  // The chat's answer is carried here by the approvals route (the page draws any finished turn the same way, whichever control sent it).
+  const page = boot({ approvals: approvalParts() }, [(c) => (c.path.startsWith("/web/approvals/") ? { status: 201, body: turn } : undefined)]);
+  const view = await open(page, "approvals");
+  view.buttons().find((b) => b.textContent.startsWith("Accept for 7 days"))!.click();
+  await settle();
+  const log = page.doc.byId.get("log")!;
+  const bot = log.find((e) => e.className === "msg bot").map((e) => e.textContent);
+  assert.deepEqual(bot, reply, "each controller line is its own chat line, equal to what status.ask gives");
+  assert.ok(bot.some((l) => l.includes(`"${last}"`)));
+  assert.deepEqual([...new Set(log.find(() => true).map((e) => e.tag))].filter((t) => !["div", "section", "p", "button", "h2", "h3"].includes(t)), []);
+  assert.deepEqual(page.doc.violations, []);
+});
