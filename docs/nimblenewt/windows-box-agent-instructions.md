@@ -44,7 +44,7 @@ The job's shell is the runner's Bash step on this PC. Reproduce it without GitHu
 Each test is one short command with its own output file.
 
 9. **Scheduled task proof.** Create nothing permanent: register a one-shot task named `nn-diag-wsb-<random>` that runs `cmd /c wsb list > C:\nn-diag\out\task-list.txt 2>&1 & echo %ERRORLEVEL% > C:\nn-diag\out\task-exit.txt` as the owner's own account in the owner's logged-on session, start it, wait at most 30 s, read both files, **delete the task** and confirm it is gone (`Get-ScheduledTask nn-diag-wsb-*`). Report: exit code, output, time, and whether the task ran in the owner's interactive session. (This is the strategy the repair uses: it must work from the elevated runner shell too, so run this test from the same shell as step 6.)
-10. The same test with the task registered at the highest run level, and without it; say which works.
+10. The same test with the task registered at the highest run level, and without it; say which works. (Measured 2026-11-24: Limited answered in 1.3 s, Highest failed after about 31 s; the repository now registers its task at Limited and keeps the Highest task only as a comparison variant. See implementation-notes.md, "Run level: Limited, from a measured result".)
 11. **Is it the session?** `query session` / `qwinsta` and the Session id of the owner's desktop versus `Runner.Worker`'s SessionId. Say whether they are the same.
 12. **Is it the job object?** Using the repository script's output (step 7), say whether the job's Node process is inside a job object that restricts it; do not try to break out of it.
 

@@ -185,7 +185,10 @@ describe("the scheduled-task launch", () => {
     assert.equal(calls.run.find((c) => /powershell/.test(c.file))!.env!["NN_START_MS"], String(START_GRACE_MS));
     assert.match(HELPER_SCRIPT, /finally \{\n  if \(\$r\.registered\) \{ try \{ Unregister-ScheduledTask/);
     assert.match(HELPER_SCRIPT, /Stop-ScheduledTask -TaskName \$name/);
-    assert.match(HELPER_SCRIPT, /-LogonType Interactive -RunLevel Highest/);
+    // Run level: measured on the owner's PC, an elevated-level task never answered while a Limited one did; the minimum level is the only one used.
+    assert.match(HELPER_SCRIPT, /-LogonType Interactive -RunLevel Limited/);
+    assert.equal((HELPER_SCRIPT.match(/-RunLevel/g) ?? []).length, 1);
+    assert.doesNotMatch(HELPER_SCRIPT, /Highest/i);
     assert.match(HELPER_SCRIPT, /DeleteExpiredTaskAfter = 'PT0S'/);
     // The automatic deletion never comes before the command's own limit (exec runs for hours), and a failed look at the task does not end the wait.
     assert.match(HELPER_SCRIPT, /EndBoundary = \(Get-Date\)\.AddMilliseconds\(\$limit \+ 600000\)/);

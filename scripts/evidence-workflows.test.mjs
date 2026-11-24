@@ -181,8 +181,10 @@ test("own-hardware: the job-context diagnostic (card wsb-console) runs once befo
   const j = job(text, "sandbox-windows");
   const s = step(j, "wsbctx");
   assert.match(s, /\n {8}continue-on-error: true\n/);
-  // 10 minutes: the context script stops itself at 240 s, the launch variants (card wsb-variants) at 290 s.
-  assert.match(s, /\n {8}timeout-minutes: 10\n/);
+  // 15 minutes: the context script stops itself at 240 s, the launch variants (card wsb-variants, two task variants since wsb-limited) at 460 s, and a minute for starting node.
+  assert.match(s, /\n {8}timeout-minutes: 15\n/);
+  assert.ok(240 + 460 + 60 <= 15 * 60);
+  assert.match(j, /run level Limited \(the verdict-bearing one\) and the same task at Highest for comparison/);
   assert.match(s, /node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs > "\$RUNNER_TEMP\/wsb-job-context\.txt"\n {10}node scripts\/wsb-launch-variants\.mjs 2>&1 \| node scripts\/redact-log\.mjs >> "\$RUNNER_TEMP\/wsb-job-context\.txt"\n/);
   // Only the redacted copy is printed or added to the summary (the variants are appended to the same file, after the context lines).
   assert.doesNotMatch(s.replace(/node scripts\/wsb-job-context\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, "").replace(/node scripts\/wsb-launch-variants\.mjs 2>&1 \| node scripts\/redact-log\.mjs/, ""), /wsb-job-context\.mjs|wsb-launch-variants\.mjs/);

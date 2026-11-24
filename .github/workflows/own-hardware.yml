@@ -155,14 +155,15 @@ jobs:
           exit 0
       # Diagnostic only (card wsb-console): what this job's own process looks like before its first `wsb` call (account kind, integrity level, session, console, job object,
       # parents and service, window station and desktop, environment variable NAMES) and one `wsb list` with a 45 s limit, to compare with the same call made by hand.
-      # Then (card wsb-variants) `wsb list` once in each of five other ways (node detached, cmd with NUL and files, powershell -Command, a new console, a one-shot scheduled task
-      # removed afterwards), 45 s each and under 290 s in all (scripts/wsb-launch-variants.mjs), appended to the same record.
+      # Then (card wsb-variants) `wsb list` once in each of six other ways (node detached, cmd with NUL and files, powershell -Command, a new console, a one-shot scheduled task
+      # at run level Limited (the verdict-bearing one) and the same task at Highest for comparison, each removed afterwards), 45 s each and under 460 s in all
+      # (scripts/wsb-launch-variants.mjs), appended to the same record.
       # Fixed words only, through the credential scanner and the log redaction; both always exit 0 and the outcome step does not read them.
-      # 10 minutes: the context script stops itself at 240 s and the variants at 290 s.
+      # 15 minutes: the context script stops itself at 240 s and the variants at 460 s (plus a minute for starting node).
       - name: Record the job's process context before wsb
         id: wsbctx
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: bash
         run: |
           node scripts/wsb-job-context.mjs 2>&1 | node scripts/redact-log.mjs > "$RUNNER_TEMP/wsb-job-context.txt"

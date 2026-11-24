@@ -1,4 +1,4 @@
-// Card wsb-variants: the five other ways of launching `wsb list` (scripts/wsb-launch-variants.mjs). Everything runs on every OS with the launcher and the clock injected; what
+// Card wsb-variants: the six other ways of launching `wsb list` (scripts/wsb-launch-variants.mjs). Everything runs on every OS with the launcher and the clock injected; what
 // only Windows can show (the real launches, the scheduled task) is recorded by the next own-hardware run. Keys are built at run time from invented characters.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  CMD_NEW_CONSOLE, CMD_NUL_FILE, MIN_VARIANT_MS, NEW_CONSOLE_BATCH, ORDER, PREFIX, STOP_MS, TASK_CHECK_MS, TASK_OVERHEAD_MS, TASK_RESERVE_MS, TASK_SCRIPT, TOTAL_LIMIT_MS,
+  CMD_NEW_CONSOLE, CMD_NUL_FILE, MIN_VARIANT_MS, NEW_CONSOLE_BATCH, ORDER, PREFIX, STOP_MS, TASK_CHECK_MS, TASK_OVERHEAD_MS, TASK_LEVELS, TASK_RESERVE_MS, TASK_SCRIPT, TASK_SCRIPT_HIGHEST, TOTAL_LIMIT_MS,
   VARIANT_TIMEOUT_MS, readCodeFile, realLaunch, render, runVariants, taskResult, taskVerdict, variantLine,
 } from "./wsb-launch-variants.mjs";
 import { OVERALL_LIMIT_MS, wsbListLine } from "./wsb-job-context.mjs";
@@ -37,7 +37,7 @@ function fakeLaunch(clock, answer, cost = () => 1000) {
 
 const ok = { status: 0, signal: null, stdout: "", stderr: "", durationMs: 50 };
 
-test("all five variants run once each in the printed order, every one whatever the earlier gave, with the launch each asks for", async () => {
+test("all six variants run once each in the printed order, every one whatever the earlier gave, with the launch each asks for", async () => {
   const clock = fakeClock();
   const { calls, launch } = fakeLaunch(clock, (c) => {
     if (c.file === "wsb") return { status: null, signal: null, error: { code: "ETIMEDOUT" }, stdout: "", stderr: GRPC, durationMs: 45_010 };
@@ -54,18 +54,26 @@ test("all five variants run once each in the printed order, every one whatever t
     throw new Error(`unexpected ${c.file}`);
   });
   const lines = await runVariants({ launch, now: clock.now, systemRoot: "C:\\Windows", tmp: tmp(), taskName: () => "NimbleNewtWsbProbe-0123456789ab" });
-  assert.equal(lines[0], `order tried: 1 nodeDetached, 2 cmdNulFile, 3 powershellCommand, 4 newConsole, 5 scheduledTask (each once, limit ${VARIANT_TIMEOUT_MS} ms, all ${TOTAL_LIMIT_MS} ms)`);
-  assert.deepEqual(ORDER, ["nodeDetached", "cmdNulFile", "powershellCommand", "newConsole", "scheduledTask"]);
+  assert.equal(lines[0], `order tried: 1 nodeDetached, 2 cmdNulFile, 3 powershellCommand, 4 newConsole, 5 scheduledTask, 6 scheduledTaskHighest (each once, limit ${VARIANT_TIMEOUT_MS} ms, all ${TOTAL_LIMIT_MS} ms)`);
+  assert.deepEqual(ORDER, ["nodeDetached", "cmdNulFile", "powershellCommand", "newConsole", "scheduledTask", "scheduledTaskHighest"]);
   assert.match(lines[1], /^1\. nodeDetached \(node spawn detached, windowsHide false; limit 45000 ms\): no answer within 45000 ms \(stopped\) after 45010 ms; output text no \(lines 0\); error text yes; markers: grpc, localhost:80, deadline, cancelled, timed out; first error line: Grpc\.Core\.RpcException/);
   assert.match(lines[2], /^2\. cmdNulFile \(.*\): answered \(exit 0\) after 812 ms; output text yes \(lines 1\); error text no; markers: none; first error line: none$/);
   assert.match(lines[3], /^3\. powershellCommand \(.*\): failed \(exit 0x00000001\) after 30500 ms; .*error text yes; markers: grpc/);
   assert.match(lines[4], /^4\. newConsole \(.*\): failed \(exit 0x80131500\) after 30000 ms; output text no \(lines 0\); error text yes; markers: grpc, localhost:80/);
   assert.match(lines[5], /^5\. scheduledTask \(.*\): answered \(exit 0\) after 1234 ms; output text yes \(lines 2\); error text no; .*; task left behind no$/);
-  assert.match(lines[6], /^all variants: \d+ ms$/);
-  assert.equal(lines.length, 7);
+  // The second task variant is labelled as the comparison one and has the same exit-code-file verdict.
+  assert.match(lines[5], /^5\. scheduledTask \(a one-shot scheduled task, run level Limited, verdict-bearing, removed afterwards; /);
+  assert.match(lines[6], /^6\. scheduledTaskHighest \(a one-shot scheduled task, run level Highest, for comparison only, removed afterwards; .*verdict: SUCCESS, exit code 0 read from the code file/);
+  assert.match(lines[7], /^all variants: \d+ ms$/);
+  assert.equal(lines.length, 8);
 
   // The launches themselves.
-  const [detached, nulFile, psCommand, newConsole, helper, ...checks] = calls;
+  const [detached, nulFile, psCommand, newConsole, helper, ...afterwards] = calls;
+  const checks = afterwards.slice(0, 1);
+  const helperHighest = afterwards[1];
+  assert.equal(helperHighest.args.at(-1), TASK_SCRIPT_HIGHEST);
+  assert.notEqual(TASK_SCRIPT_HIGHEST, TASK_SCRIPT);
+  assert.deepEqual(afterwards.slice(2).map((c) => c.args[0]), ["/Query"]);
   assert.deepEqual(detached, { file: "wsb", args: ["list"], detached: true, windowsHide: false, timeoutMs: VARIANT_TIMEOUT_MS });
   assert.equal(nulFile.file, "C:\\Windows\\System32\\cmd.exe");
   assert.deepEqual(nulFile.args, [CMD_NUL_FILE]);
@@ -83,7 +91,7 @@ test("all five variants run once each in the printed order, every one whatever t
   assert.equal(helper.timeoutMs, VARIANT_TIMEOUT_MS + TASK_OVERHEAD_MS);
   // Afterwards the task is looked for by its name (not found: exit 1), nothing more.
   assert.deepEqual(checks.map((c) => c.args), [["/Query", "/TN", "NimbleNewtWsbProbe-0123456789ab"]]);
-  assert.ok(checks.every((c) => c.file === "C:\\Windows\\System32\\schtasks.exe" && c.timeoutMs === TASK_CHECK_MS));
+  assert.ok(checks.concat(afterwards.slice(2)).every((c) => c.file === "C:\\Windows\\System32\\schtasks.exe" && c.timeoutMs === TASK_CHECK_MS));
 });
 
 test("the scheduled task: still there afterwards is deleted and looked for again; a helper with no answer, a task not registered or stopped at its limit", async () => {
@@ -96,7 +104,8 @@ test("the scheduled task: still there afterwards is deleted and looked for again
       return ok;
     });
     const lines = await runVariants({ launch, now: clock.now, tmp: tmp(), taskName: () => "NimbleNewtWsbProbe-aaaaaaaaaaaa" });
-    return { line: lines[5], schtasks: calls.filter((c) => /schtasks/.test(c.file)).map((c) => c.args[0]) };
+    return { line: lines[5], // the first task variant's checks only (the comparison variant's come after)
+    schtasks: calls.filter((c) => /schtasks/.test(c.file)).map((c) => c.args[0]).slice(0, 3) };
   };
   const stopped = await run({ registered: true, started: true, finished: false, result: null, elapsedMs: 45_001, stopped: true, removed: false, error: null }, [0, 1]);
   assert.match(stopped.line, /^5\. scheduledTask .*: no answer within 45000 ms \(stopped\) after 45001 ms; .*; task left behind no$/);
@@ -110,27 +119,27 @@ test("the scheduled task: still there afterwards is deleted and looked for again
   assert.ok(!notStarted.line.includes("jane"));
 });
 
-test("the overall limit: a variant that no longer fits is not started; the scheduled task keeps time for its clean-up; the whole stays under 5 minutes", async () => {
-  // Every launch uses its whole limit plus the longest stop: the first four take 4 x 60 s, which leaves too little for the scheduled task with its reserve.
+test("the overall limit: a variant that no longer fits is not started; every task keeps time for its clean-up; all six fit when each runs to its limit; the run fits the step's 15 minutes", async () => {
+  // Every launch uses its whole limit; the plain variants also take the longest stop. All six are still started and the whole stays inside the limit.
   const clock = fakeClock();
-  const { calls, launch } = fakeLaunch(clock, (c) => ({ status: null, signal: null, error: { code: "ETIMEDOUT" }, stdout: "", stderr: "", durationMs: c.timeoutMs }), (c) => c.timeoutMs + STOP_MS);
+  const { calls, launch } = fakeLaunch(clock, (c) => ({ status: null, signal: null, error: { code: "ETIMEDOUT" }, stdout: "", stderr: "", durationMs: c.timeoutMs }), (c) => (/schtasks/.test(c.file) || c.args.includes("-NonInteractive") ? c.timeoutMs : c.timeoutMs + STOP_MS));
+  const t0 = clock.now();
   const lines = await runVariants({ launch, now: clock.now, tmp: tmp(), taskName: () => "NimbleNewtWsbProbe-bbbbbbbbbbbb" });
-  assert.equal(calls.length, 4);
-  assert.ok(calls.every((c) => c.timeoutMs === VARIANT_TIMEOUT_MS));
-  assert.ok(TOTAL_LIMIT_MS - 4 * (VARIANT_TIMEOUT_MS + STOP_MS) - TASK_RESERVE_MS < MIN_VARIANT_MS);
-  assert.equal(lines[5], "5. scheduledTask (a one-shot scheduled task, removed afterwards): not started, too little of the overall limit left");
+  assert.ok(calls.filter((c) => c.timeoutMs === VARIANT_TIMEOUT_MS || c.timeoutMs === VARIANT_TIMEOUT_MS + TASK_OVERHEAD_MS).length >= 6);
+  assert.ok(!lines.some((l) => /not started/.test(l)), lines.join("\n"));
+  assert.ok(clock.now() - t0 <= TOTAL_LIMIT_MS, String(clock.now() - t0));
+  // The arithmetic: four plain variants and two tasks at their worst fit under the limit, and the context script's limit plus this one fit the step's 15 minutes.
+  assert.ok(4 * (VARIANT_TIMEOUT_MS + STOP_MS) + 2 * (VARIANT_TIMEOUT_MS + TASK_RESERVE_MS) <= TOTAL_LIMIT_MS);
+  assert.ok(OVERALL_LIMIT_MS + TOTAL_LIMIT_MS + 60_000 <= 15 * 60_000);
+  assert.deepEqual(TASK_LEVELS, { scheduledTask: "Limited", scheduledTaskHighest: "Highest" });
   // A slow start: later variants get a shorter limit, then none.
   const c2 = fakeClock();
-  const f2 = fakeLaunch(c2, (c) => ({ ...ok, durationMs: c.timeoutMs }), (c) => (c.file === "wsb" ? 250_000 : c.timeoutMs));
+  const f2 = fakeLaunch(c2, (c) => ({ ...ok, durationMs: c.timeoutMs }), (c) => (c.file === "wsb" ? 430_000 : c.timeoutMs));
   const l2 = await runVariants({ launch: f2.launch, now: c2.now, tmp: tmp() });
   assert.equal(f2.calls.length, 2);
-  assert.equal(f2.calls[1].timeoutMs, TOTAL_LIMIT_MS - 250_000 - STOP_MS);
+  assert.equal(f2.calls[1].timeoutMs, TOTAL_LIMIT_MS - 430_000 - STOP_MS);
   assert.match(l2[3], /^3\. powershellCommand .*: not started/);
-  // The budget: four plain variants and the scheduled task each at their worst fit under the limit only when the task is shortened or left out; the limit is under 5 minutes,
-  // and the context script's own limit plus this one fit in the step's 10 minutes.
-  assert.ok(TOTAL_LIMIT_MS < 5 * 60_000);
-  // The context script prints and exits at its own limit; this one starts nothing that could end after its limit; a minute is left for starting node and the redaction.
-  assert.ok(OVERALL_LIMIT_MS + TOTAL_LIMIT_MS + 60_000 <= 10 * 60_000);
+  assert.match(l2[6], /^6\. scheduledTaskHighest .*: not started, too little of the overall limit left$/);
   assert.equal(TASK_RESERVE_MS, TASK_OVERHEAD_MS + STOP_MS + 3 * TASK_CHECK_MS);
   assert.ok(MIN_VARIANT_MS < VARIANT_TIMEOUT_MS);
 });
@@ -141,6 +150,7 @@ test("a variant that throws is recorded as not tried and the rest still run; a w
   const lines = await runVariants({ launch, now: clock.now, tmp: tmp(), taskName: () => "Evil & name" });
   assert.equal(lines[2], "2. cmdNulFile (cmd.exe /c, stdin NUL, output to files): could not be tried (an unexpected error, not shown)");
   assert.match(lines[5], /^5\. scheduledTask .*: not started, an unexpected task name$/);
+  assert.match(lines[6], /^6\. scheduledTaskHighest .*: not started, an unexpected task name$/);
   assert.equal(calls.length, 4);
   assert.ok(!lines.join("\n").includes("jane") && !lines.join("\n").includes(KEY));
 });
@@ -173,6 +183,15 @@ test("the fixed command texts and the helper: no interpolation, file names only 
   assert.match(TASK_SCRIPT, /\$trigger\.EndBoundary = \(Get-Date\)\.AddMinutes\(10\)/);
   assert.match(TASK_SCRIPT, /\$settings\.DeleteExpiredTaskAfter = 'PT0S'/);
   assert.match(TASK_SCRIPT, /if \(-not \$r\.finished\) \{ \$r\.stopped = \$true; Stop-ScheduledTask -TaskName \$name \}/);
+});
+
+test("run levels: the verdict-bearing helper registers at Limited, the comparison helper at Highest, and they differ in that one word only", () => {
+  assert.match(TASK_SCRIPT, /-LogonType Interactive -RunLevel Limited\n/);
+  assert.doesNotMatch(TASK_SCRIPT, /Highest/);
+  assert.match(TASK_SCRIPT_HIGHEST, /-LogonType Interactive -RunLevel Highest\n/);
+  assert.doesNotMatch(TASK_SCRIPT_HIGHEST, /Limited/);
+  assert.equal(TASK_SCRIPT_HIGHEST, TASK_SCRIPT.replace("-RunLevel Limited", "-RunLevel Highest"));
+  assert.equal((TASK_SCRIPT.match(/-RunLevel/g) ?? []).length, 1);
 });
 
 test("run off Windows: says so, tries nothing, passes the log redaction unchanged, exits 0", { skip: process.platform === "win32" ? "the off-Windows answer" : false }, () => {

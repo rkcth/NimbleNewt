@@ -57,7 +57,7 @@ export const wsbTaskBase = (env: (name: string) => string | undefined): string |
 export const parseMode = (value: string | undefined): LaunchMode => (value !== undefined && (MODES as readonly string[]).includes(value.trim().toLowerCase()) ? (value.trim().toLowerCase() as LaunchMode) : "auto");
 
 /**
- * The fixed PowerShell helper. It reads NN_TASK (the task's name, made by the caller), NN_NODE, NN_CHILD, NN_DIR, NN_LIMIT_MS, NN_MARGIN_MS, NN_START_MS and NN_OUT, and writes only numbers and
+ * The fixed PowerShell helper. The task is registered at run level Limited, the minimum, never Highest: measured on the owner's PC, a Highest task failed after about 31 s where a Limited one answered in 1.3 s (no cause is known). It reads NN_TASK (the task's name, made by the caller), NN_NODE, NN_CHILD, NN_DIR, NN_LIMIT_MS, NN_MARGIN_MS, NN_START_MS and NN_OUT, and writes only numbers and
  * booleans to the file in NN_OUT. The trigger lies a minute in the past and ends ten minutes after the command's own limit, after which Task Scheduler deletes the task itself (a safety
  * net if neither removal runs; never before the command could still be running). A failed look at the task while waiting is not an end: only `code.txt`, the task's own end, the
  * grace time or the limit end the wait, so a passing Task Scheduler hiccup does not leave a long command (exec: hours) running unwatched.
@@ -75,7 +75,7 @@ try {
   $arg = '"' + $env:NN_CHILD + '" "' + $env:NN_DIR + '"'
   $action = New-ScheduledTaskAction -Execute $env:NN_NODE -Argument $arg
   $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
+  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1)
   $trigger.EndBoundary = (Get-Date).AddMilliseconds($limit + 600000).ToString('s')
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromMilliseconds($limit + 60000)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries

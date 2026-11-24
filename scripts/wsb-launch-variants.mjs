@@ -1,15 +1,17 @@
 // Own-hardware diagnostic (card wsb-variants, 2026-11-22), run by the same workflow step right after scripts/wsb-job-context.mjs: the job's `wsb list` ends after about 30 s with
 // a gRPC timeout to localhost:80, while the same command answers from the owner's elevated PowerShell window (also with stdin from NUL and its output in a file). The job's
-// process is in a Windows job object, so this tries `wsb list` once in each of five other ways and records how each ended, to compare them. It decides nothing.
+// process is in a Windows job object, so this tries `wsb list` once in each of six other ways and records how each ended, to compare them. It decides nothing.
 //   1. nodeDetached       node spawn with detached (libuv leaves it out of its kill-on-close job; new process group, no console) and windowsHide false;
 //   2. cmdNulFile         cmd.exe /c wsb list, stdin from NUL, output and errors to temporary files;
 //   3. powershellCommand  powershell.exe -NoProfile -Command wsb list;
 //   4. newConsole         cmd.exe /c start "" /wait <a temporary .cmd file>: wsb runs in a new console of its own (stdin from NUL, output to temporary files);
-//   5. scheduledTask      a one-shot scheduled task as this user (interactive, highest run level), started by the Task Scheduler service and so outside this job's process
+//   5. scheduledTask      a one-shot scheduled task as this user (interactive, run level Limited, the minimum: the VERDICT-BEARING variant, the level the product's launcher uses), started by the Task Scheduler service and so outside this job's process
 //                         tree and job objects (it also writes wsb's own exit code to a file, so that "no output" is told from a silent failure), then removed (by the helper, and checked and removed again here; a missed removal is also deleted by Task Scheduler itself
-//                         ten minutes later: the task's only trigger lies in the past and expires then). It runs last because its clean-up needs time of its own.
+//                         ten minutes later: the task's only trigger lies in the past and expires then). It runs after the plain variants because its clean-up needs time of its own.
+//   6. scheduledTaskHighest  the same task registered at run level Highest, kept FOR COMPARISON ONLY (on the owner's PC a Highest task failed after about 31 s where a Limited one
+//                         answered in 1.3 s; no cause is claimed). Same exit-code-file verdict, same clean-up; the product does not use it.
 // Every variant is tried once with a hard limit of 45 s (at the limit its process tree is stopped with taskkill /T /F); all are tried, whatever the earlier ones gave, and the
-// whole run stays under 290 s (a variant that no longer fits is not started and says so). For each: exit code, elapsed ms, whether output and error text appeared, fixed
+// whole run stays under 460 s (a variant that no longer fits is not started and says so). For each: exit code, elapsed ms, whether output and error text appeared, fixed
 // markers, and the first error line through the shared credential scanner. Fixed words only, each line through the scanner again; the workflow also pipes it through
 // scripts/redact-log.mjs. It always exits 0. Off Windows it says so and tries nothing.
 //   node scripts/wsb-launch-variants.mjs
@@ -25,8 +27,11 @@ import { describeRun, WSB_LIST_TIMEOUT_MS } from "./wsb-job-context.mjs";
 export const PREFIX = "wsb launch variants: ";
 /** Each variant's own limit (the same as the job-context script's single `wsb list`). */
 export const VARIANT_TIMEOUT_MS = WSB_LIST_TIMEOUT_MS;
-/** The whole run, kept under 5 minutes. */
-export const TOTAL_LIMIT_MS = 290_000;
+/**
+ * The whole run. Worst case, the four plain variants take 4 x (45 s + 15 s stop) and each of the two task variants 45 s plus its reserve (64 s), 458 s in all; so every variant
+ * can be tried even when each one runs to its limit. The workflow step's limit (15 minutes) covers the context script's 240 s, this, and a minute for starting node.
+ */
+export const TOTAL_LIMIT_MS = 460_000;
 /** At a variant's limit: taskkill's own limit, then a short wait for the pipes to close before the result is given anyway; STOP_MS is the most both can take. */
 export const KILL_MS = 10_000;
 export const CLOSE_GRACE_MS = 5_000;
@@ -42,13 +47,16 @@ export const TASK_RESERVE_MS = TASK_OVERHEAD_MS + STOP_MS + 3 * TASK_CHECK_MS;
 /** Output read back from a temporary file or a pipe: at most this many bytes. */
 const OUTPUT_CAP = 64 * 1024;
 
-export const ORDER = ["nodeDetached", "cmdNulFile", "powershellCommand", "newConsole", "scheduledTask"];
+export const ORDER = ["nodeDetached", "cmdNulFile", "powershellCommand", "newConsole", "scheduledTask", "scheduledTaskHighest"];
+/** The variants that register a scheduled task, with the run level each uses; the first is the verdict-bearing one. */
+export const TASK_LEVELS = { scheduledTask: "Limited", scheduledTaskHighest: "Highest" };
 const WHAT = {
   nodeDetached: "node spawn detached, windowsHide false",
   cmdNulFile: "cmd.exe /c, stdin NUL, output to files",
   powershellCommand: "powershell.exe -NoProfile -Command",
   newConsole: "cmd.exe /c start /wait, a new console",
-  scheduledTask: "a one-shot scheduled task, removed afterwards",
+  scheduledTask: "a one-shot scheduled task, run level Limited, verdict-bearing, removed afterwards",
+  scheduledTaskHighest: "a one-shot scheduled task, run level Highest, for comparison only, removed afterwards",
 };
 
 /** cmd.exe's command for variant 2; the file names come from the environment so the command is fixed text (cmd expands them, inside quotes). */
@@ -61,7 +69,7 @@ export const NEW_CONSOLE_BATCH = '@wsb list <NUL >"%NN_WSB_OUT%" 2>"%NN_WSB_ERR%
 // The scheduled-task helper. Fixed text; it reads NN_TASK (a name made here), NN_WSB_OUT, NN_WSB_ERR, NN_LIMIT_MS and SystemRoot, and writes its answer (numbers and
 // booleans) only to the file in NN_OUT. The task runs cmd.exe like variant 2. Its trigger started a minute ago (a Once trigger in the past does not run by itself) and expires
 // in ten minutes, after which Task Scheduler deletes the task (DeleteExpiredTaskAfter PT0S): a safety net if neither removal below runs.
-export const TASK_SCRIPT = String.raw`
+export const taskScript = (level) => String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $r = [ordered]@{ registered = $false; started = $false; finished = $false; result = $null; elapsedMs = $null; stopped = $false; removed = $false; error = $null }
@@ -77,7 +85,7 @@ try {
   $arg = '/d /v:off /s /c ""' + $bat + '""'
   $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\cmd.exe') -Argument $arg
   $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
+  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel ${level}
   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1)
   $trigger.EndBoundary = (Get-Date).AddMinutes(10).ToString('s')
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -102,6 +110,9 @@ try {
   [System.IO.File]::WriteAllText($env:NN_OUT, (ConvertTo-Json -Compress -InputObject $r))
 }
 `;
+/** The helper for the verdict-bearing variant (run level Limited) and the one kept for comparison (Highest); they differ in that one word only. */
+export const TASK_SCRIPT = taskScript(TASK_LEVELS.scheduledTask);
+export const TASK_SCRIPT_HIGHEST = taskScript(TASK_LEVELS.scheduledTaskHighest);
 
 const hex = (v) => (Number.isInteger(v) && v >= 0 && v <= 0xffffffff ? `0x${v.toString(16).padStart(8, "0")}` : "unknown");
 const word = (v) => (v === true ? "yes" : v === false ? "no" : "unknown");
@@ -216,7 +227,7 @@ export async function runVariants(deps = {}) {
   try {
     for (const [i, name] of ORDER.entries()) {
       const position = i + 1;
-      const reserve = name === "scheduledTask" ? TASK_RESERVE_MS : STOP_MS;
+      const reserve = name in TASK_LEVELS ? TASK_RESERVE_MS : STOP_MS;
       const limit = Math.min(VARIANT_TIMEOUT_MS, Math.floor(left() - reserve));
       if (limit < MIN_VARIANT_MS) { lines.push(`${position}. ${name} (${WHAT[name]}): not started, too little of the overall limit left`); continue; }
       const files = { NN_WSB_OUT: join(dir, `${name}.out.txt`), NN_WSB_ERR: join(dir, `${name}.err.txt`) };
@@ -236,7 +247,7 @@ export async function runVariants(deps = {}) {
           const r = await launch({ file: `${sys}\\System32\\cmd.exe`, args: [CMD_NEW_CONSOLE], verbatim: true, windowsHide: false, env: { ...files, NN_WSB_BATCH: batch }, timeoutMs: limit });
           lines.push(variantLine(position, name, { ...r, ...fromFiles() }, limit));
         } else {
-          lines.push(await scheduledTask(position, launch, sys, taskName(), dir, { ...files, NN_WSB_CODE: codeFile, NN_WSB_BATCH: join(dir, `${name}.task.cmd`) }, fromFiles, limit));
+          lines.push(await scheduledTask(position, name, launch, sys, taskName(), dir, { ...files, NN_WSB_CODE: codeFile, NN_WSB_BATCH: join(dir, `${name}.task.cmd`) }, fromFiles, limit));
         }
       } catch {
         lines.push(`${position}. ${name} (${WHAT[name]}): could not be tried (an unexpected error, not shown)`);
@@ -247,11 +258,11 @@ export async function runVariants(deps = {}) {
   return lines;
 }
 
-async function scheduledTask(position, launch, sys, name, dir, files, fromFiles, limit) {
-  if (!/^NimbleNewtWsbProbe-[0-9a-f]{12}$/.test(name)) return `${position}. scheduledTask (${WHAT.scheduledTask}): not started, an unexpected task name`;
+async function scheduledTask(position, label, launch, sys, name, dir, files, fromFiles, limit) {
+  if (!/^NimbleNewtWsbProbe-[0-9a-f]{12}$/.test(name)) return `${position}. ${label} (${WHAT[label]}): not started, an unexpected task name`;
   const answer = join(dir, "task.json");
   const ps = `${sys}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
-  const helper = await launch({ file: ps, args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", TASK_SCRIPT], env: { ...files, NN_TASK: name, NN_LIMIT_MS: String(limit), NN_OUT: answer }, timeoutMs: limit + TASK_OVERHEAD_MS });
+  const helper = await launch({ file: ps, args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", label === "scheduledTaskHighest" ? TASK_SCRIPT_HIGHEST : TASK_SCRIPT], env: { ...files, NN_TASK: name, NN_LIMIT_MS: String(limit), NN_OUT: answer }, timeoutMs: limit + TASK_OVERHEAD_MS });
   let raw = null;
   try { raw = JSON.parse(readCapped(answer).replace(/^\uFEFF/, "")); } catch { /* no answer */ }
   // Whatever the helper said, the task must be gone: query it, delete it if it is there, and query again. schtasks' exit code only (its words are translated).
@@ -260,10 +271,10 @@ async function scheduledTask(position, launch, sys, name, dir, files, fromFiles,
   let present = await exists();
   if (present !== false) { await launch({ file: schtasks, args: ["/Delete", "/TN", name, "/F"], timeoutMs: TASK_CHECK_MS }); present = await exists(); }
   const left = `; task left behind ${present === false ? "no" : present === true ? "yes (Task Scheduler deletes it when its trigger expires in ten minutes)" : "unknown"}`;
-  if (raw === null) return `${position}. scheduledTask (${WHAT.scheduledTask}): no answer from the helper (exit ${Number.isInteger(helper?.status) ? hex(helper.status) : "none"}${helper?.error?.code === "ETIMEDOUT" ? ", stopped after its limit" : ""})${left}`;
+  if (raw === null) return `${position}. ${label} (${WHAT[label]}): no answer from the helper (exit ${Number.isInteger(helper?.status) ? hex(helper.status) : "none"}${helper?.error?.code === "ETIMEDOUT" ? ", stopped after its limit" : ""})${left}`;
   const r = taskResult(raw, fromFiles());
-  if (r.notRun !== undefined) return `${position}. scheduledTask (${WHAT.scheduledTask}): not run: ${r.notRun}${left}`;
-  return variantLine(position, "scheduledTask", r, limit, `; ${taskVerdict(r)}${left}`);
+  if (r.notRun !== undefined) return `${position}. ${label} (${WHAT[label]}): not run: ${r.notRun}${left}`;
+  return variantLine(position, label, r, limit, `; ${taskVerdict(r)}${left}`);
 }
 
 export const render = (lines) => lines.map((l) => `${PREFIX}${safeMessage(l, 1000)}`);
