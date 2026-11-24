@@ -101,3 +101,33 @@ test("a check still running when the attempt's sandbox is closed is ended with i
   assert.equal(killed, 1);
   assert.equal((await running).state, "failed", "a check that was ended did not pass");
 });
+
+test("doneVerifier looks at the checkout again after the checks: a check or parallel call that removes evidence or the change does not pass, an unreadable second look is not verified, build output does not fail it (W05 follow-up)", async () => {
+  const state = (over: { changed?: number; ahead?: number; xPresent?: boolean; uncommittedCount?: number }) => ({ uncommitted: [] as string[], uncommittedCount: over.uncommittedCount ?? 0, ahead: over.ahead ?? 1, changed: over.changed ?? 2, agentCommits: true, evidence: [{ path: "x", present: over.xPresent ?? true }] });
+  const looks: (ReturnType<typeof state> | "throw")[] = [];
+  const verify = doneVerifier({
+    workspaces: { doneState: async () => { const l = looks.shift(); if (l === "throw" || l === undefined) throw new Error("no look"); return l; } },
+    checks: { run: async () => ({ state: "passed", exitCode: 0 }) },
+  });
+  const scope = { taskId: "t", projectId: "p" };
+  const one = { checks: [{ name: "c", run: ["ok"], timeoutMs: 10 }], evidence: ["x"], maxOutputBytes: 100 };
+  // Nothing changed: as before.
+  looks.push(state({}), state({}));
+  const same = await verify("a", scope, one);
+  assert.equal(same.evidence?.[0]?.present, true); assert.equal(same.tree?.changed, 2); assert.equal(same.checks[0]?.state, "passed");
+  // The check deleted the evidence and the work: the done gets the smaller counts and no evidence.
+  looks.push(state({}), state({ changed: 0, ahead: 0, xPresent: false }));
+  const gone = await verify("a", scope, one);
+  assert.equal(gone.evidence?.[0]?.present, false); assert.equal(gone.tree?.changed, 0); assert.equal(gone.tree?.ahead, 0);
+  // Files only added by the check (more changed paths, a dirty tree) are not read as a failure.
+  looks.push(state({}), state({ changed: 9, uncommittedCount: 7 }));
+  const added = await verify("a", scope, one);
+  assert.equal(added.evidence?.[0]?.present, true); assert.equal(added.tree?.changed, 2); assert.equal(added.tree?.uncommittedCount, 0);
+  // The second look fails: a passed check is not-run, the evidence is not present.
+  looks.push(state({}), "throw");
+  const blind = await verify("a", scope, one);
+  assert.equal(blind.checks[0]?.state, "not-run"); assert.equal(blind.evidence?.[0]?.present, false);
+  // No checks: one look only (nothing ran in between).
+  looks.push(state({}));
+  assert.equal((await verify("a", scope, { ...one, checks: [] })).checkout, true);
+});

@@ -695,6 +695,17 @@ export function doneVerifier(parts: {
       catch (error) { ran.push({ name: c.name, state: "not-run", reason: safeText(error, 300) }); }
     }
     if (state === undefined) return { checkout: false, checks: ran };
-    return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence, checks: ran };
+    // The checks run in the agent's own checkout while its tool call waits, so a check (or a parallel tool call) can change what the first look saw (W05 follow-up). When any check ran, the checkout is looked at again: the done never gains from a
+    // change (an evidence file that is gone now is not present, a change count that fell is the smaller one) and a checkout that cannot be looked at again is not verified. Files a check only adds (build output) do not turn the first look into a failure.
+    let last = state;
+    if (request.checks.length > 0) {
+      const again = await parts.workspaces.doneState(scope, request.evidence).catch(() => undefined);
+      if (again === undefined) {
+        const reason = "the checkout could not be looked at again after the checks ran";
+        return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence.map((e) => ({ path: e.path, present: false, why: reason })), checks: ran.map((c) => (c.state === "passed" ? { name: c.name, state: "not-run" as const, reason } : c)) };
+      }
+      last = { ...state, ahead: Math.min(state.ahead, again.ahead), changed: Math.min(state.changed, again.changed), evidence: state.evidence.map((e, i) => { const l = again.evidence[i]; return e.present && l !== undefined && l.path === e.path && !l.present ? { path: e.path, present: false, why: l.why ?? "gone after the checks ran" } : e; }) };
+    }
+    return { checkout: true, tree: { uncommitted: last.uncommitted, uncommittedCount: last.uncommittedCount, ahead: last.ahead, changed: last.changed, ...(last.agentCommits === undefined ? {} : { agentCommits: last.agentCommits }) }, evidence: last.evidence, checks: ran };
   };
 }
