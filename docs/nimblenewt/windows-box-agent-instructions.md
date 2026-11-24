@@ -35,8 +35,8 @@ Save each to `C:\nn-diag\out\`.
 
 The job's shell is the runner's Bash step on this PC. Reproduce it without GitHub:
 
-6. From the same kind of shell the runner uses: open an **elevated** terminal, `cd` to the runner's folder and run `run.cmd` is NOT needed; instead start a **child of the runner's own shell kind**. Use Git Bash if the workflow uses `shell: bash` (look at the repository file `.github/workflows/own-hardware.yml`, the job "Windows Sandbox (real)"): in that bash run `wsb list` with a 45 s limit (`timeout 45 wsb list; echo exit=$?`). Record it.
-7. Run the repository's own diagnostic exactly as the job does: from the repository checkout, `node scripts/wsb-job-context.mjs` and then `node scripts/wsb-launch-variants.mjs` (these only look and try `wsb list`; they stop themselves within about 5 minutes). Save the complete output (both are already redacted by `node scripts/redact-log.mjs`: pipe through it as the workflow does). Compare the "job context" lines with the same script run from the owner's normal elevated PowerShell. **The difference between the two outputs is the most valuable result of this whole task.** List every difference: session id, integrity level, token elevation, window station, desktop, job object flags, parent chain, environment variable NAMES that exist in one and not the other.
+6. The job's shell is Git Bash (see the job "Windows Sandbox (real)" in `.github/workflows/own-hardware.yml`). In an **elevated** Git Bash run `timeout 45 wsb list; echo exit=$?`. Record it.
+7. Run the repository's own diagnostic exactly as the job does: from the repository checkout, `node scripts/wsb-job-context.mjs` and then `node scripts/wsb-launch-variants.mjs` (these only look and try `wsb list`; they stop themselves within about 5 minutes). Save the complete output (both are already redacted by `node scripts/redact-log.mjs`: pipe through it as the workflow does). Run both scripts **twice**: once from the elevated Git Bash and once from the owner's normal elevated PowerShell, and compare. **The difference between the two outputs is the most valuable result of this whole task.** List every difference: session id, integrity level, token elevation, window station, desktop, job object flags, parent chain, environment variable NAMES that exist in one and not the other.
 8. If a real CI job is available: ask the owner to dispatch the workflow "own-hardware" (the controller does this normally) and, while its "Windows Sandbox (real)" job runs, record from a second shell: `Get-Process Runner.Worker | Format-List Id, SessionId`, the process tree under it (`Get-CimInstance Win32_Process | Where-Object ParentProcessId -eq <Worker pid>`), and whether `wsb list` from your second shell answers while the job's own call is timing out.
 
 ## Part 3: Test the hypotheses without changing anything
@@ -48,15 +48,16 @@ Each test is one short command with its own output file.
 11. **Is it the session?** `query session` / `qwinsta` and the Session id of the owner's desktop versus `Runner.Worker`'s SessionId. Say whether they are the same.
 12. **Is it the job object?** Using the repository script's output (step 7), say whether the job's Node process is inside a job object that restricts it; do not try to break out of it.
 
-## Part 4: Checks of the repair (only after the owner says the repair branch is ready)
+## Part 4: Check the repair (only when the owner gives you an exact commit)
 
-The repair (branch `card-wsb-repair`, merged to `main` when approved) makes every `wsb` command go through the scheduled-task method and fixes how the base-folder permission check treats the runner's own group. When told to:
+A repair is in review (branch `card-wsb-repair`). It routes every `wsb` command through a one-shot scheduled task for the same user and fixes how the base-folder permission check treats the runner's own group. The owner will give you an exact commit once it is merged. Until then, do not do Part 4.
 
-13. Update your checkout to the stated commit (`git fetch`, `git checkout <sha>`; do not push or commit), run `npm ci --ignore-scripts` and `npm run build`.
-14. Run the repository's real Windows Sandbox tests: `node --import ./scripts/offline-guard.mjs --test --test-timeout=1500000 packages/worker/dist/sandbox/windows-real.test.js` (use the exact command line from the workflow step "Run the real Windows Sandbox tests"; it may need environment variables the workflow sets; copy them from the workflow file, names and non-secret values only). Record pass/fail counts, the failing test names and the first 20 lines of each failure.
-15. Run the G05 containment suite and the Y02 scenarios exactly as the workflow steps "G05" and "Y02" do, only if the owner agrees (Y02 runs whole controller test files and takes long; it needs no GitHub credentials). Record the counts.
-16. Run the workflow's "Release leftovers of the Sandbox runs" step's script (`scripts/wsb-cleanup.mjs`) in report-only mode if it has one; otherwise ask before running it (it can stop sandboxes). Record whether it still says `G05 BASE LEFT ALONE`, and if so print the permission entries it names (account NAMES only).
-17. Confirm nothing is left behind: no scheduled task named `nn-*`, no running sandbox you started, no files outside `C:\nn-diag` and the checkout.
+13. `git fetch`, `git checkout <the commit>` (never push or commit), `npm ci --ignore-scripts`, `npm run build`.
+14. Run the real Windows Sandbox tests exactly as the workflow step "Run the real Windows Sandbox tests" does (copy its command line and non-secret environment from `.github/workflows/own-hardware.yml`). Record pass and fail counts, failing test names and the first 20 lines of each failure.
+15. Run the G05 containment suite and the Y02 scenarios as the workflow steps "G05" and "Y02" do, only if the owner agrees (Y02 takes long). Record the counts.
+16. Run `scripts/wsb-cleanup.mjs` (ask first if it has no report-only mode: it can stop sandboxes). Record whether it still says `G05 BASE LEFT ALONE`.
+17. Quote these new lines from the output: the **`wsb list (product launcher)`** line (how each call was launched, how it ended, how long it took), the **scheduled-task verdict** in the variants record (SUCCESS, FAILED, or "NOT an answer"), and the **`G05 base access evidence:`** lines.
+18. Confirm nothing is left behind: no scheduled task named `nn-*`, no sandbox you started, no files outside `C:\nn-diag` and the checkout.
 
 ## What to send back
 
