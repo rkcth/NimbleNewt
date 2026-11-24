@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { mayReadCatalogEntry } from "../catalog/catalog.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { expiryTime, judgedBy } from "./access.js";
@@ -54,6 +55,16 @@ test("a principal with no loader clock (built by hand, or a spread copy) is judg
 test("a principal whose rights were never loaded is refused rather than trusted", () => {
   assert.equal(allows(judgedBy(agent(undefined), () => AS_OF), "task.read", "p1"), false);
   assert.equal(allows(agent(undefined), "task.read", "p1"), false);
+});
+
+test("a project audience (judged grant by grant on copies of the principal) uses the loader's clock too, not the machine's", async () => {
+  let clock = AS_OF;
+  const p = judgedBy({ ...agent(AS_OF), grants: [{ action: "catalog.read", project: "*", source: "direct" }, { action: "task.read", project: "p1", source: "direct", expiresAt: EXPIRES }] } as unknown as Principal, () => clock);
+  const entry = { layer: "toolbox", owner: "agent:z", audience: { projects: ["p1"] } } as unknown as Parameters<typeof mayReadCatalogEntry>[2];
+  const none = async (): Promise<undefined> => undefined;
+  assert.equal(await mayReadCatalogEntry(none, p, entry), true, "the rig's clock is before the end of the grant naming p1 (the machine's is long after it)");
+  clock = AFTER_EXPIRY;
+  assert.equal(await mayReadCatalogEntry(none, p, entry), false, "after the end it no longer makes the agent part of the audience");
 });
 
 let n = 0;

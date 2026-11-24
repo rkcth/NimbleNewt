@@ -5,7 +5,7 @@ import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown, projectId as checkProjectId, taskId as checkTaskId, text, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
-import { allows } from "../security/access.js";
+import { allows, expiryTime } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
@@ -197,7 +197,9 @@ const holdsIn = (by: Principal, project: string): boolean => {
   // Each grant naming the project is judged alone (another grant, such as one for every project, does not lend it life). A grant for the whole project stays usable there despite a restriction on one
   // resource in it (that resource is not the project), so only restrictions naming no resource take it away; a grant for one resource meets the restrictions on that resource too.
   const general = (by.restrictions ?? []).filter((r) => r.resource === undefined);
-  return by.grants.some((g) => g.project === project && allows({ ...by, grants: [g], restrictions: g.resource === undefined ? general : (by.restrictions ?? []) }, g.action, project, g.resource === undefined ? {} : { resource: g.resource }));
+  // Each grant is judged on a copy, which does not carry the loader's clock (`judgedBy`): the time is read from `by` itself, so the copy is judged at the same moment as `allows(by, ...)` would be.
+  const now = expiryTime(by);
+  return by.grants.some((g) => g.project === project && allows({ ...by, grants: [g], restrictions: g.resource === undefined ? general : (by.restrictions ?? []) }, g.action, project, g.resource === undefined ? { now } : { resource: g.resource, now }));
 };
 /** Whether an agent holds `toolbox.manage` anywhere (for every project, or for at least one). */
 export const maintainsAnywhere = (by: Principal): boolean => by.kind === "agent" && (allows(by, TOOLBOX_MANAGE, undefined) || by.grants.some((g) => g.project !== "*" && allows(by, TOOLBOX_MANAGE, g.project)));
