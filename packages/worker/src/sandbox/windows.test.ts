@@ -1769,3 +1769,38 @@ describe("the launcher with a backend that reports details", () => {
 });
 
 const win32Dir = (p: string): string => p.slice(0, p.lastIndexOf("\\"));
+
+describe("Windows launcher: every wsb command goes through the host's launch strategy (card wsb-repair)", () => {
+  /** A host with a launch strategy of its own: records each wsb verb it was asked to launch, then answers like the plain host. */
+  class StrategyHost extends SimHost {
+    launched: string[] = [];
+    runWsb = async (file: string, args: readonly string[], o: { cwd?: string; timeoutMs: number }): Promise<ProcessResult> => { this.launched.push(String(args[0])); return { ...(await this.run(file, args, o)), via: "through a test strategy" }; };
+  }
+
+  test("start, exec, stop and list are launched through the strategy, once each, and the job still ends as before", async () => {
+    const host = new StrategyHost();
+    host.guest = () => ok("hello\r\n");
+    const { job, jobDir } = prepared(host);
+    const out = await runWindowsJob(host, job, [win32Dir(RUNNER)], jobDir);
+    assert.equal(out.exitCode, 0);
+    for (const verb of ["start", "exec", "stop"]) assert.equal(host.launched.filter((v) => v === verb).length, 1, `${verb} is launched once`);
+    assert.ok(host.runs.filter((r) => r.file.toLowerCase().endsWith("wsb.exe")).length >= 3);
+  });
+
+  test("a start that fails is not launched a second time (start is not idempotent)", async () => {
+    const host = new StrategyHost();
+    host.startFailure = { code: 1, stdout: "", stderr: "no", timedOut: false };
+    const { job, jobDir } = prepared(host);
+    const out = await runWindowsJob(host, job, [win32Dir(RUNNER)], jobDir);
+    assert.notEqual(out.exitCode, 0);
+    assert.equal(host.launched.filter((v) => v === "start").length, 1);
+    assert.equal(host.launched.filter((v) => v === "exec").length, 0);
+  });
+
+  test("a host without a strategy of its own is called through its plain run (the injected launcher of the tests keeps working)", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = prepared(host);
+    assert.equal((await runWindowsJob(host, job, [win32Dir(RUNNER)], jobDir)).exitCode, 0);
+    assert.ok(host.wsbCommands.length >= 3);
+  });
+});

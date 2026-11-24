@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   CMD_NEW_CONSOLE, CMD_NUL_FILE, MIN_VARIANT_MS, NEW_CONSOLE_BATCH, ORDER, PREFIX, STOP_MS, TASK_CHECK_MS, TASK_OVERHEAD_MS, TASK_RESERVE_MS, TASK_SCRIPT, TOTAL_LIMIT_MS,
-  VARIANT_TIMEOUT_MS, realLaunch, render, runVariants, taskResult, variantLine,
+  VARIANT_TIMEOUT_MS, readCodeFile, realLaunch, render, runVariants, taskResult, taskVerdict, variantLine,
 } from "./wsb-launch-variants.mjs";
 import { OVERALL_LIMIT_MS, wsbListLine } from "./wsb-job-context.mjs";
 
@@ -46,6 +46,7 @@ test("all five variants run once each in the printed order, every one whatever t
     if (/powershell\.exe$/.test(c.file) && c.args.at(-1) === "wsb list") return { status: 1, signal: null, stdout: "", stderr: GRPC, durationMs: 30_500 };
     if (/powershell\.exe$/.test(c.file)) {
       writeFileSync(c.env.NN_WSB_OUT, "a\r\nb\r\n");
+      writeFileSync(c.env.NN_WSB_CODE, "0\r\n");
       writeFileSync(c.env.NN_OUT, JSON.stringify({ registered: true, started: true, finished: true, result: 0, elapsedMs: 1234, stopped: false, removed: true, error: null }));
       return ok;
     }
@@ -77,6 +78,7 @@ test("all five variants run once each in the printed order, every one whatever t
   assert.ok(newConsole.env.NN_WSB_BATCH.endsWith("new-console.cmd"));
   assert.equal(helper.args.at(-1), TASK_SCRIPT);
   assert.equal(helper.env.NN_TASK, "NimbleNewtWsbProbe-0123456789ab");
+  assert.deepEqual(Object.keys(helper.env).sort(), ["NN_LIMIT_MS", "NN_OUT", "NN_TASK", "NN_WSB_BATCH", "NN_WSB_CODE", "NN_WSB_ERR", "NN_WSB_OUT"]);
   assert.equal(helper.env.NN_LIMIT_MS, String(VARIANT_TIMEOUT_MS));
   assert.equal(helper.timeoutMs, VARIANT_TIMEOUT_MS + TASK_OVERHEAD_MS);
   // Afterwards the task is looked for by its name (not found: exit 1), nothing more.
@@ -152,7 +154,7 @@ test("variant lines: the outcome in the job-context script's words; output and e
   assert.match(variantLine(1, "nodeDetached", { status: null, error: { code: "ENOENT" }, durationMs: 2 }, 45_000), /: not found on PATH after 2 ms; output text no \(lines 0\); error text no;/);
   // The job-context script's own line is unchanged by the shared description.
   assert.equal(wsbListLine({ status: 0, signal: null, stdout: "\r\n", stderr: "", durationMs: 812.4 }), "wsb list (once, limit 45000 ms): answered (exit 0) after 812 ms; output lines 0; markers: none; first error line: none");
-  assert.deepEqual(taskResult({ registered: true, started: true, finished: true, result: 3, elapsedMs: 9 }, { stdout: "", stderr: "" }), { signal: null, stdout: "", stderr: "", durationMs: 9, status: 3 });
+  assert.deepEqual(taskResult({ registered: true, started: true, finished: true, result: 3, elapsedMs: 9 }, { stdout: "", stderr: "", code: 3 }), { signal: null, stdout: "", stderr: "", durationMs: 9, status: 3, taskResult: 3 });
   assert.equal(taskResult({ registered: true, started: true, finished: true, result: -1 }, { stdout: "", stderr: "" }).error.code, "other");
   assert.deepEqual(render(["1. x"]), [`${PREFIX}1. x`]);
   assert.ok(!render([`x ${KEY}`])[0].includes(KEY));
@@ -164,7 +166,7 @@ test("the fixed command texts and the helper: no interpolation, file names only 
   assert.equal(NEW_CONSOLE_BATCH, '@wsb list <NUL >"%NN_WSB_OUT%" 2>"%NN_WSB_ERR%"\r\n@exit %ERRORLEVEL%\r\n');
   assert.doesNotMatch(TASK_SCRIPT, /\$\{/);
   assert.doesNotMatch(TASK_SCRIPT, /Write-(Output|Host)|\[Console\]::Write/);
-  assert.deepEqual([...new Set([...TASK_SCRIPT.matchAll(/\$env:([A-Za-z_]+)/g)].map((m) => m[1]))].sort(), ["NN_LIMIT_MS", "NN_OUT", "NN_TASK", "NN_WSB_ERR", "NN_WSB_OUT", "SystemRoot"]);
+  assert.deepEqual([...new Set([...TASK_SCRIPT.matchAll(/\$env:([A-Za-z_]+)/g)].map((m) => m[1]))].sort(), ["NN_LIMIT_MS", "NN_OUT", "NN_TASK", "NN_WSB_BATCH", "NN_WSB_CODE", "NN_WSB_ERR", "NN_WSB_OUT", "SystemRoot"]);
   assert.match(TASK_SCRIPT, /\} finally \{\n {2}if \(\$r\.registered\) \{ try \{ Unregister-ScheduledTask -TaskName \$name -Confirm:\$false; \$r\.removed = \$true \} catch \{ \} \}\n {2}\[System\.IO\.File\]::WriteAllText\(\$env:NN_OUT,/);
   // The safety net: the trigger is in the past (it never runs by itself) and expires, after which Task Scheduler deletes the task.
   assert.match(TASK_SCRIPT, /New-ScheduledTaskTrigger -Once -At \(Get-Date\)\.AddMinutes\(-1\)/);
@@ -199,4 +201,35 @@ test("the real launcher: exit code and both outputs, a program that does not end
   // Detached, as variant 1 runs it.
   const detached = await realLaunch({ file: process.execPath, args: ["-e", "process.exitCode = 0"], detached: true, windowsHide: false, timeoutMs: 120_000 });
   assert.equal(detached.status, 0);
+});
+
+test("the scheduled task's answer is unambiguous: only an exit code read from the task's own code file counts; no output with code 0 is the right empty list, no code file is not an answer", async () => {
+  const lineFor = async (writeCode) => {
+    const clock = fakeClock();
+    const { launch } = fakeLaunch(clock, (c) => {
+      if (/powershell\.exe$/.test(c.file) && c.args.at(-1) === TASK_SCRIPT) {
+        if (writeCode !== undefined) writeFileSync(c.env.NN_WSB_CODE, writeCode);
+        writeFileSync(c.env.NN_OUT, JSON.stringify({ registered: true, started: true, finished: true, result: 0, elapsedMs: 1000, stopped: false, removed: true, error: null }));
+        return ok;
+      }
+      if (/schtasks\.exe$/.test(c.file)) return { ...ok, status: 1 };
+      return { status: null, signal: null, error: { code: "ETIMEDOUT" }, durationMs: 1 };
+    });
+    return (await runVariants({ launch, now: clock.now, tmp: tmp(), taskName: () => "NimbleNewtWsbProbe-aaaaaaaaaaaa" }))[5];
+  };
+  assert.match(await lineFor("0\r\n"), /answered \(exit 0\) after 1000 ms; output text no \(lines 0\); error text no; .*verdict: SUCCESS, exit code 0 read from the code file \(the list is empty, which is the right answer when no sandbox is running\)/);
+  assert.match(await lineFor("2148734208"), /failed \(exit 0x80131500\).*verdict: FAILED, exit code 0x80131500 read from the code file; the task's own result 0x00000000 differs/);
+  assert.match(await lineFor(undefined), /verdict: NOT an answer \(the task ended but wrote no exit code\)/);
+  assert.match(await lineFor("garbage"), /verdict: NOT an answer/);
+  assert.match(taskVerdict({ status: null, error: { code: "ETIMEDOUT" } }), /verdict: no answer/);
+  assert.match(taskVerdict({ status: 0, stdout: "id\r\n" }), /SUCCESS.*a list was printed/);
+  const d = tmp();
+  const f = join(d, "code.txt");
+  writeFileSync(f, "\uFEFF 7 \r\n"); assert.equal(readCodeFile(f), 7);
+  writeFileSync(f, "4294967296"); assert.equal(readCodeFile(f), undefined);
+  writeFileSync(f, "-1"); assert.equal(readCodeFile(f), undefined);
+  assert.equal(readCodeFile(join(d, "missing.txt")), undefined);
+  // The batch the task runs writes wsb's own exit code, line by line (so %ERRORLEVEL% is wsb's), into the file the launcher reads.
+  assert.match(TASK_SCRIPT, /'@>"' \+ \$env:NN_WSB_CODE \+ '" echo %ERRORLEVEL%'/);
+  assert.match(TASK_SCRIPT, /'@wsb list <NUL >"' \+ \$env:NN_WSB_OUT/);
 });

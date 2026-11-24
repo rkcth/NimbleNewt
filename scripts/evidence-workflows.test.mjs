@@ -59,7 +59,7 @@ test("own-hardware: the probe job (one run of the whole suite on each own machin
   // A Windows run takes about twice the Mac's 21 minutes and one was cancelled at 60 (CI, 2026-11-19).
   assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(probe)?.[1]), 150);
   assert.match(probe, /label: \[nimblenewt-mac, nimblenewt-windows\]/);
-  assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(job(text, "sandbox-windows"))?.[1]), 420);
+  assert.equal(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(job(text, "sandbox-windows"))?.[1]), 480);
 });
 
 test("own-hardware: the outcome step, run as bash runs it on the runner, passes only when every evidence step succeeded", { skip: process.platform === "win32" ? "runs the step with a POSIX bash" : false }, () => {
@@ -191,10 +191,20 @@ test("own-hardware: the job-context diagnostic (card wsb-console) runs once befo
   assert.ok(j.indexOf("id: wsbctx") > j.indexOf("npm run build") && j.indexOf("id: wsbctx") < j.indexOf("id: wsb\n"));
   // A record, not evidence: the outcome step does not read it.
   assert.doesNotMatch(j.slice(j.indexOf("- name: Job summary and outcome")), /steps\.wsbctx\./);
-  const ids = ["wsbctx", "fs", "wsb", "wd", "g05", "g06", "y02", "cleanup"];
+  const ids = ["wsbctx", "wsblist", "fs", "wsb", "wd", "g05", "g06", "y02", "cleanup"];
   const stepSum = ids.reduce((sum, id) => sum + Number(/\n {8}timeout-minutes: (\d+)\n/.exec(step(j, id))[1]), 0);
   assert.ok(Number(/\n {4}timeout-minutes: (\d+)\n/.exec(j)[1]) >= stepSum + 30, `job limit below ${stepSum + 30}`);
   // No other job runs it.
   assert.equal(text.split("wsb-job-context.mjs").length - 1, 1);
   assert.equal(text.split("node scripts/wsb-launch-variants.mjs").length - 1, 1);
+});
+
+test("own-hardware: the product launcher's one-line wsb list record (card wsb-repair) is a diagnostic: after the context step, before the tests, always exit 0, redacted, not read by the outcome step", () => {
+  const j = job(read("own-hardware.yml"), "sandbox-windows");
+  const s = step(j, "wsblist");
+  assert.match(s, /\n {8}continue-on-error: true\n/);
+  assert.match(s, /node scripts\/wsb-list-line\.mjs 2>&1 \| node scripts\/redact-log\.mjs \| tee "\$RUNNER_TEMP\/wsb-list-line\.txt"/);
+  assert.ok(j.indexOf("id: wsbctx") < j.indexOf("id: wsblist") && j.indexOf("id: wsblist") < j.indexOf("id: wsb\n"));
+  assert.doesNotMatch(j.slice(j.indexOf("- name: Job summary and outcome")), /steps\.wsblist\./);
+  assert.equal(read("own-hardware.yml").split("node scripts/wsb-list-line.mjs").length - 1, 1);
 });

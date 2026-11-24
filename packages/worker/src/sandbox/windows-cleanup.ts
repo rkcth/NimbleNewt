@@ -23,6 +23,8 @@ export interface EvidenceSearch {
   readonly owners: ReadonlyMap<string, string>;
   /** Folders that were left alone and count as kept (fixed texts, no names, paths or SIDs): the G05 base when another account could change it, its owner cannot be read or is not one the runner's account can be. */
   readonly held: readonly string[];
+  /** The G05 base folder's access evidence, redacted (who could change it; what was decided about the runner's own group). Never counts as kept. */
+  readonly evidence: readonly string[];
   /** Why no record was believed at all (fixed text, no names), from `scanEvidenceFolders`; undefined when the records were read. */
   readonly recordsProblem?: string;
 }
@@ -37,6 +39,7 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
   const g05 = host.env("NIMBLENEWT_G05_WSB_BASE") ?? (host.env("RUNNER_TEMP") === undefined ? undefined : `${host.env("RUNNER_TEMP")!}\\nn-g05-wsb`);
   const owners = new Map(found.owners);
   const held: string[] = [];
+  const evidence: string[] = [];
   if (g05 !== undefined && host.exists(`${g05}\\control`)) {
     // The runner's temporary folder can inherit write access for every signed-in account from the drive root (a default C:\ grants Authenticated Users Modify to every folder made
     // under it, so a runner in C:\actions-runner fails this until the one-time fix in docs/nimblenewt/own-hardware-runners.md). So the G05 base gets the conditions recorded
@@ -44,7 +47,9 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
     // `owners`). The base's owner itself must be one only the runner's account can be: SYSTEM, Administrators or TrustedInstaller (an elevated runner's folders are owned by
     // Administrators), or the owner of the records folder that was just believed (the runner's own account when not elevated). Otherwise a folder another account made in its
     // place, owned by that account, would pass every other check. Unreadable: nothing is trusted.
-    const problem = await recordDirProblem(host, g05, "the G05 test base folder");
+    const aclNotes: string[] = [];
+    const problem = await recordDirProblem(host, g05, "the G05 test base folder", aclNotes);
+    evidence.push(...aclNotes);
     let owner: string | undefined;
     try { owner = problem === undefined ? await host.ownerSid(g05) : undefined; } catch { owner = undefined; }
     const recDir = recordDirFrom((n) => host.env(n));
@@ -57,7 +62,7 @@ export async function searchEvidenceDirs(host: WindowsHost): Promise<EvidenceSea
     else if (!TRUSTED_OWNER_SIDS.includes(owner) && owner !== recOwner) held.push("the G05 test base folder is owned neither by SYSTEM or Administrators nor by the owner of the records folder; left alone");
     else { out.push(`${g05}\\control`); owners.set(g05.toLowerCase(), owner); }
   }
-  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners, held, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };
+  return { dirs: out, unrecorded: found.unrecorded, distrusted: found.distrusted, owners, held, evidence, ...(found.recordsProblem === undefined ? {} : { recordsProblem: found.recordsProblem }) };
 }
 
 export const evidenceControlDirs = async (host: WindowsHost): Promise<string[]> => (await searchEvidenceDirs(host)).dirs;

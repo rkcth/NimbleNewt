@@ -102,6 +102,8 @@ export interface ProcessResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  /** How the program was launched, as a fixed plain sentence, when it was not the direct call (for example through a one-shot scheduled task). Recorded only. */
+  readonly via?: string;
 }
 
 export interface WindowsHost {
@@ -124,6 +126,14 @@ export interface WindowsHost {
    * diagnostic, after every normal `wsb list` call failed. Its outcome never decides anything.
    */
   runMinimalEnv?(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
+
+  /**
+   * Runs one `wsb` command (list, start, exec, stop, ...) the way that answers from inside a runner job: a one-shot scheduled task in the signed-in session (windows-task-launch.ts),
+   * falling back to the direct call only when nothing was started. Optional: a host without it (the unit tests' simulated ones) is called through `run`. Never retried here.
+   */
+  runWsb?(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
+  /** The members of a local group by name (accounts as `MACHINE\\name`), or undefined when they cannot be read. Optional; read-only; used to recognise the runner's own group. */
+  localGroupMembers?(group: string): Promise<readonly string[] | undefined>;
 
   exists(path: string): boolean;
   /** True when the path is, or passes through, a symbolic link, a junction or any other reparse point (its real path differs from the path). */
@@ -158,3 +168,7 @@ export interface WindowsHost {
   /** Starts a program (no shell) and waits for it. Used for wsb.exe and icacls.exe. */
   run(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
 }
+
+/** The call every `wsb` command goes through: the host's own launch strategy when it has one, otherwise its plain `run`. */
+export const runWsbCommand = (host: WindowsHost, file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult> =>
+  host.runWsb !== undefined ? host.runWsb(file, args, options) : host.run(file, args, options);

@@ -86,7 +86,7 @@ jobs:
     # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
     # The job's limit is above the sum of every step's own limit (390 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
     # (a self-hosted runner's job may run longer than a hosted one's 360 minutes).
-    timeout-minutes: 420
+    timeout-minutes: 480
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -169,6 +169,17 @@ jobs:
           node scripts/wsb-launch-variants.mjs 2>&1 | node scripts/redact-log.mjs >> "$RUNNER_TEMP/wsb-job-context.txt"
           cat "$RUNNER_TEMP/wsb-job-context.txt"
           { echo "## The job's process context before wsb (diagnostic)"; echo '```'; cat "$RUNNER_TEMP/wsb-job-context.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # Card wsb-repair: the product's own launcher now runs every `wsb` command through a one-shot scheduled task in the signed-in session (the one way that answered in run 45097817234),
+      # with the direct call only when the task provably did not start. This step prints ONE line: what that launcher tried for `wsb list` and how it ended (scripts/wsb-list-line.mjs).
+      # Fixed words only, through the log redaction; it always exits 0 and the outcome step does not read it. 25 minutes: a list that does not answer is tried up to three times.
+      - name: What the product's launcher tried for wsb list, in one line
+        id: wsblist
+        continue-on-error: true
+        timeout-minutes: 25
+        shell: bash
+        run: |
+          node scripts/wsb-list-line.mjs 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/wsb-list-line.txt"
+          { echo "## wsb list through the product's launcher (diagnostic)"; echo '```'; cat "$RUNNER_TEMP/wsb-list-line.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Run the real Windows Sandbox tests
         id: wsb
         continue-on-error: true

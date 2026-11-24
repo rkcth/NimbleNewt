@@ -1,5 +1,5 @@
 import { redactAndCut, type RedactionNames } from "./windows-redact.js";
-import type { ProcessResult, WindowsHost, WindowsListContext } from "./windows-host.js";
+import { runWsbCommand, type ProcessResult, type WindowsHost, type WindowsListContext } from "./windows-host.js";
 
 /**
  * `wsb list --raw` with diagnostics and a bounded retry. The first call after the Sandbox server has been idle may need to start it, so it gets a longer limit; a call that fails
@@ -137,8 +137,8 @@ export async function listSandboxes(host: WindowsHost, client: { readonly wsb: s
     let current: ProcessResult | undefined;
     let how: string;
     try {
-      current = await host.run(client.wsb, ["list", "--raw"], { cwd: client.cwd, timeoutMs: timeouts[i]! });
-      how = outcome(current);
+      current = await runWsbCommand(host, client.wsb, ["list", "--raw"], { cwd: client.cwd, timeoutMs: timeouts[i]! });
+      how = `${outcome(current)}${current.via === undefined ? "" : ` (${current.via})`}`;
     } catch { how = "could not run"; }
     calls.push(`call ${String(i + 1)}: ${how} after ${String(Date.now() - t0)} ms (limit ${String(timeouts[i])} ms)`);
     if (current !== undefined && current.code === 0 && !current.timedOut) { result = current; break; }

@@ -36,6 +36,7 @@ const unusable = found.recordsProblem !== undefined && found.unrecorded.length >
 if (unusable) problems.push(`the records could not be used (${found.recordsProblem}), so no test folder was acted on`);
 if (running) problems.push("a Windows Sandbox is still running");
 if (state === "unknown") problems.push("the running sandboxes could not be listed (the client could not be verified or the list failed)");
+for (const e of found.evidence ?? []) console.log(`G05 base access evidence: ${e}`);
 console.log(`leftovers: ${dirs.length} control folders looked at, ${result.released} jobs released, ${result.kept.length + found.held.length} could not be released, ${result.removedBases} test folders removed, ${found.unrecorded.length + found.distrusted.length} not recorded or not trusted and left alone${found.recordsProblem === undefined ? "" : `; NO RECORD WAS BELIEVED: ${found.recordsProblem}`}${state === "unknown" ? "; whether a Windows Sandbox is still running could not be checked" : ""}${running ? "; a Windows Sandbox is STILL RUNNING (not stopped by this step: close it if it is not yours)" : ""}${found.held.length === 0 ? "" : `; G05 BASE LEFT ALONE: ${found.held.join("; ")}`}`);
 if (args[0] === "--local") { mkdirSync(resolve(args[1]), { recursive: true }); writeFileSync(join(resolve(args[1]), "wsb-cleanup.txt"), `${problems.join("\n")}\n`); }
 process.exit(result.kept.length > 0 || found.held.length > 0 || running || unusable ? 1 : 0);

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { NormalizedRecipe } from "./recipe.js";
 import { GUEST_PATHS, aclSteps, describeWsbAccessDenied, isWsbAccessDenied, launchScript, overlapsWin, sharesFor, verifyClient, verifySession, wsbConfigXml, type AclStep, type Share, type WindowsSettings } from "./windows-plan.js";
 import { listSandboxes, type ListOptions } from "./windows-list.js";
-import type { WindowsHost } from "./windows-host.js";
+import { runWsbCommand, type WindowsHost } from "./windows-host.js";
 import { cutWhole } from "./windows-redact.js";
 
 /** The job file the backend writes (in the supervisor's control directory) and the runner process reads. */
@@ -163,7 +163,7 @@ export async function releaseJob(host: WindowsHost, settings: WindowsSettings, j
     if (id === undefined || !GUID.test(id)) problems.push(`the sandbox record in ${jobDir} cannot be read`);
     else if (!client.ok) problems.push(`the sandbox ${id} could not be stopped because the client could not be verified (${client.reason})`);
     else {
-      const stopped = await host.run(client.value.wsb, ["stop", "--id", id], { cwd: client.value.cwd, timeoutMs: WSB_TIMEOUT_MS }).catch(() => undefined);
+      const stopped = await runWsbCommand(host, client.value.wsb, ["stop", "--id", id], { cwd: client.value.cwd, timeoutMs: WSB_TIMEOUT_MS }).catch(() => undefined);
       if (stopped === undefined || stopped.code !== 0) {
         // A stop of a sandbox that is already gone fails too: only one that is still listed is a problem.
         const listed = await listSandboxes(host, client.value, listOptions);
@@ -212,7 +212,7 @@ async function execute(host: WindowsHost, job: WindowsJob, supervisorPaths: read
     const aclProblem = await applyAcls(host, jobDir, aclSteps(settings.shareIdentity, shares));
     if (aclProblem !== undefined) return refused(aclProblem);
 
-    const started = await host.run(client.wsb, ["start", "--config", wsbConfigXml(shares)], { cwd: client.cwd, timeoutMs: WSB_TIMEOUT_MS });
+    const started = await runWsbCommand(host, client.wsb, ["start", "--config", wsbConfigXml(shares)], { cwd: client.cwd, timeoutMs: WSB_TIMEOUT_MS });
     const id = GUID.exec(started.stdout)?.[0];
     if (id !== undefined) host.writeText(statusFile(jobDir), JSON.stringify({ id }));
     if (started.code !== 0 || id === undefined) {
@@ -231,7 +231,7 @@ async function execute(host: WindowsHost, job: WindowsJob, supervisorPaths: read
     const again = await verifySession(host, settings);
     if (!again.ok) return refused(again.reason);
 
-    const exec = await host.run(client.wsb, ["exec", "--id", id, "-c", `C:\\Windows\\System32\\cmd.exe /d /c ${GUEST_PATHS.job}\\launch.cmd`, "-d", GUEST_PATHS.work, "-r", "System"], { cwd: client.cwd, timeoutMs: EXEC_TIMEOUT_MS });
+    const exec = await runWsbCommand(host, client.wsb, ["exec", "--id", id, "-c", `C:\\Windows\\System32\\cmd.exe /d /c ${GUEST_PATHS.job}\\launch.cmd`, "-d", GUEST_PATHS.work, "-r", "System"], { cwd: client.cwd, timeoutMs: EXEC_TIMEOUT_MS });
     if (exec.timedOut) return { exitCode: EXIT_FAILED, stdout: exec.stdout, stderr: `${exec.stderr}failed: the command did not return\n` };
     return { exitCode: exec.code ?? EXIT_FAILED, stdout: exec.stdout, stderr: exec.stderr };
   } catch (error) {
