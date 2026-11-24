@@ -1,6 +1,10 @@
 import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+import { launchWsb, parseMode, runViaScheduledTask, wsbTaskBase, MODE_VARIABLE } from "./windows-task-launch.js";
+import { recordDirProblem } from "./windows-records.js";
 import { SANDBOX_PACKAGES, parseIcaclsWritable, shortStatusMessage } from "./windows-plan.js";
 import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
 
@@ -284,6 +288,13 @@ export async function retryOnceOnTimeout(attempt: () => Promise<ProcessResult>):
   return first.timedOut ? attempt() : first;
 }
 
+// The members of one local group (names only). A group that cannot be read gives no answer, which callers read as "not recognised".
+const GROUP_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+$list = @(Get-LocalGroupMember -Group $env:NN_GROUP | ForEach-Object { [string]$_.Name })
+ConvertTo-Json -InputObject $list -Compress
+`;
+
 export function windowsRealHost(): WindowsHost {
   const sysRoot = (): string => process.env["SystemRoot"] ?? "C:\\Windows";
   // taskkill walks the tree from the parent, so it runs while the parent is still alive; runBounded calls it only for a program whose end node has not yet seen, so the id is
@@ -300,7 +311,7 @@ export function windowsRealHost(): WindowsHost {
     if (out.code !== 0) throw new Error(`PowerShell failed (exit ${String(out.code)}): ${out.stderr.trim().slice(0, 300)}`);
     return JSON.parse(out.stdout.trim()) as T;
   };
-  return {
+  const host: WindowsHost = {
     platform: process.platform,
     env: (name) => process.env[name],
     pid: process.pid,
@@ -360,5 +371,33 @@ export function windowsRealHost(): WindowsHost {
       return ownerFromProbe(await powershell<{ owner?: unknown } | null>(OWNER_SCRIPT, { NN_PATH: path }), path);
     },
     run: (file, args, options) => run(file, args, options),
+    async runWsb(file, args, options) {
+      const direct = (): Promise<ProcessResult> => run(file, args, options);
+      const mode = parseMode(process.env[MODE_VARIABLE]);
+      if (mode === "direct" || process.platform !== "win32") return direct();
+      const base = wsbTaskBase((n) => process.env[n]);
+      if (base === undefined) return launchWsb(mode, () => Promise.resolve({ kind: "unavailable" as const, why: "no private folder is configured (LOCALAPPDATA and NIMBLENEWT_WSB_TASK_DIR are unset, or not a folder below a drive's root or a UNC share)" }), direct);
+      return launchWsb(mode, () => runViaScheduledTask({
+        sysRoot: sysRoot(), nodePath: process.execPath, childScript: fileURLToPath(new URL("./windows-task-child.js", import.meta.url)), baseDir: base,
+        randomHex: (n) => randomBytes(Math.ceil(n / 2)).toString("hex").slice(0, n),
+        mkdirp: (p) => { mkdirSync(win32.dirname(p), { recursive: true }); mkdirSync(p); },
+        exists: (p) => existsSync(p),
+        readText: (p) => { try { return readFileSync(p, "utf8"); } catch { return undefined; } },
+        writeText: (p, text) => { writeFileSync(p, text); },
+        remove: (p) => { rmSync(p, { recursive: true, force: true }); },
+        rename: (from, to) => { renameSync(from, to); },
+        privateProblem: (d) => recordDirProblem(host, d, "the private folder"),
+        run: (f, a, o) => run(f, a, o),
+      }, { file, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs }), direct);
+    },
+    async localGroupMembers(group) {
+      if (!/^[A-Za-z0-9_]{1,64}$/.test(group)) return undefined;
+      try {
+        const raw = await powershell<unknown>(GROUP_SCRIPT, { NN_GROUP: group }, { timeoutMs: SERVER_PROBE_TIMEOUT_MS });
+        const list = Array.isArray(raw) ? raw : raw === null ? [] : [raw];
+        return list.every((m) => typeof m === "string") ? (list as string[]) : undefined;
+      } catch { return undefined; }
+    },
   };
+  return host;
 }

@@ -77,15 +77,62 @@ export interface EvidenceFolders {
 
 const ownerOf = async (host: WindowsHost, path: string): Promise<string | undefined> => { try { return await host.ownerSid(path); } catch { return undefined; } };
 
-/** Why a folder whose contents the cleanup would act on (the records folder, the G05 base) cannot be believed, or undefined when no account but this one (besides SYSTEM, Administrators and TrustedInstaller) can change it. Fixed texts. */
-export async function recordDirProblem(host: WindowsHost, recDir: string, label = "the records folder"): Promise<string | undefined> {
+/** The runner's own built-in group: the installer of the GitHub Actions runner makes a local group `GITHUB_ActionsRunner_<suffix>` and gives it access to the runner's folders. */
+const RUNNER_GROUP = /^GITHUB_ActionsRunner_[A-Za-z0-9]{1,32}$/;
+const WELL_KNOWN = /^(?:(?:NT AUTHORITY|BUILTIN|NT SERVICE)\\[A-Za-z .]{1,40}|Everyone|CREATOR OWNER)$/i;
+
+/**
+ * Names the way the evidence shows them, without anyone's own name: a well-known system account or the runner's group by name, every other account as `account 1`, `account 2`...
+ * Each with its rights as icacls printed them, when they are known. `rights` is parallel to `names` when given.
+ */
+export function redactedWriters(names: readonly string[], me: string | undefined): string {
+  let n = 0;
+  return names.map((w) => {
+    const bare = w.split("\\").pop() ?? w;
+    if (me !== undefined && sameAccount(w, me)) return "the account running the cleanup";
+    if (RUNNER_GROUP.test(bare)) return `${bare} (the runner's group)`;
+    if (WELL_KNOWN.test(w)) return w;
+    n++;
+    return `account ${String(n)}`;
+  }).join(", ");
+}
+
+/**
+ * Whether a writer is the runner's own built-in group and no one else's way in. Assumption (recorded in the notes): the name pattern alone is not believed. The group must belong to
+ * THIS machine (`MACHINE\\GITHUB_ActionsRunner_...`, the machine being the one the cleanup runs on) and its members, read from Windows, must all be the account running the cleanup (or it
+ * has none): a group that also holds another account would still be a way in for that account. A group whose members cannot be read is not recognised.
+ */
+async function isRunnerGroup(host: WindowsHost, writer: string, me: string | undefined): Promise<boolean> {
+  const at = writer.lastIndexOf("\\");
+  const bare = at < 0 ? writer : writer.slice(at + 1);
+  if (!RUNNER_GROUP.test(bare) || host.localGroupMembers === undefined) return false;
+  const machine = host.env("COMPUTERNAME");
+  if (at < 0 || machine === undefined || machine === "" || writer.slice(0, at).toLowerCase() !== machine.toLowerCase()) return false;
+  let members: readonly string[] | undefined;
+  try { members = await host.localGroupMembers(bare); } catch { members = undefined; }
+  return members !== undefined && members.every((m) => me !== undefined && sameAccount(m, me));
+}
+
+/**
+ * Why a folder whose contents the cleanup would act on (the records folder, the G05 base) cannot be believed, or undefined when no account but this one (besides SYSTEM,
+ * Administrators, TrustedInstaller and the runner's own group, see `isRunnerGroup`) can change it. Fixed texts. `notes` receives the evidence in redacted form (who could change the
+ * folder, and what was decided about the runner's group), so a refusal can be understood from the log.
+ */
+export async function recordDirProblem(host: WindowsHost, recDir: string, label = "the records folder", notes?: string[]): Promise<string | undefined> {
   if (host.isLinkOrJunction(recDir)) return `${label} is or passes through a link or junction`;
   const user = host.env("USERNAME");
   const domain = host.env("USERDOMAIN");
   const me = user === undefined || user === "" ? undefined : domain === undefined || domain === "" ? user : `${domain}\\${user}`;
   let writers: readonly string[];
   try { writers = await host.writableBy(recDir); } catch { return `the access list of ${label} could not be read`; }
-  if (writers.some((w) => me === undefined || !sameAccount(w, me))) return `${label} can be changed by an account other than the one running the cleanup`;
+  const others: string[] = [];
+  for (const w of writers) {
+    if (me !== undefined && sameAccount(w, me)) continue;
+    if (await isRunnerGroup(host, w, me)) { notes?.push(`${w.split("\\").pop() ?? w} is the runner's own group of this machine whose members are only the account running the cleanup: not counted as another account`); continue; }
+    others.push(w);
+  }
+  notes?.push(`accounts that can change ${label}: ${writers.length === 0 ? "none besides SYSTEM, Administrators and TrustedInstaller" : redactedWriters(writers, me)}`);
+  if (others.length > 0) return `${label} can be changed by an account other than the one running the cleanup`;
   return undefined;
 }
 

@@ -6,7 +6,7 @@
 //   3. powershellCommand  powershell.exe -NoProfile -Command wsb list;
 //   4. newConsole         cmd.exe /c start "" /wait <a temporary .cmd file>: wsb runs in a new console of its own (stdin from NUL, output to temporary files);
 //   5. scheduledTask      a one-shot scheduled task as this user (interactive, highest run level), started by the Task Scheduler service and so outside this job's process
-//                         tree and job objects, then removed (by the helper, and checked and removed again here; a missed removal is also deleted by Task Scheduler itself
+//                         tree and job objects (it also writes wsb's own exit code to a file, so that "no output" is told from a silent failure), then removed (by the helper, and checked and removed again here; a missed removal is also deleted by Task Scheduler itself
 //                         ten minutes later: the task's only trigger lies in the past and expires then). It runs last because its clean-up needs time of its own.
 // Every variant is tried once with a hard limit of 45 s (at the limit its process tree is stopped with taskkill /T /F); all are tried, whatever the earlier ones gave, and the
 // whole run stays under 290 s (a variant that no longer fits is not started and says so). For each: exit code, elapsed ms, whether output and error text appeared, fixed
@@ -69,7 +69,12 @@ $name = $env:NN_TASK
 $limit = [int64]$env:NN_LIMIT_MS
 $mask = [int64]4294967295
 try {
-  $arg = '/d /v:off /s /c "wsb list <NUL >"' + $env:NN_WSB_OUT + '" 2>"' + $env:NN_WSB_ERR + '""'
+  # The task runs a batch file that writes wsb's own exit code to a file (NN_WSB_CODE), so that "answered with no output" can be told from "did not run": an empty list is the right
+  # answer when no sandbox is running, and only an exit code of 0 in that file says it was one. The batch file's lines are expanded one at a time, so %ERRORLEVEL% is wsb's.
+  $nl = [Environment]::NewLine
+  $bat = $env:NN_WSB_BATCH
+  [System.IO.File]::WriteAllText($bat, '@wsb list <NUL >"' + $env:NN_WSB_OUT + '" 2>"' + $env:NN_WSB_ERR + '"' + $nl + '@>"' + $env:NN_WSB_CODE + '" echo %ERRORLEVEL%' + $nl + '@exit %ERRORLEVEL%' + $nl)
+  $arg = '/d /v:off /s /c ""' + $bat + '""'
   $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\cmd.exe') -Argument $arg
   $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
   $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
@@ -150,6 +155,13 @@ export function realLaunch({ file, args, env = {}, detached = false, windowsHide
   });
 }
 
+/** The exit code the scheduled task's batch file wrote (a whole number), or undefined when the file is missing or not a plain number: then the run is not counted as answered. */
+export function readCodeFile(path) {
+  let text = "";
+  try { text = readFileSync(path, "utf8").replace(/^\uFEFF/, "").trim(); } catch { return undefined; }
+  return /^\d{1,10}$/.test(text) && Number(text) <= 0xffffffff ? Number(text) : undefined;
+}
+
 const readCapped = (path) => { try { return readFileSync(path, "utf8").slice(0, OUTPUT_CAP); } catch { return ""; } };
 
 /** One variant's line: the outcome as the job-context script words it, whether output and error text appeared, the markers and the cleaned first error line. */
@@ -160,6 +172,20 @@ export function variantLine(position, name, r, timeoutMs, extra = "") {
   return `${position}. ${name} (${WHAT[name]}; limit ${timeoutMs} ms): ${d.outcome} after ${d.ms} ms; output text ${word(outText)} (lines ${d.lines}); error text ${word(errText)}; markers: ${d.markers}; first error line: ${d.message}${extra}`;
 }
 
+/**
+ * What a scheduled-task run proves, in fixed words. Only an exit code of 0 read from the file the task's own batch wrote is a success (an empty list is then the correct answer
+ * when no sandbox is running); an exit code that differs from the task's own result is said; a finished task with no code file is a silent failure, not an answer.
+ */
+export function taskVerdict(r) {
+  if (r.noCodeFile === true) return "verdict: NOT an answer (the task ended but wrote no exit code)";
+  if (r.status === null || r.status === undefined) return "verdict: no answer (did not end in time or could not be read)";
+  const same = r.taskResult === undefined || r.taskResult === r.status ? "" : `; the task's own result ${hex(r.taskResult)} differs`;
+  const out = String(r.stdout ?? "").trim() !== "";
+  return r.status === 0
+    ? `verdict: SUCCESS, exit code 0 read from the code file (${out ? "a list was printed" : "the list is empty, which is the right answer when no sandbox is running"})${same}`
+    : `verdict: FAILED, exit code ${hex(r.status)} read from the code file${same}`;
+}
+
 /** The scheduled-task helper's answer as a run result; anything not in the expected form leaves the outcome unknown. */
 export function taskResult(raw, files) {
   const o = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -167,7 +193,9 @@ export function taskResult(raw, files) {
   const base = { signal: null, stdout: files.stdout, stderr: files.stderr, durationMs: ms };
   if (o.registered !== true) return { notRun: `the task could not be registered (error ${hex(o.error)})` };
   if (o.started !== true) return { notRun: `the task was registered but could not be started (error ${hex(o.error)})` };
-  if (o.finished === true && Number.isInteger(o.result) && o.result >= 0 && o.result <= 0xffffffff) return { ...base, status: o.result };
+  // The exit code file is the authority; the task's own result is only compared with it. A finished task with no code file says so instead of passing as an answer.
+  if (o.finished === true && files.code === undefined) return { ...base, status: null, error: { code: "other" }, noCodeFile: true };
+  if (o.finished === true && Number.isInteger(files.code)) return { ...base, status: files.code, taskResult: Number.isInteger(o.result) ? o.result : undefined };
   if (o.stopped === true) return { ...base, status: null, error: { code: "ETIMEDOUT" } };
   return { ...base, status: null, error: { code: "other" } };
 }
@@ -192,7 +220,8 @@ export async function runVariants(deps = {}) {
       const limit = Math.min(VARIANT_TIMEOUT_MS, Math.floor(left() - reserve));
       if (limit < MIN_VARIANT_MS) { lines.push(`${position}. ${name} (${WHAT[name]}): not started, too little of the overall limit left`); continue; }
       const files = { NN_WSB_OUT: join(dir, `${name}.out.txt`), NN_WSB_ERR: join(dir, `${name}.err.txt`) };
-      const fromFiles = () => ({ stdout: readCapped(files.NN_WSB_OUT), stderr: readCapped(files.NN_WSB_ERR) });
+      const codeFile = join(dir, `${name}.code.txt`);
+      const fromFiles = () => ({ stdout: readCapped(files.NN_WSB_OUT), stderr: readCapped(files.NN_WSB_ERR), code: readCodeFile(codeFile) });
       try {
         if (name === "nodeDetached") {
           lines.push(variantLine(position, name, await launch({ file: "wsb", args: ["list"], detached: true, windowsHide: false, timeoutMs: limit }), limit));
@@ -207,7 +236,7 @@ export async function runVariants(deps = {}) {
           const r = await launch({ file: `${sys}\\System32\\cmd.exe`, args: [CMD_NEW_CONSOLE], verbatim: true, windowsHide: false, env: { ...files, NN_WSB_BATCH: batch }, timeoutMs: limit });
           lines.push(variantLine(position, name, { ...r, ...fromFiles() }, limit));
         } else {
-          lines.push(await scheduledTask(position, launch, sys, taskName(), dir, files, fromFiles, limit));
+          lines.push(await scheduledTask(position, launch, sys, taskName(), dir, { ...files, NN_WSB_CODE: codeFile, NN_WSB_BATCH: join(dir, `${name}.task.cmd`) }, fromFiles, limit));
         }
       } catch {
         lines.push(`${position}. ${name} (${WHAT[name]}): could not be tried (an unexpected error, not shown)`);
@@ -234,7 +263,7 @@ async function scheduledTask(position, launch, sys, name, dir, files, fromFiles,
   if (raw === null) return `${position}. scheduledTask (${WHAT.scheduledTask}): no answer from the helper (exit ${Number.isInteger(helper?.status) ? hex(helper.status) : "none"}${helper?.error?.code === "ETIMEDOUT" ? ", stopped after its limit" : ""})${left}`;
   const r = taskResult(raw, fromFiles());
   if (r.notRun !== undefined) return `${position}. scheduledTask (${WHAT.scheduledTask}): not run: ${r.notRun}${left}`;
-  return variantLine(position, "scheduledTask", r, limit, left);
+  return variantLine(position, "scheduledTask", r, limit, `; ${taskVerdict(r)}${left}`);
 }
 
 export const render = (lines) => lines.map((l) => `${PREFIX}${safeMessage(l, 1000)}`);
