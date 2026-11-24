@@ -5,6 +5,7 @@ import { GUEST_PATHS, aclSteps, describeWsbAccessDenied, isWsbAccessDenied, laun
 import { listSandboxes, type ListOptions } from "./windows-list.js";
 import { runWsbCommand, type WindowsHost } from "./windows-host.js";
 import { cutWhole } from "./windows-redact.js";
+import { wsbTaskBase } from "./windows-task-launch.js";
 
 /** The job file the backend writes (in the supervisor's control directory) and the runner process reads. */
 export interface WindowsJob {
@@ -85,7 +86,9 @@ export async function admit(host: WindowsHost, settings: WindowsSettings, shares
   if (!session.ok) return session;
   for (const s of shares) {
     // The job's own read-only guest folder is inside the control directory by design; it holds nothing but the generated launch script.
-    const guarded = s.why === "job" ? supervisorPaths : [settings.controlDir, ...supervisorPaths];
+    // The scheduled-task launch's private folder (windows-task-launch.ts) is guarded too: a guest that could write there could change a request before the task runs it.
+    const taskBase = wsbTaskBase((n) => host.env(n));
+    const guarded = [...(s.why === "job" ? supervisorPaths : [settings.controlDir, ...supervisorPaths]), ...(taskBase === undefined ? [] : [taskBase])];
     for (const p of guarded) if (overlapsWin(s.host, p)) return { ok: false as const, reason: `the shared folder ${s.host} overlaps the supervisor's own files (${p})` };
   }
   return client;

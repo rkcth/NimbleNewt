@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { randomBytes } from "node:crypto";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
-import { launchWsb, parseMode, runViaScheduledTask, DIR_VARIABLE, MODE_VARIABLE } from "./windows-task-launch.js";
+import { launchWsb, parseMode, runViaScheduledTask, wsbTaskBase, MODE_VARIABLE } from "./windows-task-launch.js";
 import { recordDirProblem } from "./windows-records.js";
 import { SANDBOX_PACKAGES, parseIcaclsWritable, shortStatusMessage } from "./windows-plan.js";
 import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
@@ -375,7 +375,7 @@ export function windowsRealHost(): WindowsHost {
       const direct = (): Promise<ProcessResult> => run(file, args, options);
       const mode = parseMode(process.env[MODE_VARIABLE]);
       if (mode === "direct" || process.platform !== "win32") return direct();
-      const base = process.env[DIR_VARIABLE] ?? (process.env["LOCALAPPDATA"] === undefined || process.env["LOCALAPPDATA"] === "" ? undefined : `${process.env["LOCALAPPDATA"]}\\NimbleNewt\\wsb-task`);
+      const base = wsbTaskBase((n) => process.env[n]);
       if (base === undefined) return launchWsb(mode, () => Promise.resolve({ kind: "unavailable" as const, why: "no private folder is configured (LOCALAPPDATA and NIMBLENEWT_WSB_TASK_DIR are unset)" }), direct);
       return launchWsb(mode, () => runViaScheduledTask({
         sysRoot: sysRoot(), nodePath: process.execPath, childScript: fileURLToPath(new URL("./windows-task-child.js", import.meta.url)), baseDir: base,

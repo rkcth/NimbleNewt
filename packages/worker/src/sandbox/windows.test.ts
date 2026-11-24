@@ -1132,6 +1132,18 @@ describe("Windows launcher: running a job", () => {
     assert.deepEqual(host.wsbCommands, []);
   });
 
+  test("card wsb-repair second review: a shared folder that reaches the scheduled-task launch's private folder (or holds it) is refused at the start, before any wsb command", async () => {
+    for (const [vars, workdir] of [[{ LOCALAPPDATA: "C:\\Users\\robert\\AppData\\Local" }, "C:\\Users\\robert\\AppData\\Local\\NimbleNewt"], [{ NIMBLENEWT_WSB_TASK_DIR: "D:\\nn\\task" }, "D:\\nn\\task\\call-0123456789ab"]] as const) {
+      const host = new SimHost();
+      Object.assign(host.envMap, vars);
+      const { job, jobDir } = prepared(host);
+      const out = await runWindowsJob(host, { ...job, recipe: { ...job.recipe, workdir } }, [], jobDir);
+      assert.equal(out.exitCode, EXIT_REFUSED, workdir);
+      assert.match(out.stderr, /overlaps the supervisor/, workdir);
+      assert.deepEqual(host.wsbCommands, [], workdir);
+    }
+  });
+
   test("only one sandbox at a time: a second launch of the identical recipe and command is refused as busy, and its release leaves the first untouched", async () => {
     const host = new SimHost();
     const first = prepared(host);

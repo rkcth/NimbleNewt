@@ -11,8 +11,8 @@ import { runBounded } from "./windows-real.js";
  * counts the command as never started. Only one of the two renames can succeed, so a task that begins late (after the launcher gave up) runs nothing, and a request the child
  * claimed is never also run by the direct call. If `in.json` is gone (withdrawn, or the folder removed) it runs nothing.
  */
-/** The longest limit a request may carry: above the longest `wsb` command the backend runs (exec, 24 hours). */
-export const MAX_REQUEST_MS = 48 * 60 * 60 * 1000;
+import { MAX_REQUEST_MS } from "./windows-task-launch.js";
+export { MAX_REQUEST_MS };
 export interface ChildRequest { readonly file: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs: number }
 
 export function readRequest(text: string): ChildRequest | undefined {

@@ -10,7 +10,7 @@ import type { ProcessResult, WindowsHost } from "./windows-host.js";
 import { runWsbCommand } from "./windows-host.js";
 import { listSandboxes } from "./windows-list.js";
 import { main as childMain, readRequest } from "./windows-task-child.js";
-import { CHECK_MS, HELPER_OVERHEAD_MS, HELPER_SCRIPT, START_GRACE_MS, launchWsb, parseMode, runViaScheduledTask, type TaskLaunchDeps, type TaskOutcome } from "./windows-task-launch.js";
+import { CHECK_MS, CHILD_MARGIN_MS, HELPER_OVERHEAD_MS, MAX_REQUEST_MS, wsbTaskBase, HELPER_SCRIPT, START_GRACE_MS, launchWsb, parseMode, runViaScheduledTask, type TaskLaunchDeps, type TaskOutcome } from "./windows-task-launch.js";
 import { recordDirProblem, redactedWriters } from "./windows-records.js";
 
 const root = mkdtempSync(join(process.env["TMPDIR"] ?? tmpdir(), "nn-tl-"));
@@ -20,12 +20,14 @@ const fresh = (): string => { const d = join(root, `t${String(++n)}`); mkdirSync
 const NODE = process.execPath;
 const direct = (code = 0): ProcessResult => ({ code, stdout: "direct", stderr: "", timedOut: false });
 
-interface Calls { run: { file: string; args: readonly string[]; timeoutMs: number; env?: Record<string, string> }[] }
+interface Calls { private: string[]; run: { file: string; args: readonly string[]; timeoutMs: number; env?: Record<string, string> }[] }
 interface FakeOptions {
   /** What the helper does: `child` runs the real child (a task that began), the others stand for the failures. */
-  helper?: "child" | "no-register" | "no-start" | "no-begin" | "crash" | "hang" | "hang-claimed" | "claimed-not-begun" | "stopped-after-begin" | "no-code" | "late-begin";
+  helper?: "child" | "ended-unclaimed" | "no-register" | "no-start" | "no-begin" | "crash" | "hang" | "hang-claimed" | "claimed-not-begun" | "stopped-after-begin" | "no-code" | "late-begin";
   request?: { file: string; args: string[] };
   privateProblem?: string;
+  /** Only the base folder has the problem (the call folder is fine). */
+  privateBaseOnly?: boolean;
   taskStillThere?: boolean;
 }
 
@@ -33,7 +35,7 @@ interface FakeOptions {
 function realDeps(opt: FakeOptions = {}): { deps: TaskLaunchDeps; calls: Calls; base: string; written: Record<string, unknown>[] } {
   const base = fresh();
   const written: Record<string, unknown>[] = [];
-  const calls: Calls = { run: [] };
+  const calls: Calls = { private: [], run: [] };
   const sep = process.platform === "win32" ? "\\" : "/";
   const deps: TaskLaunchDeps = {
     sysRoot: "C:\\Windows", nodePath: NODE, childScript: "C:\\app\\windows-task-child.js", baseDir: base,
@@ -44,7 +46,7 @@ function realDeps(opt: FakeOptions = {}): { deps: TaskLaunchDeps; calls: Calls; 
     writeText: (f, text) => { writeFileSync(f.replaceAll("\\", sep), text); },
     remove: (d) => { rmSync(d.replaceAll("\\", sep), { recursive: true, force: true }); },
     rename: (a, b) => { renameSync(a.replaceAll("\\", sep), b.replaceAll("\\", sep)); },
-    privateProblem: async () => opt.privateProblem,
+    privateProblem: async (d) => { calls.private.push(d); return opt.privateProblem !== undefined && (opt.privateBaseOnly !== true || d === base) ? opt.privateProblem : undefined; },
     run: async (file, args, o) => {
       calls.run.push({ file, args, timeoutMs: o.timeoutMs, ...(o.env === undefined ? {} : { env: o.env }) });
       if (/powershell\.exe$/.test(file)) {
@@ -55,6 +57,8 @@ function realDeps(opt: FakeOptions = {}): { deps: TaskLaunchDeps; calls: Calls; 
           case "no-register": answer({ registered: false, started: false, error: 2147942402 }); break;
           case "no-start": answer({ started: false, error: 2147750687 }); break;
           case "no-begin": answer({ stopped: true }); break;
+          // The task ran and ended (the child exited at once, for example its claim failed) without claiming the request: nothing began.
+          case "ended-unclaimed": answer({ ended: true }); break;
           case "crash": break;
           case "hang": return { code: null, stdout: "", stderr: "", timedOut: true };
           // The child claimed the request (renamed in.json) but had not yet written started.txt when the helper gave up or hung: it may run, so it counts as begun.
@@ -114,7 +118,7 @@ describe("the scheduled-task launch", () => {
     const helper = calls.run.find((c) => /powershell/.test(c.file))!;
     assert.deepEqual(helper.args.slice(0, 5), ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]);
     assert.equal(helper.args[5], HELPER_SCRIPT);
-    assert.deepEqual(Object.keys(helper.env!).sort(), ["NN_CHILD", "NN_DIR", "NN_LIMIT_MS", "NN_NODE", "NN_OUT", "NN_START_MS", "NN_TASK"]);
+    assert.deepEqual(Object.keys(helper.env!).sort(), ["NN_CHILD", "NN_DIR", "NN_LIMIT_MS", "NN_MARGIN_MS", "NN_NODE", "NN_OUT", "NN_START_MS", "NN_TASK"]);
     assert.match(helper.env!["NN_TASK"]!, /^NimbleNewtWsb-[0-9a-f]{12}$/);
   });
 
@@ -127,7 +131,7 @@ describe("the scheduled-task launch", () => {
   });
 
   test("the task could not be registered or started: nothing ran, so a direct call is allowed, with the reason", async () => {
-    for (const [helper, text] of [["no-register", /could not be registered \(error 0x80070002\)/], ["no-start", /registered but could not be started \(error 0x8004131f\)/], ["no-begin", /did not begin within 20 s/], ["crash", /helper could not run/], ["hang", /helper did not report within 60 s and was stopped before the command began/]] as const) {
+    for (const [helper, text] of [["no-register", /could not be registered \(error 0x80070002\)/], ["no-start", /registered but could not be started \(error 0x8004131f\)/], ["no-begin", /did not begin within 20 s/], ["ended-unclaimed", /the task ended before the command began/], ["crash", /helper could not run/], ["hang", new RegExp(`helper did not report within ${String((30_000 + HELPER_OVERHEAD_MS) / 1000)} s and was stopped before the command began`)]] as const) {
       const { deps, base } = realDeps({ helper });
       const o = await runViaScheduledTask(deps, REQ);
       assert.match(why(o), text, helper);
@@ -228,6 +232,54 @@ describe("the scheduled-task launch: claim, withdrawal and long commands", () =>
     const { deps, written } = realDeps();
     done(await runViaScheduledTask(deps, { ...REQ, args: ["exec", "--id", "x"], timeoutMs: day }));
     assert.equal((written[0] as { timeoutMs: number }).timeoutMs, day);
+  });
+});
+
+describe("the scheduled-task launch: second review", () => {
+  test("the helper runs on Windows PowerShell 5.1: no parameter it lacks (New-TimeSpan has no -Milliseconds there), the time limit built from .NET", () => {
+    assert.doesNotMatch(HELPER_SCRIPT, /New-TimeSpan[^\n]*-Milli/);
+    assert.match(HELPER_SCRIPT, /-ExecutionTimeLimit \(\[TimeSpan\]::FromMilliseconds\(\$limit \+ 60000\)\)/);
+    // Every cmdlet the helper uses exists in 5.1 with the parameters given; the list is fixed here so a new one is looked at on purpose.
+    const cmdlets = [...new Set(HELPER_SCRIPT.match(/\b[A-Z][A-Za-z]+-[A-Z][A-Za-z]+\b/g))].sort();
+    assert.deepEqual(cmdlets, ["ConvertTo-Json", "Get-Date", "Get-ScheduledTask", "Get-ScheduledTaskInfo", "Join-Path", "New-ScheduledTaskAction", "New-ScheduledTaskPrincipal", "New-ScheduledTaskSettingsSet", "New-ScheduledTaskTrigger", "Out-Null", "Register-ScheduledTask", "Start-ScheduledTask", "Start-Sleep", "Stop-ScheduledTask", "Test-Path", "Unregister-ScheduledTask"]);
+  });
+
+  test("the helper waits past the command's limit by a margin, so the child stops the command's whole tree and writes its output before the task is stopped; the helper's own limit covers that", async () => {
+    assert.match(HELPER_SCRIPT, /\$wait = \$limit \+ \[int64\]\$env:NN_MARGIN_MS/);
+    assert.match(HELPER_SCRIPT, /if \(\$sw\.ElapsedMilliseconds -ge \$wait\) \{ break \}/);
+    assert.doesNotMatch(HELPER_SCRIPT, /-ge \$limit\)/);
+    const { deps, calls } = realDeps();
+    done(await runViaScheduledTask(deps, REQ));
+    const helper = calls.run.find((c) => /powershell/.test(c.file))!;
+    assert.equal(helper.env!["NN_MARGIN_MS"], String(CHILD_MARGIN_MS));
+    assert.ok(CHILD_MARGIN_MS >= START_GRACE_MS + 5_000, "a child that began as late as the grace allows still reaches its own limit before the helper stops the task");
+    assert.ok(HELPER_OVERHEAD_MS >= CHILD_MARGIN_MS + 30_000, "registering, the margin, stopping and removing all fit in the helper's own limit");
+    assert.ok(60_000 > START_GRACE_MS + 5_000, "the task's own execution limit (the command's + 60 s from the task's start) lies beyond the child's own end");
+  });
+
+  test("the base folder is checked as well as the call folder; a base another account could change means no helper, and the call folder is removed", async () => {
+    const ok = realDeps();
+    done(await runViaScheduledTask(ok.deps, REQ));
+    assert.deepEqual(ok.calls.private, [ok.base, `${ok.base}\\call-0123456789ab`]);
+    const b = realDeps({ privateProblem: "another account can change it", privateBaseOnly: true });
+    assert.match(why(await runViaScheduledTask(b.deps, REQ)), /the folder for the private call folders was not believed private \(another account can change it\)/);
+    assert.equal(b.calls.run.length, 0);
+    assert.deepEqual(readdirSync(b.base), []);
+  });
+
+  test("a limit above the child's maximum is turned away before anything is made (the child would refuse it after claiming it, which reads as 'cannot be said')", async () => {
+    const { deps, calls, base } = realDeps();
+    assert.match(why(await runViaScheduledTask(deps, { ...REQ, timeoutMs: MAX_REQUEST_MS + 1 })), /a limit longer than the scheduled-task launch takes/);
+    assert.equal(calls.run.length, 0);
+    assert.deepEqual(readdirSync(base), []);
+    done(await runViaScheduledTask(realDeps().deps, { ...REQ, timeoutMs: MAX_REQUEST_MS }));
+  });
+
+  test("the base folder: the variable when set and not empty, else under LOCALAPPDATA, else none", () => {
+    const env = (m: Record<string, string>) => (n: string): string | undefined => m[n];
+    assert.equal(wsbTaskBase(env({ NIMBLENEWT_WSB_TASK_DIR: "D:\\t", LOCALAPPDATA: "C:\\L" })), "D:\\t");
+    assert.equal(wsbTaskBase(env({ NIMBLENEWT_WSB_TASK_DIR: "", LOCALAPPDATA: "C:\\L" })), "C:\\L\\NimbleNewt\\wsb-task");
+    assert.equal(wsbTaskBase(env({})), undefined);
   });
 });
 

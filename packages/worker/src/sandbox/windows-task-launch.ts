@@ -25,16 +25,32 @@ export const MODE_VARIABLE = "NIMBLENEWT_WSB_LAUNCH";
 export const DIR_VARIABLE = "NIMBLENEWT_WSB_TASK_DIR";
 /** How long the task may take to begin before it is stopped and the command counted as never started. */
 export const START_GRACE_MS = 20_000;
-/** The helper's own time besides the command: registering, starting, stopping and removing the task. */
-export const HELPER_OVERHEAD_MS = 30_000;
+/**
+ * How much longer than the command's own limit the helper waits for `code.txt` before it stops the task. The child stops the command's whole process tree itself at the limit
+ * (taskkill /T) and writes the partial output; stopping the task only ends the child (Task Scheduler does not end the programs it started), so the child must get there first, also
+ * when it began as late as the start grace allows (its limit counts from its own start).
+ */
+export const CHILD_MARGIN_MS = START_GRACE_MS + 10_000;
+/** The helper's own time besides the command: registering and starting the task, the margin above, stopping and removing the task. */
+export const HELPER_OVERHEAD_MS = 75_000;
+/** The longest limit a request may carry (the child refuses longer ones): above the longest `wsb` command the backend runs (exec, 24 hours). */
+export const MAX_REQUEST_MS = 48 * 60 * 60 * 1000;
 /** Each schtasks call of the check afterwards. */
 export const CHECK_MS = 8_000;
 const READ_CAP = 16 * 1024 * 1024;
 
+/** The folder the private call folders are made in: NIMBLENEWT_WSB_TASK_DIR, else `%LOCALAPPDATA%\\NimbleNewt\\wsb-task`, else none. No shared folder of a job may reach it (windows-job.ts admit). */
+export const wsbTaskBase = (env: (name: string) => string | undefined): string | undefined => {
+  const set = env(DIR_VARIABLE);
+  if (set !== undefined && set !== "") return set;
+  const local = env("LOCALAPPDATA");
+  return local === undefined || local === "" ? undefined : `${local}\\NimbleNewt\\wsb-task`;
+};
+
 export const parseMode = (value: string | undefined): LaunchMode => (value !== undefined && (MODES as readonly string[]).includes(value.trim().toLowerCase()) ? (value.trim().toLowerCase() as LaunchMode) : "auto");
 
 /**
- * The fixed PowerShell helper. It reads NN_TASK (the task's name, made by the caller), NN_NODE, NN_CHILD, NN_DIR, NN_LIMIT_MS, NN_START_MS and NN_OUT, and writes only numbers and
+ * The fixed PowerShell helper. It reads NN_TASK (the task's name, made by the caller), NN_NODE, NN_CHILD, NN_DIR, NN_LIMIT_MS, NN_MARGIN_MS, NN_START_MS and NN_OUT, and writes only numbers and
  * booleans to the file in NN_OUT. The trigger lies a minute in the past and ends ten minutes after the command's own limit, after which Task Scheduler deletes the task itself (a safety
  * net if neither removal runs; never before the command could still be running). A failed look at the task while waiting is not an end: only `code.txt`, the task's own end, the
  * grace time or the limit end the wait, so a passing Task Scheduler hiccup does not leave a long command (exec: hours) running unwatched.
@@ -46,6 +62,7 @@ $r = [ordered]@{ registered = $false; started = $false; began = $false; finished
 $name = $env:NN_TASK
 $limit = [int64]$env:NN_LIMIT_MS
 $grace = [int64]$env:NN_START_MS
+$wait = $limit + [int64]$env:NN_MARGIN_MS
 $mask = [int64]4294967295
 try {
   $arg = '"' + $env:NN_CHILD + '" "' + $env:NN_DIR + '"'
@@ -54,7 +71,7 @@ try {
   $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1)
   $trigger.EndBoundary = (Get-Date).AddMilliseconds($limit + 600000).ToString('s')
-  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Milliseconds ($limit + 60000)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::FromMilliseconds($limit + 60000)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   $settings.DeleteExpiredTaskAfter = 'PT0S'
   Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Trigger $trigger -Settings $settings | Out-Null
   $r.registered = $true
@@ -67,7 +84,7 @@ try {
     if (Test-Path -LiteralPath $done) { $r.finished = $true; break }
     if (Test-Path -LiteralPath $began) { $r.began = $true }
     if (-not $r.began -and $sw.ElapsedMilliseconds -ge $grace) { break }
-    if ($sw.ElapsedMilliseconds -ge $limit) { break }
+    if ($sw.ElapsedMilliseconds -ge $wait) { break }
     $over = $false
     try {
       $code = ([int64](Get-ScheduledTaskInfo -TaskName $name).LastTaskResult) -band $mask
@@ -141,10 +158,14 @@ export async function runViaScheduledTask(deps: TaskLaunchDeps, req: TaskRequest
   const dir = `${deps.baseDir}\\call-${id}`;
   if (![deps.nodePath, deps.childScript, dir].every((p) => PLAIN.test(p))) return { kind: "unavailable", why: "a program or folder name the task could not take safely" };
   const limit = Math.max(1000, Math.floor(req.timeoutMs));
+  if (limit > MAX_REQUEST_MS) return { kind: "unavailable", why: "a limit longer than the scheduled-task launch takes" };
   let made = false;
   try {
     if (deps.exists(dir)) return { kind: "unavailable", why: "the private folder for the call already existed" };
     try { deps.mkdirp(dir); made = true; } catch { return { kind: "unavailable", why: "the private folder for the call could not be made" }; }
+    // The base folder too (made with the call folder if it was missing): an account that may delete or rename entries in it could swap the call folder for one of its own.
+    const baseProblem = await deps.privateProblem(deps.baseDir).catch(() => "its access list could not be read");
+    if (baseProblem !== undefined) return { kind: "unavailable", why: `the folder for the private call folders was not believed private (${baseProblem})` };
     const problem = await deps.privateProblem(dir).catch(() => "its access list could not be read");
     if (problem !== undefined) return { kind: "unavailable", why: `the private folder for the call was not believed private (${problem})` };
     try { deps.writeText(`${dir}\\in.json`, JSON.stringify({ file: req.file, args: req.args, ...(req.cwd === undefined ? {} : { cwd: req.cwd }), timeoutMs: limit })); } catch { return { kind: "unavailable", why: "the request could not be written" }; }
@@ -152,7 +173,7 @@ export async function runViaScheduledTask(deps: TaskLaunchDeps, req: TaskRequest
     const ps = `${deps.sysRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
     const helper = await deps.run(ps, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", HELPER_SCRIPT], {
       timeoutMs: limit + HELPER_OVERHEAD_MS,
-      env: { NN_TASK: name, NN_NODE: deps.nodePath, NN_CHILD: deps.childScript, NN_DIR: dir, NN_LIMIT_MS: String(limit), NN_START_MS: String(START_GRACE_MS), NN_OUT: answerFile },
+      env: { NN_TASK: name, NN_NODE: deps.nodePath, NN_CHILD: deps.childScript, NN_DIR: dir, NN_LIMIT_MS: String(limit), NN_MARGIN_MS: String(CHILD_MARGIN_MS), NN_START_MS: String(START_GRACE_MS), NN_OUT: answerFile },
     }).catch((): ProcessResult => ({ code: null, stdout: "", stderr: "", timedOut: false }));
     const answer = parseAnswer(deps.readText(answerFile));
     // The task must be gone whatever the helper said (query, delete if there, query again; the exit codes only, schtasks' words are translated).
@@ -177,6 +198,7 @@ export async function runViaScheduledTask(deps: TaskLaunchDeps, req: TaskRequest
       if (answer === undefined) return { kind: "unavailable", why: "the scheduled-task helper could not run" };
       if (answer.registered !== true) return { kind: "unavailable", why: `the task could not be registered (error ${hex(answer.error)})` };
       if (answer.started !== true) return { kind: "unavailable", why: `the task was registered but could not be started (error ${hex(answer.error)})` };
+      if (answer.ended === true) return { kind: "unavailable", why: "the task ended before the command began" };
       return { kind: "unavailable", why: `the task did not begin within ${sec(START_GRACE_MS)} s (is anyone signed in on this machine?)` };
     }
     const codeText = deps.readText(`${dir}\\code.txt`)?.trim();
