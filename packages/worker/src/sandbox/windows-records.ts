@@ -79,7 +79,7 @@ const ownerOf = async (host: WindowsHost, path: string): Promise<string | undefi
 
 /** The runner's own built-in group: the installer of the GitHub Actions runner makes a local group `GITHUB_ActionsRunner_<suffix>` and gives it access to the runner's folders. */
 const RUNNER_GROUP = /^GITHUB_ActionsRunner_[A-Za-z0-9]{1,32}$/;
-const WELL_KNOWN = /^(?:NT AUTHORITY|BUILTIN|NT SERVICE)\\[A-Za-z .]{1,40}$/i;
+const WELL_KNOWN = /^(?:(?:NT AUTHORITY|BUILTIN|NT SERVICE)\\[A-Za-z .]{1,40}|Everyone|CREATOR OWNER)$/i;
 
 /**
  * Names the way the evidence shows them, without anyone's own name: a well-known system account or the runner's group by name, every other account as `account 1`, `account 2`...

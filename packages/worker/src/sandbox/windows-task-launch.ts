@@ -35,7 +35,9 @@ export const parseMode = (value: string | undefined): LaunchMode => (value !== u
 
 /**
  * The fixed PowerShell helper. It reads NN_TASK (the task's name, made by the caller), NN_NODE, NN_CHILD, NN_DIR, NN_LIMIT_MS, NN_START_MS and NN_OUT, and writes only numbers and
- * booleans to the file in NN_OUT. The trigger lies a minute in the past and ends in ten minutes, after which Task Scheduler deletes the task itself (a safety net if neither removal runs).
+ * booleans to the file in NN_OUT. The trigger lies a minute in the past and ends ten minutes after the command's own limit, after which Task Scheduler deletes the task itself (a safety
+ * net if neither removal runs; never before the command could still be running). A failed look at the task while waiting is not an end: only `code.txt`, the task's own end, the
+ * grace time or the limit end the wait, so a passing Task Scheduler hiccup does not leave a long command (exec: hours) running unwatched.
  */
 export const HELPER_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -51,7 +53,7 @@ try {
   $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
   $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Highest
   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(-1)
-  $trigger.EndBoundary = (Get-Date).AddMinutes(10).ToString('s')
+  $trigger.EndBoundary = (Get-Date).AddMilliseconds($limit + 600000).ToString('s')
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Milliseconds ($limit + 60000)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   $settings.DeleteExpiredTaskAfter = 'PT0S'
   Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Trigger $trigger -Settings $settings | Out-Null
@@ -66,9 +68,13 @@ try {
     if (Test-Path -LiteralPath $began) { $r.began = $true }
     if (-not $r.began -and $sw.ElapsedMilliseconds -ge $grace) { break }
     if ($sw.ElapsedMilliseconds -ge $limit) { break }
-    $code = ([int64](Get-ScheduledTaskInfo -TaskName $name).LastTaskResult) -band $mask
-    if ($code -ne 267011 -and $code -ne 267009 -and (Get-ScheduledTask -TaskName $name).State -ne 'Running') { $r.ended = $true; break }
-    Start-Sleep -Milliseconds 200
+    $over = $false
+    try {
+      $code = ([int64](Get-ScheduledTaskInfo -TaskName $name).LastTaskResult) -band $mask
+      $over = $code -ne 267011 -and $code -ne 267009 -and (Get-ScheduledTask -TaskName $name).State -ne 'Running'
+    } catch { }
+    if ($over) { $r.ended = $true; break }
+    if ($r.began) { Start-Sleep -Milliseconds 1000 } else { Start-Sleep -Milliseconds 200 }
   }
   $r.elapsedMs = $sw.ElapsedMilliseconds
   if (-not $r.finished -and -not $r.ended) { $r.stopped = $true; Stop-ScheduledTask -TaskName $name }
@@ -90,11 +96,14 @@ export interface TaskLaunchDeps {
   readonly baseDir: string;
   /** A fresh hex string of the given length (tests pass a fixed one). */
   readonly randomHex: (length: number) => string;
+  /** Makes the call folder (and its parents); the folder itself must not exist yet (the real one fails then). */
   readonly mkdirp: (path: string) => void;
   readonly exists: (path: string) => boolean;
   readonly readText: (path: string) => string | undefined;
   readonly writeText: (path: string, text: string) => void;
   readonly remove: (path: string) => void;
+  /** Renames a file; throws when it cannot (for example when the source is gone). Used to withdraw an unclaimed request. */
+  readonly rename: (from: string, to: string) => void;
   /** Why the folder cannot be believed private (a link, or another account can change it), or undefined. */
   readonly privateProblem: (dir: string) => Promise<string | undefined>;
   /** Runs one program with a hard limit (the host's bounded launcher). */
@@ -134,6 +143,7 @@ export async function runViaScheduledTask(deps: TaskLaunchDeps, req: TaskRequest
   const limit = Math.max(1000, Math.floor(req.timeoutMs));
   let made = false;
   try {
+    if (deps.exists(dir)) return { kind: "unavailable", why: "the private folder for the call already existed" };
     try { deps.mkdirp(dir); made = true; } catch { return { kind: "unavailable", why: "the private folder for the call could not be made" }; }
     const problem = await deps.privateProblem(dir).catch(() => "its access list could not be read");
     if (problem !== undefined) return { kind: "unavailable", why: `the private folder for the call was not believed private (${problem})` };
@@ -149,12 +159,21 @@ export async function runViaScheduledTask(deps: TaskLaunchDeps, req: TaskRequest
     const task = `${deps.sysRoot}\\System32\\schtasks.exe`;
     const present = async (): Promise<boolean | undefined> => { const q = await deps.run(task, ["/Query", "/TN", name], { timeoutMs: CHECK_MS }).catch(() => undefined); return q === undefined || q.timedOut || q.code === null ? undefined : q.code === 0; };
     const leftover = await present();
-    if (leftover !== false) await deps.run(task, ["/Delete", "/TN", name, "/F"], { timeoutMs: CHECK_MS }).catch(() => undefined);
+    if (leftover !== false) {
+      // Still registered (or not known): its run, if any, is ended first (deleting a task does not end its running program), then the task is deleted.
+      await deps.run(task, ["/End", "/TN", name], { timeoutMs: CHECK_MS }).catch(() => undefined);
+      await deps.run(task, ["/Delete", "/TN", name, "/F"], { timeoutMs: CHECK_MS }).catch(() => undefined);
+    }
     const began = deps.exists(`${dir}\\started.txt`);
     const ran = began || answer?.began === true || deps.exists(`${dir}\\code.txt`);
+    // The proof that it never began: the request is withdrawn (renamed away) before the child claimed it. Only one of the two renames can succeed, so a child that begins later
+    // runs nothing, and a request the child already claimed (even one that has not yet written started.txt) is never counted as "not started".
+    let withdrawn = false;
+    if (!ran) { try { deps.rename(`${dir}\\in.json`, `${dir}\\withdrawn.json`); withdrawn = true; } catch { withdrawn = false; } }
+    if (!ran && !withdrawn) return { kind: "done", result: { code: null, stdout: "", stderr: "the Windows Sandbox command was handed to the scheduled-task launch, which began it late or could not be checked; it cannot be said whether the command ran", timedOut: false, via: VIA } };
     if (!ran) {
       // The command never began, so a direct call cannot double it. Only when the helper itself ended in a way that proves it is not still working.
-      if (answer === undefined && helper.timedOut) return { kind: "done", result: { code: null, stdout: "", stderr: `the Windows Sandbox command was handed to the scheduled-task launch, which did not report within ${sec(limit + HELPER_OVERHEAD_MS)} s and was stopped; it cannot be said whether the command ran`, timedOut: true, via: VIA } };
+      if (answer === undefined && helper.timedOut) return { kind: "unavailable", why: `the scheduled-task helper did not report within ${sec(limit + HELPER_OVERHEAD_MS)} s and was stopped before the command began` };
       if (answer === undefined) return { kind: "unavailable", why: "the scheduled-task helper could not run" };
       if (answer.registered !== true) return { kind: "unavailable", why: `the task could not be registered (error ${hex(answer.error)})` };
       if (answer.started !== true) return { kind: "unavailable", why: `the task was registered but could not be started (error ${hex(answer.error)})` };

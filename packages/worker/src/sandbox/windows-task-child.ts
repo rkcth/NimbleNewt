@@ -7,15 +7,19 @@ import { runBounded } from "./windows-real.js";
  * The program a one-shot scheduled task runs (card wsb-repair): `node windows-task-child.js <private folder>`. It reads `in.json` from the folder, runs the one command it names with an
  * argument list (no shell), and writes `started.txt` (before the command), `out.txt`, `err.txt` and, last and by rename, `code.txt` (the exit code as an unsigned number; none when
  * the command could not be run or ended at its limit). It runs nothing but what `in.json` names, and `in.json` sits in a folder the launcher checked to be private.
- * If `in.json` is gone (the launcher gave up and removed the folder) it runs nothing.
+ * Before anything else it claims the request by renaming `in.json` to `claimed.json`; the launcher withdraws an unclaimed request the same way (`in.json` to `withdrawn.json`) before it
+ * counts the command as never started. Only one of the two renames can succeed, so a task that begins late (after the launcher gave up) runs nothing, and a request the child
+ * claimed is never also run by the direct call. If `in.json` is gone (withdrawn, or the folder removed) it runs nothing.
  */
+/** The longest limit a request may carry: above the longest `wsb` command the backend runs (exec, 24 hours). */
+export const MAX_REQUEST_MS = 48 * 60 * 60 * 1000;
 export interface ChildRequest { readonly file: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs: number }
 
 export function readRequest(text: string): ChildRequest | undefined {
   try {
     const v = JSON.parse(text) as Partial<ChildRequest>;
     if (typeof v.file !== "string" || v.file === "" || !Array.isArray(v.args) || !v.args.every((a) => typeof a === "string")) return undefined;
-    if (typeof v.timeoutMs !== "number" || !Number.isFinite(v.timeoutMs) || v.timeoutMs < 1000 || v.timeoutMs > 3_600_000) return undefined;
+    if (typeof v.timeoutMs !== "number" || !Number.isFinite(v.timeoutMs) || v.timeoutMs < 1000 || v.timeoutMs > MAX_REQUEST_MS) return undefined;
     if (v.cwd !== undefined && typeof v.cwd !== "string") return undefined;
     return { file: v.file, args: v.args as string[], timeoutMs: v.timeoutMs, ...(v.cwd === undefined ? {} : { cwd: v.cwd }) };
   } catch { return undefined; }
@@ -30,7 +34,8 @@ export async function main(dir: string | undefined): Promise<number> {
   const sep = dir.includes("\\") ? "\\" : "/";
   const at = (n: string): string => `${dir}${sep}${n}`;
   let text: string;
-  try { text = readFileSync(at("in.json"), "utf8"); } catch { return 2; }
+  try { renameSync(at("in.json"), at("claimed.json")); } catch { return 2; }
+  try { text = readFileSync(at("claimed.json"), "utf8"); } catch { return 2; }
   const req = readRequest(text);
   if (req === undefined) return 2;
   writeFileSync(at("started.txt"), "1");

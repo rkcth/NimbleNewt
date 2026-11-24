@@ -380,11 +380,12 @@ export function windowsRealHost(): WindowsHost {
       return launchWsb(mode, () => runViaScheduledTask({
         sysRoot: sysRoot(), nodePath: process.execPath, childScript: fileURLToPath(new URL("./windows-task-child.js", import.meta.url)), baseDir: base,
         randomHex: (n) => randomBytes(Math.ceil(n / 2)).toString("hex").slice(0, n),
-        mkdirp: (p) => { mkdirSync(p, { recursive: true }); },
+        mkdirp: (p) => { mkdirSync(win32.dirname(p), { recursive: true }); mkdirSync(p); },
         exists: (p) => existsSync(p),
         readText: (p) => { try { return readFileSync(p, "utf8"); } catch { return undefined; } },
         writeText: (p, text) => { writeFileSync(p, text); },
         remove: (p) => { rmSync(p, { recursive: true, force: true }); },
+        rename: (from, to) => { renameSync(from, to); },
         privateProblem: (d) => recordDirProblem(host, d, "the private folder"),
         run: (f, a, o) => run(f, a, o),
       }, { file, args, ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs }), direct);

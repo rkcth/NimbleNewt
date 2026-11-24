@@ -2,7 +2,7 @@
 // with the launcher injected (the helper is played by a fake that does what the real one does: it runs the real child on the request); what only Windows can show (the task itself, the
 // real `wsb`) is recorded by the next own-hardware run.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -23,7 +23,7 @@ const direct = (code = 0): ProcessResult => ({ code, stdout: "direct", stderr: "
 interface Calls { run: { file: string; args: readonly string[]; timeoutMs: number; env?: Record<string, string> }[] }
 interface FakeOptions {
   /** What the helper does: `child` runs the real child (a task that began), the others stand for the failures. */
-  helper?: "child" | "no-register" | "no-start" | "no-begin" | "crash" | "hang" | "stopped-after-begin" | "no-code" | "late-begin";
+  helper?: "child" | "no-register" | "no-start" | "no-begin" | "crash" | "hang" | "hang-claimed" | "claimed-not-begun" | "stopped-after-begin" | "no-code" | "late-begin";
   request?: { file: string; args: string[] };
   privateProblem?: string;
   taskStillThere?: boolean;
@@ -43,6 +43,7 @@ function realDeps(opt: FakeOptions = {}): { deps: TaskLaunchDeps; calls: Calls; 
     readText: (f) => { try { return readFileSync(f.replaceAll("\\", sep), "utf8"); } catch { return undefined; } },
     writeText: (f, text) => { writeFileSync(f.replaceAll("\\", sep), text); },
     remove: (d) => { rmSync(d.replaceAll("\\", sep), { recursive: true, force: true }); },
+    rename: (a, b) => { renameSync(a.replaceAll("\\", sep), b.replaceAll("\\", sep)); },
     privateProblem: async () => opt.privateProblem,
     run: async (file, args, o) => {
       calls.run.push({ file, args, timeoutMs: o.timeoutMs, ...(o.env === undefined ? {} : { env: o.env }) });
@@ -56,6 +57,9 @@ function realDeps(opt: FakeOptions = {}): { deps: TaskLaunchDeps; calls: Calls; 
           case "no-begin": answer({ stopped: true }); break;
           case "crash": break;
           case "hang": return { code: null, stdout: "", stderr: "", timedOut: true };
+          // The child claimed the request (renamed in.json) but had not yet written started.txt when the helper gave up or hung: it may run, so it counts as begun.
+          case "hang-claimed": renameSync(join(dir, "in.json"), join(dir, "claimed.json")); return { code: null, stdout: "", stderr: "", timedOut: true };
+          case "claimed-not-begun": renameSync(join(dir, "in.json"), join(dir, "claimed.json")); answer({ began: false, stopped: true }); break;
           case "stopped-after-begin": w("started.txt", "1"); w("out.txt", "partial"); answer({ began: true, stopped: true }); break;
           // The helper gave up waiting and said the task never began, but the child wrote its marker just after: it began, so no direct call may follow.
           case "late-begin": w("started.txt", "1"); answer({ began: false, stopped: true }); break;
@@ -123,7 +127,7 @@ describe("the scheduled-task launch", () => {
   });
 
   test("the task could not be registered or started: nothing ran, so a direct call is allowed, with the reason", async () => {
-    for (const [helper, text] of [["no-register", /could not be registered \(error 0x80070002\)/], ["no-start", /registered but could not be started \(error 0x8004131f\)/], ["no-begin", /did not begin within 20 s/], ["crash", /helper could not run/]] as const) {
+    for (const [helper, text] of [["no-register", /could not be registered \(error 0x80070002\)/], ["no-start", /registered but could not be started \(error 0x8004131f\)/], ["no-begin", /did not begin within 20 s/], ["crash", /helper could not run/], ["hang", /helper did not report within 60 s and was stopped before the command began/]] as const) {
       const { deps, base } = realDeps({ helper });
       const o = await runViaScheduledTask(deps, REQ);
       assert.match(why(o), text, helper);
@@ -132,13 +136,14 @@ describe("the scheduled-task launch", () => {
   });
 
   test("once the command began, there is never a direct call: not when the task was stopped, not when it ended with no exit code, not when the helper hung", async () => {
-    for (const helper of ["stopped-after-begin", "no-code", "hang", "late-begin"] as const) {
+    for (const helper of ["stopped-after-begin", "no-code", "hang-claimed", "late-begin", "claimed-not-begun"] as const) {
       const { deps } = realDeps({ helper });
       let directCalls = 0;
       const r = await launchWsb("auto", () => runViaScheduledTask(deps, REQ), async () => { directCalls++; return direct(); });
       assert.equal(directCalls, 0, helper);
       assert.equal(r.code, null, helper);
       assert.ok(/did not end within|ended without reporting|cannot be said whether the command ran/.test(r.stderr), `${helper}: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /[A-Za-z]:\\|call-0123|NimbleNewtWsb-/, helper);
     }
   });
 
@@ -164,7 +169,7 @@ describe("the scheduled-task launch", () => {
   test("a task that is still there afterwards is deleted; schtasks is asked once to look and once to delete, never more, and the helper is never run twice", async () => {
     const { deps, calls } = realDeps({ taskStillThere: true });
     done(await runViaScheduledTask(deps, REQ));
-    assert.deepEqual(calls.run.filter((c) => /schtasks/.test(c.file)).map((c) => c.args[0]), ["/Query", "/Delete"]);
+    assert.deepEqual(calls.run.filter((c) => /schtasks/.test(c.file)).map((c) => c.args[0]), ["/Query", "/End", "/Delete"]);
     assert.equal(calls.run.filter((c) => /powershell/.test(c.file)).length, 1);
     assert.ok(calls.run.filter((c) => /schtasks/.test(c.file)).every((c) => c.timeoutMs === CHECK_MS));
   });
@@ -178,6 +183,9 @@ describe("the scheduled-task launch", () => {
     assert.match(HELPER_SCRIPT, /Stop-ScheduledTask -TaskName \$name/);
     assert.match(HELPER_SCRIPT, /-LogonType Interactive -RunLevel Highest/);
     assert.match(HELPER_SCRIPT, /DeleteExpiredTaskAfter = 'PT0S'/);
+    // The automatic deletion never comes before the command's own limit (exec runs for hours), and a failed look at the task does not end the wait.
+    assert.match(HELPER_SCRIPT, /EndBoundary = \(Get-Date\)\.AddMilliseconds\(\$limit \+ 600000\)/);
+    assert.match(HELPER_SCRIPT, /\$over = \$false\n    try \{\n[^]*?\} catch \{ \}\n    if \(\$over\) \{ \$r\.ended = \$true; break \}/);
     assert.match(HELPER_SCRIPT, /\$sw\.ElapsedMilliseconds -ge \$grace/);
     assert.doesNotMatch(HELPER_SCRIPT, /\$\{|\bInvoke-Expression\b|\biex\b/);
   });
@@ -189,6 +197,37 @@ describe("the scheduled-task launch", () => {
     const o = await runViaScheduledTask(deps, REQ);
     assert.equal(o.kind, "unavailable");
     assert.doesNotMatch(JSON.stringify(o), /secret/);
+  });
+});
+
+describe("the scheduled-task launch: claim, withdrawal and long commands", () => {
+  test("a request the launcher withdrew is never run by a child that begins later; the withdrawal is what allows the direct call", async () => {
+    const { deps, base } = realDeps({ helper: "no-begin" });
+    let seenDir = "";
+    const r = await runViaScheduledTask({ ...deps, remove: (d) => { seenDir = d; } }, REQ);
+    assert.match(why(r), /did not begin within 20 s/);
+    const dir = seenDir.replaceAll("\\", process.platform === "win32" ? "\\" : "/");
+    assert.deepEqual(readdirSync(dir).sort(), ["task.json", "withdrawn.json"], "the request was withdrawn");
+    assert.equal(await childMain(dir), 2, "a late child finds nothing to claim");
+    assert.deepEqual(readdirSync(dir).sort(), ["task.json", "withdrawn.json"], "and runs nothing (no started.txt)");
+    rmSync(dir, { recursive: true, force: true });
+    assert.deepEqual(readdirSync(base), []);
+  });
+
+  test("a call folder that already exists is never used (it could have been made by someone else)", async () => {
+    const { deps, calls, base } = realDeps();
+    mkdirSync(join(base, "call-0123456789ab"));
+    assert.match(why(await runViaScheduledTask({ ...deps, baseDir: base }, REQ)), /already existed/);
+    assert.equal(calls.run.length, 0);
+    assert.deepEqual(readdirSync(base), ["call-0123456789ab"], "and it is left as found, not removed");
+  });
+
+  test("exec's limit (24 hours) is accepted by the child, so exec runs through the task and is not turned away to the direct call", async () => {
+    const day = 24 * 60 * 60 * 1000;
+    assert.deepEqual(readRequest(JSON.stringify({ file: "C:\\wsb.exe", args: ["exec"], timeoutMs: day })), { file: "C:\\wsb.exe", args: ["exec"], timeoutMs: day });
+    const { deps, written } = realDeps();
+    done(await runViaScheduledTask(deps, { ...REQ, args: ["exec", "--id", "x"], timeoutMs: day }));
+    assert.equal((written[0] as { timeoutMs: number }).timeoutMs, day);
   });
 });
 
@@ -248,7 +287,7 @@ describe("the strategy: when each launch is chosen", () => {
 describe("the child the task runs", () => {
   test("the request is read only in the expected form", () => {
     assert.deepEqual(readRequest('{"file":"a","args":["x"],"timeoutMs":5000,"cwd":"c"}'), { file: "a", args: ["x"], timeoutMs: 5000, cwd: "c" });
-    for (const bad of ["{", "[]", '{"file":"","args":[],"timeoutMs":5000}', '{"file":"a","args":[1],"timeoutMs":5000}', '{"file":"a","args":[],"timeoutMs":10}', '{"file":"a","args":[],"timeoutMs":99999999}', '{"file":"a","args":[],"timeoutMs":5000,"cwd":3}']) assert.equal(readRequest(bad), undefined, bad);
+    for (const bad of ["{", "[]", '{"file":"","args":[],"timeoutMs":5000}', '{"file":"a","args":[1],"timeoutMs":5000}', '{"file":"a","args":[],"timeoutMs":10}', '{"file":"a","args":[],"timeoutMs":999999999}', '{"file":"a","args":[],"timeoutMs":5000,"cwd":3}']) assert.equal(readRequest(bad), undefined, bad);
   });
 
   test("it writes started first, the exit code last, and nothing when the folder or request is gone (it then runs nothing)", async () => {
@@ -257,10 +296,10 @@ describe("the child the task runs", () => {
     assert.equal(await childMain(undefined), 2);
     writeFileSync(join(d, "in.json"), "{");
     assert.equal(await childMain(d), 2);
-    assert.deepEqual(readdirSync(d), ["in.json"]);
+    assert.deepEqual(readdirSync(d), ["claimed.json"], "a request it cannot read is claimed and not run");
     writeFileSync(join(d, "in.json"), JSON.stringify({ file: NODE, args: ["-e", "process.exit(7)"], timeoutMs: 20_000 }));
     assert.equal(await childMain(d), 0);
-    assert.deepEqual(readdirSync(d).sort(), ["code.txt", "err.txt", "in.json", "out.txt", "started.txt"]);
+    assert.deepEqual(readdirSync(d).sort(), ["claimed.json", "code.txt", "err.txt", "out.txt", "started.txt"]);
     assert.equal(readFileSync(join(d, "code.txt"), "utf8"), "7");
   });
 
@@ -315,5 +354,6 @@ describe("the G05 base folder's access check and the runner's own group", () => 
     assert.equal(redactedWriters(["BOX\\runner1", "NT AUTHORITY\\Authenticated Users", "BUILTIN\\Users", "BOX\\erin", "BOX\\jo", G], "BOX\\runner1"),
       "the account running the cleanup, NT AUTHORITY\\Authenticated Users, BUILTIN\\Users, account 1, account 2, GITHUB_ActionsRunner_G17fda (the runner's group)");
     assert.doesNotMatch(redactedWriters(["BOX\\erin"], undefined), /erin/);
+    assert.equal(redactedWriters(["Everyone", "CREATOR OWNER", "BOX\\Everyone2"], undefined), "Everyone, CREATOR OWNER, account 1");
   });
 });
