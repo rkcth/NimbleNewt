@@ -392,7 +392,24 @@ the tool calls' arguments) and `isolation.test.mjs` (the real Pi against a stand
   and into the record (`nudges`, `continuation`). Offline tests: `continuation.test.mjs` (the extension through a fake
   runner), `runner.test.mjs` (a stopped-early stand-in agent continued exactly 3 times through the real extension, in the
   record), `isolation.test.mjs` (the real Pi against a stand-in server: 4 requests, the nudge in each later one).
-  Running C against Radiance is a separate step (no run has been made): `node scripts/pi-eval/run.mjs --variants C --repeats 1`
+  **Command-line wording (nudge fix, 2026-11-24).** The worker's nudge says to end with `nimblenewt__work-end` as the last call;
+  the Pi command line has no such tool (B's prompt says so), and in the first real C batch (20261124T052216) 5 of 12
+  contaminated runs hunted for it after a nudge. So `pi-agent.mjs` gives the extension the bench's wording
+  (`commandLineConfig` in `continuation-extension.mjs`): "end with a final report whose first line states the result
+  (done, partial or blocked)" and "... states the result blocked or partial and says why", and "A reply that is not a final
+  report does not end the work" in place of "A reply without a tool call ...". The bound (3), the cut-off lead and the rest
+  of the text are the worker's, read from the built pi-adapter; the worker's own text is not touched (a worker text that
+  lacks the replaced phrases stops the agent before any request, and a result naming the tool is refused). The words that
+  ran are in `continuation-used.json` beside the log (the runner's `continuation-config.json` keeps the worker's), and the
+  record's `continuation` has `wording: "command-line"` with digests of both texts. The settings reach the extension on a
+  descriptor (an unlinked file as Pi's descriptor 3, read and closed at load), not through variables named `PI_EVAL_CONTINUATION_*`,
+  which `pi-agent.mjs` removes from Pi's environment (on Windows, where the descriptor cannot be passed, they stay).
+  The agent also writes only into a per-run output folder (`iso.out`, inside its fresh per-run folder): its log, counts and
+  the git guard's log; the runner copies it into the run's artifacts when the agent ends. The results folder is hidden from
+  the sandboxed agent (the whole of it, or this run's artifacts alone when a folder the agent keeps lies inside it;
+  `isolation.resultsHidden` in the record). A path starting `~/` or `$HOME` in a call is read as the run's fresh home, so the
+  agent's own `~/.pi/agent` is not read as the owner's keys; the owner's real folders are still flagged.
+  Running C against Radiance is a separate step: `node scripts/pi-eval/run.mjs --variants C --repeats 1`
   (the Radiance gate and the token budget apply as for B).
 - **D** C plus a relaunch that reuses the stored session (`PI_EVAL_SESSION_ID` makes `pi-agent.mjs` pass `--session-id`).
   The relaunch driver does not exist, so D is still refused ("needs W04 and a driver that relaunches Pi with the stored session").

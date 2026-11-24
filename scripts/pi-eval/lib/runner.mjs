@@ -4,7 +4,7 @@
 // child.kill() where process groups do not exist.
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream, existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { cpSync, createWriteStream, existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -263,7 +263,7 @@ export function namesMark(commands, marks) {
  *   A path that runs to the end of a text cut at a size limit is only partly known: it is flagged only when what is
  *   visible already lies outside the run's own checkout (a cut `/srv/.../eval-wor` could still be the checkout).
  */
-export function foreignPaths(commands, { ownDir, watched = [] }) {
+export function foreignPaths(commands, { ownDir, watched = [], sandboxHome = null }) {
   // The agent may name its checkout by its real path (pwd through a symlinked work root): both spellings are its own.
   const owns = [resolve(ownDir)];
   try { owns.push(realpathSync(owns[0])); } catch { /* removed already */ }
@@ -277,7 +277,8 @@ export function foreignPaths(commands, { ownDir, watched = [] }) {
       for (const m of text.matchAll(ABS_PATH)) {
         const partial = cut && m.index + m[0].length === text.length;
         const raw = partial ? m[0] : m[0].replace(/[.:]+$/, "");
-        const p = raw.startsWith("~/") ? join(home, raw.slice(2)) : raw;
+        // `~/` is the agent's own home: the run's fresh per-run home when it had one (card W04, nudge fix), not the owner's.
+        const p = raw.startsWith("~/") ? join(sandboxHome ?? home, raw.slice(2)) : raw;
         if (owns.some((own) => p === own || p.startsWith(own + "/"))) continue;
         if (p.startsWith(piInstall)) continue; // Pi's own install
         // A cut path that may still go on to be the run's checkout or Pi's install is not known to be foreign.
@@ -340,17 +341,13 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     const prompt = renderPrompt(template, { task, taskText: await readFile(task.promptPath, "utf8"), worktreeUrl: pathToFileURL(dir).href, completionRules });
     const promptFile = join(artifacts, "prompt.md");
     await writeFile(promptFile, prompt);
-    const logFile = join(artifacts, "agent.jsonl");
-    // Card W04 (variant C): the continuation's words and bound go to the agent in a file of the run's artifacts; the agent's
-    // extension writes its counts beside the log (continuation.json) and they come back into the record.
-    const continuationEnv = {};
+    // Card W04 (variant C): the continuation's words and bound are written to the run's artifacts (the record of what ran).
+    // The agent's own copies go to its output folder (below), and the agent is not told where the results folder is.
+    let continuationConfig = null;
     if (variant.continuation === true) {
-      const config = ctx.continuation ?? await loadContinuationConfig();
-      const configFile = join(artifacts, "continuation-config.json");
-      await writeFile(configFile, `${JSON.stringify(config)}\n`);
-      continuationEnv.PI_EVAL_CONTINUATION_CONFIG = configFile;
-      continuationEnv.PI_EVAL_CONTINUATION_FILE = join(artifacts, "continuation.json");
-      record.continuation = { max: config.max, installed: false };
+      continuationConfig = ctx.continuation ?? await loadContinuationConfig();
+      await writeFile(join(artifacts, "continuation-config.json"), `${JSON.stringify(continuationConfig)}\n`);
+      record.continuation = { max: continuationConfig.max, installed: false };
     }
     // The shared-server gate, asked again right here: preparing, the setup build and a test-slot wait can take minutes,
     // so the reading taken before them is not the one the agent starts on. A refusal starts nothing (runBatch stops).
@@ -363,10 +360,23 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     // operator said so (ctx.allowVisibleHome, --allow-visible-home).
     iso = await isolateAgent(ctx, { dir, artifacts });
     record.isolation = iso.summary;
+    // Card W04 (nudge fix): the agent writes only into its output folder (inside its own per-run folder, `iso.out`): its log,
+    // its counts and its guard log. The results folder is not exposed to it (hidden where the sandbox can; see isolateAgent),
+    // and nothing in its environment names it. The runner copies the output into the run's artifacts when the agent ends.
+    const logFile = join(iso.out, "agent.jsonl");
+    const agentPrompt = join(iso.out, "prompt.md");
+    await writeFile(agentPrompt, prompt);
+    const continuationEnv = {};
+    if (continuationConfig !== null) {
+      const configFile = join(iso.out, "continuation-config.json");
+      await writeFile(configFile, `${JSON.stringify(continuationConfig)}\n`);
+      continuationEnv.PI_EVAL_CONTINUATION_CONFIG = configFile;
+      continuationEnv.PI_EVAL_CONTINUATION_FILE = join(iso.out, "continuation.json");
+    }
     log(`agent started (limit ${task.timeoutMinutes} min)`);
     record.startedAt = new Date().toISOString();
     const t0 = Date.now();
-    const a = await runCommand([...iso.prefix, ...ctx.agent.map((x, i) => (i === 0 && x === "node" ? process.execPath : x)), dir, promptFile, logFile], {
+    const a = await runCommand([...iso.prefix, ...ctx.agent.map((x, i) => (i === 0 && x === "node" ? process.execPath : x)), dir, agentPrompt, logFile], {
       cwd: dir, timeoutMs: (ctx.timeoutMinutes ?? task.timeoutMinutes) * 60_000, outFile: join(artifacts, "agent-stderr.log"),
       env: { ...iso.env, PI_EVAL_PROVIDER: ctx.set.agent.provider, PI_EVAL_MODEL: ctx.set.agent.model, PI_EVAL_THINKING: ctx.set.agent.thinking ?? "medium", ...continuationEnv, ...(ctx.agentEnv ?? {}), ...mark },
       inheritEnv: false,
@@ -376,10 +386,11 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     record.endedAt = new Date().toISOString();
     record.exitCode = a.code;
     record.timedOut = a.timedOut;
+    collectAgentOutput(iso.out, artifacts);
     const stragglers = await killProcessesIn(dir);
     if (stragglers.length > 0) record.stragglersKilled = stragglers.length;
     log(`agent ended after ${(record.wallMs / 60000).toFixed(1)} min (exit ${a.code}${a.timedOut ? ", timed out" : ""})`);
-    const summary = await summarizeLogFile(logFile);
+    const summary = await summarizeLogFile(join(artifacts, "agent.jsonl"));
     const argClean = readArgClean(join(artifacts, "arg-clean.json"));
     if (argClean) record.argClean = argClean;
     // A variant with the continuation but an agent that never wrote its counts (another agent, or the extension not loaded),
@@ -389,6 +400,8 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     if (variant.continuation === true) {
       const c = readContinuation(join(artifacts, "continuation.json"));
       const logged = summary.continuationEntries ?? 0;
+      const used = readContinuationUsed(join(artifacts, "continuation-used.json"));
+      if (used) record.continuation = { ...record.continuation, ...used };
       if (c) {
         const { configured, max, ...counts } = c;
         record.continuation = { ...record.continuation, installed: configured && max === record.continuation.max, ...counts, logged };
@@ -424,10 +437,10 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
     const watched = [...(ctx.referenceDirs ?? [ctx.repo]).flatMap((d) => [d, dirname(d)]), ctx.resultsDir, dirname(ctx.workRoot)].filter(Boolean);
     // Read from each call's full parsed arguments (summary.toolTexts, card W01e), not the stored copy cut for size.
     const calls = summary.toolTexts;
-    const foreign = foreignPaths(calls, { ownDir: dir, watched });
+    const foreign = foreignPaths(calls, { ownDir: dir, watched, sandboxHome: iso?.home ?? null });
     // Also a run whose agent tried to push, add a remote or reach the owner's keys and logins, seen in its tool calls or
     // in the git wrapper's refusals: blocked or not, it is not a run to score.
-    const attempts = credentialAttempts(calls);
+    const attempts = credentialAttempts(calls, { sandboxHome: iso?.home ?? null });
     // A refusal the guard tagged as a project test's own (an askpass or proxy program given by the project's code to a
     // repository its tests made in the temporary folder, card W01d) is still refused but reported apart, not counted.
     let guardRefusals = 0, guardRefusalsInTests = 0;
@@ -453,6 +466,31 @@ export async function runOne(ctx, task, variantName, repeat, { beforeAgent } = {
   }
   log(`=> ${record.outcome}: ${record.reason}`);
   return record;
+}
+
+/** Files the runner itself wrote into the artifacts, which an agent's output of the same name never replaces. */
+const RUNNER_OWNED = new Set(["prompt.md", "continuation-config.json", "diffstat.txt"]);
+
+/** Copies what the agent wrote in its output folder (its log, counts, guard log, anything else) into the run's artifacts. Never throws. */
+export function collectAgentOutput(outDir, artifacts) {
+  try {
+    for (const name of readdirSync(outDir)) {
+      if (RUNNER_OWNED.has(name) || name.endsWith(".tmp")) continue;
+      try { cpSync(join(outDir, name), join(artifacts, name), { recursive: true, force: true }); } catch { /* one file that cannot be copied */ }
+    }
+  } catch { /* no output folder */ }
+}
+
+/**
+ * Card W04 (nudge fix): which wording the Pi command-line extension actually used (continuation-used.json, written by
+ * pi-agent.mjs): the wording's name and a digest of each text; the texts themselves stay in that file.
+ */
+export function readContinuationUsed(file) {
+  let raw;
+  try { raw = JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
+  if (raw === null || typeof raw !== "object" || typeof raw.wording !== "string" || typeof raw.nudge !== "string" || typeof raw.lengthNudge !== "string") return null;
+  const d = (t) => createHash("sha256").update(t).digest("hex").slice(0, 16);
+  return { wording: raw.wording.slice(0, 40), nudgeSha256: d(raw.nudge), lengthNudgeSha256: d(raw.lengthNudge) };
 }
 
 /**
@@ -508,8 +546,11 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
     const readOnlyTrees = ["/srv/code", ctx.repo, ...(ctx.referenceDirs ?? []), BENCH_ROOT, ctx.workRoot ? dirname(ctx.workRoot) : null, ...(ctx.readOnlyTrees ?? [])].filter((p) => typeof p === "string");
     // The shared work root (every run's checkout) is hidden: the run sees its own checkout only (card W01c).
     const workHidden = hideable ? workRootHidden({ workRoot: ctx.workRoot, ownDir: dir, keep: readOnlyTrees }) : [];
-    const listed = hideable ? defaultHidden({ ownerHome, extra: [...(ctx.hide ?? []), ...workHidden] }) : [];
-    const own = [dir, iso.base, artifacts];
+    // Card W04 (nudge fix): the results folder is not the agent's to read or write: the whole of it when nothing the agent
+    // needs lies inside it, else this run's artifacts alone. The agent writes into its output folder (iso.out, in iso.base).
+    const resultsHidden = hideable ? resultsHiddenFor({ resultsDir: ctx.resultsDir, artifacts, keep: [dir, iso.base, ...readOnlyTrees] }) : [];
+    const listed = hideable ? defaultHidden({ ownerHome, extra: [...(ctx.hide ?? []), ...workHidden, ...resultsHidden] }) : [];
+    const own = [dir, iso.base];
     // Credential-like files and owner-only folders in what stays readable (lib/isolation.mjs credentialPaths) are hidden too.
     const scan = hideable ? credentialPaths(readOnlyTrees.filter((p) => !listed.some((h) => p === h || p.startsWith(h + "/"))), { exclude: [...own, ...listed] }) : { paths: [], truncated: false };
     // Sockets and what only a supplementary group opens in the system's folders (a snap's service socket, adm's files).
@@ -526,7 +567,7 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
     return {
       ...iso, prefix,
       summary: {
-        home: "fresh", ownerHomeHidden: hideable, hidden: listed, hiddenByName: scan.paths.length, ...(scan.truncated ? { hiddenByNameTruncated: true } : {}),
+        home: "fresh", ownerHomeHidden: hideable, resultsHidden: resultsHidden.length > 0, hidden: listed, hiddenByName: scan.paths.length, ...(scan.truncated ? { hiddenByNameTruncated: true } : {}),
         hiddenSystem: sys.paths, ...(sys.truncated ? { hiddenSystemTruncated: true } : {}),
         privateDirs: hideable ? PRIVATE_DIRS : [], readOnly: hideable ? ["/"] : [], ownProcessList: hideable,
         network: hideable ? "none (the model route only)" : "not cut off", modelKey: iso.providerProxied ? "proxied" : "none", gitGuard: true,
@@ -538,6 +579,19 @@ export async function isolateAgent(ctx, { dir, artifacts }) {
     ctx.isoDirs?.delete(iso.base);
     throw e;
   }
+}
+
+/**
+ * What to hide of the results folder (card W04, nudge fix): the whole folder (every run's record) when no folder the agent
+ * keeps (`keep`) is inside it, else only this run's artifacts folder (unless a kept folder is inside that, then nothing).
+ */
+export function resultsHiddenFor({ resultsDir, artifacts, keep = [] }) {
+  const inside = (p, root) => { const r = resolve(root), q = resolve(p); return q === r || q.startsWith(r + sep); };
+  for (const root of [resultsDir, artifacts]) {
+    if (typeof root !== "string" || !existsSync(root) || resolve(root) === sep) continue;
+    if (!keep.filter((k) => typeof k === "string").some((k) => inside(k, root))) return [root];
+  }
+  return [];
 }
 
 /** The bridge from the agent's network namespace to the key proxy. */

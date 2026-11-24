@@ -13,9 +13,10 @@ import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { checkConfig, decide, localPath, splitAlias } from "./lib/git-guard.mjs";
-import { PRIVATE_DIRS, PROXY_KEY_PREFIX, PUSH_REFUSED, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, gitConfigText, machineHidden, redactStream, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
+import { PRIVATE_DIRS, PROXY_KEY_PREFIX, ownHomeText, PUSH_REFUSED, SYSTEM_ROOTS, bwrapPrefix, credentialAttempts, credentialPaths, defaultHidden, gitConfigText, machineHidden, redactStream, sandboxUsable, scrubEnv, startKeyProxy } from "./lib/isolation.mjs";
 import { strictJson } from "./lib/arg-clean.mjs";
 import { piBinOf, runOne } from "./lib/runner.mjs";
+import { commandLineConfig } from "./continuation-extension.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -909,7 +910,10 @@ test("W01b: Pi's next request after a string `edits` holding lone surrogates rea
 // asks Pi at its last boundary (agent_before_settle) for one more request with the worker's nudge, at most 3 times. The
 // stand-in always answers with a stop that announces a next step; the record says how many nudges it took.
 test("W04: the real Pi, variant C: a stop that announces a next step is continued 3 times with the worker's nudge, then it stands; variant A makes 1 request; a done report is not nudged", { skip: needsSandbox.skip || (piBin === null ? "Pi is not installed" : false) }, async () => {
-  const config = { max: 3, mark: "[NimbleNewt: the turn goes on]", nudge: "NUDGE-WORDS go on with PLAN.md", lengthNudge: "CUT-OFF NUDGE-WORDS" };
+  // Worker-shaped words (packages/pi-adapter/src/worker/nudge.ts names the work.end tool); the command-line agent gets the bench's wording.
+  const workerNudge = "NUDGE-WORDS go on with PLAN.md. When every step is done, end with nimblenewt__work-end as your last call. If you cannot go on, end with nimblenewt__work-end with result blocked or partial and say why in the report. A reply without a tool call does not end the work.";
+  const config = { max: 3, mark: "[NimbleNewt: the turn goes on]", nudge: workerNudge, lengthNudge: `CUT-OFF ${workerNudge}` };
+  const shown = commandLineConfig(config);
   const run = async (variant, finalText) => {
     fakeModel.finalText = finalText;
     fakeModel.bodies = [];
@@ -923,11 +927,20 @@ test("W04: the real Pi, variant C: a stop that announces a next step is continue
     const c = await run("C", announce);
     assert.equal(fakeModel.bodies.length, 4, c.why);
     assert.equal(c.r.nudges, 3, c.why);
-    assert.deepEqual(c.r.continuation, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0, logged: 3 }, c.why);
+    const { wording, nudgeSha256, lengthNudgeSha256, ...counts } = c.r.continuation;
+    assert.deepEqual(counts, { max: 3, installed: true, nudges: 3, lengthNudges: 0, endedByReport: false, errors: 0, logged: 3 }, c.why);
+    assert.match(nudgeSha256 + lengthNudgeSha256, /^[0-9a-f]{32}$/);
     const users = (body) => JSON.parse(body).messages.filter((m) => m.role === "user").map((m) => (typeof m.content === "string" ? m.content : m.content.map((p) => p.text ?? "").join("")));
     const last = users(fakeModel.bodies[3]);
     assert.equal(last.filter((t) => t.startsWith(config.mark)).length, 3, c.why);
-    assert.ok(last.filter((t) => t.startsWith(config.mark)).every((t) => t === `${config.mark} ${config.nudge}`), c.why);
+    assert.ok(last.filter((t) => t.startsWith(config.mark)).every((t) => t === `${config.mark} ${shown.nudge}`), c.why);
+    assert.ok(last.every((t) => !/work-end/.test(t)), "the command-line agent is never told of a tool it does not have");
+    assert.match(shown.nudge, /end with a final report whose first line states the result \(done, partial or blocked\)/);
+    // The record shows which wording ran, and the file beside it the exact words.
+    assert.equal(c.r.continuation.wording, "command-line", c.why);
+    const used = JSON.parse(readFileSync(join(c.r.artifacts, "continuation-used.json"), "utf8"));
+    assert.equal(used.nudge, shown.nudge);
+    assert.equal(JSON.parse(readFileSync(join(c.r.artifacts, "continuation-config.json"), "utf8")).nudge, config.nudge, "the runner's own record keeps the worker's words");
     assert.equal(users(fakeModel.bodies[0]).filter((t) => t.startsWith(config.mark)).length, 0, "the first request has no nudge");
     assert.equal(c.r.outcome, "stopped-early", c.why);
     const a = await run("A", announce);
@@ -939,6 +952,35 @@ test("W04: the real Pi, variant C: a stop that announces a next step is continue
     assert.equal(d.r.nudges, 0);
     assert.equal(d.r.continuation.logged, 0, d.why);
   } finally { fakeModel.finalText = "Done. Nothing to change."; }
+});
+
+// Card W04, nudge fix: what the agent's own shell (Pi's bash tool, in the sandbox) can see of the bench's run folders.
+test("W04 nudge fix: through the real Pi, the agent's shell finds no bench variable, no open bench file, and cannot read or write the results folder", { skip: needsSandbox.skip || (piBin === null ? "Pi is not installed" : false) }, async () => {
+  const results = join(root, "results");
+  fakeModel.toolCommand = `echo "ENVCOUNT=$(env | grep -c 'PI_EVAL_CONTINUATION')"; echo "ENVPI=$(env | grep -c 'continuation')"; echo "FDS=$(ls -l /proc/$$/fd /proc/$PPID/fd 2>&1 | tr '\\n' ' ')"; echo "LS=$(ls ${results}/runs/* 2>&1 | tr '\\n' ' ')"; echo "CAT=$(cat ${results}/runs/*/prompt.md 2>&1 | head -2 | tr '\\n' ' ')"; echo "WRITE=$(echo x > ${results}/probe.txt 2>&1; echo $?)"; echo "SELF=$(cat ~/.pi/agent/models.json 2>&1 | head -c 20)"`;
+  fakeModel.finalText = "Next I'll look further.";
+  try {
+    const { ctx } = incidentCtx({ agent: ["node", join(here, "pi-agent.mjs")], agentEnv: { PI_EVAL_THINKING: "off" }, piBin, continuation: { max: 1, mark: "[M]", nudge: "go on. end with nimblenewt__work-end as your last call. or end with nimblenewt__work-end with result blocked or partial and say why in the report. A reply without a tool call does not end the work.", lengthNudge: "cut. end with nimblenewt__work-end as your last call. or end with nimblenewt__work-end with result blocked or partial and say why in the report. A reply without a tool call does not end the work." } });
+    const r = await runOne(ctx, set.tasks[0], "C", 1);
+    const log = readFileSync(join(r.artifacts, "agent.jsonl"), "utf8");
+    const out = log.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((e) => e.type === "tool_execution_end").map((e) => JSON.stringify(e.result)).join("\n");
+    const why = `${out}\nrecord ${JSON.stringify(r.continuation)} ${JSON.stringify(r.credentialAttempts)}`;
+    assert.match(out, /ENVCOUNT=0/, why);
+    assert.match(out, /ENVPI=0/, why);
+    assert.doesNotMatch(out.match(/FDS=(?:(?!\\n).)*/)?.[0] ?? "", /continuation|\.channel|\/results/, why);
+    assert.doesNotMatch(out.match(/LS=(?:(?!\\n).)*/)?.[0] ?? "", /prompt\.md|agent\.jsonl|continuation/, why);
+    assert.doesNotMatch(out.match(/CAT=(?:(?!\\n).)*/)?.[0] ?? "", /Task tiny/, why);
+    assert.equal(existsSync(join(results, "probe.txt")), false, `a write into the results folder never reaches the host: ${readdirSync(results)} hidden ${JSON.stringify(r.isolation.hidden)}`);
+    assert.ok(!readdirSync(join(results, "runs")).some((n) => existsSync(join(results, "runs", n, "probe.txt"))));
+    assert.equal(r.continuation.installed, true, why);
+    assert.equal(r.continuation.nudges, 1, why);
+    // The agent's own `~/.pi/agent` is its sandbox home's, not the owner's keys: this run is not flagged for reading it.
+    assert.match(out, /SELF=\{/, why);
+    assert.deepEqual(r.credentialAttempts, [], why);
+    // The run is still flagged, but for naming the results folder (which this probe did on purpose), not for its own `~/.pi/agent`.
+    assert.equal(r.contaminated, true, why);
+    assert.ok(r.foreignPaths.every((p) => p.startsWith(results)), why);
+  } finally { fakeModel.toolCommand = null; fakeModel.finalText = "Done. Nothing to change."; }
 });
 
 test("the checkout is still graded by the bench with its own environment (an honest agent under isolation is a verified finish)", needsSandbox, async () => {
@@ -1089,4 +1131,28 @@ test("W01c: a hidden place inside a run folder named through a link in a covered
   } finally {
     rmSync(link, { force: true });
   }
+});
+
+// Card W04, nudge fix: the agent's `~` is the run's fresh home, not the owner's.
+test("W04 nudge fix: `~/` and $HOME in a call are the sandbox home (its own .pi/agent is not the owner's keys); the owner's real folders are still flagged", () => {
+  const home = "/tmp/pi-eval-iso-abc123/home";
+  const bash = (command) => JSON.stringify({ command });
+  const read = (path) => JSON.stringify({ path });
+  const kinds = (entries, opts) => credentialAttempts(entries, opts);
+  for (const c of ["cat ~/.pi/agent/mcp.json", "grep -r mcp ~/.pi/agent", "ls -la ~/.pi/agent/ && cat $HOME/.pi/agent/models.json", "cat ${HOME}/.ssh/config", "cat " + home + "/.pi/agent/settings.json", "cat ~/.gitconfig"]) {
+    assert.deepEqual(kinds([bash(c)], { sandboxHome: home }), [], c);
+  }
+  assert.deepEqual(kinds([read("~/.pi/agent/mcp.json")], { sandboxHome: home }), []);
+  // Without a sandbox home (an agent run without isolation) the same texts are the owner's.
+  assert.deepEqual(kinds([bash("cat ~/.pi/agent/mcp.json")]), ["credentials"]);
+  assert.deepEqual(kinds([bash("cat ~/.ssh/id_ed25519")]), ["credentials"]);
+  // The owner's real folders, named by their path, stay flagged even with a sandbox home.
+  for (const c of ["cat /home/rob/.pi/agent/auth.json", "cat /home/rob/.ssh/id_ed25519", "ls /root/.ssh", "cat ~rob/.ssh/id_rsa", "cat /tmp/x~/.ssh/id_rsa", "cat " + home + "-other/.ssh/id_rsa", "echo $SSH_AUTH_SOCK", "cat /srv/code/team/secrets/key"]) {
+    assert.ok(kinds([bash(c)], { sandboxHome: home }).includes("credentials"), c);
+  }
+  assert.deepEqual(kinds([read("/home/rob/.ssh/id_rsa")], { sandboxHome: home }), ["credentials"]);
+  // The rewriting itself.
+  assert.equal(ownHomeText("cat ~/.pi/agent/x ~/y", home), `cat ${home}/_pi/agent/x ${home}/y`);
+  assert.equal(ownHomeText("a~/b x$HOME/y", home), "a~/b x$HOME/y");
+  assert.equal(ownHomeText("cat ~/.pi", null), "cat ~/.pi");
 });

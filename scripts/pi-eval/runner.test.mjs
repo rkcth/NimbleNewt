@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { git, prepareCheckout, runOne, calibrateOne, foreignPaths, killProcessesInSync } from "./lib/runner.mjs";
+import { git, prepareCheckout, runOne, calibrateOne, foreignPaths, killProcessesInSync, collectAgentOutput, readContinuationUsed, resultsHiddenFor } from "./lib/runner.mjs";
 import { spawn } from "node:child_process";
 import { symlinkSync } from "node:fs";
 import { homedir } from "node:os";
@@ -419,4 +419,56 @@ test("W06: a variant whose prompt carries the completion rules gets the worker's
   assert.ok(readFileSync(join(r.artifacts, "prompt.md"), "utf8").includes("RULES TEXT"));
   const plain = await runOne(ctx("solve"), set.tasks[0], "A", 1);
   assert.equal(plain.completionRules, undefined, "variant A records none");
+});
+
+// Card W04, nudge fix: the agent writes only into its output folder, the results folder is not its to read, `~/` is its own home.
+test("W04 nudge fix: `~/` in a call is the run's own home when it had one; the owner's home still counts, and so does a path outside the run", () => {
+  const own = join(root, "own");
+  const sandbox = join(tmpdir(), "nf-sandbox-home-elsewhere");
+  const cmd = (c) => JSON.stringify({ command: c });
+  const watched = [dirname(own)];
+  const ownerFile = join(homedir(), ".pi", "agent", "mcp.json");
+  assert.deepEqual(foreignPaths([cmd("cat ~/.pi/agent/mcp.json")], { ownDir: own, watched }), [ownerFile], "without a sandbox home `~/` is the owner's");
+  assert.deepEqual(foreignPaths([cmd("cat ~/.pi/agent/mcp.json")], { ownDir: own, watched, sandboxHome: sandbox }), [], "with one it is the sandbox's");
+  assert.deepEqual(foreignPaths([cmd(`cat ${ownerFile}`)], { ownDir: own, watched, sandboxHome: sandbox }), [ownerFile], "the owner's own path is still foreign");
+});
+
+test("W04 nudge fix: the agent's output is copied into the artifacts; the runner's own files are never replaced by it", () => {
+  const out = join(root, "nf-out"), art = join(root, "nf-art");
+  mkdirSync(join(out, "sub"), { recursive: true });
+  mkdirSync(art, { recursive: true });
+  writeFileSync(join(out, "agent.jsonl"), "log");
+  writeFileSync(join(out, "sub", "x.txt"), "deep");
+  writeFileSync(join(out, "prompt.md"), "AGENT'S OWN PROMPT");
+  writeFileSync(join(out, "continuation-config.json"), "AGENT'S CONFIG");
+  writeFileSync(join(out, "half.json.tmp"), "partial");
+  writeFileSync(join(art, "prompt.md"), "the runner's prompt");
+  collectAgentOutput(out, art);
+  assert.equal(readFileSync(join(art, "agent.jsonl"), "utf8"), "log");
+  assert.equal(readFileSync(join(art, "sub", "x.txt"), "utf8"), "deep");
+  assert.equal(readFileSync(join(art, "prompt.md"), "utf8"), "the runner's prompt");
+  assert.equal(existsSync(join(art, "continuation-config.json")), false);
+  assert.equal(existsSync(join(art, "half.json.tmp")), false);
+  assert.doesNotThrow(() => collectAgentOutput(join(root, "no-such-out"), art));
+});
+
+test("W04 nudge fix: the wording that ran is recorded as a name and digests; a missing or malformed file records nothing", () => {
+  const f = join(root, "used.json");
+  writeFileSync(f, JSON.stringify({ wording: "command-line", nudge: "N", lengthNudge: "L" }));
+  const sha = (t) => createHash("sha256").update(t).digest("hex").slice(0, 16);
+  assert.deepEqual(readContinuationUsed(f), { wording: "command-line", nudgeSha256: sha("N"), lengthNudgeSha256: sha("L") });
+  writeFileSync(f, JSON.stringify({ wording: "command-line", nudge: "N" }));
+  assert.equal(readContinuationUsed(f), null);
+  writeFileSync(f, "{");
+  assert.equal(readContinuationUsed(f), null);
+  assert.equal(readContinuationUsed(join(root, "none.json")), null);
+});
+
+test("W04 nudge fix: the results folder is hidden whole when nothing the agent keeps is inside it, else this run's artifacts alone", () => {
+  const results = join(root, "rh-results"), art = join(results, "runs", "r1");
+  mkdirSync(art, { recursive: true });
+  assert.deepEqual(resultsHiddenFor({ resultsDir: results, artifacts: art, keep: [root, join(root, "elsewhere")] }), [results]);
+  assert.deepEqual(resultsHiddenFor({ resultsDir: results, artifacts: art, keep: [join(results, "calibration")] }), [art], "a kept folder inside the results folder: only this run's artifacts");
+  assert.deepEqual(resultsHiddenFor({ resultsDir: results, artifacts: art, keep: [join(art, "x")] }), []);
+  assert.deepEqual(resultsHiddenFor({ resultsDir: join(root, "rh-none"), artifacts: join(root, "rh-none", "a"), keep: [] }), []);
 });

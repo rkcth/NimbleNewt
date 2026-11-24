@@ -1,12 +1,12 @@
 // Card W04, bench variant C: the continuation extension apart from Pi (a fake runner calls its two handlers the way Pi does)
 // and the config the runner reads from the built pi-adapter.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
-import continuationExtension, { CONTINUATION_CUSTOM_TYPE, createContinuation, readConfig } from "./continuation-extension.mjs";
+import continuationExtension, { CHANNEL_KIND, CONTINUATION_CUSTOM_TYPE, commandLineConfig, commandLineText, createContinuation, readChannel, readConfig } from "./continuation-extension.mjs";
 import { readContinuation } from "./lib/runner.mjs";
 import { loadContinuationConfig, loadTaskset } from "./lib/taskset.mjs";
 
@@ -134,4 +134,59 @@ test("the config comes from the built pi-adapter: the bound 3, the worker's mark
   assert.equal(cfg.mark, "[NimbleNewt: the turn goes on]");
   assert.match(cfg.nudge, /^Remaining: the unchecked steps of your PLAN\.md\./);
   assert.ok(cfg.lengthNudge.endsWith(cfg.nudge) && cfg.lengthNudge.startsWith("Your last reply was cut off"));
+});
+
+// Card W04, nudge fix: the command-line agent has no work.end tool, so its nudge asks for the final report instead.
+const WORKER = "Remaining: steps. When every step is done, end with nimblenewt__work-end as your last call. If you cannot go on, end with nimblenewt__work-end with result blocked or partial and say why in the report; do not report done for work that is not done. A reply without a tool call does not end the work.";
+
+test("the command-line wording asks for a final report whose first line states the result, never names the work.end tool, and keeps the rest", () => {
+  const t = commandLineText(WORKER);
+  assert.doesNotMatch(t, /work[-._]end/i);
+  assert.match(t, /end with a final report whose first line states the result \(done, partial or blocked\)\./);
+  assert.match(t, /end with a final report whose first line states the result blocked or partial and says why;/);
+  assert.match(t, /^Remaining: steps\. When every step is done, /);
+  assert.match(t, /do not report done for work that is not done\. A reply that is not a final report does not end the work\.$/);
+  const c = commandLineConfig({ max: 3, mark: "[M]", nudge: WORKER, lengthNudge: `Cut off. ${WORKER}` });
+  assert.equal(c.wording, "command-line");
+  assert.equal(c.max, 3);
+  assert.equal(c.mark, "[M]");
+  assert.equal(c.lengthNudge, `Cut off. ${t}`, "the cut-off lead is the worker's, unchanged");
+});
+
+test("a worker nudge that no longer has the replaced phrases is an error, not a silent pass-through", () => {
+  assert.throws(() => commandLineText("Make the next tool call now."), /no longer has the phrase/);
+  assert.throws(() => commandLineText(WORKER.replace("A reply without a tool call does not end the work.", "")), /no longer has the phrase/);
+  assert.throws(() => commandLineConfig({ max: 3, mark: "[M]", nudge: "x", lengthNudge: "y" }), /no longer has/);
+  // A worker text that names the tool somewhere the wording does not replace is refused: the agent is never told of it.
+  assert.throws(() => commandLineText(`${WORKER} Call nimblenewt__work-end first.`), /still names the work.end tool/);
+});
+
+test("the shipped worker's real nudge turns into the command-line wording (the worker's own text stays as it is)", async (t) => {
+  if (!existsSync(new URL("../../packages/pi-adapter/dist/continuation.js", import.meta.url))) return t.skip("the repository is not built (npx tsc --build)");
+  const cfg = await loadContinuationConfig();
+  assert.match(cfg.nudge, /nimblenewt__work-end as your last call/, "the worker's text still names its tool");
+  const used = commandLineConfig(cfg);
+  assert.doesNotMatch(`${used.nudge} ${used.lengthNudge}`, /work[-._]end/i);
+  assert.equal(used.lengthNudge, commandLineText(cfg.lengthNudge));
+  assert.ok(used.lengthNudge.startsWith("Your last reply was cut off"));
+  assert.equal(used.max, 3);
+});
+
+test("the settings arrive on a descriptor: a regular file with the bench's kind is read and closed; anything else is left alone", (t) => {
+  const f = join(dir, "channel.json");
+  writeFileSync(f, JSON.stringify({ kind: CHANNEL_KIND, config: CFG, file: join(dir, "counts.json") }));
+  const fd = openSync(f, "r");
+  assert.deepEqual(readChannel(fd), { kind: CHANNEL_KIND, config: CFG, file: join(dir, "counts.json") });
+  assert.throws(() => closeSync(fd), /EBADF/, "the descriptor was closed after reading");
+  // Not the bench's file: left open and not used.
+  writeFileSync(f, JSON.stringify({ kind: "other", config: CFG }));
+  const other = openSync(f, "r");
+  assert.equal(readChannel(other), null);
+  closeSync(other);
+  writeFileSync(f, "not json");
+  const bad = openSync(f, "r");
+  assert.equal(readChannel(bad), null);
+  closeSync(bad);
+  assert.equal(readChannel(987654), null, "a descriptor that is not open");
+  assert.equal(readChannel(dir === "" ? 0 : 1), null, "a descriptor that is not a regular file of ours");
 });
