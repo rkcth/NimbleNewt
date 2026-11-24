@@ -260,7 +260,8 @@ export async function runVariants(deps = {}) {
 
 async function scheduledTask(position, label, launch, sys, name, dir, files, fromFiles, limit) {
   if (!/^NimbleNewtWsbProbe-[0-9a-f]{12}$/.test(name)) return `${position}. ${label} (${WHAT[label]}): not started, an unexpected task name`;
-  const answer = join(dir, "task.json");
+  // Each task variant has its own answer file: a helper that writes nothing (stopped at its limit, or powershell not started) must not be read as the earlier variant's answer.
+  const answer = join(dir, `${label}.task.json`);
   const ps = `${sys}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
   const helper = await launch({ file: ps, args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", label === "scheduledTaskHighest" ? TASK_SCRIPT_HIGHEST : TASK_SCRIPT], env: { ...files, NN_TASK: name, NN_LIMIT_MS: String(limit), NN_OUT: answer }, timeoutMs: limit + TASK_OVERHEAD_MS });
   let raw = null;

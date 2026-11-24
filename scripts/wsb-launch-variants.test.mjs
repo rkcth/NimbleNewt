@@ -119,6 +119,26 @@ test("the scheduled task: still there afterwards is deleted and looked for again
   assert.ok(!notStarted.line.includes("jane"));
 });
 
+test("the comparison task never reads the verdict-bearing task's answer: a Highest helper that writes nothing gives 'no answer', not the Limited task's result", async () => {
+  const clock = fakeClock();
+  const { calls, launch } = fakeLaunch(clock, (c) => {
+    if (/powershell\.exe$/.test(c.file) && c.args.at(-1) === TASK_SCRIPT) {
+      writeFileSync(c.env.NN_WSB_CODE, "0\r\n");
+      writeFileSync(c.env.NN_OUT, JSON.stringify({ registered: true, started: true, finished: true, result: 0, elapsedMs: 1300, stopped: false, removed: true, error: null }));
+      return ok;
+    }
+    if (/powershell\.exe$/.test(c.file) && c.args.at(-1) === TASK_SCRIPT_HIGHEST) return { status: null, signal: null, error: { code: "ETIMEDOUT" }, stdout: "", stderr: "", durationMs: 70_000 };
+    if (/schtasks\.exe$/.test(c.file)) return { ...ok, status: 1 };
+    return ok;
+  });
+  const lines = await runVariants({ launch, now: clock.now, tmp: tmp(), taskName: () => "NimbleNewtWsbProbe-cccccccccccc" });
+  assert.match(lines[5], /^5\. scheduledTask .*verdict: SUCCESS/);
+  assert.match(lines[6], /^6\. scheduledTaskHighest .*: no answer from the helper \(exit none, stopped after its limit\); task left behind no$/);
+  const helpers = calls.filter((c) => /powershell\.exe$/.test(c.file) && c.env?.NN_OUT !== undefined);
+  assert.equal(helpers.length, 2);
+  assert.notEqual(helpers[0].env.NN_OUT, helpers[1].env.NN_OUT);
+});
+
 test("the overall limit: a variant that no longer fits is not started; every task keeps time for its clean-up; all six fit when each runs to its limit; the run fits the step's 15 minutes", async () => {
   // Every launch uses its whole limit; the plain variants also take the longest stop. All six are still started and the whole stays inside the limit.
   const clock = fakeClock();
