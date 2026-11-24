@@ -9079,6 +9079,16 @@ A second, independent review of W12 (card 30dcc1f7, review fixes 3396a26f and 80
 - A task text (or any file the agent reads) can still carry a block of its own that checks out (integrity, not authenticity, as the first review says); the worker re-inserts only the contract's.
 - No model calls were made (a benchmark is using Radiance); the integration tests use the scripted model with the real sandboxed worker.
 
+### W12 second review, clean-context re-check of bb48093d (2026-11-24)
+
+**Fixed**
+- **The recall tool listed cut notes an agent had named.** The notes above say W13's reader took both kinds of ID from records. That holds for hand-off notes, not for cut notes: `RecallReader.read` took cut-note digests by pattern from the text of the task's hand-off notes, and the attempt's own hand-off note (`context.handoff`, source "attempt") is that agent's words. Because the controller's note also quotes what the worker reported, an agent could write `sha256:<64 hex>` there. `task.recall` then listed it as "cut note ..." in the recomputed anchor's "Records, by ID" line and in the archives list. This commit moves cut notes to recall, so recall now has to hold the guarantee. Now a digest is listed only when this task's cut note under it is on record (read through the reader's existing `archive` dependency, same task and digest). Only the last 4 distinct digests of each note are looked up (the controller's marker is its note's last line, after the quoted words), so the reads stay bounded.
+- Test: `controller/context/recall.test.ts`: an attempt's own note with five planted digests, and a controller note that quotes the real digest and five planted ones before naming the real one in its last line. Recall lists only the real one, in the anchor part and in the archives list, with at most 4 lookups per note. Mutations: existence check removed (caught); last-digest order changed to first (caught).
+
+**Checked, no change**
+- The start-time block: the IDs come only from `#handedIn`'s records (the transferred hand-off package for this agent and the head hand-off note, both read). The dispatcher is the only place that composes a start's block (remote host, worker and Pi adapter only verify, strip or carry the digest), and `#handedIn` runs again on every start (restart, readmit). For a normal attempt the block text is unchanged: same IDs in the same order (package, then note). The only difference: digests or IDs that appeared in an earlier report or a blocker summary are no longer listed. No controller text in that paragraph ever named a cut note.
+- The one-pass scan matches the old pattern on 22 hand-picked edge cases for both copies (nested and overlapping begin lines, begin without end, end without begin, CRLF in begin and end, empty body with and without the blank line, block at start and end, bad outer block around a good one, quoted and JSON-escaped blocks, a 65-digit end line). Time on 5 MB of hostile text: 4 to 80 ms per call for each copy. The old pattern took 19.6 s on 5 MB of alternating begin and end lines.
+
 ## W13: task.recall, an agent reads back its own task's records (2026-11-11)
 
 Done:
