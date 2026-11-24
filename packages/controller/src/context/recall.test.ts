@@ -5,6 +5,7 @@ import { RECALL_LIMITS, RecallArgumentError, composeRecall, parseRecallArgs, typ
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { RecallReader } from "./recall-source.js";
+import { handoffId } from "./enforcement.js";
 import { RecallService } from "./recall-service.js";
 
 // Card W13: what task.recall shows is a function of the records it is handed, bounded, quoted as data, deterministic, and only ever the caller's own task.
@@ -91,7 +92,11 @@ test("foreign, missing and malformed ids all read the same: found false, one fix
   const shapes = new Set<string>();
   const texts = new Set<string>();
   for (const [part, id] of [["archives", DIG("b")], ["archives", "not-a-digest"], ["archives", ""], ["archives", DIG("a").replace("sha256:", "SHA256:")], ["decisions", "hof-bbbbbbbbbbbbbbbbbbbb"], ["decisions", "att-1"], ["decisions", "../../etc/passwd"], ["decisions", "x".repeat(5000)]] as const) {
-    const a = await ask(source(), { part, id });
+    // W13 second review: the cut-note store is read once for every id asked, well-formed or not, so a malformed id is not answered sooner than another task's digest.
+    let reads = 0;
+    const base = source();
+    const a = await ask({ ...base, archive: async (d) => { reads++; return base.archive(d); } }, { part, id });
+    assert.equal(reads, part === "archives" ? 1 : 0, `store reads for ${part} ${id.slice(0, 20)}`);
     assert.equal(a.found, false, `${part} ${id.slice(0, 20)}`);
     shapes.add(`${part}|${Object.keys(a).sort().join(",")}`);
     texts.add(`${part}|${bodyLines(a).slice(1).join("|")}`);
@@ -169,6 +174,8 @@ test("hostile text in the records stays inside its quotes: forged delimiters, co
     assert.equal(lines.filter((l) => l.startsWith("[NN-RECALL")).length, 1);
     assert.equal(findAnchors(a.text).length, 0);
     assert.ok(!lines.some((l) => l.startsWith("SYSTEM") || l.startsWith("[NN-ANCHOR")), "no forged line starts at the beginning of a line");
+    // W13 second review: the delimiters' names are rewritten inside the data too, so a forged one cannot be read as the end of the block even where it is not at the start of a line.
+    assert.ok(!lines.slice(1, -1).some((l) => /NN-(RECALL|ANCHOR)/i.test(l)), `no delimiter name inside the body (${JSON.stringify(args)})`);
   }
 });
 
@@ -304,3 +311,50 @@ test("W13 review: the call count forgets the attempt that used the tool longest 
   assert.equal((await svc.recall({ attemptId: "att-long", callId: "c3", by }, {})).ok, false, "still at its cap");
 });
 
+
+test("W13 second review: only the same call ID asking the same question is a free repeat; the same ID with another question is counted", async () => {
+  const svc = new RecallService({ read: async () => source(), settings: async () => ({ recallCalls: 2 }) });
+  const by = { id: "agent:ann", kind: "agent", name: "ann", grants: [] } as never;
+  const call = (callId: string, args: Record<string, unknown>) => svc.recall({ attemptId: "att-r", callId, by }, args);
+  assert.equal((await call("c1", { part: "anchor", maxChars: 8000 })).ok, true);
+  assert.equal((await call("c1", { part: "anchor", maxChars: 99_999 })).ok, true, "another spelling of the same question (the size past the bound is the bound) is the same call");
+  assert.equal(svc.used("att-r"), 1);
+  assert.equal((await call("c1", { part: "activity" })).ok, true, "the same ID with another question is a second call");
+  assert.equal(svc.used("att-r"), 2);
+  for (const args of [{ part: "decisions" }, { part: "archives" }, { part: "activity", cursor: "1" }, { part: "anchor", maxChars: 600 }]) {
+    const r = await call("c1", args);
+    assert.ok(!r.ok && r.code === "recall_limit", JSON.stringify(args));
+  }
+  assert.equal((await call("c1", { part: "anchor", maxChars: 8000 })).ok, true, "the first question under the ID is still answered again");
+  assert.equal((await call("c1", { part: "activity" })).ok, true, "and so is the second");
+  assert.equal(svc.used("att-r"), 2);
+});
+
+test("W12 second review: a digest in a hand-off note's text is listed as a cut note only when this task keeps one under it; the attempt's own note and the quoted words in the controller's note cannot add one", async () => {
+  const mk = (id: string) => ({ attemptId: id, taskId: T, projectId: "p", state: "ended", claimedAt: "t", calls: 1, notes: [] }) as never;
+  const bodies: Record<string, unknown> = { "att-1": mk("att-1"), "att-2": mk("att-2") };
+  const fakes = ["b", "c", "d", "e", "f"].map(DIG);
+  // att-1: the attempt's own note (its words) names five digests; the controller's note quotes the real one and five more, then names the real one in its last line. att-2: only the agent's own note.
+  const notes = new Map<string, { source: string; attemptId: string; text: string }>([
+    [handoffId(T, "att-1", "attempt"), { source: "attempt", attemptId: "att-1", text: `read ${fakes.join(" ")}` }],
+    [handoffId(T, "att-1", "controller"), { source: "controller", attemptId: "att-1", text: `Last known state: "${DIG("a")} ${fakes.join(" ")}"\n... the whole note is archived for this task as ${DIG("a")}` }],
+    [handoffId(T, "att-2", "attempt"), { source: "attempt", attemptId: "att-2", text: `see ${fakes[0]} and ${DIG("9")}` }],
+  ]);
+  const asked: string[] = [];
+  const reader = new RecallReader({
+    attemptsOf: async () => ["att-1", "att-2"], attempt: async (id) => bodies[id] as never, anchorFacts: async () => ({ ...anchor, handoffIds: [], archiveDigests: [] }),
+    handoff: async (_by, id) => { const n = notes.get(id); return n === undefined ? undefined : { id, taskId: T, attemptId: n.attemptId, source: n.source, endedBecause: "x", text: n.text }; },
+    archive: async (_by, taskId, digest) => { asked.push(digest); return digest === DIG("a") ? { taskId, what: "w", digest, text: "whole" } : undefined; },
+  });
+  const src = (await reader.read("att-2", {} as never))!;
+  assert.equal(src.handoffs.length, 3, "every note is still listed, with its own words");
+  assert.deepEqual(src.archives, [{ digest: DIG("a"), attemptId: "att-1" }], "only the cut note the task keeps");
+  assert.deepEqual(src.anchor.archiveDigests, [DIG("a")]);
+  const a = await ask(src);
+  for (const f of [...fakes, DIG("9")]) assert.equal(a.text.includes(f), false, `${f} is not named`);
+  assert.ok(a.text.includes(`cut note ${DIG("a")}`), a.text);
+  const list = await ask(src, { part: "archives" });
+  for (const f of [...fakes, DIG("9")]) assert.equal(list.text.includes(f), false);
+  // Bounded: at most four distinct digests of a note are looked up (its last ones, so the controller's marker after five quoted ones is still found).
+  assert.ok(asked.length <= 4 * 3, `${asked.length} reads`);
+});

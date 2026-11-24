@@ -23,6 +23,8 @@ export interface RecallReaderDeps {
 }
 
 const DIGESTS = /sha256:[0-9a-f]{64}/g;
+/** How many distinct digests of one hand-off note, its last ones, are looked up as cut notes (the controller's own note names one, in its last line). */
+const DIGESTS_PER_NOTE = 4;
 
 export class RecallReader {
   readonly #deps: RecallReaderDeps;
@@ -49,7 +51,13 @@ export class RecallReader {
           const h = await this.#deps.handoff(by, handoffId(taskId, a.id, source)).catch((): undefined => undefined);
           if (h === undefined || h.taskId !== taskId || h.attemptId !== a.id) continue;
           handoffs.push({ id: h.id, attemptId: h.attemptId, source: h.source, endedBecause: h.endedBecause, text: h.text });
-          for (const d of new Set(h.text.match(DIGESTS) ?? [])) if (!archives.some((x) => x.digest === d)) archives.push({ digest: d, attemptId: a.id });
+          // A digest in a note's text is listed only when this task's cut note under it is on record (W12 second review): the attempt's own hand-off note is the agent's words, so a digest found there by pattern alone
+          // would be listed as a controller record in the anchor's "Records, by ID" line and the archives list. The controller's own note names its cut note in its last line (after the quoted words), so the last few digests of a note are looked up and the reads stay bounded.
+          for (const d of [...new Set([...(h.text.match(DIGESTS) ?? [])].reverse())].slice(0, DIGESTS_PER_NOTE).reverse()) {
+            if (archives.some((x) => x.digest === d)) continue;
+            const kept = this.#deps.archive === undefined ? undefined : await this.#deps.archive(by, taskId, d).catch((): undefined => undefined);
+            if (kept !== undefined && kept.taskId === taskId && kept.digest === d) archives.push({ digest: d, attemptId: a.id });
+          }
         }
       }
     }

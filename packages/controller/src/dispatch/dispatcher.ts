@@ -2684,9 +2684,10 @@ export class DispatcherService {
     // Card C07g: an attempt that starts on a route other than the one its task last ran on carries the context rebuilt for this route in its first prompt. The context is asked once more here (the same facts give the
     // same decision; facts that changed since the check give the view as it is now). A refusal or an error now starts nothing: the place is given back and the next pass checks the move again (and blocks on a refusal).
     // What the task was handed with, read now: it goes in the first prompt, and its size goes with the request for the route view, which has to leave room for it (card C07g).
-    const handed = (await this.#handedInNote(b)) + (await this.#earlierReport(b));
+    const handedIn = await this.#handedIn(b);
+    const handed = handedIn.text + (await this.#earlierReport(b));
     // Card W12: the goal anchor, written from the records now; it goes at the top of the first prompt, so the room it may take (the same figure the claim-time check reserved, so the same facts give the same decision) is counted with what the task was handed with when the route view is cut.
-    const anchor = await this.#anchorFor(b, handed);
+    const anchor = await this.#anchorFor(b, handedIn.ids);
     let view: { readonly text: string; readonly measured: boolean } | undefined;
     if (this.#deps.routeChange !== undefined) {
       const previous = ((await this.#runner.get(PLACED_KIND, b.taskId))?.body as unknown as { route?: string } | undefined)?.route;
@@ -2874,7 +2875,7 @@ export class DispatcherService {
    * change to it does not count), the attempt's running notes, the owner's rules for the task and the hand-off references the first prompt names. Nothing the agent can write reaches it except as quoted, cleaned, bounded data. A
    * record that cannot be read is left out (and reported); the attempt always starts.
    */
-  async #anchorFor(b: DispatchBody, handed: string): Promise<{ readonly block: AnchorBlock; readonly maxChars: number } | undefined> {
+  async #anchorFor(b: DispatchBody, handoffIds: readonly string[]): Promise<{ readonly block: AnchorBlock; readonly maxChars: number } | undefined> {
     const dep = this.#deps.anchor;
     if (dep === undefined) return undefined;
     try {
@@ -2882,7 +2883,7 @@ export class DispatcherService {
       if (plan === undefined) return undefined;
       // The owner has it on but this start goes without it: said on the attempt's record (W12 review), never silently.
       if (!("maxChars" in plan)) { await this.#anchorLeftOut(b.attemptId, plan.leftOut); return undefined; }
-      const facts = await this.#anchorFacts(b, handed);
+      const facts = await this.#anchorFacts(b, handoffIds);
       if (facts === undefined) return undefined;
       const block = composeAnchor({ ...facts, ...(plan.recall === true ? { recall: true } : {}) }, plan.maxChars);
       if (block === undefined) { await this.#anchorLeftOut(b.attemptId, "no-room", plan.maxChars); return undefined; }
@@ -2891,7 +2892,7 @@ export class DispatcherService {
   }
 
   /** The records the anchor is made of, as of now (card W12; card W13's `task.recall` recomputes the same facts). A record that cannot be read is left out and reported. `undefined` when the task or the anchor's wiring is missing. */
-  async #anchorFacts(b: DispatchBody, handed: string): Promise<AnchorFacts | undefined> {
+  async #anchorFacts(b: DispatchBody, handoffIds: readonly string[]): Promise<AnchorFacts | undefined> {
     const dep = this.#deps.anchor;
     if (dep === undefined) return undefined;
     const task = await this.#deps.projects.getTask(b.taskId);
@@ -2904,7 +2905,9 @@ export class DispatcherService {
       ...(contract?.expectedResult === undefined ? {} : { expectedResult: contract.expectedResult }), ...(contract?.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: contract.acceptanceCriteria }),
       ...(contract === undefined ? {} : { contract: { version: contract.version, requiredEvidence: contract.requiredEvidence, checks: contract.checks.map((x) => x.name) } }),
       notes: notes.map((n) => ({ kind: n.kind, text: n.text })), ...(rules === undefined ? {} : { rules }),
-      handoffIds: [...new Set(handed.match(/\b(?:hnd|hof)-[a-z2-7]{20}\b/g) ?? [])], archiveDigests: [...new Set(handed.match(/sha256:[0-9a-f]{64}/g) ?? [])],
+      // The hand-off records the first prompt names, by the IDs the records gave (W12 second review: no longer found by pattern in text that quotes the agents' own words). Cut notes are not named here: the start has no record
+      // of them; `task.recall` (W13) lists them from the task's hand-off notes, and the block's recall line points there.
+      handoffIds: [...new Set(handoffIds)], archiveDigests: [],
     };
   }
 
@@ -2915,7 +2918,7 @@ export class DispatcherService {
   async recallAnchorFacts(attemptId: string): Promise<AnchorFacts | undefined> {
     const d = typeof attemptId === "string" && ATTEMPT.test(attemptId) ? await this.#load(attemptId) : undefined;
     if (d === undefined) return undefined;
-    try { return await this.#anchorFacts(d.body, ""); } catch (error) { this.#options.onError?.(error); return undefined; }
+    try { return await this.#anchorFacts(d.body, []); } catch (error) { this.#options.onError?.(error); return undefined; }
   }
 
   /** The attempts the dispatcher claimed for a task, oldest first (card W08's per-task record), at most `TASK_ATTEMPTS_LIMIT`. */
@@ -2984,6 +2987,14 @@ export class DispatcherService {
    * itself is never copied into the prompt (its completed work is summarised so it stays the same size across hand-offs, card C07k). Nothing here ever keeps an attempt from starting: a record that cannot be read is simply not named.
    */
   async #handedInNote(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<string> {
+    return (await this.#handedIn(b)).text;
+  }
+
+  /**
+   * The paragraph `#handedInNote` writes, with the IDs of the records it names (W12 second review): the goal anchor lists the hand-off package and hand-off note by these IDs, taken from the records here, never found by
+   * pattern in the text (that text also quotes blocker summaries, and the first prompt quotes the earlier attempt's own report and notes, where an agent could write anything shaped like an ID or a digest).
+   */
+  async #handedIn(b: Pick<DispatchBody, "taskId" | "attemptId" | "agentId">): Promise<{ readonly text: string; readonly ids: readonly string[] }> {
     // Best effort in the plain sense: a read that fails is left out of the paragraph and reported, never guessed at, and never stops the attempt from starting.
     const missing = <T,>(p: Promise<T | undefined>): Promise<T | undefined> => p.catch((error: unknown): undefined => { this.#options.onError?.(error); return undefined; });
     const context = this.#deps.context;
@@ -2996,12 +3007,13 @@ export class DispatcherService {
     const forThisAgent = handedIn !== undefined && handedIn.phase === "transferred" && handedIn.to.kind === "agent" && `agent:${handedIn.to.id}` === b.agentId;
     // The note of this very attempt (there is none while it has not ended) is not "the attempt before yours"; anything the task holds is given as it is.
     const previous = note !== undefined && note.attemptId !== b.attemptId ? note : undefined;
-    return handoffBrief({
+    const text = handoffBrief({
       taskId: b.taskId,
       ...(forThisAgent ? { handedIn: { id: handedIn.id } } : {}),
       ...(previous === undefined ? {} : { note: { id: previous.id, attemptId: previous.attemptId, source: previous.source } }),
       ...(blockers === undefined || blockers.length === 0 ? {} : { blockers }),
     });
+    return { text, ids: [...(forThisAgent ? [handedIn.id] : []), ...(previous === undefined ? [] : [previous.id])] };
   }
 
   /** The blockers that hold this task up (one indexed read per type: a subject has at most one open blocker of each). A type that cannot be read is left out, never guessed at, and the failure is reported. */

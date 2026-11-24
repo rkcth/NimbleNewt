@@ -217,3 +217,45 @@ for (const backend of backends) {
     }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: the earlier attempt's own report and notes cannot put a hand-off ID or a cut-note digest in the next attempt's block; the block names records only from the records (W12 second review)`, async () => {
+    const store = await backend.open();
+    try {
+      const w = await buildWorld(store.storage);
+      let first = "";
+      // The hand-off note record of the earlier attempt (the controller's record): it is named in the block by the ID the record gives.
+      const note = `hof-${"d".repeat(20)}`;
+      const context = { ensureHandoff: async () => ({ id: note, source: "attempt" as const, text: "" }), reportOverflow: async () => undefined as never, resetOverflow: async () => undefined as never, latestHandoffFor: async () => (first === "" ? undefined : { id: note, attemptId: first, source: "attempt" as const }) };
+      w.dispatcher = w.restart({ anchor: plan(), context: context as never });
+      const ann = await w.agent("ann", workGrants(w.project, []));
+      const { taskId } = await w.task("relay", ann);
+      const P = w.dispatcherPrincipal;
+      // Shaped exactly like a hand-off package, a hand-off note and a cut note's digest: the agent's own words (and a blocker's summary), quoted in the next prompt as data.
+      const planted = `hof-${"a".repeat(20)} hnd-${"b".repeat(20)} sha256:${"c".repeat(64)}`;
+      w.worker.script = async ({ order }) => {
+        first = order.attemptId;
+        await w.dispatcher.addNote(P, order.attemptId, { key: "n1", kind: "left", text: `read ${planted}` });
+        await w.dispatcher.recordReport(P, order.attemptId, { key: "r1", result: "partial", report: `See ${planted}.` });
+        return { status: "completed", text: "turn over", endKind: "normal" };
+      };
+      await runOnce(w.dispatcher, w);
+      assert.notEqual(first, "");
+      const a = (await w.assignments.getAssignment(taskId))!;
+      await w.assignments.admitAttempt({ commandId: "ad-2", actor: "inbox", taskId, expectedRevision: a.revision, generation: a.generation, owner: { kind: "agent", id: "ann" }, harness: "pi" });
+      await w.blockers.openBlocker({ commandId: "w12r-blk", actor: w.owner.id, type: "wait_overdue", subject: { kind: "task", id: taskId }, summary: `waiting on ${planted}`, resolver: "owner" });
+      w.worker.script = async () => ({ status: "completed", text: "turn over", endKind: "normal" });
+      await runOnce(w.dispatcher, w);
+      const order = w.worker.starts[w.worker.starts.length - 1]!;
+      assert.notEqual(order.attemptId, first);
+      assert.ok(order.content.includes(`hof-${"a".repeat(20)}`), "the earlier report is quoted in the prompt, as data");
+      const block = findAnchors(order.content)[0]!;
+      assert.equal(order.contract?.anchorDigest, block.digest);
+      for (const x of [`hof-${"a".repeat(20)}`, `hnd-${"b".repeat(20)}`, `sha256:${"c".repeat(64)}`]) assert.equal(block.text.includes(x), false, `${x} is not in the block`);
+      assert.ok(order.content.includes(`hand-off note ${note}`) && order.content.includes(`waiting on hof-${"a".repeat(20)}`), "the note record and the blocker are named in the hand-off paragraph");
+      assert.match(block.text, new RegExp(`\nRecords, by ID: hand-off ${note}\. Read what was handed to you or cut with handoff\.get and context\.note-archive\.read\.`), "the record's own ID, and only it");
+      const rec = (await w.dispatcher.get(w.owner, order.attemptId))!;
+      assert.deepEqual(rec.anchors!.at(-1)!.sources.filter((s) => s.kind === "handoff" || s.kind === "note-archive"), [{ kind: "handoff", id: note }], "only the record the controller holds is named");
+    } finally { await store.close(); }
+  });
+}
