@@ -127,6 +127,14 @@ test("doneVerifier looks at the checkout again after the checks: a check or para
   looks.push(state({}), "throw");
   const blind = await verify("a", scope, one);
   assert.equal(blind.checks[0]?.state, "not-run"); assert.deepEqual(blind.evidence, []);
+  // Second review: the reason says the check ran (the controller prints it after "could not be run by the host:"), and a failed check stays failed.
+  assert.match(String(blind.checks[0]?.reason), /^it ran and passed, but the checkout could not be looked at again/);
+  const mixed = doneVerifier({
+    workspaces: { doneState: async () => { const l = looks.shift(); if (l === "throw" || l === undefined) throw new Error("no look"); return l; } },
+    checks: { run: async (_a, c) => (c.run[0] === "ok" ? { state: "passed", exitCode: 0 } : { state: "failed", exitCode: 1 }) },
+  });
+  looks.push(state({}), "throw");
+  assert.deepEqual((await mixed("a", scope, { ...one, checks: [{ name: "c", run: ["ok"], timeoutMs: 10 }, { name: "d", run: ["bad"], timeoutMs: 10 }] })).checks.map((c) => [c.name, c.state]), [["c", "not-run"], ["d", "failed"]]);
   looks.push(state({ xPresent: false }), "throw");
   assert.deepEqual((await verify("a", scope, one)).evidence, [{ path: "x", present: false }]);
   // The second look does not name a path the first found: not known to be there, so left out; a path it names elsewhere in its list is still matched.
@@ -135,6 +143,10 @@ test("doneVerifier looks at the checkout again after the checks: a check or para
   const two = { ...one, evidence: ["x", "z"] };
   looks.push({ ...state({}), evidence: [{ path: "x", present: true }, { path: "z", present: true }] }, { ...state({}), evidence: [{ path: "z", present: true }, { path: "x", present: false, why: "empty" }] });
   assert.deepEqual((await verify("a", scope, two)).evidence, [{ path: "x", present: false, why: "empty" }, { path: "z", present: true }]);
+  // Second review: checks and no required evidence (the common contract) still get the second look, so a check that removed the change is seen.
+  looks.push({ ...state({}), evidence: [] }, { ...state({ changed: 0, ahead: 0 }), evidence: [] });
+  const bare = await verify("a", scope, { ...one, evidence: [] });
+  assert.equal(bare.tree?.changed, 0); assert.equal(bare.tree?.ahead, 0); assert.equal(looks.length, 0, "both looks were taken");
   // No checks: one look only (nothing ran in between).
   looks.push(state({}));
   assert.equal((await verify("a", scope, { ...one, checks: [] })).checkout, true);

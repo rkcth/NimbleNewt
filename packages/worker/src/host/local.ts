@@ -702,7 +702,8 @@ export function doneVerifier(parts: {
       const again = await parts.workspaces.doneState(scope, request.evidence).catch(() => undefined);
       // An evidence file the first look found but the second could not say about is left out of the report: the controller then says it could not be looked at (never present, and never "not there, write it again", which would be untrue).
       if (again === undefined) {
-        const reason = "the checkout could not be looked at again after the checks ran";
+        // The controller shows this after "could not be run by the host:", so it says the check did run and why its pass is not taken (second review: the bare "could not be looked at again" read as the check never running).
+        const reason = "it ran and passed, but the checkout could not be looked at again after the checks ran, so the pass is not taken; calling work.end again checks again";
         return { checkout: true, tree: { uncommitted: state.uncommitted, uncommittedCount: state.uncommittedCount, ahead: state.ahead, changed: state.changed, ...(state.agentCommits === undefined ? {} : { agentCommits: state.agentCommits }) }, evidence: state.evidence.filter((e) => !e.present), checks: ran.map((c) => (c.state === "passed" ? { name: c.name, state: "not-run" as const, reason } : c)) };
       }
       // Matched by path, not by place in the list: an entry the second look does not name is not known to be there now.
