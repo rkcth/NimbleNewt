@@ -1,0 +1,23 @@
+[package]
+name = "nn-appc-launcher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Experiment: starts one program inside a low-privilege AppContainer and a Job Object (Windows only)."
+license = "MIT"
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_JobObjects",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+] }
+
+[profile.release]
+opt-level = "s"
+panic = "unwind"
