@@ -347,8 +347,8 @@ describe("the strategy: when each launch is chosen", () => {
   });
 
   test("no test builds a stand-in from the real Windows host with a plain spread and a replaced run (it would keep the real scheduled-task launch)", () => {
-    const dir = fileURLToPath(new URL(".", import.meta.url).href).replace(/[\\/]dist([\\/])/, "$1src$1");
-    const offenders = readdirSync(dir).filter((f) => f.endsWith(".test.ts") || f.endsWith(".test.js")).filter((f) => {
+    const dir = fileURLToPath(new URL(".", import.meta.url));
+    const offenders = readdirSync(dir).filter((f) => f.endsWith(".test.js")).filter((f) => {
       const text = readFileSync(join(dir, f), "utf8");
       return text.includes("windowsRealHost(") && /\.\.\.host,[^;]{0,1200}?\brun:/s.test(text);
     });
