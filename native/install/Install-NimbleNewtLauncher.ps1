@@ -102,6 +102,15 @@ function Get-Prop($Object, [string] $Name) {
   if ($null -eq $p) { return $null }
   return $p.Value
 }
+# Whether a user is a member of a local group. Get-LocalGroupMember fails for the WHOLE group when the group holds a member whose account no longer exists (an unresolved SID, common in
+# Administrators on a used machine); then the group is read with 'net localgroup' (its member lines are bare names or COMPUTER\name) instead of being skipped, so a failure never reads as "not a member".
+function Test-GroupHasUser($Group, $User) {
+  try { return (@(Invoke-Read { Get-LocalGroupMember -Group $Group -ErrorAction Stop } | Where-Object { $_.SID -eq $User.SID }).Count -gt 0) }
+  catch {
+    $lines = @(& net.exe localgroup $Group.Name 2>$null | ForEach-Object { "$_".Trim() })
+    return (@($lines | Where-Object { $_ -ieq $User.Name -or $_ -like "*\$($User.Name)" }).Count -gt 0)
+  }
+}
 # The SHA-256 of a file as upper-case hex, with .NET only (no cmdlet can honour -WhatIf). A relative path is resolved against the PowerShell location, as the cmdlets would.
 function Get-Sha256Hex([string] $Path) {
   $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
@@ -177,7 +186,8 @@ public static class NnLsa {
     IntPtr p = Open();
     try {
       uint s = LsaRemoveAccountRights(p, Bytes(sid), false, Strings(rights), (uint)rights.Length);
-      if (s != 0 && s != 0xC0000034) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(s)); // not found: it was not there
+      // 0xC0000034 STATUS_OBJECT_NAME_NOT_FOUND (the account has no rights record) and 0xC0000060 STATUS_NO_SUCH_PRIVILEGE (it does not hold that right): it was not there, so nothing is left to remove
+      if (s != 0 && s != 0xC0000034 && s != 0xC0000060) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(s));
     } finally { LsaClose(p); }
   }
   public static void RemoveAll(string sid) {
@@ -303,7 +313,7 @@ function Invoke-Verify {
     $expires = $user.PasswordExpires
     Say "  sid $($user.SID.Value); enabled $($user.Enabled); password expires: $(if ($null -eq $expires) { 'never' } else { $expires }); description: $($user.Description)"
     Check ($user.Description -eq $AccountMarker) 'it is the account this script made (marker in its description)'
-    $groups = @(Invoke-Read { Get-LocalGroup | Where-Object { (Get-LocalGroupMember -Group $_ -ErrorAction SilentlyContinue | Where-Object { $_.SID -eq $user.SID }) } | ForEach-Object { $_.Name } })
+    $groups = @(Invoke-Read { Get-LocalGroup | Where-Object { Test-GroupHasUser $_ $user } | ForEach-Object { $_.Name } })
     Say "  member of: $($groups -join ', ')"
     Check ($groups.Count -eq 1 -and (Get-Prop (Invoke-Read { Get-LocalGroup -SID $SidUsers }) 'Name') -eq $groups[0]) 'it is a member of Users only (not Administrators, not any other group)'
     if (Test-Admin) {
@@ -458,8 +468,9 @@ function Invoke-Uninstall {
   }
   foreach ($d in @($InstallDir, $ControlDir)) { Assert-SafeItem $d $true }
   foreach ($f in @($launcher, $EnvFile)) { Assert-SafeItem $f $false }
-  $running = Invoke-Read { Get-Process -Name 'nn-launcher' -ErrorAction SilentlyContinue }
-  if ($running) { throw 'nn-launcher.exe is running (a job is in progress). Stop the worker first. Nothing was changed.' }
+  # Only a process that runs THIS launcher file blocks the removal (another copy of nn-launcher.exe elsewhere, for example a build step's, does not); a process whose path cannot be read is treated as this one.
+  $running = @(Invoke-Read { Get-Process -Name 'nn-launcher' -ErrorAction SilentlyContinue } | Where-Object { $path = Get-Prop $_ 'Path'; [string]::IsNullOrEmpty($path) -or (Test-SamePath $path $launcher) })
+  if ($running.Count -gt 0) { throw 'nn-launcher.exe is running (a job is in progress). Stop the worker first. Nothing was changed.' }
   $user = Invoke-Read { Get-LocalUser -Name $mAccount -ErrorAction SilentlyContinue }
   if ($null -ne $user -and ($user.Description -ne $AccountMarker -or $user.SID.Value -ne $mSid)) { throw "The user '$mAccount' is not the one this script made. Nothing was changed." }
 

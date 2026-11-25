@@ -1,6 +1,6 @@
 # Installing the native Windows launcher (one administrator step)
 
-Status: DESIGNED AND WRITTEN, NOT RUN. `Install-NimbleNewtLauncher.ps1` has been read by tests on Linux and is parsed and run with `-WhatIf` and `Verify` (which change nothing) by the hand-started Windows workflow. Nobody has run `Install` or `Uninstall` on a real machine. Run `-WhatIf` first and read what it prints.
+Status: Install has run cleanly once on the owner's PC (Windows PowerShell 5.1, elevated). Everything else (the rest of Verify, a second Install, ALL of Uninstall) is written and text-checked on Linux, and is proven by the hosted workflow on a disposable virtual machine ONLY once that run has been made and has passed: see "What has run where" below. Run `-WhatIf` first and read what it prints.
 
 Why an administrator is needed at all: the launcher itself needs none to make a container (hosted runs did it as an administrator, but creating a profile and granting folders to its SID are ordinary calls). What needs one, once, is what makes the setup safe to run unattended: a separate non-administrator account, a launcher no one but an administrator can replace, and a control folder only that account can use.
 
@@ -83,6 +83,22 @@ The owner's first real `-Action Verify` (Windows PowerShell 5.1, StrictMode 3, a
 - Every other property read on a command's result was checked against the documentation. A property that some objects of the kind lack is read through `Get-Prop`, which returns empty when the object or the property is absent: the worker task's action fields (`Execute`, `Arguments`, `WorkingDirectory`, which only the exec action type has), the manifest's fields (`schema`, `account`, `accountSid`, the folders) and the name of the Users group. Uninstall now checks that the manifest names a valid account name and a local SID before using either.
 - A Linux test reads the script and checks every property read on a command's result against a table of the documented names (a wrong name such as the one above fails it; ten deliberate breakages are caught).
 - The hosted workflow has a step that makes a real throw-away local user (hosted runner only, removed in `finally`), marks it with the installer's marker and runs Verify against it, so the account lines run on a real object. Verify on an empty machine, and `-WhatIf`, never reach those lines.
+
+## What has run where
+
+| What | Owner's PC | Disposable hosted VM (the hand-started workflow) | Linux text tests |
+| --- | --- | --- | --- |
+| Install -WhatIf | yes (found the hash-cmdlet fault) | yes, under 5.1 and PowerShell 7 | shape only |
+| Install (real) | yes, ran cleanly | step "Installer real Install, Verify and Uninstall (hosted runner only)": throw-away account, folders `...\NimbleNewt` under the runner's temp folder; not yet run when this was written | shape only |
+| Verify, account lines | yes (found the property-name fault) | yes, throw-away account step | the documented-property table |
+| Verify, access lists, launcher hash and signature, manifest, `worker.env`, worker task lines | not yet | in the real-run step: it must print no FAIL line | shape only |
+| A second Install on top of the first | not yet | in the real-run step | shape only |
+| Uninstall refused for folders the install did not make | not yet | in the real-run step | shape only |
+| Uninstall (real) and "nothing is left" | not yet | in the real-run step: account, both folders, the profile and its record, the account's rights, the lists of users and of Administrators and Users members | shape only |
+
+The real-run step is hosted-only (it refuses unless `GITHUB_ACTIONS` is `true` and `RUNNER_ENVIRONMENT` is `github-hosted`), is not in the own-runner job, uses the account `nnprobe` plus six random characters, removes by that exact name and the exact generated folder in `finally` and again in a follow-up step that always runs, and fails the job (`Uninstall left ...`) if either had anything to remove. It runs the installer through `powershell.exe -Command` with `-Confirm:$false` (the script's confirmation level is High, so without it a prompt would wait for nobody). A pass there proves the script on a clean administrator machine; it still does not prove it on the owner's PC (other policies, a domain, a language other than English), and it cannot show the non-administrator behaviour.
+
+Faults found by reading the Install and Uninstall paths line by line before that run (fixed, text-checked): removing a right the account does not hold is no longer an error (`STATUS_NO_SUCH_PRIVILEGE` as well as `STATUS_OBJECT_NAME_NOT_FOUND`); Uninstall's "is the launcher running" check is about THIS launcher file and counts a process whose path cannot be read as running (it used to match any program named `nn-launcher`, for example a build step's, and tested an array for truth); Verify's group-membership read falls back to `net localgroup` when `Get-LocalGroupMember` fails for a group that holds an unresolvable member (it used to be silenced, which would read as "not a member").
 
 ## What is NOT proven (stays listed in the implementation notes)
 

@@ -367,6 +367,235 @@ jobs:
           path: ${{ runner.temp }}/launchers
           if-no-files-found: error
           retention-days: 7
+      # Card A03b, the owner's first real runs found two faults that the text tests, the dry run and Verify on an empty machine could not reach, and the rest of Verify and ALL of Uninstall have never run on any
+      # machine. A GitHub-hosted Windows runner is a disposable, elevated virtual machine, so a REAL Install, Verify, a second Install, a refused Uninstall and a real Uninstall can be proven there at no risk to
+      # anyone. This step does that with a throw-away account (nnprobe + 6 random lower-case letters or digits) and folders named ...\NimbleNewt under $RUNNER_TEMP (the runner's own Program Files and
+      # ProgramData are not touched), under Windows PowerShell 5.1, and asserts what is really on the machine after each action. It is a GATE (no continue-on-error). ORDER: it is the LAST step before the final
+      # artifact upload, after the staging step and the launchers upload (both `if: always()`), so a failure here cannot stop the launchers from being staged and uploaded for the own-runner job; its output files
+      # (installer-real\*.txt) go into the windows-appcontainer-hosted artifact. Like the throw-away-account step above it refuses to run anywhere but a GitHub-hosted runner (GITHUB_ACTIONS 'true' and
+      # RUNNER_ENVIRONMENT 'github-hosted') before it changes anything, and it is NOT in the own-runner job. The installer is run through `powershell.exe -Command` with -Confirm:$false (with -File the text
+      # "-Confirm:$false" is not parsed as a switch value, and ConfirmImpact High would otherwise wait for a prompt nobody can answer). The random password of the account is made inside the installer
+      # and never exists here. Removal is by the exact generated name and the exact generated folder, never by a wildcard; a leftover after Uninstall is removed and reported as "Uninstall left ..." and fails the step.
+      - name: "Installer real Install, Verify and Uninstall (hosted runner only)"
+        id: installer_real
+        shell: powershell
+        if: always()
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { Write-Output '::error::this step installs a real local user and runs only on a GitHub-hosted runner'; exit 1 }
+          $f = (Resolve-Path 'native\install\Install-NimbleNewtLauncher.ps1').Path
+          $product = (Resolve-Path 'native\nn-launcher\target\release\nn-launcher.exe').Path
+          $marker = [regex]::Match((Get-Content -LiteralPath $f -Raw), "\`$AccountMarker = '([^']+)'").Groups[1].Value
+          if ($marker.Length -lt 10) { Write-Output '::error::the installer marker was not found'; exit 1 }
+          # the installer's own default for the retired profile setting (read from the script, so this step names no fixed profile)
+          $profileName = [regex]::Match((Get-Content -LiteralPath $f -Raw), "\`$ProfileName = '(\w+)'").Groups[1].Value
+          if ($profileName.Length -lt 3) { Write-Output '::error::the installer profile default was not found'; exit 1 }
+          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          $pick = New-Object byte[] 6; $rng.GetBytes($pick); $rng.Dispose()
+          $chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+          $tag = -join ($pick | ForEach-Object { $chars[$_ % $chars.Length] })
+          $name = 'nnprobe' + $tag
+          $root = Join-Path $env:RUNNER_TEMP ('nn-real-' + $tag)
+          $src = Join-Path $root 'src'
+          $d1 = Join-Path $root 'prog\NimbleNewt'
+          $d2 = Join-Path $root 'data\NimbleNewt'
+          $ctl = Join-Path $d2 'native'
+          $other = Join-Path $root 'other\NimbleNewt'
+          $profileDir = "$env:SystemDrive\Users\$name"
+          $outDir = Join-Path $env:RUNNER_TEMP 'appc-out\installer-real'
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          # the names go to the follow-up step (a safety net if this step is killed) before anything is changed
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "name=$name`nroot=$root`n")
+          $script:failed = $false
+          function Fail([string] $m) { Write-Host "::error::$m"; $script:failed = $true }
+          function Get-Hex([string] $path) {
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try { return (($sha.ComputeHash([System.IO.File]::ReadAllBytes($path)) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $sha.Dispose() }
+          }
+          function Run-Installer([string] $label, [string] $argText) {
+            $out = Join-Path $outDir "$label.txt"
+            $cmd = "`$ErrorActionPreference = 'Stop'; try { & '$f' $argText } catch { `$_ | Out-String | Write-Output; exit 1 }; if (`$null -eq `$LASTEXITCODE) { exit 0 } else { exit `$LASTEXITCODE }"
+            $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $cmd *> $out; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+            $text = (Get-Content -LiteralPath $out -Raw) | Out-String
+            Write-Host "---- $label (exit $code) ----"; Write-Host $text
+            return @{ Code = $code; Text = $text }
+          }
+          $mustNot = @('PropertyNotFound', 'cannot be found on this object', 'FullyQualifiedErrorId', 'Exception', 'Nothing was changed', 'Retrieve the value for property')
+          function Assert-Run($r, [string] $label, [int] $code, [string[]] $must) {
+            if ($r.Code -ne $code) { Fail "$label : exit $($r.Code), expected $code" }
+            foreach ($m in $must) { if ($r.Text.IndexOf($m, [System.StringComparison]::Ordinal) -lt 0) { Fail "$label : the line is missing: $m" } }
+            foreach ($m in $mustNot) { if ($r.Text.IndexOf($m, [System.StringComparison]::Ordinal) -ge 0) { Fail "$label : unexpected text: $m" } }
+          }
+          # Verify after a real Install must have NO failing line. The worker task is not registered and the launcher is unsigned: the script only REPORTS both (no PASS/FAIL line), so no FAIL is expected or allowed.
+          $expectedFail = @()
+          function Assert-VerifyClean($r, [string] $label) {
+            Assert-Run $r $label 0 @('RESULT: everything this script manages is as designed.', "Worker task 'NimbleNewtWorker'", 'not registered')
+            foreach ($l in ($r.Text -split "`r?`n")) { if ($l -match '^\s*FAIL\s' -and ($expectedFail -notcontains $l.Trim())) { Fail "$label : $($l.Trim())" } }
+          }
+          function Get-GroupFacts([string] $groupSid, [string] $accountSid) {
+            $g = Get-LocalGroup -SID $groupSid
+            try { $members = @(Get-LocalGroupMember -Group $g -ErrorAction Stop); return @{ Has = (@($members | Where-Object { $_.SID.Value -eq $accountSid }).Count -gt 0); All = @($members | ForEach-Object { $_.SID.Value } | Sort-Object) } }
+            catch { $lines = @(& net.exe localgroup $g.Name 2>$null | ForEach-Object { "$_".Trim() }); return @{ Has = (@($lines | Where-Object { $_ -ieq $name -or $_ -like "*\$name" }).Count -gt 0); All = @($lines | Sort-Object) } }
+          }
+          function Get-Rights([string] $sidText) {
+            $cfg = Join-Path $root 'secpol.inf'
+            $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & secedit.exe /export /cfg $cfg /areas USER_RIGHTS *> $null; $c = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+            if ($c -ne 0 -or -not (Test-Path -LiteralPath $cfg)) { throw "secedit export failed (exit $c)" }
+            $held = @()
+            foreach ($line in (Get-Content -LiteralPath $cfg)) {
+              if ($line -match '^\s*(Se[A-Za-z]+)\s*=\s*(.*)$') {
+                $right = $Matches[1]
+                $who = @($Matches[2].Split(',') | ForEach-Object { $_.Trim().TrimStart('*') })
+                if (($who -contains $sidText) -or ($who -contains $name) -or (@($who | Where-Object { $_ -like "*\$name" }).Count -gt 0)) { $held += $right }
+              }
+            }
+            Remove-Item -LiteralPath $cfg -Force
+            return $held
+          }
+          $adminSid = 'S-1-5-32-544'; $usersSid = 'S-1-5-32-545'; $sysSid = 'S-1-5-18'
+          function Test-Folder([string] $path, [string] $kind, [string] $sid) {
+            if (-not [System.IO.Directory]::Exists($path)) { Fail "$path does not exist"; return }
+            $acl = Get-Acl -LiteralPath $path
+            if (-not $acl.AreAccessRulesProtected) { Fail "$path inherits its parent's access list" }
+            if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $adminSid) { Fail "$path is not owned by Administrators" }
+            $noChange = [int][System.Security.AccessControl.FileSystemRights]'ChangePermissions, TakeOwnership'
+            $noWrite = [int][System.Security.AccessControl.FileSystemRights]'WriteData, AppendData, Delete, DeleteSubdirectoriesAndFiles'
+            $account = 0
+            foreach ($r in $acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])) {
+              $who = $r.IdentityReference.Value; $bits = [int]$r.FileSystemRights
+              if ($r.AccessControlType -ne 'Allow') { Fail "$path has a deny entry for $who" }
+              if (@($adminSid, $sysSid, $sid) -notcontains $who) { Fail "$path has an entry for $who" }
+              if ($who -eq $sid) {
+                $account++
+                if (($bits -band $noChange) -ne 0) { Fail "$path : the account may change the list or take ownership" }
+                if ($kind -ne 'control' -and ($bits -band $noWrite) -ne 0) { Fail "$path : the account may write or delete here" }
+                if ($kind -eq 'control' -and [int]$r.InheritanceFlags -eq 0 -and ($bits -band 0x10000) -ne 0) { Fail "$path : the account may delete the control folder itself" }
+              }
+            }
+            if ($account -lt 1) { Fail "$path has no entry for the account" }
+          }
+          function Wipe([string] $where) { if ([System.IO.Directory]::Exists($where)) { & cmd.exe /c rmdir /s /q "$where" | Out-Null } }
+          try {
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { Fail "the generated account name $name is already in use"; exit 1 }
+            foreach ($p in @($root, $profileDir, (Join-Path $env:ProgramFiles 'NimbleNewt'), (Join-Path $env:ProgramData 'NimbleNewt'))) { if (Test-Path -LiteralPath $p) { Fail "$p exists before the run"; exit 1 } }
+            $usersBefore = @(Get-LocalUser | ForEach-Object { $_.Name } | Sort-Object)
+            $adminsBefore = (Get-GroupFacts $adminSid 'none').All
+            $groupUsersBefore = (Get-GroupFacts $usersSid 'none').All
+            New-Item -ItemType Directory -Path $src -Force | Out-Null
+            Copy-Item -LiteralPath $product -Destination (Join-Path $src 'nn-launcher.exe')
+            $exe = Join-Path $src 'nn-launcher.exe'
+            $h = Get-Hex $exe
+            if ($h.Length -ne 64) { Fail 'the hash was not computed'; exit 1 }
+            $paths = "-AccountName $name -InstallDir '$d1' -DataDir '$d2'"
+            # 1. real Install
+            $i1 = Run-Installer 'install' "-Action Install -LauncherPath '$exe' -ExpectedSha256 $h -AllowUnsigned $paths -Confirm:`$false"
+            Assert-Run $i1 'Install' 0 @('Install finished', 'WARNING: installing an UNSIGNED launcher')
+            # 2. real Verify, then facts read with .NET and the system tools
+            $v1 = Run-Installer 'verify-1' "-Action Verify $paths"
+            Assert-VerifyClean $v1 'Verify after Install'
+            [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## Installer real Install, Verify, Uninstall (hosted Windows, throw-away account)`n`n### Verify after Install`n``````text`n$($v1.Text)`n```````n")
+            $user = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+            if ($null -eq $user) { Fail 'the account does not exist after Install'; exit 1 }
+            $sid = $user.SID.Value
+            if ($user.Description -ne $marker) { Fail 'the account has no installer marker' }
+            if (-not $user.Enabled) { Fail 'the account is disabled' }
+            if (-not (Get-GroupFacts $usersSid $sid).Has) { Fail 'the account is not a member of Users' }
+            if ((Get-GroupFacts $adminSid $sid).Has) { Fail 'the account is a member of Administrators' }
+            $held = @(Get-Rights $sid)
+            $want = @('SeBatchLogonRight', 'SeDenyInteractiveLogonRight', 'SeDenyNetworkLogonRight', 'SeDenyRemoteInteractiveLogonRight')
+            Write-Host "account rights by secedit: $($held -join ', ')"
+            if ((($held | Sort-Object) -join '|') -ne (($want | Sort-Object) -join '|')) { Fail "the account holds [$($held -join ', ')], expected [$($want -join ', ')]" }
+            Test-Folder $d1 'install' $sid; Test-Folder $d2 'data' $sid; Test-Folder $ctl 'control' $sid
+            $placed = Join-Path $d1 'nn-launcher.exe'
+            if (-not [System.IO.File]::Exists($placed)) { Fail 'the launcher was not placed' } elseif ((Get-Hex $placed) -ne $h) { Fail 'the placed launcher differs from the expected hash' }
+            $envFile = Join-Path $d2 'worker.env'
+            if (-not [System.IO.File]::Exists($envFile)) { Fail 'worker.env is missing' } else {
+              $lines = @(Get-Content -LiteralPath $envFile | Where-Object { $_.Trim().Length -gt 0 })
+              $pre = 'NIMBLENEWT_WIN_'
+              $wantEnv = @("${pre}CONTAINER=lpac", "${pre}CONTROL_DIR=$ctl", "${pre}LAUNCHER=$placed", "${pre}PROFILE=$profileName")
+              if ((($lines | Sort-Object) -join '|') -cne (($wantEnv | Sort-Object) -join '|')) { Fail "worker.env is not exactly the four expected lines: $($lines -join ' / ')" }
+              if (($lines -join "`n") -match '(?i)passw|secret|token|credential|api.?key') { Fail 'worker.env holds a secret-looking word' }
+            }
+            $manifestFile = Join-Path $d2 'install-manifest.json'
+            if (-not [System.IO.File]::Exists($manifestFile)) { Fail 'the manifest is missing' } else {
+              $mt = Get-Content -LiteralPath $manifestFile -Raw
+              try { $m = $mt | ConvertFrom-Json } catch { Fail 'the manifest does not parse'; $m = $null }
+              if ($null -ne $m) {
+                if ($m.schema -ne 'nimblenewt.native-install/1' -or $m.account -ne $name -or $m.accountSid -ne $sid -or $m.launcherSha256 -ne $h.ToUpperInvariant()) { Fail 'the manifest does not name this install' }
+              }
+              if ($mt -match '(?i)passw|secret|token|credential') { Fail 'the manifest holds a secret-looking word' }
+            }
+            # 3. a second Install repairs and adds nothing; Verify is still clean
+            $i2 = Run-Installer 'install-again' "-Action Install -LauncherPath '$exe' -ExpectedSha256 $h -AllowUnsigned $paths -Confirm:`$false"
+            Assert-Run $i2 'second Install' 0 @('Install finished')
+            Assert-VerifyClean (Run-Installer 'verify-2' "-Action Verify $paths") 'Verify after the second Install'
+            # 4. an Uninstall aimed at folders the install did not make is refused and changes nothing
+            $bad = Run-Installer 'uninstall-wrong-folder' "-Action Uninstall -AccountName $name -InstallDir '$d1' -DataDir '$other' -Confirm:`$false"
+            if ($bad.Code -eq 0 -or $bad.Text.IndexOf('No manifest at', [System.StringComparison]::Ordinal) -lt 0) { Fail "Uninstall with another -DataDir was not refused (exit $($bad.Code))" }
+            if ($null -eq (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) -or -not [System.IO.Directory]::Exists($d1) -or -not [System.IO.Directory]::Exists($d2)) { Fail 'the refused Uninstall changed something' }
+            # 5. the real Uninstall, then nothing may be left
+            $un = Run-Installer 'uninstall' "-Action Uninstall $paths -Confirm:`$false"
+            Assert-Run $un 'Uninstall' 0 @('Uninstall finished')
+            [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "### Uninstall`n``````text`n$($un.Text)`n```````n")
+            if ($null -ne (Get-LocalUser -Name $name -ErrorAction SilentlyContinue)) { Fail 'Uninstall left the account' }
+            foreach ($p in @($d1, $d2, $profileDir)) { if (Test-Path -LiteralPath $p) { Fail "Uninstall left $p" } }
+            if (@(Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid }).Count -gt 0) { Fail 'Uninstall left the profile record' }
+            $rightsLeft = @(Get-Rights $sid)
+            if ($rightsLeft.Count -gt 0) { Fail "Uninstall left account rights: $($rightsLeft -join ', ')" }
+            $v3 = Run-Installer 'verify-3' "-Action Verify $paths"
+            Assert-Run $v3 'Verify after Uninstall' 1 @('FAIL  the account exists', 'RESULT:')
+            # the rest of the machine is as it was
+            if ((@(Get-LocalUser | ForEach-Object { $_.Name } | Sort-Object) -join '|') -ne ($usersBefore -join '|')) { Fail 'the list of local users differs from before the run' }
+            if (((Get-GroupFacts $adminSid 'none').All -join '|') -ne ($adminsBefore -join '|')) { Fail 'the members of Administrators differ from before the run' }
+            if (((Get-GroupFacts $usersSid 'none').All -join '|') -ne ($groupUsersBefore -join '|')) { Fail 'the members of Users differ from before the run' }
+            foreach ($p in @((Join-Path $env:ProgramFiles 'NimbleNewt'), (Join-Path $env:ProgramData 'NimbleNewt'))) { if (Test-Path -LiteralPath $p) { Fail "$p appeared" } }
+          } catch {
+            Fail "the step stopped: $($_ | Out-String)"
+          } finally {
+            # Whatever happened: remove by the exact generated name and folder, and say what was still there.
+            $left = @()
+            try {
+              if ($name -match '^nnprobe[a-z0-9]{6}$') {
+                $u = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+                if ($null -ne $u) { $left += "the account $name"; if ($u.Description -eq $marker) { Remove-LocalUser -Name $name } }
+                foreach ($p in @($d1, $d2, $profileDir)) { if (Test-Path -LiteralPath $p) { $left += $p } }
+                if ($root -ceq (Join-Path $env:RUNNER_TEMP ('nn-real-' + $tag))) { Wipe $root }
+                if ($profileDir -ceq "$env:SystemDrive\Users\$name") { Wipe $profileDir }
+              }
+            } catch { Fail "the cleanup failed: $($_ | Out-String)" }
+            if ($left.Count -gt 0) { Fail "Uninstall left $($left -join '; ') (removed by the cleanup)" }
+            Write-Host 'the throw-away account and folders are removed'
+          }
+          if ($script:failed) { exit 1 }
+          exit 0
+      # Safety net for the step above, in case it was killed (a time-out or a cancelled run skips its `finally`): removes, by the exact name and folder that step generated and wrote to its outputs, anything
+      # still there, and FAILS the job if something was ("Uninstall left ..."). It only ever touches a name of the form nnprobe + 6 lower-case letters or digits and the folder RUNNER_TEMP\nn-real-<same 6>,
+      # and it refuses to run anywhere but a GitHub-hosted runner. No wildcard anywhere.
+      - name: "Installer real run: remove anything left (hosted runner only)"
+        id: installer_real_cleanup
+        shell: powershell
+        if: always()
+        timeout-minutes: 5
+        env:
+          NN_NAME: ${{ steps.installer_real.outputs.name }}
+          NN_ROOT: ${{ steps.installer_real.outputs.root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { Write-Output '::error::this step removes a real local user and runs only on a GitHub-hosted runner'; exit 1 }
+          $name = $env:NN_NAME; $root = $env:NN_ROOT
+          if ([string]::IsNullOrEmpty($name) -and [string]::IsNullOrEmpty($root)) { Write-Output 'the install step made no names: nothing to remove'; exit 0 }
+          if ($name -cnotmatch '^nnprobe[a-z0-9]{6}$' -or $root -cne (Join-Path $env:RUNNER_TEMP ('nn-real-' + $name.Substring(7)))) { Write-Output '::error::the names from the install step are not the generated ones; nothing was removed'; exit 1 }
+          $left = @()
+          $u = Get-LocalUser -Name $name -ErrorAction SilentlyContinue
+          if ($null -ne $u) { $left += "the account $name"; Remove-LocalUser -Name $name }
+          $profileDir = "$env:SystemDrive\Users\$name"
+          foreach ($p in @($root, $profileDir)) { if ([System.IO.Directory]::Exists($p)) { $left += $p; & cmd.exe /c rmdir /s /q "$p" | Out-Null } }
+          if ($left.Count -gt 0) { Write-Output "::error::Uninstall left $($left -join '; ') (removed now)"; exit 1 }
+          Write-Output 'nothing left behind'
+          exit 0
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
