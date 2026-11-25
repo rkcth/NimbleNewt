@@ -285,6 +285,83 @@ jobs:
           node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
           { echo "## G05 containment cases, native backend (hosted Windows)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      # Card A03b: the standard-account probe (native/install/Probe-NimbleNewtWorker.ps1, plan 12.3). Parsed here by Windows PowerShell 5.1 (the script and the program it writes for the task), and its -WhatIf path
+      # is run end to end with a MADE-UP manifest in a temporary folder (-ManifestPath and -ControlDir exist for this and are refused without -WhatIf). Nothing is registered or written: the step fails if the
+      # task, a probe file or the profiles folder appears. Three more runs must refuse cleanly with their message and exit code 2. The real probe needs the real account and is run by the owner.
+      - name: "Standard-account probe script (parse, -WhatIf with a made-up manifest; registers nothing)"
+        id: probe_whatif
+        shell: powershell
+        if: always()
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $f = (Resolve-Path 'native\install\Probe-NimbleNewtWorker.ps1').Path
+          $source = [System.IO.File]::ReadAllText($f)
+          # parse the script, then the program it writes for the task (a here-string inside it)
+          $at = $source.IndexOf("return @'", $source.IndexOf('function Get-InnerScriptText'))
+          $from = $source.IndexOf("`n", $at) + 1
+          $inner = $source.Substring($from, $source.IndexOf("`n'@", $from) - $from)
+          foreach ($pair in @(@('script', $source), @('inner program', $inner))) {
+            $errors = $null; $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseInput($pair[1], [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output "::error::$($pair[0]): $($_.Message)" }; exit 1 }
+          }
+          # a made-up install in a temporary folder: a manifest, a control folder and a file that stands in for the launcher (it is never run under -WhatIf)
+          $base = Join-Path $env:RUNNER_TEMP 'nn-probe-whatif'
+          if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force }
+          $data = Join-Path $base 'data\NimbleNewt'; $bin = Join-Path $base 'bin\NimbleNewt'; $control = Join-Path $data 'native'
+          New-Item -ItemType Directory -Path $control, $bin -Force | Out-Null
+          $launcher = Join-Path $bin 'nn-launcher.exe'
+          [System.IO.File]::WriteAllBytes($launcher, [System.Text.Encoding]::ASCII.GetBytes('not a launcher'))
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $h = (($sha.ComputeHash([System.IO.File]::ReadAllBytes($launcher)) | ForEach-Object { $_.ToString('X2') }) -join '')
+          $manifestPath = Join-Path $data 'install-manifest.json'
+          function Write-Manifest([string] $hash) {
+            $m = [ordered]@{ schema = 'nimblenewt.native-install/1'; account = 'nimblenewt-worker'; accountSid = 'S-1-5-21-1-2-3-1000'; installDir = $bin; dataDir = $data; controlDir = $control; launcher = $launcher; launcherSha256 = $hash }
+            [System.IO.File]::WriteAllText($manifestPath, ($m | ConvertTo-Json), [System.Text.Encoding]::ASCII)
+          }
+          Write-Manifest $h
+          function Assert-NothingMade([string] $when) {
+            if ($null -ne (Get-ScheduledTask -TaskName 'NimbleNewtProbe' -ErrorAction SilentlyContinue)) { Write-Output "::error::$when : the task NimbleNewtProbe exists"; exit 1 }
+            $left = @(Get-ChildItem -LiteralPath $control -Force)
+            if ($left.Count -ne 0) { Write-Output "::error::$when : the control folder is not empty: $($left.Name -join ', ')"; exit 1 }
+          }
+          # One run as a child shell with -File (as the owner runs it); the output goes to a file, then the checks read it.
+          function Invoke-Probe([string] $label, [string[]] $scriptArgs) {
+            $outFile = Join-Path $base "$label.txt"
+            $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f @scriptArgs *> $outFile; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+            $text = (Get-Content -LiteralPath $outFile -Raw) | Out-String
+            Write-Output "---- $label (exit $code) ----"; Write-Output $text
+            return @{ Code = $code; Text = $text }
+          }
+          function Assert-Says($r, [string] $label, [int] $code, [string[]] $must, [string[]] $mustNot) {
+            if ($r.Code -ne $code) { Write-Output "::error::$label : exit $($r.Code), expected $code"; exit 1 }
+            foreach ($m in $must) { if ($r.Text.IndexOf($m, [System.StringComparison]::Ordinal) -lt 0) { Write-Output "::error::$label : the line is missing: $m"; exit 1 } }
+            foreach ($m in $mustNot) { if ($r.Text.IndexOf($m, [System.StringComparison]::Ordinal) -ge 0) { Write-Output "::error::$label : unexpected text: $m"; exit 1 } }
+            Assert-NothingMade $label
+          }
+          $errorText = @('PropertyNotFound', 'cannot be found on this object', 'Retrieve the value for property', 'Exception', 'FullyQualifiedErrorId')
+          try {
+            Assert-NothingMade 'before'
+            $over = @('-ManifestPath', $manifestPath, '-ControlDir', $control)
+            # 1. the dry run, end to end: the task text and the dry-run line, nothing registered or written
+            $r1 = Invoke-Probe 'probe-whatif' ($over + @('-WhatIf'))
+            Assert-Says $r1 'probe -WhatIf' 0 @('What if: Performing the operation', 'register the temporary standard-account probe task', '<LogonType>S4U</LogonType>', '<RunLevel>LeastPrivilege</RunLevel>', 'UserId>', 'Nothing was registered or written') ($errorText + @('REFUSED', '<Password', '<Triggers'))
+            # 2. the same overrides WITHOUT -WhatIf are refused
+            $r2 = Invoke-Probe 'probe-override-refused' $over
+            Assert-Says $r2 'overrides without -WhatIf' 2 @('REFUSED:', 'only accepted together with -WhatIf', 'Nothing was changed') ($errorText + @('What if:'))
+            # 3. no manifest at the real place: a clear refusal
+            $r3 = Invoke-Probe 'probe-no-manifest' @('-WhatIf')
+            Assert-Says $r3 'no manifest' 2 @('REFUSED:', 'No install manifest at', 'Nothing was changed') $errorText
+            # 4. a manifest whose launcher hash does not match: refused
+            Write-Manifest ('0' * 64)
+            $r4 = Invoke-Probe 'probe-bad-hash' ($over + @('-WhatIf'))
+            Assert-Says $r4 'wrong launcher hash' 2 @('REFUSED:', 'does not have the hash the manifest recorded', 'Nothing was changed') $errorText
+          } finally {
+            if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          exit 0
       # The programs the own-runner job runs (that machine has no Rust). Staged here, hashed here, kept 7 days. The hashes also leave as job outputs, so the other job checks the downloaded files against a value
       # that did not travel inside the artifact. Runs after every build step whatever happened to the experiment steps; `launchers` stays empty (the own-runner job then does not start) unless both files exist
       # and the product file matches its release record, and both staged copies still have the hashes their build steps reported right after building (so an experiment step in between cannot

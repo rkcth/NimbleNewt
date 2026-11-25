@@ -77,6 +77,12 @@ Files: `native/nn-launcher/Cargo.toml`, `native/nn-launcher/src/lib.rs`, `native
 2. **A bounded interface.** Three actions (`Verify`, `Install`, `Uninstall`) with `-WhatIf`; it takes a file and its SHA-256, writes only the folders, the account and the worker environment file it lists, and stores no secret. Its design, every access-list line and what is not proven are in `native/install/README.md`.
 3. **A maintenance plan.** The owner of card A03b owns it. Tests on every operating system read the script (`scripts/native-launcher.test.mjs`); the hand-started Windows workflow parses it and runs `-WhatIf` and `Verify` on a hosted runner (which changes nothing). It has not been run to install on a real machine: that, and the service-account launch, stay listed as unproven in `implementation-notes.md`. A machine without Windows needs nothing of it.
 
+### The standard-account probe (PowerShell, `native/install/Probe-NimbleNewtWorker.ps1`)
+
+1. **Justification.** Whether a non-administrator account's scheduled task can create the container profile and the private window station is a Windows question that only a task run as that account can answer (plan 12.3); the answer decides the worker's design.
+2. **A bounded interface.** One script run by an administrator, with `-WhatIf`: it registers one temporary task (`NimbleNewtProbe`, S4U, no password), runs it once, prints a verdict and a block to paste back, and removes the task and the files it made by exact name. It stores and asks for no secret. See `native/install/README.md`, "The standard-account probe".
+3. **A maintenance plan.** The owner of card A03b owns it. Tests on every operating system read the script (`scripts/nonadmin-probe.test.mjs`); the hand-started Windows workflow parses it and runs it with `-WhatIf` and a made-up manifest under Windows PowerShell 5.1. It has not been run on a real machine. A machine without Windows needs nothing of it.
+
 Outside the product there are the Node.js scripts in `scripts/` (JavaScript on the same runtime, tested with `node --test`), the experiment's harness and its Rust build (`experiments/windows-appcontainer/`, `experiments/windows-appcontainer/launcher/src/main.rs`, built only by hand), and two development-only Python programs that are never shipped or run by the product: `scripts/generate_task_plan.py` (writes the task plan) and the benchmark probes in `benchmarks/nimblenewt-harness/`.
 
 ## Documentation

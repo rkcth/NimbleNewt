@@ -451,6 +451,8 @@ A product fix is a SEPARATE slice after this measurement; the product launcher k
 3. Register the real worker task from the generator's text with a probe configuration, reboot the machine (or restart the runner's host service so that no one is signed in; a real reboot is the honest test), and read the heartbeat or launcher `info` the worker wrote after the boot trigger fired. This is the "nobody signed in, after reboot" item.
 4. Uninstall (the script's own removal), `Verify` again to show nothing is left, and unregister the tasks.
 
+**Step 2 now exists as a script (2026-11-25, written, not run).** `native/install/Probe-NimbleNewtWorker.ps1` registers the probe task (S4U, no password, no trigger), runs the launcher's `info` and `check` as the account, prints the verdict of the table below and a block to paste back, and removes the task and its files; `native/install/README.md`, "The standard-account probe", says how to run and read it and what it cannot show. It does not run the ten G05 cases (a `run` needs the plan files the backend writes). Steps 1, 3 and 4 (the real worker task and the reboot) remain manual.
+
 **What each outcome means.**
 | Outcome of step 2 | Meaning | Next |
 | --- | --- | --- |

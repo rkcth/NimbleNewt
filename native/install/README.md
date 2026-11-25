@@ -75,6 +75,40 @@ The owner's first real run (Windows PowerShell 5.1, elevated, StrictMode 3) of `
 
 Only a Windows run can confirm that the repair works; Linux tests check the shape (no such cmdlet, the helper, the wrapping, the workflow).
 
+## The standard-account probe
+
+Status: WRITTEN, NOT RUN. `Probe-NimbleNewtWorker.ps1` answers the two open questions of plan 12.3 for the installer's non-administrator account, by running the product launcher once AS that account: (a) can its S4U task create the container profile, and (b) can it make the private window station (`info` asks both)? It also runs `check` and records the facts of the token the task really had. Nothing about this is known yet: every earlier measurement was elevated.
+
+**What it does.** From an elevated Windows PowerShell 5.1, after `Install` and `Verify` passed: (1) it refuses unless it is elevated, the installer's manifest is there, the account exists, is enabled, is the installer's account and is NOT a member of Administrators, the launcher still has the hash the manifest recorded, and the control folder exists; (2) it asks one question (or, with `-WhatIf`, prints the task text and stops), writes `probe-inner.ps1` into the control folder, registers ONE task named `NimbleNewtProbe` (S4U, least privilege, no password element, no trigger, 10 minute limit) and starts it once; (3) the task, as the account, writes `probe-result.json`: `whoami /user /groups /priv`, administrator role, integrity level, session id, the account's profile and temp folders, then `nn-launcher.exe info` and `check` with a fresh per-run name (`NimbleNewtRun-` and 16 random hex digits), and, only if `info` left a profile behind, `delete-profile` with the launcher's own proof; (4) the script waits on the task's state and the result file (never longer than `-TimeoutSeconds`, default 240), prints a verdict and a block to paste back, and in a `finally` removes the task (that exact name, no wildcard) and the files it made.
+
+**What it changes.** A temporary task and, in the control folder (`%ProgramData%\NimbleNewt\native`), `probe-inner.ps1`, `probe-result.tmp`, a `profiles` folder with one record, and `probe-result.json`. Everything but `probe-result.json` is removed again (the record stays only if a profile may still exist: it is the proof for deleting it). No account, right, access list, firewall or setting is touched. No password is asked for, stored or passed: if Windows wants one to register the task, that is reported as `(c) registration refused` with its message and nothing is worked around.
+
+**How to run it.**
+
+```
+# 1. read what it would do (changes nothing; prints the task text)
+powershell -ExecutionPolicy Bypass -File native\install\Probe-NimbleNewtWorker.ps1 -WhatIf
+
+# 2. the probe itself, from an elevated PowerShell (asks once)
+powershell -ExecutionPolicy Bypass -File native\install\Probe-NimbleNewtWorker.ps1
+```
+
+Then paste the block between `PASTE THIS BLOCK BACK` and `END OF BLOCK`. It carries the verdict, each launcher call's exit code and the relevant JSON fields, the Task Scheduler result code, and the statement of what changed. `-ManifestPath` and `-ControlDir` exist only so the hosted workflow can run the `-WhatIf` path with a made-up manifest; they are refused without `-WhatIf`.
+
+**How to read the verdict** (plan 12.3's table).
+
+| Verdict | Meaning |
+| --- | --- |
+| `OK: profile and private window station work` | Risk 6 does not bite for an S4U non-administrator on this machine and build; the worker unit is the design. The ten cases and the reboot test remain. |
+| `(b) private window station refused` | The profile was made, the named station was not (stage `grant`, "window objects:"): Microsoft's statement holds for this account. A design decision (plan 12.3, fallbacks 1 to 5). |
+| `(a) profile creation failed` | The S4U token has no usable profile or registry hive (stage `container` or `profile`). Load the profile first or use another logon type. |
+| `(c) registration refused` | Windows wants a password (or says access denied) to register an S4U task for this account. A design decision (fallback 4). |
+| `(d) task did not start` or `never ran or ended before writing` | The batch logon right, a deny right or a task setting; the Task Scheduler result code (shown, with its usual meaning) says which. A fix, not a design change. |
+| `(e) launcher did not answer` or `info failed elsewhere` | Not one of the table's rows (for example a launcher that could not start); paste the block. |
+| `invalid probe` | The task's token was an administrator or SYSTEM: it says nothing about a standard account. Run `Verify`. |
+
+**What it cannot show.** (1) Whether the worker survives a real reboot with nobody signed in and the boot trigger fires (plan 12.3, step 3: still a manual test of the real worker task). (2) Task Scheduler's restart behaviour after a failure (the probe has no restart policy). (3) Windows Home (the block prints the edition, but one machine is one data point). (4) A contained `run` of a program: a `run` needs the stdin, output and grant files and the job limits that the worker's backend writes for each run, so a hand-made one would test a second implementation, not the product; `info` and `check` are the probe, and the ten G05 cases through the backend are the next step. (5) The probe process's own window station name (reading it needs a compiled helper in the account's temp folder, which an S4U profile may not have); `info`'s `windowStation` and `windowStationOk` are the question that matters. (6) That the batch logon right is held: only the task's result code shows it.
+
 ## What is NOT proven (stays listed in the implementation notes)
 
 - Nothing here has run on Windows. The script's syntax is parsed by PowerShell on the hosted runner (and its brackets and strings are checked on Linux); the LSA calls, the folder creation with its access list, `Set-Acl` on `Program Files`, `New-LocalUser`, the read-back comparison of `Verify` after a real install, the link-safe removal and the profile removal are untested on any machine.
