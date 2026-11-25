@@ -2273,7 +2273,7 @@ test("own-runner hand-off review: hashes read from standard input, no empty or p
 import {
   CREATION_MODES, DESKTOP_MODES, DLL_INIT_FAILED, FACTS_SCRIPT, OUTCOME_MEANINGS, PROGRAMS, SESSION0_SCHEMA, buildSession0Args, collectContext, eventsScript, fileProgress, hex32, interpretSession0,
   judgeSession0, peImports, programCommand, renderSession0Markdown, runSession0, selectSession0Steps, session0Steps, stepFiles as s0StepFiles, summarizeSession0,
-  SESSION0_BUDGET_MS, WRITING_DESKTOP_MODES, boundEvents, boundFacts, collectEvents, scrubUserPaths,
+  SESSION0_BUDGET_MS, SESSION0_CLEANUP_WORST_MS, WRITING_DESKTOP_MODES, boundEvents, boundFacts, collectEvents, scrubUserPaths,
 } from "../experiments/windows-appcontainer/round5.mjs";
 
 const s0Plan = { workspace: "C:\\r\\ws", home: "C:\\r\\home", scratch: "C:\\r\\scratch", probeDir: "C:\\r\\probe", outDir: "C:\\r\\out", binDir: "C:\\r\\ws\\bin", npmCache: "C:\\r\\scratch\\npmcache" };
@@ -2622,14 +2622,14 @@ test("the launcher source (round 5): the window objects are touched only in the 
   assert.match(win, /"context" => \{/);
   // a set-up that failed stops the run before anything starts
   assert.match(win, /if let Some\(e\) = &desk\.failed \{ return Err\(\("grant", e\.clone\(\)\)\);/);
-  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 6, "every set-up failure message starts with the marker the harness looks for");
+  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 7, "every set-up failure message starts with the marker the harness looks for");
   // before and after lines on standard error for each step of the set-up
   for (const phrase of ["before grant", "after grant", "before create desktop", "after create desktop", "before create window station", "after create window station", "before revoke", "after revoke"]) assert.ok(desk.includes(phrase), phrase);
   // no registry, no service, no persistent setting
   for (const banned of ["RegSetValue", "RegCreateKey", "CreateService", "SetNamedSecurityInfo", "Wow64", "SetSystem", "SetUserObjectInformation"]) assert.ok(!desk.includes(banned), banned);
   // the one handle-open in desk.rs asks for READ_CONTROL and WRITE_DAC only, never all access
   assert.ok(!/GENERIC_ALL|MAXIMUM_ALLOWED/.test(desk));
-  for (const c of ["GetProcessWindowStation", "GetThreadDesktop", "GetUserObjectInformationW", "OpenWindowStationW", "OpenDesktopW", "CreateWindowStationW", "CreateDesktopW", "SetProcessWindowStation", "CloseWindowStation", "CloseDesktop", "GetSecurityInfo", "SetSecurityInfo", "RtlGetVersion", "GetSidSubAuthority", "TokenIntegrityLevel"]) {
+  for (const c of ["GetProcessWindowStation", "GetThreadDesktop", "GetUserObjectInformationW", "OpenWindowStationW", "OpenDesktopW", "CreateWindowStationW", "CreateDesktopW", "SetProcessWindowStation", "CloseWindowStation", "CloseDesktop", "GetSecurityInfo", "SetSecurityInfo", "RtlGetVersion", "GetSidSubAuthority", "TokenIntegrityLevel", "IsValidSid", "GetLengthSid", "IsValidAcl"]) {
     assert.ok(desk.includes(`${c}`), `${c} not used in desk.rs`);
     assert.ok(readme.includes(c), `${c} missing in README`);
   }
@@ -2707,7 +2707,22 @@ test("round 5 review: a step that wrote a window-object DACL and did not report 
 });
 
 test("round 5 review: the time budget stops starting steps so the clean-up still runs before the workflow step's limit", async () => {
-  assert.ok(SESSION0_BUDGET_MS + 6 * 60_000 <= 25 * 60_000, "budget plus the clean-up's own limits fit in the 25-minute workflow step");
+  // second review: the clean-up's own limits are 60 s (desktop-revoke) + 3 x 120 s (folder read-back) + 120 s (events) + 60 s (profile): 10 min; budget plus that fits the 25-minute step
+  assert.equal(SESSION0_CLEANUP_WORST_MS, 10 * 60_000);
+  assert.ok(SESSION0_BUDGET_MS + SESSION0_CLEANUP_WORST_MS <= 25 * 60_000, "budget plus the clean-up's own limits fit in the 25-minute workflow step");
+  assert.equal(SESSION0_BUDGET_MS, 15 * 60_000);
+  const wfText = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const s0Steps = [...wfText.matchAll(/--mode session0/g)];
+  assert.equal(s0Steps.length, 2);
+  for (const m of s0Steps) assert.match(wfText.slice(wfText.lastIndexOf("- name:", m.index), m.index), /timeout-minutes: 25\n/, "each session 0 step keeps its 25-minute limit");
+  // a step that writes a DACL also reserves the desktop-revoke after it (60 s): with a 16 min budget at 14 min elapsed an inherit step starts (14 + 1.25 <= 16), a grant step does not (14 + 2.25 > 16)
+  {
+    let t = 0;
+    const fake = session0Fake(() => ({ exit: DLL_INIT_FAILED }));
+    const ids2 = ["A-node-installed-inherit-no-window", "B-node-installed-grant-full-no-window"];
+    const r2 = await runSession0({ launcherPath: "fake", exec: (p, a) => { if (a[0] === "info") t = 14 * 60_000; return fake.exec(p, a); }, clock: () => t, budgetMs: 16 * 60_000, timeoutMs: 15_000, tmpBase: tmp(), tools: { nodeExe: "n", programDirs: [] }, platform: "linux", systemRoot: "C:\\Windows", stepSpec: ids2.join(","), copyFile: () => {}, ps: () => ({ stdout: "{}" }), readFile: () => Buffer.alloc(1) });
+    assert.deepEqual(r2.report.steps.map((x) => x.outcome), ["dll-init-failed", "not-started"]);
+  }
   const base = tmp();
   const calls = [];
   let now = 1_000_000;
@@ -2763,18 +2778,30 @@ test("round 5 review: desk.rs refuses the interactive station, a SID that is not
   assert.ok(prepare.indexOf("if self.failed.is_some() { return; }") > firstGrant && prepare.indexOf("if self.failed.is_some() { return; }") < prepare.indexOf("CreateDesktopW"));
   // a NULL DACL is never merged into, and the copy is taken before the entry is added
   const add = desk.slice(desk.indexOf("fn add_entry"), desk.indexOf("fn remove_entries"));
-  assert.ok(add.indexOf("if old.is_null() {") > 0 && add.indexOf("if old.is_null() {") < add.indexOf("SetEntriesInAclW(1,"));
+  assert.match(add, /let old = acl_copy\(h\)\?\.ok_or\(ERR_NULL_DACL\)\?;\n\s+let new = deskrules::with_allow_entry\(old\.bytes\(\), &sid, mask\)\.ok_or\(ERR_BAD_ACL\)\?;\n\s+write_dacl\(h, &new\)/);
   const grant = desk.slice(desk.indexOf("fn grant("), desk.indexOf("pub(crate) fn prepare"));
   assert.ok(grant.indexOf("acl_copy(h)") > 0 && grant.indexOf("acl_copy(h)") < grant.indexOf("add_entry(h"));
   assert.match(grant, /Ok\(None\) => t\.error = Some\(ERR_NULL_DACL\)/);
-  // after the revoke: written back only when the entries are the same in another order
+  // second review: the window objects' DACLs are rebuilt by the tested rules only (every other entry kept byte for byte and in order), never by SetEntriesInAclW, and written in ONE
+  // place (write_dacl: an aligned copy, IsValidAcl first, DACL_SECURITY_INFORMATION alone)
+  assert.ok(!/SetEntriesInAclW\s*\(|EXPLICIT_ACCESS_W|GRANT_ACCESS/.test(desk), "no SetEntriesInAclW on window objects");
+  assert.equal((desk.match(/SetSecurityInfo\(/g) ?? []).length, 1, "one write of a window object's DACL");
+  const write = desk.slice(desk.indexOf("fn write_dacl"), desk.indexOf("fn add_entry"));
+  assert.ok(write.indexOf("IsValidAcl(p) == 0") > 0 && write.indexOf("IsValidAcl(p) == 0") < write.indexOf("SetSecurityInfo("));
+  assert.match(write, /SetSecurityInfo\(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut\(\), null_mut\(\), p, null_mut\(\)\)/);
+  const remove = desk.slice(desk.indexOf("fn remove_entries"), desk.indexOf("struct AclCopy"));
+  assert.ok(remove.indexOf("if removed == 0 { return Ok(()); }") > 0 && remove.indexOf("if removed == 0 { return Ok(()); }") < remove.indexOf("write_dacl("), "nothing to remove, nothing written");
+  assert.match(remove, /let Some\(old\) = acl_copy\(h\)\? else \{ return Ok\(\(\)\) \};/);
+  // after the revoke: compared with the copy and reported, never written back
   const finish = desk.slice(desk.indexOf("pub(crate) fn finish"), desk.indexOf("pub(crate) fn all_reverted"));
-  assert.equal((finish.match(/SetSecurityInfo\(/g) ?? []).length, 1);
-  assert.ok(finish.indexOf("if cmp == AclCompare::Reordered {") < finish.indexOf("SetSecurityInfo("));
-  assert.equal((finish.match(/if cmp == AclCompare::Reordered \{/g) ?? []).length, 1, "written back only for the same entries in another order");
-  assert.ok(!/cmp != AclCompare::Same|AclCompare::Different =>/.test(finish), "never written back for a difference in the entries");
-  assert.match(finish, /\} else \{\n\s+t\.matches = Some\(cmp == AclCompare::Same\);/);
+  assert.ok(!/SetSecurityInfo|write_dacl|add_entry/.test(finish), "the copy taken before the grant is never written back");
+  assert.match(finish, /t\.matches = Some\(cmp == AclCompare::Same\);/);
   assert.match(desk, /t\.created \|\| t\.original\.is_none\(\) \|\| \(t\.revoked && t\.left == 0 && t\.matches == Some\(true\)\)/);
+  // the station switch for a made desktop is undone at once and checked; a failure stops the run
+  const create = prepare.slice(prepare.indexOf("Create::Station =>"));
+  assert.ok(create.indexOf("SetProcessWindowStation(hs as HWINSTA)") < create.indexOf("SetProcessWindowStation(original)") && create.indexOf("SetProcessWindowStation(original)") < create.indexOf("add_entry(hd"));
+  assert.match(create, /let back = !switched \|\| unsafe \{ SetProcessWindowStation\(original\) \} != 0;/);
+  assert.match(create, /window objects: the launcher could not switch back/);
   // desktop-revoke: derived SID (no CreateAppContainerProfile), only a profile SID
   const revokeCmd = win.slice(win.indexOf('"desktop-revoke" => {'), win.indexOf('"revoke" => {'));
   assert.match(revokeCmd, /desk::derived_sid\(&a\.name\)/);
@@ -2783,6 +2810,12 @@ test("round 5 review: desk.rs refuses the interactive station, a SID that is not
   assert.ok(!desk.includes("CreateAppContainerProfile"));
   const revoke = desk.slice(desk.indexOf("pub(crate) fn revoke_current"));
   assert.ok(revoke.indexOf("deskrules::is_profile_sid") < revoke.indexOf("open_station"));
+  // second review: desktop-revoke applies the grant's station rule too: on an interactive or unreadable station it only counts (READ_CONTROL) and writes nothing
+  const guardAt = revoke.indexOf("deskrules::may_change_launcher_objects(&sname,");
+  assert.ok(guardAt > 0 && guardAt < revoke.indexOf("READ_CONTROL_BIT | WRITE_DAC_BIT") && guardAt < revoke.indexOf("remove_entries("));
+  const skipped = revoke.slice(guardAt, revoke.indexOf("return ok;\n    }"));
+  assert.ok(!/WRITE_DAC|remove_entries|write_dacl/.test(skipped), "the refused branch opens for reading only and writes nothing");
+  for (const t of ["fn the_entry_is_added_without_changing_any_other_entry_and_removing_it_gives_back_the_same_entries", "fn nothing_is_added_to_a_malformed_list_or_next_to_an_entry_already_there", "fn the_removal_takes_out_only_explicit_entries_for_exactly_this_sid"]) assert.ok(rules.includes(t), t);
   // the rules themselves have Rust unit tests that run on every platform
   for (const t of ["fn only_a_non_interactive_station_whose_flags_were_read_may_be_changed", "fn only_the_sid_of_one_profile_is_accepted", "fn the_dacl_after_the_revoke_is_compared_entry_by_entry_with_the_one_before"]) assert.ok(rules.includes(t), t);
   assert.match(rules, /if station\.eq_ignore_ascii_case\("winsta0"\)/);

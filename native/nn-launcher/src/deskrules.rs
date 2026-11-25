@@ -41,14 +41,68 @@ pub(crate) fn acl_entries(acl: &[u8]) -> Option<(u8, Vec<&[u8]>)> {
     Some((acl[0], out))
 }
 
-/// How the DACL after the revoke compares with the one read before the grant.
+const ACE_ALLOWED: u8 = 0; // ACCESS_ALLOWED_ACE_TYPE
+const ACE_DENIED: u8 = 1; // ACCESS_DENIED_ACE_TYPE
+const ACE_INHERITED: u8 = 0x10; // INHERITED_ACE
+/// The largest ACL: AclSize is a 16-bit count of bytes and an ACL is a whole number of DWORDs.
+const ACL_MAX: usize = 0xFFFC;
+
+/// A SID in binary form (revision 1, at most 15 sub-authorities, 8 bytes plus 4 per sub-authority, exactly).
+pub(crate) fn sid_ok(sid: &[u8]) -> bool { sid.len() >= 8 && sid[0] == 1 && sid[1] <= 15 && sid.len() == 8 + 4 * sid[1] as usize }
+
+/// An ACL built from a revision and its entries, with no slack (None: too large, or an entry whose size is not a whole number of DWORDs).
+fn build_acl(revision: u8, entries: &[&[u8]]) -> Option<Vec<u8>> {
+    let size = 8 + entries.iter().map(|e| e.len()).sum::<usize>();
+    if size > ACL_MAX || entries.len() > u16::MAX as usize || entries.iter().any(|e| e.len() % 4 != 0) { return None; }
+    let mut v = Vec::with_capacity(size);
+    v.extend([revision, 0]);
+    v.extend((size as u16).to_le_bytes());
+    v.extend((entries.len() as u16).to_le_bytes());
+    v.extend([0, 0]);
+    for e in entries { v.extend_from_slice(e); }
+    Some(v)
+}
+
+/// Is this entry an explicit (not inherited) allow or deny entry for exactly this SID? (ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE: header, mask, then the SID at byte 8.)
+fn names_sid_explicitly(entry: &[u8], sid: &[u8]) -> bool {
+    (entry[0] == ACE_ALLOWED || entry[0] == ACE_DENIED) && entry[1] & ACE_INHERITED == 0 && entry.len() >= 8 + sid.len() && &entry[8..8 + sid.len()] == sid
+}
+
+/// The ACL with ONE allow entry (no flags) for the SID added and nothing else changed: every existing entry keeps its bytes and its place relative to the others. The new entry goes where
+/// SetEntriesInAclW documents that it puts a new allow entry, just before the first existing allow entry (so after the deny entries that lead the list), or last when there is none.
+/// Unlike SetEntriesInAclW, nothing is merged, re-sorted or rewritten, so removing the entry again (`without_explicit_entries`) gives back exactly the entries that were there, whoever
+/// removes it (this launcher at its end, or `desktop-revoke` after this launcher was killed). None: a malformed ACL or SID, an entry for the SID already present, or no room.
+pub(crate) fn with_allow_entry(acl: &[u8], sid: &[u8], mask: u32) -> Option<Vec<u8>> {
+    if !sid_ok(sid) { return None; }
+    let (revision, entries) = acl_entries(acl)?;
+    if entries.iter().any(|e| names_sid_explicitly(e, sid)) { return None; }
+    let mut ace = vec![ACE_ALLOWED, 0];
+    ace.extend(((8 + sid.len()) as u16).to_le_bytes());
+    ace.extend(mask.to_le_bytes());
+    ace.extend_from_slice(sid);
+    let at = entries.iter().position(|e| e[0] == ACE_ALLOWED).unwrap_or(entries.len());
+    let mut out: Vec<&[u8]> = entries.clone();
+    out.insert(at, &ace);
+    build_acl(revision, &out)
+}
+
+/// The ACL without any explicit allow or deny entry for the SID (inherited ones and every other entry kept in order), and how many were taken out. None: a malformed ACL or SID.
+pub(crate) fn without_explicit_entries(acl: &[u8], sid: &[u8]) -> Option<(Vec<u8>, usize)> {
+    if !sid_ok(sid) { return None; }
+    let (revision, entries) = acl_entries(acl)?;
+    let kept: Vec<&[u8]> = entries.iter().copied().filter(|e| !names_sid_explicitly(e, sid)).collect();
+    let removed = entries.len() - kept.len();
+    Some((build_acl(revision, &kept)?, removed))
+}
+
+/// How the DACL after the revoke compares with the one read before the grant. Nothing is ever written back from the copy: the result is reported only.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum AclCompare {
-    /// The same entries in the same order: nothing to do.
+    /// The same entries in the same order.
     Same,
-    /// The same entries in another order (SetEntriesInAclW writes the canonical order): writing the copy taken before puts it back exactly, and loses nothing anyone else added.
+    /// The same entries in another order (something else rewrote the DACL meanwhile; this launcher's own insert and removal keep the order). Reported, not written.
     Reordered,
-    /// Entries differ (someone else changed the DACL meanwhile, or an entry was not removed): NOT written back, reported.
+    /// Entries differ (someone else changed the DACL meanwhile, or an entry was not removed): reported, not written.
     Different,
 }
 
@@ -144,5 +198,86 @@ mod tests {
         assert_eq!(compare_acls(&before, &[0u8; 4]), AclCompare::Different, "a malformed read is never Same");
         // the same entry twice is not the same as two different ones in another order
         assert_eq!(compare_acls(&acl(&[sy.clone(), sy.clone()], 0), &acl(&[sy.clone(), logon.clone()], 0)), AclCompare::Different);
+    }
+
+    // A container SID in binary form: revision 1, 7 sub-authorities, authority 15 (S-1-15-2-...).
+    fn container_sid(tail: u8) -> Vec<u8> {
+        let mut v = vec![1, 7, 0, 0, 0, 0, 0, 15];
+        v.extend(2u32.to_le_bytes());
+        for i in 0..6u32 { v.extend((1000 + i + tail as u32).to_le_bytes()); }
+        v
+    }
+    fn sid_ace(kind: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
+        let mut v = vec![kind, flags];
+        v.extend(((8 + sid.len()) as u16).to_le_bytes());
+        v.extend(mask.to_le_bytes());
+        v.extend_from_slice(sid);
+        v
+    }
+
+    #[test]
+    fn the_entry_is_added_without_changing_any_other_entry_and_removing_it_gives_back_the_same_entries() {
+        let me = container_sid(0);
+        let other = container_sid(1);
+        let deny = ace(1, 0, 0x40, 9);
+        let sy = ace(0, 0, 0x37f, 18);
+        let inherit_only = ace(0, 0x0B, 0x1ff, 18);
+        let logon = ace(0, 0, 0x37f, 5);
+        // a list that is not in the canonical order (an allow before a deny): kept exactly as it is
+        let before = acl(&[deny.clone(), sy.clone(), inherit_only.clone(), ace(1, 0, 0x2, 7), logon.clone(), sid_ace(0, 0, 0x1, &other)], 12);
+        let with = with_allow_entry(&before, &me, 0x2_037f).expect("added");
+        let (rev, e) = acl_entries(&with).unwrap();
+        assert_eq!(rev, 2);
+        assert_eq!(e.len(), 7);
+        // where SetEntriesInAclW documents a new allow entry: before the first allow entry, after the leading deny
+        assert_eq!(e[0], &deny[..]);
+        assert_eq!(e[1], &sid_ace(0, 0, 0x2_037f, &me)[..]);
+        assert_eq!(e[2..].to_vec(), acl_entries(&before).unwrap().1[1..].to_vec(), "every other entry unchanged, in its order");
+        assert_eq!(u16::from_le_bytes([with[2], with[3]]) as usize, with.len(), "AclSize is the bytes used");
+        let (back, n) = without_explicit_entries(&with, &me).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(compare_acls(&before, &back), AclCompare::Same);
+        // no allow entry at all: the new one goes last; an empty ACL gets just the one
+        let denies = acl(&[deny.clone()], 0);
+        assert_eq!(acl_entries(&with_allow_entry(&denies, &me, 1).unwrap()).unwrap().1[1], &sid_ace(0, 0, 1, &me)[..]);
+        assert_eq!(acl_entries(&with_allow_entry(&acl(&[], 0), &me, 1).unwrap()).unwrap().1.len(), 1);
+        // the revision of the ACL is kept (ACL_REVISION_DS stays 4)
+        let mut ds = before.clone(); ds[0] = 4;
+        assert_eq!(with_allow_entry(&ds, &me, 1).unwrap()[0], 4);
+    }
+
+    #[test]
+    fn nothing_is_added_to_a_malformed_list_or_next_to_an_entry_already_there() {
+        let me = container_sid(0);
+        let base = acl(&[ace(0, 0, 0x37f, 18)], 0);
+        assert!(with_allow_entry(&[2, 0, 8], &me, 1).is_none(), "malformed ACL");
+        assert!(with_allow_entry(&base, &me[..me.len() - 4], 1).is_none(), "SID shorter than its sub-authority count");
+        let mut bad_rev = me.clone(); bad_rev[0] = 2;
+        assert!(with_allow_entry(&base, &bad_rev, 1).is_none(), "SID revision");
+        assert!(with_allow_entry(&acl(&[sid_ace(0, 0, 1, &me)], 0), &me, 1).is_none(), "an explicit allow for the SID is already there");
+        assert!(with_allow_entry(&acl(&[sid_ace(1, 0, 1, &me)], 0), &me, 1).is_none(), "an explicit deny for the SID is already there");
+        // an inherited entry for the SID is not this launcher's: it does not block, and the removal keeps it
+        let inh = acl(&[sid_ace(0, 0x10, 1, &me), ace(0, 0, 0x37f, 18)], 0);
+        let with = with_allow_entry(&inh, &me, 2).unwrap();
+        let (back, n) = without_explicit_entries(&with, &me).unwrap();
+        assert_eq!((n, compare_acls(&inh, &back)), (1, AclCompare::Same));
+        // too large for an ACL: refused, not cut short
+        let big: Vec<Vec<u8>> = (0..3275).map(|i| ace(0, 0, i, 18)).collect();
+        let full = acl(&big, 0);
+        assert!(acl_entries(&full).is_some());
+        assert!(with_allow_entry(&full, &me, 1).is_none());
+    }
+
+    #[test]
+    fn the_removal_takes_out_only_explicit_entries_for_exactly_this_sid() {
+        let me = container_sid(0);
+        let other = container_sid(1);
+        let entries = [sid_ace(0, 0, 1, &me), sid_ace(0, 0, 1, &other), sid_ace(1, 0, 2, &me), sid_ace(0, 0x10, 4, &me), ace(0, 0, 0x37f, 18), sid_ace(0, 0x02, 8, &me)];
+        let (out, n) = without_explicit_entries(&acl(&entries, 4), &me).unwrap();
+        assert_eq!(n, 3, "allow, deny and a container-inherit allow for the SID; not the inherited one");
+        assert_eq!(acl_entries(&out).unwrap().1, vec![&entries[1][..], &entries[3][..], &entries[4][..]]);
+        let (same, none) = without_explicit_entries(&acl(&entries[1..2], 0), &me).unwrap();
+        assert_eq!((none, compare_acls(&acl(&entries[1..2], 0), &same)), (0, AclCompare::Same));
+        assert!(without_explicit_entries(&[0u8; 3], &me).is_none());
     }
 }

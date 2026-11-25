@@ -20,13 +20,19 @@ import { basename, dirname, join, win32 } from "node:path";
 import { aclReadBack, buildChildEnv, buildCommandLine, buildFixturePlan, parseLauncherLine, removeTree, stderrHead } from "./lib.mjs";
 
 export const SESSION0_SCHEMA = "nn-appc-session0-1";
-/** The limit of one step. */
-export const SESSION0_STEP_TIMEOUT_MS = 15_000;
-/** No step is STARTED when it could end after this much time since the start (its own limit plus the harness's margin of 60 s), so the clean-up (desktop-revoke, the read-back, the
- * profile) runs well before the workflow step's own limit (25 min) would kill the harness and skip it. The steps not started are reported as `not-started`. */
-export const SESSION0_BUDGET_MS = 19 * 60_000;
 /** The desktop modes that write a DACL of the launcher's own window station or desktop: after such a step that did not report everything reverted, `desktop-revoke` runs at once. */
 export const WRITING_DESKTOP_MODES = ["grant-read", "grant-full", "grant-station", "grant-desktop", "new-desktop"];
+/** The limit of one step. */
+export const SESSION0_STEP_TIMEOUT_MS = 15_000;
+/** The longest the clean-up after the last step can take by its own limits: desktop-revoke (60 s), the folder ACL read-back (check, revoke, check: 3 x 120 s), the events script (120 s)
+ * and the profile deletion (60 s). */
+export const SESSION0_CLEANUP_WORST_MS = 60_000 + 3 * 120_000 + 120_000 + 60_000;
+/** The workflow step's own limit (timeout-minutes: 25), which kills the harness. */
+export const SESSION0_WORKFLOW_STEP_MS = 25 * 60_000;
+/** No step is STARTED when it could end after this much time since the start (its own limit, the harness's margin of 60 s, and for a step that writes a DACL the desktop-revoke
+ * after it, 60 s), so the whole clean-up fits before the workflow step's limit even when every call takes its full limit (second review: 19 min plus a 10-minute clean-up did not).
+ * The steps not started are reported as `not-started`. */
+export const SESSION0_BUDGET_MS = SESSION0_WORKFLOW_STEP_MS - SESSION0_CLEANUP_WORST_MS;
 export const DLL_INIT_FAILED = -1073741502; // 0xC0000142 as the signed exit code the launcher reports
 
 export const DESKTOP_MODES = ["inherit", "empty", "winsta0", "grant-read", "grant-full", "grant-station", "grant-desktop", "new-desktop", "new-station"];
@@ -367,7 +373,7 @@ export async function runSession0(opts) {
     for (const step of selectSession0Steps(opts.stepSpec)) {
       const files = stepFiles(step, plan);
       // The time budget: a step that could end after it is not started (the clean-up below must run before the workflow's limit).
-      if (!opts.dryRun && clock() - t0 + timeoutMs + 60_000 > budgetMs) {
+      if (!opts.dryRun && clock() - t0 + timeoutMs + 60_000 + (WRITING_DESKTOP_MODES.includes(step.desktop) ? 60_000 : 0) > budgetMs) {
         results.push({ id: step.id, group: step.group, program: step.program, desktop: step.desktop, creation: step.creation, outcome: "not-started", detail: `time budget: ${Math.round(budgetMs / 60_000)} min reached before this step` });
         continue;
       }

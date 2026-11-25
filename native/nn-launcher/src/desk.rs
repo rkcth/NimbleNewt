@@ -32,6 +32,10 @@ pub(crate) const DESKTOP_FULL: u32 = READ_CONTROL_BIT | 0x01FF;
 /// Private codes (outside the Win32 range used here): the object has a NULL DACL, so no entry is merged into it; the SID is not one AppContainer profile's.
 pub(crate) const ERR_NULL_DACL: u32 = 0x2000_0002;
 pub(crate) const ERR_NOT_PROFILE_SID: u32 = 0x2000_0003;
+/// The DACL read was not a well-formed ACL, already held an explicit entry for the SID, or the new one would not fit: nothing written.
+pub(crate) const ERR_BAD_ACL: u32 = 0x2000_0004;
+/// The launcher could not switch back to its own window station after making a desktop in the new one.
+pub(crate) const ERR_STATION_SWITCH_BACK: u32 = 0x2000_0005;
 
 /// What one mode does: the level of the entry on the CURRENT station and desktop (None: no entry), whether to create objects, and what lpDesktop holds.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -108,58 +112,48 @@ fn object_entries(h: HANDLE, sid: PSID) -> Result<u32, u32> {
     }
 }
 
-/// Adds one explicit allow entry (no inheritance: these objects have no children that inherit) for the SID. `h` needs READ_CONTROL and WRITE_DAC.
-fn add_entry(h: HANDLE, sid: PSID, mask: u32) -> Result<(), u32> {
+/// The binary form of a SID (None: not a valid SID).
+fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
     unsafe {
-        let mut old: *mut ACL = null_mut();
-        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
-        let rc = GetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut old, null_mut(), &mut sd);
-        if rc != 0 { return Err(rc); }
-        // A NULL DACL grants everyone everything; SetEntriesInAclW with no old ACL would make a DACL holding only this entry, which would shut everyone else out. Refused.
-        if old.is_null() { LocalFree(sd as *mut c_void); return Err(ERR_NULL_DACL); }
-        let mut ea: EXPLICIT_ACCESS_W = zeroed();
-        ea.grfAccessPermissions = mask;
-        ea.grfAccessMode = GRANT_ACCESS;
-        ea.grfInheritance = 0; // NO_INHERITANCE
-        ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-        ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
-        ea.Trustee.ptstrName = sid as *mut u16;
-        let mut new: *mut ACL = null_mut();
-        let rc = SetEntriesInAclW(1, &ea, old, &mut new);
-        if rc != 0 { LocalFree(sd as *mut c_void); return Err(rc); }
-        let rc = SetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), new, null_mut());
-        LocalFree(new as *mut c_void);
-        LocalFree(sd as *mut c_void);
+        if sid.is_null() || IsValidSid(sid) == 0 { return None; }
+        let n = GetLengthSid(sid) as usize;
+        let v = std::slice::from_raw_parts(sid as *const u8, n).to_vec();
+        if deskrules::sid_ok(&v) { Some(v) } else { None }
+    }
+}
+
+/// Writes an ACL built by deskrules as the object's DACL (an aligned copy, checked with IsValidAcl first; DACL_SECURITY_INFORMATION alone, so the protection bit of the
+/// descriptor is not changed: a window object has no parent to inherit from). `h` needs WRITE_DAC.
+fn write_dacl(h: HANDLE, acl: &[u8]) -> Result<(), u32> {
+    unsafe {
+        let mut buf = vec![0usize; acl.len().div_ceil(size_of::<usize>())];
+        std::ptr::copy_nonoverlapping(acl.as_ptr(), buf.as_mut_ptr() as *mut u8, acl.len());
+        let p = buf.as_mut_ptr() as *mut ACL;
+        if IsValidAcl(p) == 0 { return Err(ERR_BAD_ACL); }
+        let rc = SetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), p, null_mut());
         if rc != 0 { Err(rc) } else { Ok(()) }
     }
 }
 
-/// Removes every explicit entry that names the SID (the same hand-made removal as for files: a copy of the ACL with those entries deleted, highest index first).
+/// Adds one explicit allow entry (no inheritance flags: the desktops of a station do not take it over) for the SID, with every other entry left byte for byte where it was
+/// (deskrules::with_allow_entry; not SetEntriesInAclW, which rebuilds the list and may merge or re-sort entries, so that a removal by `desktop-revoke` after a killed run could not put
+/// the order back). `h` needs READ_CONTROL and WRITE_DAC.
+fn add_entry(h: HANDLE, sid: PSID, mask: u32) -> Result<(), u32> {
+    let sid = sid_bytes(sid).ok_or(ERR_NOT_PROFILE_SID)?;
+    // A NULL DACL grants everyone everything; a DACL made of this one entry would shut everyone else out. Refused (acl_copy reports a NULL DACL as None).
+    let old = acl_copy(h)?.ok_or(ERR_NULL_DACL)?;
+    let new = deskrules::with_allow_entry(old.bytes(), &sid, mask).ok_or(ERR_BAD_ACL)?;
+    write_dacl(h, &new)
+}
+
+/// Removes every explicit entry that names the SID and keeps every other entry in its order (deskrules::without_explicit_entries); with none there, nothing is written.
 fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
-    unsafe {
-        let mut old: *mut ACL = null_mut();
-        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
-        let rc = GetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut old, null_mut(), &mut sd);
-        if rc != 0 { return Err(rc); }
-        if old.is_null() || explicit_aces(old, sid) == 0 { LocalFree(sd as *mut c_void); return Ok(()); }
-        let size = (*old).AclSize as usize;
-        let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
-        std::ptr::copy_nonoverlapping(old as *const u8, buf.as_mut_ptr() as *mut u8, size);
-        LocalFree(sd as *mut c_void);
-        let copy = buf.as_mut_ptr() as *mut ACL;
-        for i in (0..(*copy).AceCount as u32).rev() {
-            let mut ace: *mut c_void = null_mut();
-            if GetAce(copy, i, &mut ace) == 0 || ace.is_null() { continue; }
-            let header = &*(ace as *const ACE_HEADER);
-            if header.AceType != ACE_TYPE_ALLOWED && header.AceType != ACE_TYPE_DENIED { continue; }
-            if header.AceFlags & ACE_FLAG_INHERITED != 0 { continue; }
-            let ace_sid = &(*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as *const u32 as PSID;
-            if EqualSid(ace_sid, sid) != 0 && DeleteAce(copy, i) == 0 { return Err(GetLastError()); }
-        }
-        let rc = SetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), copy, null_mut());
-        if rc != 0 { return Err(rc); }
-        match object_entries(h, sid) { Ok(0) => Ok(()), Ok(_) => Err(ERR_STILL_PRESENT), Err(e) => Err(e) }
-    }
+    let sid_b = sid_bytes(sid).ok_or(ERR_NOT_PROFILE_SID)?;
+    let Some(old) = acl_copy(h)? else { return Ok(()) }; // a NULL DACL holds no entry
+    let (new, removed) = deskrules::without_explicit_entries(old.bytes(), &sid_b).ok_or(ERR_BAD_ACL)?;
+    if removed == 0 { return Ok(()); }
+    write_dacl(h, &new)?;
+    match object_entries(h, sid) { Ok(0) => Ok(()), Ok(_) => Err(ERR_STILL_PRESENT), Err(e) => Err(e) }
 }
 
 /// A copy of a DACL (aligned for the ACL structure), taken before the grant.
@@ -185,7 +179,7 @@ fn acl_copy(h: HANDLE) -> Result<Option<AclCopy>, u32> {
 }
 
 /// One object the launcher changed or made, and what became of it. `original`: the DACL before the grant (objects the launcher did not make); `matches`: whether the DACL after the revoke
-/// has the same entries as `original` (None: not compared); `reordered`: the entries came back in another order and the copy was written back.
+/// has the same entries as `original` (None: not compared); `reordered`: the same entries came back in another order (reported; nothing is written back).
 struct Touched { what: &'static str, name: String, mask: u32, applied: bool, error: Option<u32>, revoked: bool, left: i64, handle: HANDLE, owned: bool, is_station: bool, created: bool,
     original: Option<AclCopy>, matches: Option<bool>, reordered: bool }
 
@@ -285,7 +279,12 @@ impl Desk {
                     let switched = unsafe { SetProcessWindowStation(hs as HWINSTA) } != 0;
                     let hd = if switched { (unsafe { CreateDesktopW(wide(dname).as_ptr(), null(), null(), 0, 0x01FF | READ_CONTROL_BIT | WRITE_DAC_BIT, null()) }) as HANDLE } else { null_mut() };
                     let create_error = unsafe { GetLastError() };
-                    if switched { unsafe { SetProcessWindowStation(original) }; }
+                    // Switched back at once, checked: a launcher left on the made station would report and close the wrong objects, so the run does not start.
+                    let back = !switched || unsafe { SetProcessWindowStation(original) } != 0;
+                    if !back {
+                        log(&format!("could not switch back to the window station {station} (error {})", unsafe { GetLastError() }));
+                        if self.failed.is_none() { self.failed = Some(format!("window objects: the launcher could not switch back to its window station {station} (error {ERR_STATION_SWITCH_BACK})")); }
+                    }
                     let mut td = Touched { what: "new desktop", name: dname.to_string(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: hd, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
                     if hd.is_null() { td.error = Some(if switched { create_error } else { create_error.max(1) }); }
                     else { match add_entry(hd, self.sid, DESKTOP_FULL) { Ok(()) => td.applied = true, Err(e) => td.error = Some(e) } }
@@ -308,21 +307,14 @@ impl Desk {
                 match remove_entries(t.handle, self.sid) { Ok(()) => t.revoked = true, Err(e) => t.error = Some(e) }
                 t.left = object_entries(t.handle, self.sid).map(|n| n as i64).unwrap_or(-1);
                 if let Some(orig) = &t.original {
+                    // Compared and reported only: the copy taken before the grant is NEVER written back (it could be stale; the insert and the removal keep every other entry as it was,
+                    // so a difference means something else changed the DACL meanwhile, and that change is left alone).
                     let now = acl_copy(t.handle);
                     let cmp = match &now { Ok(Some(c)) => deskrules::compare_acls(orig.bytes(), c.bytes()), _ => AclCompare::Different };
-                    if cmp == AclCompare::Reordered {
-                        // The same entries in another order: write the copy taken before the grant back (it holds nothing anyone else added) and compare again.
-                        let mut copy = AclCopy { buf: orig.buf.clone(), len: orig.len };
-                        let rc = unsafe { SetSecurityInfo(t.handle, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), copy.buf.as_mut_ptr() as *mut ACL, null_mut()) };
-                        t.reordered = rc == 0;
-                        if rc != 0 { t.error = Some(rc); }
-                        let again = acl_copy(t.handle);
-                        t.matches = Some(matches!(&again, Ok(Some(c)) if deskrules::compare_acls(orig.bytes(), c.bytes()) == AclCompare::Same));
-                    } else {
-                        t.matches = Some(cmp == AclCompare::Same);
-                    }
+                    t.reordered = cmp == AclCompare::Reordered;
+                    t.matches = Some(cmp == AclCompare::Same);
                 }
-                log(&format!("after revoke {} {}: revoked {} entries left {} same as before {:?} order restored {}", t.what, t.name, t.revoked, t.left, t.matches, t.reordered));
+                log(&format!("after revoke {} {}: revoked {} entries left {} same as before {:?} order differs {}", t.what, t.name, t.revoked, t.left, t.matches, t.reordered));
             }
             if t.owned {
                 unsafe { if t.is_station { CloseWindowStation(t.handle as HWINSTA); } else { CloseDesktop(t.handle as HDESK); } }
@@ -345,7 +337,7 @@ impl Desk {
             i.s("object", t.what); i.s("name", &t.name); i.n("mask", t.mask as i64); i.b("applied", t.applied); i.b("created", t.created);
             i.n("error", t.error.map(|e| e as i64).unwrap_or(0)); i.b("revoked", t.revoked); i.n("entriesLeft", t.left);
             match t.matches { Some(m) => i.b("matchesOriginal", m), None => i.raw("matchesOriginal", "null".into()) }
-            i.b("orderRestored", t.reordered);
+            i.b("orderDiffers", t.reordered);
             i.render()
         }).collect();
         o.raw("objects", format!("[{}]", items.join(",")));
@@ -423,6 +415,22 @@ pub(crate) fn revoke_current(j: &mut Json, sid: PSID) -> bool {
     if !deskrules::is_profile_sid(&sid_string(sid)) { j.s("error", "refused: the SID is not one AppContainer profile's"); return false; }
     let sname = current_station_name();
     let dname = current_desktop_name();
+    // The same rule as for the grant: an interactive (or unreadable) window station is never written, also not to remove entries (the grant never added any there). Its entries for
+    // the SID are only counted (READ_CONTROL), and `ok` is true only when there are none.
+    if let Err(e) = deskrules::may_change_launcher_objects(&sname, station_flags(unsafe { GetProcessWindowStation() } as HANDLE)) {
+        j.s("skipped", &e);
+        let mut ok = true;
+        for (key, h, station) in [("windowStation", open_station(&sname, READ_CONTROL_BIT), true), ("desktop", open_desktop(&dname, READ_CONTROL_BIT), false)] {
+            let mut o = Json::new();
+            let left = if h.is_null() { -1 } else { object_entries(h, sid).map(|n| n as i64).unwrap_or(-1) };
+            o.b("removed", false);
+            o.n("entriesLeft", left);
+            if left != 0 { ok = false; }
+            if !h.is_null() { unsafe { if station { CloseWindowStation(h as HWINSTA); } else { CloseDesktop(h as HDESK); } } }
+            j.raw(key, o.render());
+        }
+        return ok;
+    }
     let mut ok = true;
     let hs = open_station(&sname, READ_CONTROL_BIT | WRITE_DAC_BIT);
     let hs_error = unsafe { GetLastError() };
