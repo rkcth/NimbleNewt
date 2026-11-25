@@ -533,7 +533,7 @@ test("the workflow runs only by hand, pins its actions, gates the own-runner job
   assert.ok(!/^\s+(push|pull_request|schedule):/m.test(wf));
   for (const m of wf.matchAll(/uses: ([^\s@]+)@(\S+)/g)) assert.match(m[2], /^[0-9a-f]{40}$/, `${m[1]} is not pinned to a commit`);
   assert.match(wf, /own_runner:\n\s+description:[^\n]*\n\s+type: boolean\n\s+default: false/);
-  assert.match(wf, /if: \$\{\{ inputs\.own_runner == true/);
+  assert.match(wf, /if: \$\{\{ !cancelled\(\) && needs\.hosted\.outputs\.launchers == 'ok' && inputs\.own_runner == true && github\.repository == 'rkcth\/NimbleNewt' && github\.ref == 'refs\/heads\/main' \}\}/);
   assert.match(wf, /runs-on: \[self-hosted, nimblenewt-windows\]/);
   assert.equal([...wf.matchAll(/timeout-minutes: 45/g)].length >= 1, true);
   assert.ok(wf.includes("scripts/redact-log.mjs"));
@@ -2179,4 +2179,44 @@ test("round 4 probe: tools are skipped once a start has hung, and the spawn diag
   assert.match(src, /isolatedStuck\.count > 0[\s\S]*process\.kill\(process\.pid, "SIGKILL"\)/);
   // a probe step that hung or EPERM'd must not stop the cell: the diagnostic runs before the tools and never longer than 4 s + 1.5 s per mode
   assert.match(src, /Math\.min\(4000, Math\.max\(1000, budget\.remaining\(\) - 4000\)\)/);
+});
+
+test("the own-runner job builds nothing (no cargo, no rustup), downloads the hosted job's launchers, and checks their hashes before any step starts them", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  assert.ok(!/cargo|rustup|rustc/.test(own.replace(/^\s*#.*$/gm, "")), "the own runner has no Rust toolchain and must not build");
+  // it needs the hosted job, runs unless cancelled, and only when the hosted job staged verified launchers
+  assert.match(own, /\n {4}needs: hosted\n/);
+  assert.match(own, /if: \$\{\{ !cancelled\(\) && needs\.hosted\.outputs\.launchers == 'ok' && inputs\.own_runner == true && github\.repository == 'rkcth\/NimbleNewt' && github\.ref == 'refs\/heads\/main' \}\}/);
+  assert.ok(!/if: \$\{\{ always\(\)/.test(own.slice(0, own.indexOf("steps:"))), "always() would run the job on a cancelled run");
+  assert.match(wf, /^permissions:\n {2}contents: read/m);
+  assert.ok(!/^ {4}permissions:/m.test(wf), "no job widens the permissions");
+  // the artifact is short-lived, pinned, produced after the builds, and its hashes leave as job outputs
+  assert.match(hosted, /name: windows-appcontainer-launchers\n\s+path: \$\{\{ runner\.temp \}\}\/launchers\n\s+if-no-files-found: error\n\s+retention-days: 7/);
+  for (const o of ["launchers", "experiment_sha256", "product_sha256"]) assert.ok(hosted.includes(`${o}: \${{ steps.stage.outputs.${o} }}`), o);
+  assert.ok(hosted.indexOf("Product launcher (native/nn-launcher)") < hosted.indexOf("id: stage"), "staged after the product build and its release record");
+  const stage = hosted.slice(hosted.indexOf("id: stage"), hosted.indexOf("name: windows-appcontainer-launchers"));
+  for (const part of ["nn-appc-launcher.exe", "nn-launcher.exe", "native-launcher.mjs verify", "sha256sum", "launchers=ok", "if: always()"]) assert.ok(stage.includes(part), part);
+  // the download is pinned (full commit), and the check comes before the first step that starts a launcher
+  assert.match(own, /uses: actions\/download-artifact@[0-9a-f]{40} # v8\.0\.2\n\s+with:\n\s+name: windows-appcontainer-launchers/);
+  const at = (needle) => { const i = own.indexOf(needle); assert.ok(i >= 0, needle); return i; };
+  const verify = at("Verify the downloaded launchers");
+  assert.ok(at("actions/download-artifact@") < verify);
+  const verifyStep = own.slice(verify, at("Containment cases as the runner service"));
+  for (const part of ["EXPECT_EXPERIMENT: ${{ needs.hosted.outputs.experiment_sha256 }}", "EXPECT_PRODUCT: ${{ needs.hosted.outputs.product_sha256 }}", "sha256sum", "set -eu", "native-launcher.mjs verify", "nothing was run"]) assert.ok(verifyStep.includes(part), part);
+  const firstCopy = verifyStep.indexOf("cp \"$src/");
+  for (const f of ["nn-appc-launcher.exe\" \"$EXPECT_EXPERIMENT", "nn-launcher.exe\" \"$EXPECT_PRODUCT"]) {
+    const i = verifyStep.indexOf(`check "$src/${f}"`);
+    assert.ok(i >= 0 && i < firstCopy, `${f}: hash checked before anything is copied into place`);
+    assert.ok(verifyStep.lastIndexOf("check ", verifyStep.length) > firstCopy, "the placed copies are hashed again");
+  }
+  // every step that runs a launcher comes after the check, and the product one uses the verified copy
+  for (const needle of ["run-experiment.mjs", "nn-launcher.exe\" info", "containment-evidence.mjs"]) assert.ok(at(needle) > verify, needle);
+  assert.match(own, /NIMBLENEWT_WIN_LAUNCHER: \$\{\{ runner\.temp \}\}\\verified-launchers\\nn-launcher\.exe/);
+  // the service-account answer for the product path: info and the ten cases, and no install step
+  assert.match(own, /nn-launcher\.exe" info --name NimbleNewtProductCheck/);
+  assert.match(own, /containment-evidence\.mjs run --out "\$RUNNER_TEMP\/appc-out\/g05-native" --redact [^\n]*redact-log\.mjs/);
+  assert.ok(!/Install-NimbleNewtLauncher|-Action (Install|Uninstall)/.test(own.replace(/^\s*#.*$/gm, "")), "no installer step on the own runner");
+  assert.ok(!/secrets\./.test(wf));
 });

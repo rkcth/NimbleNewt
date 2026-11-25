@@ -6,6 +6,8 @@ name: Windows AppContainer experiment
 #   job `hosted`:     a GitHub-hosted Windows machine (the runner account is an administrator and a session is open: the cheapest first answer).
 #   job `own-runner`: the owner's self-hosted Windows runner, which runs as a service (no interactive session). It starts only when the input `own_runner` is ticked (default off)
 #                     and only from main, so it is not run by accident. This is the run that answers the "no one signed in" and "no administrator" questions.
+#                     It has no Rust toolchain and builds nothing: it runs the two launcher programs the hosted job built from this same commit (a short-lived artifact), after checking each
+#                     against the SHA-256 the hosted job reported as a job output (a value the artifact cannot change). The programs on the owner's machine are those CI builds, never a local build.
 # No secrets are used. The results (markdown and JSON, with names, paths and SIDs replaced) are uploaded as artifacts; job logs go through scripts/redact-log.mjs.
 on:
   workflow_dispatch:
@@ -23,6 +25,11 @@ jobs:
     name: Hosted Windows
     runs-on: windows-latest
     timeout-minutes: 75
+    # Set by the staging step only when both launcher programs exist and the product one matches its release record. Job outputs are read even when another step failed.
+    outputs:
+      launchers: ${{ steps.stage.outputs.launchers }}
+      experiment_sha256: ${{ steps.stage.outputs.experiment_sha256 }}
+      product_sha256: ${{ steps.stage.outputs.product_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -171,6 +178,34 @@ jobs:
           node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
           { echo "## G05 containment cases, native backend (hosted Windows)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      # The programs the own-runner job runs (that machine has no Rust). Staged here, hashed here, kept 7 days. The hashes also leave as job outputs, so the other job checks the downloaded files against a value
+      # that did not travel inside the artifact. Runs after every build step whatever happened to the experiment steps; `launchers` stays empty (the own-runner job then does not start) unless both files exist
+      # and the product file matches its release record.
+      - name: Stage the built launchers for the own-runner job
+        id: stage
+        shell: bash
+        if: always()
+        run: |
+          d="$RUNNER_TEMP/launchers"; rm -rf "$d"; mkdir -p "$d"
+          exp=experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe
+          prod=native/nn-launcher/target/release/nn-launcher.exe
+          rec="$RUNNER_TEMP/appc-out/nn-launcher.record.json"
+          if [ -f "$exp" ] && [ -f "$prod" ] && [ -f "$rec" ] && node scripts/native-launcher.mjs verify --file "$prod" --record "$rec"; then
+            cp "$exp" "$d/nn-appc-launcher.exe"; cp "$prod" "$d/nn-launcher.exe"; cp "$rec" "$d/nn-launcher.record.json"
+            e="$(sha256sum "$d/nn-appc-launcher.exe" | cut -d' ' -f1)"; p="$(sha256sum "$d/nn-launcher.exe" | cut -d' ' -f1)"
+            printf '%s  nn-appc-launcher.exe\n%s  nn-launcher.exe\n' "$e" "$p" > "$d/SHA256SUMS"
+            { echo "launchers=ok"; echo "experiment_sha256=$e"; echo "product_sha256=$p"; } >> "$GITHUB_OUTPUT"
+            echo "::notice::staged launchers for commit $GITHUB_SHA (experiment $e, product $p)"
+          else
+            echo "::warning::the launchers were not staged (a build or the release record check failed); the own-runner job will not start"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && steps.stage.outputs.launchers == 'ok' }}
+        with:
+          name: windows-appcontainer-launchers
+          path: ${{ runner.temp }}/launchers
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -181,7 +216,10 @@ jobs:
 
   own-runner:
     name: Own Windows runner (service)
-    if: ${{ inputs.own_runner == true && github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' }}
+    needs: hosted
+    # `!cancelled()` (not the default "every needed job succeeded"): an experiment step of the hosted job that fails (a finding is allowed to be a failure) must not stop this run, but a hosted job that
+    # built no launcher must: `launchers == 'ok'` is set only when both programs were staged with a matching release record. Unticked, other repository or other branch: skipped as before.
+    if: ${{ !cancelled() && needs.hosted.outputs.launchers == 'ok' && inputs.own_runner == true && github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, nimblenewt-windows]
     timeout-minutes: 45
     concurrency:
@@ -207,12 +245,33 @@ jobs:
           [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n", (New-Object System.Text.UTF8Encoding $false))
       - run: npm ci
       - run: npm run build
-      - name: Build the launcher (needs Rust on this machine)
+      # No Rust here. The launchers are the ones the hosted job built from this commit. Nothing below starts either program until the check has passed; the programs are placed (for the harness's default
+      # path and for the product backend) only after their hashes match the hosted job's outputs, and the placed copies are hashed again.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-appcontainer-launchers
+          path: ${{ runner.temp }}/downloaded-launchers
+      - name: Verify the downloaded launchers against the hosted job's hashes, then place them
         shell: bash
-        working-directory: experiments/windows-appcontainer/launcher
+        env:
+          EXPECT_EXPERIMENT: ${{ needs.hosted.outputs.experiment_sha256 }}
+          EXPECT_PRODUCT: ${{ needs.hosted.outputs.product_sha256 }}
         run: |
-          if ! command -v cargo >/dev/null 2>&1; then echo "::error::cargo is not installed on this runner (install Rust with rustup)"; exit 1; fi
-          cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
+          set -eu
+          case "$EXPECT_EXPERIMENT" in *[!0-9a-f]*|"") echo "::error::no hash for the experiment launcher from the hosted job"; exit 1;; esac
+          case "$EXPECT_PRODUCT" in *[!0-9a-f]*|"") echo "::error::no hash for the product launcher from the hosted job"; exit 1;; esac
+          [ "${#EXPECT_EXPERIMENT}" -eq 64 ] && [ "${#EXPECT_PRODUCT}" -eq 64 ] || { echo "::error::a hash from the hosted job is not 64 hex digits"; exit 1; }
+          src="$RUNNER_TEMP/downloaded-launchers"; ok="$RUNNER_TEMP/verified-launchers"; dest=experiments/windows-appcontainer/launcher/target/release
+          rm -rf "$ok"
+          check() { got="$(sha256sum "$1" | cut -d' ' -f1)"; if [ "$got" != "$2" ]; then echo "::error::$1 has SHA-256 $got, the hosted job built $2; nothing was run"; exit 1; fi; }
+          check "$src/nn-appc-launcher.exe" "$EXPECT_EXPERIMENT"
+          check "$src/nn-launcher.exe" "$EXPECT_PRODUCT"
+          node scripts/native-launcher.mjs verify --file "$src/nn-launcher.exe" --record "$src/nn-launcher.record.json"
+          mkdir -p "$ok" "$dest"
+          cp "$src/nn-launcher.exe" "$ok/nn-launcher.exe"; cp "$src/nn-launcher.record.json" "$ok/nn-launcher.record.json"; cp "$src/nn-appc-launcher.exe" "$dest/nn-appc-launcher.exe"
+          check "$ok/nn-launcher.exe" "$EXPECT_PRODUCT"; check "$dest/nn-appc-launcher.exe" "$EXPECT_EXPERIMENT"
+          echo "launchers verified: experiment $EXPECT_EXPERIMENT, product $EXPECT_PRODUCT (built by CI from $GITHUB_SHA)"
+          { echo "## Launchers on this machine"; echo "Built by the hosted job from commit \`$GITHUB_SHA\` and verified before use: experiment \`$EXPECT_EXPERIMENT\`, product \`$EXPECT_PRODUCT\`. Unsigned; nothing was built here."; } >> "$GITHUB_STEP_SUMMARY"
       - name: Containment cases as the runner service (no window, no prompt)
         shell: bash
         run: |
@@ -232,6 +291,33 @@ jobs:
           rc=0
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode spawn --timeout-ms 15000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/spawn.md" ]; then cat "$RUNNER_TEMP/appc-out/spawn.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      # Card A03b slice 3/4: the PRODUCT launcher as the runner service: `info` (does the container profile come up with no one signed in?) and the ten containment cases of card G05 through the native
+      # backend, the same commands as the hosted job. Installing the launcher (an account, folder ACLs) is not done here: that needs a separate go-ahead.
+      - name: Product launcher info as the runner service
+        shell: bash
+        if: always()
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          rc=0
+          "$RUNNER_TEMP/verified-launchers/nn-launcher.exe" info --name NimbleNewtProductCheck > "$RUNNER_TEMP/product-info.json" || rc=$?
+          node scripts/redact-log.mjs < "$RUNNER_TEMP/product-info.json" | tee "$RUNNER_TEMP/appc-out/product-info.redacted.txt"
+          { echo "## Product launcher info (own Windows runner, service)"; echo '```'; cat "$RUNNER_TEMP/appc-out/product-info.redacted.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"
+      - name: G05 containment cases through the native backend (one confined start, node runner)
+        shell: bash
+        if: always()
+        timeout-minutes: 20
+        env:
+          NIMBLENEWT_WIN_LAUNCHER: ${{ runner.temp }}\verified-launchers\nn-launcher.exe
+          NIMBLENEWT_WIN_CONTROL_DIR: ${{ runner.temp }}\nn-native
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out/g05-native"
+          rc=0
+          node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
+          { echo "## G05 containment cases, native backend (own Windows runner, service)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
