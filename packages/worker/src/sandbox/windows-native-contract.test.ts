@@ -190,28 +190,48 @@ test("the private window station code never touches an object of the launcher's 
   const pure = code(crate("src/winobj.rs").split("#[cfg(test)]")[0]!);
   for (const text of [priv, pure]) {
     assert.ok(!/winsta0/i.test(text), "never the interactive station");
-    assert.ok(!/OpenWindowStationW|OpenDesktopW|GetThreadDesktop|SetThreadDesktop|SwitchDesktop|SetEntriesInAclW|SetSecurityDescriptorDacl|SetKernelObjectSecurity/.test(text), "no open by name, no entry builder that rebuilds the list");
+    assert.ok(!/OpenWindowStationW|OpenDesktopW|GetThreadDesktop|SetThreadDesktop|SwitchDesktop|SetEntriesInAclW|SetKernelObjectSecurity|SetUserObjectSecurity/.test(text), "no open by name, no entry builder that rebuilds the list");
   }
-  // the only writers are on handles of objects this launcher made: write_dacl is called from add_entry only, and add_entry only from PrivateDesktop::give
-  assert.equal(priv.match(/\bwrite_dacl\(/g)!.length, 2, "its definition and its one call, in add_entry");
-  assert.equal(priv.match(/\badd_entry\(/g)!.length, 2, "its definition and its one call, in give");
-  assert.equal(priv.match(/\bgive\(/g)!.length, 3, "the definition and the two calls (the station, the desktop)");
-  assert.match(priv, /CreateWindowStationW\(wstation\.as_ptr\(\), winobj::STATION_CREATE_ONLY, STATION_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/, "the station is made with no security attributes (the token's default DACL, the measured configuration) and CWF_CREATE_ONLY (an existing station of that name is never opened)");
+  // The product writes NO DACL: both objects are CREATED with their final one (winobj::private_dacl in the SECURITY_ATTRIBUTES of the creating call). The DACL writers of the experiment
+  // (write_dacl, add_entry) are compiled into the experiment build only, and the one SetSecurityDescriptorDacl is on the launcher's own new descriptor, inside CreationSd::new.
+  const raw = crate("src/privdesk.rs");
+  for (const f of ["pub(crate) fn write_dacl(", "pub(crate) fn add_entry(", "pub(crate) const WRITE_DAC_BIT"]) {
+    const at = raw.indexOf(f);
+    assert.ok(at > 0 && /#\[cfg\(feature = "experiment"\)\][^\n]*\n$/.test(raw.slice(0, at)), `${f} is behind the experiment feature`);
+  }
+  assert.equal(priv.match(/\bwrite_dacl\(/g)!.length, 2, "its definition and its one call, in add_entry (experiment)");
+  assert.equal(priv.match(/\badd_entry\(/g)!.length, 1, "its definition only: the product's create does not call it (desk.rs does, in the experiment build)");
+  assert.equal(priv.match(/SetSecurityInfo\(/g)!.length, 1, "the one in write_dacl");
+  assert.equal(priv.match(/SetSecurityDescriptorDacl\(/g)!.length, 1);
+  assert.ok(between(priv, "impl CreationSd {", "fn creation_sd(").includes("SetSecurityDescriptorDacl(psd, 1, p, 0)"), "on the launcher's own new descriptor only");
+  assert.match(priv, /SetSecurityDescriptorControl\(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED\)/, "nothing is inherited into it");
+  const create = between(priv, "pub(crate) fn create(sid: PSID)", "fn check(");
+  assert.ok(!/add_entry|write_dacl|WRITE_DAC/.test(create), "the product's create neither writes a DACL nor asks for WRITE_DAC");
+  assert.match(create, /CreateWindowStationW\(wstation\.as_ptr\(\), winobj::STATION_CREATE_ONLY, STATION_RIGHTS, &sa\)/, "made with its final DACL and CWF_CREATE_ONLY (an existing station of that name is never opened)");
   assert.match(pure, /pub\(crate\) const STATION_CREATE_ONLY: u32 = 0x0000_0001;/, "CWF_CREATE_ONLY is 1 (winuser.h)");
-  assert.match(priv, /CreateDesktopW\(wdesktop\.as_ptr\(\), null\(\), null\(\), 0, DESKTOP_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/);
-  // the masks are the measured ones; the DACL read back must pass the check; the process station is put back and that is checked
+  assert.match(create, /CreateDesktopW\(wdesktop\.as_ptr\(\), null\(\), null\(\), 0, DESKTOP_RIGHTS, &sa\)/);
+  assert.match(create, /creation_sd\(&own\[0\], &sid_b, STATION_RIGHTS, winobj::STATION_FULL, "window station"\)\?/);
+  assert.match(create, /creation_sd\(&own\[0\], &sid_b, DESKTOP_RIGHTS, winobj::DESKTOP_FULL, "desktop"\)\?/);
+  assert.ok(create.indexOf("let sa = desktop_sd.attributes();") > create.indexOf("StationSwitch::to("), "the desktop's descriptor is the one built for it");
+  assert.match(pure, /fn private_dacl\(user: &\[u8\], container: &\[u8\], mask: u32, full: u32\)/);
+  assert.match(priv, /bInheritHandle: 0 \}/, "the handles are not inheritable");
+  // the masks are the measured ones (the container's), and the account's cover them; the DACL read back must pass the check; the process station is put back and that is checked
   assert.match(pure, /STATION_RIGHTS: u32 = 0x0002_037F;/);
   assert.match(pure, /DESKTOP_RIGHTS: u32 = 0x0002_01FF;/);
+  assert.match(pure, /STATION_FULL: u32 = 0x000F_037F;/);
+  assert.match(pure, /DESKTOP_FULL: u32 = 0x000F_01FF;/);
   assert.match(priv, /winobj::private_acl_ok\(c\.bytes\(\), sid_b, mask, &self\.own\)/, "the read-back is checked against the launcher's own token user and owner");
-  assert.match(priv, /for class in \[TokenUser, TokenOwner\]/);
-  const create = between(priv, "pub(crate) fn create(sid: PSID)", "fn give(");
+  assert.match(priv, /for class in \[TokenUser, TokenOwner\]/, "the user first: own[0] is the account the objects are made for");
+  assert.equal(priv.match(/\bcheck\(h[sd], &sid_b, (STATION|DESKTOP)_RIGHTS, /g)!.length, 2, "both objects read back and checked");
   assert.ok(create.indexOf("let own = own_principals()") > 0 && create.indexOf("let own = own_principals()") < create.indexOf("CreateWindowStationW("), "the own principals are read before anything is made");
-  // the check is an allow list: anything that is not the container, a fixed trusted principal, a logon SID or the launcher's own is refused
+  // the check is an allow list: anything that is not the container, a fixed trusted principal or the launcher's own is refused (no logon-session wildcard)
   assert.match(pure, /const ALWAYS_TRUSTED: \[&str; 3\] = \["S-1-5-18", "S-1-5-32-544", "S-1-3-4"\];/);
+  assert.ok(!/is_logon_sid|S-1-5-5-/.test(pure), "no logon-session SID is accepted");
+  assert.match(pure, /if e\[1\] != 0 \|\| u32::from_le_bytes/, "the container's entry carries no flags at all");
   assert.match(pure, /return Err\(format!\("\{text\} holds an allow entry \(only the container/);
   assert.match(priv, /impl Drop for StationSwitch \{ fn drop\(&mut self\) \{ self\.restore\(\); \} \}/);
   assert.match(priv, /if !restored \{ return Err\(trouble\("launcher could not switch back/);
-  assert.ok(priv.indexOf("let restored = back.restore();") < priv.indexOf("p.give(hd, sid"), "back on its own station before anything else is done");
+  assert.ok(priv.indexOf("let restored = back.restore();") < priv.indexOf("p.check(hd, &sid_b"), "back on its own station before anything else is done");
   // objects are closed desktop first, then the station
   assert.ok(priv.indexOf("CloseDesktop(self.desktop") < priv.indexOf("CloseWindowStation(self.station"));
   // only an AppContainer profile's SID is ever given an entry

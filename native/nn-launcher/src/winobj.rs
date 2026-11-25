@@ -36,22 +36,48 @@ pub(crate) fn sid_text(sid: &[u8]) -> Option<String> {
 /// Groups that must never hold an allow entry on a private window object: Everyone, Anonymous, Network, Interactive, Authenticated Users, Guests, Users, and the two package groups.
 const BROAD_SIDS: [&str; 9] = ["S-1-1-0", "S-1-5-7", "S-1-5-2", "S-1-5-4", "S-1-5-11", "S-1-5-32-546", "S-1-5-32-545", "S-1-15-2-1", "S-1-15-2-2"];
 
-/// The principals besides the container that may hold an allow entry on a private window object whoever runs the launcher: SYSTEM, Administrators and OWNER RIGHTS (the entries a
-/// default token DACL holds for LocalSystem and for an elevated account). The launcher's own token user and owner are added by the caller, and a logon-session SID (S-1-5-5-X-Y) is allowed too.
+/// The principals besides the container that may hold an allow entry on a private window object whoever runs the launcher: SYSTEM, Administrators and OWNER RIGHTS (accounts that already
+/// control the machine or the object). The launcher's own token user and owner are added by the caller. A logon-session SID (S-1-5-5-X-Y) is NOT accepted: the DACL the launcher gives the
+/// objects at creation (`private_dacl`) holds none, and one of another logon session would let that session's processes in.
 const ALWAYS_TRUSTED: [&str; 3] = ["S-1-5-18", "S-1-5-32-544", "S-1-3-4"];
 
-/// A logon-session SID (S-1-5-5-X-Y): the default token DACL of a logon gives it read and execute; it names the processes of the launcher's own logon session.
-fn is_logon_sid(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix("S-1-5-5-") else { return false };
-    let parts: Vec<&str> = rest.split('-').collect();
-    parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+/// Everything the launcher's own account and SYSTEM get on the private objects: the specific rights of the type plus STANDARD_RIGHTS_REQUIRED (DELETE, READ_CONTROL, WRITE_DAC, WRITE_OWNER),
+/// no generic bits (so nothing is mapped when the descriptor is stored, and what is read back is what was written). A superset of the container's mask: an AppContainer's access is what both its
+/// user and groups AND its package SID are granted, so the account's entry must cover the container's.
+pub(crate) const STATION_FULL: u32 = 0x000F_037F;
+pub(crate) const DESKTOP_FULL: u32 = 0x000F_01FF;
+
+fn allow_ace(mask: u32, sid: &[u8]) -> Vec<u8> {
+    let mut ace = vec![ACE_ALLOWED, 0];
+    ace.extend(((8 + sid.len()) as u16).to_le_bytes());
+    ace.extend(mask.to_le_bytes());
+    ace.extend_from_slice(sid);
+    ace
 }
 
-/// Is this the DACL a private window object may have? It is read back after the entry was added, and the run does not start unless it passes. It is an ALLOW LIST: every entry is a plain allow or
-/// deny entry (anything else is not understood, so refused); the container's SID holds exactly ONE allow entry, explicit, with exactly the expected mask; every other allow entry names SYSTEM,
-/// Administrators, OWNER RIGHTS, a logon-session SID, or one of `own` (the launcher's token user and owner, the principals the default token DACL is made for). Anything else (Everyone, LOCAL,
-/// Domain Users, SERVICE, another container or capability, another account) is refused and named, so a default token DACL that was widened is caught here, not only the groups a deny list knows.
-/// A NULL DACL never reaches here (it is refused where the DACL is read).
+/// The DACL a private window station (`full` STATION_FULL, `mask` STATION_RIGHTS) or desktop (DESKTOP_FULL, DESKTOP_RIGHTS) is CREATED with: the launcher's own token user and SYSTEM with
+/// `full`, the container with `mask`, all explicit, no inheritance flags, nothing else. Given in the SECURITY_ATTRIBUTES of the creating call, so there is no moment at which the object exists
+/// with a default descriptor (Microsoft documents two different defaults for a NULL one: "grants GENERIC_ALL access to all users" on the CreateWindowStation page, "come from the primary or
+/// impersonation token of the creator" on the window-station security page) and no DACL is written afterwards. None: a malformed SID, a container SID that is not one profile's, or a user that is
+/// a broad group or a container.
+pub(crate) fn private_dacl(user: &[u8], container: &[u8], mask: u32, full: u32) -> Option<Vec<u8>> {
+    if !sid_ok(user) || mask & !full != 0 { return None; }
+    let me = sid_text(container)?;
+    let who = sid_text(user)?;
+    if !is_profile_sid(&me) || BROAD_SIDS.contains(&who.as_str()) || who.starts_with("S-1-15-") { return None; }
+    let system: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+    let mut entries = vec![allow_ace(full, user)];
+    if user != system { entries.push(allow_ace(full, &system)); }
+    entries.push(allow_ace(mask, container));
+    let refs: Vec<&[u8]> = entries.iter().map(|e| &e[..]).collect();
+    build_acl(2, &refs)
+}
+
+/// Is this the DACL a private window object may have? It is read back after the object was made, and the run does not start unless it passes. It is an ALLOW LIST: every entry is a plain allow or
+/// deny entry (anything else, an object, callback, audit or label entry, is not understood, so refused; a deny entry can only take access away, so it is passed over); the container's SID holds
+/// exactly ONE allow entry, with no flags at all (not inherited, not inherit-only, not inheritable) and exactly the expected mask; every other allow entry names SYSTEM, Administrators, OWNER
+/// RIGHTS or one of `own` (the launcher's token user and owner). Anything else (Everyone, LOCAL, Domain Users, SERVICE, a logon session, another container or capability, another account) is
+/// refused and named. A NULL DACL never reaches here (it is refused where the DACL is read).
 pub(crate) fn private_acl_ok(acl: &[u8], container: &[u8], mask: u32, own: &[Vec<u8>]) -> Result<(), String> {
     let me = sid_text(container).ok_or("the container SID is not well formed")?;
     let (_, entries) = acl_entries(acl).ok_or("the DACL is not a well-formed ACL")?;
@@ -64,15 +90,15 @@ pub(crate) fn private_acl_ok(acl: &[u8], container: &[u8], mask: u32, own: &[Vec
         let text = sid_text(sid).ok_or("an entry holds a malformed SID")?;
         if e[0] == ACE_DENIED { continue; }
         if text == me {
-            if e[1] & ACE_INHERITED != 0 || u32::from_le_bytes([e[4], e[5], e[6], e[7]]) != mask { return Err("the container's allow entry is inherited or has another mask".into()); }
+            if e[1] != 0 || u32::from_le_bytes([e[4], e[5], e[6], e[7]]) != mask { return Err("the container's allow entry has flags (inherited or inheritance) or another mask".into()); }
             found += 1;
             continue;
         }
         // A broad group or another container is refused even when it is the launcher's own owner (it would not be "the launcher's own account" then).
         if BROAD_SIDS.contains(&text.as_str()) { return Err(format!("{text} holds an allow entry")); }
         if text.starts_with("S-1-15-") { return Err(format!("{text} (another container or capability) holds an allow entry")); }
-        if ALWAYS_TRUSTED.contains(&text.as_str()) || is_logon_sid(&text) || own.iter().any(|o| o.as_slice() == sid) { continue; }
-        return Err(format!("{text} holds an allow entry (only the container, the launcher's own account, SYSTEM, Administrators, OWNER RIGHTS and the logon session may)"));
+        if ALWAYS_TRUSTED.contains(&text.as_str()) || own.iter().any(|o| o.as_slice() == sid) { continue; }
+        return Err(format!("{text} holds an allow entry (only the container, the launcher's own account, SYSTEM, Administrators and OWNER RIGHTS may)"));
     }
     match found { 1 => Ok(()), 0 => Err("the container's entry is missing".into()), _ => Err("the container holds more than one allow entry".into()) }
 }
@@ -106,6 +132,7 @@ pub(crate) fn acl_entries(acl: &[u8]) -> Option<(u8, Vec<&[u8]>)> {
 
 pub(crate) const ACE_ALLOWED: u8 = 0; // ACCESS_ALLOWED_ACE_TYPE
 pub(crate) const ACE_DENIED: u8 = 1; // ACCESS_DENIED_ACE_TYPE
+#[cfg(any(test, feature = "experiment"))] // the experiment's entry builder; the product creates its objects with their final DACL
 pub(crate) const ACE_INHERITED: u8 = 0x10; // INHERITED_ACE
 /// The largest ACL: AclSize is a 16-bit count of bytes and an ACL is a whole number of DWORDs.
 pub(crate) const ACL_MAX: usize = 0xFFFC;
@@ -127,6 +154,7 @@ pub(crate) fn build_acl(revision: u8, entries: &[&[u8]]) -> Option<Vec<u8>> {
 }
 
 /// Is this entry an explicit (not inherited) allow or deny entry for exactly this SID? (ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE: header, mask, then the SID at byte 8.)
+#[cfg(any(test, feature = "experiment"))] // the experiment's entry builder; the product creates its objects with their final DACL
 pub(crate) fn names_sid_explicitly(entry: &[u8], sid: &[u8]) -> bool {
     (entry[0] == ACE_ALLOWED || entry[0] == ACE_DENIED) && entry[1] & ACE_INHERITED == 0 && entry.len() >= 8 + sid.len() && &entry[8..8 + sid.len()] == sid
 }
@@ -135,6 +163,7 @@ pub(crate) fn names_sid_explicitly(entry: &[u8], sid: &[u8]) -> bool {
 /// SetEntriesInAclW documents that it puts a new allow entry, just before the first existing allow entry (so after the deny entries that lead the list), or last when there is none.
 /// Unlike SetEntriesInAclW, nothing is merged, re-sorted or rewritten, so removing the entry again (`without_explicit_entries`) gives back exactly the entries that were there, whoever
 /// removes it (this launcher at its end, or `desktop-revoke` after this launcher was killed). None: a malformed ACL or SID, an entry for the SID already present, or no room.
+#[cfg(any(test, feature = "experiment"))] // the experiment's entry builder; the product creates its objects with their final DACL
 pub(crate) fn with_allow_entry(acl: &[u8], sid: &[u8], mask: u32) -> Option<Vec<u8>> {
     if !sid_ok(sid) { return None; }
     let (revision, entries) = acl_entries(acl)?;
@@ -242,12 +271,13 @@ mod tests {
         let mine = ace(0, 0, STATION_RIGHTS, &me);
         let with = |extra: Vec<u8>| acl(&[mine.clone(), ace(0, 0, 0x37f, &sid(5, &[18])), extra]);
         // what default token DACLs hold: the account itself, SYSTEM, Administrators, OWNER RIGHTS, the logon session
-        for (name, ok) in [("own user", user.clone()), ("Administrators", sid(5, &[32, 544])), ("OWNER RIGHTS", sid(3, &[4])), ("logon session", sid(5, &[5, 0, 5814400]))] {
+        for (name, ok) in [("own user", user.clone()), ("Administrators", sid(5, &[32, 544])), ("OWNER RIGHTS", sid(3, &[4]))] {
             assert_eq!(private_acl_ok(&with(ace(0, 0, 0xa0000000, &ok)), &me, STATION_RIGHTS, &own), Ok(()), "{name}");
         }
         // groups a deny list easily misses, and any other account: refused and named
         for (name, other) in [("LOCAL", sid(2, &[0])), ("CONSOLE LOGON", sid(2, &[1])), ("SERVICE", sid(5, &[6])), ("BATCH", sid(5, &[3])), ("Domain Users", sid(5, &[21, 1, 2, 3, 513])),
-            ("another account", sid(5, &[21, 1, 2, 3, 1002])), ("ALL SERVICES", sid(5, &[80, 0])), ("NTLM authentication", sid(5, &[64, 10])), ("a logon SID of another shape", sid(5, &[5, 1]))] {
+            ("another account", sid(5, &[21, 1, 2, 3, 1002])), ("ALL SERVICES", sid(5, &[80, 0])), ("NTLM authentication", sid(5, &[64, 10])), ("a logon SID of another shape", sid(5, &[5, 1])),
+            ("a logon session (the creation DACL holds none; another session's would let it in)", sid(5, &[5, 0, 5814400]))] {
             let e = private_acl_ok(&with(ace(0, 0, 1, &other)), &me, STATION_RIGHTS, &own).expect_err(name);
             assert!(e.contains(&sid_text(&other).unwrap()) && e.contains("allow entry"), "{name}: {e}");
         }
@@ -256,10 +286,42 @@ mod tests {
         // a broad group stays refused even when it is passed as the launcher's own (an owner that is Everyone is not "the launcher's own account")
         assert!(private_acl_ok(&with(ace(0, 0, 1, &sid(1, &[0]))), &me, STATION_RIGHTS, &[sid(1, &[0])]).is_err());
         // exactly one entry for the container: a second one (another mask, or the same) is refused
-        assert!(private_acl_ok(&with(ace(0, 0, 0x10000000, &me)), &me, STATION_RIGHTS, &own).unwrap_err().contains("inherited or has another mask"));
+        assert!(private_acl_ok(&with(ace(0, 0, 0x10000000, &me)), &me, STATION_RIGHTS, &own).unwrap_err().contains("flags (inherited or inheritance) or another mask"));
+        // the container's entry carries no flags at all: inherit-only (it would not apply to the object), object or container inherit (it would spread to desktops made later)
+        for flags in [0x08u8, 0x01, 0x02, 0x04, 0x03] {
+            let e = private_acl_ok(&acl(&[ace(0, flags, STATION_RIGHTS, &me), ace(0, 0, 0x37f, &sid(5, &[18]))]), &me, STATION_RIGHTS, &own).expect_err("flags");
+            assert!(e.contains("flags"), "{flags:#x}: {e}");
+        }
         assert!(private_acl_ok(&with(mine.clone()), &me, STATION_RIGHTS, &own).unwrap_err().contains("more than one"));
         // the creation flag that refuses an existing station
         assert_eq!(STATION_CREATE_ONLY, 1);
+    }
+
+    #[test]
+    fn the_creation_dacl_is_the_account_system_and_the_container_and_passes_its_own_check() {
+        let me = container();
+        let user = sid(5, &[21, 1, 2, 3, 1001]);
+        let system = sid(5, &[18]);
+        for (mask, full) in [(STATION_RIGHTS, STATION_FULL), (DESKTOP_RIGHTS, DESKTOP_FULL)] {
+            let d = private_dacl(&user, &me, mask, full).unwrap();
+            assert_eq!(d, acl(&[ace(0, 0, full, &user), ace(0, 0, full, &system), ace(0, 0, mask, &me)]), "byte for byte");
+            assert_eq!(private_acl_ok(&d, &me, mask, &[user.clone()]), Ok(()));
+            assert!(private_acl_ok(&d, &me, mask, &[]).is_err(), "the account's own entry needs the account passed in");
+            assert_eq!(mask & !full, 0, "the account's entry covers the container's (an AppContainer gets what both are granted)");
+            assert_eq!(full & 0xF000_0000, 0, "no generic bits: nothing is mapped when stored");
+        }
+        assert_eq!((STATION_FULL, DESKTOP_FULL), (0xF037F, 0xF01FF));
+        // run as LocalSystem: the account is SYSTEM, one entry for it, not two
+        let d = private_dacl(&system, &me, STATION_RIGHTS, STATION_FULL).unwrap();
+        assert_eq!(acl_entries(&d).unwrap().1.len(), 2);
+        assert_eq!(private_acl_ok(&d, &me, STATION_RIGHTS, &[system.clone()]), Ok(()));
+        // refused: a container SID that is not a profile's, a broad or container account, a malformed SID, a container mask wider than the account's
+        assert!(private_dacl(&user, &sid(15, &[2, 1]), STATION_RIGHTS, STATION_FULL).is_none());
+        assert!(private_dacl(&user, &user, STATION_RIGHTS, STATION_FULL).is_none());
+        for bad in [sid(1, &[0]), sid(5, &[11]), sid(15, &[2, 11, 12, 13, 14, 15, 16, 18]), vec![1, 2, 0]] {
+            assert!(private_dacl(&bad, &me, STATION_RIGHTS, STATION_FULL).is_none(), "{bad:?}");
+        }
+        assert!(private_dacl(&user, &me, STATION_RIGHTS | 0x1000_0000, STATION_FULL).is_none());
     }
 
     #[test]
