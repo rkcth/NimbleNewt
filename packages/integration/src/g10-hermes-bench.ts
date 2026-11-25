@@ -25,6 +25,8 @@ const work = mkdtempSync(join(tmpdir(), "g10h-"));
 const cwd = join(work, "cwd"); mkdirSync(cwd);
 let n = 0;
 const runner: HermesRunner = (prompt) => new Promise((resolve) => {
+  // The prompt is one argument (no shell); one that starts with "-" could still be read as an option, so it is refused rather than sent.
+  if (prompt.startsWith("-")) throw new Error("a prompt may not start with \"-\"");
   const usageFile = join(work, `usage-${++n}.json`);
   const started = performance.now();
   execFile(HERMES, ["--provider", "openai-codex", "-m", MODEL, "--reasoning", "low", "--ignore-rules", "--usage-file", usageFile, "-z", prompt], { cwd, timeout: 300_000, maxBuffer: 1 << 20 }, (error, stdout) => {
