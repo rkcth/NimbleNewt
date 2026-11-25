@@ -285,6 +285,49 @@ jobs:
           node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
           { echo "## G05 containment cases, native backend (hosted Windows)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      # Card A03b, found by the owner's first real Verify (Windows PowerShell 5.1, StrictMode 3, after a real Install): Verify read a property that Get-LocalUser's objects do not have and stopped right after
+      # "PASS  the account exists". The dry run and Verify on an EMPTY machine (the step above) never reach the account lines, so they could not see it. This step makes a real, throw-away local user
+      # and runs Verify against it, so the account lines run on a real LocalUser object. It changes the machine (a user exists for a few seconds), so it refuses to run anywhere but a GitHub-hosted runner
+      # (a disposable virtual machine): GITHUB_ACTIONS must be 'true' and RUNNER_ENVIRONMENT must be 'github-hosted'. It is NOT in the own-runner job. The user is removed by exact name in `finally` and
+      # the step fails if it is still there. The random password is made with .NET, handed to New-LocalUser as a SecureString and never printed.
+      - name: "Installer Verify against a real throw-away account (hosted runner only)"
+        id: installer_verify_account
+        shell: powershell
+        if: always()
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { Write-Output '::error::this step makes a real local user and runs only on a GitHub-hosted runner'; exit 1 }
+          $f = (Resolve-Path 'native\install\Install-NimbleNewtLauncher.ps1').Path
+          $marker = [regex]::Match((Get-Content -LiteralPath $f -Raw), "\`$AccountMarker = '([^']+)'").Groups[1].Value
+          if ($marker.Length -lt 10) { Write-Output '::error::the installer marker was not found'; exit 1 }
+          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          $pick = New-Object byte[] 6; $rng.GetBytes($pick)
+          $chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+          $name = 'nnprobe' + (-join ($pick | ForEach-Object { $chars[$_ % $chars.Length] }))
+          $pw = New-Object byte[] 48; $rng.GetBytes($pw); $rng.Dispose()
+          $secure = New-Object System.Security.SecureString
+          foreach ($c in ([Convert]::ToBase64String($pw) + 'aA1!').ToCharArray()) { $secure.AppendChar($c) }
+          $secure.MakeReadOnly()
+          $failed = $false
+          try {
+            New-LocalUser -Name $name -Password $secure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description $marker | Out-Null
+            try { Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $name } catch [Microsoft.PowerShell.Commands.MemberExistsException] { }
+            $out = Join-Path $env:RUNNER_TEMP 'nn-verify-account.txt'
+            $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $f -Action Verify -AccountName $name *> $out; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $old }
+            $text = (Get-Content -LiteralPath $out -Raw) | Out-String
+            Write-Output "---- Verify against the throw-away account (exit $code) ----"; Write-Output $text
+            foreach ($m in @('PropertyNotFound', 'cannot be found on this object', 'FullyQualifiedErrorId', 'Exception')) { if ($text.IndexOf($m, [System.StringComparison]::Ordinal) -ge 0) { Write-Output "::error::Verify: unexpected text: $m"; $failed = $true } }
+            foreach ($m in @('PASS  the account exists', 'PASS  it is the account this script made', 'password expires: never', 'account rights:', 'RESULT:')) { if ($text.IndexOf($m, [System.StringComparison]::Ordinal) -lt 0) { Write-Output "::error::Verify: the line is missing: $m"; $failed = $true } }
+            if ($code -ne 1) { Write-Output "::error::Verify on a machine with no installed files should end with exit 1 (got $code)"; $failed = $true }
+          } finally {
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $name }
+            if (Get-LocalUser -Name $name -ErrorAction SilentlyContinue) { Write-Output "::error::the throw-away account $name is still there"; $failed = $true }
+            else { Write-Output 'the throw-away account is removed' }
+          }
+          if ($failed) { exit 1 }
+          exit 0
       # The programs the own-runner job runs (that machine has no Rust). Staged here, hashed here, kept 7 days. The hashes also leave as job outputs, so the other job checks the downloaded files against a value
       # that did not travel inside the artifact. Runs after every build step whatever happened to the experiment steps; `launchers` stays empty (the own-runner job then does not start) unless both files exist
       # and the product file matches its release record, and both staged copies still have the hashes their build steps reported right after building (so an experiment step in between cannot

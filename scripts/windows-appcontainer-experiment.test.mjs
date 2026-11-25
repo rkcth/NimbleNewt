@@ -2896,3 +2896,35 @@ test("A03b what-if repair: the hosted installer step runs both shells with the r
   assert.ok(!ps.includes("Get-FileHash") && ps.includes("function Get-Sha256Hex") && ps.includes("function Invoke-Read"));
   assert.ok(!/(^|\n)\s+permissions:/.test(step) && !/uses:/.test(step), "pins and permissions are not touched by this step");
 });
+
+test("A03b Verify-with-a-real-account: the hosted job makes a throw-away marked user, runs Verify against it, refuses anywhere but a GitHub-hosted runner, and always removes the user", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  const from = hosted.indexOf("id: installer_verify_account");
+  assert.ok(from > hosted.indexOf("id: installer_whatif") && from < hosted.indexOf("id: stage"), "after the dry-run step, before staging");
+  const next = hosted.indexOf("\n      # The programs the own-runner job runs", from);
+  const step = hosted.slice(hosted.lastIndexOf("\n      - name:", from) + 1, next);
+  const text = step.replace(/^\s*#.*$/gm, "");
+  assert.match(step, /shell: powershell\n/, "Windows PowerShell 5.1");
+  assert.match(step, /\n\s+if: always\(\)\n/);
+  assert.ok(!/continue-on-error/.test(step) && !/uses:/.test(step) && !/permissions:/.test(step), "a gate; pins and permissions untouched");
+  // the hosted-only guard comes before anything is made
+  const guard = text.indexOf("$env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'");
+  assert.ok(guard >= 0 && guard < text.indexOf("New-LocalUser") && text.slice(guard, guard + 300).includes("exit 1"), "refuses unless GITHUB_ACTIONS is 'true' and the runner is github-hosted");
+  // a random name, a random password that is never printed, the installer's own marker, the owner's real flags
+  assert.ok(text.includes("'nnprobe' +") && text.includes("RandomNumberGenerator]::Create()") && text.includes("GetBytes($pick)"));
+  assert.ok(text.includes("-Description $marker") && text.includes("$AccountMarker = '"), "the marker is read from the installer itself");
+  assert.ok(text.includes("-PasswordNeverExpires"));
+  assert.ok(!/Write-(Output|Host)[^\n]*(\$secure|\$pw\b|Password)/i.test(text) && !/\$pw\b[^\n]*\|\s*Out-|ConvertFrom-SecureString|-AsPlainText/.test(text), "the password is never printed or converted to text");
+  // runs Verify under 5.1 against that account, and checks what a crash would have hidden
+  assert.ok(text.includes("-Action Verify -AccountName $name"));
+  for (const part of ["PropertyNotFound", "cannot be found on this object", "PASS  the account exists", "PASS  it is the account this script made", "password expires: never", "RESULT:"]) assert.ok(text.includes(part), part);
+  // cleanup in finally, by the exact name, and a check that it is gone; Uninstall is not run
+  const fin = text.slice(text.indexOf("} finally {"));
+  assert.ok(fin.includes("Remove-LocalUser -Name $name") && fin.includes("is still there") && /Get-LocalUser -Name \$name/.test(fin), "removal by exact name, then a check it is gone");
+  assert.ok(!/Remove-LocalUser[^\n]*[*?]/.test(text) && !/'Uninstall'|Action Uninstall|-Action Install/.test(text));
+  assert.ok(text.indexOf("New-LocalUser") < text.indexOf("} finally {") && text.indexOf("try {") < text.indexOf("New-LocalUser"), "the user is made inside the try whose finally removes it");
+  // never on the own runner
+  assert.ok(!/installer_verify_account|New-LocalUser|nnprobe/.test(own), "the own-runner job never makes a user");
+});
