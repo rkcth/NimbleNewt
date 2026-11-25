@@ -190,7 +190,9 @@ async function takeLock(host: NativeHost, settings: NativeSettings, runId: strin
     }
     // Marked as in progress here BEFORE the file exists, so another caller in this process never sees the new number without its run.
     LIVE_HERE.add(runId);
-    if (!host.createExclusive(`${dir}\\${n + 1}`, mine)) { LIVE_HERE.delete(runId); continue; }
+    let made: boolean;
+    try { made = host.createExclusive(`${dir}\\${n + 1}`, mine); } catch { LIVE_HERE.delete(runId); return undefined; } // the lock cannot be written: busy, nothing runs
+    if (!made) { LIVE_HERE.delete(runId); continue; }
     const now = lockNumbers(host, settings);
     if (now.some((x) => x > n + 1)) { LIVE_HERE.delete(runId); try { host.remove(`${dir}\\${n + 1}`); } catch { /* a higher number holds the slot either way */ } return undefined; }
     for (const x of now) if (x < n + 1) { try { host.remove(`${dir}\\${x}`); host.remove(`${dir}\\${x}.released`); } catch { /* an old number never decides anything */ } }
@@ -277,7 +279,7 @@ export interface SweepResult { readonly released: number; readonly problems: rea
  * Ends what a run that never finished (the runner was killed, the machine restarted) may have left: for each job folder whose runner is gone, the container's entries on its granted paths are
  * revoked and read back; a clean folder is removed, one that cannot be cleaned is kept and reported. A folder whose runner is alive is another run's and is left alone. `only` limits the sweep to one folder.
  */
-export async function sweepLeftovers(host: NativeHost, settings: NativeSettings, only?: string, except?: string): Promise<SweepResult> {
+export async function sweepLeftovers(host: NativeHost, settings: NativeSettings, only?: string, except?: string, mayRevoke = true): Promise<SweepResult> {
   const problems: string[] = [];
   const live: string[] = [];
   let released = 0;
@@ -293,6 +295,9 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
     // A run that may still have a program in the container (its runner, or the launcher the runner started, is running; or that cannot be told) is never revoked: its seal would be lifted under a
     // live program. For `release` that is a problem to report; the folder stays for a later sweep.
     if (await writerAlive(host, status.runnerPid, status.startedAt, status.runId)) { live.push(dir); if (only !== undefined) problems.push(`${dir}: the run's runner or launcher may still be running, so its entries are kept until it ends (a later health check sweeps them)`); continue; }
+    // Revoking needs the run slot: a run that starts meanwhile may apply its grants to the same task folders (one container SID), and a seal revoke sent late would then lift ITS seal while its
+    // workspace entry stays. Without the slot nothing is revoked; the slot's holder swept before it started, and a later sweep takes what is left.
+    if (!mayRevoke) { problems.push(`${dir}: another native run holds the run slot, so its entries are kept for a later sweep (nothing is revoked while a run may be starting)`); continue; }
     const text = host.readText(jobFile(dir));
     let grants: NativeGrant[];
     // The runner had started (the status file says so), so grants may exist: without a readable job file they are not known, which is a problem, never "nothing to revoke".
@@ -301,4 +306,16 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
     if (back.state === "clean") { host.remove(dir); released++; } else problems.push(`${dir}: ${back.state === "left" ? `the container still has an entry on ${back.left.join(", ")}` : "the access lists could not be read back"}`);
   }
   return { released, problems, live };
+}
+
+/**
+ * `sweepLeftovers` for callers outside a run (the health check and `release`): the run slot is taken first and held for the sweep, so no revoke of an earlier run's paths can overlap a run that
+ * applies its grants to the same folders. While another run holds the slot nothing is revoked (a folder that had started is reported, one that never started is still removed by `release`).
+ */
+export async function sweepLeftoversLocked(host: NativeHost, settings: NativeSettings, only?: string): Promise<SweepResult> {
+  const id = `sweep-${host.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const lock = await takeLock(host, settings, id);
+  try { return await sweepLeftovers(host, settings, only, undefined, lock !== undefined); } finally {
+    if (lock !== undefined) { LIVE_HERE.delete(id); dropLock(host, settings, lock, id); }
+  }
 }

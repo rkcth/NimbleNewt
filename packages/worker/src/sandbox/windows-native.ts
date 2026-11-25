@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { BackendHealth, GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
-import { jobFile, jobsDir, runNativeJob, sweepLeftovers, type NativeHost, type NativeJob } from "./windows-native-job.js";
+import { jobFile, jobsDir, runNativeJob, sweepLeftoversLocked, type NativeHost, type NativeJob } from "./windows-native-job.js";
 import { nativeRealHost } from "./windows-native-real.js";
 import {
   DEFAULT_JOB_LIMITS, DEFAULT_PROFILE_NAME, EXIT_BUSY, LPAC_CAPABILITIES, MAX_RUN_MS, NATIVE_BACKEND_NAME, NATIVE_MODE, REFUSED_ROUTE,
@@ -145,7 +145,7 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     if (requireNtfs) {
       for (const v of [controlDir, probeDir]) { const fs = await host.fileSystemOf(v); if (fs === undefined || fs.toUpperCase() !== "NTFS") return no(`${v} is not on NTFS (${fs ?? "unreadable"}); folder grants need NTFS`); }
     }
-    const swept = await sweepLeftovers(host, settings);
+    const swept = await sweepLeftoversLocked(host, settings);
     if (swept.problems.length > 0) return no(`a run left access-list entries behind and they could not be undone: ${swept.problems.join("; ")}`);
     let info;
     try { info = parseLauncherLine((await host.run(launcher, ["info", "--name", settings.profileName], { timeoutMs: 60_000 })).stdout); } catch (error) { return no(`the launcher could not be run: ${(error as Error).message}`); }
@@ -230,7 +230,7 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     async release(spawnPlan: SpawnPlan): Promise<void> {
       const jobDir = spawnPlan.env["NIMBLENEWT_NATIVE_JOB"];
       if (jobDir === undefined || !overlapsWin(jobDir, jobsDir(settings)) || jobDir === jobsDir(settings)) return;
-      const result = await sweepLeftovers(host, settings, jobDir);
+      const result = await sweepLeftoversLocked(host, settings, jobDir);
       if (result.problems.length > 0) throw new Error(`native Windows cleanup incomplete: ${result.problems.join("; ")}`);
     },
   };

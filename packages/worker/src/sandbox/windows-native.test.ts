@@ -1013,6 +1013,58 @@ describe("A03b second review: no second program with the container's SID, seals 
     assert.throws(() => backend.plan(recipe({ readOnly: [{ host: "C:\\Program File\u017f\\NimbleNewt", guest: "/inputs/tools" }] }), ["/inputs/tools/tool.exe"], "run-0004-dddd"), /overlaps the supervisor/);
   });
 
+  test("third review: release of an earlier run's folder while another run holds the slot revokes nothing (that run's grants on the same task folders stay whole)", async () => {
+    const host = new SimHost();
+    const old = jobFor(host);
+    const live = second(host, "run-0009-live", recipe());
+    let during: { error: string; revokes: number; left: number } | undefined;
+    host.script = { onProgram: async () => {
+      // The earlier run on the same task folders had started (status file) and its runner is gone: its job file still names the same paths the live run has just been granted.
+      host.writeText(`${old.jobDir}\\status.json`, JSON.stringify({ runnerPid: 900, runId: old.job.runId, startedAt: new Date(Date.now() - 60_000).toISOString() }));
+      const before = host.calls.filter((c) => c.args[0] === "revoke" || c.args[0] === "check").length;
+      let error = "";
+      try { await old.backend.release!(old.plan); } catch (e) { error = (e as Error).message; }
+      during = { error, revokes: host.calls.filter((c) => c.args[0] === "revoke" || c.args[0] === "check").length - before, left: live.job.grants.filter((g) => (host.entries.get(key(g.path)) ?? 0) > 0).length };
+    } };
+    assert.equal((await runNativeJob(host, live.job, undefined, live.jobDir)).exitCode, 0);
+    assert.match(during?.error ?? "", /holds the run slot/);
+    assert.equal(during?.revokes, 0, "no check or revoke while another run holds the slot");
+    assert.equal(during?.left, live.job.grants.length, "the live run's grants (its seal included) were all still there");
+    assert.ok(host.exists(jobFile(old.jobDir)), "the folder stays for a later sweep");
+    // The slot is free again: release now sweeps it.
+    await old.backend.release!(old.plan);
+    assert.equal(host.exists(jobFile(old.jobDir)), false);
+  });
+
+  test("third review: a contender that acts on an older listing creates a number below the live holder's and backs off without running", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    // 1 was released; 2 was taken and has gone (removed by the taker of 3); 3 is held by a live run. The contender's first listing is from before 3 existed.
+    host.files.set(key(`${LOCKS}\\1`), JSON.stringify({ pid: 400, runId: "done", at: new Date(Date.now() - 120_000).toISOString() }));
+    host.files.set(key(`${LOCKS}\\1.released`), "done");
+    host.files.set(key(`${LOCKS}\\3`), JSON.stringify({ pid: 555, runId: "live", at: new Date(Date.now() - 10_000).toISOString() }));
+    host.alive.add(555);
+    host.procs = [{ pid: 555, parent: 1, started: new Date(Date.now() - 60_000).toISOString() }];
+    const real = host.listDir.bind(host);
+    let stale = true;
+    host.listDir = (p: string): string[] => { if (stale && key(p) === key(LOCKS)) { stale = false; return ["1", "1.released"]; } return real(p); };
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, EXIT_BUSY);
+    assert.equal(host.calls.filter((c) => c.args[0] === "run").length, 0, "no second program while 3 is held");
+    assert.equal(host.exists(`${LOCKS}\\2`), false, "the contender removed the number it made");
+    assert.ok(host.exists(`${LOCKS}\\3`));
+  });
+
+  test("third review: a lock that cannot be written is busy (no run, no grant), and the run id is not left marked as in progress", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    const real = host.createExclusive.bind(host);
+    host.createExclusive = (): boolean => { throw new Error("disk full"); };
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, EXIT_BUSY);
+    assert.equal(host.calls.filter((c) => c.args[0] === "run").length, 0);
+    host.createExclusive = real;
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, 0, "the same run id runs once the lock can be written");
+  });
+
   test("the real host's exclusive create is whole or nothing and leaves no temporary file", () => {
     const dir = mkdtempSync(join(tmpdir(), "nn-a03b-x-"));
     try {
