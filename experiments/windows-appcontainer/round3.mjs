@@ -94,15 +94,16 @@ export const NUL_OPEN_SCRIPT = "const fs=require('fs');const r={};for(const p of
  * `env`: a function of the plan giving environment changes (a null value removes a name).
  */
 export function gitVariants() {
-  const g = (id, desc, o = {}) => ({ id, desc, container: "ac-nocap", stdin: "nul", stdoutPipe: false, exe: "cmd", copy: undefined, wrap: false, env: () => ({}), args: ["--version"], ...o });
+  const g = (id, desc, o = {}) => ({ id, desc, container: "ac-nocap", stdin: "nul", stdoutPipe: false, stdoutNul: false, openTest: false, exe: "cmd", copy: undefined, wrap: false, env: () => ({}), args: ["--version"], ...o });
   const lpac = "lpac-optout-reg-com";
   return [
-    g("base", "Git\\cmd\\git.exe; standard input the launcher's read-only NUL; output to files"),
+    g("base", "Git\\cmd\\git.exe; standard input the launcher's read-only NUL; output to files", { openTest: true }),
     g("stdin-nul-rw", "standard input is NUL opened for reading AND writing", { stdin: "nul-rw" }),
     g("stdin-file", "standard input is a real (empty) file in the workspace", { stdin: "file" }),
     g("stdin-pipe", "standard input is an anonymous pipe that is already at end of input", { stdin: "pipe" }),
     g("stdin-pipe-open", "standard input is an anonymous pipe whose write end stays open", { stdin: "pipe-open" }),
     g("out-pipes", "standard output and error are anonymous pipes (copied to files by the launcher)", { stdoutPipe: true }),
+    g("all-nul-rw", "standard input, output and error are all the NUL device opened by the launcher for reading AND writing (inheritable handles; nothing is captured, so only the exit code counts)", { stdin: "nul-rw", stdoutNul: true }),
     g("all-pipes", "standard input, output and error are all anonymous pipes", { stdin: "pipe", stdoutPipe: true }),
     g("mingw64-direct", "Git\\mingw64\\bin\\git.exe started directly (no Git\\cmd wrapper)", { exe: "mingw64" }),
     g("env-msys", "environment MSYS=winsymlinks:nativestrict and MSYS2_ARG_CONV_EXCL=* (the MSYS runtime's own switches; a MinGW git should ignore them)", { env: () => ({ MSYS: "winsymlinks:nativestrict", MSYS2_ARG_CONV_EXCL: "*" }) }),
@@ -112,7 +113,8 @@ export function gitVariants() {
     g("fsmonitor-off", "git -c core.fsmonitor=false --version", { args: ["-c", "core.fsmonitor=false", "--version"] }),
     g("copy-cmd-exe", "a copy of Git\\cmd\\git.exe run from the workspace", { copy: "cmd" }),
     g("copy-mingw64-exe", "a copy of Git\\mingw64\\bin\\git.exe run from the workspace", { copy: "mingw64" }),
-    g("lpac-base", "LPAC (optout) + registryRead + lpacCom, otherwise as base", { container: lpac }),
+    g("lpac-base", "LPAC (optout) + registryRead + lpacCom, otherwise as base", { container: lpac, openTest: true }),
+    g("lpac-all-nul-rw", "LPAC + registryRead + lpacCom, standard input, output and error all NUL read-write", { container: lpac, stdin: "nul-rw", stdoutNul: true }),
     g("lpac-stdin-nul-rw", "LPAC + registryRead + lpacCom, standard input NUL read-write", { container: lpac, stdin: "nul-rw" }),
     g("lpac-mingw64-nul-rw", "LPAC + registryRead + lpacCom, mingw64 git.exe, standard input NUL read-write", { container: lpac, stdin: "nul-rw", exe: "mingw64" }),
   ];
@@ -155,10 +157,35 @@ export function gitStepFor(variant, stepId, plan, ctx) {
   if (variant.stdin === "file") launcherArgs.push("--stdin", `file:${join(plan.workspace, "stdin.txt")}`);
   else if (variant.stdin !== "nul") launcherArgs.push("--stdin", variant.stdin);
   if (variant.stdoutPipe) launcherArgs.push("--stdout-pipe", "--stderr-pipe");
-  return { id: stepId, label: def.label, program: "git", exe, args: () => args, expect: def.expect, cwd: stepId === "git-version" ? plan.workspace : plan.gitWork, env: variant.env(plan), launcherArgs };
+  if (variant.stdoutNul) launcherArgs.push("--stdout-nul-rw", "--stderr-nul-rw");
+  // With the output going to the NUL device nothing is captured: the exit code alone says whether git started.
+  const expect = variant.stdoutNul ? () => true : def.expect;
+  return { id: stepId, label: def.label, program: "git", exe, args: () => args, expect, cwd: stepId === "git-version" ? plan.workspace : plan.gitWork, env: variant.env(plan), launcherArgs };
 }
 
 export const NUL_STEP = { id: "node-open-nul", label: "node opens the NUL device (r, w, r+; NUL and \\\\.\\NUL)", program: "node", args: () => ["-e", NUL_OPEN_SCRIPT], expect: (out) => out.trim().startsWith("{") };
+
+/** The launcher's own `open-test` run as the child inside the container (the launcher copies of itself are run from the granted workspace). */
+export const OPEN_TEST_STEP = (exe) => ({ id: "open-test", label: "the launcher's open-test: NUL opened with each flag combination git's start-up could use", program: "launcher", exe, args: () => ["open-test"], expect: (out) => out.includes('"command":"open-test"') });
+
+/** The open-test line's results: which combinations the container accepted and which it refused (with the error code). */
+export function parseOpenTest(stdout) {
+  for (const line of String(stdout ?? "").split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try { const o = JSON.parse(t); if (o?.command === "open-test" && Array.isArray(o.opens)) return o.opens.map((x) => ({ name: String(x.name), via: String(x.via), ok: x.ok === true, code: Number(x.code) })); } catch { /* not this line */ }
+  }
+  return undefined;
+}
+
+/** The plain statement: the combinations refused (with codes) and the ones accepted. */
+export function summarizeOpenTest(opens) {
+  if (!Array.isArray(opens) || opens.length === 0) return { refused: [], accepted: [], text: "the open-test did not run in this container" };
+  const refused = opens.filter((o) => !o.ok);
+  const accepted = opens.filter((o) => o.ok);
+  const text = refused.length === 0 ? "the container accepted every combination" : accepted.length === 0 ? "the container refused every combination" : `refused: ${refused.map((o) => `${o.name} (${o.via === "C runtime errno" ? "errno" : "error"} ${o.code})`).join("; ")}; accepted: ${accepted.map((o) => o.name).join("; ")}`;
+  return { refused, accepted, text };
+}
 
 /** The NUL-opening result of a step's output: { 'NUL r': 'ok' | 'EACCES' ... } or undefined. */
 export function parseNulOpen(stdout) {
@@ -221,6 +248,7 @@ export async function runGitLadder(opts) {
     const steps = [];
     const granted = new Set();
     let nulOpen;
+    let openTest;
     try {
       for (const d of [plan.workspace, plan.home, plan.scratch, plan.outDir, plan.binDir, plan.gitWork]) mkdirSync(d, { recursive: true });
       writeFileSync(join(plan.workspace, "stdin.txt"), "");
@@ -250,6 +278,16 @@ export async function runGitLadder(opts) {
       const nulStep = runStep(NUL_STEP, "nul");
       nulOpen = nulStep.nulOpen;
       steps.push(nulStep);
+      if (variant.openTest && opts.launcherPath) {
+        // The launcher's copy runs from the granted workspace (the container may not reach the checkout it was built in).
+        const copied = join(plan.binDir, "nn-appc-launcher.exe");
+        let ok = true;
+        try { (opts.copyFile ?? copyFileSync)(opts.launcherPath, copied); } catch (error) { ok = false; copyNotes.push(`launcher copy failed (${error?.code ?? "error"})`); }
+        const openStep = ok ? runStep(OPEN_TEST_STEP(copied), "open-test") : { id: "open-test", label: OPEN_TEST_STEP(copied).label, status: "not-started", detail: "the launcher could not be copied" };
+        if (ok && openStep.status !== "not-started") openStep.opens = parseOpenTest(safe(() => readFileSync(join(plan.outDir, "open-test.out.txt"), "utf8")) ?? "");
+        openTest = openStep.opens;
+        steps.push(openStep);
+      }
       const first = runStep(gitStepFor(variant, "git-version", plan, ctx), "git-version");
       steps.push(first);
       if (copyNotes.length > 0) first.copyNotes = copyNotes;
@@ -274,8 +312,8 @@ export async function runGitLadder(opts) {
       grantsLeft += finalLeft.length;
       try { removeTree(root); foldersRemoved++; } catch { notes.push("a fixture folder could not be removed"); }
       out.push({
-        id: variant.id, desc: variant.desc, container: variant.container, settings: { stdin: variant.stdin, outputPipes: variant.stdoutPipe, program: variant.copy ? `copy of ${variant.copy}` : variant.exe, wrap: variant.wrap, args: variant.args.join(" ") },
-        steps: [...steps], nulOpen, gitRuns: steps.find((s) => s.id === "git-version")?.status === "pass", commitRuns: steps.find((s) => s.id === "git-commit")?.status === "pass",
+        id: variant.id, desc: variant.desc, container: variant.container, settings: { stdin: variant.stdin, outputPipes: variant.stdoutPipe, outputNul: variant.stdoutNul, program: variant.copy ? `copy of ${variant.copy}` : variant.exe, wrap: variant.wrap, args: variant.args.join(" ") },
+        steps: [...steps], nulOpen, openTest, gitRuns: steps.find((s) => s.id === "git-version")?.status === "pass", commitRuns: steps.find((s) => s.id === "git-commit")?.status === "pass",
         aclFirstReadBack: firstReadBack, aclLeftFinal: finalLeft,
       });
     }
@@ -311,6 +349,15 @@ export function renderGitMarkdown(report) {
   L.push("");
   const works = report.variants.filter((v) => v.gitRuns);
   L.push(works.length > 0 ? `Variants where git --version passed: ${works.map((v) => v.id).join(", ")}; where init, add and commit all passed: ${report.variants.filter((v) => v.commitRuns).map((v) => v.id).join(", ") || "none"}.` : "No variant ran git.", "");
+  const withOpen = report.variants.filter((v) => v.openTest !== undefined);
+  if (withOpen.length > 0) {
+    L.push("## NUL device: which open flags the container refuses", "", "The launcher's own `open-test` was started as the child inside the container (a copy in the granted workspace) and opened NUL with each combination below; git's start-up opens it with the first row (`_wopen(\"nul\", O_RDWR)` becomes `CreateFileW` with read and write access, share read+write, OPEN_EXISTING, normal attributes).", "");
+    L.push(`| combination | ${withOpen.map((v) => v.container).join(" | ")} |`, `|${" --- |".repeat(withOpen.length + 1)}`);
+    for (const o of withOpen[0].openTest) L.push(`| ${code(o.name)} | ${withOpen.map((v) => { const x = v.openTest.find((y) => y.name === o.name); return x === undefined ? "-" : x.ok ? "ok" : `refused (${x.via === "C runtime errno" ? "errno" : "error"} ${x.code})`; }).join(" | ")} |`);
+    L.push("");
+    for (const v of withOpen) L.push(`- ${v.container}: ${summarizeOpenTest(v.openTest).text}.`);
+    L.push("");
+  }
   for (const v of report.variants) {
     L.push(`## ${v.id}`, "", `- ${v.desc}. Container: ${v.container}; arguments: ${v.settings.args}.`);
     for (const s of v.steps.filter((x) => x.status !== "pass" && x.status !== "skipped")) {
@@ -321,6 +368,7 @@ export function renderGitMarkdown(report) {
       if ((s.stdoutHead ?? []).length > 0) bits.push(`stdout: ${s.stdoutHead.map(code).join(" | ")}`);
       L.push(`- ${s.id}: ${bits.join("; ")}`);
     }
+    if (v.openTest === undefined && v.steps.some((x) => x.id === "open-test")) L.push("- open-test: did not produce a result in this variant.");
     if (v.nulOpen) L.push(`- NUL device from inside: ${Object.entries(v.nulOpen).map(([k, x]) => `${k}=${x}`).join(", ")}.`);
     L.push(v.aclFirstReadBack.length > 0 ? `- Read-back found ACL entries left on: ${v.aclFirstReadBack.map((x) => `${x.path} (${x.entriesLeft})`).join("; ")}; after a second revoke: ${v.aclLeftFinal.length === 0 ? "none left" : v.aclLeftFinal.map((x) => `${x.path} (${x.entriesLeft})`).join("; ")}.` : "- Read-back of every granted path: no ACL entry left.");
     L.push("");

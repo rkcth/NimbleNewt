@@ -60,7 +60,18 @@ jobs:
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode git --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/git.md" ]; then cat "$RUNNER_TEMP/appc-out/git.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
-      - name: Containment cases in seven configurations (90 s per cell)
+      - name: npm ci variants (45 s per step)
+        shell: bash
+        if: always()
+        timeout-minutes: 15
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail).
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode npm --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/npm.md" ]; then cat "$RUNNER_TEMP/appc-out/npm.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      - name: Containment cases in eight configurations (90 s per cell)
         shell: bash
         if: always()
         timeout-minutes: 25

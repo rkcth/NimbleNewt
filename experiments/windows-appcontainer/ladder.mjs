@@ -318,9 +318,14 @@ export const SID_PATTERN = /^S-1-15-2(?:-\d+){1,}$/;
 export const RULE_PATTERN = /^nn-appc-block-[0-9a-f]{8}$/;
 
 /** The loopback exemption of a package (CheckNetIsolation, administrator): an AppContainer cannot reach the host's own loopback addresses without one. */
-export function loopbackCommands(packageSid) {
+export const PACKAGE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+export function loopbackCommands(packageSid, packageName) {
   if (!SID_PATTERN.test(packageSid)) throw new Error("package SID has an unexpected form");
+  if (packageName !== undefined && !PACKAGE_NAME_PATTERN.test(packageName)) throw new Error("package name has an unexpected form");
   return {
+    // Round 3b: the same exemption given by the package's name (`-n=`, the "package family name" of the documentation; for a container made with CreateAppContainerProfile that is the profile name).
+    // It is read back by the SID (`exists`), whichever way it was added, because `LoopbackExempt -s` lists the SIDs.
+    ...(packageName === undefined ? {} : { addByName: `& CheckNetIsolation.exe LoopbackExempt -a -n=${packageName} | Out-Null; if ($LASTEXITCODE -ne 0) { throw "CheckNetIsolation add by name exit $LASTEXITCODE" }; 'added'` }),
     add: `& CheckNetIsolation.exe LoopbackExempt -a -p=${packageSid} | Out-Null; if ($LASTEXITCODE -ne 0) { throw "CheckNetIsolation add exit $LASTEXITCODE" }; 'added'`,
     exists: `@((& CheckNetIsolation.exe LoopbackExempt -s) | Select-String -SimpleMatch '${packageSid}').Count`,
     remove: `& CheckNetIsolation.exe LoopbackExempt -d -p=${packageSid} | Out-Null; 'removed'`,
@@ -333,14 +338,14 @@ const psCount = (ps, script) => { const n = Number(String(safe(() => ps(script).
  * Puts a cell's network conditions in place (an outbound BLOCK rule for the package SID, a loopback exemption) and reads each back. `ok` is false when something asked for is not
  * confirmed, and the cell is then not run (its results would not mean what its name says). Call `netTeardown` in a finally path whatever happens.
  */
-export function netSetup(cell, { ps, packageSid, ruleName }) {
-  const st = { wanted: { rule: cell.firewallBlock === true, exempt: cell.loopbackExempt === true }, ruleName, packageSid, ruleAdded: false, exemptAdded: false, ok: true, errors: [] };
+export function netSetup(cell, { ps, packageSid, ruleName, profileName }) {
+  const st = { wanted: { rule: cell.firewallBlock === true, exempt: cell.loopbackExempt === true || cell.loopbackExempt === "name", exemptBy: cell.loopbackExempt === "name" ? "name" : "sid" }, ruleName, packageSid, profileName, ruleAdded: false, exemptAdded: false, ok: true, errors: [] };
   if (!st.wanted.rule && !st.wanted.exempt) return { ...st, summary: "none needed" };
   if (typeof ps !== "function") return { ...st, ok: false, errors: ["no PowerShell available"], summary: "NOT put in place: no PowerShell available" };
   const fw = firewallCommands(ruleName, packageSid);
-  const lb = loopbackCommands(packageSid);
+  const lb = loopbackCommands(packageSid, st.wanted.exemptBy === "name" ? profileName : undefined);
   if (st.wanted.exempt) {
-    const r = safe(() => ps(lb.add));
+    const r = safe(() => ps(st.wanted.exemptBy === "name" ? lb.addByName : lb.add));
     st.exemptAdded = r?.status === 0 && (psCount(ps, lb.exists) ?? 0) >= 1;
     if (!st.exemptAdded) { st.ok = false; st.errors.push(`loopback exemption: ${String(r?.stderr ?? "no answer").trim().split(/\r?\n/)[0]?.slice(0, 160)}`); }
   }
@@ -349,7 +354,7 @@ export function netSetup(cell, { ps, packageSid, ruleName }) {
     st.ruleAdded = r?.status === 0 && (psCount(ps, fw.exists) ?? 0) >= 1;
     if (!st.ruleAdded) { st.ok = false; st.errors.push(`block rule: ${String(r?.stderr ?? "no answer").trim().split(/\r?\n/)[0]?.slice(0, 160)}`); }
   }
-  st.summary = st.ok ? `in place and read back (block rule ${st.wanted.rule ? "yes" : "no"}, loopback exemption ${st.wanted.exempt ? "yes" : "no"})` : `NOT confirmed (${st.errors.join("; ")}); the cell was not run`;
+  st.summary = st.ok ? `in place and read back (block rule ${st.wanted.rule ? "yes" : "no"}, loopback exemption ${st.wanted.exempt ? `yes, by ${st.wanted.exemptBy}` : "no"})` : `NOT confirmed (${st.errors.join("; ")}); the cell was not run`;
   return st;
 }
 
@@ -444,6 +449,8 @@ export async function runFirewall(opts) {
   names.root = root;
   const plan = ladderPlan(root, platform === "win32" ? win32 : { join, dirname, basename: (p) => p });
   const phases = [];
+  const lbCmds = opts.exemptByName === true ? loopbackCommands(packageSid, profileName) : undefined;
+  const exemption = lbCmds ? { by: "name", commandAdd: lbCmds.addByName, commandRemove: lbCmds.remove, added: false, confirmed: false, removed: false, existsAfterRemoval: null } : undefined;
   const rule = { name: ruleName, packageScoped: true, commandAdd: cmds.add, commandRemove: cmds.remove, added: false, removed: false, existsAfterRemoval: null };
   let firewallProfiles = "unknown";
   try {
@@ -484,6 +491,17 @@ export async function runFirewall(opts) {
     const clients = opts.clients ?? ["curl", "node"];
     phases.push(await outsideControl("control-before-rule"));
     for (const c of clients) phases.push(await inside("inside-without-rule", c));
+    // Round 3b: the loopback exemption added by the package's NAME (CheckNetIsolation LoopbackExempt -a -n=...), confirmed by asking for it back, then the same clients, then removed.
+    if (exemption) {
+      log("firewall: adding the loopback exemption by name");
+      const ex = safe(() => ps(lbCmds.addByName));
+      exemption.added = ex?.status === 0;
+      exemption.confirmed = exemption.added && (psCount(ps, lbCmds.exists) ?? 0) >= 1;
+      if (!exemption.added) exemption.addError = (ex?.stderr ?? "").trim().split(/\r?\n/)[0]?.slice(0, 200) ?? "no answer";
+      if (exemption.confirmed) for (const c of clients) phases.push(await inside("inside-with-name-exemption", c));
+      safe(() => ps(lbCmds.remove));
+      exemption.removed = psCount(ps, lbCmds.exists) === 0;
+    }
     // The rule: needs administrator rights. Its presence is confirmed by asking for it back before anything is concluded.
     log("firewall: adding the block rule");
     const added = safe(() => ps(cmds.add));
@@ -497,7 +515,8 @@ export async function runFirewall(opts) {
       for (const c of clients) phases.push(await inside("inside-after-removal", c));
     }
   } finally {
-    // The rule is deleted whatever happened; its absence is read back.
+    // The exemption (if one was added) and the rule are deleted whatever happened; their absence is read back.
+    if (exemption && !exemption.removed) { safe(() => ps(lbCmds.remove)); const n = psCount(ps, lbCmds.exists); exemption.removed = n === 0; exemption.existsAfterRemoval = n; }
     const removed = safe(() => ps(cmds.remove));
     rule.removed = removed?.status === 0;
     const exists = Number((safe(() => ps(cmds.exists).stdout) ?? "NaN").trim());
@@ -514,7 +533,12 @@ export async function runFirewall(opts) {
   const missing = variant.capabilities.filter((c) => !seen.includes(c));
   let verdict = judgeFirewall(phases, rule);
   if (missing.length > 0 && phases.some((p) => p.started)) verdict = { verdict: "inconclusive", why: `the launcher did not apply the capabilities the variant names (missing: ${missing.join(", ")})` };
-  const report = { schema: FIREWALL_SCHEMA, generatedAt: now, host, variant: variant.id, capabilities: variant.capabilities, capabilitiesSeen: seen, firewallProfiles, rule, phases, verdict: verdict.verdict, why: verdict.why, cleanup: { profileDeleted, ruleRemoved: rule.removed && rule.existsAfterRemoval === 0 }, notes };
+  if (exemption) {
+    const byName = phases.filter((p) => p.phase === "inside-with-name-exemption" && p.started);
+    exemption.loopbackReached = byName.length === 0 ? null : byName.some((p) => p.loopbackConnections > 0);
+    exemption.outboundReached = byName.length === 0 ? null : byName.some((p) => p.outboundConnections > 0);
+  }
+  const report = { schema: FIREWALL_SCHEMA, generatedAt: now, host, variant: variant.id, capabilities: variant.capabilities, capabilitiesSeen: seen, firewallProfiles, rule, ...(exemption ? { exemption } : {}), phases, verdict: verdict.verdict, why: verdict.why, assumptions: verdict.assumptions ?? [], cleanup: { profileDeleted, ruleRemoved: rule.removed && rule.existsAfterRemoval === 0, ...(exemption ? { exemptionRemoved: exemption.removed && (exemption.existsAfterRemoval ?? 0) === 0 } : {}) }, notes };
   return { report, markdown: renderFirewallMarkdown(report), ranAtAll: true, names };
 }
 
@@ -523,7 +547,6 @@ export async function runFirewall(opts) {
  * and the outside control reached both listeners with the rule in place. `loopback`: whether the container could ever reach the loopback listener.
  */
 export function judgeFirewall(phases, rule) {
-  if (!rule.added) return { verdict: "inconclusive", why: `the block rule could not be added${rule.addError ? ` (${rule.addError})` : ""}; administrator rights are needed` };
   const sel = (name) => phases.filter((p) => p.phase === name && p.started);
   const before = sel("inside-without-rule");
   const withRule = sel("inside-with-rule");
@@ -531,18 +554,39 @@ export function judgeFirewall(phases, rule) {
   const reachedBefore = before.some((p) => p.outboundConnections > 0);
   const leakedWith = withRule.some((p) => p.outboundConnections > 0 || p.loopbackConnections > 0);
   const loopBefore = before.some((p) => p.loopbackConnections > 0);
-  if (withRule.length === 0 && before.length === 0) return { verdict: "inconclusive", why: "no connect client started inside the container" };
-  if (withRule.length === 0) return { verdict: "inconclusive", why: "no connect client started inside the container with the rule in place" };
-  if (!reachedBefore) return { verdict: "inconclusive", why: "the container could not reach the outbound listener even without the rule (the capability alone did not allow it), so the rule cannot be shown to add anything" };
-  if (leakedWith) return { verdict: "fail", why: "a connection from inside the container reached a listener while the block rule existed" };
-  if (!ctlAfter || ctlAfter.outboundConnections < 1 || ctlAfter.loopbackConnections < 1) return { verdict: "inconclusive", why: "the control outside the container did not reach both listeners with the rule in place, so the rule's scope is not shown" };
-  return { verdict: "pass", why: `the outbound connection worked before the rule, none reached a listener with the rule${loopBefore ? " (the loopback one worked before it as well)" : " (loopback was already refused for the container)"}, and the control outside the container was unaffected` };
+  // The three assumptions the experiment rests on, each judged alone from the listeners' counts (holds | FAILS | not shown).
+  const a1 = before.length === 0 ? { status: "not shown", evidence: "no connect client started inside the container without the rule" } : reachedBefore ? { status: "holds", evidence: "a client inside the container reached the outbound listener before the rule existed" } : { status: "FAILS", evidence: "no client inside the container reached the outbound listener even without the rule" };
+  const a2 = !rule.added || withRule.length === 0 ? { status: "not shown", evidence: !rule.added ? "the rule was not added" : "no connect client started inside the container with the rule in place" } : !reachedBefore ? { status: "not shown", evidence: "nothing reached the listener before the rule, so a block cannot be told apart from the network being closed anyway" } : leakedWith ? { status: "FAILS", evidence: "a client inside the container reached a listener while the rule existed" } : { status: "holds", evidence: "nothing from inside the container reached either listener while the rule existed" };
+  const a3 = !rule.added || ctlAfter === undefined ? { status: "not shown", evidence: "no control outside the container was run with the rule in place" } : ctlAfter.outboundConnections >= 1 && ctlAfter.loopbackConnections >= 1 ? { status: "holds", evidence: "the control outside the container still reached both listeners with the rule in place" } : { status: "FAILS", evidence: "the control outside the container could not reach both listeners with the rule in place" };
+  const assumptions = [
+    { n: 1, text: "the capabilities internetClient and privateNetworkClientServer open the network for the container", ...a1 },
+    { n: 2, text: "an outbound block rule scoped to the container's package SID stops that connection", ...a2 },
+    { n: 3, text: "the rule affects only that container (a process outside it is not blocked)", ...a3 },
+  ];
+  const result = (verdict, why) => ({ verdict, why, assumptions });
+  if (!rule.added) return result("inconclusive", `the block rule could not be added${rule.addError ? ` (${rule.addError})` : ""}; administrator rights are needed`);
+  if (withRule.length === 0 && before.length === 0) return result("inconclusive", "no connect client started inside the container");
+  if (withRule.length === 0) return result("inconclusive", "no connect client started inside the container with the rule in place");
+  if (!reachedBefore) return result("inconclusive", "the container could not reach the outbound listener even without the rule (the capability alone did not allow it), so the rule cannot be shown to add anything");
+  if (leakedWith) return result("fail", "a connection from inside the container reached a listener while the block rule existed");
+  if (!ctlAfter || ctlAfter.outboundConnections < 1 || ctlAfter.loopbackConnections < 1) return result("inconclusive", "the control outside the container did not reach both listeners with the rule in place, so the rule's scope is not shown");
+  return result("pass", `the outbound connection worked before the rule, none reached a listener with the rule${loopBefore ? " (the loopback one worked before it as well)" : " (loopback was already refused for the container)"}, and the control outside the container was unaffected`);
 }
 
 export function renderFirewallMarkdown(report) {
   const L = ["# Windows AppContainer experiment, round 2: network cut by firewall", ""];
   L.push(`Generated ${report.generatedAt}. Host: ${report.host.platform} ${report.host.release ?? ""}; session id ${report.host.sessionId}; elevated: ${report.host.elevated}. Container variant: ${report.variant} (capabilities: ${(report.capabilities ?? []).join(", ") || "none"}). Firewall profiles: ${report.firewallProfiles}.`, "");
   L.push(`Verdict: **${report.verdict}**: ${report.why}.`, "");
+  if ((report.assumptions ?? []).length > 0) {
+    L.push("Assumptions, judged one by one:", "");
+    for (const a of report.assumptions) L.push(`${a.n}. Assumption ${a.n} ${a.status === "FAILS" ? "**FAILS**" : a.status}: ${a.text}. Evidence: ${a.evidence}.`);
+    const failing = report.assumptions.filter((a) => a.status === "FAILS");
+    L.push("", failing.length > 0 ? `The assumption that fails: ${failing.map((a) => `number ${a.n} (${a.text})`).join("; ")}.` : report.assumptions.every((a) => a.status === "holds") ? "No assumption failed." : `No assumption was shown to fail; not shown: ${report.assumptions.filter((a) => a.status === "not shown").map((a) => `number ${a.n}`).join(", ")}.`, "");
+  }
+  if (report.exemption) {
+    const e = report.exemption;
+    L.push(`Loopback exemption added by name (\`${e.commandAdd}\`): added ${e.added}${e.addError ? ` (${e.addError})` : ""}; confirmed in the exemption list by the package SID: ${e.confirmed}; the container reached the loopback listener with it: ${e.loopbackReached === null ? "not run" : e.loopbackReached}; the outbound listener: ${e.outboundReached === null ? "not run" : e.outboundReached}; removed and gone: ${e.removed}.`, "");
+  }
   L.push("Commands run (PowerShell, administrator):", "", "```", report.rule.commandAdd, report.rule.commandRemove, "```", "");
   L.push(`Rule added and confirmed: ${report.rule.added}; removed: ${report.rule.removed}; rules still named like it after removal: ${report.rule.existsAfterRemoval}.`, "");
   L.push("| phase | client | started | loopback listener connections | outbound listener connections | notes |", "| --- | --- | --- | --- | --- | --- |");

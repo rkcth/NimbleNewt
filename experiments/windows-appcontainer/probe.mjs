@@ -4,11 +4,12 @@
 // wrote into the config, and prints ONE line: `NN-PROBE-REPORT:` followed by a JSON report. It uses Node's own modules only (the container cannot
 // read the repository, so the harness copies this single file next to the config). Every created file is removed again where possible.
 // The report holds outcomes and error codes, never file contents or environment values.
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 export const PROBE_SCHEMA = "nn-appc-probe-1";
 export const REPORT_PREFIX = "NN-PROBE-REPORT:";
@@ -79,12 +80,42 @@ const readsSecret = (file, secret) => {
   return text.includes(secret) ? "content-visible" : "readable-but-no-secret";
 };
 
+/**
+ * One child program through the ASYNC spawn with a kill timer (never spawnSync: round 3's cases mode hung inside a synchronous spawn from the container, which stops every
+ * timer of the probe). Resolves with {status, signal, error, stdout, stderr}; a child that runs past `timeoutMs` is killed and the result says ETIMEDOUT. It always resolves.
+ * `stdio` is passed as given (file descriptors, "ignore" or "pipe"); piped output is collected as text.
+ */
+export function spawnLimited(file, args, { stdio = "ignore", timeoutMs = 5000, cwd, env, shell = false } = {}) {
+  return new Promise((resolveSpawn) => {
+    let settled = false;
+    let timer;
+    let child;
+    let stdout = "";
+    let stderr = "";
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveSpawn({ status: null, signal: null, stdout, stderr, ...value });
+    };
+    try {
+      child = spawn(file, args, { stdio, windowsHide: true, cwd, env, shell });
+    } catch (error) { done({ error: { code: error?.code ?? "SPAWN" } }); return; }
+    timer = setTimeout(() => { try { child.kill(); } catch { /* already gone */ } done({ error: { code: "ETIMEDOUT" } }); }, timeoutMs);
+    child.stdout?.on("data", (d) => { stdout += d; });
+    child.stderr?.on("data", (d) => { stderr += d; });
+    child.once("error", (error) => done({ error: { code: error?.code ?? "SPAWN" } }));
+    child.once("close", (status, signal) => done({ status, signal }));
+  });
+}
+
 let toolCounter = 0;
 /**
  * Runs a tool and returns {outcome, code, startupDenials}. `allowed` = it started and exited 0. Output goes to FILES in the scratch folder (not pipes: whether the probe's own
- * spawn with pipes works inside a container is measured separately by diag-spawn-modes), every run has its own limit that never exceeds what is left of the probe's budget.
+ * spawn with pipes works inside a container is measured separately by diag-spawn-modes), every run has its own limit that never exceeds what is left of the probe's budget,
+ * and the spawn is asynchronous with a kill timer.
  */
-function runTool(name, file, args, options, denials) {
+async function runTool(name, file, args, options, denials) {
   const left = options.budget?.remaining?.() ?? Infinity;
   const limit = Math.min(options.timeoutMs ?? 20_000, left - 1500);
   if (limit < 1000) return { name, outcome: "skipped", code: "budget" };
@@ -94,7 +125,7 @@ function runTool(name, file, args, options, denials) {
   try {
     if (base) { fdOut = openSync(`${base}.out`, "w"); fdErr = openSync(`${base}.err`, "w"); }
   } catch { fdOut = undefined; fdErr = undefined; }
-  const result = spawnSync(file, args, { encoding: "utf8", timeout: limit, windowsHide: true, cwd: options.cwd, env: options.env ?? process.env, shell: options.shell === true, stdio: fdOut === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", fdOut, fdErr] });
+  const result = await spawnLimited(file, args, { timeoutMs: limit, cwd: options.cwd, env: options.env ?? process.env, shell: options.shell === true, stdio: fdOut === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", fdOut, fdErr] });
   let stdout = result.stdout ?? "";
   let stderr = result.stderr ?? "";
   if (fdOut !== undefined) {
@@ -111,6 +142,83 @@ function runTool(name, file, args, options, denials) {
   if (result.status === 0) return { name, outcome: "allowed", note: `exit 0, ${stdout.trim().split(/\r?\n/)[0]?.slice(0, 60) ?? ""}` };
   const firstErr = stderr.trim().split(/\r?\n/)[0]?.slice(0, 100) ?? "";
   return { name, outcome: STARTUP_DENIAL_PATTERN.test(text) ? "denied" : "error", code: `exit ${result.status}${result.signal ? ` ${result.signal}` : ""}`, ...(firstErr ? { note: firstErr } : {}) };
+}
+
+// ---------------------------------------------------------------------------------------------------------------- results that survive a hang
+
+/**
+ * Rebuilds a (partial) report from the progress file's text. The probe writes, one line each and the moment it is known:
+ *   `<ms> ms start <id>` / `<ms> ms end <id>`   the step's boundaries,
+ *   `<ms> ms ATTEMPT {"id","group","expect","attempt"}`   one attempt of a step that is still running (the diagnostics that start programs write each mode here),
+ *   `<ms> ms RESULT {...}`   the step's whole result (the same object the final report carries; `denials` are its start-up denial lines),
+ *   `<ms> ms WATCHDOG <step>`   the watchdog fired.
+ * The step that has a start line but no end line (and no RESULT) is returned with the attempts it did write plus one `{name: "step did not finish", outcome: "error", code: "HUNG"}`.
+ * Self-contained (no outer names): the watchdog worker receives this function as text. Never throws.
+ */
+export function rebuildFromProgress(text, schema = "nn-appc-probe-1") {
+  const results = new Map();
+  const attempts = new Map();
+  const meta = new Map();
+  const order = [];
+  const denials = [];
+  let current;
+  let lastMs = 0;
+  let watchdogStep;
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const m = /^(\d+) ms (start|end|RESULT|ATTEMPT|WATCHDOG)(?: (.*))?$/.exec(line);
+    if (!m) continue;
+    lastMs = Math.max(lastMs, Number(m[1]));
+    const kind = m[2];
+    const rest = m[3] ?? "";
+    try {
+      if (kind === "start") { if (rest !== "") current = rest; }
+      else if (kind === "end") current = undefined;
+      else if (kind === "WATCHDOG") watchdogStep = rest;
+      else if (kind === "RESULT") {
+        const rec = JSON.parse(rest);
+        if (!order.includes(rec.id)) order.push(rec.id);
+        results.set(rec.id, rec);
+        for (const d of rec.denials ?? []) denials.push(d);
+      } else {
+        const rec = JSON.parse(rest);
+        if (!attempts.has(rec.id)) attempts.set(rec.id, []);
+        attempts.get(rec.id).push(rec.attempt);
+        meta.set(rec.id, { group: rec.group, expect: rec.expect });
+      }
+    } catch { /* a damaged line (the process died mid-write) is skipped */ }
+  }
+  const probes = [];
+  for (const id of order) { const { denials: _d, ...rest } = results.get(id); probes.push(rest); }
+  // The step that was running (a start line with no end line and no result) comes last.
+  if (current !== undefined && !results.has(current)) probes.push({ id: current, ...(meta.get(current) ?? {}), attempts: [...(attempts.get(current) ?? []), { name: "step did not finish", outcome: "error", code: "HUNG" }], actual: "inconclusive", unfinished: true });
+  return { schema, partial: true, rebuilt: true, watchdog: { step: watchdogStep ?? current ?? "(none)", elapsedMs: lastMs }, probes, startupDenials: denials.slice(0, 40) };
+}
+
+/**
+ * The watchdog that works while the main thread is blocked: a worker thread with its own event loop. After `deadlineMs` it appends `WATCHDOG` to the progress file, writes the rebuilt
+ * partial report to standard output with a direct write (the main thread's stream would be stuck with it), and ends the WHOLE process with a kill signal on itself
+ * (process.exit in a worker would only end the worker). The caller terminates it when the probe finishes. `kill` and `source` exist for the tests.
+ */
+export function startWorkerWatchdog({ progressFile, deadlineMs, startedAt = Date.now(), kill = "SIGKILL", prefix = REPORT_PREFIX, schema = PROBE_SCHEMA }) {
+  const code = `
+    const { workerData } = require("node:worker_threads");
+    const fs = require("node:fs");
+    const rebuild = ${rebuildFromProgress.toString()};
+    setTimeout(() => {
+      let text = "";
+      try { text = fs.readFileSync(workerData.progressFile, "utf8"); } catch {}
+      const report = rebuild(text, workerData.schema);
+      try { fs.appendFileSync(workerData.progressFile, (Date.now() - workerData.startedAt) + " ms WATCHDOG " + report.watchdog.step + "\\n"); } catch {}
+      report.watchdog.step = report.watchdog.step === "(none)" ? "(unknown)" : report.watchdog.step;
+      try { fs.writeSync(1, workerData.prefix + JSON.stringify(report) + "\\n"); } catch {}
+      try { process.kill(process.pid, workerData.kill); } catch {}
+      process.exit(3);
+    }, workerData.deadlineMs);
+  `;
+  const worker = new Worker(code, { eval: true, workerData: { progressFile, deadlineMs, startedAt, kill, prefix, schema } });
+  worker.unref();
+  worker.on("error", () => { /* a worker that could not run leaves the harness's own limit as the backstop */ });
+  return { stop: () => { try { worker.terminate(); } catch { /* ignored */ } } };
 }
 
 export const DEFAULT_BUDGET_MS = 52_000;
@@ -136,6 +244,10 @@ export async function runProbes(cfg, hooks = {}) {
   };
   const partial = () => ({ schema: PROBE_SCHEMA, partial: true, watchdog: { step: state.step, elapsedMs: Date.now() - started }, node: process.version, platform: process.platform, pid: process.pid, probes, startupDenials: startupDenials.slice(0, 40) });
   const watchdogMs = cfg.watchdogMs ?? DEFAULT_WATCHDOG_MS;
+  // The backstop for a blocked main thread (a timer cannot fire then): a worker thread ends the process shortly after the timer's deadline; the harness rebuilds the report from the progress file.
+  const worker = cfg.progressFile && !hooks.onWatchdog && cfg.workerWatchdog !== false
+    ? (() => { try { return startWorkerWatchdog({ progressFile: cfg.progressFile, deadlineMs: watchdogMs + (cfg.workerGraceMs ?? 2000), startedAt: started }); } catch { return undefined; } })()
+    : undefined;
   const watchdog = setTimeout(() => {
     progress(`WATCHDOG ${state.step}`);
     (hooks.onWatchdog ?? ((rep) => { process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(rep)}\n`); process.exit(3); }))(partial());
@@ -145,9 +257,15 @@ export async function runProbes(cfg, hooks = {}) {
   const add = async (id, group, expect, fn, extra = {}) => {
     progress(`start ${id}`);
     const t = Date.now();
+    const denialsBefore = startupDenials.length;
     let attempts;
-    try { attempts = await fn(); } catch (error) { attempts = [{ name: "probe-step", outcome: "error", code: error?.code ?? error?.name ?? "THROWN" }]; }
-    probes.push({ id, group, expect, attempts, actual: summarize(expect, attempts), ms: Date.now() - t, ...extra });
+    // `emit(attempt)`: a step that starts programs writes each attempt's line the moment it is known (a later hang then loses nothing).
+    const emit = (attempt) => progress(`ATTEMPT ${JSON.stringify({ id, group, expect, attempt })}`);
+    try { attempts = await fn(emit); } catch (error) { attempts = [{ name: "probe-step", outcome: "error", code: error?.code ?? error?.name ?? "THROWN" }]; }
+    const record = { id, group, expect, attempts, actual: summarize(expect, attempts), ms: Date.now() - t, ...extra };
+    probes.push(record);
+    // The result goes to the progress file at once, before the step's end line (the denial lines of this step travel with it).
+    progress(`RESULT ${JSON.stringify({ ...record, denials: startupDenials.slice(denialsBefore, denialsBefore + 10) })}`);
     progress(`end ${id}`);
   };
   const netMs = cfg.network?.timeoutMs ?? 3000;
@@ -239,47 +357,8 @@ export async function runProbes(cfg, hooks = {}) {
       if (process.platform !== "win32") return [skip("NUL device", "not Windows")];
       return ["NUL", "\\\\.\\NUL"].flatMap((p) => ["r", "w", "r+"].map((m) => attemptSync(`open ${p} ${m}`, () => { closeSync(openSync(p, m)); })));
     });
-    await add("diag-spawn-modes", "diag", "allowed", () => {
-      const out = join(cfg.scratch, `spawn-modes-${process.pid}`);
-      const modes = [
-        ["files", () => { const a = openSync(`${out}.o`, "w"); const b = openSync(`${out}.e`, "w"); try { return spawnSync(process.execPath, ["-e", "0"], { stdio: ["ignore", a, b], timeout: Math.min(8000, Math.max(1000, budget.remaining() - 1500)), windowsHide: true }); } finally { closeSync(a); closeSync(b); } }],
-        ["pipes", () => spawnSync(process.execPath, ["-e", "0"], { stdio: ["pipe", "pipe", "pipe"], timeout: Math.min(8000, Math.max(1000, budget.remaining() - 1500)), windowsHide: true })],
-        ["ignore", () => spawnSync(process.execPath, ["-e", "0"], { stdio: "ignore", timeout: Math.min(8000, Math.max(1000, budget.remaining() - 1500)), windowsHide: true })],
-      ];
-      const res = modes.map(([name, run]) => attemptSync(`spawn node with stdio ${name}`, () => {
-        const r = run();
-        if (r.error) throw Object.assign(new Error("spawn"), { code: r.error.code === "ETIMEDOUT" ? "TIMEOUT" : r.error.code });
-        if (r.status !== 0) throw Object.assign(new Error("exit"), { code: `exit ${r.status}` });
-      }));
-      for (const x of [".o", ".e"]) { try { rmSync(`${out}${x}`, { force: true }); } catch { /* ignored */ } }
-      return res;
-    });
-
-    // Tools (all expected to work with the minimal grants). Each has a limit of its own and none runs past the probe's budget.
-    const toolEnv = process.env;
-    const t = cfg.tools;
-    const base = { env: toolEnv, outDir: cfg.scratch, budget };
-    await add("tool-node-version", "tool", "allowed", () => [runTool("node", process.execPath, ["--version"], { ...base, timeoutMs: 15_000 }, startupDenials)]);
-    await add("tool-git-version", "tool", "allowed", () => [runTool("git", t.git, ["--version"], { ...base, timeoutMs: 15_000 }, startupDenials)]);
-    await add("tool-git-init-commit", "tool", "allowed", () => {
-      const gw = t.gitWork;
-      mkdirSync(gw, { recursive: true });
-      const git = (label, args) => runTool(`git ${label}`, t.git, ["-c", "user.name=NN Experiment", "-c", "user.email=nn@example.invalid", "-c", "core.autocrlf=false", ...args], { ...base, cwd: gw, timeoutMs: 20_000 }, startupDenials);
-      const gitSteps = [git("init", ["init", "-q"])];
-      if (gitSteps[0].outcome === "allowed") {
-        writeFileSync(join(gw, "a.txt"), "hello\n");
-        gitSteps.push(git("add", ["add", "a.txt"]), git("commit", ["commit", "-q", "-m", "experiment"]));
-      }
-      return gitSteps;
-    });
-    const npmArgs = (args) => [t.npmCli, ...args];
-    await add("tool-npm-version", "tool", "allowed", () => [t.npmCli ? runTool("npm", process.execPath, npmArgs(["--version"]), { ...base, timeoutMs: 25_000 }, startupDenials) : skip("npm", "npm-cli.js not found")]);
-    await add("tool-npm-ci-offline", "tool", "allowed", () => (t.npmCli
-      ? [runTool("npm ci", process.execPath, npmArgs(["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]), { ...base, cwd: t.npmProject, timeoutMs: 40_000 }, startupDenials),
-        attemptSync("installed-file", () => { if (!existsSync(join(t.npmProject, "node_modules", "nn-tiny", "index.js"))) throw Object.assign(new Error("missing"), { code: "ENOENT" }); })]
-      : [skip("npm ci", "npm-cli.js not found")]));
-
-    // The protected-name operations come LAST: they change the workspace's own structure. Each success is undone at once.
+    // The protected-name operations: they change the workspace's own structure, each success is undone at once. Round 3b moved them BEFORE the tools: the tools start programs from
+    // inside the container, which is what hung in round 3, and these four verdicts are the ones the product needs most.
     const prot = cfg.protectedName.dir;
     const undoRename = (from, to) => { try { renameSync(from, to); } catch { /* the harness's witness reports a folder that is gone */ } };
     await add("extra-protect-rename-dir", "extra", "denied", () => {
@@ -311,7 +390,57 @@ export async function runProbes(cfg, hooks = {}) {
       if (a.outcome === "allowed") undoRename(moved, ws);
       return [a];
     });
-  } finally { clearTimeout(watchdog); }
+
+    // Tools (all expected to work with the minimal grants). Each has a limit of its own and none runs past the probe's budget.
+    const toolEnv = process.env;
+    const t = cfg.tools;
+    const base = { env: toolEnv, outDir: cfg.scratch, budget };
+    await add("tool-node-version", "tool", "allowed", async () => [await runTool("node", process.execPath, ["--version"], { ...base, timeoutMs: 15_000 }, startupDenials)]);
+    await add("tool-git-version", "tool", "allowed", async () => [await runTool("git", t.git, ["--version"], { ...base, timeoutMs: 15_000 }, startupDenials)]);
+    await add("tool-git-init-commit", "tool", "allowed", async () => {
+      const gw = t.gitWork;
+      mkdirSync(gw, { recursive: true });
+      const git = (label, args) => runTool(`git ${label}`, t.git, ["-c", "user.name=NN Experiment", "-c", "user.email=nn@example.invalid", "-c", "core.autocrlf=false", ...args], { ...base, cwd: gw, timeoutMs: 20_000 }, startupDenials);
+      const gitSteps = [await git("init", ["init", "-q"])];
+      if (gitSteps[0].outcome === "allowed") {
+        writeFileSync(join(gw, "a.txt"), "hello\n");
+        gitSteps.push(await git("add", ["add", "a.txt"]), await git("commit", ["commit", "-q", "-m", "experiment"]));
+      }
+      return gitSteps;
+    });
+    const npmArgs = (args) => [t.npmCli, ...args];
+    await add("tool-npm-version", "tool", "allowed", async () => [t.npmCli ? await runTool("npm", process.execPath, npmArgs(["--version"]), { ...base, timeoutMs: 25_000 }, startupDenials) : skip("npm", "npm-cli.js not found")]);
+    await add("tool-npm-ci-offline", "tool", "allowed", async () => (t.npmCli
+      ? [await runTool("npm ci", process.execPath, npmArgs(["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]), { ...base, cwd: t.npmProject, timeoutMs: 40_000 }, startupDenials),
+        attemptSync("installed-file", () => { if (!existsSync(join(t.npmProject, "node_modules", "nn-tiny", "index.js"))) throw Object.assign(new Error("missing"), { code: "ENOENT" }); })]
+      : [skip("npm ci", "npm-cli.js not found")]));
+
+    // LAST (round 3b): the diagnostic that starts `node -e 0` from inside the container. In round 3 it hung in a synchronous spawn, after every other step had finished and before the
+    // report was printed. Each mode is an asynchronous spawn with a 5 s kill timer, and its result line is written before the next mode starts.
+    await add("diag-spawn-modes", "diag", "allowed", async (emit) => {
+      const out = join(cfg.scratch, `spawn-modes-${process.pid}`);
+      const limit = () => Math.min(5000, Math.max(1000, budget.remaining() - 1500));
+      const modes = [
+        ["files", async () => { const a = openSync(`${out}.o`, "w"); const b = openSync(`${out}.e`, "w"); try { return await spawnLimited(process.execPath, ["-e", "0"], { stdio: ["ignore", a, b], timeoutMs: limit() }); } finally { closeSync(a); closeSync(b); } }],
+        ["pipes", () => spawnLimited(process.execPath, ["-e", "0"], { stdio: ["pipe", "pipe", "pipe"], timeoutMs: limit() })],
+        ["ignore", () => spawnLimited(process.execPath, ["-e", "0"], { stdio: "ignore", timeoutMs: limit() })],
+      ];
+      const res = [];
+      for (const [name, run] of modes) {
+        let attempt;
+        try {
+          const r = await run();
+          if (r.error) throw Object.assign(new Error("spawn"), { code: r.error.code === "ETIMEDOUT" ? "TIMEOUT" : r.error.code });
+          if (r.status !== 0) throw Object.assign(new Error("exit"), { code: `exit ${r.status}` });
+          attempt = { name: `spawn node with stdio ${name}`, outcome: "allowed" };
+        } catch (error) { attempt = { name: `spawn node with stdio ${name}`, outcome: classifyError(error), code: error?.code ?? null }; }
+        res.push(attempt);
+        emit(attempt);
+      }
+      for (const x of [".o", ".e"]) { try { rmSync(`${out}${x}`, { force: true }); } catch { /* ignored */ } }
+      return res;
+    });
+  } finally { clearTimeout(watchdog); worker?.stop(); }
 
   return {
     schema: PROBE_SCHEMA,

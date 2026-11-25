@@ -7,11 +7,11 @@ import net from "node:net";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyError, isEntryPoint, runProbes, summarize, REPORT_PREFIX } from "../experiments/windows-appcontainer/probe.mjs";
 import {
   ALL_PROBE_IDS, CASE_IDS, aclReadBack, grantedPaths, PROBE_NODE_OPTIONS, SECRETS, stderrHead, adminNeeded, buildChildEnv, buildCommandLine, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness,
-  createFixtures, extractProbeReport, judgeCell, judgeProbe, makeTarball, matrixCells, parseLauncherLine, pickOutboundHost, quoteWindowsArg, removeTree, renderMarkdown,
+  REBUILT_LABEL, chooseProbeReport, createFixtures, extractProbeReport, judgeCell, judgeProbe, makeTarball, matrixCells, parseLauncherLine, pickOutboundHost, quoteWindowsArg, removeTree, renderMarkdown,
   scrubText, selectCells, tally, validateReport, witnessProblem,
 } from "../experiments/windows-appcontainer/lib.mjs";
 import { discoverTools, parseCli, runExperiment } from "../experiments/windows-appcontainer/run-experiment.mjs";
@@ -521,9 +521,9 @@ test("the workflow runs only by hand, pins its actions, gates the own-runner job
   assert.equal([...wf.matchAll(/timeout-minutes: 45/g)].length >= 1, true);
   assert.ok(wf.includes("scripts/redact-log.mjs"));
   // Both run steps keep the harness's exit code through the redaction pipe and still write the summary.
-  // six hosted steps (round 3: ladder, git, cases, links, timing, firewall) and two own-runner steps; each keeps the harness's exit code and writes its summary
-  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 8);
-  for (const mode of ["ladder", "git", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (45000|90000|120000)`));
+  // seven hosted steps (round 3: ladder, git, cases, links, timing, firewall; round 3b: npm) and two own-runner steps; each keeps the harness's exit code and writes its summary
+  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 9);
+  for (const mode of ["ladder", "git", "npm", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (45000|90000|120000)`));
   assert.match(wf, /own_runner:\n\s+description:[^\n]*\n\s+type: boolean\n\s+default: false/);
   assert.ok(!/secrets\./.test(wf));
   assert.ok(wf.includes("actions/upload-artifact@"));
@@ -894,10 +894,11 @@ test("the firewall's node client really connects to the listeners it is given (a
 import {
   DEFAULT_LIMITS, DIAG_IDS, configCells, npmFixtureFiles, writeNpmProject,
 } from "../experiments/windows-appcontainer/lib.mjs";
-import { DEFAULT_BUDGET_MS, DEFAULT_WATCHDOG_MS, connectOnce } from "../experiments/windows-appcontainer/probe.mjs";
-import { loopbackCommands, netSetup, netTeardown } from "../experiments/windows-appcontainer/ladder.mjs";
+import { DEFAULT_BUDGET_MS, DEFAULT_WATCHDOG_MS, connectOnce, rebuildFromProgress, spawnLimited } from "../experiments/windows-appcontainer/probe.mjs";
+import { LSTAT_REPRO_SCRIPT, REALPATH_SHIM, firstRefusedPrefix, judgeNpm, lstatReproStep, npmStepFor, npmVariants, packagesInstalled, parseRepro, renderNpmMarkdown, runNpmLadder, selectNpmVariants } from "../experiments/windows-appcontainer/npm.mjs";
+import { PACKAGE_NAME_PATTERN, loopbackCommands, netSetup, netTeardown } from "../experiments/windows-appcontainer/ladder.mjs";
 import {
-  NUL_ACL_SCRIPT, analyzeSddl, gitProgram, gitStepFor, gitVariants, parseNulOpen, renderGitMarkdown, renderLinksMarkdown, renderTimingMarkdown, runGitLadder, runLinks, runTiming, selectGitVariants,
+  NUL_ACL_SCRIPT, analyzeSddl, gitProgram, gitStepFor, gitVariants, parseNulOpen, parseOpenTest, summarizeOpenTest, renderGitMarkdown, renderLinksMarkdown, renderTimingMarkdown, runGitLadder, runLinks, runTiming, selectGitVariants,
 } from "../experiments/windows-appcontainer/round3.mjs";
 import { MODES } from "../experiments/windows-appcontainer/run-experiment.mjs";
 
@@ -1019,10 +1020,11 @@ test("diagnostics have no verdict; the protected-name operations, the own juncti
   assert.equal(tally([j]).info, 1);
 });
 
-test("configurations: seven network/LPAC cells plus the no-protection contrast, capabilities and conditions named, arguments carry them in order", () => {
+test("configurations: eight network/LPAC cells plus the no-protection contrast, capabilities and conditions named, arguments carry them in order", () => {
   const cells = configCells();
-  assert.deepEqual(cells.map((c) => c.id), ["ac-nocap", "ac-nocap-noprotect", "ac-inet-private", "ac-inet-private-fwblock", "ac-inet-private-loopback", "ac-inet-private-loopback-fwblock", "lpac-optout-reg", "lpac-optout-reg-com"]);
+  assert.deepEqual(cells.map((c) => c.id), ["ac-nocap", "ac-nocap-noprotect", "ac-inet-private", "ac-inet-private-fwblock", "ac-inet-private-loopback", "ac-inet-private-loopback-fwblock", "ac-inet-private-loopback-byname", "lpac-optout-reg", "lpac-optout-reg-com"]);
   const by = Object.fromEntries(cells.map((c) => [c.id, c]));
+  assert.equal(by["ac-inet-private-loopback-byname"].loopbackExempt, "name");
   assert.deepEqual(by["ac-inet-private"].capabilities, ["internetClient", "privateNetworkClientServer"]);
   assert.equal(by["ac-inet-private-fwblock"].firewallBlock, true);
   assert.equal(by["ac-inet-private-loopback"].loopbackExempt, true);
@@ -1142,8 +1144,8 @@ test("a probe that stopped early shows where: the partial report names the step 
 });
 
 test("command line: the new modes, no default variant list for the firewall, and the firewall's default variant carries the capabilities its name says", async () => {
-  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "links", "timing", "firewall"]);
-  for (const m of ["cases", "git", "links", "timing"]) assert.equal(parseCli(["--mode", m]).mode, m);
+  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall"]);
+  for (const m of ["cases", "git", "npm", "links", "timing"]) assert.equal(parseCli(["--mode", m]).mode, m);
   assert.equal(parseCli([]).variantSpec, undefined);
   // round 2 ran this experiment WITHOUT the capabilities because "all" was passed on and the first variant (no capability) was taken
   for (const spec of [undefined, "all"]) {
@@ -1174,9 +1176,9 @@ test("the workflow has one step per mode, each after the first with if: always()
   const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
   assert.match(hosted, /timeout-minutes: 75/);
   const steps = hosted.split(/\n {6}- /).filter((x) => /run-experiment\.mjs/.test(x));
-  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["ladder", "git", "cases", "links", "timing", "firewall"]);
+  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["ladder", "git", "npm", "cases", "links", "timing", "firewall"]);
   steps.forEach((st, i) => assert.equal(/\n\s+if: always\(\)/.test(st), i > 0, `step ${i}`));
-  assert.match(steps[2], /--mode cases --timeout-ms 90000/);
+  assert.match(steps[3], /--mode cases --timeout-ms 90000/);
   assert.ok(steps.every((st) => /timeout-minutes: \d+/.test(st)));
   const own = wf.slice(wf.indexOf("  own-runner:"));
   assert.match(own, /default: false|inputs\.own_runner == true/);
@@ -1249,6 +1251,7 @@ test("git ladder run: --version first, init/add/commit only after it passes, the
   const base = tmp();
   const calls = [];
   const onlyWithNulRw = (args, cmdline) => {
+    if (/open-test/.test(cmdline)) return { out: `${JSON.stringify({ tool: "nn-appc-launcher", command: "open-test", ok: true, opens: [{ name: "NUL GENERIC_READ|GENERIC_WRITE share R|W NORMAL", via: "CreateFileW", ok: false, code: 5 }, { name: "NUL GENERIC_READ only", via: "CreateFileW", ok: true, code: 0 }, { name: "_wopen(nul, O_RDWR)", via: "C runtime errno", ok: false, code: 13 }] })}\n` };
     if (/NUL/.test(cmdline) && /fs\.openSync|openSync/.test(cmdline)) return { out: `${JSON.stringify({ "NUL r": "ok", "NUL w": "EACCES", "NUL r+": "EACCES", "\\\\.\\NUL r": "ok", "\\\\.\\NUL w": "EACCES", "\\\\.\\NUL r+": "EACCES" })}\n` };
     if (/git\.exe/.test(cmdline) && /--version/.test(cmdline)) return args.includes("nul-rw") ? { out: "git version 2.50.0\n" } : { exit: 128, err: "fatal: could not open '/dev/null' for reading and writing: Permission denied\n" };
     return {};
@@ -1258,14 +1261,22 @@ test("git ladder run: --version first, init/add/commit only after it passes, the
     assert.equal(r.ranAtAll, true);
     const by = Object.fromEntries(r.report.variants.map((v) => [v.id, v]));
     assert.equal(by.base.gitRuns, false);
-    assert.deepEqual(by.base.steps.map((s) => s.id), ["node-open-nul", "git-version", "git-init", "git-add", "git-commit"]);
-    assert.deepEqual(by.base.steps.slice(2).map((s) => s.status), ["skipped", "skipped", "skipped"]);
-    assert.equal(by.base.steps[1].exitHex, "0x80");
-    assert.match(by.base.steps[1].stderrHead[0], /could not open '\/dev\/null' for reading and writing/);
+    assert.deepEqual(by.base.steps.map((s) => s.id), ["node-open-nul", "open-test", "git-version", "git-init", "git-add", "git-commit"]);
+    assert.deepEqual(by.base.steps.slice(3).map((s) => s.status), ["skipped", "skipped", "skipped"]);
+    assert.equal(by.base.steps[2].exitHex, "0x80");
+    assert.match(by.base.steps[2].stderrHead[0], /could not open '\/dev\/null' for reading and writing/);
     assert.equal(by.base.nulOpen["NUL r+"], "EACCES");
+    // the launcher's open-test ran as the child (a copy in the workspace) and its refusals are named in plain words
+    assert.equal(by.base.steps[1].status, "pass");
+    assert.equal(by.base.openTest.length, 3);
+    assert.match(summarizeOpenTest(by.base.openTest).text, /^refused: NUL GENERIC_READ\|GENERIC_WRITE share R\|W NORMAL \(error 5\); _wopen\(nul, O_RDWR\) \(errno 13\); accepted: NUL GENERIC_READ only$/);
+    assert.equal(by["stdin-nul-rw"].openTest, undefined);
+    assert.match(r.markdown, /NUL device: which open flags the container refuses/);
+    assert.match(r.markdown, /ac-nocap: refused: NUL GENERIC_READ\|GENERIC_WRITE share R\|W NORMAL \(error 5\)/);
     assert.equal(by["stdin-nul-rw"].gitRuns, true);
     assert.equal(by["stdin-nul-rw"].commitRuns, true);
     assert.deepEqual(by["stdin-nul-rw"].steps.map((s) => s.status), ["pass", "pass", "pass", "pass", "pass"]);
+    assert.deepEqual(by["stdin-nul-rw"].steps.map((s) => s.id), ["node-open-nul", "git-version", "git-init", "git-add", "git-commit"]);
     assert.equal(by["copy-cmd-exe"].gitRuns, false);
     assert.equal(r.report.nulAcl.allAppPackagesAllowed, true);
     assert.deepEqual(r.report.cleanup, { profileDeleted: true, foldersRemoved: 3, grantsLeft: 0 });
@@ -1403,4 +1414,405 @@ test("the launcher's round 3 additions: standard handles as NUL read-write, a fi
   const cargo = readFileSync(join(exp, "launcher", "Cargo.toml"), "utf8");
   assert.ok(cargo.includes('"Win32_System_Pipes"') && cargo.includes('"Win32_System_IO"'));
   assert.match(readme, /Round 3/);
+});
+
+
+// ------------------------------------------------------------------------------------------------ round 3b: results that survive a hang
+
+test("the progress file carries each step's result, and the report is rebuilt from it: finished steps, the step that was running, damaged lines skipped", () => {
+  const rec = (id, extra = {}) => ({ id, group: "case", expect: "denied", attempts: [{ name: "a", outcome: "denied", code: "EACCES" }], actual: "denied", ms: 3, ...extra });
+  const text = [
+    `1 ms start deny-write-system`, `5 ms RESULT ${JSON.stringify({ ...rec("deny-write-system"), denials: [{ tool: "git", line: "Access is denied." }] })}`, `5 ms end deny-write-system`,
+    `6 ms start deny-credential-read`, `9 ms RESULT {"id":"deny-credential-read", damaged`, `9 ms RESULT ${JSON.stringify(rec("deny-credential-read"))}`, `9 ms end deny-credential-read`,
+    `10 ms start diag-spawn-modes`, `20 ms ATTEMPT ${JSON.stringify({ id: "diag-spawn-modes", group: "diag", expect: "allowed", attempt: { name: "spawn node with stdio files", outcome: "allowed" } })}`,
+  ].join("\n");
+  const r = rebuildFromProgress(text);
+  assert.equal(r.partial, true);
+  assert.equal(r.rebuilt, true);
+  assert.deepEqual(r.probes.map((p) => p.id), ["deny-write-system", "deny-credential-read", "diag-spawn-modes"]);
+  assert.equal(r.probes[0].denials, undefined, "the denial lines move to the report's own list");
+  assert.deepEqual(r.startupDenials, [{ tool: "git", line: "Access is denied." }]);
+  const last = r.probes[2];
+  assert.equal(last.unfinished, true);
+  assert.equal(last.group, "diag");
+  assert.deepEqual(last.attempts.map((a) => a.name), ["spawn node with stdio files", "step did not finish"]);
+  assert.equal(last.attempts[1].code, "HUNG");
+  assert.equal(r.watchdog.step, "diag-spawn-modes");
+  // nothing written: an empty, partial report; no exception on garbage
+  assert.deepEqual(rebuildFromProgress("").probes, []);
+  assert.deepEqual(rebuildFromProgress(undefined).probes, []);
+  assert.deepEqual(rebuildFromProgress("garbage\n12 ms start\n").probes, []);
+});
+
+test("the real probe writes one RESULT line per step before its end line, each diagnostic mode its own line, and diag-spawn-modes runs last", async () => {
+  const { cfg, dir, plan } = probeWorld();
+  try {
+    const report = await runProbes(cfg);
+    const lines = readFileSync(plan.progressFile, "utf8").trim().split(/\r?\n/);
+    for (const id of ALL_PROBE_IDS) {
+      const iRes = lines.findIndex((l) => new RegExp(`^\\d+ ms RESULT \\{"id":"${id}"`).test(l));
+      const iEnd = lines.findIndex((l) => l.endsWith(` end ${id}`));
+      assert.ok(iRes >= 0, `RESULT ${id}`);
+      assert.ok(iRes < iEnd, `RESULT before end for ${id}`);
+    }
+    const attempts = lines.filter((l) => / ms ATTEMPT /.test(l));
+    assert.equal(attempts.length, 3);
+    assert.ok(attempts.every((l) => l.includes('"id":"diag-spawn-modes"')));
+    const order = lines.filter((l) => / start /.test(l)).map((l) => l.split(" start ")[1]);
+    assert.equal(order.at(-1), "diag-spawn-modes");
+    assert.ok(order.indexOf("tool-npm-ci-offline") < order.indexOf("diag-spawn-modes"));
+    assert.ok(order.indexOf("extra-protect-rename-parent") < order.indexOf("tool-node-version"), "the protected-name operations run before the tools that start programs");
+    // rebuilding from the complete file gives the same steps as the final report
+    const rebuilt = rebuildFromProgress(readFileSync(plan.progressFile, "utf8"));
+    assert.deepEqual(rebuilt.probes.map((p) => p.id), report.probes.map((p) => p.id));
+    assert.deepEqual(rebuilt.probes.map((p) => p.actual), report.probes.map((p) => p.actual));
+  } finally { removeTree(dir); }
+});
+
+test("a spawned child always ends: a program that never exits is killed at the timer and the result says so; the probe has no synchronous spawn", async () => {
+  const t = Date.now();
+  const hung = await spawnLimited(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", timeoutMs: 400 });
+  assert.equal(hung.error?.code, "ETIMEDOUT");
+  assert.ok(Date.now() - t < 8000);
+  const ok = await spawnLimited(process.execPath, ["-e", "process.stdout.write('hi')"], { stdio: ["ignore", "pipe", "pipe"], timeoutMs: 20_000 });
+  assert.equal(ok.status, 0);
+  assert.equal(ok.stdout, "hi");
+  const missing = await spawnLimited("nn-no-such-program-here", [], { stdio: "ignore", timeoutMs: 2000 });
+  assert.ok(missing.error);
+  const src = readFileSync(join(exp, "probe.mjs"), "utf8").split(/\r?\n/).filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+  assert.ok(!/spawnSync|execSync|execFileSync/.test(src), "no synchronous child process call in the probe's code");
+  assert.match(src, /for \(const \[name, run\] of modes\) \{[\s\S]*emit\(attempt\);/, "each mode's result line is written before the next mode starts");
+});
+
+test("the watchdog worker ends a process whose main thread is blocked, after writing the partial progress and the rebuilt report", () => {
+  const dir = tmp();
+  try {
+    const progress = join(dir, "progress.txt");
+    writeFileSync(progress, `1 ms start control-write-own-directories\n3 ms RESULT ${JSON.stringify({ id: "control-write-own-directories", group: "case", expect: "allowed", attempts: [{ name: "a", outcome: "allowed" }], actual: "allowed", ms: 2 })}\n3 ms end control-write-own-directories\n4 ms start diag-spawn-modes\n`);
+    const script = `import { startWorkerWatchdog } from ${JSON.stringify(pathToFileURL(join(exp, "probe.mjs")).href)};
+startWorkerWatchdog({ progressFile: ${JSON.stringify(progress)}, deadlineMs: 300 });
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000); // the main thread is blocked: no timer of its own could fire
+`;
+    writeFileSync(join(dir, "blocked.mjs"), script);
+    const t = Date.now();
+    const r = spawnSync(process.execPath, [join(dir, "blocked.mjs")], { encoding: "utf8", timeout: 30_000 });
+    assert.ok(Date.now() - t < 25_000, "ended by the worker, not by the test's own limit");
+    assert.ok(r.signal !== null || r.status !== 0, "the process was ended");
+    const rep = extractProbeReport(r.stdout);
+    assert.ok(rep, "the partial report was printed");
+    assert.equal(rep.rebuilt, true);
+    assert.deepEqual(rep.probes.map((p) => p.id), ["control-write-own-directories", "diag-spawn-modes"]);
+    assert.equal(rep.probes[1].unfinished, true);
+    assert.match(readFileSync(progress, "utf8"), / ms WATCHDOG diag-spawn-modes\n$/);
+    // a probe that finishes stops the worker: nothing is printed and the process ends by itself
+    const quick = `import { startWorkerWatchdog } from ${JSON.stringify(pathToFileURL(join(exp, "probe.mjs")).href)};
+const w = startWorkerWatchdog({ progressFile: ${JSON.stringify(progress)}, deadlineMs: 400 });
+w.stop();
+`;
+    writeFileSync(join(dir, "quick.mjs"), quick);
+    const q = spawnSync(process.execPath, [join(dir, "quick.mjs")], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(q.status, 0);
+    assert.equal(q.stdout, "");
+  } finally { removeTree(dir); }
+});
+
+test("which report a cell is judged by: the whole one, else the one rebuilt from the progress file when it holds more, and the label says which", () => {
+  const rec = (id) => ({ id, group: "case", expect: "denied", attempts: [{ name: "a", outcome: "denied" }], actual: "denied", ms: 1 });
+  const progress = [`1 ms start deny-write-system`, `2 ms RESULT ${JSON.stringify(rec("deny-write-system"))}`, `2 ms end deny-write-system`, `3 ms start deny-credential-read`, `4 ms RESULT ${JSON.stringify(rec("deny-credential-read"))}`, `4 ms end deny-credential-read`].join("\n");
+  const whole = { schema: "nn-appc-probe-1", probes: [rec("deny-write-system")], startupDenials: [] };
+  assert.deepEqual(chooseProbeReport(whole, progress), { report: whole, label: "ok" });
+  const none = chooseProbeReport(undefined, progress);
+  assert.equal(none.label, REBUILT_LABEL);
+  assert.equal(REBUILT_LABEL, "partial: rebuilt from progress");
+  assert.equal(none.report.probes.length, 2);
+  assert.deepEqual(chooseProbeReport(undefined, ""), { report: undefined, label: "missing" });
+  const printedPartial = { schema: "nn-appc-probe-1", partial: true, watchdog: { step: "x", elapsedMs: 5 }, probes: [rec("deny-write-system"), rec("deny-credential-read")], startupDenials: [] };
+  assert.match(chooseProbeReport(printedPartial, progress).label, /^partial: the probe's watchdog ended it in step x after 5 ms/);
+  assert.equal(chooseProbeReport({ ...printedPartial, probes: [] }, progress).label, REBUILT_LABEL);
+  assert.equal(chooseProbeReport({ ...printedPartial, rebuilt: true }, "").label, REBUILT_LABEL);
+  assert.equal(chooseProbeReport({ schema: "x", fatal: "EACCES", probes: [], startupDenials: [] }, "").label, "fatal: EACCES");
+  // a step that was still running counts only when it wrote an attempt line
+  assert.equal(chooseProbeReport(undefined, "1 ms start deny-write-system\n").label, "missing");
+});
+
+test("a rebuilt cell is judged step by step: finished steps keep their verdict, the unfinished one and the unreached ones are inconclusive, a diagnostic is info", () => {
+  const rebuilt = rebuildFromProgress([
+    `1 ms start control-write-own-directories`, `2 ms RESULT ${JSON.stringify({ id: "control-write-own-directories", group: "case", expect: "allowed", attempts: [{ name: "w", outcome: "allowed" }], actual: "allowed", ms: 1 })}`, `2 ms end control-write-own-directories`,
+    `3 ms start control-read-own-decoy`, `4 ms RESULT ${JSON.stringify({ id: "control-read-own-decoy", group: "case", expect: "allowed", attempts: [{ name: "d", outcome: "allowed" }], actual: "allowed", ms: 1 })}`, `4 ms end control-read-own-decoy`,
+    `5 ms start deny-write-system`, `6 ms RESULT ${JSON.stringify({ id: "deny-write-system", group: "case", expect: "denied", attempts: [{ name: "s", outcome: "denied", code: "EACCES" }], actual: "denied", ms: 1 })}`, `6 ms end deny-write-system`,
+    `7 ms start deny-credential-read`,
+    `8 ms start diag-spawn-modes`,
+  ].join("\n").replace("7 ms start deny-credential-read\n8 ms start diag-spawn-modes", "7 ms start deny-credential-read\n7 ms end deny-credential-read\n8 ms start diag-spawn-modes"));
+  const results = judgeCell(rebuilt, undefined);
+  const by = Object.fromEntries(results.map((r) => [r.id, r]));
+  assert.equal(by["control-write-own-directories"].verdict, "pass");
+  assert.equal(by["deny-write-system"].verdict, "pass");
+  assert.equal(by["deny-credential-read"].verdict, "inconclusive", "ended without a result: not reported");
+  assert.equal(by["diag-spawn-modes"].verdict, "info", "a diagnostic has no verdict, and shows that it did not finish");
+  assert.match(by["diag-spawn-modes"].detail, /step did not finish=error\(HUNG\)/);
+  assert.equal(by["tool-git-version"].verdict, "inconclusive");
+  assert.equal(results.length, ALL_PROBE_IDS.length);
+  const hungDeny = rebuildFromProgress("1 ms start deny-network-loopback\n");
+  const hung = judgeCell(hungDeny, undefined).find((r) => r.id === "deny-network-loopback");
+  assert.equal(hung.verdict, "inconclusive");
+});
+
+test("harness: a probe that hung and printed nothing is rebuilt from the progress file, the cell says so, and nothing it did get done is lost", async () => {
+  const base = tmp();
+  try {
+    const inner = fakeLauncher("good", []);
+    const rec = (id, group, expect, outcome) => ({ id, group, expect, attempts: [{ name: "a", outcome }], actual: outcome, ms: 4 });
+    const exec = (p, a) => {
+      if (a[0] !== "run") return inner(p, a);
+      const flag = (f) => a[a.indexOf(f) + 1];
+      const cfg = JSON.parse(readFileSync(join(dirname(flag("--stdout")), "..", "probe", "probe-config.json"), "utf8"));
+      const lines = [];
+      for (const id of ALL_PROBE_IDS.filter((x) => x !== "diag-spawn-modes" && !x.startsWith("tool-"))) {
+        const control = id.startsWith("control-");
+        lines.push(`1 ms start ${id}`, `2 ms RESULT ${JSON.stringify(rec(id, id.startsWith("extra-") ? "extra" : id.startsWith("diag-") ? "diag" : "case", control || id.startsWith("diag-") ? "allowed" : "denied", control || id.startsWith("diag-") ? "allowed" : "denied"))}`, `2 ms end ${id}`);
+      }
+      lines.push("3 ms start tool-node-version");
+      writeFileSync(cfg.progressFile, `${lines.join("\n")}\n`);
+      writeFileSync(flag("--stdout"), ""); // the report was never printed
+      writeFileSync(flag("--stderr"), "");
+      return { status: 1, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: true, childStarted: true, childExitCode: 1, timedOut: true, leftoverProcesses: 0, elapsedMs: 90000, allGrantsRevoked: true, grants: [] })}\n`, stderr: "" };
+    };
+    const r = await runExperiment({ launcherPath: "fake", exec, tmpBase: base, tools, cells: selectCells("ac-nocap", configCells()), systemPaths: [], systemFolder: base, outbound: { host: "192.0.2.1", local: false } });
+    const c = r.report.cells[0];
+    assert.equal(c.probeReport, "partial: rebuilt from progress");
+    const by = Object.fromEntries(c.results.map((x) => [x.id, x]));
+    assert.equal(by["deny-write-system"].verdict, "pass");
+    assert.equal(by["control-read-own-decoy"].verdict, "pass");
+    assert.equal(by["tool-node-version"].verdict, "inconclusive");
+    assert.equal(by["tool-git-version"].verdict, "inconclusive");
+    assert.ok(c.results.filter((x) => x.verdict === "pass").length >= 10);
+    assert.equal(c.probeProgress.some((l) => /RESULT|ATTEMPT/.test(l)), false, "the progress tail shows boundaries, not result lines");
+    assert.match(r.markdown, /\| ac-nocap \| timed out, partial: rebuilt from progress \|/);
+    assert.match(r.markdown, /Probe report: partial: rebuilt from progress\./);
+  } finally { removeTree(base); }
+});
+
+// ------------------------------------------------------------------------------------------------ round 3b: npm
+
+test("npm variants: unique ids, each is one change from the base, the arguments carry the flags, the shell, the project folder and the environment", () => {
+  const all = npmVariants();
+  assert.equal(new Set(all.map((v) => v.id)).size, all.length);
+  for (const id of ["base", "nodeopts-preserve", "flags-preserve", "npm-cmd", "npm-cmd-preserve", "env-more", "cwd-workspace", "preload-realpath-native", "preserve-env-workspace", "lpac-base"]) assert.ok(all.some((v) => v.id === id), id);
+  assert.throws(() => selectNpmVariants("nope"), /unknown npm variant/);
+  assert.equal(selectNpmVariants("base,npm-cmd").length, 2);
+  const plan = ladderPlan("C:\\fx");
+  const ctx = { ...ladderCtx, npmCli: "C:\\node\\node_modules\\npm\\bin\\npm-cli.js", npmCmd: "C:\\node\\npm.cmd" };
+  const step = (id) => npmStepFor(all.find((v) => v.id === id), plan, ctx);
+  const base = step("base");
+  assert.equal(base.cwd, `${plan.scratch}\\npmproj`);
+  assert.deepEqual(base.args().slice(0, 2), [ctx.npmCli, "ci"]);
+  assert.ok(base.args().includes("--offline"));
+  assert.deepEqual(base.env, {});
+  assert.deepEqual(step("nodeopts-preserve").env, { NODE_OPTIONS: "--preserve-symlinks --preserve-symlinks-main" });
+  assert.deepEqual(step("flags-preserve").args().slice(0, 3), ["--preserve-symlinks", "--preserve-symlinks-main", ctx.npmCli]);
+  const cmd = step("npm-cmd");
+  assert.equal(cmd.exe, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(cmd.args().slice(0, 2), ["/c", "C:\\node\\npm.cmd"]);
+  assert.equal(step("cwd-workspace").cwd, `${plan.workspace}\\npmproj`);
+  const more = step("env-more").env;
+  for (const k of ["npm_config_prefix", "npm_config_logs_dir", "npm_config_cache", "npm_config_userconfig", "npm_config_globalconfig", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) assert.ok(more[k].startsWith(plan.home), k);
+  assert.match(step("preload-realpath-native").env.NODE_OPTIONS, /^--require .*nn-realpath-shim\.js$/);
+  assert.equal(step("lpac-base").cwd, base.cwd);
+  assert.equal(all.find((v) => v.id === "lpac-base").container, "lpac-optout-reg-com");
+  // the launcher arguments: the step's program, working directory and environment reach the launcher
+  const a = buildStepArgs(ladderVariants().find((v) => v.id === "ac-nocap"), step("env-more"), plan, ctx, 45_000, { stdout: "o", stderr: "e" });
+  assert.equal(a[a.indexOf("--cwd") + 1], base.cwd);
+  assert.ok(a.some((x) => x === `npm_config_prefix=${more.npm_config_prefix}`));
+  assert.ok(REALPATH_SHIM.includes("realpathSync.native"));
+});
+
+test("the failing call is reproduced alone: the repro script prints every prefix, the realpath outcomes and the drive root's access; the first refusal is named", () => {
+  const r = spawnSync(process.execPath, ["-e", LSTAT_REPRO_SCRIPT, process.execPath], { encoding: "utf8", timeout: 20_000, cwd: os.tmpdir() });
+  assert.equal(r.status, 0, r.stderr);
+  const p = parseRepro(r.stdout);
+  assert.ok(p);
+  assert.equal(p.realpathJs, "ok");
+  assert.equal(p.realpathNative, "ok");
+  assert.equal(p.rootLstat, "ok");
+  for (const k of ["npmScript", "cwd", "nodeExe"]) assert.ok(p.prefixes[k].length >= 2 && p.prefixes[k].every(([, c]) => c === "ok"), k);
+  assert.equal(firstRefusedPrefix(p), undefined);
+  const refused = { prefixes: { npmScript: [["C:\\", "EPERM lstat"], ["C:\\x", "ok"]], cwd: [] } };
+  assert.deepEqual(firstRefusedPrefix(refused), { kind: "npmScript", path: "C:\\", code: "EPERM lstat" });
+  assert.equal(parseRepro("no json"), undefined);
+  const step = lstatReproStep(ladderPlan("C:\\fx"), { npmCli: "C:\\n\\npm-cli.js" });
+  assert.deepEqual(step.args().slice(0, 1), ["-e"]);
+  assert.equal(step.args()[2], "C:\\n\\npm-cli.js");
+});
+
+test("npm run: a variant passes only with exit 0 AND every package on disk; the failing one keeps its error lines; the repro runs once per container; clean-up and read-back happen", async () => {
+  const base = tmp();
+  const calls = [];
+  const reproLine = JSON.stringify({ prefixes: { npmScript: [["C:\\", "EPERM lstat"]], cwd: [], nodeExe: [] }, realpathJs: "EPERM lstat", realpathNative: "ok", realpathJsCwd: "EPERM lstat", rootLstat: "EPERM lstat", rootStat: "ok", rootAccess: "ok", rootReaddir: "EPERM scandir" });
+  const behavior = (args, cmdline) => {
+    if (cmdline.includes("lstatSync")) return { out: `${reproLine}\n` };
+    const cwd = args[args.indexOf("--cwd") + 1];
+    const env = args.filter((a) => a.startsWith("NODE_OPTIONS="));
+    const passes = env.length === 1 && /preserve/.test(env[0]);
+    if (!passes) return { exit: 1, err: "node:fs:2744\nconst out = binding.lstat(base, false, undefined, true /* throwIfNoEntry */);\n^\nError: EPERM: operation not permitted, lstat 'C:\\'\n" };
+    for (let i = 0; i < 40; i++) { mkdirSync(join(cwd, "node_modules", `nn-tiny-${i}`), { recursive: true }); writeFileSync(join(cwd, "node_modules", `nn-tiny-${i}`, "index.js"), "x"); }
+    return {};
+  };
+  try {
+    const r = await runNpmLadder({ launcherPath: "fake", exec: ladderFake(behavior, calls), tmpBase: base, tools: { ...gitTools, npmCli: "C:\\node\\node_modules\\npm\\bin\\npm-cli.js" }, platform: "linux", systemRoot: "C:\\Windows", now: () => "2026-11-25T00:00:00.000Z", variantSpec: "base,nodeopts-preserve,lpac-base" });
+    assert.equal(r.ranAtAll, true);
+    const by = Object.fromEntries(r.report.variants.map((v) => [v.id, v]));
+    assert.equal(by.base.step.status, "fail");
+    assert.equal(by.base.step.exitHex, "0x1");
+    assert.equal(by.base.step.installed, false);
+    assert.match(by.base.step.stderrHead.join("\n"), /EPERM: operation not permitted, lstat 'C:\\'/);
+    assert.equal(by["nodeopts-preserve"].step.status, "pass");
+    assert.equal(by["nodeopts-preserve"].step.installed, true);
+    assert.deepEqual(r.report.passing, ["nodeopts-preserve"]);
+    assert.deepEqual(Object.keys(r.report.repro).sort(), ["ac-nocap", "lpac-optout-reg-com"], "once per container");
+    assert.equal(r.report.repro["ac-nocap"].firstRefused.path, "C:\\");
+    assert.deepEqual(r.report.cleanup, { profileDeleted: true, foldersRemoved: 3, grantsLeft: 0 });
+    assert.ok(calls.includes("check") && calls.includes("delete-profile"));
+    assert.match(r.markdown, /First prefix refused: npmScript: `C:\\` EPERM lstat/);
+    assert.match(r.markdown, /\| base \| ac-nocap \| fail 0x1 \| false \|/);
+    assert.match(r.markdown, /Variants where npm ci --offline passed: nodeopts-preserve\./);
+    assert.equal(readdirSync(base).length, 0);
+    // exit 0 without the packages is not a pass
+    const odd = judgeNpm({ id: "npm-ci", label: "x", expect: () => true }, { childStarted: true, childExitCode: 0 }, "", "", false);
+    assert.equal(odd.status, "odd");
+    assert.equal(packagesInstalled(join(base, "none"), 2, () => false), false);
+    assert.equal(packagesInstalled("p", 2, () => true), true);
+    assert.match(renderNpmMarkdown({ ...r.report, passing: [] }), /No variant made npm ci --offline pass/);
+  } finally { removeTree(base); }
+});
+
+test("npm run: a container that cannot be made starts nothing, and without npm-cli.js nothing is tried", async () => {
+  const base = tmp();
+  try {
+    const none = await runNpmLadder({ launcherPath: "fake", tmpBase: base, tools: gitTools, exec: () => ({ status: 125, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "container" })}\n`, stderr: "" }) });
+    assert.equal(none.ranAtAll, false);
+    const calls = [];
+    const r = await runNpmLadder({ launcherPath: "fake", exec: ladderFake(() => ({}), calls), tmpBase: base, tools: gitTools, platform: "linux", now: () => "2026-11-25T00:00:00.000Z" });
+    assert.equal(r.report.variants.length, 0);
+    assert.ok(r.report.notes.some((n) => /npm-cli\.js was not found/.test(n)));
+    assert.ok(!calls.includes("run"));
+  } finally { removeTree(base); }
+});
+
+// ------------------------------------------------------------------------------------------------ round 3b: git and the NUL device
+
+test("git: the all-NUL variants pass the launcher's flags and judge by exit code only; the open-test results are summarized in plain words", () => {
+  const all = gitVariants();
+  const plan = ladderPlan("C:\\fx");
+  const ctx = { ...ladderCtx, gitRoot: "C:\\Git" };
+  const step = (id) => gitStepFor(all.find((v) => v.id === id), "git-version", plan, ctx);
+  assert.deepEqual(step("all-nul-rw").launcherArgs, ["--stdin", "nul-rw", "--stdout-nul-rw", "--stderr-nul-rw"]);
+  assert.equal(step("all-nul-rw").expect(""), true, "nothing is captured, so the exit code alone counts");
+  assert.equal(step("base").expect(""), false);
+  assert.deepEqual(step("lpac-all-nul-rw").launcherArgs, ["--stdin", "nul-rw", "--stdout-nul-rw", "--stderr-nul-rw"]);
+  assert.equal(all.find((v) => v.id === "lpac-all-nul-rw").container, "lpac-optout-reg-com");
+  assert.deepEqual(all.filter((v) => v.openTest).map((v) => v.id), ["base", "lpac-base"]);
+  assert.equal(parseOpenTest("noise\nnot json\n"), undefined);
+  assert.equal(summarizeOpenTest(undefined).text, "the open-test did not run in this container");
+  const ok = [{ name: "a", via: "CreateFileW", ok: true, code: 0 }];
+  assert.equal(summarizeOpenTest(ok).text, "the container accepted every combination");
+  assert.equal(summarizeOpenTest([{ name: "a", via: "CreateFileW", ok: false, code: 5 }]).text, "the container refused every combination");
+  assert.deepEqual(parseOpenTest(`${JSON.stringify({ command: "open-test", opens: [{ name: "n", via: "CreateFileW", ok: false, code: 5 }] })}\n`), [{ name: "n", via: "CreateFileW", ok: false, code: 5 }]);
+});
+
+test("the launcher source: an open-test command (CreateFileW flag combinations and the C runtime's _wopen, no new crate), and the standard output and error can be the NUL device", () => {
+  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  assert.match(src, /fn open_test\(\) -> String/);
+  assert.match(src, /raw\.get\(1\)\.map\(String::as_str\) == Some\("open-test"\)/);
+  for (const needle of ["FILE_SHARE_DELETE", "_wopen(", "_close(", "_errno()", "\\\\\\\\.\\\\NUL", "O_RDWR"]) assert.ok(src.includes(needle), needle);
+  assert.match(src, /"--stdout-nul-rw" => a\.stdout_nul = true/);
+  assert.match(src, /"--stderr-nul-rw" => a\.stderr_nul = true/);
+  for (const doc of ["open-test", "_wopen", "--stdout-nul-rw", "FILE_SHARE_DELETE"]) assert.ok(readme.includes(doc), `README: ${doc}`);
+  assert.ok(!/^\s*\[dependencies\][\s\S]*(libc|winapi)\s*=/m.test(readFileSync(join(exp, "launcher", "Cargo.toml"), "utf8")), "no new crate");
+});
+
+// ------------------------------------------------------------------------------------------------ round 3b: firewall assumptions and the loopback exemption by name
+
+test("firewall: each of the three assumptions is judged alone and the report names the one that fails", () => {
+  const ph = (phase, loop, out, started = true) => ({ phase, client: "c", started, loopbackConnections: loop, outboundConnections: out });
+  const rule = { added: true };
+  const status = (r) => r.assumptions.map((a) => a.status);
+  const good = [ph("control-before-rule", 1, 1), ph("inside-without-rule", 0, 1), ph("inside-with-rule", 0, 0), ph("control-with-rule", 1, 1)];
+  assert.deepEqual(status(judgeFirewall(good, rule)), ["holds", "holds", "holds"]);
+  // round 3 on the hosted runner: the capabilities did not open the network
+  const closed = good.map((p) => (p.phase === "inside-without-rule" ? ph(p.phase, 0, 0) : p));
+  assert.deepEqual(status(judgeFirewall(closed, rule)), ["FAILS", "not shown", "holds"]);
+  assert.deepEqual(status(judgeFirewall(good.map((p) => (p.phase === "inside-with-rule" ? ph(p.phase, 0, 1) : p)), rule)), ["holds", "FAILS", "holds"]);
+  assert.deepEqual(status(judgeFirewall(good.map((p) => (p.phase === "control-with-rule" ? ph(p.phase, 1, 0) : p)), rule)), ["holds", "holds", "FAILS"]);
+  assert.deepEqual(status(judgeFirewall([], { added: false })), ["not shown", "not shown", "not shown"]);
+  const md = (phases, rl = rule) => renderFirewallMarkdown({ generatedAt: "t", host: { platform: "win32", elevated: true, sessionId: 1 }, variant: "v", capabilities: [], firewallProfiles: "x", rule: { ...rl, commandAdd: "add", commandRemove: "rm" }, phases, ...judgeFirewall(phases, rl), cleanup: { profileDeleted: true, ruleRemoved: true }, notes: [] });
+  assert.match(md(closed), /Assumption 1 \*\*FAILS\*\*: the capabilities internetClient and privateNetworkClientServer open the network for the container/);
+  assert.match(md(closed), /The assumption that fails: number 1 \(/);
+  assert.match(md(good), /No assumption failed\./);
+  assert.match(md([], { added: false }), /No assumption was shown to fail; not shown: number 1, number 2, number 3\./);
+});
+
+test("loopback exemption by name: the command is validated, the cell adds it by name and reads it back by the package SID, and the teardown removes it", () => {
+  assert.throws(() => loopbackCommands("S-1-15-2-1-2-3-4-5-6-7", "bad name; x"), /package name/);
+  assert.ok(PACKAGE_NAME_PATTERN.test("NimbleNewtExperiment"));
+  const c = loopbackCommands("S-1-15-2-1-2-3-4-5-6-7", "NimbleNewtExperiment");
+  assert.match(c.addByName, /CheckNetIsolation\.exe LoopbackExempt -a -n=NimbleNewtExperiment/);
+  assert.equal(loopbackCommands("S-1-15-2-1-2-3-4-5-6-7").addByName, undefined);
+  const table = { exempt: false, calls: [] };
+  const ps = (script) => {
+    table.calls.push(script);
+    if (/-a -n=/.test(script)) { table.exempt = true; return { status: 0, stdout: "added\n", stderr: "" }; }
+    if (/-a -p=/.test(script)) { table.exempt = true; return { status: 0, stdout: "added\n", stderr: "" }; }
+    if (/-d -p=/.test(script)) { table.exempt = false; return { status: 0, stdout: "removed\n", stderr: "" }; }
+    if (/LoopbackExempt -s/.test(script)) return { status: 0, stdout: `${table.exempt ? 1 : 0}\n`, stderr: "" };
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const cell = configCells().find((x) => x.id === "ac-inet-private-loopback-byname");
+  const st = netSetup(cell, { ps, packageSid: "S-1-15-2-1-2-3-4-5-6-7", ruleName: "nn-appc-block-0a1b2c3d", profileName: "NimbleNewtExperiment" });
+  assert.equal(st.ok, true);
+  assert.equal(st.wanted.exemptBy, "name");
+  assert.ok(table.calls.some((x) => /-a -n=NimbleNewtExperiment/.test(x)) && !table.calls.some((x) => /-a -p=/.test(x)));
+  assert.match(st.summary, /loopback exemption yes, by name/);
+  assert.equal(table.exempt, true);
+  assert.deepEqual(netTeardown(st, { ps }), { ruleGone: true, exemptGone: true });
+  assert.equal(table.exempt, false);
+  // one that is not confirmed in the list is a failed set-up
+  const refusing = netSetup(cell, { ps: (x) => (/-a -n=/.test(x) ? { status: 0, stdout: "", stderr: "" } : { status: 0, stdout: "0\n", stderr: "" }), packageSid: "S-1-15-2-1-2-3-4-5-6-7", ruleName: "nn-appc-block-0a1b2c3d", profileName: "NimbleNewtExperiment" });
+  assert.equal(refusing.ok, false);
+});
+
+test("firewall run with the exemption by name: it is added and read back, the same clients run, it is removed, and a throw still removes it", async () => {
+  const base = tmp();
+  const fake = firewallFake();
+  const ex = { on: false, adds: 0 };
+  const ps = (script) => {
+    if (/-a -n=/.test(script)) { ex.on = true; ex.adds++; return { status: 0, stdout: "added\n", stderr: "" }; }
+    if (/-d -p=/.test(script)) { ex.on = false; return { status: 0, stdout: "removed\n", stderr: "" }; }
+    if (/LoopbackExempt -s/.test(script)) return { status: 0, stdout: `${ex.on ? 1 : 0}\n`, stderr: "" };
+    return fake.ps(script);
+  };
+  try {
+    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"], exemptByName: true, profileName: "NimbleNewtExperiment" });
+    assert.deepEqual(r.report.phases.map((p) => p.phase), ["control-before-rule", "inside-without-rule", "inside-with-name-exemption", "inside-with-rule", "control-with-rule", "inside-after-removal"]);
+    assert.equal(r.report.exemption.confirmed, true);
+    assert.equal(r.report.exemption.removed, true);
+    assert.equal(r.report.exemption.loopbackReached, false, "the fake container's loopback stays closed");
+    assert.equal(r.report.cleanup.exemptionRemoved, true);
+    assert.match(r.markdown, /Loopback exemption added by name/);
+    assert.equal(ex.on, false);
+    assert.equal(r.report.assumptions.length, 3);
+    // a throw while the exemption exists: removed in the finally path
+    await assert.rejects(runFirewall({ launcherPath: "fake", exec: fake.exec, ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"], exemptByName: true, profileName: "NimbleNewtExperiment",
+      log: (m) => { if (/inside-with-name-exemption/.test(m) && ex.on) throw new Error("boom"); } }), /boom/);
+    assert.equal(ex.on, false);
+    assert.deepEqual(readdirSync(base), []);
+  } finally { removeTree(base); }
+});
+
+test("round 3b: the workflow runs the npm step and every step keeps its own limit; the README tells what the round answers", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  assert.match(wf, /--mode npm --timeout-ms 45000/);
+  assert.ok((wf.match(/if: always\(\)/g) ?? []).length >= 6);
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  for (const needle of ["Round 3b", "rebuilt from progress", "worker", "--mode npm", "open-test"]) assert.ok(readme.includes(needle), needle);
 });

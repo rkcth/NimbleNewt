@@ -1,6 +1,6 @@
 // NimbleNewt experiment (not product code): the harness. It builds fresh fixtures for each cell of the matrix, starts the launcher (which runs probe.mjs inside
 // a low-privilege AppContainer), judges what came back with the host's own witnesses, and writes results.json and results.md.
-//   node run-experiment.mjs [--mode matrix|ladder|firewall|cases|git|links|timing] [--out DIR] [--launcher PATH] [--cells all|id,id] [--variants all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
+//   node run-experiment.mjs [--mode matrix|ladder|firewall|cases|git|npm|links|timing] [--out DIR] [--launcher PATH] [--cells all|id,id] [--variants all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
 //   --mode matrix (default): round 1's containment matrix. --mode ladder: round 2's smoke ladder (which programs start in which container variant). --mode firewall: round 2's
 //   "network cut by firewall" mini-experiment (needs administrator rights for the firewall rule). --timeout-ms is the per-cell (matrix) or per-step (ladder, firewall) limit.
 //   Round 3: --mode cases runs the ten cases, the extra probes (junctions, protected-name operations), the diagnostics and the tools in seven container configurations (ac-nocap,
@@ -17,9 +17,10 @@ import { basename, dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_LIMITS, PROFILE_NAME, aclReadBack, grantedPaths, buildChildEnv, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness, createFixtures, extractProbeReport,
-  configCells, judgeCell, matrixCells, parseLauncherLine, pickOutboundHost, removeTree, renderMarkdown, scrubText, selectCells, stderrHead, validateReport,
+  chooseProbeReport, configCells, judgeCell, matrixCells, parseLauncherLine, pickOutboundHost, removeTree, renderMarkdown, scrubText, selectCells, stderrHead, validateReport,
 } from "./lib.mjs";
 import { STEP_TIMEOUT_MS, netSetup, netTeardown, runFirewall, runLadder } from "./ladder.mjs";
+import { runNpmLadder } from "./npm.mjs";
 import { runGitLadder, runLinks, runTiming } from "./round3.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,8 +61,10 @@ export function discoverTools({ platform = process.platform, nodeExe = process.e
   const gitRoot = gitDir && ["cmd", "bin"].includes(p.basename(gitDir).toLowerCase()) ? p.dirname(gitDir) : gitDir;
   const npmCandidates = [p.join(p.dirname(nodeExe), "node_modules", "npm", "bin", "npm-cli.js"), p.join(p.dirname(p.dirname(nodeExe)), "lib", "node_modules", "npm", "bin", "npm-cli.js")];
   const npmCli = npmCandidates.find((c) => exists(c));
+  const npmCmdCandidate = p.join(p.dirname(nodeExe), platform === "win32" ? "npm.cmd" : "npm");
+  const npmCmd = exists(npmCmdCandidate) ? npmCmdCandidate : undefined;
   const programDirs = [...new Set([p.dirname(nodeExe), gitRoot].filter(Boolean))];
-  return { nodeExe, gitExe, gitDir, gitRoot, npmCli, programDirs };
+  return { nodeExe, gitExe, gitDir, gitRoot, npmCli, npmCmd, programDirs };
 }
 
 export async function runExperiment(opts) {
@@ -130,7 +133,7 @@ export async function runExperiment(opts) {
         args = buildLauncherArgs(cell, plan, ctx, limits);
         log(`cell ${cell.id}: starting`);
         if (!opts.dryRun && (cell.firewallBlock || cell.loopbackExempt)) {
-          netState = netSetup(cell, { ps: opts.ps, packageSid, ruleName: `nn-appc-block-${(opts.randomHex ?? (() => Math.random().toString(16).slice(2, 10).padEnd(8, "0")))()}` });
+          netState = netSetup(cell, { ps: opts.ps, packageSid, profileName, ruleName: `nn-appc-block-${(opts.randomHex ?? (() => Math.random().toString(16).slice(2, 10).padEnd(8, "0")))()}` });
           log(`cell ${cell.id}: network set-up ${netState.summary}`);
         }
         if (opts.dryRun) { launch = { ok: false, childStarted: false, stage: "dry-run", error: "dry run: the launcher was not started" }; }
@@ -143,9 +146,12 @@ export async function runExperiment(opts) {
               elapsedMs: line.elapsedMs, allGrantsRevoked: line.allGrantsRevoked === true, grants: line.grants ?? [], stderrBytes: line.stderrBytes, stdoutBytes: line.stdoutBytes, hang: line.hang, capabilities: Array.isArray(line.capabilities) ? line.capabilities.map((c) => c.name) : undefined };
         }
         const stdoutText = safe(() => readFileSync(join(plan.outDir, "stdout.txt"), "utf8")) ?? "";
-        const rep = extractProbeReport(stdoutText);
-        probeReport = rep === undefined ? "missing" : rep.fatal ? `fatal: ${rep.fatal}` : rep.partial ? `partial: the probe's watchdog ended it in step ${rep.watchdog?.step ?? "?"} after ${rep.watchdog?.elapsedMs ?? "?"} ms` : "ok";
-        progressTail = (safe(() => readFileSync(plan.progressFile, "utf8")) ?? "").split(/\r?\n/).filter(Boolean).slice(-6);
+        // The probe wrote each step's result to the progress file the moment it had it: a report that never got printed (a hang, a kill) is rebuilt from those lines.
+        const progressText = safe(() => readFileSync(plan.progressFile, "utf8")) ?? "";
+        const chosen = chooseProbeReport(extractProbeReport(stdoutText), progressText);
+        const rep = chosen.report;
+        probeReport = chosen.label;
+        progressTail = progressText.split(/\r?\n/).filter((l) => l !== "" && !/ ms (RESULT|ATTEMPT) /.test(l)).slice(-6);
         startupDenials = rep?.startupDenials ?? [];
         if (probeReport !== "ok") errHead = stderrHead(safe(() => readFileSync(join(plan.outDir, "stderr.txt"), "utf8")) ?? "");
         results = judgeCell(rep, collectWitness(plan, ctx));
@@ -164,7 +170,7 @@ export async function runExperiment(opts) {
         try { removeTree(root); foldersRemoved++; } catch { notes.push("a fixture folder could not be removed"); }
       }
       resultsCells.push({
-        id: cell.id, sameAs: cell.sameAs, dims: { lpac: cell.lpac, win32kDisabled: cell.win32kDisabled, aapOptOut: cell.aapOptOut, aapPolicy: cell.aapPolicy, protect: cell.protect, capabilities: cell.capabilities ?? [], firewallBlock: cell.firewallBlock === true, loopbackExempt: cell.loopbackExempt === true },
+        id: cell.id, sameAs: cell.sameAs, dims: { lpac: cell.lpac, win32kDisabled: cell.win32kDisabled, aapOptOut: cell.aapOptOut, aapPolicy: cell.aapPolicy, protect: cell.protect, capabilities: cell.capabilities ?? [], firewallBlock: cell.firewallBlock === true, loopbackExempt: Boolean(cell.loopbackExempt), loopbackExemptBy: cell.loopbackExempt === "name" ? "name" : "sid" },
         launch, softGrantFailures: (launch.grants ?? []).filter((g) => g.soft && !g.applied).map((g) => ({ path: g.path, mode: g.mode, errorCode: g.errorCode })),
         plantNotes, probeReport, probeProgress: probeReport === "ok" ? [] : progressTail, results, startupDenials, stderrHead: errHead, aclFirstReadBack, aclLeft,
         net: { ...netState, ...(netCleanup ? { cleanup: netCleanup } : {}), summary: `${netState.summary}${netCleanup ? `; removed afterwards: rule ${netCleanup.ruleGone ? "gone" : "STILL THERE"}, exemption ${netCleanup.exemptGone ? "gone" : "STILL THERE"}` : ""}` },
@@ -186,7 +192,7 @@ export async function runExperiment(opts) {
 
 function safe(fn) { try { return fn(); } catch { return undefined; } }
 
-export const MODES = ["matrix", "cases", "ladder", "git", "links", "timing", "firewall"];
+export const MODES = ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall"];
 
 export function parseCli(argv) {
   const o = { mode: "matrix", variantSpec: undefined, out: resolve("nn-appc-results"), launcherPath: join(here, "launcher", "target", "release", `nn-appc-launcher${process.platform === "win32" ? ".exe" : ""}`), cellSpec: "all", dryRun: false };
@@ -214,13 +220,14 @@ async function main() {
   let result;
   let stem = "results";
   if (o.mode === "git") { stem = "git"; result = await runGitLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell }); }
+  else if (o.mode === "npm") { stem = "npm"; result = await runNpmLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher }); }
   else if (o.mode === "links") { stem = "links"; result = await runLinks({ ...common, exec: execLauncher, ps: execPowerShell }); }
   else if (o.mode === "timing") { stem = "timing"; result = await runTiming({ ...common, exec: execLauncher, spawn: spawnSync }); }
   else if (o.mode === "cases") { stem = "cases"; result = await runExperiment({ ...common, cells: selectCells(o.cellSpec, configCells()), ps: execPowerShell, exec: execLauncher }); }
   else if (o.mode === "ladder") { stem = "ladder"; result = await runLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher }); }
   else if (o.mode === "firewall") {
     stem = "firewall";
-    result = await runFirewall({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell, outbound: pickOutboundHost(os.networkInterfaces()) });
+    result = await runFirewall({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell, outbound: pickOutboundHost(os.networkInterfaces()), exemptByName: true });
   } else result = await runExperiment(common);
   const { report, markdown, ranAtAll, names } = result;
   const clean = (text) => scrubText(text, { ...names, root: undefined });

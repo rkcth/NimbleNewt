@@ -119,6 +119,8 @@ struct Args {
     stdin: String, // nul (read-only NUL, the default), nul-rw, file:PATH, pipe (an empty pipe: end of input at once), pipe-open (a pipe whose write end stays open until the child ends)
     stdout_pipe: bool, // the child's output goes through an anonymous pipe that the launcher copies into the file
     stderr_pipe: bool,
+    stdout_nul: bool, // the child's standard output is the NUL device opened for reading and writing by the launcher (nothing is captured)
+    stderr_nul: bool,
     capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
 }
 
@@ -159,6 +161,8 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--stdin" => { let v = value("--stdin")?; if !(matches!(v.as_str(), "nul" | "nul-rw" | "pipe" | "pipe-open") || v.starts_with("file:")) { return Err("--stdin: nul, nul-rw, file:PATH, pipe or pipe-open".into()); } a.stdin = v; }
             "--stdout-pipe" => a.stdout_pipe = true,
             "--stderr-pipe" => a.stderr_pipe = true,
+            "--stdout-nul-rw" => a.stdout_nul = true,
+            "--stderr-nul-rw" => a.stderr_nul = true,
             "--capability" => { let c = value("--capability")?; if c.is_empty() { return Err("--capability is empty".into()); } a.capabilities.push(c); }
             other => return Err(format!("unknown option {other}")),
         }
@@ -579,14 +583,15 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
     }.map_err(|e| ("stdio", e))?;
     // Standard output and error: the file itself, or an anonymous pipe that a launcher thread copies into the file.
     let mut drains: Vec<std::thread::JoinHandle<()>> = Vec::new();
-    let mut open_output = |path: &str, piped: bool| -> Result<Handle, String> {
+    let mut open_output = |path: &str, piped: bool, nul_rw: bool| -> Result<Handle, String> {
+        if nul_rw { return open_nul_rw(); }
         if !piped { return open_inheritable(path, true); }
         let (r, w) = make_pipe(true)?;
         drains.push(drain_pipe(r, path.to_string()));
         Ok(w)
     };
-    let out = open_output(out_path, a.stdout_pipe).map_err(|e| ("stdio", e))?;
-    let err = open_output(err_path, a.stderr_pipe).map_err(|e| ("stdio", e))?;
+    let out = open_output(out_path, a.stdout_pipe, a.stdout_nul).map_err(|e| ("stdio", e))?;
+    let err = open_output(err_path, a.stderr_pipe, a.stderr_nul).map_err(|e| ("stdio", e))?;
     let env = env_block(&a.env);
 
     // 3. The attribute list: security capabilities (the container, no capability), the all-application-packages policy, the
@@ -728,8 +733,80 @@ fn describe(a: &Args, mut j: Json) -> Json {
     j
 }
 
+// ---------------------------------------------------------------------------------------------------------------- the NUL device open test
+
+// The C runtime's own open (what git for Windows' mingw_open calls for "/dev/null"): declared here because windows-sys has no C runtime bindings.
+extern "C" {
+    fn _wopen(path: *const u16, oflag: i32, pmode: i32) -> i32;
+    fn _close(fd: i32) -> i32;
+    fn _errno() -> *mut i32;
+}
+
+/// `open-test`: meant to be started AS THE CHILD inside the container (run --exe <this program> --cmdline "<this program> open-test"). It opens the NUL device with the flag
+/// combinations that git's start-up could use and prints the result of each (GetLastError, or the C runtime's errno) as one JSON line. It writes nothing and holds no secrets.
+fn open_test() -> String {
+    let mut results: Vec<String> = Vec::new();
+    let mut add = |name: &str, ok: bool, code: i64, via: &str| {
+        let mut o = Json::new();
+        o.s("name", name);
+        o.s("via", via);
+        o.b("ok", ok);
+        o.n("code", code);
+        results.push(o.render());
+    };
+    let rw = GENERIC_READ | GENERIC_WRITE;
+    let share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    let share_del = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let combos: [(&str, &str, u32, u32, u32); 12] = [
+        ("NUL GENERIC_READ|GENERIC_WRITE share R|W NORMAL (the C runtime's O_RDWR)", "NUL", rw, share, FILE_ATTRIBUTE_NORMAL),
+        ("NUL GENERIC_READ|GENERIC_WRITE share R|W|DELETE", "NUL", rw, share_del, FILE_ATTRIBUTE_NORMAL),
+        ("NUL GENERIC_READ|GENERIC_WRITE no sharing", "NUL", rw, 0, FILE_ATTRIBUTE_NORMAL),
+        ("NUL GENERIC_READ only", "NUL", GENERIC_READ, share, FILE_ATTRIBUTE_NORMAL),
+        ("NUL GENERIC_WRITE only", "NUL", GENERIC_WRITE, share, FILE_ATTRIBUTE_NORMAL),
+        ("NUL FILE_GENERIC_READ|FILE_GENERIC_WRITE (the launcher's own open)", "NUL", FILE_GENERIC_READ | FILE_GENERIC_WRITE, share, FILE_ATTRIBUTE_NORMAL),
+        ("NUL FILE_READ_DATA|FILE_WRITE_DATA|SYNCHRONIZE", "NUL", FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE, share, FILE_ATTRIBUTE_NORMAL),
+        ("NUL FILE_READ_ATTRIBUTES only", "NUL", FILE_READ_ATTRIBUTES, share_del, FILE_ATTRIBUTE_NORMAL),
+        ("NUL access 0 (query only)", "NUL", 0, share_del, FILE_ATTRIBUTE_NORMAL),
+        ("NUL GENERIC_READ|GENERIC_WRITE, no attributes", "NUL", rw, share, 0),
+        ("\\\\.\\NUL GENERIC_READ|GENERIC_WRITE share R|W", "\\\\.\\NUL", rw, share, FILE_ATTRIBUTE_NORMAL),
+        ("\\\\.\\NUL GENERIC_READ|GENERIC_WRITE share R|W|DELETE", "\\\\.\\NUL", rw, share_del, FILE_ATTRIBUTE_NORMAL),
+    ];
+    for (name, path, access, sharing, flags) in combos {
+        unsafe {
+            let w = wide(path);
+            let h = CreateFileW(w.as_ptr(), access, sharing, null(), OPEN_EXISTING, flags, null_mut());
+            if h == INVALID_HANDLE_VALUE { add(name, false, GetLastError() as i64, "CreateFileW"); } else { CloseHandle(h); add(name, true, 0, "CreateFileW"); }
+        }
+    }
+    // The same with an inheritable handle (security attributes with bInheritHandle set): what a descriptor that children may inherit is opened with.
+    unsafe {
+        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: null_mut(), bInheritHandle: 1 };
+        let w = wide("NUL");
+        let h = CreateFileW(w.as_ptr(), rw, share, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null_mut());
+        if h == INVALID_HANDLE_VALUE { add("NUL GENERIC_READ|GENERIC_WRITE share R|W, inheritable", false, GetLastError() as i64, "CreateFileW"); } else { CloseHandle(h); add("NUL GENERIC_READ|GENERIC_WRITE share R|W, inheritable", true, 0, "CreateFileW"); }
+    }
+    // The C runtime's _wopen with O_RDWR (2) and O_RDWR|O_BINARY (0x8002): the call git makes. The code is the C runtime's errno.
+    for (name, flags) in [("_wopen(nul, O_RDWR)", 2i32), ("_wopen(nul, O_RDWR|O_BINARY)", 0x8002i32), ("_wopen(nul, O_RDONLY)", 0i32), ("_wopen(nul, O_WRONLY)", 1i32)] {
+        unsafe {
+            let w = wide("nul");
+            let fd = _wopen(w.as_ptr(), flags, 0o600);
+            if fd < 0 { let e = *_errno(); add(name, false, e as i64, "C runtime errno"); } else { _close(fd); add(name, true, 0, "C runtime"); }
+        }
+    }
+    let mut j = Json::new();
+    j.s("tool", "nn-appc-launcher");
+    j.s("command", "open-test");
+    j.b("ok", true);
+    j.raw("opens", format!("[{}]", results.join(",")));
+    j.render()
+}
+
 pub fn main() {
     let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(String::as_str) == Some("open-test") {
+        println!("{}", open_test());
+        std::process::exit(0);
+    }
     let mut j = Json::new();
     j.s("tool", "nn-appc-launcher");
     j.n("version", 1);

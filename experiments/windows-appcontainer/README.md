@@ -13,6 +13,7 @@ service, it needs UAC and it is Pro-only.
 
 | File | What it is |
 | --- | --- |
+| `npm.mjs` | Round 3b: why `npm ci --offline` fails in the container and which variant makes it pass (`--mode npm`). |
 | `round3.mjs` | Round 3: the git ladder, the junction/ACL-propagation check and the timing measurement (and the reader of the NUL device's security descriptor). |
 | `launcher/` | A small Rust program (`nn-appc-launcher`, one dependency: `windows-sys`) that creates or reuses the container profile, grants and later revokes ACL entries, starts one program in the container and the job, and prints one JSON line. |
 | `probe.mjs` | The script that runs **inside** the container (Node's own modules only). It attempts the ten containment cases and the tool and network checks. |
@@ -75,7 +76,8 @@ nn-appc-launcher run --exe PATH --cmdline "TEXT" --cwd PATH --stdout FILE --stde
     [--name PROFILE] [--grant MODE:PATH]... [--grant-soft MODE:PATH]... [--env NAME=VALUE]...
     [--aap-policy none|optout|optin] [--capability SID-or-NAME]... [--win32k-off] [--no-kill-on-close]
     [--memory-mb N] [--active-processes N] [--ui-limits] [--timeout-ms N]
-    [--stdin nul|nul-rw|file:PATH|pipe|pipe-open] [--stdout-pipe] [--stderr-pipe]
+    [--stdin nul|nul-rw|file:PATH|pipe|pipe-open] [--stdout-pipe] [--stderr-pipe] [--stdout-nul-rw] [--stderr-nul-rw]
+nn-appc-launcher open-test      (meant to run AS THE CHILD inside the container; prints the NUL device open results)
 nn-appc-launcher info | revoke --grant MODE:PATH... | check --grant MODE:PATH... | grant --grant MODE:PATH... | delete-profile      (all take --name)
 ```
 
@@ -117,6 +119,7 @@ It fails closed: no container, no run. There is no other process-creation call i
 | `ProcessIdToSessionId` (with `GetCurrentProcessId`) | The session (0 = services session), reported. |
 | `CreatePipe`, `SetHandleInformation` | Round 3: an anonymous pipe for the child's standard input (`--stdin pipe`, `pipe-open`) or output (`--stdout-pipe`, `--stderr-pipe`); the end the launcher keeps is made non-inheritable. |
 | `ReadFile` | Round 3: a launcher thread copies a child's output pipe into its output file until every write end is closed. |
+| `CreateFileW` (again), `_wopen`, `_close`, `_errno` | Round 3b, `open-test` only: open the NUL device with each flag combination git's start-up could use (read/write access, `FILE_SHARE_READ`/`FILE_SHARE_WRITE` with and without `FILE_SHARE_DELETE`, query-only access, `NUL` and `\\.\NUL`, an inheritable handle) and with the C runtime's `_wopen` as git's `mingw_open` does (`O_RDWR`, with and without `O_BINARY`, read-only, write-only); the result of each (system error, or the C runtime's errno) is printed. The three C runtime functions are declared by hand (no new crate). |
 | `CloseHandle`, `FreeSid`, `LocalFree` | Release what was acquired. |
 
 Capabilities go into the security-capabilities attribute (`SE_GROUP_ENABLED` each, in the order given). A name that cannot be resolved stops the run before anything starts (stage `capability`).
@@ -204,3 +207,48 @@ node experiments/windows-appcontainer/run-experiment.mjs --mode timing --out out
 **Timing (`--mode timing`).** Five launcher calls around `cmd /c exit 0` (wall time of the call against the time the child ran, and the same program started directly), three `node -e 0`, writing 100 files, `git init` + `add -A` + `commit` of those 100 files (inside only where `git --version` works there; the same commands are timed outside as the baseline), and an offline `npm ci` of 40 local packages (inside and outside), in `ac-nocap` and `lpac-optout-reg-com`.
 
 The launcher's new options: `--stdin nul|nul-rw|file:PATH|pipe|pipe-open` (`nul` is the read-only NUL of rounds 1 and 2), `--stdout-pipe` and `--stderr-pipe` (an anonymous pipe copied into the `--stdout`/`--stderr` file by a launcher thread), the `grant` command, and `inheritedEntries` next to `entriesLeft` in every per-grant read-back. The Cargo features `Win32_System_Pipes` and `Win32_System_IO` were added (the dependency and its lock file are unchanged).
+
+## Round 3b: results that survive a hang, npm, git and the NUL device, the firewall's assumptions
+
+Round 3 (hosted run 45510001368): the cases mode gave no verdicts. All eight configurations ended `timed out` and every case was `inc`: the probe had run through every step up to `end diag-nul-open`
+and hung at `start diag-spawn-modes` (a synchronous `spawnSync` of `node -e 0` from inside the container); a blocked main thread stops every timer, so the watchdog never fired, and the report is printed
+only at the very end, so the verdicts already computed were lost. Round 3b changes only what is needed to answer that and the open questions below.
+
+```
+node experiments/windows-appcontainer/run-experiment.mjs --mode npm      --out out [--variants id,id]
+node experiments/windows-appcontainer/run-experiment.mjs --mode git      --out out      (now also: open-test, all-NUL variants)
+node experiments/windows-appcontainer/run-experiment.mjs --mode firewall --out out      (now also: the loopback exemption by name, the three assumptions)
+```
+
+**Results survive a hang.** The probe appends, to its progress file and the moment it has it, one line per step result (`<ms> ms RESULT {json}`, the same object the final report carries, with the
+step's start-up denial lines) and one line per attempt of a step that starts programs (`ATTEMPT {json}`). When the final report is missing or partial, the harness rebuilds the report from those lines
+(`rebuildFromProgress` in `probe.mjs`, `chooseProbeReport` in `lib.mjs`): the cell is then labelled `partial: rebuilt from progress` (in the table's `started` column and in the cell's notes), the steps
+that finished keep their verdicts, the step that was running and the steps never reached are `inc` (a diagnostic is shown as information with its attempts so far plus `step did not finish: HUNG`).
+A late hang therefore loses nothing that was already known.
+
+**Nothing starts a program synchronously any more.** `diag-spawn-modes` moved to the very end; each of its three modes (output to files, pipes, ignored) is an asynchronous `spawn` with a 5 s kill timer
+(`spawnLimited`), and its result line is written before the next mode starts. The tools (`node --version`, `git`, `npm`) use the same asynchronous call with their own limit. The four protected-name
+operations (rename, delete, replace by a junction, rename the parent) now run BEFORE the tools: the tools start programs from inside the container, which is what hung, and those four verdicts matter most.
+
+**A watchdog that works while the main thread is blocked.** A worker thread (`startWorkerWatchdog`, source passed as text so the container needs only `probe.mjs`) has its own event loop. At the
+probe's watchdog time plus 2 s it appends `WATCHDOG <step>` to the progress file, writes the rebuilt partial report to standard output with a direct `writeSync` (the main thread's stream would be
+stuck), and ends the whole process by killing its own process id (`process.exit` inside a worker would only end the worker). If a worker cannot run under the container, the harness's own 90 s limit on the
+launcher call is the backstop, and the same rebuild applies. Whether a worker thread starts inside an AppContainer is itself something this run shows (the progress file then carries a `WATCHDOG` line).
+
+**npm (`--mode npm`, `npm.mjs`).** Round 3: `node npm-cli.js ci --offline` ends at once in both containers with `EPERM: operation not permitted, lstat 'C:\'` raised at node:fs line 2744, which is the JavaScript
+`realpathSync` (it lstats every prefix of a path from the drive root). The `lstat-repro` step runs that call alone (every prefix of npm's script path, the working directory and node.exe, then the JavaScript and the
+native realpath, and stat/access/readdir of the drive root) so the refused prefix is named. Then each variant changes one thing and runs `npm ci --offline --ignore-scripts` of 40 local packages:
+NODE_OPTIONS or command-line `--preserve-symlinks --preserve-symlinks-main`; `npm.cmd` through `cmd /c` (with and without the options); npm cache, prefix, logs, user and global configuration, HOME, USERPROFILE,
+APPDATA and LOCALAPPDATA all in the granted home folder; the project inside the granted workspace; a `--require` preload that swaps `fs.realpathSync` for the native one; combinations; and the combinations in the
+LPAC container. A variant passes only when the exit code is 0 and the harness (outside the container) finds every package on disk.
+
+**Git (`--mode git`).** New launcher flags `--stdout-nul-rw` and `--stderr-nul-rw` make the standard output and error the NUL device opened by the launcher for reading and writing (with the existing
+`--stdin nul-rw` and inheritable handles): variants `all-nul-rw` and `lpac-all-nul-rw` (nothing is captured, so only the exit code counts). The launcher's new `open-test` command is run AS THE CHILD inside the
+container (a copy in the granted workspace, for `base` and `lpac-base`) and prints, for each flag combination git's start-up could use, whether `CreateFileW` or `_wopen` on `NUL` worked and with which error: the table in
+`git.md` then names the combination the container refuses. Whether git has to run in the container at all is argued in the implementation notes (the product keeps `.git` outside the sandbox).
+
+**Firewall.** The report now judges its three assumptions one by one and says which fails: (1) the capabilities `internetClient` and `privateNetworkClientServer` open the network for the container; (2) a block rule scoped to
+the package SID stops that connection; (3) the rule affects only that container. With `--mode firewall` one more phase runs before the rule: `CheckNetIsolation LoopbackExempt -a -n=<profile name>` (the package family name of
+a profile made with `CreateAppContainerProfile` is its name), read back by the package SID from `LoopbackExempt -s`, the same clients, then removed (also in the finally path). The cases mode has the cell
+`ac-inet-private-loopback-byname` for the same exemption. A control from a Low-integrity process was NOT built: starting a process with a modified token needs `CreateProcessAsUser` or `CreateProcessWithTokenW`, which the
+launcher's source test forbids on purpose (one process-creation call, always with the container attributes); the harness's own connect from outside any container remains the control.

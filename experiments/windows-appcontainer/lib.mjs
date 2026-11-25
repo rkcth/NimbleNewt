@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, win32 } from "node:path";
 import { gzipSync } from "node:zlib";
-import { REPORT_PREFIX, summarize } from "./probe.mjs";
+import { REPORT_PREFIX, rebuildFromProgress, summarize } from "./probe.mjs";
 
 export const REPORT_SCHEMA = "nn-appc-experiment-1";
 export const PROFILE_NAME = "NimbleNewtExperiment";
@@ -75,6 +75,7 @@ export function matrixCells() {
  *   ac-inet-private-fwblock   the same, with an outbound BLOCK firewall rule scoped to the container's package SID (needs administrator rights).
  *   ac-inet-private-loopback  the same, plus a loopback exemption for the package (CheckNetIsolation): the container may reach the host's loopback listener.
  *   ac-inet-private-loopback-fwblock  the loopback exemption AND the block rule: does the rule stop what the capabilities and the exemption allow?
+ *   ac-inet-private-loopback-byname   the exemption added by the package's NAME (`CheckNetIsolation LoopbackExempt -a -n=<name>`) instead of its SID (round 3b), read back by SID
  *   lpac-optout-reg           LPAC (policy optout) + registryRead (the smallest LPAC that runs Node).
  *   lpac-optout-reg-com       LPAC + registryRead + lpacCom.
  */
@@ -88,6 +89,7 @@ export function configCells() {
     c("ac-inet-private-fwblock", { capabilities: net, firewallBlock: true }),
     c("ac-inet-private-loopback", { capabilities: net, loopbackExempt: true }),
     c("ac-inet-private-loopback-fwblock", { capabilities: net, loopbackExempt: true, firewallBlock: true }),
+    c("ac-inet-private-loopback-byname", { capabilities: net, loopbackExempt: "name" }),
     c("lpac-optout-reg", { lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead"] }),
     c("lpac-optout-reg-com", { lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead", "lpacCom"] }),
   ];
@@ -313,6 +315,27 @@ export function extractProbeReport(text) {
   return undefined;
 }
 
+/** The label of a cell whose report was rebuilt from the progress file (printed in the table and the cell's notes). */
+export const REBUILT_LABEL = "partial: rebuilt from progress";
+
+/**
+ * Which report a cell is judged by. The probe's own final report when it is whole. Otherwise (no report, a watchdog's partial report, a fatal one) the report rebuilt from the progress
+ * file's RESULT and ATTEMPT lines when that holds more steps than the report the probe printed; the label then says so. `label` is "ok" for a whole report.
+ */
+export function chooseProbeReport(rep, progressText) {
+  if (rep !== undefined && !rep.partial && !rep.fatal) return { report: rep, label: "ok" };
+  const rebuilt = rebuildFromProgress(progressText);
+  const printed = rep?.probes?.length ?? 0;
+  if (rep?.rebuilt === true) return { report: rep, label: REBUILT_LABEL };
+  const usable = rebuilt.probes.filter((p) => p.unfinished !== true || p.attempts.length > 1).length;
+  if (usable > printed) {
+    return { report: { ...rebuilt, watchdog: rep?.watchdog ?? rebuilt.watchdog, startupDenials: [...(rep?.startupDenials ?? []), ...rebuilt.startupDenials].slice(0, 40) }, label: REBUILT_LABEL };
+  }
+  if (rep === undefined) return { report: undefined, label: "missing" };
+  if (rep.fatal) return { report: rep, label: `fatal: ${rep.fatal}` };
+  return { report: rep, label: `partial: the probe's watchdog ended it in step ${rep.watchdog?.step ?? "?"} after ${rep.watchdog?.elapsedMs ?? "?"} ms` };
+}
+
 // ---------------------------------------------------------------------------------------------------------------- ACL read-back
 
 /** The granted paths named in a launcher argument list (--grant and --grant-soft), without their modes, each once. */
@@ -386,6 +409,8 @@ const detailOf = (probe) => probe.attempts.map((a) => `${a.name}=${a.outcome}${a
 export function judgeProbe(probe, witness, controlsOk) {
   const actual = summarize(probe.expect, probe.attempts);
   const detail = detailOf(probe);
+  // A step that was running when the probe stopped (rebuilt from the progress file) has no verdict, whatever its attempts so far show.
+  if (probe.unfinished === true && probe.group !== "diag") return { id: probe.id, group: probe.group, expect: probe.expect, actual: "no-report", verdict: "inconclusive", detail: `the probe stopped while this step was running; ${detail}`, attempts: probe.attempts.map(({ name, outcome, code }) => ({ name, outcome, ...(code ? { code } : {}) })) };
   // A diagnostic has no verdict: what happened is the result.
   if (probe.group === "diag") return { id: probe.id, group: probe.group, expect: probe.expect, actual: probe.attempts.every((a) => a.outcome === "allowed") ? "allowed" : "mixed", verdict: "info", detail, attempts: probe.attempts.map(({ name, outcome, code, note }) => ({ name, outcome, ...(code ? { code } : {}), ...(note ? { note } : {}) })), ms: probe.ms };
   const problem = witness === undefined ? undefined : witnessProblem(probe.id, witness);
@@ -403,7 +428,8 @@ export function judgeProbe(probe, witness, controlsOk) {
 
 /** All verdicts of a cell. A probe the child never reported is inconclusive; controls that failed make every denial only "weak". */
 export function judgeCell(probeReport, witness) {
-  const byId = new Map((probeReport?.probes ?? []).map((p) => [p.id, p]));
+  // A probe rebuilt from the progress file may lack its group and expectation (a step that hung before its first attempt line): they follow from the id.
+  const byId = new Map((probeReport?.probes ?? []).map((p) => [p.id, { ...p, group: p.group ?? groupOf(p.id), expect: p.expect ?? expectOf(p.id) }]));
   const controlsOk = CONTROL_IDS.every((id) => { const p = byId.get(id); return p !== undefined && summarize(p.expect, p.attempts) === "allowed"; });
   return ALL_PROBE_IDS.map((id) => {
     const p = byId.get(id);
@@ -412,6 +438,7 @@ export function judgeCell(probeReport, witness) {
   });
 }
 
+export const expectOf = (id) => (id.startsWith("tool-") || id.startsWith("control-") || id.startsWith("diag-") ? "allowed" : "denied");
 export const groupOf = (id) => (CASE_IDS.includes(id) ? "case" : TOOL_IDS.includes(id) ? "tool" : DIAG_IDS.includes(id) ? "diag" : "extra");
 
 export function tally(results) {
@@ -474,7 +501,7 @@ export function renderMarkdown(report) {
   L.push(`| cell | started | ${ids.map((i) => i.replace(/^(control|deny|extra|tool)-/, "$1:")).join(" | ")} | tally |`);
   L.push(`|${" --- |".repeat(ids.length + 3)}`);
   for (const c of report.cells) {
-    const started = c.launch.childStarted ? (c.launch.timedOut ? "timed out" : `exit ${c.launch.exitCode}`) : `REFUSED (${c.launch.stage ?? "?"})`;
+    const started = (c.launch.childStarted ? (c.launch.timedOut ? "timed out" : `exit ${c.launch.exitCode}`) : `REFUSED (${c.launch.stage ?? "?"})`) + (c.probeReport === REBUILT_LABEL ? ", partial: rebuilt from progress" : "");
     const t = tally(c.results);
     L.push(`| ${c.id}${c.sameAs ? ` (same as ${c.sameAs})` : ""} | ${started} | ${c.results.map((r) => MARK[r.verdict]).join(" | ")} | ${t.pass}/${t.weak}/${t.fail}/${t.inconclusive} |`);
   }
