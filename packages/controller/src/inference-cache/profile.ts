@@ -118,6 +118,12 @@ export interface EndpointOptions {
   readonly hybrid?: boolean;
   /** Overrides the smallest prefix that caches. */
   readonly minPrefixTokens?: number;
+  /**
+   * llama-server only, an attestation the owner or the deployment makes about the server: it runs with `--cache-ram 0`, so it keeps no host prompt cache beside the slots. Erasing a slot is then enough to stop a call
+   * from reusing the prompt another project left there (measured once, on one build: G10, `g10-llamacpp-run2.json`). The controller cannot detect it (nothing in the committed `/props` or `/slots` fixtures names the setting),
+   * so without it a call that crosses a project boundary is sent with `cache_prompt: false` instead of an erase followed by reuse (the default `--cache-ram` kept a prompt head across an erase: `g10-llamacpp-run1.json`).
+   */
+  readonly hostPromptCacheOff?: boolean;
 }
 export interface EndpointConfig {
   readonly kind?: string;
@@ -155,11 +161,17 @@ export interface CacheProfile {
   slotRequest?(action: "save" | "restore", slot: number, filename?: string): { readonly method: "POST"; readonly path: string; readonly body: WireRequest };
   /** Clears one slot's in-memory KV cache (llama.cpp `?action=erase`). It does **not** delete any saved file: llama.cpp has no API for that. Present only where the backend can do it. */
   clearSlotRequest?(slot: number): { readonly method: "POST"; readonly path: string; readonly body: WireRequest };
+  /**
+   * Whether clearing a slot is enough to keep another project's prompt from being reused by the next call. `attested`: the endpoint's configuration says the server keeps no other prompt cache
+   * (`hostPromptCacheOff`), so the adapter clears and then reuses. `unattested`: the server may keep a host prompt cache an erase does not touch, so the adapter sends a call that crosses a project boundary with reuse off.
+   * Absent: the backend has no such cache the profile knows of (the adapter's behaviour is unchanged).
+   */
+  readonly eraseIsolation?: "attested" | "unattested";
 }
 
 export const CACHE_LIMITS = { model: 200, slots: 256, minPrefix: 100_000, tokens: 10_000_000, key: 128 } as const;
-const OPTION_KEYS = ["slots", "slotSave", "promptDetails", "prefixCaching", "promptCacheKey", "extendedRetention", "pinPrefix", "hostTier", "hybrid", "minPrefixTokens"] as const;
-const BOOLEAN_OPTIONS = ["slotSave", "promptDetails", "prefixCaching", "promptCacheKey", "extendedRetention", "pinPrefix", "hostTier", "hybrid"] as const;
+const OPTION_KEYS = ["slots", "slotSave", "promptDetails", "prefixCaching", "promptCacheKey", "extendedRetention", "pinPrefix", "hostTier", "hybrid", "hostPromptCacheOff", "minPrefixTokens"] as const;
+const BOOLEAN_OPTIONS = ["slotSave", "promptDetails", "prefixCaching", "promptCacheKey", "extendedRetention", "pinPrefix", "hostTier", "hybrid", "hostPromptCacheOff"] as const;
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /** Checks an endpoint's configuration. An unknown option name is refused (a misspelt setting must not silently do nothing). The kind is not checked here: an unrecognised kind is the generic profile. */

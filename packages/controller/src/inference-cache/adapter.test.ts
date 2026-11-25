@@ -14,7 +14,7 @@ const convo = (label: string, turns: number, n = 400): WireRequest => ({ model: 
 test("llama.cpp: agents that alternate keep their prompts when each has its own slot, and lose them all when they share one", async () => {
   const run = async (slots: number, useAffinity: boolean): Promise<{ computed: number; outcomes: string[] }> => {
     const sim = new LlamaSim(slots);
-    const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots } }), sim);
+    const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots, hostPromptCacheOff: true } }), sim);
     const affinity = new SlotAffinity(slots);
     const expected: Record<string, number> = {};
     let computed = 0; const outcomes: string[] = [];
@@ -39,7 +39,7 @@ test("llama.cpp: agents that alternate keep their prompts when each has its own 
 
 test("llama.cpp: slot save and restore keep a conversation across eviction, restore into another slot forks it, and a refusal never throws", async () => {
   const sim = new LlamaSim(2);
-  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true } }), sim);
+  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true, hostPromptCacheOff: true } }), sim);
   const first = await adapter.call(convo("a", 1), ctx({ slot: 0 }));
   assert.equal(first.hit.cachedTokens, 0);
   assert.deepEqual(await adapter.slot("save", 0, slotFile("nn-abcdefgh2345.bin"), scopeA), { ok: true, tokens: first.hit.promptTokens, ms: 4.5 });
@@ -128,7 +128,7 @@ test("a refused cache setting repeats the same messages without any cache settin
   const v = await new CacheAdapter(profileFor({ kind: "vllm", model: "m" }), new VllmSim({ oldVersion: true })).call(convo("a", 1), ctx());
   assert.deepEqual([v.status, v.fallback?.removed], [200, ["cache_salt"]]);
   // llama.cpp build without slot selection
-  const l = await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), new LlamaSim(2, { rejectSlot: true })).call(convo("a", 1), ctx({ slot: 1 }));
+  const l = await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), new LlamaSim(2, { rejectSlot: true })).call(convo("a", 1), ctx({ slot: 1 }));
   assert.deepEqual([l.status, l.fallback?.removed], [200, ["cache_prompt", "id_slot"]]);
   // an error that has nothing to do with the cache is returned as it is, and nothing is repeated
   let sent = 0;
@@ -200,7 +200,7 @@ test("Strata: a pin is sent only when the dispatcher holds the route's pin marke
 
 describe_slots();
 function describe_slots(): void {
-  const llama = (sim: LlamaSim, freshSlot?: "erase" | "off") => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true } }), sim, freshSlot === undefined ? {} : { freshSlot });
+  const llama = (sim: LlamaSim, freshSlot?: "erase" | "off") => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true, hostPromptCacheOff: true } }), sim, freshSlot === undefined ? {} : { freshSlot });
   const warm = async (sim: LlamaSim, scopeKey: string, slot: number, label = "x") => { const a = llama(sim); await a.call(convo(label, 1), ctx({ scopeKey, slot })); await a.call(convo(label, 1), ctx({ scopeKey, slot })); return a; };
 
   test("slots: a call with no slot (none given, or refused) runs with reuse off, so it cannot land in another project's slot", async () => {
@@ -257,7 +257,7 @@ function describe_slots(): void {
     assert.ok(!sim.seen.slice(seenBefore).some((r) => r.path.includes("erase")));
     const stubborn: Transport = { send: async (r) => (r.path.includes("erase") ? refuse(404, "no such endpoint") : sim.send(r)) };
     await warm(sim, scopeA, 1, "q");
-    const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), stubborn);
+    const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), stubborn);
     const r = await adapter.call(convo("q", 1), ctx({ scopeKey: scopeB, slot: 1 }));
     assert.deepEqual([r.slotCleared, r.hit.cachedTokens, r.applied], [undefined, 0, ["cache_prompt=false", "id_slot"]]);
     // restore: the saved state is the project's own, so the next call keeps it
@@ -280,7 +280,7 @@ test("slots: a refused id_slot retries with reuse off, forgets every holder, and
     if (!rejected && "id_slot" in r.body) { rejected = true; return refuse(400, "unknown field id_slot"); }
     return ok({ timings: { cache_n: 0, prompt_n: 10 } });
   } };
-  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), server);
+  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), server);
   const first = await adapter.call(convo("x", 1), ctx({ slot: 1 }));
   assert.deepEqual(sent.map((r) => (r.path.includes("erase") ? "erase" : JSON.stringify({ cache_prompt: r.body["cache_prompt"], id_slot: r.body["id_slot"] }))), ["erase", '{"cache_prompt":true,"id_slot":1}', '{"cache_prompt":false}']);
   assert.deepEqual([first.status, first.fallback?.removed], [200, ["cache_prompt", "id_slot"]]);
@@ -292,7 +292,7 @@ test("slots: a refused id_slot retries with reuse off, forgets every holder, and
   // a refusal that names cache_prompt itself cannot be answered safely: the error comes back and nothing is retried
   sent.length = 0;
   const strict: Transport = { send: async (r) => { sent.push(r); return r.path.includes("erase") ? ok({}) : refuse(400, "unknown field cache_prompt"); } };
-  const refused = await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), strict).call(convo("x", 1), ctx({ slot: 0 }));
+  const refused = await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), strict).call(convo("x", 1), ctx({ slot: 0 }));
   assert.deepEqual([refused.status, refused.fallback, sent.length], [400, undefined, 2]);
 });
 
@@ -301,7 +301,7 @@ test("slots: adapters on one server share holders and affinity through the contr
   assert.equal(endpoints.state("http://Host:8080/"), endpoints.state("http://host:8080"), "the URL is normalised");
   assert.notEqual(endpoints.state("http://host:8081"), endpoints.state("http://host:8080"));
   assert.throws(() => endpoints.state("not a url"), (e: unknown) => e instanceof DomainError && e.field === "url");
-  const profile = () => profileFor({ kind: "llama-cpp", model: "m", options: { slots: 1 } });
+  const profile = () => profileFor({ kind: "llama-cpp", model: "m", options: { slots: 1, hostPromptCacheOff: true } });
   const run = async (state1: ReturnType<CacheEndpoints["state"]>, state2: ReturnType<CacheEndpoints["state"]>) => {
     const sim = new LlamaSim(1);
     const a = new CacheAdapter(profile(), sim, { state: state1 });
@@ -326,7 +326,7 @@ test("slots: adapters on one server share holders and affinity through the contr
 test("slots: a plain call on a slotted server may land anywhere, so it takes the server's turn and every holder is forgotten", async () => {
   const sim = new LlamaSim(2);
   const state = new CacheEndpoints().state("http://plain:1");
-  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), sim, { state });
+  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), sim, { state });
   await adapter.call(convo("x", 1), ctx({ scopeKey: scopeA, slot: 1 })); // A: slot 1 cleared, holder A
   await adapter.call(convo("x", 1), ctx({ scopeKey: scopeA, slot: 1 }));
   const plain = await adapter.call(convo("x", 1), ctx({ scopeKey: scopeB, slot: 1, plain: true }));
@@ -341,7 +341,7 @@ test("slots: a plain call on a slotted server may land anywhere, so it takes the
 test("slots: a restore records its holder inside the slot's turn, and not if what is known was wiped meanwhile", async () => {
   const sim = new LlamaSim(2);
   const state = new CacheEndpoints().state("http://restore:1");
-  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true } }), sim, { state });
+  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true, hostPromptCacheOff: true } }), sim, { state });
   await adapter.call(convo("r", 1), ctx({ scopeKey: scopeA, slot: 0 }));
   await adapter.slot("save", 0, slotFile("nn-abcdefgh2345.bin"), scopeA);
   // a restore racing with a slot-less call of another project: the restore holds the slot's turn first, then the slot-less call forgets everything
@@ -351,7 +351,7 @@ test("slots: a restore records its holder inside the slot's turn, and not if wha
   assert.equal(state.holder.get(1), scopeA);
   // a wipe during the restore (a retry placed anywhere) keeps the holder from being recorded
   const slow: Transport = { send: async (r) => { state.forget(); return sim.send(r); } };
-  const racing = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true } }), slow, { state });
+  const racing = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true, hostPromptCacheOff: true } }), slow, { state });
   state.holder.clear();
   await racing.slot("restore", 0, slotFile("nn-abcdefgh2345.bin"), scopeA);
   assert.equal(state.holder.has(0), false);
@@ -360,7 +360,7 @@ test("slots: a restore records its holder inside the slot's turn, and not if wha
 test("slots: calls of different projects into one slot take turns, so a clear and a send never interleave; other slots run side by side", async () => {
   const sim = new LlamaSim(2);
   const state = new CacheEndpoints().state("http://turns:1");
-  const make = () => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), sim, { state });
+  const make = () => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), sim, { state });
   await Promise.all([make().call(convo("pa", 1), ctx({ scopeKey: scopeA, slot: 0 })), make().call(convo("pb", 1), ctx({ scopeKey: scopeB, slot: 0 })), make().call(convo("pc", 1), ctx({ scopeKey: scopeA, slot: 1 }))]);
   const slot0 = sim.seen.filter((r) => r.path.startsWith("/slots/0") || r.body["id_slot"] === 0).map((r) => (r.path.includes("erase") ? "erase" : "chat"));
   assert.deepEqual(slot0, ["erase", "chat", "erase", "chat"], "never erase, erase, chat, chat");
@@ -376,10 +376,103 @@ test("a 422 that names the field we sent is a refused cache setting; one that na
 
 test("isolation required: a backend that cannot keep projects apart is called without cache settings and the result says why", async () => {
   const sim = new LlamaSim(2);
-  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), sim);
+  const adapter = new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), sim);
   await adapter.call(convo("a", 1), ctx({ slot: 0 }));
   const iso = await adapter.call(convo("a", 3), ctx({ slot: 0, isolationRequired: true }), 500);
   assert.deepEqual([iso.hit.cachedTokens, iso.outcome, iso.applied], [0, "cold", ["cache_prompt=false"]]);
   assert.match(iso.skipped.join(), /requires isolation/);
   assert.equal(sim.seen.at(-1)!.body["id_slot"], undefined);
+});
+
+// ---- C06 erase isolation: an erase empties the slot, not a host prompt cache beside it (G10, llama.cpp run 1 against run 2) ----------------------------------------------------------------
+const hostLlama = (sim: LlamaSim, attested: boolean, freshSlot?: "erase" | "off", state?: ReturnType<CacheEndpoints["state"]>) =>
+  new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, ...(attested ? { hostPromptCacheOff: true } : {}) } }), sim, { ...(freshSlot === undefined ? {} : { freshSlot }), ...(state === undefined ? {} : { state }) });
+const bodiesOf = (sim: LlamaSim) => sim.seen.filter((r) => r.path.startsWith("/v1/")).map((r) => r.body);
+
+test("erase isolation: without the attestation a call across a project boundary is sent with cache_prompt false and reuses nothing, even when the host cache holds the head", async () => {
+  const sim = new LlamaSim(2, { hostCache: true });
+  const a = hostLlama(sim, false);
+  await a.call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  const b = await a.call(convo("x", 3), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.equal(b.status, 200);
+  assert.deepEqual([b.hit.cachedTokens, b.slotCleared, b.isolation, b.applied], [0, undefined, "cache-prompt-off-host-cache-not-attested", ["cache_prompt=false", "id_slot"]]);
+  assert.equal(bodiesOf(sim).at(-1)!["cache_prompt"], false);
+  assert.ok(!sim.seen.some((r) => r.path.includes("erase")), "no erase is sent: it would not isolate here");
+  assert.match(b.skipped.join(), /host cache not attested off/);
+  assert.match(b.skipped.join(), /--cache-ram 0/);
+  // the stand-in really does reuse across an erase when the host cache is on and the call asks to reuse (the measured behaviour the old path relied on)
+  const control = new LlamaSim(2, { hostCache: true });
+  const c = hostLlama(control, true);
+  await c.call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  const leaked = await control.send({ method: "POST", path: "/slots/0?action=erase", headers: {}, body: {} }).then(() => control.send({ method: "POST", path: "/v1/chat/completions", headers: {}, body: { ...convo("x", 3), cache_prompt: true, id_slot: 0 } }));
+  assert.ok((leaked.body as { timings: { cache_n: number } }).timings.cache_n > 0, "erase alone does not stop reuse when the host cache is on");
+});
+
+test("erase isolation: the same project still reuses its own prompt, before and after a boundary crossing", async () => {
+  const sim = new LlamaSim(2, { hostCache: true });
+  const a = hostLlama(sim, false);
+  const first = await a.call(convo("x", 1), ctx({ scopeKey: scopeA, slot: 0 }));
+  const second = await a.call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  assert.deepEqual([first.isolation, second.isolation, second.hit.cachedTokens > 0, bodiesOf(sim).at(-1)!["cache_prompt"]], ["cache-prompt-off-host-cache-not-attested", "same-project", true, true]);
+  const other = await a.call(convo("y", 1), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.equal(other.hit.cachedTokens, 0);
+  const own = await a.call(convo("y", 3), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.deepEqual([own.isolation, own.hit.cachedTokens > 0], ["same-project", true]);
+});
+
+test("erase isolation: with the attestation the erase path is used and the call carries cache_prompt true", async () => {
+  const sim = new LlamaSim(2, { hostCache: false });
+  const a = hostLlama(sim, true);
+  await a.call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  const b = await a.call(convo("x", 3), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.deepEqual([b.slotCleared, b.isolation, b.hit.cachedTokens, b.applied], [true, "erase-host-cache-attested-off", 0, ["cache_prompt", "id_slot"]]);
+  assert.ok(sim.seen.some((r) => r.path === "/slots/0?action=erase"));
+  assert.equal(bodiesOf(sim).at(-1)!["cache_prompt"], true);
+  const again = await a.call(convo("x", 5), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.deepEqual([again.isolation, again.hit.cachedTokens > 0], ["same-project", true]);
+});
+
+test("erase isolation: an unknown holder counts as another project (a fresh adapter, a release, a call without a slot)", async () => {
+  const sim = new LlamaSim(2, { hostCache: true });
+  await hostLlama(sim, false).call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  const restarted = await hostLlama(sim, false).call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  assert.deepEqual([restarted.isolation, restarted.hit.cachedTokens], ["cache-prompt-off-host-cache-not-attested", 0], "after a restart even the same project's first call does not reuse: a re-read, never a leak");
+  const adapter = hostLlama(sim, false);
+  await adapter.call(convo("x", 1), ctx({ scopeKey: scopeA, slot: 0 }));
+  await adapter.call(convo("z", 1), ctx({ scopeKey: scopeB }));
+  const after = await adapter.call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+  assert.deepEqual([after.isolation, after.hit.cachedTokens], ["cache-prompt-off-host-cache-not-attested", 0]);
+});
+
+test("erase isolation: the audit record names the mode for every route through the slot hygiene", async () => {
+  const sim = new LlamaSim(2, { hostCache: true });
+  const modes: Record<string, string | undefined> = {};
+  const unattested = hostLlama(sim, false);
+  modes["unattested first"] = (await unattested.call(convo("x", 1), ctx({ scopeKey: scopeA, slot: 0 }))).isolation;
+  modes["same project"] = (await unattested.call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }))).isolation;
+  modes["configured off"] = (await hostLlama(sim, true, "off").call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }))).isolation;
+  modes["attested erase"] = (await hostLlama(sim, true).call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }))).isolation;
+  const stubborn: Transport = { send: async (r) => (r.path.includes("erase") ? refuse(404, "no such endpoint") : sim.send(r)) };
+  modes["erase refused"] = (await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), stubborn).call(convo("x", 3), ctx({ scopeKey: scopeA, slot: 0 }))).isolation;
+  modes["no slot"] = (await unattested.call(convo("x", 3), ctx({ scopeKey: scopeA }))).isolation;
+  assert.deepEqual(modes, { "unattested first": "cache-prompt-off-host-cache-not-attested", "same project": "same-project", "configured off": "cache-prompt-off-configured", "attested erase": "erase-host-cache-attested-off", "erase refused": "cache-prompt-off-erase-failed", "no slot": undefined });
+  // the vLLM and Claude adapters write no isolation mode: their behaviour is unchanged
+  const vllm = await new CacheAdapter(profileFor({ kind: "vllm", model: "m", options: { prefixCaching: true, promptDetails: true } }), new VllmSim()).call(convo("x", 1), ctx({ scopeKey: scopeA }));
+  assert.equal(vllm.isolation, undefined);
+});
+
+test("erase isolation: the profile says what is attested and measured, in the capabilities, the tuning list and the caveats", () => {
+  const off = profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } });
+  const on = profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } });
+  assert.deepEqual([off.eraseIsolation, on.eraseIsolation], ["unattested", "attested"]);
+  assert.match(off.capabilities.retention.via, /not attested off/);
+  assert.match(on.capabilities.retention.via, /attested off for this endpoint: --cache-ram 0/);
+  const tune = off.tuning.find((t) => t.setting === "--cache-ram")!;
+  assert.equal(tune.value, "0");
+  assert.match(tune.why, /one run on one build/);
+  assert.match(tune.why, /Not measured/);
+  assert.match(off.caveats.join(" "), /cache_prompt false/);
+  assert.match(on.caveats.join(" "), /not detectable/);
+  assert.throws(() => profileFor({ kind: "llama-cpp", model: "m", options: { hostPromptCacheOff: "yes" } as never }), /true or false/);
+  assert.equal(profileFor({ kind: "vllm", model: "m" }).eraseIsolation, undefined);
 });

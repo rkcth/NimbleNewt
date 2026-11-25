@@ -74,7 +74,7 @@ const slotRequest = (base: string, action: "save" | "restore", slot: number, fil
 function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
   const capabilities: CacheCapabilities = {
     prefixReuse: "automatic",
-    retention: { control: "server", via: "an idle slot keeps its prompt until another prompt takes the slot; a saved slot file keeps it until erased" },
+    retention: { control: "server", via: `an idle slot keeps its prompt until another prompt takes the slot; a saved slot file keeps it until erased; with the server's default host prompt cache (--cache-ram) it may also keep prompts beside the slots${o.hostPromptCacheOff === true ? " (attested off for this endpoint: --cache-ram 0)" : " (not attested off for this endpoint)"}` },
     isolation: "none",
     pin: o.slotSave === true ? AVAILABLE("a slot file saved with /slots/{id}?action=save is kept until erased and can be restored into any idle slot") : UNSUPPORTED("slots are overwritten by later prompts and no slot save path is configured"),
     fork: o.slotSave === true ? AVAILABLE("restore one saved slot file into a second idle slot") : AVAILABLE("a second conversation that starts with the same tokens reuses them when its slot is chosen by similarity (needs the prefix to still be in a slot)"),
@@ -88,12 +88,13 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
     { where: "server", setting: "--cache-reuse", value: "256", why: "reuse chunks of the prompt by shifting the KV cache when only a middle part changed" },
     { where: "server", setting: "--slot-prompt-similarity", value: "0.5", why: "when no slot is named, choose a slot whose prompt matches at least this share" },
     { where: "server", setting: "--slot-save-path", why: "needed for save and restore of named slot files" },
+    { where: "server", setting: "--cache-ram", value: "0", why: "for a server shared by projects: the default host prompt cache keeps prompts beside the slots, and an erase of a slot does not remove them (G10, one run on one build: after an erase the next call with cache_prompt true reused 6,469 of 6,470 tokens another project had sent; with --cache-ram 0 it reused none). Then set the endpoint option hostPromptCacheOff: true. Without that attestation a call that crosses a project boundary is sent with cache_prompt false. Not measured: other builds, other values, a second run" },
   ];
   return {
     kind: "llama-cpp", label: "llama.cpp (llama-server)", model, wire: "openai-chat", capabilities, tuning, minPrefixTokens: 1, defaultLifetimeMs: 3_600_000,
     basis: "llama.cpp tools/server README and source as audited in backend-protocol-audit.md (2026-10-16); not measured here",
     hitFields: ["timings.cache_n", "timings.prompt_n"],
-    caveats: ["Slot save and restore wait for an idle slot; they cannot snapshot a running decode.", "Slot files are specific to the model and build that wrote them.", "A short unrelated request may take a slot another agent's prompt was kept in; leave a spare slot for one-shot calls."],
+    caveats: ["Slot save and restore wait for an idle slot; they cannot snapshot a running decode.", "Slot files are specific to the model and build that wrote them.", "A short unrelated request may take a slot another agent's prompt was kept in; leave a spare slot for one-shot calls.", o.hostPromptCacheOff === true ? "Isolation between projects rests on the attestation that this server runs with --cache-ram 0 (hostPromptCacheOff); a slot is erased before another project uses it and the call then reuses only its own prompt. The setting is not detectable from the server, and the evidence is one run on one build." : "The server may keep a host prompt cache (--cache-ram, on by default) that a slot erase does not clear, so a call that crosses a project boundary is sent with cache_prompt false (no reuse). Run the server with --cache-ram 0 and set hostPromptCacheOff to keep reuse after an erase."],
     neverCall: [],
     prepare(request, ctx): Prepared {
       const body = copy(request); const applied: string[] = []; const skipped: string[] = [];
@@ -110,6 +111,7 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
     read: (response) => readTimings(response),
     refusedCacheSetting: refusedBy(/\b(id_slot|cache_prompt)\b/),
     slotted: o.slots !== undefined,
+    eraseIsolation: o.hostPromptCacheOff === true ? "attested" : "unattested",
     slotRequest: (action, slot, filename) => {
       if (o.slotSave !== true) throw new DomainError("invalid_command", "slot save and restore are not configured for this endpoint", { field: "slotSave" });
       return slotRequest("/slots", action, slot, filename);

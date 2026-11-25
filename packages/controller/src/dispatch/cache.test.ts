@@ -15,7 +15,7 @@ const longer = { model: "m", messages: [{ role: "system", content: "doc" }, { ro
 const make = (extra: Partial<ConstructorParameters<typeof CachePolicies>[0]> = {}) => new CachePolicies({
   secret: SECRET, state: new CacheEndpoints(), principal,
   endpoints: {
-    "llama/local": { url: "http://127.0.0.1:8080", config: { kind: "llama-cpp", model: "local", route: "llama/local", options: { slots: 2 } } },
+    "llama/local": { url: "http://127.0.0.1:8080", config: { kind: "llama-cpp", model: "local", route: "llama/local", options: { slots: 2, hostPromptCacheOff: true } } },
     "vllm/big": { url: "http://127.0.0.1:8000", config: { kind: "vllm", model: "big", route: "vllm/big" } },
     "strata/one": { url: "http://127.0.0.1:9000", config: { kind: "strata", model: "one", route: "strata/one", options: { pinPrefix: true } } },
     "openai/gpt": { url: "https://api.openai.example", config: { kind: "openai", model: "gpt", route: "openai/gpt" } },

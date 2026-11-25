@@ -30,7 +30,7 @@ function models(): MutableModels {
   return m;
 }
 
-const endpoints = (slots: number) => ({ "llama/local": { url: URL, config: { kind: "llama-cpp" as const, model: "local", route: "llama/local", options: { slots } } } });
+const endpoints = (slots: number) => ({ "llama/local": { url: URL, config: { kind: "llama-cpp" as const, model: "local", route: "llama/local", options: { slots, hostPromptCacheOff: true } } } });
 
 async function agent(policies: CachePolicies, projectId: string, server: LlamaSim) {
   const attempt = await policies.forAttempt({ projectId, route: "llama/local" }, { splitSystem: true });

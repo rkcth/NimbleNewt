@@ -119,6 +119,13 @@ export type CacheOutcome =
   /** The response carried no cache figure. */
   | "unknown";
 
+/**
+ * `same-project`: the slot's last holder was this project, so its own prompt is reused. `erase`: the slot was cleared and the call reused. `erase-host-cache-attested-off`: cleared and reused, on a server the endpoint's
+ * configuration attests runs with `--cache-ram 0`. `cache-prompt-off-host-cache-not-attested`: the call crossed a project boundary on a server not attested to keep no host prompt cache, so it was sent with `cache_prompt: false`.
+ * `cache-prompt-off-configured`: the same by the adapter's `freshSlot: "off"` setting. `cache-prompt-off-erase-failed`: the clear was refused, so reuse was turned off.
+ */
+export type IsolationMode = "same-project" | "erase" | "erase-host-cache-attested-off" | "cache-prompt-off-host-cache-not-attested" | "cache-prompt-off-configured" | "cache-prompt-off-erase-failed";
+
 export interface CallResult {
   readonly status: number;
   readonly body: unknown;
@@ -128,6 +135,8 @@ export interface CallResult {
   readonly skipped: readonly string[];
   /** The slot was cleared before the call because its last holder was another project or unknown. */
   readonly slotCleared?: boolean;
+  /** How the call was kept apart from other projects' prompts (set for a call into a named slot of a slotted server): the mode, in words an auditor can read. */
+  readonly isolation?: IsolationMode;
   /** Present when the endpoint refused a cache setting and the call was repeated with none: the same messages went again, so no context was lost. */
   readonly fallback?: { readonly reason: string; readonly refusedStatus: number; readonly removed: readonly string[] };
 }
@@ -198,6 +207,7 @@ export class CacheAdapter {
   async #call(request: WireRequest, context: CacheContext, expectedCachedTokens: number): Promise<CallResult> {
     let ctxUsed = context;
     let slotCleared = false;
+    let isolation: IsolationMode | undefined;
     const epoch = this.#state.epoch;
     const slotted = this.#profile.slotted;
     const slot = context.plain !== true && context.slot !== undefined && Number.isSafeInteger(context.slot) && context.slot >= 0 ? context.slot : undefined;
@@ -208,15 +218,18 @@ export class CacheAdapter {
       } else if (this.#state.holder.get(slot) !== context.scopeKey) {
         // The slot's last holder was another project, or is unknown (a start, a release, a call without a slot): its KV may still be there.
         let cleared = false;
-        if (this.#freshSlot === "erase" && this.#profile.clearSlotRequest !== undefined) {
+        // An erase empties the slot, not a host prompt cache beside it: where the server may keep one (not attested off) a call across a project boundary is sent with reuse off instead.
+        const eraseSound = this.#profile.eraseIsolation !== "unattested";
+        if (this.#freshSlot === "erase" && this.#profile.clearSlotRequest !== undefined && eraseSound) {
           const r = this.#profile.clearSlotRequest(slot);
           const res = await this.#send(r.body, {}, r.path, r.method);
           cleared = res.status < 400;
           slotCleared = cleared;
-          if (cleared) this.#state.holder.delete(slot);
-        }
+          if (cleared) { this.#state.holder.delete(slot); isolation = this.#profile.eraseIsolation === "attested" ? "erase-host-cache-attested-off" : "erase"; }
+          else isolation = "cache-prompt-off-erase-failed";
+        } else isolation = this.#freshSlot === "off" || this.#profile.clearSlotRequest === undefined ? "cache-prompt-off-configured" : "cache-prompt-off-host-cache-not-attested";
         if (!cleared) ctxUsed = { ...context, reuseOff: true };
-      }
+      } else isolation = "same-project";
     }
     const first = this.#profile.prepare(request, ctxUsed);
     let sent = await this.#send(first.body, first.headers);
@@ -236,7 +249,7 @@ export class CacheAdapter {
     if (slotted && slot !== undefined && placed && sent.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, context.scopeKey);
     const hit = sent.status < 400 ? this.#profile.read(sent.body) : this.#profile.read(undefined);
     const outcome = sent.status < 400 ? judge(hit, used.expects, expectedCachedTokens) : "unknown";
-    return { status: sent.status, body: sent.body, hit, outcome, applied: used.applied, skipped: used.skipped, ...(slotCleared ? { slotCleared } : {}), ...(fallback === undefined ? {} : { fallback }) };
+    return { status: sent.status, body: sent.body, hit, outcome, applied: used.applied, skipped: isolation === "cache-prompt-off-host-cache-not-attested" && used === first ? [...used.skipped, "cache_prompt off (host cache not attested off): the server may keep a prompt cache a slot erase does not clear; run it with --cache-ram 0 and set hostPromptCacheOff to reuse after an erase"] : used.skipped, ...(isolation === undefined ? {} : { isolation }), ...(slotCleared ? { slotCleared } : {}), ...(fallback === undefined ? {} : { fallback }) };
   }
 
   /**

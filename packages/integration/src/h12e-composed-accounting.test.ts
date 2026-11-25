@@ -69,7 +69,7 @@ test("the composed controller with the real worker process: a project reuses its
     dispatch: {
       manual: true,
       // No endpoint state is given: the composer keeps the controller's own.
-      cache: { secret: "installation-secret-0123456789", endpoints: { "localp/small": { url: LLAMA, config: { kind: "llama-cpp", model: "local", route: "localp/small", options: { slots: 2 } } } } },
+      cache: { secret: "installation-secret-0123456789", endpoints: { "localp/small": { url: LLAMA, config: { kind: "llama-cpp", model: "local", route: "localp/small", options: { slots: 2, hostPromptCacheOff: true } } } } },
       local: {
         acceptUnenforcedLimits: true,
         window: () => WINDOW,

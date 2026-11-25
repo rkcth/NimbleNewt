@@ -9,12 +9,17 @@ const lcp = (a: readonly string[], b: readonly string[]): number => { let i = 0;
 export const ok = (body: unknown): HttpResponse => ({ status: 200, body });
 export const refuse = (status: number, message: string): HttpResponse => ({ status, body: { error: { message } } });
 
-/** llama-server: one prompt per slot; `id_slot` picks the slot, otherwise slot 0; cache_prompt reuses the longest common prefix; slot files save and restore. */
+/**
+ * llama-server: one prompt per slot; `id_slot` picks the slot, otherwise slot 0; cache_prompt reuses the longest common prefix; slot files save and restore.
+ * With `hostCache: true` (the server's default `--cache-ram`) a prompt that leaves a slot is also kept beside the slots, a slot erase does not touch those, and a call with `cache_prompt: true` reuses the longest
+ * prefix of the slot's prompt or of any kept prompt (the behaviour measured in G10, `g10-llamacpp-run1.json`: 6,469 of 6,470 tokens reused after an erase); `cache_prompt: false` reuses nothing. `hostCache: false` is `--cache-ram 0`.
+ */
 export class LlamaSim implements Transport {
   readonly slots: string[][];
   readonly files = new Map<string, string[]>();
   readonly seen: HttpRequest[] = [];
-  constructor(n: number, readonly options: { rejectSlot?: boolean } = {}) { this.slots = Array.from({ length: n }, () => []); }
+  readonly hostKept: string[][] = [];
+  constructor(n: number, readonly options: { rejectSlot?: boolean; hostCache?: boolean } = {}) { this.slots = Array.from({ length: n }, () => []); }
   async send(r: HttpRequest): Promise<HttpResponse> {
     this.seen.push(r);
     await new Promise((resolve) => setImmediate(resolve)); // a real server takes time, so concurrent calls can interleave unless the adapter serialises them
@@ -24,12 +29,15 @@ export class LlamaSim implements Transport {
       if (slot >= this.slots.length) return refuse(400, "invalid slot");
       if (action === "save") { this.files.set(name!, [...this.slots[slot]!]); return ok({ id_slot: slot, filename: name, n_saved: this.slots[slot]!.length, n_written: 1, timings: { save_ms: 4.5 } }); }
       if (action === "restore") { const f = this.files.get(name!); if (f === undefined) return refuse(404, "file not found"); this.slots[slot] = [...f]; return ok({ id_slot: slot, filename: name, n_restored: f.length, timings: { restore_ms: 3.1 } }); }
+      if (this.options.hostCache === true && this.slots[slot]!.length > 0) this.hostKept.push(this.slots[slot]!);
       this.slots[slot] = []; return ok({ id_slot: slot, n_erased: 1 });
     }
     if (this.options.rejectSlot === true && "id_slot" in r.body) return refuse(400, "unknown field id_slot");
     const slot = typeof r.body["id_slot"] === "number" ? (r.body["id_slot"] as number) : 0;
     const t = tokensOf(r.body);
-    const reuse = r.body["cache_prompt"] === true ? Math.min(lcp(this.slots[slot]!, t), t.length - 1) : 0;
+    const best = [this.slots[slot]!, ...(this.options.hostCache === true ? this.hostKept : [])].reduce((m, p) => Math.max(m, lcp(p, t)), 0);
+    const reuse = r.body["cache_prompt"] === true ? Math.min(best, t.length - 1) : 0;
+    if (this.options.hostCache === true && this.slots[slot]!.length > 0) this.hostKept.push(this.slots[slot]!);
     this.slots[slot] = t;
     return ok({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: t.length, completion_tokens: 3 }, timings: { cache_n: reuse, prompt_n: t.length - reuse } });
   }

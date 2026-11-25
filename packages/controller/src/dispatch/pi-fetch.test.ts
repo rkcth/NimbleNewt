@@ -14,7 +14,7 @@ const SECRET = "installation-secret-0123456789";
 const A = "proj-aaaaaaaaaaaaaaaaaaaa", B = "proj-bbbbbbbbbbbbbbbbbbbb";
 const URL_LLAMA = "http://127.0.0.1:8080";
 const CHAT = `${URL_LLAMA}/v1/chat/completions`;
-const config = (slots: number) => ({ "llama/local": { url: URL_LLAMA, config: { kind: "llama-cpp" as const, model: "local", route: "llama/local", options: { slots } } } });
+const config = (slots: number) => ({ "llama/local": { url: URL_LLAMA, config: { kind: "llama-cpp" as const, model: "local", route: "llama/local", options: { slots, hostPromptCacheOff: true } } } });
 const make = (slots: number, extra: Partial<ConstructorParameters<typeof CachePolicies>[0]> = {}) => new CachePolicies({ secret: SECRET, state: new CacheEndpoints(), principal, endpoints: config(slots), ...extra });
 const chat = (turns: number, prefix = "shared project document ".repeat(60)) => ({ model: "local", stream: true, messages: [{ role: "system", content: prefix }, ...Array.from({ length: turns }, (_, i) => ({ role: i % 2 === 0 ? "user" : "assistant", content: `turn ${i}` }))] });
 const post = (fetchFn: typeof globalThis.fetch, body: unknown, init: RequestInit = {}): Promise<Response> => fetchFn(CHAT, { method: "POST", headers: { authorization: "Bearer k", "content-type": "application/json" }, body: JSON.stringify(body), ...init });
