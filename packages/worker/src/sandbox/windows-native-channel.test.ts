@@ -185,6 +185,38 @@ describe("A03b slice 4: the supervisor's relay between the controller's pipes an
     await r.relay.finish(false);
   });
 
+  test("a controller that stops taking lines: the outbox bound and its name are still checked while a relayed line waits, and the wait ends on the fault", async () => {
+    for (const kind of ["grows", "swapped"] as const) {
+      const inbox = new MemFile(); const outbox = new MemFile(); const input = new PassThrough();
+      const faults: string[] = []; let writes = 0;
+      const ports: ChannelPorts = { input, output: { write: () => { writes++; return new Promise<void>(() => undefined); } } };
+      const relay = new ChannelRelay({ inbox, outbox, ports, limits: { ...FILE_CHANNEL_DEFAULTS, maxBytes: 4096 }, onFault: (r) => { faults.push(r); }, pollMinMs: 1, pollMaxMs: 3, guardMs: 5 });
+      relay.start();
+      outbox.append(msg(1, { t: "first" }));
+      await until(() => writes === 1, "the first line is waiting on the controller");
+      // A sparse-like jump: the size alone is over the bound, whatever has been read.
+      if (kind === "grows") outbox.append(Buffer.alloc(1 << 20)); else outbox.named = false;
+      await until(() => faults.length === 1, kind);
+      assert.match(faults[0]!, kind === "grows" ? /larger than the channel allows/ : /replaced or removed/, kind);
+      const end = await relay.finish(false);
+      assert.ok(end.fault !== undefined, kind);
+    }
+  });
+
+  test("a controller that keeps its pipe open but stops reading cannot hold the end back: finish gives up with a fault after the drain bound", async () => {
+    const inbox = new MemFile(); const outbox = new MemFile(); const input = new PassThrough();
+    const faults: string[] = [];
+    const ports: ChannelPorts = { input, output: { write: () => new Promise<void>(() => undefined) } };
+    const relay = new ChannelRelay({ inbox, outbox, ports, limits: FILE_CHANNEL_DEFAULTS, onFault: (r) => { faults.push(r); }, pollMinMs: 1, pollMaxMs: 3, drainMs: 50 });
+    relay.start();
+    outbox.append(Buffer.concat([msg(1, { t: "a" }), msg(2, { t: "b" })]));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const end = await Promise.race([relay.finish(true), new Promise<never>((_, reject) => { timer = setTimeout(() => { reject(new Error("finish did not end")); }, 5000); })]);
+    clearTimeout(timer);
+    assert.match(end.fault!, /did not take the worker's remaining output in time/);
+    assert.equal(faults.length, 1);
+  });
+
   test("what a frame names is only text: paths, handles and commands in a payload are passed on as they are and nothing is opened or run", async () => {
     const r = rig();
     r.relay.start();

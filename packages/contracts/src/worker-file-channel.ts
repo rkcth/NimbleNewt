@@ -140,7 +140,8 @@ export interface WorkerFileOps {
 }
 export const nodeWorkerFileOps: WorkerFileOps = {
   openRead: (path) => openSync(path, "r"),
-  // Append mode: on Windows node asks for FILE_APPEND_DATA only, which is all the container's access to this file is meant to allow.
+  // Append mode: on Windows node asks for FILE_APPEND_DATA only. The container's access to the file is NOT limited to appending (its scratch grant is modify; there is no append-only mode): the
+  // supervisor treats anything but growth as a fault and checks the size bound on its own.
   openAppend: (path) => openSync(path, "a"),
   read: (fd, buffer, position) => readSync(fd, buffer, 0, buffer.length, position),
   write: (fd, data) => { let done = 0; while (done < data.length) done += writeSync(fd, data, done, data.length - done); },

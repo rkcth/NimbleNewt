@@ -255,7 +255,7 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
           const made = openChannel(host, job.channel);
           channelFiles = [made.inbox, made.outbox];
           if (ports === undefined) throw new Error("the runner has no pipes of the controller to relay");
-          relay = new ChannelRelay({ inbox: made.inbox, outbox: made.outbox, ports, limits: job.channel, onFault: () => { abort.abort(); } });
+          relay = new ChannelRelay({ inbox: made.inbox, outbox: made.outbox, ports, limits: job.channel, drainMs: job.channel.stallMs, onFault: () => { abort.abort(); } });
         } catch (error) { failure = { kind: "channel", message: `the channel could not be set up: ${(error as Error).message}` }; }
       }
     }

@@ -50,6 +50,16 @@ describe("A03b slice 4: the file framing", () => {
       assert.throws(() => d.push(bytes), FileChannelError, name);
       assert.throws(() => d.push(m(1, {})), FileChannelError, `${name}: stays failed`);
     }
+    // Bytes that are not UTF-8 INSIDE a JSON string (where a lenient decoder would turn them into U+FFFD and the JSON would still parse): a stray byte, an encoded lone surrogate, an overlong form.
+    for (const raw of [[0xff], [0xed, 0xa0, 0x80], [0xc0, 0xaf]]) {
+      const payload = Buffer.concat([Buffer.from('{"s":"'), Buffer.from(raw), Buffer.from('"}')]);
+      const frame = Buffer.concat([Buffer.from(`1 m ${payload.length}:`), payload, Buffer.from("\n")]);
+      assert.throws(() => decoder().push(frame), /not valid text/, raw.join(","));
+    }
+    // An escaped lone surrogate and a __proto__ key are valid JSON text: they pass as plain data (the controller's own message checks apply to them as on a pipe).
+    const odd = decoder().push(encodeFrame(1, "m", '{"__proto__":{"x":1},"s":"\\ud800"}'));
+    assert.equal(odd.length, 1);
+    assert.equal(({} as Record<string, unknown>)["x"], undefined);
   });
 
   test("bounds: a payload over the limit fails as soon as its header is read, and so does the frame count", () => {

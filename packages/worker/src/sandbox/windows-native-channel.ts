@@ -66,6 +66,13 @@ export interface RelayDeps {
   readonly onFault: (reason: string) => void;
   readonly pollMinMs?: number;
   readonly pollMaxMs?: number;
+  /**
+   * After the program has ended, how long `finish` waits for the controller to take the next of the worker's remaining lines before it gives up with a fault (so a controller that keeps its pipe open but stops
+   * reading cannot hold the revoke back). Default: `FILE_CHANNEL_DEFAULTS.stallMs`.
+   */
+  readonly drainMs?: number;
+  /** How often the outbox's size and name are checked apart from the reads (so the bound holds while a relayed line waits on the controller). Default 100 ms. */
+  readonly guardMs?: number;
 }
 
 const READ_CHUNK = 1024 * 1024;
@@ -93,10 +100,16 @@ export class ChannelRelay {
   #pump: Promise<void> | undefined;
   #wake: (() => void) | undefined;
   #heartbeat: ReturnType<typeof setInterval> | undefined;
+  #guard: ReturnType<typeof setInterval> | undefined;
   #listeners: { event: string; fn: (...args: never[]) => void }[] = [];
+  /** Settles when the relay faults: a relayed line still waiting on the controller is then no longer waited for. */
+  readonly #faultedSignal: Promise<void>;
+  #signalFault: () => void = () => undefined;
+  #lastTaken = Date.now();
 
   constructor(deps: RelayDeps) {
     this.#d = deps;
+    this.#faultedSignal = new Promise<void>((resolve) => { this.#signalFault = resolve; });
     this.#decoder = new FrameDecoder({ kinds: ["m", "a", "e"], maxPayload: deps.limits.maxPayload, maxFrames: deps.limits.maxFrames });
     this.#pollMin = deps.pollMinMs ?? FILE_CHANNEL_DEFAULTS.pollMinMs;
     this.#pollMax = deps.pollMaxMs ?? FILE_CHANNEL_DEFAULTS.pollMaxMs;
@@ -115,7 +128,22 @@ export class ChannelRelay {
       if (Date.now() - this.#lastInboxWrite >= this.#d.limits.heartbeatMs) this.#writeInbox("h", "", 0);
     }, Math.max(1, Math.floor(this.#d.limits.heartbeatMs / 2)));
     this.#heartbeat.unref();
+    // The reads check the bound too, but a read pass waits while the controller takes a relayed line; this check does not, so the worker cannot grow its file without bound meanwhile.
+    this.#guard = setInterval(() => { this.#checkOutbox(); }, Math.max(1, this.#d.guardMs ?? 100));
+    this.#guard.unref();
     this.#pump = this.#run();
+  }
+
+  /** The outbox's size and name, read through the supervisor's own handle and compared with the name; a fault when either is out of bounds. */
+  #checkOutbox(): void {
+    if (this.#faulted !== undefined || this.#stopping) return;
+    try {
+      const outbox = this.#d.outbox;
+      if (!outbox.stillNamed()) return this.#fault("the worker's output file was replaced or removed");
+      const size = outbox.size();
+      if (size < this.#offset) return this.#fault("the worker's output file was cut short");
+      if (size > this.#d.limits.maxBytes) return this.#fault("the worker's output file is larger than the channel allows");
+    } catch (error) { this.#fault(`the worker's output could not be checked: ${(error as Error).message}`); }
   }
 
   /**
@@ -125,7 +153,11 @@ export class ChannelRelay {
   async finish(orderly: boolean): Promise<ChannelEnd> {
     this.#stopping = true;
     this.#wake?.();
-    await this.#pump;
+    // The rest of the outbox is relayed, but a controller that stops taking lines cannot hold the revoke back: no line taken for `drainMs` is a fault, which also lets go of the waiting write.
+    const drainMs = this.#d.drainMs ?? FILE_CHANNEL_DEFAULTS.stallMs;
+    this.#lastTaken = Date.now();
+    const drain = setInterval(() => { if (Date.now() - this.#lastTaken >= drainMs) this.#fault("the controller did not take the worker's remaining output in time"); }, Math.max(1, Math.min(1000, Math.floor(drainMs / 4))));
+    try { await this.#pump; } finally { clearInterval(drain); }
     this.#release();
     let note: string | undefined;
     if (this.#faulted === undefined) {
@@ -140,6 +172,8 @@ export class ChannelRelay {
   #release(): void {
     if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
     this.#heartbeat = undefined;
+    if (this.#guard !== undefined) clearInterval(this.#guard);
+    this.#guard = undefined;
     const input = this.#d.ports.input;
     for (const l of this.#listeners.splice(0)) input.removeListener(l.event, l.fn as (...args: unknown[]) => void);
     // Errors after the relay let go are no one's business here, but an unhandled one would end the runner.
@@ -154,6 +188,9 @@ export class ChannelRelay {
     this.#faulted = reason;
     if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
     this.#heartbeat = undefined;
+    if (this.#guard !== undefined) clearInterval(this.#guard);
+    this.#guard = undefined;
+    this.#signalFault();
     this.#wake?.();
     try { this.#d.onFault(reason); } catch { /* the caller's end of the abort */ }
   }
@@ -237,7 +274,12 @@ export class ChannelRelay {
 
   async #frame(f: Frame): Promise<void> {
     this.#framesFromWorker++;
-    if (f.kind === "m") { await this.#d.ports.output.write(`${f.payload}\n`); return; }
+    if (f.kind === "m") {
+      // A fault (the guard, the drain bound, the caller's end) stops the wait; the line is then not counted as taken, and the pass ends on the fault.
+      await Promise.race([this.#d.ports.output.write(`${f.payload}\n`), this.#faultedSignal]);
+      this.#lastTaken = Date.now();
+      return;
+    }
     if (f.kind === "e") { this.#workerEnded = true; return; }
     const ack = Number(f.payload);
     const at = this.#unacked.findIndex((u) => u.seq === ack);
