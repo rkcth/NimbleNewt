@@ -48,9 +48,13 @@ export const WORKER_SERVICE = {
 } as const;
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-// The same account-name shape the controller's unit accepts.
-const WIN_USER = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,62}\\)?[A-Za-z0-9][A-Za-z0-9._ -]{0,62}[A-Za-z0-9]$|^[A-Za-z0-9]$/;
-const REFUSED_USER = /(^|\\)(system|administrator|administrators|root|localsystem|local service|network service|guest)$|^(nt authority|nt service|builtin)\\/i;
+// The account: an optional computer (NetBIOS-style) part and a name part with EXACTLY the shape the installer's -AccountName accepts (Install-NimbleNewtLauncher.ps1 ValidatePattern; a test pins the
+// two), so the unit can only name an account the installer could have made. A SID string (`S-1-5-18` is SYSTEM; Task Scheduler's UserId accepts SIDs) and the built-in and well-known names are refused,
+// case-insensitively, with or without a computer part. A RENAMED built-in Administrator cannot be recognised by name: the installer's Verify and the steps' account are the check for that.
+const WIN_USER = /^(?:([A-Za-z0-9][A-Za-z0-9_-]{0,14})\\)?([A-Za-z][A-Za-z0-9_-]{0,19})$/;
+const REFUSED_NAME = /^(system|localsystem|administrator|administrators|admin|root|guest|guests|users|everyone|localservice|networkservice|defaultaccount|wdagutilityaccount|defaultuser0|krbtgt|trustedinstaller|interactive|network|batch|service|anonymous|authenticated-users)$/i;
+const REFUSED_DOMAIN = /^(nt|builtin|nt-authority|nt-service|nt_authority|nt_service|window-manager|font-driver-host|iis-apppool)$/i;
+const SID_LIKE = /^s-\d/i;
 const MAX_PATH_TEXT = 260;
 const bad = (field: string, message: string): never => { throw new ServiceSpecError(field, message); };
 
@@ -89,7 +93,8 @@ export function generateWorkerServiceUnit(spec: WorkerServiceSpec): WorkerServic
   // The installer refuses these in the values it writes to worker.env; the file it wrote therefore never sits at such a path.
   if (/['=]/.test(envFile)) bad("dataDir", "must not contain ' or = (the installer refuses them in its own folders)");
   if (typeof spec.windowsUser !== "string" || spec.windowsUser === "") bad("windowsUser", "is required: the installer's account, as COMPUTER\\nimblenewt-worker");
-  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(spec.windowsUser) || !WIN_USER.test(spec.windowsUser) || REFUSED_USER.test(spec.windowsUser)) bad("windowsUser", "must be an ordinary local account name (COMPUTER\\user or user); SYSTEM, administrator, service and built-in accounts are refused");
+  const um = WIN_USER.exec(spec.windowsUser);
+  if (um === null || SID_LIKE.test(um[2]!) || REFUSED_NAME.test(um[2]!) || (um[1] !== undefined && (SID_LIKE.test(um[1]) || REFUSED_DOMAIN.test(um[1])))) bad("windowsUser", "must be the installer's account, as COMPUTER\\user or user (a name the installer's -AccountName accepts: a letter, then up to 19 letters, digits, '_' or '-'); SIDs, SYSTEM, administrator, service and built-in accounts are refused");
   const user = spec.windowsUser;
 
   const args = [`--env-file=${envFile}`, entry, "--config", configFile].map(windowsArg).join(" ");
@@ -138,6 +143,7 @@ export function generateWorkerServiceUnit(spec: WorkerServiceSpec): WorkerServic
     uninstall: [`Stop-ScheduledTask -TaskName ${q}`, `Unregister-ScheduledTask -TaskName ${q} -Confirm:$false`],
     notes: [
       `Registered by an administrator only (a boot trigger and another account's principal need one). It runs as ${user}, which the installer made a standard user: logon type S4U, run level LeastPrivilege, NO stored password and no password element.`,
+      "OPEN, registration: Microsoft's 'Security Contexts for Tasks' page lists registering a task 'under the security context of a different user's account' with the S4U logon type among the cases where an administrator must supply a password, and the account's password is not kept by anyone. Whether Register-ScheduledTask -Xml with this S4U principal and no user or password option is accepted is therefore UNPROVEN (the own-hardware proof's first registration shows it). If Windows refuses it, do not work around it here: the fallbacks are in the plan (12.3), and a stored password is a design change.",
       "S4U limits (Microsoft, Principal.LogonType): no password is stored by the system and there is no access to the network or to encrypted files. The worker cannot use this account's own credentials on another computer; its connection to the controller uses the host token file named in its configuration.",
       "The task runs in a non-interactive session (Session 0): no window, nobody signed in needed. Whether an S4U task can create the AppContainer profile and run the launcher with its private window station AS A NON-ADMINISTRATOR is UNPROVEN (Microsoft says only Administrators may name a window station; plan 12.2 risk 6). A failed run says so with stage 'grant'; see the own-hardware proof procedure in the plan.",
       `Starts at boot after ${WORKER_SERVICE.bootDelay}; one instance at a time; no execution time limit. Task Scheduler restarts after a failure ${r.windowsRestartCount} times, ${r.windowsRestartInterval} apart, and cannot tell exit codes apart; after that it stays down until an administrator starts the task. An exit 0 is not restarted.`,

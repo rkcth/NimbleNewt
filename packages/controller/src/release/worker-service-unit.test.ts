@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SERVICE_RESTART, ServiceSpecError, WORKER_SERVICE, generateServiceUnit, generateWorkerServiceUnit, type WorkerServiceSpec } from "./index.js";
+import { SERVICE_RESTART, ServiceSpecError, WORKER_SERVICE, generateServiceUnit, generateWorkerServiceUnit, windowsArg, type WorkerServiceSpec } from "./index.js";
 
 /**
  * The worker's Task Scheduler unit (card A03b follow-up): an S4U principal (no stored password), a boot trigger, a bounded restart, explicit paths. The checks read the XML with a small parser of their own and compare
@@ -260,6 +260,7 @@ test("the steps and notes say who registers it, that nothing here registered any
   assert.match(notes, /no access to the network or to encrypted files/);
   assert.match(notes, /Session 0/);
   assert.match(notes, /NON-ADMINISTRATOR is UNPROVEN/);
+  assert.match(notes, /OPEN, registration: .*different user's account.* must supply a password.*UNPROVEN/);
   assert.match(notes, /3 times, PT1M apart/);
   assert.match(notes, /schtasks \/Create \/TN <name> \/XML <file>/);
   assert.deepEqual(u.uninstall, ["Stop-ScheduledTask -TaskName 'NimbleNewtWorker'", "Unregister-ScheduledTask -TaskName 'NimbleNewtWorker' -Confirm:$false"]);
@@ -273,4 +274,46 @@ test("the controller's own Windows unit is untouched: still a logon-triggered in
   assert.match(c.content, /<LogonTrigger>/);
   assert.match(c.content, /<LogonType>InteractiveToken<\/LogonType>/);
   assert.ok(!/BootTrigger|S4U/.test(c.content));
+});
+
+test("the account is one the installer could have made: its -AccountName pattern, no SID, no built-in or well-known name in any case, no lookalike or padded spelling", () => {
+  const refuse = (user: string): void => {
+    assert.throws(() => generateWorkerServiceUnit({ ...SPEC, windowsUser: user }), (e: unknown) => e instanceof ServiceSpecError && e.field === "windowsUser", JSON.stringify(user));
+  };
+  for (const user of [
+    "S-1-5-18", "s-1-5-19", "BOX\\S-1-5-18", "S-1-5-21-1-2-3-500", "S-1\\nimblenewt-worker",
+    "LocalService", "NetworkService", "localsystem", "ADMINISTRATOR", "box\\Administrator", "Admin", "DefaultAccount", "WDAGUtilityAccount", "defaultuser0", "Guest", "Everyone", "Users", "krbtgt", "TrustedInstaller",
+    "BUILTIN\\x", "builtin\\nimblenewt-worker", "NT\\x", "NT-AUTHORITY\\x",
+    "Administrator.", "nimblenewt-worker.", " nimblenewt-worker", "nimblenewt-worker ", "BOX\\ nimblenewt-worker", ".\\nimblenewt-worker", "BOX.\\nimblenewt-worker", "BOX\\\\nimblenewt-worker", "A\\B\\c",
+    "nimblenewt.worker", "nimble newt", "1worker", "_worker", "x".repeat(21), "C".repeat(16) + "\\nimblenewt-worker",
+    "nimblenewt\u2010worker", "nimbl\u0435newt", "nimblenewt-worker\n", "nimblenewt-worker\u0000", "nimblenewt-worker@BOX", "BOX/nimblenewt-worker",
+  ]) refuse(user);
+  for (const user of ["nimblenewt-worker", "BOX\\nimblenewt-worker", "my-pc\\nn_w2", "W".repeat(15) + "\\" + "w".repeat(20)]) {
+    assert.equal(val(child(child(parseXml(generateWorkerServiceUnit({ ...SPEC, windowsUser: user }).content), "Principals"), "Principal"), "UserId"), user);
+  }
+  // The name part's pattern is the installer's -AccountName ValidatePattern, character for character, and the installer's default is the documented account.
+  const ps1 = join(import.meta.dirname, "..", "..", "..", "..", "native", "install", "Install-NimbleNewtLauncher.ps1");
+  assert.ok(existsSync(ps1), ps1);
+  const m = /\[ValidatePattern\('\^([^']+)\$'\)\] \[string\] \$AccountName = 'nimblenewt-worker'/.exec(readFileSync(ps1, "utf8"));
+  assert.ok(m, "the installer's AccountName parameter");
+  const src = readFileSync(join(import.meta.dirname, "..", "..", "src", "release", "worker-service-unit.ts"), "utf8");
+  assert.ok(src.includes(`\\\\)?(${m[1]})$/;`), `the generator's name part is the installer's pattern ${m[1]}`);
+});
+
+test("the command line round-trips through the Windows argument rules: backslash runs before a quote, a trailing backslash before the closing quote, spaces, and an argument made of them", () => {
+  // A path that is the root of a drive ends in a backslash: inside quotes it must be doubled, or the closing quote is escaped and the next argument merges into it.
+  const u = generateWorkerServiceUnit({ ...SPEC, configFile: "C:\\" });
+  const args = val(child(child(parseXml(u.content), "Actions"), "Exec"), "Arguments");
+  assert.ok(args.endsWith('"--config" "C:\\\\"'), args);
+  assert.deepEqual(argvOf(args), ["--env-file=C:\\ProgramData\\NimbleNewt\\worker.env", SPEC.entry, "--config", "C:\\"]);
+  // The quoting function itself, on the cases CommandLineToArgvW and the C runtime treat specially.
+  for (const s of ["", " ", "a b", "a\\", "a\\\\", "\\", 'a"b', 'a\\"b', 'a\\\\"b', '"', '\\"', "a\\ b\\", "\t"]) assert.deepEqual(argvOf(windowsArg(s)), [s], JSON.stringify(s));
+  // and on many strings built from the characters that matter, several per line
+  let seed = 7;
+  const rnd = (n: number): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const alphabet = ["a", " ", "\\", '"', "&", "'"];
+  for (let k = 0; k < 2000; k++) {
+    const words = Array.from({ length: 1 + rnd(4) }, () => Array.from({ length: rnd(8) }, () => alphabet[rnd(alphabet.length)]).join(""));
+    assert.deepEqual(argvOf(words.map(windowsArg).join(" ")), words, JSON.stringify(words));
+  }
 });

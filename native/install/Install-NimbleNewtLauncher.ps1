@@ -308,20 +308,25 @@ function Invoke-Verify {
   Say "How the service gets these: start the worker with 'node --env-file=$EnvFile ...' (the worker's task unit names this file); with the default folders the worker finds the same values without it."
   # The worker's scheduled task is registered by an administrator, never by this script. If it exists, report (read only) who it runs as, how it logs on and what starts it; if it does not, say so (not a failure).
   Say "Worker task '$WorkerTaskName' (registered by an administrator; this script only reads it):"
-  $task = Get-ScheduledTask -TaskName $WorkerTaskName -ErrorAction SilentlyContinue
-  if ($null -eq $task) { Say '  not registered (see README.md, "The worker task"); nothing to check' }
+  # Only the root folder ('\'): the unit's steps register there, and -TaskName alone would also return tasks of the same name in other folders.
+  $task = @(Get-ScheduledTask -TaskPath '\' -TaskName $WorkerTaskName -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ })
+  if ($task.Count -eq 0) { Say '  not registered (see README.md, "The worker task"); nothing to check' }
   else {
+    $task = $task[0]
     $tp = $task.Principal
-    $tt = @($task.Triggers | ForEach-Object { $_.CimClass.CimClassName })
-    $ta = @($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)  (working directory $($_.WorkingDirectory))" })
-    Say "  principal $($tp.UserId); logon type $($tp.LogonType); run level $($tp.RunLevel)"
+    # The ScheduledTasks module returns enums (LogonType S4U = 2, RunLevel Limited = 0); compare their text so that a name or a number reads the same.
+    $logon = "$($tp.LogonType)"
+    $level = "$($tp.RunLevel)"
+    $tt = @(@($task.Triggers) | Where-Object { $null -ne $_ } | ForEach-Object { $_.CimClass.CimClassName })
+    $acts = @(@($task.Actions) | Where-Object { $null -ne $_ })
+    Say "  principal $($tp.UserId); logon type $logon; run level $level"
     Say "  triggers: $($tt -join ', ')"
-    foreach ($line in $ta) { Say "  action: $line" }
-    Check ($tp.LogonType -eq 'S4U') 'the task logs on with S4U (no stored password; no network or encrypted-file access)'
-    Check ($tp.RunLevel -eq 'Limited') 'the task runs with the limited run level (LeastPrivilege)'
-    Check (($tp.UserId -ieq $AccountName) -or ($tp.UserId -like "*\$AccountName")) "the task runs as the account '$AccountName'"
+    foreach ($a in $acts) { Say "  action: $($a.Execute) $($a.Arguments)  (working directory $($a.WorkingDirectory))" }
+    Check (@('S4U', '2') -contains $logon) 'the task logs on with S4U (no stored password; no network or encrypted-file access)'
+    Check (@('Limited', '0') -contains $level) 'the task runs with the limited run level (LeastPrivilege)'
+    Check (($tp.UserId -ieq $AccountName) -or ($tp.UserId -ieq "$env:COMPUTERNAME\$AccountName")) "the task runs as the local account '$AccountName'"
     Check (($tt.Count -ge 1) -and (@($tt | Where-Object { $_ -ne 'MSFT_TaskBootTrigger' }).Count -eq 0)) 'its trigger is a boot trigger only (nobody needs to be signed in)'
-    Check (@($task.Actions | Where-Object { $_.Arguments -like "*--env-file=$EnvFile*" }).Count -ge 1) 'it starts node with the environment file worker.env'
+    Check (($acts.Count -eq 1) -and (@($acts | Where-Object { "$($_.Arguments)".IndexOf("--env-file=$EnvFile", [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -eq 1)) 'it has one action, which starts node with the environment file worker.env'
   }
   Say $(if ($script:bad -eq 0) { 'RESULT: everything this script manages is as designed.' } else { "RESULT: $($script:bad) check(s) failed (see FAIL lines)." })
   if ($script:bad -gt 0) { exit 1 }

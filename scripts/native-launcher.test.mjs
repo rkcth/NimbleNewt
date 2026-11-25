@@ -106,14 +106,20 @@ test("the installer is Verify by default, supports -WhatIf, and asks an administ
 test("A03b worker task: Verify only READS the worker's scheduled task (S4U, least privilege, boot trigger, worker.env), registers nothing, and a missing task is not a failure", () => {
   const verify = fn("Invoke-Verify");
   assert.match(ps, /\$WorkerTaskName = 'NimbleNewtWorker'/);
-  assert.ok(verify.includes("Get-ScheduledTask -TaskName $WorkerTaskName -ErrorAction SilentlyContinue"));
-  for (const part of ["$tp.LogonType -eq 'S4U'", "$tp.RunLevel -eq 'Limited'", "MSFT_TaskBootTrigger", "--env-file=$EnvFile", "$tp.UserId -ieq $AccountName", "$tp.UserId -like"]) assert.ok(verify.includes(part), part);
+  // the root folder only (-TaskName alone also returns same-named tasks of other folders, and an array would make every check below unreliable)
+  assert.ok(verify.includes("@(Get-ScheduledTask -TaskPath '\\' -TaskName $WorkerTaskName -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ })"));
+  assert.ok(verify.includes("$task = $task[0]"));
+  // enum or number: the text of LogonType (S4U = 2) and RunLevel (Limited = 0) is compared; the UserId is the bare name or THIS computer's, never any domain's
+  for (const part of ['$logon = "$($tp.LogonType)"', '$level = "$($tp.RunLevel)"', "@('S4U', '2') -contains $logon", "@('Limited', '0') -contains $level", "MSFT_TaskBootTrigger", "--env-file=$EnvFile", "OrdinalIgnoreCase", "$tp.UserId -ieq $AccountName", '$tp.UserId -ieq "$env:COMPUTERNAME\\$AccountName"', "$acts.Count -eq 1"]) assert.ok(verify.includes(part), part);
+  assert.ok(!/UserId -like/.test(verify), "no wildcard match of the account (OTHERDOMAIN\\name would pass)");
+  // collections that may be empty or hold $null are filtered before a property is read (Set-StrictMode -Version 3)
+  assert.ok(verify.includes("@(@($task.Triggers) | Where-Object { $null -ne $_ } | ForEach-Object { $_.CimClass.CimClassName })"));
   // the task checks are Checks (a FAIL when it exists and is wrong), and an absent task only says so
-  assert.match(verify, /if \(\$null -eq \$task\) \{ Say '  not registered/);
-  assert.ok(!/\$null -eq \$task\) \{[^}]*Check \$false/.test(verify), "a task that is not registered is not a failure");
-  // nothing in the whole script registers, changes, starts or removes a task
-  assert.ok(!/\b(Register|Unregister|Set|New|Start|Stop|Enable|Disable)-ScheduledTask\b|\bschtasks\b|Register-ScheduledJob|\bSchedule\.Service\b/i.test(code), "the installer never registers or changes a task");
-  assert.deepEqual([...code.matchAll(/\b\w+-ScheduledTask\b/g)].map((m) => m[0]), ["Get-ScheduledTask"], "the only task cmdlet is the read");
+  assert.match(verify, /if \(\$task\.Count -eq 0\) \{ Say '  not registered/);
+  assert.ok(!/\$task\.Count -eq 0\) \{[^}]*Check \$false/.test(verify), "a task that is not registered is not a failure");
+  // nothing in the whole script registers, changes, starts or removes a task (cmdlets, schtasks, the COM object, the CIM class behind the cmdlets)
+  assert.ok(!/\b(Register|Unregister|Set|New|Start|Stop|Enable|Disable)-ScheduledTask\b|\bschtasks\b|Register-ScheduledJob|\bSchedule\.Service\b|PS_ScheduledTask|MSFT_ScheduledTask\b|Invoke-CimMethod|RegisterByXml|RegisterTask/i.test(code), "the installer never registers or changes a task");
+  assert.deepEqual([...code.matchAll(/\b\w+-ScheduledTask\w*/g)].map((m) => m[0]), ["Get-ScheduledTask"], "the only task cmdlet is the read");
   assert.ok(/does not register or start the worker/.test(ps));
   // the password story is unchanged: no password reaches a task from here
   assert.ok(!/-Password\b|-RunAsUser|LogonType\s+Password/i.test(code.replace(/New-LocalUser[^\n]*-Password[^\n]*/g, "")));
