@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { describe, test } from "node:test";
 import { REQUIRED_CASE_IDS, runContainmentSuite } from "./containment.js";
 import {
-  CONFIG_FILE, RUNNER_FILE, WINDOWS_CASES, WINDOWS_CASE_RUNNER, confinedWitness, freeProof, judgeWindowsCase, parseRunnerResults, runWindowsNodeCases,
+  CONFIG_FILE, MAX_RESULT_BYTES, RUNNER_FILE, WINDOWS_CASES, WINDOWS_CASE_RUNNER, confinedWitness, freeProof, judgeWindowsCase, parseRunnerResults, readResultFile, runWindowsNodeCases,
   type FreeRun, type HostProbe, type LaunchOutcome, type NodeSuiteContext, type NodeSuiteFixture, type RunnerAttempt, type RunnerCaseResult, type WindowsCaseConfig,
 } from "./containment-windows-cases.js";
 import type { LaunchRequest, SandboxLauncher } from "./launcher.js";
@@ -63,7 +63,7 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
     const sys = kind("deny-write-system");
     assert.equal(judgeWindowsCase(sys, res(sys.id, att("system0", "denied"), att("system1", "denied")), { result: "unavailable", proofMissing: undefined }, undefined).verdict, "pass");
     const p = kind("deny-write-protected-name");
-    const free = freeOk(p.id, "edit", "create", "delete");
+    const free = freeOk(p.id, "edit", "create", "delete", "replace-move-away", "replace-with-junction");
     const confined = (junction: RunnerAttempt) => res(p.id, att("edit", "denied"), att("create", "denied"), att("delete", "denied"), att("replace-move-away", "denied"), junction);
     assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { code: "previous-step-refused", skippable: true })), free, undefined).verdict, "pass");
     // the same step skipped but not marked skippable is a probe that did not run
@@ -71,7 +71,40 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
     // a skippable step that got through is a leak
     assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "allowed", { skippable: true })), free, undefined).verdict, "fail");
     // unconfined, the skippable step may have been skipped or allowed
-    assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { skippable: true })), { result: res(p.id, att("edit", "allowed"), att("replace-with-junction", "skipped", { skippable: true })), proofMissing: undefined }, undefined).verdict, "pass");
+    const freeSkipped = res(p.id, att("edit", "allowed"), att("create", "allowed"), att("delete", "allowed"), att("replace-move-away", "allowed"), att("replace-with-junction", "skipped", { skippable: true }));
+    assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { skippable: true })), { result: freeSkipped, proofMissing: undefined }, undefined).verdict, "pass");
+  });
+
+  test("the pairing is per attempt: a confined run that left out an attempt, or made one the unconfined run did not, is inconclusive", () => {
+    const k = kind("deny-controller-data-read");
+    const free = freeOk(k.id, "file", "list");
+    assert.equal(judgeWindowsCase(k, res(k.id, att("file", "denied"), att("list", "denied")), free, undefined).verdict, "pass");
+    const fewer = judgeWindowsCase(k, res(k.id, att("file", "denied")), free, undefined);
+    assert.equal(fewer.verdict, "inconclusive");
+    assert.match(fewer.detail, /same attempts/);
+    assert.equal(judgeWindowsCase(k, res(k.id, att("file", "denied"), att("list", "denied"), att("other", "denied")), free, undefined).verdict, "inconclusive");
+    assert.equal(judgeWindowsCase(k, res(k.id, att("file", "denied"), att("lst", "denied")), free, undefined).verdict, "inconclusive");
+    // a leak still fails even when the attempts differ
+    assert.equal(judgeWindowsCase(k, res(k.id, att("file", "allowed")), free, undefined).verdict, "fail");
+  });
+
+  test("the host reads the result file only when it is one plain file within the bound", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-a03b2f-")));
+    try {
+      const plain = join(root, "r.jsonl"); writeFileSync(plain, "line\n");
+      assert.equal(readResultFile(plain), "line\n");
+      assert.equal(readResultFile(join(root, "absent")), undefined);
+      const other = join(root, "other.txt"); writeFileSync(other, "elsewhere\n");
+      const hard = join(root, "hard.jsonl"); linkSync(other, hard);
+      assert.equal(readResultFile(hard), undefined, "a second name of another file");
+      const big = join(root, "big.jsonl"); writeFileSync(big, "x".repeat(MAX_RESULT_BYTES + 1));
+      assert.equal(readResultFile(big), undefined, "over the bound");
+      assert.equal(readResultFile(root), undefined, "a folder");
+      if (!onWindows) {
+        const sym = join(root, "sym.jsonl"); symlinkSync(other, sym);
+        assert.equal(readResultFile(sym), undefined, "a link");
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test("the network case: a failed connection of any kind counts as a refusal, but a connection that was made fails and an unexpected error is inconclusive; other cases do not accept `blocked`", () => {

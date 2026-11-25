@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { SandboxRecipe } from "./recipe.js";
 
@@ -294,6 +294,12 @@ export function judgeWindowsCase(kind: CaseKind, confined: RunnerCaseResult | un
   const through = confined.attempts.find((a) => a.outcome === "allowed");
   if (witness !== undefined) return fail(witness);
   if (through !== undefined) return fail(`an attempt got through in the sandbox (${through.name})`);
+  if (kind.paired && typeof free.result === "object") {
+    // The pairing is per attempt: the confined run must have made exactly the attempts that were shown to work unconfined (a skipped skippable step keeps its name), else a refusal of one attempt
+    // could stand for another that was never made. (A leak above fails whatever the attempts were.)
+    const names = (a: readonly RunnerAttempt[]): string => [...new Set(a.map((x) => x.name))].sort().join(",");
+    if (names(confined.attempts) !== names(free.result.attempts)) return inconclusive("the confined run did not make the same attempts as the unconfined run, so the pairing does not cover it");
+  }
   const attempts = required(confined.attempts);
   if (attempts.length === 0) return inconclusive("the case made no attempt");
   const refusedFor = (a: RunnerAttempt): boolean => a.outcome === "denied" || (kind.network === true && a.outcome === "blocked");
@@ -398,10 +404,26 @@ function plant(ctx: NodeSuiteContext, n: number, free: boolean): Planted {
 
 const clip = (s: string): string => (s.length > 200 ? `${s.slice(0, 200)}...` : s).replace(/[\r\n]+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, "?");
 
+/**
+ * The result file lies in a folder the confined program can change, so the host reads it only when it is a plain file with one name and within the bound (a link, a junction target, a hard link to
+ * another file or a device is never followed), and reads at most the bound. Anything else is no result (every case inconclusive).
+ */
+export function readResultFile(file: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    const s = lstatSync(file);
+    if (!s.isFile() || s.isSymbolicLink() || s.nlink > 1 || s.size > MAX_RESULT_BYTES) return undefined;
+    fd = openSync(file, "r");
+    const buf = Buffer.alloc(MAX_RESULT_BYTES + 1);
+    let got = 0;
+    for (;;) { const n = readSync(fd, buf, got, buf.length - got, null); if (n <= 0) break; got += n; if (got > MAX_RESULT_BYTES) return undefined; }
+    return buf.subarray(0, got).toString("utf8");
+  } catch { return undefined; } finally { if (fd !== undefined) try { closeSync(fd); } catch { /* closed */ } }
+}
+
 function readResults(cfg: WindowsCaseConfig): Map<string, RunnerCaseResult> {
-  let text = "";
-  try { text = readFileSync(cfg.resultFile, "utf8"); } catch { return new Map(); }
-  return parseRunnerResults(text, WINDOWS_CASES.map((c) => c.id));
+  const text = readResultFile(cfg.resultFile);
+  return text === undefined ? new Map() : parseRunnerResults(text, WINDOWS_CASES.map((c) => c.id));
 }
 
 /**
