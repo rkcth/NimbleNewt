@@ -79,7 +79,7 @@ export interface ContainmentReport {
   /** Whether the launcher advertised capacity; without it no case ran. */
   readonly capacityAvailable: boolean;
   readonly capacityReason?: string;
-  /** Stated, not measured: the macOS boundary is process-level and weaker than Linux's (denied paths stay visible, no private process list, no private view of the filesystem). */
+  /** Stated, not measured: the macOS boundary and the native Windows launcher's are process-level and weaker than Linux's (denied paths stay visible, no private process list, no private view of the filesystem). */
   readonly weakerThanLinux: boolean;
   readonly cases: readonly CaseResult[];
   readonly trustedHost?: TrustedHostException;
@@ -470,6 +470,13 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
   }
 }
 
+/** The Windows Sandbox variant (superseded, a virtual machine) keeps the earlier statement; every other Windows backend is the native process-level launcher, weaker than Linux's. */
+const WINDOWS_SANDBOX_BACKEND = "windows-sandbox";
+/** Whether a report for this platform and backend must state that its boundary is weaker than Linux's: macOS and the native Windows launcher yes; Linux and the Windows Sandbox variant no. */
+export function statesWeakerBoundary(platform: string, backend: string): boolean {
+  return platform === "darwin" || (platform === "win32" && backend !== WINDOWS_SANDBOX_BACKEND);
+}
+
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 
 function macosProductVersion(): string | undefined {
@@ -492,7 +499,7 @@ export async function produceReport(repo: string, options: SuiteOptions = {}): P
     ...(macos === undefined ? {} : { macosVersion: macos }),
     backend: suite.capacity.backend ?? "none", ...(suite.capacity.version === undefined ? {} : { backendVersion: suite.capacity.version }),
     capacityAvailable: suite.capacity.available, ...(suite.capacity.reason === undefined ? {} : { capacityReason: short(suite.capacity.reason) }),
-    weakerThanLinux: platform === "darwin", cases: suite.cases, ...(suite.trustedHost === undefined ? {} : { trustedHost: suite.trustedHost }),
+    weakerThanLinux: statesWeakerBoundary(platform, suite.capacity.backend ?? "none"), cases: suite.cases, ...(suite.trustedHost === undefined ? {} : { trustedHost: suite.trustedHost }),
   };
 }
 
@@ -613,7 +620,10 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
       if (platform === "darwin") {
         if (r.macosVersion === undefined || r.macosVersion.trim() === "") problems.push("the macOS version the boundary was proven on is not recorded");
         if (!r.weakerThanLinux) problems.push("the report does not state that the macOS boundary is weaker than Linux's");
-      } else if (r.weakerThanLinux) problems.push("only a macOS report may claim the weaker boundary");
+      } else if (platform === "win32") {
+        if (r.backend === WINDOWS_SANDBOX_BACKEND) { if (r.weakerThanLinux) problems.push("a Windows Sandbox report may not claim the weaker boundary"); }
+        else if (!r.weakerThanLinux) problems.push("the report does not state that the native Windows boundary is process-level and weaker than Linux's");
+      } else if (r.weakerThanLinux) problems.push("only a macOS or native Windows report may claim the weaker boundary");
       if (platform === "win32") {
         const w = r.windows;
         if (w === undefined) problems.push("the Windows host evidence is missing (unattended identity, mapped-output ACL, packaged working directory, strict supervisor ACL)");

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
-import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, runContainmentSuite, runOutcome, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
+import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, runContainmentSuite, runOutcome, statesWeakerBoundary, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
 import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, windowsSandboxEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher, type LaunchRequest, type RunResult } from "./launcher.js";
 import { bubblewrapBackend } from "./linux.js";
@@ -132,7 +132,7 @@ const goodWindows = (): WindowsEvidence => ({
 function report(platform: PlatformName, extra: Partial<Record<keyof ContainmentReport, unknown>> = {}): ContainmentReport {
   const base: ContainmentReport = {
     schema: CONTAINMENT_SCHEMA, generatedAt: "2026-11-10T12:00:00Z", implementationCommit: COMMIT, dirty: false, platform, arch: "x64", osVersion: "1.0", backend: "b", capacityAvailable: true,
-    weakerThanLinux: platform === "darwin", ...(platform === "darwin" ? { macosVersion: "15.1" } : {}),
+    weakerThanLinux: platform !== "linux", ...(platform === "darwin" ? { macosVersion: "15.1" } : {}),
     cases: REQUIRED_CASE_IDS.map((id) => ({ id, category: "control" as const, verdict: "pass" as const, detail: "held" })),
     trustedHost: { mode: "trusted-host", authority: "owner", reachesHostFiles: true, refusedWithoutAuthority: true },
     ...(platform === "win32" ? { windows: goodWindows() } : {}),
@@ -167,11 +167,23 @@ describe("G05 release gate", () => {
     blocked(all({ linux: report("linux", { trustedHost: { mode: "trusted-host", authority: "o", reachesHostFiles: true, refusedWithoutAuthority: false } }) }), /not refused without/);
     blocked(all({ linux: report("linux", { trustedHost: { mode: "trusted-host", authority: "o", reachesHostFiles: false, refusedWithoutAuthority: true } }) }), /was not shown/);
   });
-  test("macOS must record its version and state that it is weaker than Linux; Linux and Windows may not claim the weaker boundary", () => {
+  test("macOS must record its version and state that it is weaker than Linux; Windows native must too; Linux may not claim the weaker boundary", () => {
     blocked(all({ darwin: report("darwin", { macosVersion: undefined }) }), /macOS version/);
     blocked(all({ darwin: report("darwin", { macosVersion: "  " }) }), /macOS version/);
     blocked(all({ darwin: report("darwin", { weakerThanLinux: false }) }), /weaker than Linux/);
-    blocked(all({ linux: report("linux", { weakerThanLinux: true }) }), /only a macOS report/);
+    blocked(all({ linux: report("linux", { weakerThanLinux: true }) }), /only a macOS or native Windows report/);
+  });
+  test("native Windows must state the weaker boundary; the Windows Sandbox variant may not; Linux and macOS are unchanged", () => {
+    blocked(all({ win32: report("win32", { backend: "windows-native", weakerThanLinux: false }) }), /native Windows boundary is process-level and weaker/);
+    blocked(all({ win32: report("win32", { backend: "none", weakerThanLinux: false }) }), /native Windows boundary/);
+    assert.deepEqual(gate(all({ win32: report("win32", { backend: "windows-native", weakerThanLinux: true }) })).blockers, []);
+    assert.deepEqual(gate(all({ win32: report("win32", { backend: "windows-sandbox", weakerThanLinux: false }) })).blockers, []);
+    blocked(all({ win32: report("win32", { backend: "windows-sandbox", weakerThanLinux: true }) }), /Windows Sandbox report may not claim/);
+    assert.deepEqual(gate(all({ darwin: report("darwin", { weakerThanLinux: true }) })).blockers, []);
+    assert.equal(statesWeakerBoundary("linux", "bubblewrap"), false);
+    assert.equal(statesWeakerBoundary("darwin", "seatbelt"), true);
+    assert.equal(statesWeakerBoundary("win32", "windows-native"), true);
+    assert.equal(statesWeakerBoundary("win32", "windows-sandbox"), false);
   });
   test("Windows: each piece of host evidence is separately required", () => {
     const w = goodWindows();

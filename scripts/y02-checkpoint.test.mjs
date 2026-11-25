@@ -24,7 +24,7 @@ const dir = () => mkdtempSync(join(tmpdir(), "y02-"));
 
 function containment(p) {
   const r = {
-    schema: worker.CONTAINMENT_SCHEMA, generatedAt: T, implementationCommit: COMMIT, dirty: false, platform: p, arch: "x64", osVersion: "test 1", backend: "test", capacityAvailable: true, weakerThanLinux: p === "darwin",
+    schema: worker.CONTAINMENT_SCHEMA, generatedAt: T, implementationCommit: COMMIT, dirty: false, platform: p, arch: "x64", osVersion: "test 1", backend: "test", capacityAvailable: true, weakerThanLinux: p !== "linux",
     cases: worker.REQUIRED_CASE_IDS.map((id) => ({ id, category: "control", verdict: "pass", detail: "held" })),
     trustedHost: { mode: "trusted-host", authority: "owner", reachesHostFiles: true, refusedWithoutAuthority: true },
   };
@@ -229,6 +229,7 @@ test("containment evidence is judged by the G05 gate: a report for another commi
   blocked(judgeAltered(edit("win32", (r) => { r.windows.supervisorAclCheck = "report-only"; })), /containment win32: .*strict/);
   blocked(judgeAltered(edit("win32", (r) => { delete r.windows; })), /containment win32: the Windows host evidence is missing/);
   blocked(judgeAltered(edit("darwin", (r) => { r.weakerThanLinux = false; })), /containment darwin: .*weaker/);
+  blocked(judgeAltered(edit("win32", (r) => { r.weakerThanLinux = false; })), /containment win32: .*weaker/);
   blocked(judgeAltered(edit("linux", (r) => { r.platform = "darwin"; })), /containment-linux\.json is a report for darwin/);
   blocked(judgeAltered(edit("linux", (r) => { r.generatedAt = "2026-09-01T00:00:00Z"; })), /containment linux: .*30 days/);
   const v = judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "fail"; }));
