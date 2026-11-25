@@ -1,0 +1,1 @@
+{"status":400,"body":{"error":{"message":"logit_bias: the device sampler has no per-token bias stage; it is accepted only at an empty object, where it does nothing","type":"invalid_request_error","param":"logit_bias","code":"unsupported_parameter"}}}

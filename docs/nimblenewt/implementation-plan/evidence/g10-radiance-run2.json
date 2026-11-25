@@ -1,0 +1,1795 @@
+{
+ "startedAt": "2026-11-25T14:02:46.347Z",
+ "model": "qwen3.8-flash-next-iq4r",
+ "parts": "RFC",
+ "gapsS": [
+  0,
+  60,
+  300
+ ],
+ "lines": 300,
+ "levels": [
+  1,
+  2,
+  4,
+  8
+ ],
+ "statsAtStart": {
+  "at": "2026-11-25T14:02:46.352Z",
+  "version": "2.2.0",
+  "running": 5,
+  "waiting": 1,
+  "in_flight": 6,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 24964,
+  "kv_tokens_total": 1036596,
+  "kv_tokens_cached": 0,
+  "kv_bytes_used": 768959560,
+  "kv_bytes_total": 1133775040,
+  "prefix_hit_rate": 0.32819733023643494,
+  "prefix_evictions": 18699010,
+  "linear_hit_rate": 0.3038375973701477,
+  "linear_cached_tokens": 34531136,
+  "checkpoints_written": 39890,
+  "ckpt_evictions": {
+   "retention": 18309,
+   "store_full": 21106
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 26,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 102
+  },
+  "total_requests": 8849,
+  "prefill_tps": 2755.560791015625,
+  "decode_tps": 30.521791458129883,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 33085820928,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 33205243904,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "retained": {
+  "steps": [
+   {
+    "phase": "cold-native",
+    "step": "cold",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 0,
+    "computedTokens": 10073,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 18243,
+    "serverTtftMs": 25034,
+    "clientTtftMs": 25038,
+    "wallMs": 25595,
+    "answer": "amber-716",
+    "expected": "amber-716",
+    "correct": true
+   },
+   {
+    "phase": "cold-native",
+    "step": "native-repeat",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 1,
+    "serverPromptMs": 14059,
+    "serverTtftMs": 33588,
+    "clientTtftMs": 33590,
+    "wallMs": 34147,
+    "answer": "amber-716",
+    "expected": "amber-716",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-0",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3273,
+    "cachedTokens": 0,
+    "computedTokens": 3273,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 14689,
+    "serverTtftMs": 22439,
+    "clientTtftMs": 22441,
+    "wallMs": 23032,
+    "answer": "violet-542",
+    "expected": "violet-542",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-0s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 24509,
+    "serverTtftMs": 48445,
+    "clientTtftMs": 48448,
+    "wallMs": 48508,
+    "answer": "amber-716",
+    "expected": "amber-716",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-1",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3271,
+    "cachedTokens": 0,
+    "computedTokens": 3271,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 4623,
+    "serverTtftMs": 18405,
+    "clientTtftMs": 18406,
+    "wallMs": 18463,
+    "answer": "amber-575",
+    "expected": "amber-575",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-60s",
+    "status": 200,
+    "outcome": "miss",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 0,
+    "computedTokens": 10073,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 12702,
+    "serverTtftMs": 22348,
+    "clientTtftMs": 22352,
+    "wallMs": 22871,
+    "answer": "Ibis",
+    "expected": "Ibis",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-2",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3273,
+    "cachedTokens": 0,
+    "computedTokens": 3273,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 5059,
+    "serverTtftMs": 10767,
+    "clientTtftMs": 10770,
+    "wallMs": 10862,
+    "answer": "jade-535",
+    "expected": "jade-535",
+    "correct": true
+   }
+  ],
+  "markers": [
+   {
+    "gapS": 0,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 60,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 0,
+    "outcome": "miss",
+    "reusedAll": false,
+    "answerCorrect": true
+   },
+   {
+    "gapS": 300,
+    "resolved": "lost"
+   },
+   {
+    "activeMarkersAtEnd": []
+   }
+  ],
+  "sessions": [
+   {
+    "id": 8906,
+    "model": "qwen4exp",
+    "label": "nn-oTIL7c6LF9S6CQrhOyRPNGJKpUs",
+    "tokens": 10075,
+    "bytes": 151885760,
+    "idle_s": 311.256651278,
+    "age_s": 311.256651278,
+    "on_device": 0,
+    "on_host": 2518,
+    "moving": false,
+    "snapshots": 0,
+    "snap_bytes": 0,
+    "resume_tokens": 0
+   },
+   {
+    "id": 8871,
+    "model": "qwen4exp",
+    "label": "nn-oTIL7c6LF9S6CQrhOyRPNGJKpUs",
+    "tokens": 10078,
+    "bytes": 151946080,
+    "idle_s": 412.650165139,
+    "age_s": 518.350669299,
+    "on_device": 6,
+    "on_host": 2513,
+    "moving": false,
+    "snapshots": 0,
+    "snap_bytes": 0,
+    "resume_tokens": 0
+   }
+  ],
+  "statsBefore": {
+   "at": "2026-11-25T14:02:46.453Z",
+   "version": "2.2.0",
+   "running": 5,
+   "waiting": 1,
+   "in_flight": 6,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 24984,
+   "kv_tokens_total": 1036596,
+   "kv_tokens_cached": 0,
+   "kv_bytes_used": 769110360,
+   "kv_bytes_total": 1133775040,
+   "prefix_hit_rate": 0.32819733023643494,
+   "prefix_evictions": 18699010,
+   "linear_hit_rate": 0.3038375973701477,
+   "linear_cached_tokens": 34531136,
+   "checkpoints_written": 39890,
+   "ckpt_evictions": {
+    "retention": 18309,
+    "store_full": 21106
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 26,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 102
+   },
+   "total_requests": 8849,
+   "prefill_tps": 2555.33935546875,
+   "decode_tps": 45.91310501098633,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 33085820928,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 33205243904,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "statsAfter": {
+   "at": "2026-11-25T14:11:50.396Z",
+   "version": "2.2.0",
+   "running": 5,
+   "waiting": 3,
+   "in_flight": 8,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 27196,
+   "kv_tokens_total": 1036596,
+   "kv_tokens_cached": 0,
+   "kv_bytes_used": 785788840,
+   "kv_bytes_total": 1376110640,
+   "prefix_hit_rate": 0.33115485310554504,
+   "prefix_evictions": 19093640,
+   "linear_hit_rate": 0.3063236176967621,
+   "linear_cached_tokens": 35689152,
+   "checkpoints_written": 40760,
+   "ckpt_evictions": {
+    "retention": 18747,
+    "store_full": 21524
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 32,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 107
+   },
+   "total_requests": 9024,
+   "prefill_tps": 1999.745849609375,
+   "decode_tps": 146.72340393066406,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 33085820928,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 33205243904,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "checks": {
+   "coldComputedEverything": true,
+   "nativeReuseServed": true,
+   "markerStayedActive": false,
+   "retainedReusedAll": false,
+   "allAnswersCorrect": true
+  }
+ },
+ "refusal": {
+  "steps": [
+   {
+    "phase": "refusal",
+    "step": "warm-cold",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 0,
+    "computedTokens": 10073,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 8938,
+    "serverTtftMs": 22770,
+    "clientTtftMs": 22773,
+    "wallMs": 22844,
+    "answer": "amber-378",
+    "expected": "amber-378",
+    "correct": true
+   },
+   {
+    "phase": "refusal",
+    "step": "warm-native",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 1,
+    "serverPromptMs": 1717,
+    "serverTtftMs": 11068,
+    "clientTtftMs": 11070,
+    "wallMs": 11124,
+    "answer": "amber-378",
+    "expected": "amber-378",
+    "correct": true
+   },
+   {
+    "phase": "refusal",
+    "step": "fallback-served",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 1462,
+    "serverTtftMs": 11336,
+    "clientTtftMs": 11337,
+    "wallMs": 11875,
+    "answer": "amber-378",
+    "expected": "amber-378",
+    "correct": true,
+    "fallback": {
+     "reason": "logit_bias: the device sampler has no per-token bias stage; it is accepted only at an empty object, where it does nothing",
+     "refusedStatus": 400,
+     "removed": [
+      "session_id",
+      "logit_bias"
+     ]
+    }
+   },
+   {
+    "phase": "refusal",
+    "step": "fallback-second-question",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [],
+    "promptTokens": 10073,
+    "cachedTokens": 8192,
+    "computedTokens": 1881,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 2149,
+    "serverTtftMs": 9944,
+    "clientTtftMs": 9946,
+    "wallMs": 10465,
+    "answer": "Marten",
+    "expected": "Marten",
+    "correct": true,
+    "fallback": {
+     "reason": "logit_bias: the device sampler has no per-token bias stage; it is accepted only at an empty object, where it does nothing",
+     "refusedStatus": 400,
+     "removed": [
+      "session_id",
+      "logit_bias"
+     ]
+    }
+   },
+   {
+    "phase": "refusal",
+    "step": "other-400-temperature",
+    "status": 400,
+    "outcome": "unknown",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 0,
+    "cachedTokens": 0,
+    "computedTokens": 0,
+    "expectedCachedTokens": 0,
+    "wallMs": 3,
+    "answer": "",
+    "expected": "",
+    "correct": false
+   }
+  ],
+  "refusal": {
+   "status": 400,
+   "message": "logit_bias: the device sampler has no per-token bias stage; it is accepted only at an empty object, where it does nothing"
+  },
+  "checks": {
+   "serverRefusedTheSetting": true,
+   "fallbackRecorded": true,
+   "fallbackAnsweredFromFullContext": true,
+   "fallbackStillReusedTheHead": true,
+   "fallbackRepeatsPerCall": true,
+   "otherRefusalReturnedUnchanged": true
+  }
+ },
+ "concurrency": {
+  "levels": [
+   {
+    "streams": 1,
+    "cold": [
+     {
+      "phase": "concurrency-1",
+      "step": "cold-0",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6672,
+      "cachedTokens": 0,
+      "computedTokens": 6672,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 8736,
+      "serverTtftMs": 16257,
+      "clientTtftMs": 16259,
+      "wallMs": 16651,
+      "answer": "amber-467",
+      "expected": "amber-467",
+      "correct": true
+     }
+    ],
+    "repeat": [
+     {
+      "phase": "concurrency-1",
+      "step": "repeat-0",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6672,
+      "cachedTokens": 6144,
+      "computedTokens": 528,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 6129,
+      "serverTtftMs": 12923,
+      "clientTtftMs": 12925,
+      "wallMs": 12979,
+      "answer": "amber-467",
+      "expected": "amber-467",
+      "correct": true
+     }
+    ],
+    "coldWallMs": 17376,
+    "repeatWallMs": 13586,
+    "statsBefore": {
+     "at": "2026-11-25T14:12:46.725Z",
+     "version": "2.2.0",
+     "running": 3,
+     "waiting": 5,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 11796,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 20,
+     "kv_bytes_used": 437380440,
+     "kv_bytes_total": 1152594880,
+     "prefix_hit_rate": 0.3314896523952484,
+     "prefix_evictions": 19133123,
+     "linear_hit_rate": 0.30656129121780396,
+     "linear_cached_tokens": 35794880,
+     "checkpoints_written": 40832,
+     "ckpt_evictions": {
+      "retention": 18763,
+      "store_full": 21578
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 33,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9055,
+     "prefill_tps": 2766.142578125,
+     "decode_tps": 10.492902755737305,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085820928,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205243904,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "statsAfter": {
+     "at": "2026-11-25T14:13:18.151Z",
+     "version": "2.2.0",
+     "running": 2,
+     "waiting": 6,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 15512,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 0,
+     "kv_bytes_used": 349252880,
+     "kv_bytes_total": 1268891840,
+     "prefix_hit_rate": 0.3314417600631714,
+     "prefix_evictions": 19167692,
+     "linear_hit_rate": 0.3065090775489807,
+     "linear_cached_tokens": 35844800,
+     "checkpoints_written": 40899,
+     "ckpt_evictions": {
+      "retention": 18788,
+      "store_full": 21620
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 34,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9072,
+     "prefill_tps": 3035.012939453125,
+     "decode_tps": 109.3155746459961,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085796352,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205219328,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "peak": {
+     "running": 6,
+     "waiting": 6
+    },
+    "sessions": [
+     {
+      "id": 9071,
+      "model": "qwen4exp",
+      "label": "nn-YeGDhmb26MjZm7V9vb1k6ubrDEu",
+      "tokens": 6677,
+      "bytes": 100674080,
+      "idle_s": 1.064467033,
+      "age_s": 14.7739942,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     }
+    ]
+   },
+   {
+    "streams": 2,
+    "cold": [
+     {
+      "phase": "concurrency-2",
+      "step": "cold-0",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 0,
+      "computedTokens": 6674,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3988,
+      "serverTtftMs": 27112,
+      "clientTtftMs": 27115,
+      "wallMs": 27180,
+      "answer": "saffron-418",
+      "expected": "saffron-418",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-2",
+      "step": "cold-1",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 0,
+      "computedTokens": 6674,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 12550,
+      "serverTtftMs": 26613,
+      "clientTtftMs": 26615,
+      "wallMs": 27153,
+      "answer": "amber-875",
+      "expected": "amber-875",
+      "correct": true
+     }
+    ],
+    "repeat": [
+     {
+      "phase": "concurrency-2",
+      "step": "repeat-0",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 6144,
+      "computedTokens": 530,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 4039,
+      "serverTtftMs": 17919,
+      "clientTtftMs": 17922,
+      "wallMs": 18459,
+      "answer": "saffron-418",
+      "expected": "saffron-418",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-2",
+      "step": "repeat-1",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 6144,
+      "computedTokens": 530,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 538,
+      "serverTtftMs": 14415,
+      "clientTtftMs": 14417,
+      "wallMs": 14948,
+      "answer": "amber-875",
+      "expected": "amber-875",
+      "correct": true
+     }
+    ],
+    "coldWallMs": 27919,
+    "repeatWallMs": 18882,
+    "statsBefore": {
+     "at": "2026-11-25T14:13:18.155Z",
+     "version": "2.2.0",
+     "running": 2,
+     "waiting": 6,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 15512,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 0,
+     "kv_bytes_used": 349252880,
+     "kv_bytes_total": 1268891840,
+     "prefix_hit_rate": 0.3314417600631714,
+     "prefix_evictions": 19167692,
+     "linear_hit_rate": 0.3065090775489807,
+     "linear_cached_tokens": 35844800,
+     "checkpoints_written": 40899,
+     "ckpt_evictions": {
+      "retention": 18788,
+      "store_full": 21620
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 34,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9072,
+     "prefill_tps": 3035.012939453125,
+     "decode_tps": 109.3155746459961,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085796352,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205219328,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "statsAfter": {
+     "at": "2026-11-25T14:14:05.330Z",
+     "version": "2.2.0",
+     "running": 6,
+     "waiting": 2,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 49092,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 0,
+     "kv_bytes_used": 1067030880,
+     "kv_bytes_total": 1349961920,
+     "prefix_hit_rate": 0.3316522538661957,
+     "prefix_evictions": 19201393,
+     "linear_hit_rate": 0.3067292869091034,
+     "linear_cached_tokens": 35957760,
+     "checkpoints_written": 40981,
+     "ckpt_evictions": {
+      "retention": 18822,
+      "store_full": 21665
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 36,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9094,
+     "prefill_tps": 2864.54638671875,
+     "decode_tps": 108.19346618652344,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085792256,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205215232,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "peak": {
+     "running": 6,
+     "waiting": 8
+    },
+    "sessions": [
+     {
+      "id": 9089,
+      "model": "qwen4exp",
+      "label": "nn-NeVPBjxnEHmUBtdJsEL3umUalNZ",
+      "tokens": 6681,
+      "bytes": 100734400,
+      "idle_s": 0.794880043,
+      "age_s": 19.992620692,
+      "on_device": 0,
+      "on_host": 1670,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9090,
+      "model": "qwen4exp",
+      "label": "nn-LW15EdzeZLYRjmgBSz7HOP3iAj2",
+      "tokens": 6679,
+      "bytes": 100674080,
+      "idle_s": 4.301207517,
+      "age_s": 20.023985213,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     }
+    ]
+   },
+   {
+    "streams": 4,
+    "cold": [
+     {
+      "phase": "concurrency-4",
+      "step": "cold-0",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 0,
+      "computedTokens": 6674,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 8596,
+      "serverTtftMs": 12165,
+      "clientTtftMs": 12168,
+      "wallMs": 12681,
+      "answer": "violet-473",
+      "expected": "violet-473",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-4",
+      "step": "cold-1",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 0,
+      "computedTokens": 6673,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 6134,
+      "serverTtftMs": 15172,
+      "clientTtftMs": 15175,
+      "wallMs": 15672,
+      "answer": "amber-704",
+      "expected": "amber-704",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-4",
+      "step": "cold-2",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 0,
+      "computedTokens": 6675,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 7317,
+      "serverTtftMs": 19483,
+      "clientTtftMs": 19486,
+      "wallMs": 19963,
+      "answer": "saffron-547",
+      "expected": "saffron-547",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-4",
+      "step": "cold-3",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 0,
+      "computedTokens": 6675,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 4748,
+      "serverTtftMs": 19921,
+      "clientTtftMs": 19924,
+      "wallMs": 19992,
+      "answer": "cobalt-291",
+      "expected": "cobalt-291",
+      "correct": true
+     }
+    ],
+    "repeat": [
+     {
+      "phase": "concurrency-4",
+      "step": "repeat-0",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 6144,
+      "computedTokens": 530,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 677,
+      "serverTtftMs": 12234,
+      "clientTtftMs": 12237,
+      "wallMs": 12673,
+      "answer": "violet-473",
+      "expected": "violet-473",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-4",
+      "step": "repeat-1",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 6144,
+      "computedTokens": 529,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1760,
+      "serverTtftMs": 12234,
+      "clientTtftMs": 12237,
+      "wallMs": 12668,
+      "answer": "amber-704",
+      "expected": "amber-704",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-4",
+      "step": "repeat-2",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 6144,
+      "computedTokens": 531,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1066,
+      "serverTtftMs": 12628,
+      "clientTtftMs": 12630,
+      "wallMs": 12700,
+      "answer": "saffron-547",
+      "expected": "saffron-547",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-4",
+      "step": "repeat-3",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 6144,
+      "computedTokens": 531,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 384,
+      "serverTtftMs": 12627,
+      "clientTtftMs": 12630,
+      "wallMs": 12701,
+      "answer": "cobalt-291",
+      "expected": "cobalt-291",
+      "correct": true
+     }
+    ],
+    "coldWallMs": 20377,
+    "repeatWallMs": 12857,
+    "statsBefore": {
+     "at": "2026-11-25T14:14:05.334Z",
+     "version": "2.2.0",
+     "running": 6,
+     "waiting": 2,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 49092,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 0,
+     "kv_bytes_used": 1067030880,
+     "kv_bytes_total": 1349961920,
+     "prefix_hit_rate": 0.3316522538661957,
+     "prefix_evictions": 19201393,
+     "linear_hit_rate": 0.3067292869091034,
+     "linear_cached_tokens": 35957760,
+     "checkpoints_written": 40981,
+     "ckpt_evictions": {
+      "retention": 18822,
+      "store_full": 21665
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 36,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9094,
+     "prefill_tps": 2864.54638671875,
+     "decode_tps": 108.19346618652344,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085792256,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205215232,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "statsAfter": {
+     "at": "2026-11-25T14:14:39.063Z",
+     "version": "2.2.0",
+     "running": 2,
+     "waiting": 6,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 32184,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 24568,
+     "kv_bytes_used": 474959760,
+     "kv_bytes_total": 1386938080,
+     "prefix_hit_rate": 0.3317316472530365,
+     "prefix_evictions": 19230335,
+     "linear_hit_rate": 0.3068010210990906,
+     "linear_cached_tokens": 36021312,
+     "checkpoints_written": 41042,
+     "ckpt_evictions": {
+      "retention": 18845,
+      "store_full": 21700
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 40,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9113,
+     "prefill_tps": 4718.76123046875,
+     "decode_tps": 73.89881134033203,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085693952,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205116928,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "peak": {
+     "running": 6,
+     "waiting": 10
+    },
+    "sessions": [
+     {
+      "id": 9113,
+      "model": "qwen4exp",
+      "label": "nn-Mu13ZtmUXzB_-bGFXdyyoeWJc2H",
+      "tokens": 6681,
+      "bytes": 100734400,
+      "idle_s": 0.640413679,
+      "age_s": 13.728955953,
+      "on_device": 0,
+      "on_host": 1670,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9112,
+      "model": "qwen4exp",
+      "label": "nn-Do-CxWR_N52pp8pKET3kStyASuk",
+      "tokens": 6682,
+      "bytes": 100734400,
+      "idle_s": 0.641459213,
+      "age_s": 13.762559322,
+      "on_device": 0,
+      "on_host": 1670,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9111,
+      "model": "qwen4exp",
+      "label": "nn-x4OnVkgc3DUnjQ-txysSRUqLKOl",
+      "tokens": 6680,
+      "bytes": 100734400,
+      "idle_s": 0.672933094,
+      "age_s": 21.046942937,
+      "on_device": 0,
+      "on_host": 1670,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9110,
+      "model": "qwen4exp",
+      "label": "nn-zXZZzIDez5TdJ1DrWp_DG_CoG3b",
+      "tokens": 6678,
+      "bytes": 100674080,
+      "idle_s": 0.674709631,
+      "age_s": 18.05354467,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     }
+    ]
+   },
+   {
+    "streams": 8,
+    "cold": [
+     {
+      "phase": "concurrency-8",
+      "step": "cold-0",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 0,
+      "computedTokens": 6674,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3240,
+      "serverTtftMs": 17845,
+      "clientTtftMs": 17851,
+      "wallMs": 18197,
+      "answer": "jade-883",
+      "expected": "jade-883",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-1",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 0,
+      "computedTokens": 6673,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3434,
+      "serverTtftMs": 24767,
+      "clientTtftMs": 24773,
+      "wallMs": 25610,
+      "answer": "amber-192",
+      "expected": "amber-192",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-2",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6670,
+      "cachedTokens": 0,
+      "computedTokens": 6670,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3140,
+      "serverTtftMs": 18865,
+      "clientTtftMs": 18871,
+      "wallMs": 19232,
+      "answer": "jade-441",
+      "expected": "jade-441",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-3",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6672,
+      "cachedTokens": 0,
+      "computedTokens": 6672,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3887,
+      "serverTtftMs": 20275,
+      "clientTtftMs": 20288,
+      "wallMs": 20987,
+      "answer": "violet-579",
+      "expected": "violet-579",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-4",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 0,
+      "computedTokens": 6673,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3801,
+      "serverTtftMs": 21314,
+      "clientTtftMs": 21320,
+      "wallMs": 22015,
+      "answer": "violet-819",
+      "expected": "violet-819",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-5",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 0,
+      "computedTokens": 6675,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3835,
+      "serverTtftMs": 22703,
+      "clientTtftMs": 22709,
+      "wallMs": 23380,
+      "answer": "saffron-427",
+      "expected": "saffron-427",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-6",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 0,
+      "computedTokens": 6675,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 3792,
+      "serverTtftMs": 23724,
+      "clientTtftMs": 23730,
+      "wallMs": 24432,
+      "answer": "saffron-227",
+      "expected": "saffron-227",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "cold-7",
+      "status": 200,
+      "outcome": "cold",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 0,
+      "computedTokens": 6673,
+      "expectedCachedTokens": 0,
+      "serverPromptMs": 4981,
+      "serverTtftMs": 26312,
+      "clientTtftMs": 26318,
+      "wallMs": 27131,
+      "answer": "amber-939",
+      "expected": "amber-939",
+      "correct": true
+     }
+    ],
+    "repeat": [
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-0",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6674,
+      "cachedTokens": 6144,
+      "computedTokens": 530,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 407,
+      "serverTtftMs": 5994,
+      "clientTtftMs": 5999,
+      "wallMs": 6751,
+      "answer": "jade-883",
+      "expected": "jade-883",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-1",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 6144,
+      "computedTokens": 529,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1508,
+      "serverTtftMs": 7100,
+      "clientTtftMs": 7105,
+      "wallMs": 7472,
+      "answer": "amber-192",
+      "expected": "amber-192",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-2",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6670,
+      "cachedTokens": 6144,
+      "computedTokens": 526,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 421,
+      "serverTtftMs": 9565,
+      "clientTtftMs": 9571,
+      "wallMs": 10004,
+      "answer": "jade-441",
+      "expected": "jade-441",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-3",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6672,
+      "cachedTokens": 6144,
+      "computedTokens": 528,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1560,
+      "serverTtftMs": 8306,
+      "clientTtftMs": 8311,
+      "wallMs": 9143,
+      "answer": "violet-579",
+      "expected": "violet-579",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-4",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 6144,
+      "computedTokens": 529,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 431,
+      "serverTtftMs": 8306,
+      "clientTtftMs": 8311,
+      "wallMs": 9154,
+      "answer": "violet-819",
+      "expected": "violet-819",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-5",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 6144,
+      "computedTokens": 531,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1684,
+      "serverTtftMs": 9565,
+      "clientTtftMs": 9570,
+      "wallMs": 10425,
+      "answer": "saffron-427",
+      "expected": "saffron-427",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-6",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6675,
+      "cachedTokens": 6144,
+      "computedTokens": 531,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1657,
+      "serverTtftMs": 12083,
+      "clientTtftMs": 12088,
+      "wallMs": 12888,
+      "answer": "saffron-227",
+      "expected": "saffron-227",
+      "correct": true
+     },
+     {
+      "phase": "concurrency-8",
+      "step": "repeat-7",
+      "status": 200,
+      "outcome": "hit",
+      "applied": [
+       "session_id"
+      ],
+      "promptTokens": 6673,
+      "cachedTokens": 6144,
+      "computedTokens": 529,
+      "expectedCachedTokens": 1,
+      "serverPromptMs": 1707,
+      "serverTtftMs": 10854,
+      "clientTtftMs": 10859,
+      "wallMs": 11662,
+      "answer": "amber-939",
+      "expected": "amber-939",
+      "correct": true
+     }
+    ],
+    "coldWallMs": 27187,
+    "repeatWallMs": 13592,
+    "statsBefore": {
+     "at": "2026-11-25T14:14:39.068Z",
+     "version": "2.2.0",
+     "running": 2,
+     "waiting": 6,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 32184,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 24568,
+     "kv_bytes_used": 474959760,
+     "kv_bytes_total": 1386938080,
+     "prefix_hit_rate": 0.3317316472530365,
+     "prefix_evictions": 19230335,
+     "linear_hit_rate": 0.3068010210990906,
+     "linear_cached_tokens": 36021312,
+     "checkpoints_written": 41042,
+     "ckpt_evictions": {
+      "retention": 18845,
+      "store_full": 21700
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 40,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9113,
+     "prefill_tps": 4718.76123046875,
+     "decode_tps": 73.89881134033203,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085693952,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205116928,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "statsAfter": {
+     "at": "2026-11-25T14:15:20.283Z",
+     "version": "2.2.0",
+     "running": 6,
+     "waiting": 2,
+     "in_flight": 8,
+     "max_num_seqs": 8,
+     "kv_tokens_used": 69072,
+     "kv_tokens_total": 1036596,
+     "kv_tokens_cached": 0,
+     "kv_bytes_used": 1217680080,
+     "kv_bytes_total": 1597273920,
+     "prefix_hit_rate": 0.3317278325557709,
+     "prefix_evictions": 19262206,
+     "linear_hit_rate": 0.30680209398269653,
+     "linear_cached_tokens": 36113344,
+     "checkpoints_written": 41128,
+     "ckpt_evictions": {
+      "retention": 18868,
+      "store_full": 21761
+     },
+     "ckpt_refused": 0,
+     "hit_cuts": {
+      "no_snapshot": 48,
+      "windowed_group": 0,
+      "adopt_failed": 0,
+      "resumed_below": 107
+     },
+     "total_requests": 9145,
+     "prefill_tps": 5084.64794921875,
+     "decode_tps": 23.4071044921875,
+     "cards": [
+      {
+       "index": 0,
+       "vramUsed": 33085607936,
+       "vramTotal": 34208743424
+      },
+      {
+       "index": 1,
+       "vramUsed": 33205030912,
+       "vramTotal": 34208743424
+      }
+     ]
+    },
+    "peak": {
+     "running": 8,
+     "waiting": 13
+    },
+    "sessions": [
+     {
+      "id": 9144,
+      "model": "qwen4exp",
+      "label": "nn-xkNOmPuzQKe_G6WpYcvbUnqGFWN",
+      "tokens": 6682,
+      "bytes": 100734400,
+      "idle_s": 1.131752332,
+      "age_s": 16.774765461,
+      "on_device": 0,
+      "on_host": 1670,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9143,
+      "model": "qwen4exp",
+      "label": "nn-xteCuwkVnaftJDYzzMoZMtK6rZr",
+      "tokens": 6678,
+      "bytes": 100674080,
+      "idle_s": 2.35845576,
+      "age_s": 14.083083377,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9141,
+      "model": "qwen4exp",
+      "label": "nn-q50XDygJySV76BWms4pVoYRw76C",
+      "tokens": 6682,
+      "bytes": 100734400,
+      "idle_s": 3.59364869,
+      "age_s": 17.827340708,
+      "on_device": 0,
+      "on_host": 1670,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9142,
+      "model": "qwen4exp",
+      "label": "nn-5B5Qw0en0W03pFFPKC8k0xc36H7",
+      "tokens": 6675,
+      "bytes": 100613760,
+      "idle_s": 4.022649304,
+      "age_s": 21.984259199,
+      "on_device": 0,
+      "on_host": 1668,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9140,
+      "model": "qwen4exp",
+      "label": "nn-CipT8B6_kd8RXHUNJO9VboFTV0P",
+      "tokens": 6679,
+      "bytes": 100674080,
+      "idle_s": 4.876231283,
+      "age_s": 19.193762384,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9139,
+      "model": "qwen4exp",
+      "label": "nn-MwLCaxGMZWzdkpHuHaTvY9tWjFM",
+      "tokens": 6678,
+      "bytes": 100674080,
+      "idle_s": 4.877349668,
+      "age_s": 20.221949747,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9138,
+      "model": "qwen4exp",
+      "label": "nn-sssPWzNY0qjWC1XatGvx-hTCFof",
+      "tokens": 6678,
+      "bytes": 100674080,
+      "idle_s": 6.552574834,
+      "age_s": 15.605416034,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     },
+     {
+      "id": 9137,
+      "model": "qwen4exp",
+      "label": "nn-eaHMEBXgkjCvKJnNh2yOMUfUP65",
+      "tokens": 6679,
+      "bytes": 100674080,
+      "idle_s": 7.275207089,
+      "age_s": 23.016743718,
+      "on_device": 0,
+      "on_host": 1669,
+      "moving": false,
+      "snapshots": 3,
+      "snap_bytes": 356978832,
+      "resume_tokens": 6144
+     }
+    ]
+   }
+  ],
+  "afterLoad": [
+   {
+    "phase": "concurrency-after-load",
+    "step": "first-conversation-again",
+    "status": 200,
+    "outcome": "miss",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 6672,
+    "cachedTokens": 0,
+    "computedTokens": 6672,
+    "expectedCachedTokens": 6144,
+    "serverPromptMs": 3717,
+    "serverTtftMs": 10751,
+    "clientTtftMs": 10753,
+    "wallMs": 11119,
+    "answer": "amber-467",
+    "expected": "amber-467",
+    "correct": true
+   }
+  ],
+  "checks": {
+   "allAnswersCorrectUnderLoad": true,
+   "everyRepeatReusedSomething": true,
+   "everyColdComputedEverything": true
+  }
+ },
+ "statsAtEnd": {
+  "at": "2026-11-25T14:15:31.406Z",
+  "version": "2.2.0",
+  "running": 8,
+  "waiting": 1,
+  "in_flight": 8,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 95196,
+  "kv_tokens_total": 1036596,
+  "kv_tokens_cached": 7252,
+  "kv_bytes_used": 1646947440,
+  "kv_bytes_total": 1731485920,
+  "prefix_hit_rate": 0.331780344247818,
+  "prefix_evictions": 19274999,
+  "linear_hit_rate": 0.30680379271507263,
+  "linear_cached_tokens": 36132480,
+  "checkpoints_written": 41157,
+  "ckpt_evictions": {
+   "retention": 18880,
+   "store_full": 21778
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 49,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 107
+  },
+  "total_requests": 9150,
+  "prefill_tps": 5242.1640625,
+  "decode_tps": 43.07539367675781,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 33085607936,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 33205030912,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "finishedAt": "2026-11-25T14:15:31.406Z"
+}

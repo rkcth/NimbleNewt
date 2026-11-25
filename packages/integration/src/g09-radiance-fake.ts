@@ -24,6 +24,8 @@ export interface FakeRadiance {
   readonly fetch: typeof globalThis.fetch;
   readonly requests: { path: string; method: string; auth: boolean; body?: unknown }[];
   readonly state: { inFlight: number; maxInFlight: number; aborted: number; total: number };
+  /** Drops everything the server remembers of earlier requests (an eviction): the next request is computed in full. */
+  forget(): void;
 }
 
 const enc = new TextEncoder();
@@ -60,9 +62,14 @@ export function fakeRadiance(options: FakeOptions): FakeRadiance {
     if (!auth) { requests.push({ path: url.pathname, method, auth }); return json({ error: "unauthorized" }, 401); }
     if (method === "GET" && url.pathname === "/stats") { requests.push({ path: url.pathname, method, auth }); return json({ version: "fake", in_flight: state.inFlight, running: state.inFlight, waiting: 0, total_requests: state.total, max_num_seqs: 8 }); }
     if (method === "GET" && url.pathname === "/v1/models") { requests.push({ path: url.pathname, method, auth }); return json({ data: [{ id: "qwen3.8-flash-next-iq4r", state: options.modelState ?? "resident" }, { id: "other-model", state: "cold" }] }); }
+    if (method === "GET" && url.pathname === "/sessions") { requests.push({ path: url.pathname, method, auth }); return json({ sessions: [] }); }
     if (method !== "POST" || url.pathname !== "/v1/chat/completions") return json({ error: "not found" }, 404);
-    const body = JSON.parse(typeof init?.body === "string" ? init.body : Buffer.from(init?.body as Uint8Array).toString("utf8")) as { messages: Msg[]; max_tokens?: number; stream?: boolean };
+    const body = JSON.parse(typeof init?.body === "string" ? init.body : Buffer.from(init?.body as Uint8Array).toString("utf8")) as { messages: Msg[]; max_tokens?: number; stream?: boolean; temperature?: unknown; logit_bias?: Record<string, unknown> };
     requests.push({ path: url.pathname, method, auth, body });
+    // Refusals the real server (G10, 2.2.0) sends for a mistyped number and for a setting it does not implement; a refused request is never counted as served.
+    const refuse = (message: string, param: string, code: string | null): Response => json({ error: { message, type: "invalid_request_error", param, code } }, 400);
+    if (body.temperature !== undefined && typeof body.temperature !== "number") return refuse("temperature: expected a number", "temperature", null);
+    if (body.logit_bias !== undefined && Object.keys(body.logit_bias).length > 0) return refuse("logit_bias: the device sampler has no per-token bias stage; it is accepted only at an empty object, where it does nothing", "logit_bias", "unsupported_parameter");
     state.total++; state.inFlight++; state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
     // Reuse: the longest run of leading characters shared with an earlier request, in whole 2,048-token steps.
     const flat = body.messages.map((m) => `${m.role}\u0000${textOf(m)}\u0000${JSON.stringify(m.tool_calls ?? null)}`).join("\u0001");
@@ -75,6 +82,12 @@ export function fakeRadiance(options: FakeOptions): FakeRadiance {
     const signal = init?.signal;
     let left = false;
     const leave = (): void => { if (left) return; left = true; void sleep(options.drainMs ?? 30).then(() => { state.inFlight--; }); };
+    if (body.stream !== true) {
+      leave();
+      const text = (a.text ?? "").slice(0, (body.max_tokens ?? 1000) * 4);
+      const tm = { cache_n: cached, prompt_n: promptTokens - cached, prompt_ms: (promptTokens - cached) / 2, ttft_ms: (promptTokens - cached) / 2 + 5 };
+      return json({ id: "chatcmpl-fake", object: "chat.completion", model: "qwen3.8-flash-next-iq4r", choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }], usage: { prompt_tokens: promptTokens, completion_tokens: Math.ceil(text.length / 4), prompt_tokens_details: { cached_tokens: cached } }, timings: tm });
+    }
     const head = { id: "chatcmpl-fake", object: "chat.completion.chunk", created: 1, model: "qwen3.8-flash-next-iq4r", system_fingerprint: "fake" };
     const event = (o: object): Uint8Array => enc.encode(`data: ${JSON.stringify({ ...head, ...o })}\n\n`);
     const pieces: Uint8Array[] = [event({ choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })];
@@ -111,5 +124,5 @@ export function fakeRadiance(options: FakeOptions): FakeRadiance {
     }, { highWaterMark: 0 });
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   }) as typeof globalThis.fetch;
-  return { fetch, requests, state };
+  return { fetch, requests, state, forget: () => { seen.length = 0; } };
 }

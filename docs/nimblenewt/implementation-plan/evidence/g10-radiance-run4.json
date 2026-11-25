@@ -1,0 +1,385 @@
+{
+ "startedAt": "2026-11-25T14:19:42.480Z",
+ "model": "qwen3.8-flash-next-iq4r",
+ "parts": "R",
+ "gapsS": [
+  0
+ ],
+ "lines": 300,
+ "levels": [
+  1,
+  2,
+  4,
+  8
+ ],
+ "statsAtStart": {
+  "at": "2026-11-25T14:19:42.485Z",
+  "version": "2.2.0",
+  "running": 4,
+  "waiting": 4,
+  "in_flight": 8,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 13156,
+  "kv_tokens_total": 1036596,
+  "kv_tokens_cached": 0,
+  "kv_bytes_used": 563781040,
+  "kv_bytes_total": 1201333440,
+  "prefix_hit_rate": 0.3333064615726471,
+  "prefix_evictions": 19560332,
+  "linear_hit_rate": 0.3080846965312958,
+  "linear_cached_tokens": 36864256,
+  "checkpoints_written": 41723,
+  "ckpt_evictions": {
+   "retention": 19097,
+   "store_full": 22122
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 55,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 109
+  },
+  "total_requests": 9335,
+  "prefill_tps": 3253.46435546875,
+  "decode_tps": 120.25127410888672,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 33085607936,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 33205030912,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "retained": {
+  "steps": [
+   {
+    "phase": "cold-native",
+    "step": "cold",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10070,
+    "cachedTokens": 0,
+    "computedTokens": 10070,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 10830,
+    "serverTtftMs": 15907,
+    "clientTtftMs": 15912,
+    "wallMs": 16336,
+    "answer": "amber-450",
+    "expected": "amber-450",
+    "correct": true
+   },
+   {
+    "phase": "cold-native",
+    "step": "native-repeat",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10070,
+    "cachedTokens": 8192,
+    "computedTokens": 1878,
+    "expectedCachedTokens": 1,
+    "serverPromptMs": 2680,
+    "serverTtftMs": 11710,
+    "clientTtftMs": 11712,
+    "wallMs": 11758,
+    "answer": "amber-450",
+    "expected": "amber-450",
+    "correct": true
+   },
+   {
+    "phase": "other",
+    "step": "other-0",
+    "status": 200,
+    "outcome": "cold",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 3272,
+    "cachedTokens": 0,
+    "computedTokens": 3272,
+    "expectedCachedTokens": 0,
+    "serverPromptMs": 2025,
+    "serverTtftMs": 13530,
+    "clientTtftMs": 13532,
+    "wallMs": 13920,
+    "answer": "violet-432",
+    "expected": "violet-432",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-after-0s",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10070,
+    "cachedTokens": 8192,
+    "computedTokens": 1878,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 1495,
+    "serverTtftMs": 8073,
+    "clientTtftMs": 8075,
+    "wallMs": 8120,
+    "answer": "amber-450",
+    "expected": "amber-450",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "retained-switch-back",
+    "status": 200,
+    "outcome": "hit",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10070,
+    "cachedTokens": 8192,
+    "computedTokens": 1878,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 2761,
+    "serverTtftMs": 13047,
+    "clientTtftMs": 13049,
+    "wallMs": 13072,
+    "answer": "Badger",
+    "expected": "Badger",
+    "correct": true
+   },
+   {
+    "phase": "retained",
+    "step": "lost-changed-head",
+    "status": 200,
+    "outcome": "miss",
+    "applied": [
+     "session_id"
+    ],
+    "promptTokens": 10072,
+    "cachedTokens": 0,
+    "computedTokens": 10072,
+    "expectedCachedTokens": 8192,
+    "serverPromptMs": 9123,
+    "serverTtftMs": 22084,
+    "clientTtftMs": 22087,
+    "wallMs": 22141,
+    "answer": "amber-450",
+    "expected": "amber-450",
+    "correct": true
+   }
+  ],
+  "markers": [
+   {
+    "gapS": 0,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "reusedAll": true,
+    "answerCorrect": true
+   },
+   {
+    "switchBack": true,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 8192,
+    "outcome": "hit",
+    "answerCorrect": true
+   },
+   {
+    "changedHead": true,
+    "expectedCachedTokens": 8192,
+    "servedCachedTokens": 0,
+    "outcome": "miss",
+    "answerCorrect": true,
+    "markerAfter": "lost"
+   },
+   {
+    "activeMarkersAtEnd": []
+   }
+  ],
+  "sessions": [
+   {
+    "id": 9373,
+    "model": "qwen4exp",
+    "label": "nn-NJAQneV-yRFrZghDQFH2GweyZ3n",
+    "tokens": 10072,
+    "bytes": 151885760,
+    "idle_s": 22.459236439,
+    "age_s": 22.459236439,
+    "on_device": 0,
+    "on_host": 2518,
+    "moving": false,
+    "snapshots": 2,
+    "snap_bytes": 237985888,
+    "resume_tokens": 8192
+   },
+   {
+    "id": 9366,
+    "model": "qwen4exp",
+    "label": "nn-NJAQneV-yRFrZghDQFH2GweyZ3n",
+    "tokens": 10075,
+    "bytes": 151885760,
+    "idle_s": 35.532728896,
+    "age_s": 69.34244581,
+    "on_device": 0,
+    "on_host": 2518,
+    "moving": false,
+    "snapshots": 2,
+    "snap_bytes": 237985888,
+    "resume_tokens": 8192
+   }
+  ],
+  "statsBefore": {
+   "at": "2026-11-25T14:19:42.584Z",
+   "version": "2.2.0",
+   "running": 4,
+   "waiting": 4,
+   "in_flight": 8,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 13168,
+   "kv_tokens_total": 1036596,
+   "kv_tokens_cached": 0,
+   "kv_bytes_used": 563871520,
+   "kv_bytes_total": 1201333440,
+   "prefix_hit_rate": 0.3333064615726471,
+   "prefix_evictions": 19560332,
+   "linear_hit_rate": 0.3080846965312958,
+   "linear_cached_tokens": 36864256,
+   "checkpoints_written": 41723,
+   "ckpt_evictions": {
+    "retention": 19097,
+    "store_full": 22122
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 55,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 109
+   },
+   "total_requests": 9335,
+   "prefill_tps": 3110.124267578125,
+   "decode_tps": 126.77241516113281,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 33085607936,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 33205030912,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "statsAfter": {
+   "at": "2026-11-25T14:21:08.258Z",
+   "version": "2.2.0",
+   "running": 4,
+   "waiting": 4,
+   "in_flight": 8,
+   "max_num_seqs": 8,
+   "kv_tokens_used": 22756,
+   "kv_tokens_total": 1036596,
+   "kv_tokens_cached": 0,
+   "kv_bytes_used": 636165040,
+   "kv_bytes_total": 1461915840,
+   "prefix_hit_rate": 0.3335464596748352,
+   "prefix_evictions": 19633900,
+   "linear_hit_rate": 0.3082733452320099,
+   "linear_cached_tokens": 37045376,
+   "checkpoints_written": 41884,
+   "ckpt_evictions": {
+    "retention": 19161,
+    "store_full": 22213
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 57,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 109
+   },
+   "total_requests": 9382,
+   "prefill_tps": 2548.93505859375,
+   "decode_tps": 172.62046813964844,
+   "cards": [
+    {
+     "index": 0,
+     "vramUsed": 33085607936,
+     "vramTotal": 34208743424
+    },
+    {
+     "index": 1,
+     "vramUsed": 33205030912,
+     "vramTotal": 34208743424
+    }
+   ]
+  },
+  "checks": {
+   "coldComputedEverything": true,
+   "nativeReuseServed": true,
+   "missMarkedLost": true,
+   "missStillAnsweredFromFullContext": true,
+   "retainedReusedAll": true,
+   "retentionMissObserved": false,
+   "allAnswersCorrect": true
+  }
+ },
+ "statsAtEnd": {
+  "at": "2026-11-25T14:21:08.261Z",
+  "version": "2.2.0",
+  "running": 4,
+  "waiting": 4,
+  "in_flight": 8,
+  "max_num_seqs": 8,
+  "kv_tokens_used": 22756,
+  "kv_tokens_total": 1036596,
+  "kv_tokens_cached": 0,
+  "kv_bytes_used": 636165040,
+  "kv_bytes_total": 1461915840,
+  "prefix_hit_rate": 0.3335464596748352,
+  "prefix_evictions": 19633900,
+  "linear_hit_rate": 0.3082733452320099,
+  "linear_cached_tokens": 37045376,
+  "checkpoints_written": 41884,
+  "ckpt_evictions": {
+   "retention": 19161,
+   "store_full": 22213
+  },
+  "ckpt_refused": 0,
+  "hit_cuts": {
+   "no_snapshot": 57,
+   "windowed_group": 0,
+   "adopt_failed": 0,
+   "resumed_below": 109
+  },
+  "total_requests": 9382,
+  "prefill_tps": 2548.93505859375,
+  "decode_tps": 172.62046813964844,
+  "cards": [
+   {
+    "index": 0,
+    "vramUsed": 33085607936,
+    "vramTotal": 34208743424
+   },
+   {
+    "index": 1,
+    "vramUsed": 33205030912,
+    "vramTotal": 34208743424
+   }
+  ]
+ },
+ "finishedAt": "2026-11-25T14:21:08.261Z"
+}
