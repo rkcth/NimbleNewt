@@ -482,14 +482,19 @@ fn dump_json(paths: &[String]) -> String {
 }
 
 /// One machine-wide lock around every DACL read-modify-write this launcher does. Several launchers may run at once (the backend's `maxConcurrentRuns`), and they all write the SAME program
-/// folder's DACL (each adds, then removes, its own container's entry): a write made from a copy read before another launcher's write would lose that entry or bring a removed one back. The named
-/// mutex has no `Global\` prefix, so it is per logon session, which is where every launcher of one service runs; its default security is the creator's. A launcher that cannot take it in two
-/// minutes fails the grant or the revoke (fail closed). NOT MEASURED with two real launchers.
+/// folder's DACL (each adds, then removes, its own container's entry): a write made from a copy read before another launcher's write would lose that entry or bring a removed one back. The name
+/// has the `Global\` prefix: without one a named object lives in the namespace of the creator's Terminal Services SESSION (Microsoft, "Kernel Object Namespaces"), so a launcher started from a
+/// signed-in session and one started by the worker in session 0 would hold two different locks over the same folder. Creating a MUTEX in the global namespace needs no privilege (Microsoft names
+/// only file-mapping and symbolic-link objects as needing SeCreateGlobalPrivilege). Its default security is the creator's: a launcher of another account that cannot open it fails, and so does a
+/// launcher that cannot take it in two minutes: the grant or the revoke fails (fail closed). Any local account could create the name first and so stop every grant (refusal, never a weaker run).
+/// An abandoned mutex (a launcher that died holding it) is taken: each DACL write is one SetNamedSecurityInfo call, so nothing is left half done. NOT MEASURED with two real launchers.
+/// The lock's name (a test pins the `Global\\` prefix).
+pub(crate) const ACL_LOCK_NAME: &str = "Global\\NimbleNewtAclWrite";
 struct AclLock(HANDLE);
 impl AclLock {
     fn take() -> Result<AclLock, u32> {
         unsafe {
-            let h = CreateMutexW(null(), 0, wide("NimbleNewtAclWrite").as_ptr());
+            let h = CreateMutexW(null(), 0, wide(ACL_LOCK_NAME).as_ptr());
             if h.is_null() { return Err(GetLastError()); }
             match WaitForSingleObject(h, 120_000) {
                 WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(AclLock(h)),

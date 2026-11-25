@@ -1975,6 +1975,100 @@ describe("A03b per-run container profile: how many runs at once, never in one wo
     assert.equal(host.calls.length, 0, "no launcher call, no grant");
   });
 
+  test("review: a claim is created whole, so a writer that stops mid-write leaves nothing that blocks later runs (the default limit included)", async () => {
+    const host = new SimHost();
+    // a writer that stops half way through a plain write leaves "{" on disk; the claim must not go through such a write at all
+    const write = host.writeText.bind(host);
+    host.writeText = (p: string, t: string): void => { if (key(p).startsWith(key(CLAIMS) + "\\")) { write(p, t.slice(0, 1)); throw new Error("the process stopped mid-write"); } write(p, t); };
+    const a = jobFor(host);
+    assert.equal((await runNativeJob(host, a.job, undefined, a.jobDir)).exitCode, 0, "the claim was made whole");
+    const b = planned(host, ws("b"), "run-0002-bbbb");
+    assert.equal((await runNativeJob(host, b.job, undefined, b.jobDir)).exitCode, 0, "and nothing half written blocks the next run");
+    assert.deepEqual(host.listDir(CLAIMS), []);
+    // an earlier claim file of the SAME id (an attempt that stopped) is this run's own: it is replaced, not counted against it
+    host.writeText = write;
+    const c = planned(host, ws("c"), "run-0003-cccc");
+    host.mkdirp(CLAIMS);
+    host.writeText(`${CLAIMS}\\${c.job.runId}.json`, "{");
+    assert.equal((await runNativeJob(host, c.job, undefined, c.jobDir)).exitCode, 0);
+  });
+
+  test("review: a claim folder that cannot be listed or written is busy, never a thrown run that keeps its slot; a throw in the cleanup still gives the slot and the claim back", async () => {
+    for (const [label, arrange] of [
+      ["the claims folder cannot be listed", (h: SimHost) => { const list = h.listDir.bind(h); h.listDir = (p: string): string[] => { if (key(p) === key(CLAIMS)) throw new Error("EIO"); return list(p); }; }],
+      ["the claims folder cannot be made", (h: SimHost) => { const mk = h.mkdirp.bind(h); h.mkdirp = (p: string): void => { if (key(p) === key(CLAIMS)) throw new Error("EACCES"); mk(p); }; }],
+      ["the claim cannot be created", (h: SimHost) => { const ce = h.createExclusive.bind(h); h.createExclusive = (p: string, t: string): boolean => { if (key(p).startsWith(key(CLAIMS) + "\\")) throw new Error("ENOSPC"); return ce(p, t); }; }],
+    ] as const) {
+      const host = new SimHost();
+      const { job, jobDir } = jobFor(host);
+      arrange(host);
+      const out = await runNativeJob(host, job, undefined, jobDir);
+      assert.equal(out.exitCode, EXIT_BUSY, label);
+      assert.match(out.stderr, /folder claim could not be/, label);
+      assert.ok(slotsFree(host, 1), `${label}: the slot is given back`);
+      assert.equal(host.calls.length, 0, `${label}: nothing granted`);
+      assert.equal((await runNativeJob(new SimHost(), job, undefined, jobDir)).exitCode, 0, `${label}: the run id is free again`);
+    }
+    // a throw in the cleanup after the run (removing the input file fails)
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    const rm = host.remove.bind(host);
+    host.remove = (p: string): void => { if (key(p) === key(job.files.input)) throw new Error("EBUSY"); rm(p); };
+    await assert.rejects(runNativeJob(host, job, undefined, jobDir), /EBUSY/);
+    assert.ok(slotsFree(host, 1), "the slot is given back");
+    assert.deepEqual(host.listDir(CLAIMS), [], "the claim is given back");
+    host.remove = rm;
+    const next = planned(host, ws("n"), "run-0009-nnnn");
+    assert.equal((await runNativeJob(host, next.job, undefined, next.jobDir)).exitCode, 0, "a later run is not kept busy");
+  });
+
+  test("review: a runner that stopped after its records were removed but before its status file was leaves a folder the sweep releases (no wedge); an old job file or a launcher record alone stays a problem", async () => {
+    const dead = { runnerPid: 4242, startedAt: new Date(Date.now() - 60_000).toISOString(), runId: "x" };
+    // retired: both records gone, the status file still there
+    {
+      const host = new SimHost();
+      const { job, jobDir } = jobFor(host);
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ ...dead, runId: job.runId }));
+      const swept = await sweepLeftovers(host, settings());
+      assert.deepEqual(swept.problems, []);
+      assert.equal(swept.released, 1);
+      assert.ok(!host.exists(jobDir));
+      assert.equal(host.calls.length, 0, "nothing is revoked or deleted for a run that was retired");
+    }
+    // an older backend's job file (no profile in it): reported, never guessed at
+    {
+      const host = new SimHost();
+      const { job, jobDir } = jobFor(host);
+      const { profile: _p, ...old } = JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob;
+      host.writeText(jobFile(jobDir), JSON.stringify(old));
+      host.writeText(`${jobDir}\\status.json`, JSON.stringify({ ...dead, runId: job.runId }));
+      const swept = await sweepLeftovers(host, settings());
+      assert.match(swept.problems[0] ?? "", /no profile name in the job file/);
+      assert.ok(host.exists(jobDir));
+    }
+    // the launcher's record without the backend's: kept and reported, the launcher not called
+    {
+      const host = new SimHost();
+      const { job, jobDir } = jobFor(host);
+      markStarted(host, job, jobDir, { ...dead, runId: job.runId });
+      host.remove(`${profilesDir(job.settings)}\\${job.profile.name}.json`);
+      const swept = await sweepLeftovers(host, settings());
+      assert.match(swept.problems[0] ?? "", /missing or unreadable/);
+      assert.equal(host.calls.length, 0);
+      assert.ok(host.profiles.has(job.profile.name), "nothing deleted without the record");
+    }
+    // the records are removed launcher's first, so a stop between the two leaves the backend's record, which a sweep retires
+    {
+      const host = new SimHost();
+      const { job, jobDir } = jobFor(host);
+      const order: string[] = [];
+      const rm = host.remove.bind(host);
+      host.remove = (p: string): void => { if (key(p).startsWith(key(profilesDir(job.settings)) + "\\")) order.push(key(p).endsWith(".sid") ? "sid" : "json"); rm(p); };
+      assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, 0);
+      assert.deepEqual(order, ["sid", "json"]);
+    }
+  });
+
   test("configuration: the limit is a whole number from 1 to 4, one by default, and the audit and health say what is unmeasured", async () => {
     const host = new SimHost();
     for (const bad of [0, -1, 5, 1.5, Number.NaN, 100]) assert.throws(() => windowsNativeBackend(options(host, { maxConcurrentRuns: bad })), /maxConcurrentRuns: a whole number from 1 to 4/, String(bad));

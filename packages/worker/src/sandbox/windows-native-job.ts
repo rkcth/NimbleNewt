@@ -251,23 +251,31 @@ interface Claim { readonly pid: number; readonly runId: string; readonly owner: 
  * folder, or one inside or around it, is held by one run at a time; different workspaces do not touch each other. The claim is a file of its own (named by `id`) written FIRST, and only then are the other
  * claims read: of two contenders at least one sees the other, and both backing off is allowed (busy, retry); one that wrote before the other read always wins. A claim whose writer is gone (see
  * `writerAlive`) is not counted (the sweep deals with what it left); claims with the same `owner` are one run's (its own sweep of an earlier run's leftovers may name that run's folders).
+ * The claim is created WHOLE (`createExclusive`: a private temporary file linked to the name), like the slot files, so a writer that stops mid-write never leaves a half-written claim that every later
+ * run would have to count as held. Never throws: anything that goes wrong is a reason (busy), and the claim is gone again.
  * Returns undefined when the claim is held, otherwise the reason it was refused (and the claim is gone again).
  */
 async function claimFolders(host: NativeHost, settings: NativeSettings, id: string, owner: string, folders: readonly string[]): Promise<string | undefined> {
   const dir = claimsDir(settings);
-  host.mkdirp(dir);
-  const mine: Claim = { pid: host.pid, runId: owner, owner, at: new Date().toISOString(), folders };
-  try { host.writeText(`${dir}\\${id}.json`, JSON.stringify(mine)); } catch { return "the folder claim could not be written"; }
-  for (const name of host.listDir(dir)) {
-    if (name.toLowerCase() === `${id}.json`.toLowerCase() || !name.endsWith(".json")) continue;
-    const text = host.readText(`${dir}\\${name}`);
-    let other: Claim;
-    try { other = JSON.parse(text ?? "") as Claim; } catch { host.remove(`${dir}\\${id}.json`); return `a folder claim (${name}) cannot be read, so it counts as held`; }
-    if (other.owner === owner || !Array.isArray(other.folders)) continue;
-    if (!(await writerAlive(host, other.pid, other.at, other.runId))) continue;
-    for (const f of folders) for (const g of other.folders) if (overlapsWin(f, g)) { host.remove(`${dir}\\${id}.json`); return `another run in progress uses ${g}, which is the same as or inside or around ${f}: one run at a time per workspace`; }
-  }
-  return undefined;
+  const file = `${dir}\\${id}.json`;
+  const refuse = (reason: string): string => { try { host.remove(file); } catch { /* a claim whose writer is gone is never counted */ } return reason; };
+  try {
+    host.mkdirp(dir);
+    const mine: Claim = { pid: host.pid, runId: owner, owner, at: new Date().toISOString(), folders };
+    // `id` is this run's (or this sweep's) own: a file of that name is an earlier attempt of the same id that stopped, never another run's claim.
+    host.remove(file);
+    if (!host.createExclusive(file, JSON.stringify(mine))) return refuse("the folder claim could not be written (its name was taken meanwhile)");
+    for (const name of host.listDir(dir)) {
+      if (name.toLowerCase() === `${id}.json`.toLowerCase() || !name.toLowerCase().endsWith(".json")) continue;
+      const text = host.readText(`${dir}\\${name}`);
+      let other: Claim;
+      try { other = JSON.parse(text ?? "") as Claim; if (typeof other !== "object" || other === null || !Array.isArray(other.folders)) throw new Error("not a claim"); } catch { return refuse(`a folder claim (${name}) cannot be read, so it counts as held`); }
+      if (other.owner === owner) continue;
+      if (!(await writerAlive(host, other.pid, other.at, other.runId))) continue;
+      for (const f of folders) for (const g of other.folders) if (overlapsWin(f, g)) return refuse(`another run in progress uses ${g}, which is the same as or inside or around ${f}: one run at a time per workspace`);
+    }
+    return undefined;
+  } catch (error) { return refuse(`the folder claim could not be made: ${(error as Error).message}`); }
 }
 const dropClaim = (host: NativeHost, settings: NativeSettings, id: string): void => { try { host.remove(`${claimsDir(settings)}\\${id}.json`); } catch { /* a dead claim is never counted */ } };
 
@@ -296,7 +304,9 @@ export function launcherSid(host: NativeHost, settings: NativeSettings, name: st
   return m !== null && m[1] === name ? m[2]! : undefined;
 }
 const removeProfileRecords = (host: NativeHost, settings: NativeSettings, name: string): void => {
-  for (const f of [profileJson(settings, name), runProfileFor(settings, name).record]) { try { host.remove(f); } catch { /* kept for the sweep */ } }
+  // The launcher's record goes FIRST: a stop between the two then leaves only the backend's record, which the sweep retires (no launcher record: nothing was made or it is gone), never a launcher
+  // record with no backend record, which no sweep would ever find.
+  for (const f of [runProfileFor(settings, name).record, profileJson(settings, name)]) { try { host.remove(f); } catch { /* kept for the sweep */ } }
 };
 
 /**
@@ -401,48 +411,52 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
       }
     }
   } finally {
-    // The program has ended (or never started): the outbox is read to its end and both files are let go before anything is revoked or reported.
-    if (relay !== undefined) {
-      relayEnd = await relay.finish(line?.ok === true && line.childExitCode === 0 && line.timedOut !== true);
-      if (relayEnd.fault !== undefined) failure = { kind: "channel", message: relayEnd.fault + (failure === undefined ? "" : ` (the run was then ended: ${failure.message})`) };
+    // The claim and the slot are given back on EVERY path out of the cleanup below, a throw included: a slot kept by a run that is over would make every later run busy while this process lives.
+    try {
+      // The program has ended (or never started): the outbox is read to its end and both files are let go before anything is revoked or reported.
+      if (relay !== undefined) {
+        relayEnd = await relay.finish(line?.ok === true && line.childExitCode === 0 && line.timedOut !== true);
+        if (relayEnd.fault !== undefined) failure = { kind: "channel", message: relayEnd.fault + (failure === undefined ? "" : ` (the run was then ended: ${failure.message})`) };
+      }
+      for (const f of channelFiles) { try { f.close(); } catch { /* released with the process */ } }
+      // Every exit path: the revoke is read back by an independent look (not only the launcher's own report). It is made by the run's own SID, which the launcher recorded before it made the profile.
+      const sid = launcherSid(host, settings, job.profile.name);
+      const back: ReadBack = applied ? await revokeAndReadBack(host, settings, job.grants, { name: job.profile.name, ...(sid === undefined ? {} : { sid }) }) : { state: "clean", left: [] };
+      // Then the profile: when the launcher says it deleted it and found it gone, that is that; otherwise (it was killed, it kept the profile because a grant would not revoke, the check was unsure) the
+      // backend asks for the delete itself, and only a profile shown gone lets the records go. A profile whose entries are not all gone is kept (a later sweep revokes by SID first).
+      let profileProblem: string | undefined;
+      let profileGone = false;
+      if (profileRecorded) {
+        if (sid === undefined) { removeProfileRecords(host, settings, job.profile.name); profileGone = true; } // the launcher never made a profile for this run
+        else if (back.state !== "clean") profileProblem = `the container profile ${job.profile.name} is kept because its entries are not all gone`;
+        else if (line?.profileDeleted === true && line.profileGone === true) { removeProfileRecords(host, settings, job.profile.name); profileGone = true; }
+        else { profileProblem = await deleteProfile(host, settings, job.profile.name, sid); profileGone = profileProblem === undefined; }
+      }
+      // The channel folder is in the container's scratch, so the container may have put a link or junction in its place: it is removed only after the revoke (nothing of the container may still change it)
+      // and without following anything. What cannot be removed that way is left for the task's own cleanup and noted.
+      if (job.channel !== undefined && host.channelFs !== undefined) {
+        let gone = false;
+        try { gone = host.channelFs?.removeFolder(job.channel.dir, [job.channel.inbox, job.channel.outbox]) === true; } catch { /* noted below */ }
+        if (!gone && relayEnd !== undefined) relayEnd = { ...relayEnd, note: `${relayEnd.note === undefined ? "" : `${relayEnd.note}; `}the channel folder was left in the scratch folder (it could not be removed without following a link)` };
+      }
+      if (back.state !== "clean" && failure === undefined) failure = { kind: "revoke", message: back.state === "left" ? `the container still has an entry on ${back.left.join(", ")} after the run` : "the access lists could not be read back after the run" };
+      else if (back.state !== "clean" && failure !== undefined) failure = { kind: failure.kind, message: `${failure.message}; also ${back.state === "left" ? `an entry for the container is still on ${back.left.join(", ")}` : "the access lists could not be read back"}` };
+      if (profileProblem !== undefined && back.state === "clean") failure = failure === undefined ? { kind: "profile", message: profileProblem } : { kind: failure.kind, message: `${failure.message}; also ${profileProblem}` };
+      const record: RunRecord = {
+        runId: job.runId, mode: "native", container: settings.container, startedAt, childStarted: line?.childStarted === true,
+        exitCode: line?.childExitCode ?? null, timedOut: line?.timedOut === true, ...(failure === undefined ? {} : { failure }),
+        grants: (line?.grants ?? []).map((g) => ({ path: g.path, mode: g.mode, soft: g.soft, applied: g.applied, revoked: g.revoked, errorCode: g.errorCode ?? null })),
+        softRefused: line === undefined ? [] : softRefusals(line), entriesLeft: back.left, readBack: back.state,
+        ...(!profileRecorded ? {} : { profile: { name: job.profile.name, ...(sid === undefined ? {} : { sid }), deleted: profileGone, gone: profileGone } }),
+        ...(relayEnd === undefined ? {} : { channel: { ...relayEnd.stats, ...(relayEnd.note === undefined ? {} : { note: relayEnd.note }) } }),
+      };
+      writeRecord(host, settings, record);
+      // A clean run leaves nothing in the job folder but what is removed here; a run whose revoke could not be read back keeps its job file for the sweep.
+      if (back.state === "clean" && (profileGone || !profileRecorded)) { host.remove(job.files.input); host.remove(statusFile(jobDir)); }
+    } finally {
+      dropClaim(host, settings, job.runId);
+      dropSlot(host, slot, job.runId);
     }
-    for (const f of channelFiles) { try { f.close(); } catch { /* released with the process */ } }
-    // Every exit path: the revoke is read back by an independent look (not only the launcher's own report). It is made by the run's own SID, which the launcher recorded before it made the profile.
-    const sid = launcherSid(host, settings, job.profile.name);
-    const back: ReadBack = applied ? await revokeAndReadBack(host, settings, job.grants, { name: job.profile.name, ...(sid === undefined ? {} : { sid }) }) : { state: "clean", left: [] };
-    // Then the profile: when the launcher says it deleted it and found it gone, that is that; otherwise (it was killed, it kept the profile because a grant would not revoke, the check was unsure) the
-    // backend asks for the delete itself, and only a profile shown gone lets the records go. A profile whose entries are not all gone is kept (a later sweep revokes by SID first).
-    let profileProblem: string | undefined;
-    let profileGone = false;
-    if (profileRecorded) {
-      if (sid === undefined) { removeProfileRecords(host, settings, job.profile.name); profileGone = true; } // the launcher never made a profile for this run
-      else if (back.state !== "clean") profileProblem = `the container profile ${job.profile.name} is kept because its entries are not all gone`;
-      else if (line?.profileDeleted === true && line.profileGone === true) { removeProfileRecords(host, settings, job.profile.name); profileGone = true; }
-      else { profileProblem = await deleteProfile(host, settings, job.profile.name, sid); profileGone = profileProblem === undefined; }
-    }
-    // The channel folder is in the container's scratch, so the container may have put a link or junction in its place: it is removed only after the revoke (nothing of the container may still change it)
-    // and without following anything. What cannot be removed that way is left for the task's own cleanup and noted.
-    if (job.channel !== undefined && host.channelFs !== undefined) {
-      let gone = false;
-      try { gone = host.channelFs?.removeFolder(job.channel.dir, [job.channel.inbox, job.channel.outbox]) === true; } catch { /* noted below */ }
-      if (!gone && relayEnd !== undefined) relayEnd = { ...relayEnd, note: `${relayEnd.note === undefined ? "" : `${relayEnd.note}; `}the channel folder was left in the scratch folder (it could not be removed without following a link)` };
-    }
-    if (back.state !== "clean" && failure === undefined) failure = { kind: "revoke", message: back.state === "left" ? `the container still has an entry on ${back.left.join(", ")} after the run` : "the access lists could not be read back after the run" };
-    else if (back.state !== "clean" && failure !== undefined) failure = { kind: failure.kind, message: `${failure.message}; also ${back.state === "left" ? `an entry for the container is still on ${back.left.join(", ")}` : "the access lists could not be read back"}` };
-    if (profileProblem !== undefined && back.state === "clean") failure = failure === undefined ? { kind: "profile", message: profileProblem } : { kind: failure.kind, message: `${failure.message}; also ${profileProblem}` };
-    const record: RunRecord = {
-      runId: job.runId, mode: "native", container: settings.container, startedAt, childStarted: line?.childStarted === true,
-      exitCode: line?.childExitCode ?? null, timedOut: line?.timedOut === true, ...(failure === undefined ? {} : { failure }),
-      grants: (line?.grants ?? []).map((g) => ({ path: g.path, mode: g.mode, soft: g.soft, applied: g.applied, revoked: g.revoked, errorCode: g.errorCode ?? null })),
-      softRefused: line === undefined ? [] : softRefusals(line), entriesLeft: back.left, readBack: back.state,
-      ...(!profileRecorded ? {} : { profile: { name: job.profile.name, ...(sid === undefined ? {} : { sid }), deleted: profileGone, gone: profileGone } }),
-      ...(relayEnd === undefined ? {} : { channel: { ...relayEnd.stats, ...(relayEnd.note === undefined ? {} : { note: relayEnd.note }) } }),
-    };
-    writeRecord(host, settings, record);
-    // A clean run leaves nothing in the job folder but what is removed here; a run whose revoke could not be read back keeps its job file for the sweep.
-    if (back.state === "clean" && (profileGone || !profileRecorded)) { host.remove(job.files.input); host.remove(statusFile(jobDir)); }
-    dropClaim(host, settings, job.runId);
-    dropSlot(host, slot, job.runId);
   }
   if (failure !== undefined) return failed(failure.kind, failure.message);
   const out = host.readText(job.files.out, MAX_OUTPUT_READ) ?? "";
@@ -519,6 +533,9 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
     try { job = JSON.parse(text ?? "") as typeof job; if (!Array.isArray(job.grants)) throw new Error("no grants"); } catch { problems.push(`${dir}: the job file is missing or cannot be read, so its grants are not known`); continue; }
     const name = typeof job.profile?.name === "string" ? job.profile.name : "";
     const record = readProfileRecord(host, settings, name);
+    // Both records gone while the status file is still there: the run was retired (the backend's record is written before the status file and removed only after the read-back was clean and the
+    // profile was shown gone, or the launcher never made one), and the runner stopped before it removed its status file. Nothing is left to revoke or delete; the folder goes.
+    if (record === undefined && isRunProfileName(name) && !host.exists(profileJson(settings, name)) && !host.exists(runProfileFor(settings, name).record)) { host.remove(dir); released++; continue; }
     // The profile record is the proof of what this run made: without it nothing is revoked or deleted by guess.
     if (record === undefined) { problems.push(`${dir}: the run's profile record (${name || "no profile name in the job file"}) is missing or unreadable, so nothing is revoked or deleted for it`); continue; }
     handled.add(name);

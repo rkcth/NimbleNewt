@@ -316,6 +316,9 @@ test("per-run profiles: every DACL write the launcher makes is under one machine
   const change = between(w, "fn change_ace(path: &str", "struct GrantRecord");
   assert.ok(/^fn change_ace\(path: &str, sid: PSID, mode: Mode, revoke: bool\) -> Result<\(\), u32> \{\n\s*let _lock = AclLock::take\(\)\?;/.test(change), "taken first, held (a guard) until the function returns");
   assert.match(w, /impl Drop for AclLock \{ fn drop\(&mut self\) \{ unsafe \{ ReleaseMutex\(self\.0\); CloseHandle\(self\.0\); \} \} \}/);
-  assert.match(w, /CreateMutexW\(null\(\), 0, wide\("NimbleNewtAclWrite"\)\.as_ptr\(\)\)/, "one fixed name, no Global prefix (per logon session)");
+  assert.match(w, /CreateMutexW\(null\(\), 0, wide\(ACL_LOCK_NAME\)\.as_ptr\(\)\)/, "one fixed name");
+  // Without a prefix the name would be per Terminal Services session (a signed-in launcher and the worker's session-0 launcher would hold two different locks): the global namespace, explicitly.
+  assert.ok(w.includes('pub(crate) const ACL_LOCK_NAME: &str = "Global\\\\NimbleNewtAclWrite";'), "the Global\\ prefix");
+  assert.equal(w.match(/CreateMutexW\(/g)!.length, 1, "one named mutex, the lock");
   assert.equal(w.match(/SetNamedSecurityInfoW\(/g)!.length, 3, "the three DACL writers are all inside change_ace's callees (remove_explicit, layered_acl, the grant itself)");
 });
