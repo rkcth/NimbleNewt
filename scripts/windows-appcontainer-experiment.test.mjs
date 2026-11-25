@@ -2220,3 +2220,49 @@ test("the own-runner job builds nothing (no cargo, no rustup), downloads the hos
   assert.ok(!/Install-NimbleNewtLauncher|-Action (Install|Uninstall)/.test(own.replace(/^\s*#.*$/gm, "")), "no installer step on the own runner");
   assert.ok(!/secrets\./.test(wf));
 });
+
+test("own-runner hand-off review: hashes read from standard input, no empty or partial hash accepted, launcher steps gated on the verify step, build-time hashes bound, profiles removed", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const code = wf.replace(/^\s*#.*$/gm, "");
+  const own = code.slice(code.indexOf("  own-runner:"));
+  const hosted = code.slice(code.indexOf("  hosted:"), code.indexOf("  own-runner:"));
+  // GNU sha256sum writes "\<hash>" for a file name with a backslash (every Windows $RUNNER_TEMP path): every hash in the workflow is read from standard input
+  const sums = [...code.matchAll(/sha256sum[^\n|]*/g)].map((m) => m[0]);
+  assert.equal(sums.length, 5, sums.join(" / ")); // two build steps, the staging helper, the verify helper, the clean-up step
+  for (const s of sums) assert.match(s, /^sha256sum -b < "?[^"\s]+"? $/, s);
+  // the expected values: non-empty, lower-case hex only, exactly 64 digits, compared whole (never a substring or pattern match)
+  const verify = own.slice(own.indexOf("id: verify"), own.indexOf("Containment cases as the runner service"));
+  for (const v of ["EXPECT_EXPERIMENT", "EXPECT_PRODUCT"]) assert.ok(verify.includes(`case "$${v}" in *[!0-9a-f]*|"") echo`), `${v}: empty or non-hex refused`);
+  assert.ok(verify.includes('[ "${#EXPECT_EXPERIMENT}" -eq 64 ] && [ "${#EXPECT_PRODUCT}" -eq 64 ] || {'), "length 64 required");
+  assert.ok(verify.includes('if [ "$got" != "$2" ]; then'), "whole-string comparison");
+  assert.ok(!/\[\[|==\s*\*|grep[^\n]*EXPECT/.test(verify), "no pattern or substring comparison");
+  // every step after the verify step either has no `if:` (runs only when all before succeeded), is gated on the verify outcome, or is the results upload
+  const after = own.slice(own.indexOf("id: verify"));
+  const steps = after.split(/\n {6}- /).slice(1);
+  assert.ok(steps.length >= 6, String(steps.length));
+  for (const s of steps) {
+    const m = /\n {8}if: ([^\n]*)/.exec(`\n  ${s}`);
+    if (m === null) continue;
+    if (s.startsWith("uses: actions/upload-artifact@")) { assert.equal(m[1], "always()"); continue; }
+    assert.match(m[1], /^\$\{\{ (!cancelled\(\)|always\(\)) && steps\.verify\.outcome == 'success' \}\}$/, s.split("\n")[0]);
+  }
+  // the hosted job binds each file to the hash its build step reported before any experiment step ran
+  assert.match(hosted, /id: build_experiment\n[^]*?cargo build --release --locked[^\n]*\n\s+echo "sha256=\$\(sha256sum -b < target\/release\/nn-appc-launcher\.exe \| cut -d' ' -f1\)" >> "\$GITHUB_OUTPUT"/);
+  assert.match(hosted, /id: build_product\n[^]*?native-launcher\.mjs verify[^\n]*\n\s+echo "sha256=\$\(sha256sum -b < target\/release\/nn-launcher\.exe \| cut -d' ' -f1\)" >> "\$GITHUB_OUTPUT"/);
+  assert.ok(hosted.indexOf("id: build_experiment") < hosted.indexOf("--mode spawn"), "the experiment hash is taken before the first experiment step");
+  const stage = hosted.slice(hosted.indexOf("id: stage"), hosted.indexOf("name: windows-appcontainer-launchers"));
+  for (const part of ["BUILT_EXPERIMENT: ${{ steps.build_experiment.outputs.sha256 }}", "BUILT_PRODUCT: ${{ steps.build_product.outputs.sha256 }}", 'hex64 "$BUILT_EXPERIMENT" && hex64 "$BUILT_PRODUCT"', 'if [ "$e" = "$BUILT_EXPERIMENT" ] && [ "$p" = "$BUILT_PRODUCT" ]; then']) assert.ok(stage.includes(part), part);
+  assert.ok(stage.indexOf('if [ "$e" = "$BUILT_EXPERIMENT" ]') < stage.indexOf("launchers=ok"), "launchers=ok only after the build-time hashes match");
+  // the container profiles this job makes have CI-only names and are removed again with the re-hashed verified experiment launcher
+  assert.match(own, /NIMBLENEWT_WIN_PROFILE: NimbleNewtOwnRunnerG05\n/);
+  const clean = own.slice(own.indexOf("Remove the container profiles this job made"));
+  assert.match(clean, /^Remove[^\n]*\n\s+shell: bash\n\s+if: \$\{\{ always\(\) && steps\.verify\.outcome == 'success' \}\}/);
+  assert.ok(clean.indexOf('if [ "$got" != "$EXPECT_EXPERIMENT" ]; then') < clean.indexOf("delete-profile"), "hashed again before it is run");
+  assert.match(clean, /for n in NimbleNewtProductCheck NimbleNewtOwnRunnerG05; do/);
+  assert.ok(!/NimbleNewtAgent/.test(own), "the product's default profile name is never used (or deleted) on the owner's machine");
+  // the job's own steps install nothing, make no account, change no firewall rule or machine setting (the experiment harness's reverted ACL grants are its own, tested above)
+  assert.ok(!/New-LocalUser|net user|New-NetFirewallRule|Set-ExecutionPolicy|reg add|sc(\.exe)? create|icacls|setx|msiexec|choco|winget|Install-NimbleNewtLauncher/i.test(own), "no persistent machine change in the own-runner job's own steps");
+  // the download takes only this run's one named artifact: no run id, token, other repository, pattern or merge
+  const dl = own.slice(own.indexOf("actions/download-artifact@"), own.indexOf("id: verify"));
+  assert.ok(!/run-id|github-token|repository:|pattern:|merge-multiple/.test(dl), dl);
+});

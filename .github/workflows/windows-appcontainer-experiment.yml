@@ -41,9 +41,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Build the launcher (locked dependencies)
+        id: build_experiment
         shell: bash
         working-directory: experiments/windows-appcontainer/launcher
-        run: cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
+        # The hash is taken as the build left the file, before any experiment step runs, and leaves as a step output (a later step cannot change it); the staging step requires its copy to match.
+        # Hashed from standard input: GNU sha256sum puts a backslash before the hash when the file name has one (every Windows $RUNNER_TEMP path does).
+        run: |
+          cargo build --release --locked 2>&1 | node ../../../scripts/redact-log.mjs
+          echo "sha256=$(sha256sum -b < target/release/nn-appc-launcher.exe | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       # Round 4 (see experiments/windows-appcontainer/README.md): one step per mode, each runs even when an earlier one failed, each has its own limit. The smoke ladder (round 2) and the
       # git ladder (round 3b: git does not need to run inside the container) have answered their questions and are no longer run here; their code stays in the repository.
       # Every probe cell has a 90 s hard limit (the probe ends itself after 60 s), every spawn step 15 s.
@@ -115,6 +120,7 @@ jobs:
       # Card A03b slice 3: the PRODUCT launcher (native/nn-launcher, no cargo feature) with the toolchain its rust-toolchain.toml pins, built `--locked`; `info` must work; an experiment-only command must be
       # refused ("not in this build"); the release record is made and verified. The experiment launcher above is the same source with the `experiment` feature. Unsigned: a hosted build is never a release.
       - name: "Product launcher (native/nn-launcher), locked build, info, refusal of experiment commands, release record"
+        id: build_product
         shell: bash
         if: always()
         timeout-minutes: 20
@@ -138,6 +144,7 @@ jobs:
           test "$rc" -eq 125
           node ../../scripts/native-launcher.mjs record --file target/release/nn-launcher.exe --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
           node ../../scripts/native-launcher.mjs verify --file target/release/nn-launcher.exe --record "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
+          echo "sha256=$(sha256sum -b < target/release/nn-launcher.exe | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       # Card A03b slice 3: the administrator installer script is parsed by PowerShell and run with -WhatIf and Verify. Neither changes the machine: the checks below fail the step if an account or a folder appeared.
       - name: "Installer script (parse, -WhatIf and Verify; changes nothing)"
         shell: powershell
@@ -180,22 +187,33 @@ jobs:
           exit "$rc"
       # The programs the own-runner job runs (that machine has no Rust). Staged here, hashed here, kept 7 days. The hashes also leave as job outputs, so the other job checks the downloaded files against a value
       # that did not travel inside the artifact. Runs after every build step whatever happened to the experiment steps; `launchers` stays empty (the own-runner job then does not start) unless both files exist
-      # and the product file matches its release record.
+      # and the product file matches its release record, and both staged copies still have the hashes their build steps reported right after building (so an experiment step in between cannot
+      # have changed them).
       - name: Stage the built launchers for the own-runner job
         id: stage
         shell: bash
         if: always()
+        env:
+          BUILT_EXPERIMENT: ${{ steps.build_experiment.outputs.sha256 }}
+          BUILT_PRODUCT: ${{ steps.build_product.outputs.sha256 }}
         run: |
           d="$RUNNER_TEMP/launchers"; rm -rf "$d"; mkdir -p "$d"
           exp=experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe
           prod=native/nn-launcher/target/release/nn-launcher.exe
           rec="$RUNNER_TEMP/appc-out/nn-launcher.record.json"
-          if [ -f "$exp" ] && [ -f "$prod" ] && [ -f "$rec" ] && node scripts/native-launcher.mjs verify --file "$prod" --record "$rec"; then
+          # from standard input: with a file name containing a backslash (any $RUNNER_TEMP path here) GNU sha256sum writes "\<hash>"
+          hash() { sha256sum -b < "$1" | cut -d' ' -f1; }
+          hex64() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) false;; esac; }
+          if [ -f "$exp" ] && [ -f "$prod" ] && [ -f "$rec" ] && hex64 "$BUILT_EXPERIMENT" && hex64 "$BUILT_PRODUCT" && node scripts/native-launcher.mjs verify --file "$prod" --record "$rec"; then
             cp "$exp" "$d/nn-appc-launcher.exe"; cp "$prod" "$d/nn-launcher.exe"; cp "$rec" "$d/nn-launcher.record.json"
-            e="$(sha256sum "$d/nn-appc-launcher.exe" | cut -d' ' -f1)"; p="$(sha256sum "$d/nn-launcher.exe" | cut -d' ' -f1)"
-            printf '%s  nn-appc-launcher.exe\n%s  nn-launcher.exe\n' "$e" "$p" > "$d/SHA256SUMS"
-            { echo "launchers=ok"; echo "experiment_sha256=$e"; echo "product_sha256=$p"; } >> "$GITHUB_OUTPUT"
-            echo "::notice::staged launchers for commit $GITHUB_SHA (experiment $e, product $p)"
+            e="$(hash "$d/nn-appc-launcher.exe")"; p="$(hash "$d/nn-launcher.exe")"
+            if [ "$e" = "$BUILT_EXPERIMENT" ] && [ "$p" = "$BUILT_PRODUCT" ]; then
+              printf '%s  nn-appc-launcher.exe\n%s  nn-launcher.exe\n' "$e" "$p" > "$d/SHA256SUMS"
+              { echo "launchers=ok"; echo "experiment_sha256=$e"; echo "product_sha256=$p"; } >> "$GITHUB_OUTPUT"
+              echo "::notice::staged launchers for commit $GITHUB_SHA (experiment $e, product $p)"
+            else
+              echo "::warning::a launcher changed after its build step (staged experiment $e, built $BUILT_EXPERIMENT; staged product $p, built $BUILT_PRODUCT); nothing was staged, the own-runner job will not start"
+            fi
           else
             echo "::warning::the launchers were not staged (a build or the release record check failed); the own-runner job will not start"
           fi
@@ -251,7 +269,9 @@ jobs:
         with:
           name: windows-appcontainer-launchers
           path: ${{ runner.temp }}/downloaded-launchers
+      # Every later step that starts a launcher runs only when this step succeeded (`steps.verify.outcome == 'success'`, never a bare always()).
       - name: Verify the downloaded launchers against the hosted job's hashes, then place them
+        id: verify
         shell: bash
         env:
           EXPECT_EXPERIMENT: ${{ needs.hosted.outputs.experiment_sha256 }}
@@ -263,7 +283,8 @@ jobs:
           [ "${#EXPECT_EXPERIMENT}" -eq 64 ] && [ "${#EXPECT_PRODUCT}" -eq 64 ] || { echo "::error::a hash from the hosted job is not 64 hex digits"; exit 1; }
           src="$RUNNER_TEMP/downloaded-launchers"; ok="$RUNNER_TEMP/verified-launchers"; dest=experiments/windows-appcontainer/launcher/target/release
           rm -rf "$ok"
-          check() { got="$(sha256sum "$1" | cut -d' ' -f1)"; if [ "$got" != "$2" ]; then echo "::error::$1 has SHA-256 $got, the hosted job built $2; nothing was run"; exit 1; fi; }
+          # from standard input: with a file name containing a backslash (any $RUNNER_TEMP path here) GNU sha256sum writes "\<hash>"
+          check() { got="$(sha256sum -b < "$1" | cut -d' ' -f1)"; if [ "$got" != "$2" ]; then echo "::error::$1 has SHA-256 $got, the hosted job built $2; nothing was run"; exit 1; fi; }
           check "$src/nn-appc-launcher.exe" "$EXPECT_EXPERIMENT"
           check "$src/nn-launcher.exe" "$EXPECT_PRODUCT"
           node scripts/native-launcher.mjs verify --file "$src/nn-launcher.exe" --record "$src/nn-launcher.record.json"
@@ -283,7 +304,7 @@ jobs:
           exit "$rc"
       - name: Child-program ladder as the runner service
         shell: bash
-        if: always()
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 25
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
@@ -296,7 +317,7 @@ jobs:
       # backend, the same commands as the hosted job. Installing the launcher (an account, folder ACLs) is not done here: that needs a separate go-ahead.
       - name: Product launcher info as the runner service
         shell: bash
-        if: always()
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 5
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
@@ -308,17 +329,36 @@ jobs:
           grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"
       - name: G05 containment cases through the native backend (one confined start, node runner)
         shell: bash
-        if: always()
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 20
+        # A profile name used only by this job (not the product's default NimbleNewtAgent), so the clean-up step below can remove it without touching anything else.
         env:
           NIMBLENEWT_WIN_LAUNCHER: ${{ runner.temp }}\verified-launchers\nn-launcher.exe
           NIMBLENEWT_WIN_CONTROL_DIR: ${{ runner.temp }}\nn-native
+          NIMBLENEWT_WIN_PROFILE: NimbleNewtOwnRunnerG05
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out/g05-native"
           rc=0
           node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
           { echo "## G05 containment cases, native backend (own Windows runner, service)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      # `info` and the G05 backend each create a container profile in the runner service's account and the product launcher never deletes one (the experiment harness steps above remove their own).
+      # Both names are used only by this job; they are removed here with the verified experiment launcher (same source, which has `delete-profile`), hashed once more first, so the run leaves no profile
+      # behind on the owner's machine. A profile that cannot be removed is reported, not fatal.
+      - name: Remove the container profiles this job made
+        shell: bash
+        if: ${{ always() && steps.verify.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          EXPECT_EXPERIMENT: ${{ needs.hosted.outputs.experiment_sha256 }}
+        run: |
+          exe=experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe
+          got="$(sha256sum -b < "$exe" | cut -d' ' -f1)"
+          if [ "$got" != "$EXPECT_EXPERIMENT" ]; then echo "::error::$exe has SHA-256 $got, the hosted job built $EXPECT_EXPERIMENT; not run"; exit 1; fi
+          for n in NimbleNewtProductCheck NimbleNewtOwnRunnerG05; do
+            rc=0; out="$("$exe" delete-profile --name "$n" 2>&1)" || rc=$?
+            if [ "$rc" -eq 0 ]; then echo "removed the container profile $n"; else echo "::warning::the container profile $n was not removed (exit $rc): $(printf '%s\n' "$out" | node scripts/redact-log.mjs | tail -n 1)"; fi
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
