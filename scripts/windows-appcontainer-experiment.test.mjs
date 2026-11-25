@@ -8,7 +8,7 @@ import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { classifyError, isEntryPoint, runProbes, summarize, REPORT_PREFIX } from "../experiments/windows-appcontainer/probe.mjs";
+import { classifyError, isEntryPoint, isolatedStuck, runProbes, spawnIsolated, summarize, REPORT_PREFIX } from "../experiments/windows-appcontainer/probe.mjs";
 import {
   ALL_PROBE_IDS, CASE_IDS, aclReadBack, grantedPaths, PROBE_NODE_OPTIONS, SECRETS, stderrHead, adminNeeded, buildChildEnv, buildCommandLine, buildFixturePlan, buildLauncherArgs, buildProbeConfig, buildReport, collectWitness,
   REBUILT_LABEL, chooseProbeReport, createFixtures, extractProbeReport, judgeCell, judgeProbe, makeTarball, matrixCells, parseLauncherLine, pickOutboundHost, quoteWindowsArg, removeTree, renderMarkdown,
@@ -82,7 +82,9 @@ test("the child environment is built only from named values and fixture folders"
   assert.equal(env.npm_config_offline, "true");
   assert.equal(env.HOME, "C:\\fx\\home");
   assert.equal(env.SystemRoot, "C:\\Windows");
-  for (const key of Object.keys(process.env)) if (!["PATH", "HOME", "TMPDIR", "TEMP", "TMP"].includes(key.toUpperCase())) assert.ok(!(key in env) || ["SystemRoot", "windir", "ComSpec", "PATHEXT"].includes(key) || key.startsWith("npm_config_") || key.startsWith("GIT_"), `leaked ${key}`);
+  // round 4: the programs the probe starts get the same Node options as the probe itself (as the product's launcher would set them)
+  assert.equal(env.NODE_OPTIONS, "--preserve-symlinks --preserve-symlinks-main");
+  for (const key of Object.keys(process.env)) if (!["PATH", "HOME", "TMPDIR", "TEMP", "TMP"].includes(key.toUpperCase())) assert.ok(!(key in env) || ["SystemRoot", "windir", "ComSpec", "PATHEXT", "NODE_OPTIONS"].includes(key) || key.startsWith("npm_config_") || key.startsWith("GIT_"), `leaked ${key}`);
 });
 
 // ------------------------------------------------------------------------------------------------ fixtures
@@ -521,9 +523,9 @@ test("the workflow runs only by hand, pins its actions, gates the own-runner job
   assert.equal([...wf.matchAll(/timeout-minutes: 45/g)].length >= 1, true);
   assert.ok(wf.includes("scripts/redact-log.mjs"));
   // Both run steps keep the harness's exit code through the redaction pipe and still write the summary.
-  // seven hosted steps (round 3: ladder, git, cases, links, timing, firewall; round 3b: npm) and two own-runner steps; each keeps the harness's exit code and writes its summary
-  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 9);
-  for (const mode of ["ladder", "git", "npm", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (45000|90000|120000)`));
+  // six hosted steps (round 4: spawn first; cases, npm, links, timing, firewall) and two own-runner steps (cases, spawn); each keeps the harness's exit code and writes its summary
+  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 8);
+  for (const mode of ["spawn", "npm", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (15000|45000|90000|120000)`));
   assert.match(wf, /own_runner:\n\s+description:[^\n]*\n\s+type: boolean\n\s+default: false/);
   assert.ok(!/secrets\./.test(wf));
   assert.ok(wf.includes("actions/upload-artifact@"));
@@ -992,11 +994,15 @@ test("the real probe leaves the fixtures as it found them after the protected-na
     assert.equal(by["extra-protect-rename-dir"].actual, "allowed");
     assert.ok(existsSync(plan.workspace) && existsSync(plan.protectedDir));
     assert.ok(!existsSync(`${plan.protectedDir}-renamed`) && !existsSync(`${plan.workspace}-renamed`) && !existsSync(`${plan.protectedDir}-away`));
-    assert.ok(by["diag-spawn-modes"].attempts.length === 3 && by["diag-spawn-modes"].attempts.every((a) => a.outcome === "allowed"));
+    // four modes (files with a stdin file, inherit, pipes, ignore): unconfined, every one works
+    assert.ok(by["diag-spawn-modes"].attempts.length === 4 && by["diag-spawn-modes"].attempts.every((a) => a.outcome === "allowed"));
     assert.equal(by["diag-nul-open"].attempts[0].outcome, "skipped"); // not Windows
     // the tool outputs went to files that were removed again
     assert.deepEqual(readdirSync(plan.scratch).filter((f) => f.startsWith("tool-")), []);
-    assert.ok(readFileSync(join(exp, "probe.mjs"), "utf8").includes('stdio: fdOut === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", fdOut, fdErr]'));
+    // the tools take their standard input from an empty FILE and write to files, and are started from a worker thread (round 4: "ignore" makes libuv open the NUL device, which the container cannot)
+    const probeSrc = readFileSync(join(exp, "probe.mjs"), "utf8");
+    assert.ok(probeSrc.includes('stdin: base ? "file" : "pipe", out: base ? "files" : "pipe"'));
+    assert.ok(!/stdio: \[?"ignore"/.test(probeSrc.slice(probeSrc.indexOf("async function runTool("), probeSrc.indexOf("results that survive a hang"))));
   } finally { removeTree(dir); }
 });
 
@@ -1022,7 +1028,8 @@ test("diagnostics have no verdict; the protected-name operations, the own juncti
 
 test("configurations: eight network/LPAC cells plus the no-protection contrast, capabilities and conditions named, arguments carry them in order", () => {
   const cells = configCells();
-  assert.deepEqual(cells.map((c) => c.id), ["ac-nocap", "ac-nocap-noprotect", "ac-inet-private", "ac-inet-private-fwblock", "ac-inet-private-loopback", "ac-inet-private-loopback-fwblock", "ac-inet-private-loopback-byname", "lpac-optout-reg", "lpac-optout-reg-com"]);
+  assert.deepEqual(cells.map((c) => c.id), ["ac-nocap", "ac-nocap-noprotect", "ac-inet-private", "ac-inet-private-fwblock", "ac-inet-private-loopback", "ac-inet-private-loopback-fwblock", "ac-inet-private-loopback-byname", "lpac-optout-reg", "lpac-optout-reg-com",
+    "ac-nocap-deny-strong", "ac-nocap-sealed", "ac-nocap-sealed-root", "ac-nocap-sealed-root-nolimits", "ac-inet-private-sealed-root", "lpac-optout-reg-com-sealed-root"]);
   const by = Object.fromEntries(cells.map((c) => [c.id, c]));
   assert.equal(by["ac-inet-private-loopback-byname"].loopbackExempt, "name");
   assert.deepEqual(by["ac-inet-private"].capabilities, ["internetClient", "privateNetworkClientServer"]);
@@ -1144,8 +1151,8 @@ test("a probe that stopped early shows where: the partial report names the step 
 });
 
 test("command line: the new modes, no default variant list for the firewall, and the firewall's default variant carries the capabilities its name says", async () => {
-  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall"]);
-  for (const m of ["cases", "git", "npm", "links", "timing"]) assert.equal(parseCli(["--mode", m]).mode, m);
+  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall", "spawn"]);
+  for (const m of ["cases", "git", "npm", "links", "timing", "spawn"]) assert.equal(parseCli(["--mode", m]).mode, m);
   assert.equal(parseCli([]).variantSpec, undefined);
   // round 2 ran this experiment WITHOUT the capabilities because "all" was passed on and the first variant (no capability) was taken
   for (const spec of [undefined, "all"]) {
@@ -1176,9 +1183,10 @@ test("the workflow has one step per mode, each after the first with if: always()
   const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
   assert.match(hosted, /timeout-minutes: 75/);
   const steps = hosted.split(/\n {6}- /).filter((x) => /run-experiment\.mjs/.test(x));
-  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["ladder", "git", "npm", "cases", "links", "timing", "firewall"]);
+  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["spawn", "cases", "npm", "links", "timing", "firewall"]);
   steps.forEach((st, i) => assert.equal(/\n\s+if: always\(\)/.test(st), i > 0, `step ${i}`));
-  assert.match(steps[3], /--mode cases --timeout-ms 90000/);
+  assert.match(steps[1], /--mode cases --timeout-ms 90000/);
+  assert.match(steps[0], /--mode spawn --timeout-ms 15000/);
   assert.ok(steps.every((st) => /timeout-minutes: \d+/.test(st)));
   const own = wf.slice(wf.indexOf("  own-runner:"));
   assert.match(own, /default: false|inputs\.own_runner == true/);
@@ -1456,11 +1464,12 @@ test("the real probe writes one RESULT line per step before its end line, each d
       assert.ok(iRes < iEnd, `RESULT before end for ${id}`);
     }
     const attempts = lines.filter((l) => / ms ATTEMPT /.test(l));
-    assert.equal(attempts.length, 3);
+    assert.equal(attempts.length, 4);
     assert.ok(attempts.every((l) => l.includes('"id":"diag-spawn-modes"')));
     const order = lines.filter((l) => / start /.test(l)).map((l) => l.split(" start ")[1]);
-    assert.equal(order.at(-1), "diag-spawn-modes");
-    assert.ok(order.indexOf("tool-npm-ci-offline") < order.indexOf("diag-spawn-modes"));
+    // round 4: the spawn diagnostic runs after the protected-name operations and BEFORE the tools (each of its starts is made from a worker thread with a limit of its own)
+    assert.ok(order.indexOf("extra-protect-rename-parent") < order.indexOf("diag-spawn-modes"));
+    assert.ok(order.indexOf("diag-spawn-modes") < order.indexOf("tool-node-version"));
     assert.ok(order.indexOf("extra-protect-rename-parent") < order.indexOf("tool-node-version"), "the protected-name operations run before the tools that start programs");
     // rebuilding from the complete file gives the same steps as the final report
     const rebuilt = rebuildFromProgress(readFileSync(plan.progressFile, "utf8"));
@@ -1481,7 +1490,7 @@ test("a spawned child always ends: a program that never exits is killed at the t
   assert.ok(missing.error);
   const src = readFileSync(join(exp, "probe.mjs"), "utf8").split(/\r?\n/).filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
   assert.ok(!/spawnSync|execSync|execFileSync/.test(src), "no synchronous child process call in the probe's code");
-  assert.match(src, /for \(const \[name, run\] of modes\) \{[\s\S]*emit\(attempt\);/, "each mode's result line is written before the next mode starts");
+  assert.match(src, /for \(const \[name, mode\] of modes\) \{[\s\S]*emit\(attempt\);/, "each mode's result line is written before the next mode starts");
 });
 
 test("the watchdog worker ends a process whose main thread is blocked, after writing the partial progress and the rebuilt report", () => {
@@ -1815,4 +1824,284 @@ test("round 3b: the workflow runs the npm step and every step keeps its own limi
   assert.ok((wf.match(/if: always\(\)/g) ?? []).length >= 6);
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   for (const needle of ["Round 3b", "rebuilt from progress", "worker", "--mode npm", "open-test"]) assert.ok(readme.includes(needle), needle);
+});
+
+// ------------------------------------------------------------------------------------------------ round 4: protected-name layouts, spawn ladder
+
+import {
+  JOB_MODES, PIPE_DIAG_SCRIPT, SPAWN_STEP_SCRIPT, buildSpawnArgs, jobArgs, judgeSpawn, parseStepResult, renderSpawnMarkdown, runSpawnLadder, selectSpawnVariants, spawnVariants, stepFiles, stepProgram, summarizeSpawn, targetCommand,
+} from "../experiments/windows-appcontainer/round4.mjs";
+import { namedDacls } from "../experiments/windows-appcontainer/run-experiment.mjs";
+
+
+/** Splits a Windows command line into its arguments (the CommandLineToArgvW rules for quotes and backslashes), to read back what buildCommandLine wrote. */
+function splitCommandLine(text) {
+  const args = [];
+  let cur = "";
+  let inQuote = false;
+  let started = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      let n = 0;
+      while (text[i] === "\\") { n++; i++; }
+      if (text[i] === '"') { cur += "\\".repeat(Math.floor(n / 2)); if (n % 2 === 1) cur += '"'; else inQuote = !inQuote; } else { cur += "\\".repeat(n); i--; }
+      started = true;
+    } else if (ch === '"') { inQuote = !inQuote; started = true; }
+    else if (/\s/.test(ch) && !inQuote) { if (started) { args.push(cur); cur = ""; started = false; } }
+    else { cur += ch; started = true; }
+  }
+  if (started) args.push(cur);
+  return args;
+}
+
+test("round 4 cells: the layouts are named, the arguments carry the layout, the workspace entry, the DACL dumps and the job limits", () => {
+  const cells = configCells();
+  const by = Object.fromEntries(cells.map((c) => [c.id, c]));
+  assert.equal(by["ac-nocap"].protectMode, "deny-write");
+  assert.equal(by["ac-nocap"].rootMode, "modify");
+  assert.equal(by["ac-nocap-deny-strong"].protectMode, "deny-strong");
+  assert.equal(by["ac-nocap-sealed"].protectMode, "seal");
+  assert.equal(by["ac-nocap-sealed-root"].rootMode, "modify-root");
+  assert.equal(by["ac-nocap-sealed-root-nolimits"].limits, "none");
+  assert.equal(by["lpac-optout-reg-com-sealed-root"].aapPolicy, "optout");
+  assert.deepEqual(by["ac-inet-private-sealed-root"].capabilities, ["internetClient", "privateNetworkClientServer"]);
+  const plan = buildFixturePlan("C:\\fx");
+  const pairs = (a, flag) => a.flatMap((x, i) => (x === flag ? [a[i + 1]] : []));
+  const a = buildLauncherArgs(by["ac-nocap-sealed-root"], plan, sampleCtx(plan));
+  assert.deepEqual(pairs(a, "--grant"), ["modify-root:C:\\fx\\ws", "modify:C:\\fx\\home", "modify:C:\\fx\\scratch", "ro:C:\\fx\\probe", "seal:C:\\fx\\ws\\.git"]);
+  assert.deepEqual(pairs(a, "--dump"), ["C:\\fx\\ws", "C:\\fx\\ws\\.git", "C:\\fx\\ws\\.git\\config"]);
+  assert.ok(a.includes("--ui-limits") && a.includes("--memory-mb"));
+  const none = buildLauncherArgs(by["ac-nocap-sealed-root-nolimits"], plan, sampleCtx(plan));
+  assert.ok(!none.includes("--ui-limits") && !none.includes("--memory-mb") && !none.includes("--active-processes"));
+  assert.deepEqual(pairs(none, "--timeout-ms"), ["90000"]);
+  // the older cells are unchanged: the deny entry, the plain modify on the workspace
+  const old = buildLauncherArgs(by["ac-nocap"], plan, sampleCtx(plan));
+  assert.deepEqual(pairs(old, "--grant"), ["modify:C:\\fx\\ws", "modify:C:\\fx\\home", "modify:C:\\fx\\scratch", "ro:C:\\fx\\probe", "deny-write:C:\\fx\\ws\\.git"]);
+  const noprot = buildLauncherArgs(by["ac-nocap-noprotect"], plan, sampleCtx(plan));
+  assert.ok(!noprot.some((x) => /^(deny-write|deny-strong|seal):/.test(String(x))));
+});
+
+test("round 4 DACL dumps: the container's own SID is named before the scrubber turns every SID into one word", () => {
+  const sid = "S-1-15-2-1-2-3-4-5-6-7";
+  const d = namedDacls([{ path: "C:\\x\\ws\\.git", sddl: `D:PAI(D;OICI;0x1;;;${sid})(A;;FA;;;S-1-5-21-1-2-3-1001)` }], sid);
+  assert.equal(d[0].sddl, "D:PAI(D;OICI;0x1;;;<container>)(A;;FA;;;S-1-5-21-1-2-3-1001)");
+  assert.equal(namedDacls(undefined, sid), undefined);
+  assert.equal(scrubText(d[0].sddl, {}), "D:PAI(D;OICI;0x1;;;<container>)(A;;FA;;;<sid>)");
+  const md = renderMarkdown(buildReport({ now: "t", host: { platform: "win32", elevated: false, sessionId: 0 }, cells: [{ id: "c", dims: { lpac: false, protect: true, protectMode: "seal" }, launch: { ok: true, childStarted: true, exitCode: 0, daclsBefore: d, daclsAfter: d }, softGrantFailures: [], plantNotes: [], probeReport: "ok", results: ALL_PROBE_IDS.map((id) => ({ id, group: "case", expect: "denied", verdict: "pass", actual: "denied", detail: "", attempts: [] })), startupDenials: [] }], profile: {}, cleanup: { profileDeleted: true } }));
+  assert.match(md, /DACL after the grants, `ws\\.git`: `D:PAI\(D;OICI;0x1;;;<container>\)/);
+  assert.match(md, /protected-name layout seal; workspace folder entry modify; job limits all/);
+});
+
+test("the launcher source (round 4): the layered layouts are built by hand in a fixed order, a sealed folder inherits nothing, the DACLs can be dumped, every new call is documented", () => {
+  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  for (const c of ["InitializeAcl", "AddAce", "AddAccessAllowedAceEx", "AddAccessDeniedAceEx", "GetLengthSid", "ConvertSecurityDescriptorToStringSecurityDescriptorW"]) { assert.ok(src.includes(`${c}(`), `${c} not used`); assert.ok(readme.includes(c), `${c} missing in README`); }
+  assert.match(src, /"deny-strong" => Some\(Mode::DenyStrong\), "seal" => Some\(Mode::Seal\), "modify-root" => Some\(Mode::ModifyRoot\)/);
+  assert.match(src, /unsafe fn build_layered\(/);
+  // seal: one deny (everything but read and execute) first, the allow (read and execute) after the old explicit entries, the DACL protected, inherited entries of the container dropped
+  assert.match(src, /Mode::Seal => \(build_layered\(old, sid, &\[\(true, Mode::DenyStrong\.mask\(\), INHERIT_CI_OI\)\], &\[\(false, Mode::Seal\.mask\(\), INHERIT_CI_OI\)\], true, true\)\?, true\)/);
+  assert.match(src, /DACL_SECURITY_INFORMATION \| PROTECTED_DACL_SECURITY_INFORMATION/);
+  // modify-root: the folder itself without DELETE, everything inside with it (an inherit-only entry)
+  assert.match(src, /\(false, modify & !DELETE, 0\), \(false, modify, INHERIT_CI_OI \| INHERIT_ONLY\)/);
+  // a revoke of a seal lets the folder inherit again
+  assert.match(src, /remove_explicit\(&wpath, old, sid, mode == Mode::Seal\)/);
+  assert.match(src, /UNPROTECTED_DACL_SECURITY_INFORMATION/);
+  // the DACL dumps: after the grants and again after the program ended; a read-only `dump` command
+  assert.match(src, /j\.raw\("daclsBefore", dump_json\(&a\.dump\)\)/);
+  assert.match(src, /j\.raw\("daclsAfter", dump_json\(&a\.dump\)\)/);
+  assert.match(src, /"dump" => \{/);
+  assert.match(src, /"--dump" => a\.dump\.push/);
+  // the one process-creation call is still the only one
+  assert.equal(src.match(/CreateProcessW\(/g).length, 1);
+  for (const banned of ["CreateProcessAsUser", "CreateProcessWithToken", "BREAKAWAY"]) assert.ok(!src.includes(banned), banned);
+});
+
+test("spawn ladder variants: unique ids, the dimensions the brief names are all there, the native steps use no libuv", () => {
+  const all = spawnVariants();
+  assert.equal(new Set(all.map((v) => v.id)).size, all.length);
+  const spawn = all.filter((v) => v.kind === "spawn");
+  // the full matrix: job limits on and off x four stdio modes x four programs
+  for (const jobs of ["all", "none"]) for (const stdio of ["pipe", "inherit", "files", "ignore"]) for (const target of ["node-copy", "node-installed", "cmd", "hostname"]) assert.ok(spawn.some((v) => v.id === `${jobs}-${stdio}-${target}` && v.jobs === jobs && v.stdio === stdio && v.target === target), `${jobs}-${stdio}-${target}`);
+  assert.ok(spawn.some((v) => v.detached === true) && spawn.some((v) => v.windowsHide === false));
+  assert.deepEqual([...new Set(spawn.map((v) => v.jobs))].sort(), Object.keys(JOB_MODES).sort());
+  assert.ok(spawn.some((v) => v.container === "lpac-optout-reg-com"));
+  const native = all.filter((v) => v.kind === "native").map((v) => v.id);
+  assert.deepEqual(native, ["native-cmd-node-all", "native-cmd-hostname-all", "native-cmd-node-none", "native-cmd-hostname-none", "diag-named-pipe"]);
+  assert.equal(selectSpawnVariants("all-pipe-hostname,none-files-cmd").length, 2);
+  assert.throws(() => selectSpawnVariants("nope"), /unknown spawn variant/);
+  assert.deepEqual(jobArgs("all"), ["--memory-mb", "4096", "--active-processes", "64", "--ui-limits"]);
+  assert.deepEqual(jobArgs("none"), []);
+  assert.deepEqual(jobArgs("ui-only"), ["--ui-limits"]);
+  assert.deepEqual(jobArgs("no-ui"), ["--memory-mb", "4096", "--active-processes", "64"]);
+  assert.deepEqual(jobArgs("active-only"), ["--active-processes", "64"]);
+  assert.deepEqual(jobArgs("memory-only"), ["--memory-mb", "4096"]);
+  // every container named exists in the ladder's list
+  for (const v of all) assert.ok(ladderVariants().some((c) => c.id === v.container), v.container);
+});
+
+test("spawn ladder arguments: grants, the container, the job flags, the node options, the step's own JSON, a 15 s limit", () => {
+  const plan = { ...buildFixturePlan("C:\\fx"), binDir: "C:\\fx\\ws\\bin" };
+  const ctx = { profileName: "P", nodeExe: "C:\\node\\node.exe", programDirs: ["C:\\node"], systemRoot: "C:\\Windows", pathDirs: ["C:\\node"] };
+  const v = spawnVariants().find((x) => x.id === "none-files-node-copy");
+  const files = stepFiles(v, plan);
+  const a = buildSpawnArgs(v, plan, ctx, files);
+  const pairs = (flag) => a.flatMap((x, i) => (x === flag ? [a[i + 1]] : []));
+  assert.deepEqual(pairs("--grant"), ["modify:C:\\fx\\ws", "modify:C:\\fx\\home", "modify:C:\\fx\\scratch", "ro:C:\\fx\\probe"]);
+  assert.deepEqual(pairs("--grant-soft"), ["rx:C:\\node"]);
+  assert.deepEqual(pairs("--timeout-ms"), ["15000"]);
+  assert.ok(!a.includes("--memory-mb") && !a.includes("--ui-limits") && !a.includes("--active-processes"));
+  assert.ok(pairs("--env").includes("NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main"));
+  const cmdline = pairs("--cmdline")[0];
+  assert.match(cmdline, /^C:\\node\\node\.exe --preserve-symlinks --preserve-symlinks-main C:\\fx\\probe\\spawn-step\.js /);
+  const cfg = JSON.parse(splitCommandLine(cmdline).at(-1));
+  assert.equal(cfg.stdio, "files");
+  assert.equal(cfg.target, "C:\\fx\\ws\\bin\\node.exe");
+  assert.equal(cfg.timeoutMs, 5000);
+  const lpac = buildSpawnArgs(spawnVariants().find((x) => x.id === "lpac-all-pipe-node-installed"), plan, ctx, files);
+  assert.deepEqual(lpac.flatMap((x, i) => (x === "--aap-policy" ? [lpac[i + 1]] : [])), ["optout"]);
+  assert.deepEqual(lpac.flatMap((x, i) => (x === "--capability" ? [lpac[i + 1]] : [])), ["registryRead", "lpacCom"]);
+  // native steps run cmd.exe, which starts the program itself
+  const nat = stepProgram(spawnVariants().find((x) => x.id === "native-cmd-node-all"), plan, ctx, files);
+  assert.equal(nat.exe, "C:\\Windows\\System32\\cmd.exe");
+  assert.match(nat.cmdline, /\/c C:\\node\\node\.exe -e 0$/);
+  assert.equal(targetCommand("hostname", plan, ctx, "m").file, "C:\\Windows\\System32\\hostname.exe");
+  assert.equal(targetCommand("node-installed", plan, ctx, "C:\\m").marker, true);
+});
+
+test("the step script really starts one grandchild in every stdio mode and tells how far it got; the named-pipe script is valid", () => {
+  const dir = tmp();
+  try {
+    writeFileSync(join(dir, "spawn-step.js"), SPAWN_STEP_SCRIPT);
+    writeFileSync(join(dir, "pipe-diag.js"), PIPE_DIAG_SCRIPT);
+    assert.equal(spawnSync(process.execPath, ["--check", join(dir, "pipe-diag.js")]).status, 0);
+    for (const stdio of ["pipe", "inherit", "files", "ignore"]) {
+      const base = join(dir, `s-${stdio}`);
+      const cfg = { target: process.execPath, args: ["-e", `require('fs').writeFileSync(${JSON.stringify(`${base}.marker`)},'ran')`], stdio, detached: false, windowsHide: true, base, timeoutMs: 15_000 };
+      const r = spawnSync(process.execPath, [join(dir, "spawn-step.js"), JSON.stringify(cfg)], { encoding: "utf8", timeout: 30_000 });
+      const res = parseStepResult(r.stdout);
+      assert.equal(res?.outcome, "exit", stdio);
+      assert.equal(res.status, 0, stdio);
+      assert.ok(existsSync(`${base}.marker`), `${stdio}: the grandchild ran`);
+      const steps = readFileSync(`${base}.progress`, "utf8").trim().split(/\r?\n/).map((l) => l.replace(/^\d+ ms /, ""));
+      assert.deepEqual(steps.slice(0, 3).map((x) => x.split(" ")[0]), ["start", "before-spawn", "spawn-returned"]);
+      assert.ok(steps.at(-1).startsWith("done"));
+    }
+    // a program that does not exist is an error code, not a hang; a child that never ends is killed at the step's timer and says so
+    const missing = spawnSync(process.execPath, [join(dir, "spawn-step.js"), JSON.stringify({ target: join(dir, "no-such-program"), args: [], stdio: "pipe", base: join(dir, "m"), timeoutMs: 5000 })], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(parseStepResult(missing.stdout).outcome, "error");
+    assert.equal(parseStepResult(missing.stdout).code, "ENOENT");
+    const never = spawnSync(process.execPath, [join(dir, "spawn-step.js"), JSON.stringify({ target: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], stdio: "pipe", base: join(dir, "n"), timeoutMs: 500 })], { encoding: "utf8", timeout: 30_000 });
+    assert.equal(parseStepResult(never.stdout).outcome, "timeout");
+    assert.equal(parseStepResult("noise\nNN-SPAWN-RESULT:{bad"), undefined);
+  } finally { removeTree(dir); }
+});
+
+test("spawn outcomes: works, EPERM, a hang inside the call, a hang after it, a refused launcher, native steps", () => {
+  const v = spawnVariants().find((x) => x.id === "all-pipe-node-installed");
+  const line = { childStarted: true, childExitCode: 0, timedOut: false, elapsedMs: 40 };
+  const out = (o) => `NN-SPAWN-RESULT:${JSON.stringify(o)}\n`;
+  assert.equal(judgeSpawn(v, line, out({ outcome: "exit", status: 0 }), "0 ms start\n1 ms before-spawn\n", true).outcome, "works");
+  assert.equal(judgeSpawn(v, line, out({ outcome: "exit", status: 0 }), "", false).outcome, "ran-no-marker");
+  assert.equal(judgeSpawn(v, line, out({ outcome: "exit", status: 3 }), "", true).outcome, "exit-3");
+  const eperm = judgeSpawn(v, line, out({ outcome: "error", code: "EPERM", phase: "spawn-call" }), "", false);
+  assert.equal(eperm.outcome, "EPERM");
+  assert.equal(judgeSpawn(v, line, out({ outcome: "timeout", phase: "child-did-not-end" }), "", true).outcome, "hang-child");
+  const hung = { childStarted: true, childExitCode: 124, timedOut: true };
+  assert.equal(judgeSpawn(v, hung, "", "0 ms start\n2 ms before-spawn\n", false).outcome, "hang-in-spawn");
+  assert.equal(judgeSpawn(v, hung, "", "0 ms start\n2 ms before-spawn\n3 ms spawn-returned pid=4\n", true).outcome, "hang-child");
+  assert.equal(judgeSpawn(v, hung, "", "", false).outcome, "no-result");
+  assert.equal(judgeSpawn(v, line, "", "", false).outcome, "no-result");
+  assert.equal(judgeSpawn(v, { childStarted: false, stage: "create-process", error: "CreateProcessW failed: 5" }, "", "", false).outcome, "launcher-refused");
+  assert.equal(judgeSpawn(v, undefined, "", "", false).outcome, "launcher-refused");
+  const nat = spawnVariants().find((x) => x.id === "native-cmd-node-all");
+  assert.equal(judgeSpawn(nat, line, "", "", undefined).outcome, "works");
+  assert.equal(judgeSpawn(nat, { ...line, childExitCode: 1 }, "", "", undefined).outcome, "exit-1");
+  assert.equal(judgeSpawn(nat, hung, "", "", undefined).outcome, "hang-in-spawn");
+  const pipe = spawnVariants().find((x) => x.id === "diag-named-pipe");
+  assert.equal(judgeSpawn(pipe, line, 'NN-PIPE-RESULT:{"server":"listening","client":"ok"}\n', "", undefined).outcome, "works");
+  assert.equal(judgeSpawn(pipe, line, 'NN-PIPE-RESULT:{"server":"EACCES"}\n', "", undefined).outcome, "no-result");
+  const sum = summarizeSpawn([{ outcome: "works", stdio: "pipe", jobs: "all", target: "cmd", container: "ac-nocap", id: "a" }, { outcome: "EPERM", stdio: "ignore", jobs: "all", target: "cmd", container: "ac-nocap", id: "b" }]);
+  assert.deepEqual(sum.working, ["a"]);
+  assert.deepEqual(sum.byStdio, { pipe: { works: 1, total: 1 }, ignore: { works: 0, total: 1 } });
+});
+
+test("spawn run: every step is a launcher run of its own, the outcomes follow the step's files, the grants are read back and the folders removed", async () => {
+  const base = tmp();
+  const calls = [];
+  const copies = [];
+  // a fake container: stdio "ignore" is refused (EPERM), "pipe" with every job limit hangs inside the call, everything else works; the native steps work
+  const behavior = (args, cmdline) => {
+    const m = cmdline.match(/spawn-step\.js (.*)$/);
+    if (!m) return /pipe-diag/.test(cmdline) ? { out: 'NN-PIPE-RESULT:{"server":"listening","client":"ok"}\n' } : {};
+    const cfg = JSON.parse(splitCommandLine(cmdline).at(-1));
+    const progress = (txt) => writeFileSync(`${cfg.base}.progress`, txt);
+    if (cfg.stdio === "ignore") { progress("0 ms start\n1 ms before-spawn\n"); return { out: `NN-SPAWN-RESULT:${JSON.stringify({ outcome: "error", code: "EPERM", phase: "spawn-call" })}\n` }; }
+    if (cfg.stdio === "pipe" && args.includes("--ui-limits")) { progress("0 ms start\n1 ms before-spawn\n"); return { timedOut: true, exit: 124 }; }
+    progress("0 ms start\n1 ms before-spawn\n2 ms spawn-returned pid=1\n");
+    writeFileSync(`${cfg.base}.marker`, "ran");
+    return { out: `NN-SPAWN-RESULT:${JSON.stringify({ outcome: "exit", status: 0 })}\n` };
+  };
+  try {
+    const r = await runSpawnLadder({ launcherPath: "fake", exec: ladderFake(behavior, calls), tmpBase: base, tools: { ...gitTools, programDirs: ["C:\\node"] }, platform: "linux", systemRoot: "C:\\Windows", now: () => "2026-11-26T00:00:00.000Z", copyFile: (from, to) => { copies.push(to); writeFileSync(to, "stub"); }, variantSpec: "all-ignore-cmd,all-pipe-node-installed,none-pipe-node-installed,none-files-node-copy,native-cmd-node-all,diag-named-pipe" });
+    assert.equal(r.ranAtAll, true);
+    const by = Object.fromEntries(r.report.variants.map((v) => [v.id, v]));
+    assert.equal(by["all-ignore-cmd"].outcome, "EPERM");
+    assert.equal(by["all-pipe-node-installed"].outcome, "hang-in-spawn");
+    assert.equal(by["none-pipe-node-installed"].outcome, "works");
+    assert.equal(by["none-files-node-copy"].outcome, "works");
+    assert.equal(by["native-cmd-node-all"].outcome, "works");
+    assert.equal(by["diag-named-pipe"].outcome, "works");
+    assert.deepEqual(r.report.summary.working, ["none-pipe-node-installed", "none-files-node-copy"]);
+    assert.equal(calls.filter((c) => c === "run").length, 6, "one launcher run per step");
+    assert.equal(copies.length, 1, "node.exe is copied into the workspace once");
+    assert.deepEqual(r.report.cleanup, { profileDeleted: true, foldersRemoved: 1, grantsLeft: 0, aclFirstReadBack: [] });
+    assert.ok(calls.includes("check") && calls.includes("delete-profile"));
+    assert.match(r.markdown, /\| all-pipe-node-installed \| ac-nocap \| all \| node-installed \| pipe \| false \| true \| hang-in-spawn \| before-spawn \|/);
+    assert.match(r.markdown, /Configurations of the script's grandchild that worked: none-pipe-node-installed, none-files-node-copy\./);
+    assert.match(r.markdown, /- all-ignore-cmd: EPERM \(spawn-call\)/);
+    assert.equal(readdirSync(base).length, 0);
+    const refused = await runSpawnLadder({ launcherPath: "fake", exec: () => ({ status: 125, stdout: JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "container" }), stderr: "" }), tmpBase: base, tools: gitTools, platform: "linux" });
+    assert.equal(refused.ranAtAll, false);
+    assert.equal(readdirSync(base).length, 0);
+  } finally { removeTree(base); }
+});
+
+test("an isolated spawn runs in a worker: it works, it is killed at its timer, a thread that never answers is reported as HUNG and counted, and the main thread is never blocked", async () => {
+  const ok = await spawnIsolated({ file: process.execPath, args: ["-e", "process.stdout.write('hi')"], stdin: "pipe", out: "pipe", timeoutMs: 20_000 });
+  assert.equal(ok.status, 0);
+  assert.equal(ok.stdout, "hi");
+  assert.equal(ok.phase, "spawn-returned");
+  const dir = tmp();
+  try {
+    const files = await spawnIsolated({ file: process.execPath, args: ["-e", "process.stdout.write('f')"], stdin: "file", out: "files", base: join(dir, "t"), timeoutMs: 20_000 });
+    assert.equal(files.status, 0);
+    assert.equal(readFileSync(join(dir, "t.out"), "utf8"), "f");
+    const never = await spawnIsolated({ file: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], stdin: "pipe", out: "pipe", timeoutMs: 300 });
+    assert.equal(never.error?.code, "ETIMEDOUT");
+    const missing = await spawnIsolated({ file: join(dir, "no-such"), args: [], stdin: "pipe", out: "pipe", timeoutMs: 5000 });
+    assert.equal(missing.error?.code, "ENOENT");
+  } finally { removeTree(dir); }
+  // a worker whose thread is stuck (here: a blocking wait, standing for a process creation that never returns): the main thread's timer answers HUNG, and keeps going
+  const before = isolatedStuck.count;
+  let ticks = 0;
+  const ticker = setInterval(() => { ticks++; }, 50);
+  const t = Date.now();
+  const hung = await spawnIsolated({ file: process.execPath, args: [], stdin: "pipe", out: "pipe", timeoutMs: 200, workerSource: `const { parentPort } = require("node:worker_threads"); parentPort.postMessage({ t: "phase", v: "before-spawn" }); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);` });
+  clearInterval(ticker);
+  assert.equal(hung.error?.code, "HUNG");
+  assert.equal(hung.phase, "before-spawn");
+  assert.equal(isolatedStuck.count, before + 1);
+  assert.ok(Date.now() - t < 4000, "answered by the main thread's timer, not by the stuck thread");
+  assert.ok(ticks >= 5, "the main thread's event loop kept running");
+  isolatedStuck.count = before;
+});
+
+test("round 4 probe: tools are skipped once a start has hung, and the spawn diagnostic has four modes that each write their own line", () => {
+  const src = readFileSync(join(exp, "probe.mjs"), "utf8");
+  assert.match(src, /options\.state\?\.spawnHung === true\) return \{ name, outcome: "skipped", code: "spawn-hung" \}/);
+  assert.match(src, /\["files, stdin from a file"[\s\S]*\["inherit"[\s\S]*\["pipes"[\s\S]*\["ignore"/);
+  assert.match(src, /isolatedStuck\.count > 0[\s\S]*process\.kill\(process\.pid, "SIGKILL"\)/);
+  // a probe step that hung or EPERM'd must not stop the cell: the diagnostic runs before the tools and never longer than 4 s + 1.5 s per mode
+  assert.match(src, /Math\.min\(4000, Math\.max\(1000, budget\.remaining\(\) - 4000\)\)/);
 });

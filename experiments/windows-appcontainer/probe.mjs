@@ -5,7 +5,7 @@
 // read the repository, so the harness copies this single file next to the config). Every created file is removed again where possible.
 // The report holds outcomes and error codes, never file contents or environment values.
 import { spawn } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import net from "node:net";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -109,6 +109,71 @@ export function spawnLimited(file, args, { stdio = "ignore", timeoutMs = 5000, c
   });
 }
 
+/** Isolated spawns whose worker never answered (the thread is stuck inside the operating system's process creation). Such a thread cannot be joined: the probe ends the process by a kill. */
+export const isolatedStuck = { count: 0 };
+
+// The worker side of `spawnIsolated`, as text (the container needs only this one file). It never throws and always posts a `done` message, unless the thread itself is stuck in the
+// native call, which is exactly what the main thread's own timer then reports as HUNG.
+const ISOLATED_SPAWN_SOURCE = `
+(() => {
+  const { workerData: d, parentPort } = require("node:worker_threads");
+  const { spawn } = require("node:child_process");
+  const fs = require("node:fs");
+  const send = (m) => { try { parentPort.postMessage(m); } catch {} };
+  const fds = [];
+  let settled = false, timer, child, stdout = "", stderr = "";
+  const finish = (v) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    for (const f of fds) { try { fs.closeSync(f); } catch {} }
+    send({ t: "done", result: { status: null, signal: null, stdout, stderr, ...v } });
+  };
+  try {
+    let sin = d.stdin, sout = d.out, serr = d.out;
+    if (d.stdin === "file") { fs.writeFileSync(d.base + ".in", ""); sin = fs.openSync(d.base + ".in", "r"); fds.push(sin); }
+    if (d.out === "files") { sout = fs.openSync(d.base + ".out", "w"); serr = fs.openSync(d.base + ".err", "w"); fds.push(sout, serr); }
+    send({ t: "phase", v: "before-spawn" });
+    child = spawn(d.file, d.args, { stdio: [sin, sout, serr], windowsHide: d.windowsHide !== false, detached: d.detached === true, cwd: d.cwd, env: d.env, shell: d.shell === true });
+    send({ t: "phase", v: "spawn-returned" });
+  } catch (e) { finish({ error: { code: (e && e.code) || "SPAWN" } }); return; }
+  timer = setTimeout(() => { try { child.kill(); } catch {} finish({ error: { code: "ETIMEDOUT" } }); }, d.timeoutMs);
+  if (child.stdout) child.stdout.on("data", (x) => { stdout += x; });
+  if (child.stderr) child.stderr.on("data", (x) => { stderr += x; });
+  child.once("error", (e) => finish({ error: { code: (e && e.code) || "SPAWN" } }));
+  child.once("close", (status, signal) => finish({ status, signal }));
+})();
+`;
+
+/**
+ * One child program, started from a WORKER THREAD, so that a process creation that never returns (round 3 and 4: a spawn from inside the container blocked its thread for good) cannot stop
+ * the probe: the main thread's own timer answers `HUNG` `timeoutMs` + 1.5 s after the start, and every other step goes on. `spec`: file, args, cwd, env, `stdin` (file: an empty file
+ * `<base>.in` | ignore | pipe | inherit), `out` (files: `<base>.out` and `<base>.err` | pipe | ignore | inherit), timeoutMs, detached, windowsHide, shell. Always resolves with
+ * {status, signal, stdout, stderr, phase, error?} (`workerSource` replaces the worker's code, for the tests only): `phase` is the last the worker reported (`before-spawn`, `spawn-returned`), which says whether the creation call itself returned.
+ */
+export function spawnIsolated(spec) {
+  return new Promise((resolveSpawn) => {
+    let phase = "not-started";
+    let settled = false;
+    let timer;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveSpawn({ status: null, signal: null, stdout: "", stderr: "", ...value, phase });
+    };
+    timer = setTimeout(() => { isolatedStuck.count++; done({ error: { code: "HUNG" } }); }, spec.timeoutMs + 1500);
+    let worker;
+    try { worker = new Worker(spec.workerSource ?? ISOLATED_SPAWN_SOURCE, { eval: true, workerData: { ...spec, env: spec.env ?? { ...process.env } } }); } catch (error) { done({ error: { code: error?.code ?? "WORKER" } }); return; }
+    worker.unref();
+    worker.on("message", (m) => {
+      if (m?.t === "phase") phase = m.v;
+      else if (m?.t === "done") { done(m.result); worker.terminate().catch(() => {}); }
+    });
+    worker.on("error", (error) => done({ error: { code: error?.code ?? "WORKER" } }));
+  });
+}
+
 let toolCounter = 0;
 /**
  * Runs a tool and returns {outcome, code, startupDenials}. `allowed` = it started and exited 0. Output goes to FILES in the scratch folder (not pipes: whether the probe's own
@@ -117,26 +182,25 @@ let toolCounter = 0;
  */
 async function runTool(name, file, args, options, denials) {
   const left = options.budget?.remaining?.() ?? Infinity;
-  const limit = Math.min(options.timeoutMs ?? 20_000, left - 1500);
+  const limit = Math.min(options.timeoutMs ?? 20_000, left - 1500 - 1500);
   if (limit < 1000) return { name, outcome: "skipped", code: "budget" };
+  if (options.state?.spawnHung === true) return { name, outcome: "skipped", code: "spawn-hung" };
   const dir = options.outDir;
   const base = dir ? join(dir, `tool-${process.pid}-${++toolCounter}`) : undefined;
-  let fdOut, fdErr;
-  try {
-    if (base) { fdOut = openSync(`${base}.out`, "w"); fdErr = openSync(`${base}.err`, "w"); }
-  } catch { fdOut = undefined; fdErr = undefined; }
-  const result = await spawnLimited(file, args, { timeoutMs: limit, cwd: options.cwd, env: options.env ?? process.env, shell: options.shell === true, stdio: fdOut === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", fdOut, fdErr] });
+  // Round 4: standard input is an empty FILE (opening the NUL device is refused to the container, and libuv opens it for "ignore"), output goes to files, and the start is made from a
+  // worker thread with a limit of its own, so that a process creation that never returns is a HUNG result and not the end of the probe.
+  const result = await spawnIsolated({ file, args, cwd: options.cwd, env: options.env ?? { ...process.env }, shell: options.shell === true, stdin: base ? "file" : "pipe", out: base ? "files" : "pipe", base, timeoutMs: limit });
   let stdout = result.stdout ?? "";
   let stderr = result.stderr ?? "";
-  if (fdOut !== undefined) {
-    try { closeSync(fdOut); closeSync(fdErr); } catch { /* ignored */ }
+  if (base) {
     try { stdout = readFileSync(`${base}.out`, "utf8"); stderr = readFileSync(`${base}.err`, "utf8"); } catch { /* ignored */ }
-    try { rmSync(`${base}.out`, { force: true }); rmSync(`${base}.err`, { force: true }); } catch { /* ignored */ }
+    for (const x of [".in", ".out", ".err"]) { try { rmSync(`${base}${x}`, { force: true }); } catch { /* ignored */ } }
   }
   const text = `${stdout}\n${stderr}`;
   for (const line of text.split(/\r?\n/)) if (STARTUP_DENIAL_PATTERN.test(line)) denials.push({ tool: name, line: line.trim().slice(0, 240) });
   if (result.error) {
-    if (result.error.code) denials.push({ tool: name, line: `spawn error ${result.error.code}` });
+    if (result.error.code === "HUNG" && options.state) options.state.spawnHung = true;
+    if (result.error.code) denials.push({ tool: name, line: `spawn error ${result.error.code}${result.error.code === "HUNG" ? ` (${result.phase})` : ""}` });
     return { name, outcome: classifyError(result.error), code: result.error.code === "ETIMEDOUT" ? "TIMEOUT" : (result.error.code ?? "SPAWN") };
   }
   if (result.status === 0) return { name, outcome: "allowed", note: `exit 0, ${stdout.trim().split(/\r?\n/)[0]?.slice(0, 60) ?? ""}` };
@@ -313,6 +377,7 @@ export async function runProbes(cfg, hooks = {}) {
     await add("deny-write-protected-name", "case", "denied", () => [
       attemptSync("edit", () => writeFileSync(cfg.protectedName.config, "changed")),
       attemptSync("create", () => writeFileSync(join(cfg.protectedName.dir, "nn-hook"), "x")),
+      attemptSync("rename-file", () => { const to = `${cfg.protectedName.config}-renamed`; renameSync(cfg.protectedName.config, to); try { renameSync(to, cfg.protectedName.config); } catch { /* the harness's witness reports it */ } }),
       attemptSync("delete", () => rmSync(cfg.protectedName.config)),
     ]);
 
@@ -391,10 +456,36 @@ export async function runProbes(cfg, hooks = {}) {
       return [a];
     });
 
+    // The spawn diagnostic (round 4). Each mode starts `node -e 0` from a worker thread with a 4 s limit of its own (a hung creation is answered by the main thread's timer after 5.5 s), and
+    // its result line is written before the next mode starts. It runs BEFORE the tools: the tools use the first configuration that works here, and are skipped when a start hangs.
+    await add("diag-spawn-modes", "diag", "allowed", async (emit) => {
+      const out = join(cfg.scratch, `spawn-modes-${process.pid}`);
+      const limit = () => Math.min(4000, Math.max(1000, budget.remaining() - 4000));
+      const modes = [
+        ["files, stdin from a file", { stdin: "file", out: "files" }],
+        ["inherit", { stdin: "inherit", out: "inherit" }],
+        ["pipes", { stdin: "pipe", out: "pipe" }],
+        ["ignore", { stdin: "ignore", out: "ignore" }],
+      ];
+      const res = [];
+      for (const [name, mode] of modes) {
+        let attempt;
+        const r = await spawnIsolated({ file: process.execPath, args: ["-e", "0"], base: out, timeoutMs: limit(), ...mode });
+        for (const x of [".in", ".out", ".err"]) { try { rmSync(`${out}${x}`, { force: true }); } catch { /* ignored */ } }
+        const label = `spawn node with stdio ${name}`;
+        if (r.error) attempt = { name: label, outcome: classifyError({ code: r.error.code === "ETIMEDOUT" ? "TIMEOUT" : r.error.code }), code: r.error.code === "ETIMEDOUT" ? "TIMEOUT" : r.error.code, note: `phase ${r.phase}` };
+        else if (r.status !== 0) attempt = { name: label, outcome: "error", code: `exit ${r.status}` };
+        else attempt = { name: label, outcome: "allowed" };
+        res.push(attempt);
+        emit(attempt);
+      }
+      return res;
+    });
+
     // Tools (all expected to work with the minimal grants). Each has a limit of its own and none runs past the probe's budget.
-    const toolEnv = process.env;
+    const toolEnv = { ...process.env };
     const t = cfg.tools;
-    const base = { env: toolEnv, outDir: cfg.scratch, budget };
+    const base = { env: toolEnv, outDir: cfg.scratch, budget, state: { spawnHung: false } };
     await add("tool-node-version", "tool", "allowed", async () => [await runTool("node", process.execPath, ["--version"], { ...base, timeoutMs: 15_000 }, startupDenials)]);
     await add("tool-git-version", "tool", "allowed", async () => [await runTool("git", t.git, ["--version"], { ...base, timeoutMs: 15_000 }, startupDenials)]);
     await add("tool-git-init-commit", "tool", "allowed", async () => {
@@ -415,31 +506,6 @@ export async function runProbes(cfg, hooks = {}) {
         attemptSync("installed-file", () => { if (!existsSync(join(t.npmProject, "node_modules", "nn-tiny", "index.js"))) throw Object.assign(new Error("missing"), { code: "ENOENT" }); })]
       : [skip("npm ci", "npm-cli.js not found")]));
 
-    // LAST (round 3b): the diagnostic that starts `node -e 0` from inside the container. In round 3 it hung in a synchronous spawn, after every other step had finished and before the
-    // report was printed. Each mode is an asynchronous spawn with a 5 s kill timer, and its result line is written before the next mode starts.
-    await add("diag-spawn-modes", "diag", "allowed", async (emit) => {
-      const out = join(cfg.scratch, `spawn-modes-${process.pid}`);
-      const limit = () => Math.min(5000, Math.max(1000, budget.remaining() - 1500));
-      const modes = [
-        ["files", async () => { const a = openSync(`${out}.o`, "w"); const b = openSync(`${out}.e`, "w"); try { return await spawnLimited(process.execPath, ["-e", "0"], { stdio: ["ignore", a, b], timeoutMs: limit() }); } finally { closeSync(a); closeSync(b); } }],
-        ["pipes", () => spawnLimited(process.execPath, ["-e", "0"], { stdio: ["pipe", "pipe", "pipe"], timeoutMs: limit() })],
-        ["ignore", () => spawnLimited(process.execPath, ["-e", "0"], { stdio: "ignore", timeoutMs: limit() })],
-      ];
-      const res = [];
-      for (const [name, run] of modes) {
-        let attempt;
-        try {
-          const r = await run();
-          if (r.error) throw Object.assign(new Error("spawn"), { code: r.error.code === "ETIMEDOUT" ? "TIMEOUT" : r.error.code });
-          if (r.status !== 0) throw Object.assign(new Error("exit"), { code: `exit ${r.status}` });
-          attempt = { name: `spawn node with stdio ${name}`, outcome: "allowed" };
-        } catch (error) { attempt = { name: `spawn node with stdio ${name}`, outcome: classifyError(error), code: error?.code ?? null }; }
-        res.push(attempt);
-        emit(attempt);
-      }
-      for (const x of [".o", ".e"]) { try { rmSync(`${out}${x}`, { force: true }); } catch { /* ignored */ } }
-      return res;
-    });
   } finally { clearTimeout(watchdog); worker?.stop(); }
 
   return {
@@ -465,6 +531,11 @@ if (isMain) {
   try {
     const cfg = JSON.parse(readFileSync(process.argv[2], "utf8"));
     const report = await runProbes(cfg);
+    if (isolatedStuck.count > 0) {
+      // A worker thread is stuck inside the operating system's process creation and cannot be joined, so a normal exit would wait for it: write the report straight to the output and end the process.
+      try { writeSync(1, `${REPORT_PREFIX}${JSON.stringify(report)}\n`); } catch { /* the progress file has the results */ }
+      process.kill(process.pid, "SIGKILL");
+    }
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
   } catch (error) {
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify({ schema: PROBE_SCHEMA, fatal: String(error?.code ?? error?.name ?? "error"), probes: [], startupDenials: [] })}\n`);

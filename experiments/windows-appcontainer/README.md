@@ -13,6 +13,7 @@ service, it needs UAC and it is Pro-only.
 
 | File | What it is |
 | --- | --- |
+| `round4.mjs` | Round 4: the child-program ladder (`--mode spawn`) and the step script that runs inside the container. |
 | `npm.mjs` | Round 3b: why `npm ci --offline` fails in the container and which variant makes it pass (`--mode npm`). |
 | `round3.mjs` | Round 3: the git ladder, the junction/ACL-propagation check and the timing measurement (and the reader of the NUL device's security descriptor). |
 | `launcher/` | A small Rust program (`nn-appc-launcher`, one dependency: `windows-sys`) that creates or reuses the container profile, grants and later revokes ACL entries, starts one program in the container and the job, and prints one JSON line. |
@@ -76,12 +77,13 @@ nn-appc-launcher run --exe PATH --cmdline "TEXT" --cwd PATH --stdout FILE --stde
     [--name PROFILE] [--grant MODE:PATH]... [--grant-soft MODE:PATH]... [--env NAME=VALUE]...
     [--aap-policy none|optout|optin] [--capability SID-or-NAME]... [--win32k-off] [--no-kill-on-close]
     [--memory-mb N] [--active-processes N] [--ui-limits] [--timeout-ms N]
-    [--stdin nul|nul-rw|file:PATH|pipe|pipe-open] [--stdout-pipe] [--stderr-pipe] [--stdout-nul-rw] [--stderr-nul-rw]
+    [--stdin nul|nul-rw|file:PATH|pipe|pipe-open] [--stdout-pipe] [--stderr-pipe] [--stdout-nul-rw] [--stderr-nul-rw] [--dump PATH]...
+nn-appc-launcher dump --dump PATH...    (read-only: the DACL of each path as SDDL)
 nn-appc-launcher open-test      (meant to run AS THE CHILD inside the container; prints the NUL device open results)
 nn-appc-launcher info | revoke --grant MODE:PATH... | check --grant MODE:PATH... | grant --grant MODE:PATH... | delete-profile      (all take --name)
 ```
 
-Modes: `ro`, `rx`, `modify`, `deny-write`. A `--grant` that fails stops the run before anything starts; a `--grant-soft` (program install
+Modes: `ro`, `rx`, `modify`, `deny-write`, and (round 4) `deny-strong`, `seal`, `modify-root`. A `--grant` that fails stops the run before anything starts; a `--grant-soft` (program install
 folders, which may need rights the account does not have) is recorded and the run goes on. The child gets **only** the `--env` values (nothing is
 inherited), its standard input from `NUL`, and its standard output and error written straight to the two files (the launcher does not copy
 them after the fact, and has no cap on their size; the job's memory limit does not bound disk output). All grants are revoked
@@ -120,6 +122,8 @@ It fails closed: no container, no run. There is no other process-creation call i
 | `CreatePipe`, `SetHandleInformation` | Round 3: an anonymous pipe for the child's standard input (`--stdin pipe`, `pipe-open`) or output (`--stdout-pipe`, `--stderr-pipe`); the end the launcher keeps is made non-inheritable. |
 | `ReadFile` | Round 3: a launcher thread copies a child's output pipe into its output file until every write end is closed. |
 | `CreateFileW` (again), `_wopen`, `_close`, `_errno` | Round 3b, `open-test` only: open the NUL device with each flag combination git's start-up could use (read/write access, `FILE_SHARE_READ`/`FILE_SHARE_WRITE` with and without `FILE_SHARE_DELETE`, query-only access, `NUL` and `\\.\NUL`, an inheritable handle) and with the C runtime's `_wopen` as git's `mingw_open` does (`O_RDWR`, with and without `O_BINARY`, read-only, write-only); the result of each (system error, or the C runtime's errno) is printed. The three C runtime functions are declared by hand (no new crate). |
+| `InitializeAcl`, `AddAccessDeniedAceEx`, `AddAccessAllowedAceEx`, `AddAce`, `GetLengthSid` | Round 4: build a DACL by hand in a fixed order (the `seal` and `modify-root` modes, see "Round 4"): the container's new entries, the old entries that stay (copied as they were, or as explicit ones when the DACL is about to be protected), none of the container's old ones. `SetEntriesInAcl` is still used for the older modes. |
+| `ConvertSecurityDescriptorToStringSecurityDescriptorW` | Round 4: print a path's DACL as SDDL (`--dump PATH`, and the `dump` command), so the run shows what the grants really wrote. |
 | `CloseHandle`, `FreeSid`, `LocalFree` | Release what was acquired. |
 
 Capabilities go into the security-capabilities attribute (`SE_GROUP_ENABLED` each, in the order given). A name that cannot be resolved stops the run before anything starts (stage `capability`).
@@ -252,3 +256,34 @@ the package SID stops that connection; (3) the rule affects only that container.
 a profile made with `CreateAppContainerProfile` is its name), read back by the package SID from `LoopbackExempt -s`, the same clients, then removed (also in the finally path). The cases mode has the cell
 `ac-inet-private-loopback-byname` for the same exemption. A control from a Low-integrity process was NOT built: starting a process with a modified token needs `CreateProcessAsUser` or `CreateProcessWithTokenW`, which the
 launcher's source test forbids on purpose (one process-creation call, always with the container attributes); the harness's own connect from outside any container remains the control.
+
+## Round 4: the protected-name layouts and child programs
+
+Round 3b (hosted run 45517848440) gave the first verdicts: every case held except `deny-write-protected-name` (and the four `extra-protect-*` operations), which FAILED in all nine cells, also in the cells with the deny entry on `.git`
+(and the contrast cell without it was identical, so the deny entry did nothing); and every `tool-*` probe failed with `spawn error EPERM`. Round 4 is about those two things only.
+
+```
+node experiments/windows-appcontainer/run-experiment.mjs --mode spawn --out out [--variants id,id] [--timeout-ms 15000]
+node experiments/windows-appcontainer/run-experiment.mjs --mode cases --out out [--cells id,id]      (fifteen cells: the six new ones are at the end)
+```
+
+**Protected names (A).** What the launcher can write, by mode (the `--grant MODE:PATH` forms):
+* `deny-write` (rounds 1-3b): a DENY entry (write, append, attributes, delete, delete-child) for the container, inheritable, merged by `SetEntriesInAcl` into the folder's DACL. Did nothing in 3b.
+* `deny-strong`: the same entry with every right except read and execute (adds change-DACL and take-ownership), same merge.
+* `seal`: the DACL is built by hand and PROTECTED (it inherits nothing from the workspace, so the workspace grant's write rights never reach it): one inheritable DENY entry (everything but read and execute) first, then the other accounts' entries
+  (copied as explicit ones), then one inheritable ALLOW entry (read and execute). The protection does not rely on a deny entry being honoured: the container simply holds no write, delete or delete-child right on the folder or anything in it.
+  A revoke removes the container's entries and lets the folder inherit again.
+* `modify-root` (on the workspace folder itself): one entry for the folder alone (modify WITHOUT delete) and one inherit-only entry for everything inside (modify). The container can then change everything in the workspace but cannot delete, rename or move the workspace folder itself
+  (a rename needs DELETE on the folder or delete-child on its parent, which the container never had on the parent).
+Windows allows a delete or rename when the object's own DELETE right OR the parent's delete-child right is held, so protecting a folder from rename and delete needs both: no DELETE on the folder (seal) and no delete-child on its parent (`modify` never granted it).
+The cells: `ac-nocap` (deny-write, as before), `ac-nocap-deny-strong`, `ac-nocap-sealed`, `ac-nocap-sealed-root` (seal + modify-root), `ac-nocap-sealed-root-nolimits` (the same with no job limits), `ac-inet-private-sealed-root` and `lpac-optout-reg-com-sealed-root`.
+Every cell's launcher call now takes `--dump` for the workspace, `.git` and `.git\config`: the DACL (SDDL text, the container's SID named `<container>`) is recorded after the grants were applied and again after the program ended, so the next run shows whether the entry was written and in which order, and whether anything changed it.
+The probe's protected-name case also tries to rename the config file (undone at once).
+
+**Child programs (B).** The probe now sets `NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main` for the programs it starts (the harness's child environment carries it, as the product's launcher would). Its tools take their standard input from an
+empty FILE and write to files, and every start is made from a worker thread with a limit of its own (`spawnIsolated`): a process creation that never returns costs that step 5.5 s as a `HUNG` result and does not stop the probe, the diagnostic or the other tools. After a hung start the remaining tools are skipped (`spawn-hung`).
+`diag-spawn-modes` has four modes (files with a stdin file, inherit, pipes, ignore), each at most 5.5 s, and runs before the tools. If a worker is stuck the probe ends the process with a kill after writing its report (a stuck thread cannot be joined).
+`--mode spawn` (`round4.mjs`) is the ladder: each step is a launcher run of its own (15 s) in which a node script starts ONE grandchild (async `child_process.spawn`) and writes progress lines before the call, right after it returns and at the end; a marker file written by a node grandchild says whether it ever ran.
+Dimensions: stdio (pipe, inherit, files = stdin from a file plus output files, ignore), job limits (all, none, and each of UI, active-process and memory alone), program (node.exe copied into the workspace, node.exe in the granted install folder, cmd.exe, hostname.exe),
+libuv's `detached` and `windowsHide`, the container (plain and LPAC), plus native steps (cmd.exe starts node or hostname with the system's own process creation, no libuv) and a named-pipe diagnostic. Outcomes: works, EPERM or another code, hang-in-spawn, hang-child, ran-no-marker, exit-N, no-result.
+The suspects: libuv opens the NUL device for "ignore" and for a missing standard input (the container cannot open NUL: error 5), libuv creates named pipes for "pipe", and libuv assigns every non-detached child to a job of its own (nested inside the launcher's job).

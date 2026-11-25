@@ -3,6 +3,8 @@
 //   node run-experiment.mjs [--mode matrix|ladder|firewall|cases|git|npm|links|timing] [--out DIR] [--launcher PATH] [--cells all|id,id] [--variants all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
 //   --mode matrix (default): round 1's containment matrix. --mode ladder: round 2's smoke ladder (which programs start in which container variant). --mode firewall: round 2's
 //   "network cut by firewall" mini-experiment (needs administrator rights for the firewall rule). --timeout-ms is the per-cell (matrix) or per-step (ladder, firewall) limit.
+//   Round 4: --mode spawn is the child-program ladder (which stdio mode, job limits and program let a program inside the container start another one); --mode cases now also runs
+//   the protected-name layouts (deny-write, deny-strong, seal), the workspace folder entry modify-root and a no-limits cell, and keeps each cell under 90 s.
 //   Round 3: --mode cases runs the ten cases, the extra probes (junctions, protected-name operations), the diagnostics and the tools in seven container configurations (ac-nocap,
 //   ac-inet-private with and without an outbound block rule and a loopback exemption, two LPAC variants); --mode git is the git ladder; --mode links reads what a grant on the workspace
 //   did to the targets of junctions inside it; --mode timing measures start-up, a 100-file git commit and an offline npm ci. Every cell has a 90 s hard limit and the probe ends itself after 60 s.
@@ -21,6 +23,7 @@ import {
 } from "./lib.mjs";
 import { STEP_TIMEOUT_MS, netSetup, netTeardown, runFirewall, runLadder } from "./ladder.mjs";
 import { runNpmLadder } from "./npm.mjs";
+import { SPAWN_STEP_TIMEOUT_MS, runSpawnLadder } from "./round4.mjs";
 import { runGitLadder, runLinks, runTiming } from "./round3.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -143,7 +146,8 @@ export async function runExperiment(opts) {
           const line = parseLauncherLine(r.stdout);
           launch = line === undefined ? { ok: false, childStarted: false, stage: "no-launcher-answer", error: `the launcher printed no JSON line (exit ${r.status ?? r.error ?? "?"})` }
             : { ok: line.ok === true, childStarted: line.childStarted === true, stage: line.stage, error: line.error, exitCode: line.childExitCode, timedOut: line.timedOut === true, leftoverProcesses: line.leftoverProcesses,
-              elapsedMs: line.elapsedMs, allGrantsRevoked: line.allGrantsRevoked === true, grants: line.grants ?? [], stderrBytes: line.stderrBytes, stdoutBytes: line.stdoutBytes, hang: line.hang, capabilities: Array.isArray(line.capabilities) ? line.capabilities.map((c) => c.name) : undefined };
+              elapsedMs: line.elapsedMs, allGrantsRevoked: line.allGrantsRevoked === true, grants: line.grants ?? [], stderrBytes: line.stderrBytes, stdoutBytes: line.stdoutBytes, hang: line.hang,
+              daclsBefore: namedDacls(line.daclsBefore, packageSid), daclsAfter: namedDacls(line.daclsAfter, packageSid), capabilities: Array.isArray(line.capabilities) ? line.capabilities.map((c) => c.name) : undefined };
         }
         const stdoutText = safe(() => readFileSync(join(plan.outDir, "stdout.txt"), "utf8")) ?? "";
         // The probe wrote each step's result to the progress file the moment it had it: a report that never got printed (a hang, a kill) is rebuilt from those lines.
@@ -170,7 +174,7 @@ export async function runExperiment(opts) {
         try { removeTree(root); foldersRemoved++; } catch { notes.push("a fixture folder could not be removed"); }
       }
       resultsCells.push({
-        id: cell.id, sameAs: cell.sameAs, dims: { lpac: cell.lpac, win32kDisabled: cell.win32kDisabled, aapOptOut: cell.aapOptOut, aapPolicy: cell.aapPolicy, protect: cell.protect, capabilities: cell.capabilities ?? [], firewallBlock: cell.firewallBlock === true, loopbackExempt: Boolean(cell.loopbackExempt), loopbackExemptBy: cell.loopbackExempt === "name" ? "name" : "sid" },
+        id: cell.id, sameAs: cell.sameAs, dims: { lpac: cell.lpac, win32kDisabled: cell.win32kDisabled, aapOptOut: cell.aapOptOut, aapPolicy: cell.aapPolicy, protect: cell.protect, protectMode: cell.protect ? (cell.protectMode ?? "deny-write") : "none", rootMode: cell.rootMode ?? "modify", limits: cell.limits ?? "all", capabilities: cell.capabilities ?? [], firewallBlock: cell.firewallBlock === true, loopbackExempt: Boolean(cell.loopbackExempt), loopbackExemptBy: cell.loopbackExempt === "name" ? "name" : "sid" },
         launch, softGrantFailures: (launch.grants ?? []).filter((g) => g.soft && !g.applied).map((g) => ({ path: g.path, mode: g.mode, errorCode: g.errorCode })),
         plantNotes, probeReport, probeProgress: probeReport === "ok" ? [] : progressTail, results, startupDenials, stderrHead: errHead, aclFirstReadBack, aclLeft,
         net: { ...netState, ...(netCleanup ? { cleanup: netCleanup } : {}), summary: `${netState.summary}${netCleanup ? `; removed afterwards: rule ${netCleanup.ruleGone ? "gone" : "STILL THERE"}, exemption ${netCleanup.exemptGone ? "gone" : "STILL THERE"}` : ""}` },
@@ -190,9 +194,15 @@ export async function runExperiment(opts) {
   return { report, markdown: renderMarkdown(report), ranAtAll: true, names };
 }
 
+/** The DACLs the launcher dumped, with the container's own SID named (the scrubber would otherwise turn every SID into the same word). */
+export function namedDacls(list, packageSid) {
+  if (!Array.isArray(list)) return undefined;
+  return list.map((d) => ({ path: String(d?.path ?? ""), sddl: typeof packageSid === "string" && packageSid !== "" ? String(d?.sddl ?? "").replaceAll(packageSid, "<container>") : String(d?.sddl ?? "") }));
+}
+
 function safe(fn) { try { return fn(); } catch { return undefined; } }
 
-export const MODES = ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall"];
+export const MODES = ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall", "spawn"];
 
 export function parseCli(argv) {
   const o = { mode: "matrix", variantSpec: undefined, out: resolve("nn-appc-results"), launcherPath: join(here, "launcher", "target", "release", `nn-appc-launcher${process.platform === "win32" ? ".exe" : ""}`), cellSpec: "all", dryRun: false };
@@ -221,6 +231,7 @@ async function main() {
   let stem = "results";
   if (o.mode === "git") { stem = "git"; result = await runGitLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell }); }
   else if (o.mode === "npm") { stem = "npm"; result = await runNpmLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher }); }
+  else if (o.mode === "spawn") { stem = "spawn"; result = await runSpawnLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? SPAWN_STEP_TIMEOUT_MS, exec: execLauncher }); }
   else if (o.mode === "links") { stem = "links"; result = await runLinks({ ...common, exec: execLauncher, ps: execPowerShell }); }
   else if (o.mode === "timing") { stem = "timing"; result = await runTiming({ ...common, exec: execLauncher, spawn: spawnSync }); }
   else if (o.mode === "cases") { stem = "cases"; result = await runExperiment({ ...common, cells: selectCells(o.cellSpec, configCells()), ps: execPowerShell, exec: execLauncher }); }

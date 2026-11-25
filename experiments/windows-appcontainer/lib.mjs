@@ -80,8 +80,9 @@ export function matrixCells() {
  *   lpac-optout-reg-com       LPAC + registryRead + lpacCom.
  */
 export function configCells() {
-  const c = (id, o) => ({ id, lpac: false, win32kDisabled: false, aapOptOut: false, aapPolicy: "none", protect: true, sameAs: undefined, capabilities: [], firewallBlock: false, loopbackExempt: false, ...o });
+  const c = (id, o) => ({ id, lpac: false, win32kDisabled: false, aapOptOut: false, aapPolicy: "none", protect: true, protectMode: "deny-write", rootMode: "modify", limits: "all", sameAs: undefined, capabilities: [], firewallBlock: false, loopbackExempt: false, ...o });
   const net = ["internetClient", "privateNetworkClientServer"];
+  const sealed = { protectMode: "seal", rootMode: "modify-root" };
   return [
     c("ac-nocap", {}),
     c("ac-nocap-noprotect", { protect: false }),
@@ -92,6 +93,13 @@ export function configCells() {
     c("ac-inet-private-loopback-byname", { capabilities: net, loopbackExempt: "name" }),
     c("lpac-optout-reg", { lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead"] }),
     c("lpac-optout-reg-com", { lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead", "lpacCom"] }),
+    // Round 4: the protected-name layouts and the job limits. Each differs from `ac-nocap` in one way (except the last three, which combine the layout that worked).
+    c("ac-nocap-deny-strong", { protectMode: "deny-strong" }),
+    c("ac-nocap-sealed", { protectMode: "seal" }),
+    c("ac-nocap-sealed-root", sealed),
+    c("ac-nocap-sealed-root-nolimits", { ...sealed, limits: "none" }),
+    c("ac-inet-private-sealed-root", { ...sealed, capabilities: net }),
+    c("lpac-optout-reg-com-sealed-root", { ...sealed, lpac: true, aapOptOut: true, aapPolicy: "optout", capabilities: ["registryRead", "lpacCom"] }),
   ];
 }
 
@@ -257,6 +265,8 @@ export function buildChildEnv(plan, ctx, delimiter = ";") {
     PATH: ctx.pathDirs.join(delimiter),
     npm_config_cache: plan.npmCache, npm_config_offline: "true", npm_config_audit: "false", npm_config_fund: "false", npm_config_update_notifier: "false",
     npm_config_userconfig: join(plan.home, ".npmrc"), npm_config_globalconfig: join(plan.home, ".npmglobalrc"),
+    // As the product's launcher would set them: the programs the probe starts (npm) need the same Node options as the probe itself (lstat of C:\\ is refused to the container).
+    NODE_OPTIONS: PROBE_NODE_OPTIONS.join(" "),
     GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(plan.home, ".gitconfig"), GIT_TERMINAL_PROMPT: "0",
   };
   if (ctx.systemRoot) { env.SystemRoot = ctx.systemRoot; env.windir = ctx.systemRoot; env.ComSpec = win32.join(ctx.systemRoot, "System32", "cmd.exe"); env.PATHEXT = ".COM;.EXE;.BAT;.CMD"; }
@@ -280,13 +290,18 @@ export function buildLauncherArgs(cell, plan, ctx, limits = DEFAULT_LIMITS) {
   const args = ["run", "--name", ctx.profileName ?? PROFILE_NAME];
   const grant = (mode, path, soft = false) => args.push(soft ? "--grant-soft" : "--grant", `${mode}:${path}`);
   // Required grants: the container's own folders. Soft grants: the program folders it must execute from (they may belong to the system and need rights the account lacks).
-  grant("modify", plan.workspace); grant("modify", plan.home); grant("modify", plan.scratch); grant("ro", plan.probeDir);
-  if (cell.protect) grant("deny-write", plan.protectedDir);
+  // `modify-root` (round 4): the workspace folder itself may not be deleted or moved, everything inside may be modified.
+  grant(cell.rootMode ?? "modify", plan.workspace); grant("modify", plan.home); grant("modify", plan.scratch); grant("ro", plan.probeDir);
+  if (cell.protect) grant(cell.protectMode ?? "deny-write", plan.protectedDir);
   for (const dir of ctx.programDirs) grant("rx", dir, true);
   args.push("--aap-policy", cell.aapPolicy);
   for (const c of cell.capabilities ?? []) args.push("--capability", c);
   if (cell.win32kDisabled) args.push("--win32k-off");
-  args.push("--memory-mb", String(limits.memoryMb), "--active-processes", String(limits.activeProcesses), "--ui-limits", "--timeout-ms", String(limits.timeoutMs));
+  // `limits: "none"` (round 4): no job memory, process-count or UI limit (the job still kills everything when it closes).
+  if (cell.limits !== "none") args.push("--memory-mb", String(limits.memoryMb), "--active-processes", String(limits.activeProcesses), "--ui-limits");
+  args.push("--timeout-ms", String(limits.timeoutMs));
+  // What the grants really wrote, read from the DACLs after they were applied and again after the program ended (round 4: the protected-name diagnosis).
+  for (const d of [plan.workspace, plan.protectedDir, plan.protectedConfig]) args.push("--dump", d);
   args.push("--stdout", join(plan.outDir, "stdout.txt"), "--stderr", join(plan.outDir, "stderr.txt"), "--cwd", plan.workspace);
   for (const [k, v] of Object.entries(ctx.childEnv)) args.push("--env", `${k}=${v}`);
   args.push("--exe", ctx.nodeExe, "--cmdline", buildCommandLine(ctx.nodeExe, [...PROBE_NODE_OPTIONS, plan.probeFile, plan.configFile]));
@@ -519,7 +534,7 @@ export function renderMarkdown(report) {
   }
   for (const c of report.cells) {
     L.push(`## ${c.id}`, "");
-    L.push(`- Settings: LPAC ${c.dims.lpac ? "on" : "off"}, Win32k ${c.dims.win32kDisabled ? "disabled" : "enabled"}, AAP opt-out flag ${c.dims.aapOptOut ? "on" : "off"} (policy attribute: ${c.dims.aapPolicy}), protected-name deny ${c.dims.protect ? "on" : "off"}; capabilities ${(c.dims.capabilities ?? []).join(", ") || "none"}; outbound block rule ${c.dims.firewallBlock ? "yes" : "no"}; loopback exemption ${c.dims.loopbackExempt ? "yes" : "no"}.`);
+    L.push(`- Settings: LPAC ${c.dims.lpac ? "on" : "off"}, Win32k ${c.dims.win32kDisabled ? "disabled" : "enabled"}, AAP opt-out flag ${c.dims.aapOptOut ? "on" : "off"} (policy attribute: ${c.dims.aapPolicy}), protected-name layout ${c.dims.protectMode ?? (c.dims.protect ? "deny-write" : "none")}; workspace folder entry ${c.dims.rootMode ?? "modify"}; job limits ${c.dims.limits ?? "all"}; capabilities ${(c.dims.capabilities ?? []).join(", ") || "none"}; outbound block rule ${c.dims.firewallBlock ? "yes" : "no"}; loopback exemption ${c.dims.loopbackExempt ? "yes" : "no"}.`);
     if (c.net) L.push(`- Network set-up: ${c.net.summary}`);
     if (c.sameAs) L.push(`- Same configuration as ${c.sameAs} (no policy attribute); kept as a repeat.`);
     const l = c.launch;
@@ -527,6 +542,9 @@ export function renderMarkdown(report) {
     else L.push(`- Program ${l.timedOut ? "timed out" : `ended with ${l.exitCode}`} after ${l.elapsedMs ?? "?"} ms; leftover processes: ${l.leftoverProcesses ?? "?"}; all grants revoked: ${l.allGrantsRevoked}.`);
     if ((c.aclFirstReadBack ?? []).length > 0) L.push(`- ACL read-back after the run found entries left on: ${c.aclFirstReadBack.map((x) => `${x.path} (${x.entriesLeft})`).join("; ")}; after a second revoke: ${(c.aclLeft ?? []).length === 0 ? "none left" : c.aclLeft.map((x) => `${x.path} (${x.entriesLeft})`).join("; ")}.`);
     else if (c.aclLeft !== undefined) L.push("- ACL read-back of every granted path after the run: no entry left.");
+    for (const [label, list] of [["after the grants", l.daclsBefore], ["after the program ended", l.daclsAfter]]) {
+      if (Array.isArray(list)) for (const d of list) L.push(`- DACL ${label}, \`${d.path.replace(/^.*[\\/]ws/, "ws")}\`: \`${d.sddl.replaceAll("`", "'")}\``);
+    }
     if (c.softGrantFailures.length > 0) L.push(`- Soft grants refused: ${c.softGrantFailures.map((g) => `${g.mode} ${g.path} (error ${g.errorCode})`).join("; ")}.`);
     if (c.plantNotes.length > 0) L.push(`- Fixture notes: ${c.plantNotes.join("; ")}.`);
     if (c.probeReport !== "ok") L.push(`- Probe report: ${c.probeReport}.`);

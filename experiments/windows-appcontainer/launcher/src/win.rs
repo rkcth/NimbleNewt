@@ -74,14 +74,14 @@ impl Json {
 // ---------------------------------------------------------------------------------------------------------------- arguments
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode { Ro, Rx, Modify, DenyWrite }
+enum Mode { Ro, Rx, Modify, DenyWrite, DenyStrong, Seal, ModifyRoot }
 
 impl Mode {
     fn parse(s: &str) -> Option<Mode> {
-        match s { "ro" => Some(Mode::Ro), "rx" => Some(Mode::Rx), "modify" => Some(Mode::Modify), "deny-write" => Some(Mode::DenyWrite), _ => None }
+        match s { "ro" => Some(Mode::Ro), "rx" => Some(Mode::Rx), "modify" => Some(Mode::Modify), "deny-write" => Some(Mode::DenyWrite), "deny-strong" => Some(Mode::DenyStrong), "seal" => Some(Mode::Seal), "modify-root" => Some(Mode::ModifyRoot), _ => None }
     }
     fn name(self) -> &'static str {
-        match self { Mode::Ro => "ro", Mode::Rx => "rx", Mode::Modify => "modify", Mode::DenyWrite => "deny-write" }
+        match self { Mode::Ro => "ro", Mode::Rx => "rx", Mode::Modify => "modify", Mode::DenyWrite => "deny-write", Mode::DenyStrong => "deny-strong", Mode::Seal => "seal", Mode::ModifyRoot => "modify-root" }
     }
     fn mask(self) -> u32 {
         match self {
@@ -90,8 +90,15 @@ impl Mode {
             Mode::Modify => FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
             // What a protected name must not allow: writes, appends, attribute writes, delete, and delete-child on a folder.
             Mode::DenyWrite => FILE_GENERIC_WRITE & !SYNCHRONIZE & !READ_CONTROL | DELETE | FILE_DELETE_CHILD,
+            // Everything except reading and executing: writes, appends, attribute writes, delete, delete-child, change the DACL, take ownership.
+            Mode::DenyStrong => FILE_ALL_ACCESS & !FILE_GENERIC_READ & !FILE_GENERIC_EXECUTE,
+            // `seal` and `modify-root` build their own entries (see `layered_acl`); the mask shown is the allow entry of a seal.
+            Mode::Seal => FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+            Mode::ModifyRoot => FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
         }
     }
+    /// A mode that only takes rights away (a deny entry) rather than granting them.
+    fn is_deny(self) -> bool { matches!(self, Mode::DenyWrite | Mode::DenyStrong) }
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +129,7 @@ struct Args {
     stdout_nul: bool, // the child's standard output is the NUL device opened for reading and writing by the launcher (nothing is captured)
     stderr_nul: bool,
     capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
+    dump: Vec<String>, // paths whose DACL is printed as SDDL after the grants are applied and again after the child ended (repeatable --dump)
 }
 
 fn parse_args(raw: &[String]) -> Result<Args, String> {
@@ -146,7 +154,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--grant" | "--grant-soft" => {
                 let spec = value("--grant")?;
                 let (m, p) = spec.split_once(':').ok_or("--grant needs MODE:PATH")?;
-                let mode = Mode::parse(m).ok_or("grant mode must be ro, rx, modify or deny-write")?;
+                let mode = Mode::parse(m).ok_or("grant mode must be ro, rx, modify, deny-write, deny-strong, seal or modify-root")?;
                 a.grants.push(GrantSpec { mode, path: p.to_string(), soft: flag == "--grant-soft" });
             }
             // none: no attribute (a plain AppContainer). optout: the LPAC form. optin: the attribute present with the default value.
@@ -163,6 +171,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--stderr-pipe" => a.stderr_pipe = true,
             "--stdout-nul-rw" => a.stdout_nul = true,
             "--stderr-nul-rw" => a.stderr_nul = true,
+            "--dump" => a.dump.push(value("--dump")?),
             "--capability" => { let c = value("--capability")?; if c.is_empty() { return Err("--capability is empty".into()); } a.capabilities.push(c); }
             other => return Err(format!("unknown option {other}")),
         }
@@ -337,7 +346,7 @@ fn entry_count(path: &str, sid: PSID, inherited: bool) -> Result<u32, u32> {
 /// from it (DeleteAce, highest index first). The first round used SetEntriesInAcl with REVOKE_ACCESS, which left the container's deny entry on the
 /// protected `.git` folder in place on the hosted runner (read-back: still present, error 0x20000001); removing entries by hand does not depend on the mode.
 /// Returns Ok(true) when something was written.
-unsafe fn remove_explicit(wpath: &[u16], old: *const ACL, sid: PSID) -> Result<bool, u32> {
+unsafe fn remove_explicit(wpath: &[u16], old: *const ACL, sid: PSID, unprotect: bool) -> Result<bool, u32> {
     let size = (*old).AclSize as usize;
     // usize elements: an ACL is DWORD-aligned and the buffer is pointer-aligned.
     let mut buf = vec![0usize; size.div_ceil(size_of::<usize>())];
@@ -357,9 +366,106 @@ unsafe fn remove_explicit(wpath: &[u16], old: *const ACL, sid: PSID) -> Result<b
         }
     }
     if !removed { return Ok(false); }
-    let rc = SetNamedSecurityInfoW(wpath.as_ptr() as *mut u16, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), copy, null_mut());
+    // A sealed folder had its DACL protected (no inheritance); the revoke lets it inherit again.
+    let info = if unprotect { DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION } else { DACL_SECURITY_INFORMATION };
+    let rc = SetNamedSecurityInfoW(wpath.as_ptr() as *mut u16, SE_FILE_OBJECT, info, null_mut(), null_mut(), copy, null_mut());
     if rc != 0 { return Err(rc); }
     Ok(true)
+}
+
+// Round 4: entries built by hand, in a fixed order, so that the layout does not depend on how SetEntriesInAcl merges entries.
+const ACL_REV: u32 = 2; // ACL_REVISION
+const INHERIT_CI_OI: u32 = 0x3; // CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+const INHERIT_ONLY: u32 = 0x8; // INHERIT_ONLY_ACE
+const SDDL_REV_1: u32 = 1; // SDDL_REVISION_1
+
+/// One entry to add: (deny?, access mask, ACE flags).
+type NewAce = (bool, u32, u32);
+
+/// Builds a DACL from the old one: `front` entries (for the container), then the old explicit denies, then the old explicit entries of other kinds, `back` entries, then the
+/// old inherited ones. Every old entry that names the container is dropped (the explicit ones always; the inherited ones when `drop_inherited`). With `clear_inherited` the
+/// remaining inherited entries are copied as EXPLICIT ones (the DACL is about to be protected, so nothing is inherited any more). Returns the buffer (pointer-aligned) holding the ACL.
+unsafe fn build_layered(old: *const ACL, sid: PSID, front: &[NewAce], back: &[NewAce], drop_inherited: bool, clear_inherited: bool) -> Result<Vec<usize>, u32> {
+    let sid_len = GetLengthSid(sid) as usize;
+    let old_size = if old.is_null() { 8 } else { (*old).AclSize as usize };
+    let total = ((old_size + (front.len() + back.len()) * (16 + sid_len) + 16 + 3) & !3).min(0xFFF8); // an ACL length is a multiple of four
+    let mut buf = vec![0usize; total.div_ceil(size_of::<usize>())];
+    let acl = buf.as_mut_ptr() as *mut ACL;
+    if InitializeAcl(acl, total as u32, ACL_REV) == 0 { return Err(GetLastError()); }
+    let add_new = |e: &NewAce| -> Result<(), u32> {
+        let ok = if e.0 { AddAccessDeniedAceEx(acl, ACL_REV, e.2, e.1, sid) } else { AddAccessAllowedAceEx(acl, ACL_REV, e.2, e.1, sid) };
+        if ok == 0 { Err(GetLastError()) } else { Ok(()) }
+    };
+    // (type, inherited, pointer, size) of every old entry that stays.
+    let mut kept: Vec<(u8, bool, *mut c_void, usize)> = Vec::new();
+    if !old.is_null() {
+        for i in 0..(*old).AceCount as u32 {
+            let mut ace: *mut c_void = null_mut();
+            if GetAce(old, i, &mut ace) == 0 || ace.is_null() { continue; }
+            let header = &*(ace as *const ACE_HEADER);
+            let inherited = header.AceFlags & ACE_FLAG_INHERITED != 0;
+            if header.AceType == ACE_TYPE_ALLOWED || header.AceType == ACE_TYPE_DENIED {
+                let ace_sid = &(*(ace as *const ACCESS_ALLOWED_ACE)).SidStart as *const u32 as PSID;
+                if EqualSid(ace_sid, sid) != 0 && (!inherited || drop_inherited) { continue; }
+            }
+            kept.push((header.AceType, inherited && !clear_inherited, ace, header.AceSize as usize));
+        }
+    }
+    let copy = |e: &(u8, bool, *mut c_void, usize)| -> Result<(), u32> {
+        let mut bytes = vec![0u8; e.3];
+        std::ptr::copy_nonoverlapping(e.2 as *const u8, bytes.as_mut_ptr(), e.3);
+        if clear_inherited { bytes[1] &= !ACE_FLAG_INHERITED; } // byte 1 of an ACE is AceFlags
+        if AddAce(acl, ACL_REV, u32::MAX, bytes.as_ptr() as *const c_void, e.3 as u32) == 0 { Err(GetLastError()) } else { Ok(()) }
+    };
+    for e in front { add_new(e)?; }
+    for e in kept.iter().filter(|e| !e.1 && e.0 == ACE_TYPE_DENIED) { copy(e)?; }
+    for e in kept.iter().filter(|e| !e.1 && e.0 != ACE_TYPE_DENIED) { copy(e)?; }
+    for e in back { add_new(e)?; }
+    for e in kept.iter().filter(|e| e.1 && e.0 == ACE_TYPE_DENIED) { copy(e)?; }
+    for e in kept.iter().filter(|e| e.1 && e.0 != ACE_TYPE_DENIED) { copy(e)?; }
+    Ok(buf)
+}
+
+/// The two layered layouts.
+///  `seal` (a protected name such as `.git`): the folder's DACL becomes PROTECTED (it inherits nothing, so the workspace grant's write rights do not reach it); for the container it
+///    holds one deny entry (everything but read and execute, inheritable) and one allow entry (read and execute, inheritable). Other accounts' entries are kept, as explicit ones.
+///  `modify-root` (the workspace folder itself): the container may modify everything below it, and the folder itself too, except that it may not DELETE it (and so not rename or move it):
+///    one entry for the folder alone (modify without DELETE) and one inherit-only entry for everything inside (modify).
+unsafe fn layered_acl(wpath: &[u16], old: *const ACL, sid: PSID, mode: Mode) -> Result<(), u32> {
+    let modify = Mode::Modify.mask();
+    let (built, protect) = match mode {
+        Mode::Seal => (build_layered(old, sid, &[(true, Mode::DenyStrong.mask(), INHERIT_CI_OI)], &[(false, Mode::Seal.mask(), INHERIT_CI_OI)], true, true)?, true),
+        _ => (build_layered(old, sid, &[], &[(false, modify & !DELETE, 0), (false, modify, INHERIT_CI_OI | INHERIT_ONLY)], false, false)?, false),
+    };
+    let info = if protect { DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION } else { DACL_SECURITY_INFORMATION };
+    let rc = SetNamedSecurityInfoW(wpath.as_ptr() as *mut u16, SE_FILE_OBJECT, info, null_mut(), null_mut(), built.as_ptr() as *const ACL, null_mut());
+    if rc != 0 { Err(rc) } else { Ok(()) }
+}
+
+/// The DACL of a path as SDDL text (or `error N`), for the diagnosis of what the grants really wrote.
+fn dacl_sddl(path: &str) -> String {
+    unsafe {
+        let wpath = wide(path);
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        let rc = GetNamedSecurityInfoW(wpath.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), null_mut(), null_mut(), &mut sd);
+        if rc != 0 { return format!("error {rc}"); }
+        let mut text: *mut u16 = null_mut();
+        let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REV_1, DACL_SECURITY_INFORMATION, &mut text, null_mut());
+        let code = GetLastError();
+        LocalFree(sd as *mut c_void);
+        if ok == 0 || text.is_null() { return format!("convert error {code}"); }
+        let mut n = 0;
+        while *text.add(n) != 0 { n += 1; }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+        LocalFree(text as *mut c_void);
+        s
+    }
+}
+
+/// `[{"path":..,"sddl":..}]` for the paths given with --dump (a path that does not exist reports its error number).
+fn dump_json(paths: &[String]) -> String {
+    let parts: Vec<String> = paths.iter().map(|p| { let mut o = Json::new(); o.s("path", p); o.s("sddl", &dacl_sddl(p)); o.render() }).collect();
+    format!("[{}]", parts.join(","))
 }
 
 /// Adds (GRANT_ACCESS / DENY_ACCESS) or removes (a revoke) the container's explicit entries on a folder or file. Returns a Win32 error code.
@@ -374,14 +480,19 @@ fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32
         if rc != 0 { return Err(rc); }
         if revoke {
             let none = old.is_null() || explicit_aces(old, sid) == 0;
-            let written = if none { Ok(false) } else { remove_explicit(&wpath, old, sid) };
+            let written = if none { Ok(false) } else { remove_explicit(&wpath, old, sid, mode == Mode::Seal) };
             LocalFree(sd as *mut c_void);
             written?;
             return match explicit_count(path, sid) { Ok(0) => Ok(()), Ok(_) => Err(ERR_STILL_PRESENT), Err(e) => Err(e) };
         }
+        if matches!(mode, Mode::Seal | Mode::ModifyRoot) {
+            let r = layered_acl(&wpath, old, sid, mode);
+            LocalFree(sd as *mut c_void);
+            return r;
+        }
         let mut ea: EXPLICIT_ACCESS_W = zeroed();
         ea.grfAccessPermissions = mode.mask();
-        ea.grfAccessMode = if mode == Mode::DenyWrite { DENY_ACCESS } else { GRANT_ACCESS };
+        ea.grfAccessMode = if mode.is_deny() { DENY_ACCESS } else { GRANT_ACCESS };
         ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
         ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
         ea.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
@@ -571,6 +682,7 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
             Err(e) => { grants.items[last].error = Some(e); if !spec.soft { return Err(("grant", format!("grant {} on a required path failed: {e}", spec.mode.name()))); } }
         }
     }
+    if !a.dump.is_empty() { j.raw("daclsBefore", dump_json(&a.dump)); }
     // 2. The job, the three standard handles, the environment.
     let job = make_job(a).map_err(|e| ("job", e))?;
     // Standard input: NUL read-only (default), NUL read-write, a real file, an empty pipe (end of input at once) or a pipe held open until the child ends.
@@ -656,6 +768,7 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         GetExitCodeProcess(process.0, &mut code);
         if leftover != 0 { TerminateJobObject(job.0, 1); } // the program ended but left processes behind: end them too
         for d in drains.drain(..) { let _ = d.join(); } // every write end is closed by now (the job is ended), so the copies finish
+        if !a.dump.is_empty() { j.raw("daclsAfter", dump_json(&a.dump)); }
         j.s("stdin", &a.stdin);
         j.b("stdoutPipe", a.stdout_pipe);
         j.b("stderrPipe", a.stderr_pipe);
@@ -875,6 +988,13 @@ pub fn main() {
                     Outcome { j, code: 0 }
                 }
             }
+        }
+        "dump" => {
+            // Read-only: the DACL of each --dump path as SDDL.
+            let mut j = j;
+            j.raw("dacls", dump_json(&a.dump));
+            j.b("ok", true);
+            Outcome { j, code: 0 }
         }
         "delete-profile" => {
             let mut j = j;
