@@ -2,6 +2,8 @@
 
 Status: PLAN ONLY (2026-11-24, Claude agent). No code was written or run. No card is flipped. Nothing here changes the implementation plan's statuses.
 
+**Update 2026-11-25: the seven decisions in section 14 are decided by delegation (ASSUMPTION; the owner can overrule any of them), the native route is the Windows plan, and the cards were rewritten to match (A03b, G05, G06, H12r, H12i, A08c, Y02; see `implementation-notes.md`, "Native Windows plan revision"). Still a plan: no product code changed and no card flipped.**
+
 Why this exists. The owner decided on 2026-11-24 that the Windows Sandbox (`wsb`) route is not enough: it needs a signed-in interactive console session, `wsb start` was refused (access denied, 0x80070005) even in the owner's own elevated console session on Windows 11 Pro, its unattended and UAC story is unproven, and it exists only on Pro, Enterprise and Education, not Home. The owner wants a plan for Windows isolation that works **unattended** (a service; nobody signed in or at the keyboard; no UAC prompt at run time; at most one admin approval at install) and, if possible, on **Windows Home** too.
 
 ## 1. How to read the evidence labels
@@ -314,7 +316,7 @@ C2 assumes the flags in section 6.4 on a Linux host and that the daemon is not r
 
 | Card | Today | If A (WSL2) | If B (native) |
 | --- | --- | --- | --- |
-| A03b Windows Sandbox launcher (planned; depends on A03) | The Windows backend; session-dependent | Replaced by a "WSL distro" launcher that reuses the Linux plan; scope shrinks to a service-account WSL start plus health | Replaced by a native launcher (token, AppContainer, ACLs, job, cleanup, health probe). The Sandbox launcher code stays as an optional Pro tier or is retired by owner decision |
+| A03b Windows Sandbox launcher (planned; depends on A03; **rewritten 2026-11-25 to the native launcher, the "If B" column**) | The Windows backend; session-dependent | Replaced by a "WSL distro" launcher that reuses the Linux plan; scope shrinks to a service-account WSL start plus health | Replaced by a native launcher (token, AppContainer, ACLs, job, cleanup, health probe). The Sandbox launcher code stays as an optional Pro tier or is retired by owner decision |
 | G05 isolation evidence per OS (planned) | Needs unattended service identity after logout and reboot | Same wording; WSL start must be shown after logout and reboot | Same wording; the native launcher is easier to run in hosted CI. Case 9 gets a native variant |
 | G06 qualify actual Windows (planned) | Real Windows host | Unchanged; WSL adds "reboot with nobody signed in" evidence | Unchanged; path cases (Unicode, junctions, 260 chars) matter more because the agent works on real NTFS |
 | Y02 QA checkpoint 2 (planned; blocks P02 and P03) | Needs Windows launcher on real Windows | Needs WSL path on real Windows | Needs the native launcher on real Windows and hosted CI |
@@ -399,6 +401,20 @@ On **Linux and macOS with Docker**: "You can run NimbleNewt from a container ima
 The statement of what is and is not protected (both editions): files outside the agent's folders, the controller's data, saved credentials and the network are protected as tested by the ten containment cases for the commit in use; a Windows bug could still escape a native sandbox, because the PC's kernel is shared; the report names the tier in use.
 
 ## 14. Decisions the owner must make
+
+**Status 2026-11-25: all seven decided by delegation. ASSUMPTION 2026-11-25: the owner delegated these (nothing waits on him) and each takes the recommended answer, "yes", with the scope noted. The owner can overrule any of them at any time; an overruling changes the cards named in the notes entry "Native Windows plan revision", not the experiment.** The experiment (`experiments/windows-appcontainer/`, rounds 3b and 4 in `implementation-notes.md`) showed the native route is viable without Windows Sandbox, so decision 5 is taken on evidence, not only on the recommendation.
+
+| # | Decision | Decided 2026-11-25 (by delegation) | Cards it changes |
+| --- | --- | --- | --- |
+| 1 | A weaker-than-Linux native baseline is the Windows default, labelled as such | Yes. The native launcher is process-level and weaker than Linux's (the kernel is shared); the first release accepts that, and every launch record, the audit log and the docs say so plainly | A03b, G05, Y02 |
+| 2 | One administrator approval at install | Yes, once: the service account, the service registration and the folder rights. Nothing at run time, no UAC prompt | A03b |
+| 3 | No network route for Windows agents at first release | Yes. The container has no network capability, loopback is never exempted, and a recipe with a route is refused on Windows with a message saying so | H12i, A03b |
+| 4 | Trusted-host (no isolation) mode on Windows | Off by default; never automatic; shown as in section 7 | A03b (unchanged elsewhere) |
+| 5 | Retire Windows Sandbox as the main plan and stop the autologon work | Yes. A03b no longer implements the Sandbox launcher or an autologon/lock mode; the existing Sandbox code is not extended | A03b, H12r, A08c |
+| 6 | A Docker image on Linux and macOS | After the first release, as a deployment option; no per-task container backend in this plan; none for Windows isolation | none now (no card created) |
+| 7 | Docker naming in the docs | Name Docker Engine and Podman; mention Docker Desktop only as the user's own choice | docs only |
+
+The text below is the original question and recommendation for each, kept for the record.
 
 Only true product and security tradeoffs; everything else is my call (ASSUMPTION lines follow).
 

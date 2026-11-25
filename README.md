@@ -266,7 +266,7 @@ Authenticated principals, revisioned grants, the sandbox launchers, the protecte
 - [x] **A01** · P20 · Implement authenticated principals and capabilities _(needs S01, F02, S09, Y01)_
 - [x] **A02** · P21 · Implement revisioned grants and restrictions _(needs A01)_
 - [x] **A03** · P21 · Implement selected sandbox launcher _(needs A01, F03)_
-- [ ] **A03b** · P22 · Implement the Windows Sandbox launcher _(needs A03)_
+- [ ] **A03b** · P22 · Implement the native Windows launcher (AppContainer, Job Object, ACLs) _(needs A03)_
 - [x] **A04** · P22 · Implement protected filesystem and Git bridge _(needs A03, S05)_
 - [x] **A05** · P22 · Implement exact-operation review admission _(needs A02, S05, F07)_
 - [x] **A06** · P23 · Implement human pre-commit gate and attribution _(needs A04, A05)_
@@ -424,7 +424,7 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [ ] **H12i** · P30 · Give tasks controlled network routes through the worker relay _(needs H12b, A07, T01, T03, A03b)_
 - [x] **H12j** · P30 · Close the H12b worker-process gaps _(needs H12b)_
 - [x] **H12m** · P30 · Bind the workspace operations to the local host and to remote hosts _(needs H12l, A04, H12b, H02)_
-- [ ] **H12r** · P30 · Run the worker process under Seatbelt and Windows Sandbox _(needs H12b, A03b)_
+- [ ] **H12r** · P30 · Run the worker process under Seatbelt and the native Windows launcher _(needs H12b, A03b)_
 - [x] **H02c** · P31 · Prove partition fencing, relocation integrity and the store owner in the composed controller _(needs H02b)_
 - [x] **H02e** · P31 · Stop a poll from deleting a re-placed offer _(needs H02, H07)_
 - [x] **H07b** · P31 · Choose hosts by candidates, fall back on refusal and run the host poller in the worker process _(needs H07, H12a)_

@@ -1,5 +1,7 @@
 # Running checks on the owner's own machines
 
+> Note 2026-11-25: Windows Sandbox is no longer the Windows plan (card A03b now builds a native AppContainer launcher; see `windows-isolation-plan.md`). The Windows Sandbox job and tests described below remain only as existing diagnostics; do not start new Windows Sandbox work from them.
+
 Some checks only mean something on real hardware: the OS sandbox and containment checks (cards A03, A04, G05), the real-OS parts of the QA checkpoints and the final qualification (D04). GitHub's hosted runners are virtual machines without the owner's OS builds, permission settings or sandbox features. This page describes the way the project can run checks on the owner's Mac and Windows machines: **self-hosted GitHub Actions runners**, started by hand. Status: **not set up yet.** The runner workflow ([own-hardware.yml](../../.github/workflows/own-hardware.yml)) is a probe; it does not contain sandbox checks yet. The other route, used for the earlier Windows research, is SSH with a dedicated key the owner names for the purpose.
 
 ## The risk, stated plainly
