@@ -103,6 +103,22 @@ test("the installer is Verify by default, supports -WhatIf, and asks an administ
   assert.ok(fn("Invoke-Install").includes("-ne $ExpectedSha256.ToUpperInvariant()") && fn("Invoke-Install").includes("-AllowUnsigned"));
 });
 
+test("A03b worker task: Verify only READS the worker's scheduled task (S4U, least privilege, boot trigger, worker.env), registers nothing, and a missing task is not a failure", () => {
+  const verify = fn("Invoke-Verify");
+  assert.match(ps, /\$WorkerTaskName = 'NimbleNewtWorker'/);
+  assert.ok(verify.includes("Get-ScheduledTask -TaskName $WorkerTaskName -ErrorAction SilentlyContinue"));
+  for (const part of ["$tp.LogonType -eq 'S4U'", "$tp.RunLevel -eq 'Limited'", "MSFT_TaskBootTrigger", "--env-file=$EnvFile", "$tp.UserId -ieq $AccountName", "$tp.UserId -like"]) assert.ok(verify.includes(part), part);
+  // the task checks are Checks (a FAIL when it exists and is wrong), and an absent task only says so
+  assert.match(verify, /if \(\$null -eq \$task\) \{ Say '  not registered/);
+  assert.ok(!/\$null -eq \$task\) \{[^}]*Check \$false/.test(verify), "a task that is not registered is not a failure");
+  // nothing in the whole script registers, changes, starts or removes a task
+  assert.ok(!/\b(Register|Unregister|Set|New|Start|Stop|Enable|Disable)-ScheduledTask\b|\bschtasks\b|Register-ScheduledJob|\bSchedule\.Service\b/i.test(code), "the installer never registers or changes a task");
+  assert.deepEqual([...code.matchAll(/\b\w+-ScheduledTask\b/g)].map((m) => m[0]), ["Get-ScheduledTask"], "the only task cmdlet is the read");
+  assert.ok(/does not register or start the worker/.test(ps));
+  // the password story is unchanged: no password reaches a task from here
+  assert.ok(!/-Password\b|-RunAsUser|LogonType\s+Password/i.test(code.replace(/New-LocalUser[^\n]*-Password[^\n]*/g, "")));
+});
+
 /** True when the line is, or is inside a block opened by, a line that asks `$PSCmdlet.ShouldProcess(` (walks up through the enclosing braces only; an earlier, closed block does not count). */
 function insideShouldProcess(lines, i) {
   const count = (l, c) => l.split(c).length - 1;

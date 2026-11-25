@@ -5,6 +5,7 @@ export * from "./start-notices.js";
 export * from "./heartbeat.js";
 export * from "./supervisor.js";
 export * from "./service-units.js";
+export * from "./worker-service-unit.js";
 export * from "./updater.js";
 export * from "./trust.js";
 export * from "./trust-mirror.js";

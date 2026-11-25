@@ -27,6 +27,9 @@ const HELP = `NimbleNewt service unit printer (prints only; installs nothing)
   --protect-system M   Linux, opt-in: full or strict (with --read-write-path DIR, repeatable). Off by default: it stops the
                        controller's bubblewrap sandbox where unprivileged user namespaces are restricted (Ubuntu 23.10+).
   --unit-only          Print only the unit file text.
+
+  print-worker [options]   The Windows task that runs the WORKER unattended as the installer's account (S4U, boot trigger, no stored password). An administrator registers it; this prints only.
+    --node PATH --worker-entry PATH --config PATH --working-directory DIR --windows-user COMPUTER\\nimblenewt-worker [--data-dir DIR (the installer's -DataDir)] [--name NAME] [--unit-only]
   Arguments after -- are passed to the controller. Do not put secrets there; they are refused.
 Exit codes: 0 printed, 1 refused (the reason is on stderr).
 `;
@@ -51,9 +54,31 @@ function parse(argv) {
     else if (k in flags) throw new Error(`--${k} was given twice`);
     else flags[k] = v;
   }
-  const known = new Set(["platform", "root", "node", "launcher", "entry", "switcher", "environment-file", "log-dir", "name", "windows-user", "protect-system", "read-write-path", "unit-only", "help"]);
+  const known = new Set(["platform", "root", "node", "launcher", "entry", "switcher", "environment-file", "log-dir", "name", "windows-user", "protect-system", "read-write-path", "unit-only", "help", "worker-entry", "config", "working-directory", "data-dir"]);
   for (const k of Object.keys(flags)) if (!known.has(k)) throw new Error(`unknown option --${k}`);
   return { flags, positional, controllerArgs };
+}
+
+async function printWorker(flags, io, err) {
+  if (io.uid === 0) { err("Refusing to print for root: print this as an ordinary user; the unit itself is registered by an administrator."); return 1; }
+  const { generateWorkerServiceUnit } = await lib("release/worker-service-unit.js");
+  try {
+    const unit = generateWorkerServiceUnit({
+      node: flags.node ?? process.execPath,
+      entry: flags["worker-entry"] ?? join(repo, "scripts", "remote-worker.mjs"),
+      configFile: flags.config,
+      workingDirectory: flags["working-directory"],
+      windowsUser: flags["windows-user"],
+      ...(flags["data-dir"] === undefined ? {} : { dataDir: flags["data-dir"] }),
+      ...(flags.name === undefined ? {} : { name: flags.name }),
+    });
+    if (flags["unit-only"] === true) { io.stdout.write(unit.content); return 0; }
+    io.stdout.write([`# NimbleNewt WORKER task (${unit.fileName})`, "# THIS PROGRAM REGISTERED NOTHING. An administrator reads the unit, then runs the steps if they agree.", "", "## Unit", unit.content.trimEnd(), "", "## Steps (an administrator runs these)", ...unit.steps.map((x, i) => `${i + 1}. ${x}`), "", "## To remove it", ...unit.uninstall.map((x) => `- ${x}`), "", "## Notes", ...unit.notes.map((x) => `- ${x}`), ""].join("\n"));
+    return 0;
+  } catch (error) {
+    if (error?.name === "ServiceSpecError") { err(`refused: ${safeMessage(error, 2000)}`); return 1; }
+    throw error;
+  }
 }
 
 export async function main(argv, io = { stdout: process.stdout, stderr: process.stderr, env: process.env, uid: process.getuid?.(), platform: process.platform }) {
@@ -62,6 +87,7 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
   try { parsed = parse(argv); } catch (error) { err(safeMessage(error, 2000)); return 1; }
   const { flags, positional, controllerArgs } = parsed;
   if (flags.help === true || positional[0] === "help" || positional.length === 0) { err(HELP); return flags.help === true || positional[0] === "help" ? 0 : 1; }
+  if (positional[0] === "print-worker" && positional.length === 1) return printWorker(flags, io, err);
   if (positional[0] !== "print" || positional.length > 1) { err(`unknown command ${positional[0]}\n${HELP}`); return 1; }
   // The units run as the person who installs them; printing steps for root would put the service in root's account.
   if (io.uid === 0) { err("Refusing to print install steps for root: the service must run as an ordinary user. Run this as that user."); return 1; }

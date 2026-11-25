@@ -14,7 +14,7 @@
     3. "%ProgramData%\NimbleNewt\" (manifest and worker.env, written by an administrator; the account may read) and its sub-folder "native" (the supervisor's control folder, where
        the account writes its job records and may delete them, but may not delete or rename the folder itself; no other user has any access).
     4. worker.env: the four NIMBLENEWT_WIN_* names the worker reads (no secret in it).
-  What it does NOT do: it does not register or start the worker (the service unit is the release's own step), it never touches a task, workspace or data folder of the product,
+  What it does NOT do: it does not register or start the worker (the worker's task unit is the release's own step, run by an administrator; Verify only reads that task if it exists), it never touches a task (other than reading the worker task in Verify), workspace or data folder of the product,
   it does not change a firewall, a policy other than the five account rights above, or any other account, and it does not need the network.
 
   Password. The account is used through a scheduled task that logs it on with S4U ("run whether the user is logged on or not", no password stored) or, later, a Windows service.
@@ -67,6 +67,8 @@ $ExeName = 'nn-launcher.exe'
 $ControlDir = Join-Path $DataDir 'native'
 $ManifestPath = Join-Path $DataDir 'install-manifest.json'
 $EnvFile = Join-Path $DataDir 'worker.env'
+# The scheduled task of the worker: registered by an administrator from the release's unit text (generateWorkerServiceUnit); this script only reads it in Verify.
+$WorkerTaskName = 'NimbleNewtWorker'
 # New-LocalUser refuses a description longer than 48 characters, so the marker is short (a test pins the length).
 $AccountMarker = 'NimbleNewt launcher account (installer-made)'
 # Well-known SIDs, not names: the names change with the Windows language.
@@ -303,7 +305,24 @@ function Invoke-Verify {
   } else { Check $false "$exe exists" }
   if (Test-Path -LiteralPath $ManifestPath) { Say "Manifest ($ManifestPath):"; Get-Content -LiteralPath $ManifestPath | ForEach-Object { Say "  $_" } } else { Check $false 'the install manifest exists' }
   if (Test-Path -LiteralPath $EnvFile) { Say "Worker environment file ($EnvFile; no secret in it):"; Get-Content -LiteralPath $EnvFile | ForEach-Object { Say "  $_" } } else { Check $false 'worker.env exists' }
-  Say "How the service gets these: start the worker with 'node --env-file=$EnvFile ...' (the release's service unit names this file); with the default folders the worker finds the same values without it."
+  Say "How the service gets these: start the worker with 'node --env-file=$EnvFile ...' (the worker's task unit names this file); with the default folders the worker finds the same values without it."
+  # The worker's scheduled task is registered by an administrator, never by this script. If it exists, report (read only) who it runs as, how it logs on and what starts it; if it does not, say so (not a failure).
+  Say "Worker task '$WorkerTaskName' (registered by an administrator; this script only reads it):"
+  $task = Get-ScheduledTask -TaskName $WorkerTaskName -ErrorAction SilentlyContinue
+  if ($null -eq $task) { Say '  not registered (see README.md, "The worker task"); nothing to check' }
+  else {
+    $tp = $task.Principal
+    $tt = @($task.Triggers | ForEach-Object { $_.CimClass.CimClassName })
+    $ta = @($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)  (working directory $($_.WorkingDirectory))" })
+    Say "  principal $($tp.UserId); logon type $($tp.LogonType); run level $($tp.RunLevel)"
+    Say "  triggers: $($tt -join ', ')"
+    foreach ($line in $ta) { Say "  action: $line" }
+    Check ($tp.LogonType -eq 'S4U') 'the task logs on with S4U (no stored password; no network or encrypted-file access)'
+    Check ($tp.RunLevel -eq 'Limited') 'the task runs with the limited run level (LeastPrivilege)'
+    Check (($tp.UserId -ieq $AccountName) -or ($tp.UserId -like "*\$AccountName")) "the task runs as the account '$AccountName'"
+    Check (($tt.Count -ge 1) -and (@($tt | Where-Object { $_ -ne 'MSFT_TaskBootTrigger' }).Count -eq 0)) 'its trigger is a boot trigger only (nobody needs to be signed in)'
+    Check (@($task.Actions | Where-Object { $_.Arguments -like "*--env-file=$EnvFile*" }).Count -ge 1) 'it starts node with the environment file worker.env'
+  }
   Say $(if ($script:bad -eq 0) { 'RESULT: everything this script manages is as designed.' } else { "RESULT: $($script:bad) check(s) failed (see FAIL lines)." })
   if ($script:bad -gt 0) { exit 1 }
 }

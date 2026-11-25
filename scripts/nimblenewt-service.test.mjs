@@ -89,3 +89,28 @@ test("run as a real process: prints, writes nothing in the working directory, an
     assert.equal(bad.stdout, "");
   } finally { rmSync(cwd, { recursive: true, force: true }); }
 });
+
+test("print-worker prints the worker's S4U task and says an administrator registers it; it registers nothing and refuses a hostile or missing value (A03b service)", async () => {
+  const base = ["print-worker", "--node", "C:\\Program Files\\nodejs\\node.exe", "--worker-entry", "C:\\NN\\scripts\\remote-worker.mjs", "--config", "C:\\ProgramData\\NimbleNewt\\worker.json", "--working-directory", "C:\\NN", "--windows-user", "BOX\\nimblenewt-worker"];
+  const ok = await run(base);
+  assert.equal(ok.code, 0, ok.err);
+  assert.match(ok.out, /THIS PROGRAM REGISTERED NOTHING/);
+  assert.match(ok.out, /<LogonType>S4U<\/LogonType>/);
+  assert.match(ok.out, /<BootTrigger>/);
+  assert.ok(!/LogonTrigger|<Password/.test(ok.out));
+  assert.match(ok.out, /ELEVATED PowerShell/);
+  const only = await run([...base, "--unit-only"]);
+  assert.equal(only.code, 0, only.err);
+  assert.ok(only.out.startsWith('<?xml version="1.0" encoding="UTF-16"?>') && !only.out.includes("Steps"));
+  for (const [patch, why] of [[["--config", "C:\\x\\..\\y"], /configFile: must be normalised/], [["--windows-user", "SYSTEM"], /windowsUser/], [["--data-dir", "C:\\a%b"], /dataDir/]]) {
+    const argv = [...base]; for (let i = 0; i < patch.length; i += 2) { const at = argv.indexOf(patch[i]); if (at >= 0) argv[at + 1] = patch[i + 1]; else argv.push(patch[i], patch[i + 1]); }
+    const r = await run(argv);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.err, why);
+    assert.equal(r.out, "");
+  }
+  const missing = await run(["print-worker", "--windows-user", "BOX\\nimblenewt-worker"]);
+  assert.equal(missing.code, 1);
+  assert.equal(missing.out, "");
+  assert.equal((await run(base, { uid: 0 })).code, 1);
+});
