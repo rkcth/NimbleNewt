@@ -24,6 +24,7 @@ const slow = fast ? JSON.parse(readFileSync(fileURLToPath(new URL("./slow-tests.
 const shardFlag = process.argv.find((a) => a.startsWith("--shard="));
 const all = existsSync("dist") ? testFiles("dist") : [];
 let files = all.filter((f) => !slow.some((name) => ("/" + f.split(sep).join("/")).endsWith("/" + name)));
+const notSlow = files.length;
 if (shardFlag !== undefined) {
   const m = /^--shard=(\d+)\/(\d+)$/.exec(shardFlag);
   if (m === null) { console.error(`invalid ${shardFlag}`); process.exit(2); }
@@ -31,7 +32,7 @@ if (shardFlag !== undefined) {
   files = shardFiles(files, weights, Number(m[1]), Number(m[2]));
   console.log(`SHARD ${m[1]}/${m[2]}: ${files.length} of ${all.length} test files`);
 }
-if (fast && files.length !== all.length) console.log(`FAST TIER: ${all.length - files.length} slow test file(s) left out of ${all.length}; run \`npm test\` for the full suite`);
+if (fast && notSlow !== all.length) console.log(`FAST TIER: ${all.length - notSlow} slow test file(s) left out of ${all.length}; run \`npm test\` for the full suite`);
 if (files.length === 0 && shardFlag === undefined) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
 if (files.length === 0) { console.log("this shard has no test files in this package"); process.exit(0); }
 const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;

@@ -3,8 +3,10 @@ import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { affected, packageGraph } from "./affected-packages.mjs";
+import { readdirSync, readFileSync } from "node:fs";
+import { affected, packageGraph, ROOT_ONLY } from "./affected-packages.mjs";
 import { shardFiles } from "./shard.mjs";
+import { tierSteps } from "./test-changed.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const graph = new Map([["contracts", []], ["registry", []], ["controller", ["registry"]], ["worker", ["contracts"]], ["pi-adapter", ["contracts", "registry"]], ["integration", ["contracts", "controller", "pi-adapter", "worker"]], ["ui", []]]);
@@ -22,6 +24,68 @@ test("a change outside the packages selects everything, documentation alone sele
   assert.deepEqual(affected(["docs/nimblenewt/implementation-plan/task-plan.md"], graph), ["pi-adapter", "integration"], "pi-adapter's tests read the plan");
   assert.equal(affected(["docs/a.md", "package.json"], graph), "all");
   assert.equal(affected(["packages\\ui\\src\\a.ts"], graph).join(), "ui", "Windows separators");
+});
+
+test("files only the root checks look at select no package; the ones a package's tests run or read still select every package", () => {
+  for (const f of ["scripts/windows-appcontainer-experiment.test.mjs", "scripts/test-changed.mjs", "scripts/test-shard.mjs", "scripts/ci-annotate.mjs", "scripts/y02-checkpoint.mjs", "scripts/wsb-list-line.mjs", "CONTRIBUTING.md", "SECURITY.md", ".github/workflows/exhaustive.yml", ".github/workflows/windows-appcontainer-experiment.yml"]) assert.deepEqual(affected([f], graph), [], f);
+  // what run-package-tests.mjs, the offline guard, the stores' hosts and the launcher scripts use, and the weights that decide the shards, stay "everything"
+  for (const f of ["scripts/run-package-tests.mjs", "scripts/offline-guard.mjs", "scripts/shard.mjs", "scripts/slow-tests.json", "scripts/test-weights.json", "scripts/clean-dist.mjs", "scripts/safe-error.mjs", "scripts/local-host.mjs", "scripts/nimblenewt.mjs", "scripts/new-helper.mjs", "scripts/fixtures/x.json", "experiments/experiments.js", ".github/workflows/ci.yml", "prototypes/meeting/a.mjs"]) assert.equal(affected([f], graph), "all", f);
+  // the experiment's own folder is read by the worker's contract test
+  assert.deepEqual(affected(["experiments/windows-appcontainer/ladder.mjs"], graph), ["worker", "integration"]);
+  assert.deepEqual(affected(["native/nn-launcher/src/win.rs"], graph), ["worker", "integration"], "the worker's contract test reads the launcher crate");
+  assert.equal(affected([".github/workflows/own-hardware.yml"], graph), "all");
+  assert.deepEqual(affected(["scripts/test-changed.mjs", "packages/ui/src/a.ts"], graph), ["ui"], "a root-only file adds nothing to the packages that were touched");
+  assert.equal(affected(["scripts\\test-shard.mjs"], graph).length, 0, "Windows separators");
+});
+
+test("the root-only list is honest: no package source and no other script runs, reads or imports a file on it", () => {
+  const files = (dir, keep) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? (e.name === "node_modules" || e.name === "dist" ? [] : files(join(dir, e.name), keep)) : keep(e.name) ? [join(dir, e.name)] : []));
+  const listed = [...files(join(root, "scripts"), () => true), ...files(join(root, ".github", "workflows"), () => true)].map((f) => f.slice(root.length).replaceAll("\\", "/").replace(/^\//, "")).filter((f) => ROOT_ONLY.some((p) => p.test(f)));
+  assert.ok(listed.some((f) => f.startsWith(".github/workflows/")), "the workflow files are covered by the same check");
+  assert.ok(listed.length > 25, `the list should match real files (${listed.length})`);
+  const readers = [
+    ...["config", "contracts", "controller", "integration", "pi-adapter", "registry", "ui", "worker", "api"].flatMap((n) => { try { return files(join(root, "packages", n, "src"), (f) => /\.(ts|tsx|mjs|js|json)$/.test(f)); } catch { return []; } }),
+    ...files(join(root, "scripts"), (f) => /\.(mjs|js|json)$/.test(f)).filter((f) => !ROOT_ONLY.some((p) => p.test("scripts/" + f.slice(join(root, "scripts").length + 1).replaceAll("\\", "/")))),
+  ];
+  const texts = readers.map((f) => [f, readFileSync(f, "utf8")]);
+  for (const file of listed) {
+    const name = file.split("/").pop();
+    for (const [reader, text] of texts) assert.ok(!text.includes(name), `${reader.slice(root.length)} names ${name}: take it off ROOT_ONLY in scripts/affected-packages.mjs`);
+  }
+});
+
+const show = (steps) => steps.map((s) => (s.npm === undefined ? `node ${s.node.join(" ")}` : `npm ${s.npm.join(" ")}`));
+
+test("the typical tier split into parts runs exactly what the unsharded tier runs: every package once, the controller in slices, the root checks in part 1", () => {
+  const packages = [...graph.keys()];
+  const whole = show(tierSteps("all", packages));
+  assert.deepEqual(whole.slice(0, 2), ["npm run clean", "npm run build"]);
+  assert.deepEqual(whole.slice(2, 6), ["npm run check:deps", "npm run licenses:check", "npm run roadmap:check", "node --test scripts/*.test.mjs"]);
+  assert.ok(whole.includes("npm run test -w @nimblenewt/controller --if-present"), "unsharded: the whole controller in one step");
+  for (const count of [2, 3, 5]) {
+    const parts = Array.from({ length: count }, (_, i) => show(tierSteps("all", packages, i + 1, count)));
+    const tests = parts.flat().filter((l) => l.startsWith("npm run test"));
+    for (const p of packages.filter((n) => n !== "controller")) assert.equal(tests.filter((l) => l === `npm run test -w @nimblenewt/${p} --if-present`).length, 1, `${p} once (${count} parts)`);
+    const slices = count - 1;
+    for (let i = 1; i <= slices; i++) assert.equal(tests.filter((l) => l === `npm run test -w @nimblenewt/controller --if-present${slices > 1 ? ` -- --shard=${i}/${slices}` : ""}`).length, 1, `controller slice ${i}/${slices} (${count} parts)`);
+    assert.equal(tests.length, packages.length - 1 + slices);
+    assert.equal(parts.flat().filter((l) => l === "node --test scripts/*.test.mjs").length, 1, "the scripts' tests run once");
+    assert.ok(parts[0].includes("npm run check:deps") && !parts.slice(1).some((p) => p.includes("npm run check:deps")), "root checks only in part 1");
+    for (const part of parts) assert.deepEqual(part.slice(0, 2), ["npm run clean", "npm run build"], "every part with tests builds first");
+    assert.ok(!parts[0].some((l) => /-w @nimblenewt\/(?!controller)/.test(l)), "part 1 carries the controller slice and the root checks, not the other packages");
+    assert.ok(packages.filter((n) => n !== "controller").every((n) => parts[count - 1].includes(`npm run test -w @nimblenewt/${n} --if-present`)) && !parts[count - 1].some((l) => /controller/.test(l)), "the last part carries every other package and no controller slice");
+  }
+});
+
+test("a selection without the controller is spread over the parts; a part with nothing to run builds nothing; documentation-only runs the root checks without a build", () => {
+  const packages = [...graph.keys()];
+  const parts = [1, 2, 3, 4].map((i) => show(tierSteps(["worker", "integration", "ui"], packages, i, 4)));
+  assert.deepEqual(parts.flat().filter((l) => l.startsWith("npm run test")).sort(), ["npm run test -w @nimblenewt/integration --if-present", "npm run test -w @nimblenewt/ui --if-present", "npm run test -w @nimblenewt/worker --if-present"]);
+  assert.deepEqual(parts[3], [], "a part with no tests does nothing at all");
+  assert.deepEqual(show(tierSteps([], packages, 1, 4)), ["npm run check:deps", "npm run licenses:check", "npm run roadmap:check", "node --test scripts/*.test.mjs"]);
+  assert.deepEqual(show(tierSteps([], packages, 2, 4)), []);
+  assert.deepEqual(show(tierSteps(["ui"], packages)), ["npm run clean", "npm run build", "npm run check:deps", "npm run licenses:check", "npm run roadmap:check", "node --test scripts/*.test.mjs", "npm run test -w @nimblenewt/ui --if-present"]);
+  assert.throws(() => tierSteps("all", packages, 5, 4), /invalid shard/);
 });
 
 test("the graph read from the repository has the product packages and no cycle", () => {

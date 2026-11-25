@@ -3,6 +3,11 @@ name: CI
 # The typical tier (card X11), run on every push to main and on pull requests: build, the package rules, and the tests of the packages the change touches and the packages that
 # depend on them, on the reference store and SQLite, leaving out the long qualification runs. A change outside the packages (the lockfile, the scripts, the workflows) tests
 # every package. The exhaustive tier (all backends, six OS and Node cells) is exhaustive.yml, run for milestones and releases.
+#
+# The tier runs as five parallel parts (scripts/test-changed.mjs --shard=i/5): the controller's tests alone took longer than a job may run (run 45613816508 was cancelled at the 30-minute
+# limit with the controller's tests still passing), so four parts each run a quarter of the controller's test files by recorded run time, and the fifth runs the other packages; part 1
+# also runs the root checks and the scripts' own tests. The job named "typical tier (ubuntu / node 22)" is the gate: it succeeds only when every part did, and keeps the name that the
+# repository's status checks use.
 on:
   push:
     branches: [main]
@@ -12,10 +17,14 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: typical tier (ubuntu / node 22)
+  parts:
+    name: typical tier part ${{ matrix.shard }} of 5
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,6 +44,7 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           BASE_REF: ${{ github.base_ref }}
+          SHARD: ${{ matrix.shard }}/5
         run: |
           set -o pipefail
           if [ -n "$BASE_REF" ]; then BASE="$(git merge-base HEAD "origin/$BASE_REF")"
@@ -42,12 +52,28 @@ jobs:
           else BASE=""; fi
           if [ -n "$BASE" ]; then ARGS="--base=$BASE"; else ARGS="--all"; fi
           # Run with the network disabled (a new namespace, loopback only): this covers child processes and native code that the in-process offline guard cannot.
-          sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --clear-groups env "PATH=$3" "HOME=$4" CI=true NIMBLENEWT_REQUIRE_SANDBOX=1 node scripts/test-changed.mjs "$5"' sh "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$ARGS" 2>&1 | tee test.log
+          sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --clear-groups env "PATH=$3" "HOME=$4" CI=true NIMBLENEWT_REQUIRE_SANDBOX=1 node scripts/test-changed.mjs "$5" "--shard=$6"' sh "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$ARGS" "$SHARD" 2>&1 | tee test.log
       # Job logs need authentication to read; surface the tail of a failure as an annotation instead.
       - name: Annotate test failure
         if: failure()
         run: node scripts/ci-annotate.mjs test.log
-      - name: Generated plan files are current
-        run: python3 scripts/generate_task_plan.py && git diff --exit-code docs/
       # The suite must not rewrite tracked files (e.g. a stale generated inventory).
       - run: git diff --exit-code
+
+  # The gate. It keeps the job name that the typical tier has always had, and it fails when any part failed, was cancelled or did not run.
+  test:
+    name: typical tier (ubuntu / node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: parts
+    if: ${{ always() }}
+    steps:
+      - name: Every part of the typical tier passed
+        env:
+          PARTS: ${{ needs.parts.result }}
+        run: |
+          echo "typical tier parts: $PARTS"
+          [ "$PARTS" = "success" ]
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generated plan files are current
+        run: python3 scripts/generate_task_plan.py && git diff --exit-code docs/
