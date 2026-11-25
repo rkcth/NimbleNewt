@@ -1,0 +1,21 @@
+{
+ "step": "fork",
+ "repeat": 1,
+ "usage": {
+  "input_tokens": 20629,
+  "output_tokens": 6,
+  "cache_read_tokens": 3712,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "api_calls": 1,
+  "model": "gpt-6.1-sol",
+  "provider": "openai-codex",
+  "completed": true,
+  "failed": false,
+  "auxiliary": {
+   "api_calls": 1
+  }
+ },
+ "answer": "Ibis",
+ "expected": "Ibis"
+}

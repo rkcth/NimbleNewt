@@ -2,9 +2,11 @@ import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BackendHealth, GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
+import { FILE_CHANNEL_DEFAULTS, FILE_CHANNEL_ENV } from "@nimblenewt/contracts";
+import type { BackendHealth, GuestView, PlanOptions, SandboxBackend, SpawnPlan } from "./backend.js";
 import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
+import type { ChannelJob } from "./windows-native-channel.js";
 import { jobFile, jobsDir, runNativeJob, sweepLeftoversLocked, type NativeHost, type NativeJob } from "./windows-native-job.js";
 import { nativeRealHost } from "./windows-native-real.js";
 import {
@@ -36,6 +38,8 @@ export interface WindowsNativeOptions {
   readonly maxRunMs?: number;
   /** Refuse unless the task's volumes are NTFS (default true; a test stand-in turns it off). */
   readonly requireNtfs?: boolean;
+  /** Bounds of the controller's channel for a streamed run (card A03b, slice 4). Defaults: `FILE_CHANNEL_DEFAULTS`. Tests use small ones. */
+  readonly channelLimits?: Partial<Pick<ChannelJob, "maxBytes" | "maxFrames" | "maxPayload" | "windowBytes" | "heartbeatMs" | "stallMs">>;
 }
 
 const bad = (message: string): never => { throw new SandboxError("invalid_recipe", message); };
@@ -105,26 +109,41 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
 
   const guestView = (recipe: NormalizedRecipe): GuestView => ({ workdir: recipe.workdir, home: recipe.home, scratch: recipe.scratch, tmp: recipe.scratch, inputs: recipe.readOnly.map((m) => ({ host: m.host, guest: m.host })) });
 
-  const buildJob = (recipe: NormalizedRecipe, command: readonly string[], runId: string, jobDir: string, settingsNow: NativeSettings = settings): NativeJob => {
+  const channelLimits = { ...FILE_CHANNEL_DEFAULTS, ...options.channelLimits };
+  for (const [n, v] of Object.entries({ maxBytes: channelLimits.maxBytes, maxFrames: channelLimits.maxFrames, maxPayload: channelLimits.maxPayload, windowBytes: channelLimits.windowBytes, heartbeatMs: channelLimits.heartbeatMs, stallMs: channelLimits.stallMs })) {
+    if (!Number.isSafeInteger(v) || v < 1) bad(`channelLimits.${n}: a whole number of at least 1`);
+  }
+  if (channelLimits.windowBytes < channelLimits.maxPayload * 2) bad("channelLimits.windowBytes: at least twice maxPayload (one longest line must never wait on its own acknowledgement)");
+
+  /** The channel of a streamed run: a folder in the task's scratch (container-writable already) with the two files; their paths reach the worker as environment variables. */
+  const channelFor = (recipe: NormalizedRecipe, runId: string): ChannelJob => {
+    const dir = `${recipe.scratch}\\.nn-ch-${runId.slice(0, 12)}`;
+    return { dir, inbox: `${dir}\\to-worker.nnc`, outbox: `${dir}\\from-worker.nnc`, maxBytes: channelLimits.maxBytes, maxFrames: channelLimits.maxFrames, maxPayload: channelLimits.maxPayload, windowBytes: channelLimits.windowBytes, heartbeatMs: channelLimits.heartbeatMs, stallMs: channelLimits.stallMs };
+  };
+
+  const buildJob = (recipe: NormalizedRecipe, command: readonly string[], runId: string, jobDir: string, settingsNow: NativeSettings = settings, interactive = false): NativeJob => {
     checkNativeRecipe(recipe, settingsNow, supervisor, env, (p) => host.isLinkOrJunction(p));
     const program = command[0];
     if (program === undefined) return bad("command: a program is needed");
     const exe = programPath(recipe, program, settingsNow.systemRoot);
     const grants = grantsFor(recipe, settingsNow, supervisor);
     const files = { input: `${jobDir}\\in.txt`, out: `${jobDir}\\out.txt`, err: `${jobDir}\\err.txt` };
+    const channel = interactive ? channelFor(recipe, runId) : undefined;
     const childEnv = nativeEnv(recipe, settingsNow, (h) => host.isDirectory(h));
+    // Set last: nothing the recipe says can name another file for the worker's channel.
+    if (channel !== undefined) Object.assign(childEnv, { [FILE_CHANNEL_ENV.inbox]: channel.inbox, [FILE_CHANNEL_ENV.outbox]: channel.outbox, [FILE_CHANNEL_ENV.maxBytes]: String(channel.maxBytes), [FILE_CHANNEL_ENV.maxPayload]: String(channel.maxPayload), [FILE_CHANNEL_ENV.stallMs]: String(channel.stallMs) });
     return {
       version: 1, runId, settings: settingsNow, grants, args: launcherArgs(recipe, exe, command.slice(1), settingsNow, grants, files, childEnv), files, workdir: recipe.workdir,
-      volumes: [recipe.workdir, recipe.home, recipe.scratch, ...recipe.readOnly.map((m) => m.host)], requireNtfs,
+      volumes: [recipe.workdir, recipe.home, recipe.scratch, ...recipe.readOnly.map((m) => m.host)], requireNtfs, ...(channel === undefined ? {} : { channel }),
     };
   };
 
-  const plan = (recipe: NormalizedRecipe, command: readonly string[], runId?: string): SpawnPlan => {
+  const plan = (recipe: NormalizedRecipe, command: readonly string[], runId?: string, planOptions?: PlanOptions): SpawnPlan => {
     if (host.platform !== "win32") throw new SandboxError("unavailable", "the native Windows launcher exists only on Windows");
     if (recipe.route !== undefined) bad(REFUSED_ROUTE);
     const id = runId !== undefined && /^[A-Za-z0-9-]{8,64}$/.test(runId) ? runId : randomUUID();
     const jobDir = `${jobsDir(settings)}\\${id}`;
-    const job = buildJob(recipe, command, id, jobDir);
+    const job = buildJob(recipe, command, id, jobDir, settings, planOptions?.interactive === true);
     host.mkdirp(jobDir);
     host.writeText(jobFile(jobDir), JSON.stringify(job));
     // The runner's own temporary folder is the supervisor's (inside the control directory), never shared with the container.
@@ -136,7 +155,7 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
   };
 
   const checkHealth = async (): Promise<BackendHealth> => {
-    const notes = [`mode: ${NATIVE_MODE}`, "the service-account launch from Session 0 with nobody signed in, a non-administrator account, the controller's channel across the container boundary and Windows Home are not yet proven"];
+    const notes = [`mode: ${NATIVE_MODE}`, "the service-account launch from Session 0 with nobody signed in, a non-administrator account, the file relay for the controller's channel inside a real container and Windows Home are not yet proven"];
     const no = (reason: string): BackendHealth => ({ healthy: false, backend: NATIVE_BACKEND_NAME, reason, notes });
     if (host.platform !== "win32") return no(`the native Windows launcher exists only on Windows, not ${host.platform}`);
     if (!host.exists(launcher)) return no(`the launcher was not found at ${launcher}: the administrator's one-time install step has not been done`);
@@ -195,9 +214,10 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
 
   return {
     name: NATIVE_BACKEND_NAME,
-    // Not interactive: a program that talks to the controller over its standard input and output would need pipes, which the container cannot make (every pipe start hung in the measured run); the controller's
-    // channel across the container boundary is the card's named unproven item. A request that asks for it is refused with a typed reason.
-    interactiveInput: false,
+    // A streamed run (a program that talks to the controller over standard input and output) cannot be given pipes inside the container (every pipe start hung in the measured run), so the supervisor relays the
+    // controller's lines through two files (windows-native-channel.ts; card A03b, slice 4). True because that relay is wired end to end through `runNativeJob` and tested with a simulated launcher; how a REAL
+    // container treats the files (its read and append access, sharing, caching) is not measured.
+    interactiveInput: true,
     plan,
     guestView,
     health,
@@ -210,7 +230,8 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
       jobLimits: `kill-on-close, memory ${memoryMb} MB, ${activeProcesses} active processes`,
       standardHandles: "files (never the NUL device, never a pipe made inside the container)",
       grants: "the container's SID only; task folders required, program folders soft (a refused one is recorded)",
-      unproven: "service-account launch in Session 0, non-administrator account, controller channel across the container boundary, Windows Home",
+      channel: "streamed runs: the supervisor relays the controller's lines through two files (poll with offsets); the container's own file semantics are unmeasured",
+      unproven: "service-account launch in Session 0, non-administrator account, the file relay inside a real container, Windows Home",
     }),
     async descendants(pid: number): Promise<readonly { pid: number; started: string }[]> {
       try {

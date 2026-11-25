@@ -76,7 +76,8 @@ For comparison, the simulator figures recorded by C06b for Radiance were 1,719 a
 
 ## What is NOT proven
 
-- **Only Radiance was measured.** Strata, vLLM and llama.cpp are not running on this machine; OpenAI and Claude need API keys, which an agent may not use or ask for on its own authority. Their profiles stay unqualified, their fixtures stay simulated, and Anthropic's treatment of a string against a one-block array user message (C06b's open question) is still open.
+- **Hosted OpenAI was measured through Hermes on 2026-11-25** (see the notes section "G10 hosted OpenAI route measured through Hermes"): `cache_read_tokens` is reported; a repeat in a new session showed no reuse of the head, a resumed session 99.3%; the profile's key was not carried. Claude is still not measured.
+- **Only Radiance was measured locally.** Strata, vLLM and llama.cpp are not running on this machine; OpenAI and Claude need API keys, which an agent may not use or ask for on its own authority. Their profiles stay unqualified, their fixtures stay simulated, and Anthropic's treatment of a string against a one-block array user message (C06b's open question) is still open.
 - **One server version, one model, one configuration.** Radiance 2.1.0 with Flash-Next on two cards; another version, model or `--checkpoint-slots` setting is a new measurement. The 2,048-token step was observed, not read from the server's settings.
 - **No concurrency.** (First run only; the second run, below, covers up to eight at once.) One request at a time, on purpose; the "cache cliff" when more conversations are live than the pool holds was not tested.
 - **Retention beyond 90 seconds** was not measured, nor what happens when the snapshot store is full of other users' conversations (the run did not fill it: `ckpt_evictions.store_full` stayed 0; the 41 evictions were all for retention).

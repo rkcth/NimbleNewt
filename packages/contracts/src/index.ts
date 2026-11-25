@@ -351,6 +351,7 @@ export const PLAN_FILE = "PLAN.md";
 
 export * from "./harness.js";
 export * from "./worker-channel.js";
+export * from "./worker-file-channel.js";
 export * from "./anchor.js";
 export * from "./lease-watchdog.js";
 
