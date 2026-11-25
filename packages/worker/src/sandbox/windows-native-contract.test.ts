@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseLauncherLine } from "./windows-native-plan.js";
+import { LPAC_CAPABILITIES, parseLauncherLine } from "./windows-native-plan.js";
 
 // Card A03b slice 3: the contract between the TypeScript side (windows-native-plan.ts, windows-native-job.ts) and the Rust launcher crate (native/nn-launcher). The crate cannot run here
 // (Windows only), so these tests read its source and the compiled TypeScript and pin the NAMES that cross the boundary: the `tool` identifier, the JSON field names the parser reads, the
@@ -101,6 +101,16 @@ test("the grant modes the backend sends are the ones the product build accepts; 
   const parsed = sorted([...between(args, "fn parse(s: &str)", "fn name(self)").matchAll(/"([a-z-]+)" =>/g)].map((m) => m[1]!));
   for (const m of sent) assert.ok(parsed.includes(m), `mode ${m}`);
   assert.ok(/if !EXPERIMENT && matches!\(mode, Mode::DenyWrite \| Mode::DenyStrong\)/.test(args), "deny-write and deny-strong are refused unless the experiment feature is on");
+});
+
+test("the capabilities the backend sends are exactly the ones the PRODUCT build accepts, and the product refuses limits that would switch a job limit off", () => {
+  const listed = /pub\(crate\) const PRODUCT_CAPABILITIES: \[&str; \d+\] = \[([^\]]*)\];/.exec(args)?.[1];
+  assert.ok(listed !== undefined, "PRODUCT_CAPABILITIES is declared in args.rs");
+  assert.deepEqual(sorted([...listed.matchAll(/"([^"]+)"/g)].map((m) => m[1]!)), sorted(LPAC_CAPABILITIES), "the backend's LPAC_CAPABILITIES and the crate's PRODUCT_CAPABILITIES are the same list");
+  const parse = between(args, "fn parse_args", "// ---- end of parse_args");
+  assert.ok(/if !EXPERIMENT && !PRODUCT_CAPABILITIES\.contains\(&c\.as_str\(\)\)/.test(parse), "any other capability (a network one, a SID) is refused by the product build");
+  assert.ok(/"optin" if EXPERIMENT =>/.test(parse), "the optin policy is experiment-only");
+  assert.ok(/a\.memory_mb == 0 \|\| a\.active_processes == 0 \|\| a\.timeout_ms == 0 \|\| a\.timeout_ms == u32::MAX/.test(parse), "a product run always keeps its job limits and a finite timeout");
 });
 
 test("the product build is the default: the feature is off, the binary is named nn-launcher, and the experiment crate is the only one that turns the feature on", () => {

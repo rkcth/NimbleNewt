@@ -115,7 +115,11 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal 2>&1 | node scripts/redact-log.mjs
           mkdir -p "$RUNNER_TEMP/appc-out"
           cd native/nn-launcher
-          RUSTFLAGS="--remap-path-prefix=$PWD=/nn-launcher -C link-arg=/Brepro" cargo build --release --locked 2>&1 | node ../../scripts/redact-log.mjs
+          # rustc sees Windows paths (D:\a\...), not Git Bash's /d/a/...: the prefixes to remap are the Windows forms of the crate folder and the cargo home (RELEASE.md, step 1).
+          crate_w="$(cygpath -w "$PWD")"; cargo_w="$(cygpath -w "${CARGO_HOME:-$USERPROFILE/.cargo}")"
+          RUSTFLAGS="--remap-path-prefix=$crate_w=/nn-launcher --remap-path-prefix=$cargo_w=/cargo -C link-arg=/Brepro" cargo build --release --locked 2>&1 | node ../../scripts/redact-log.mjs
+          # a report, not a gate (reproducibility is not claimed yet): does a build-machine folder name remain in the file?
+          for p in "$crate_w" "$cargo_w" "$(cygpath -m "$PWD")"; do if grep -a -q -F -- "$p" target/release/nn-launcher.exe; then echo "::warning::the release file still names the build folder $p"; fi; done
           # the argument tests: the product build refuses every experiment-only option, the experiment build accepts them (src/args.rs)
           cargo test --locked 2>&1 | node ../../scripts/redact-log.mjs
           cargo test --locked --features experiment 2>&1 | node ../../scripts/redact-log.mjs
@@ -147,7 +151,8 @@ jobs:
           if (Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')) { Write-Output '::error::-WhatIf made the install folder'; exit 1 }
           if (Test-Path (Join-Path $env:ProgramData 'NimbleNewt')) { Write-Output '::error::-WhatIf made the data folder'; exit 1 }
           # Verify on a machine with nothing installed must run to its end and report failures (exit 1), never crash.
-          $out = & $f -Action Verify 2>&1 | Out-String
+          # *>&1: the script prints with Write-Host, which is the information stream (6) in Windows PowerShell 5.1; 2>&1 alone would capture nothing.
+          $out = & $f -Action Verify *>&1 | Out-String
           Write-Output $out
           if ($out -notmatch 'FAIL  the account exists' -or $out -notmatch 'RESULT:') { Write-Output '::error::Verify did not report on an empty machine'; exit 1 }
           exit 0

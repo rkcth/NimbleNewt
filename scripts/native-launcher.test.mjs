@@ -79,6 +79,11 @@ test("the Rust crates of Cargo.lock each have a recorded, allowed license, and a
   assert.deepEqual(cargoPackages(LOCK.replace(/\n/g, "\r\n")), keys);
   assert.deepEqual(cargoPackages(`${LOCK}\n[[package]]\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nversion = "2.0.0"\nname = "reordered"\n`), [...keys, "reordered@2.0.0"].sort());
   assert.throws(() => cargoPackages(`${LOCK}\n[[package]]\nsource = "registry+x"\n`), /without a name and version/);
+  // a line TOML would read but cargo never writes is refused, not skipped: it could hide a crate or make a third-party crate look local
+  for (const odd of ['[[package]]\nname = "spaced"\nversion = "1.0.0"\nsource="registry+https://github.com/rust-lang/crates.io-index"', '[[ package ]]\nname = "hidden"\nversion = "1.0.0"\nsource = "registry+x"',
+    '[[package]] # x\nname = "c"\nversion = "1.0.0"\nsource = "registry+x"', '[[package]]\nname = "t"\nversion = "1.0.0"\n  source = "registry+x"', '[[package]]\nname = "q"\nversion = "1.0.0"\nsource = \'registry+x\'']) {
+    assert.throws(() => cargoPackages(`${LOCK}\n${odd}\n`), /not in the form cargo writes/, odd);
+  }
 });
 
 // ------------------------------------------------------------------------------------------------ the installer script, read as text
@@ -218,13 +223,53 @@ test("uninstall removes what install made, from a manifest, and nothing it did n
   assert.ok(un.indexOf("Set-Acl -LiteralPath $ControlDir") < un.indexOf("Remove-TreeNoFollow $ControlDir"));
   assert.ok(un.includes(".Count -eq 0) { [System.IO.Directory]::Delete($d, $false) }"));
   const walk = fn("Remove-TreeNoFollow");
-  assert.ok(walk.indexOf("ReparsePoint") < walk.indexOf("Get-ChildItem") && /ReparsePoint\) \{\n\s+if \(\$item\.PSIsContainer\) \{ \[System\.IO\.Directory\]::Delete\(\$path, \$false\) \}[^\n]*\n\s+return/.test(walk), "a link is removed as the link and not descended into");
+  assert.ok(walk.indexOf("Test-Reparse $path") < walk.indexOf("Get-ChildItem") && /if \(Test-Reparse \$path\) \{\n\s+if \(\$isFolder\) \{ \[System\.IO\.Directory\]::Delete\(\$path, \$false\) \}[^\n]*\n\s+return/.test(walk), "a link is removed as the link and not descended into");
   assert.ok(/Assert-NimbleNewtPath \$InstallDir '-InstallDir'\nAssert-NimbleNewtPath \$DataDir '-DataDir'\nswitch \(\$Action\)/.test(ps), "the folder parameters are checked before any action");
   const made = fn("Invoke-Install");
   for (const part of ["New-LocalUser", "[NnLsa]::Add(", "Set-ProtectedAcl", "Copy-Item", "Set-Content -LiteralPath $EnvFile", "$manifest = [ordered]@"]) assert.ok(made.includes(part), part);
   // idempotent: the account and the launcher are checked before they are made or copied
   assert.ok(made.includes("if ($null -eq $existing)") && made.includes("-ne $hash) { Copy-Item"));
   assert.ok(fn("Invoke-Verify").includes("the entry list is exactly the expected one"));
+});
+
+test("second review: the account marker fits New-LocalUser, links are seen without being followed, a folder that inherits its parent's list is refused, and LSA code is compiled only when used", () => {
+  // New-LocalUser -Description takes at most 48 characters; a longer marker would make Install fail at the account step, after its checks
+  const marker = /^\$AccountMarker = '([^']*)'$/m.exec(ps)?.[1];
+  assert.ok(marker !== undefined && marker.length > 10 && marker.length <= 48, `marker length ${marker?.length}`);
+  // presence and link checks read the item's own attributes (a dangling link is present and a link); Test-Path and Get-Item follow links on 5.1
+  assert.ok(/function Get-ItemAttributes\(\[string\] \$path\) \{\n\s+try \{ return \[System\.IO\.File\]::GetAttributes\(\$path\) \} catch \[System\.IO\.FileNotFoundException\], \[System\.IO\.DirectoryNotFoundException\] \{ return \$null \}/.test(ps), "absent only on not-found; every other failure is thrown");
+  assert.match(ps, /function Test-Reparse\(\[string\] \$path\) \{ \$attrs = Get-ItemAttributes \$path;/);
+  for (const name of ["Assert-SafeItem", "Set-ProtectedAcl", "Remove-TreeNoFollow", "Invoke-Uninstall"]) {
+    assert.ok(!/Test-Path|Get-Item /.test(fn(name).replace(/Test-Path -LiteralPath \$ManifestPath/, "")), `${name} decides presence without following links`);
+  }
+  const safe = fn("Assert-SafeItem");
+  assert.ok(/if \(\$folder -and -not \$acl\.AreAccessRulesProtected\) \{ throw/.test(safe), "a folder with its parent's list was not made by this script and is refused");
+  assert.ok(safe.indexOf("Test-Reparse $path") < safe.indexOf("Get-Acl"), "the link check comes before the list is read");
+  // Add-Type only inside Initialize-NnLsa, and each LSA call is preceded by it in the same block
+  assert.equal(code.match(/\bAdd-Type\b/g).length, 1);
+  assert.ok(fn("Initialize-NnLsa").includes("Add-Type -TypeDefinition"));
+  const lines = code.split("\n");
+  let calls = 0;
+  lines.forEach((line, i) => {
+    if (!/\[NnLsa\]::\w+\(/.test(line)) return;
+    calls++;
+    let j = i - 1;
+    while (j > 0 && /\[NnLsa\]::\w+\(/.test(lines[j])) j--; // calls right after another LSA call share its Initialize-NnLsa
+    assert.match(lines[j], /^\s*Initialize-NnLsa$/, `before: ${line.trim()}`);
+  });
+  assert.equal(calls, 4, "List, Add, Remove, RemoveAll");
+  // the folder parameters: printable ASCII, and none of # ' ` = (node --env-file cuts an unquoted value at #), refused before any action
+  const shape = fn("Assert-NimbleNewtPath");
+  assert.ok(shape.includes("$path -notmatch '^[\\x20-\\x7E]+$'") && shape.includes(`[^:*?"<>|#''\`=]+$'`), shape);
+  assert.ok(fn("Invoke-Install").includes(`'^[\\x21-\\x7E][\\x20-\\x7E]*$'`) && fn("Invoke-Install").includes(`'["=#''\`]'`), "worker.env values are checked again where they are written");
+});
+
+test("second review: the hosted installer step captures Verify's Write-Host lines, and the product build remaps the Windows form of its folders", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  assert.ok(/\$out = & \$f -Action Verify \*>&1 \| Out-String/.test(wf), "Write-Host is the information stream in 5.1: 2>&1 alone captures nothing and the step would fail on a correct Verify");
+  assert.ok(/function Say\(\[string\] \$text\) \{ Write-Host \$text \}/.test(ps), "the script prints with Write-Host (the reason for *>&1)");
+  assert.ok(/crate_w="\$\(cygpath -w "\$PWD"\)"/.test(wf) && /--remap-path-prefix=\$crate_w=\/nn-launcher --remap-path-prefix=\$cargo_w=\/cargo -C link-arg=\/Brepro/.test(wf));
+  assert.ok(!/--remap-path-prefix=\$PWD=/.test(wf), "a Git Bash path (/d/a/...) never matches the Windows paths rustc sees");
 });
 
 test("the installer's README states what is not proven, and the contribution guide accounts for the new files", () => {

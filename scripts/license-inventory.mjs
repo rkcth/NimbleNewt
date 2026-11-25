@@ -86,9 +86,15 @@ const CARGO_LICENSES = fileURLToPath(new URL("../native/nn-launcher/cargo-licens
 /** The third-party crates of a Cargo.lock (every package with a `source`: a registry, a git repository or anything else; only the local path crates have none), as sorted
  *  `name@version` keys. Each `[[package]]` block is read on its own, whatever the order of its lines or its line endings, so a crate cannot drop out of the check by its layout.
  *  A block without a name and a version is an error (the check then fails rather than skip it). */
+// Every line shape cargo writes into a lock file. Any other line (a header or a key written another way, for example `[[ package ]]` or `source="..."`, which TOML would also read) stops the
+// check: read loosely, such a line could hide a crate or make a third-party crate look like a local one.
+const CARGO_LOCK_LINE = /^(?:|#.*|version = \d+|\[\[package\]\]|\[\[patch\.unused\]\]|\[metadata\]|(?:name|version|source|checksum|replace) = "[^"\\]*"|dependencies = \[\]?| "[^"\\]*",?|\]|"[^"\\]*" = "[^"\\]*")$/;
+
 export function cargoPackages(lockText) {
   const keys = [];
-  for (const block of lockText.replace(/\r\n?/g, "\n").split(/^\[\[package\]\]$/m).slice(1)) {
+  const text = lockText.replace(/\r\n?/g, "\n");
+  text.split("\n").forEach((line, i) => { if (!CARGO_LOCK_LINE.test(line)) throw new Error(`Cargo.lock line ${i + 1} is not in the form cargo writes, so the license check cannot read it: ${line.slice(0, 80)}`); });
+  for (const block of text.split(/^\[\[package\]\]$/m).slice(1)) {
     const body = block.split(/^\[/m)[0];
     const field = (name) => new RegExp(`^${name} = "([^"]*)"$`, "m").exec(body)?.[1];
     const [name, version, source] = [field("name"), field("version"), field("source")];

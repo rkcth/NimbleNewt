@@ -7,6 +7,8 @@ pub(crate) const EXPERIMENT: bool = cfg!(feature = "experiment");
 // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT / _OPT_IN
 pub(crate) const AAP_OPT_OUT: u32 = 0x1;
 pub(crate) const AAP_OPT_IN: u32 = 0x0;
+/// The capabilities the PRODUCT build accepts (the backend's LPAC_CAPABILITIES in windows-native-plan.ts); the contract test pins the two lists to each other.
+pub(crate) const PRODUCT_CAPABILITIES: [&str; 2] = ["registryRead", "lpacCom"];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Mode { Ro, Rx, Modify, DenyWrite, DenyStrong, Seal, ModifyRoot }
@@ -81,7 +83,7 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
                 a.grants.push(GrantSpec { mode, path: p.to_string(), soft: flag == "--grant-soft" });
             }
             // none: no attribute (a plain AppContainer). optout: the LPAC form. optin: the attribute present with the default value.
-            "--aap-policy" => a.aap = match value("--aap-policy")?.as_str() { "none" => None, "optout" => Some(AAP_OPT_OUT), "optin" => Some(AAP_OPT_IN), _ => return Err("--aap-policy: none, optout or optin".into()) },
+            "--aap-policy" => a.aap = match value("--aap-policy")?.as_str() { "none" => None, "optout" => Some(AAP_OPT_OUT), "optin" if EXPERIMENT => Some(AAP_OPT_IN), "optin" => return Err("--aap-policy optin is an experiment option and is not in this build".into()), _ => return Err("--aap-policy: none, optout or optin".into()) },
             "--win32k-off" => a.win32k_off = true,
             "--no-kill-on-close" => a.kill_on_close = false,
             "--memory-mb" => a.memory_mb = value("--memory-mb")?.parse().map_err(|_| "--memory-mb is not a number")?,
@@ -95,11 +97,25 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--stdout-nul-rw" => a.stdout_nul = true,
             "--stderr-nul-rw" => a.stderr_nul = true,
             "--dump" => a.dump.push(value("--dump")?),
-            "--capability" => { let c = value("--capability")?; if c.is_empty() { return Err("--capability is empty".into()); } a.capabilities.push(c); }
+            "--capability" => {
+                let c = value("--capability")?;
+                if c.is_empty() { return Err("--capability is empty".into()); }
+                // The product container is the LPAC with exactly these two capabilities (card A03b): never a network capability (internetClient and the like), a SID or any other name.
+                if !EXPERIMENT && !PRODUCT_CAPABILITIES.contains(&c.as_str()) { return Err(format!("capability {c} is not in this build (only {})", PRODUCT_CAPABILITIES.join(", "))); }
+                a.capabilities.push(c);
+            }
             other => return Err(format!("unknown option {other}")),
         }
     }
     if !EXPERIMENT && !matches!(a.command.as_str(), "run" | "check" | "revoke" | "info") { return Err(format!("command {} is not in this build (run, check, revoke, info)", a.command)); }
+    if !EXPERIMENT {
+        // The plain AppContainer (the fallback) has no capability at all; the two LPAC capabilities come only with the LPAC policy.
+        if !a.capabilities.is_empty() && a.aap != Some(AAP_OPT_OUT) { return Err("--capability is only in this build with --aap-policy optout (the LPAC); the plain AppContainer has none".into()); }
+        // A run always has the job's limits: 0 would mean no memory or process limit, and u32::MAX is INFINITE (no timeout).
+        if a.command == "run" && (a.memory_mb == 0 || a.active_processes == 0 || a.timeout_ms == 0 || a.timeout_ms == u32::MAX) {
+            return Err("run needs --memory-mb, --active-processes and --timeout-ms above 0 (and a finite timeout) in this build".into());
+        }
+    }
     Ok(a)
 }
 
@@ -169,6 +185,34 @@ mod tests {
             let e = parse(&[command]).err().unwrap_or_else(|| panic!("command {command:?} was accepted"));
             assert!(e.contains("not in this build"), "{command}: {e}");
         }
+        // only the two LPAC capabilities, exactly spelled, and only with the LPAC policy; no network capability, no SID, no other name
+        for cap in ["internetClient", "internetClientServer", "privateNetworkClientServer", "S-1-15-3-1", "S-1-15-3-2", "registryread", "RegistryRead", "lpaccom", "lpacCom ", "documentsLibrary"] {
+            let mut v = product_run();
+            v.extend(["--capability", cap]);
+            let e = parse(&v).err().unwrap_or_else(|| panic!("--capability {cap:?} was accepted"));
+            assert!(e.contains("not in this build"), "{cap}: {e}");
+        }
+        for policy in ["none", "optin"] {
+            let v: Vec<&str> = product_run().into_iter().map(|x| if x == "optout" { policy } else { x }).collect();
+            assert!(parse(&v).is_err(), "capabilities with --aap-policy {policy}");
+        }
+        let without_policy: Vec<&str> = { let mut v = product_run(); let i = v.iter().position(|x| *x == "--aap-policy").unwrap(); v.drain(i..i + 2); v };
+        assert!(parse(&without_policy).is_err(), "capabilities without any --aap-policy");
+        // the plain AppContainer fallback: no policy attribute, no capability
+        let fallback: Vec<&str> = { let mut v = product_run(); for _ in 0..2 { let i = v.iter().position(|x| *x == "--capability").unwrap(); v.drain(i..i + 2); } v.into_iter().map(|x| if x == "optout" { "none" } else { x }).collect() };
+        assert!(parse(&fallback).is_ok(), "the plain AppContainer fallback line");
+        assert!(parse(&["run", "--aap-policy", "optin"]).unwrap_err().contains("not in this build"));
+        // a run keeps the job's limits: no 0 (no limit) and no INFINITE timeout
+        for (flag, value) in [("--memory-mb", "0"), ("--active-processes", "0"), ("--timeout-ms", "0"), ("--timeout-ms", "4294967295")] {
+            let mut v = product_run();
+            v.extend([flag, value]);
+            assert!(parse(&v).unwrap_err().contains("above 0"), "{flag} {value}");
+        }
+        let mut no_limits = product_run();
+        let i = no_limits.iter().position(|x| *x == "--memory-mb").unwrap();
+        no_limits.drain(i..i + 2);
+        assert!(parse(&no_limits).is_err(), "a run without --memory-mb");
+        assert!(parse(&["check", "--grant", "seal:C:\\w\\.git"]).is_ok() && parse(&["revoke", "--grant", "rx:C:\\n"]).is_ok(), "check and revoke take no limits");
         // the refusal does not depend on where the option stands or on what follows it
         let mut v = product_run();
         v.extend(["--keep-profile"]);
@@ -186,6 +230,7 @@ mod tests {
         assert!(!a.kill_on_close && a.win32k_off && a.keep_profile && a.stdout_pipe && a.stderr_nul && a.dump.len() == 1);
         assert!(parse(&["grant", "--grant", "deny-strong:C:\\x"]).is_ok());
         assert!(parse(&["run", "--stdin", "pipe-open"]).is_ok());
+        assert!(parse(&["run", "--capability", "internetClient", "--aap-policy", "optin"]).is_ok(), "the experiment measures other capabilities and policies");
         for command in ["grant", "dump", "delete-profile"] { assert!(parse(&[command]).is_ok(), "{command}"); }
     }
 }

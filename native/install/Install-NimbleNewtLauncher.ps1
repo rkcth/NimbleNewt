@@ -67,7 +67,8 @@ $ExeName = 'nn-launcher.exe'
 $ControlDir = Join-Path $DataDir 'native'
 $ManifestPath = Join-Path $DataDir 'install-manifest.json'
 $EnvFile = Join-Path $DataDir 'worker.env'
-$AccountMarker = 'NimbleNewt native launcher account (made by Install-NimbleNewtLauncher.ps1; no interactive logon)'
+# New-LocalUser refuses a description longer than 48 characters, so the marker is short (a test pins the length).
+$AccountMarker = 'NimbleNewt launcher account (installer-made)'
 # Well-known SIDs, not names: the names change with the Windows language.
 $SidSystem = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
 $SidAdmins = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
@@ -84,17 +85,27 @@ $SynchronizeBit = 0x100000   # .NET adds SYNCHRONIZE to every allow entry it wri
 function Say([string] $text) { Write-Host $text }
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 function Assert-Admin { if (-not (Test-Admin)) { throw "$Action needs an elevated (administrator) PowerShell. Nothing was changed." } }
-function Test-Reparse([string] $path) { (Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint }
+# The attributes of the item itself, or $null when nothing has that name. A link or junction is NOT followed (GetFileAttributes reports the link), so a dangling link counts as
+# present; Test-Path and Get-Item follow links on Windows PowerShell 5.1 and would call it absent. Any other failure (access denied, a bad name) is thrown: fail closed.
+function Get-ItemAttributes([string] $path) {
+  try { return [System.IO.File]::GetAttributes($path) } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return $null }
+}
+function Test-Present([string] $path) { $null -ne (Get-ItemAttributes $path) }
+function Test-Reparse([string] $path) { $attrs = Get-ItemAttributes $path; ($null -ne $attrs) -and (($attrs -band [IO.FileAttributes]::ReparsePoint) -ne 0) }
+function Test-FolderItem([string] $path) { (((Get-ItemAttributes $path) -band [IO.FileAttributes]::Directory) -ne 0) }
 function Test-SamePath([string] $a, [string] $b) { (-not [string]::IsNullOrEmpty($a)) -and (-not [string]::IsNullOrEmpty($b)) -and ([IO.Path]::GetFullPath($a).TrimEnd('\') -ieq [IO.Path]::GetFullPath($b).TrimEnd('\')) }
 function Assert-NimbleNewtPath([string] $path, [string] $what) {
   # A full local path, already normal (no "..", no relative part, no share), ending in \NimbleNewt: the only shape Install makes and Uninstall removes.
-  if ($path -notmatch '^[A-Za-z]:\\[^:*?"<>|]+$' -or $path.TrimEnd('\') -ne [IO.Path]::GetFullPath($path).TrimEnd('\') -or (Split-Path -Leaf $path.TrimEnd('\')) -ne 'NimbleNewt') {
-    throw "$what must be a full local path ending in \NimbleNewt (it is '$path'). Nothing was changed."
+  # Printable ASCII only (worker.env is written as ASCII) and no # ' ` = (node --env-file cuts an unquoted value at #): checked here, before anything is changed.
+  if ($path -notmatch '^[\x20-\x7E]+$' -or $path -notmatch '^[A-Za-z]:\\[^:*?"<>|#''`=]+$' -or $path.TrimEnd('\') -ne [IO.Path]::GetFullPath($path).TrimEnd('\') -or (Split-Path -Leaf $path.TrimEnd('\')) -ne 'NimbleNewt') {
+    throw "$what must be a full local path ending in \NimbleNewt, in printable ASCII without # ' `` = (it is '$path'). Nothing was changed."
   }
 }
 
 # ---- the local security policy (account rights) through the LSA API; no tool to install ---------------------------------------------------------------------------------
-if (-not ('NnLsa' -as [type])) {
+# Compiled only right before the first LSA call (Install and Uninstall inside their ShouldProcess question, Verify when elevated): a -WhatIf run compiles nothing.
+function Initialize-NnLsa {
+  if ('NnLsa' -as [type]) { return }
   Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -201,18 +212,23 @@ function New-ProtectedSecurity($rules) {
   return $acl
 }
 function Assert-SafeItem([string] $path, [bool] $folder) {
-  if (-not (Test-Path -LiteralPath $path)) { return }
-  # %ProgramData% lets any user make a folder. A pre-made folder or file, a link or a junction under our names must never be adopted (the owner of a thing keeps the right to change its list).
+  if (-not (Test-Present $path)) { return }
+  # %ProgramData% lets any user make a folder. A pre-made folder or file, a link or a junction (also a dangling one) under our names must never be adopted (the owner of a thing keeps the
+  # right to change its list).
   if (Test-Reparse $path) { throw "$path is a link or junction; remove it (as an administrator) and run again. Nothing more was changed." }
-  if ((Get-Item -LiteralPath $path -Force).PSIsContainer -ne $folder) { throw "$path exists but is not a $(if ($folder) { 'folder' } else { 'file' }). Nothing more was changed." }
-  $owner = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier])
+  if ((Test-FolderItem $path) -ne $folder) { throw "$path exists but is not a $(if ($folder) { 'folder' } else { 'file' }). Nothing more was changed." }
+  $acl = Get-Acl -LiteralPath $path
+  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
   if ($TrustedOwners -notcontains $owner.Value) { throw "$path already exists and is owned by $($owner.Value), not by an administrator. Remove it or choose another -DataDir/-InstallDir. Nothing more was changed." }
+  # A folder this script made never inherits its parent's list. One that does was made by someone else (for example an administrator by hand in %ProgramData%), and while it carried the
+  # parent's "Users may create" any user could have put a file or a hard link under one of our names in it (a hard link is no reparse point and has its target's owner).
+  if ($folder -and -not $acl.AreAccessRulesProtected) { throw "$path already exists with the access list of its parent folder, so this script did not make it and other users may have written in it. Remove it (as an administrator) and run again. Nothing more was changed." }
 }
 # Makes the folder WITH its protected list in one call when it is absent (no moment with the parent's default list), then checks what is there and writes the list as a whole. If someone
 # else made the folder first (a race in %ProgramData%), the check after the call sees their ownership or their link and stops.
 function Set-ProtectedAcl([string] $path, $rules) {
   $security = New-ProtectedSecurity $rules
-  if (-not (Test-Path -LiteralPath $path)) {
+  if (-not (Test-Present $path)) {
     if ($null -ne [System.IO.Directory].GetMethod('CreateDirectory', [type[]]@([string], [System.Security.AccessControl.DirectorySecurity]))) { [void][System.IO.Directory]::CreateDirectory($path, $security) }   # Windows PowerShell 5.1
     else { [void][System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo $path), $security) }                                                                                         # PowerShell 7
   }
@@ -223,17 +239,18 @@ function Set-ProtectedAcl([string] $path, $rules) {
 # Removes a folder tree WITHOUT following any link or junction in it: a link is removed as the link itself, never what it points to (Windows PowerShell 5.1's Remove-Item -Recurse follows
 # directory links, and the account can make a junction in its control folder).
 function Remove-TreeNoFollow([string] $path) {
-  $item = Get-Item -LiteralPath $path -Force
-  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-    if ($item.PSIsContainer) { [System.IO.Directory]::Delete($path, $false) } else { [System.IO.File]::Delete($path) }
+  if (-not (Test-Present $path)) { return }
+  $isFolder = Test-FolderItem $path
+  if (Test-Reparse $path) {
+    if ($isFolder) { [System.IO.Directory]::Delete($path, $false) } else { [System.IO.File]::Delete($path) }
     return
   }
-  if ($item.PSIsContainer) {
+  if ($isFolder) {
     foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) { Remove-TreeNoFollow $child.FullName }
-    $item.Attributes = [IO.FileAttributes]::Directory
+    [System.IO.File]::SetAttributes($path, [IO.FileAttributes]::Directory)
     [System.IO.Directory]::Delete($path, $false)
   } else {
-    $item.Attributes = [IO.FileAttributes]::Normal
+    [System.IO.File]::SetAttributes($path, [IO.FileAttributes]::Normal)
     [System.IO.File]::Delete($path)
   }
 }
@@ -255,6 +272,7 @@ function Invoke-Verify {
     Say "  member of: $($groups -join ', ')"
     Check ($groups.Count -eq 1 -and (Get-LocalGroup -SID $SidUsers).Name -eq $groups[0]) 'it is a member of Users only (not Administrators, not any other group)'
     if (Test-Admin) {
+      Initialize-NnLsa
       $rights = [NnLsa]::List($user.SID.Value)
       Say "  account rights: $($rights -join ', ')"
       Check ($rights -contains 'SeBatchLogonRight') 'it may log on as a batch job'
@@ -329,6 +347,7 @@ function Invoke-Install {
   $sid = if ($WhatIfPreference -and $null -eq $existing) { New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-21-0-0-0-1000' } else { (Get-LocalUser -Name $AccountName).SID }
   # 2. The account rights (only these; Verify lists them).
   if ($PSCmdlet.ShouldProcess($AccountName, "grant $($RightsGranted -join ', ') and deny $($RightsDenied -join ', ')")) {
+    Initialize-NnLsa
     [NnLsa]::Add($sid.Value, $RightsGranted + $RightsDenied)
     if (-not $ServiceLogon) { [NnLsa]::Remove($sid.Value, @('SeServiceLogonRight')) }
   }
@@ -349,7 +368,7 @@ function Invoke-Install {
   }
   # 5. worker.env and the manifest: paths and names only. No password, token or key exists anywhere in this script, so none can be written.
   if ($PSCmdlet.ShouldProcess($EnvFile, 'write the four NIMBLENEWT_WIN_* names')) {
-    foreach ($v in @($target, $ControlDir, $Container, $ProfileName)) { if ($v -match '[\r\n"=]') { throw "a value for worker.env has a character that is not allowed: $v" } }
+    foreach ($v in @($target, $ControlDir, $Container, $ProfileName)) { if ($v -notmatch '^[\x21-\x7E][\x20-\x7E]*$' -or $v -match '["=#''`]') { throw "a value for worker.env has a character that is not allowed: $v" } }
     foreach ($f in @($EnvFile, $ManifestPath)) { Assert-SafeItem $f $false }
     $lines = @("NIMBLENEWT_WIN_LAUNCHER=$target", "NIMBLENEWT_WIN_CONTROL_DIR=$ControlDir", "NIMBLENEWT_WIN_CONTAINER=$Container", "NIMBLENEWT_WIN_PROFILE=$ProfileName")
     Set-Content -LiteralPath $EnvFile -Value $lines -Encoding ascii
@@ -384,6 +403,7 @@ function Invoke-Uninstall {
   # 1. The account first (the manifest stays until the end, so a rerun can finish an interrupted removal).
   if ($null -ne $user) {
     if ($PSCmdlet.ShouldProcess($m.account, 'remove every account right it holds, delete its profile (and with it the AppContainer profile it made), and delete the user')) {
+      Initialize-NnLsa
       [NnLsa]::RemoveAll($user.SID.Value)
       Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $user.SID.Value } | Remove-CimInstance
       Remove-LocalUser -SID $user.SID
@@ -391,13 +411,13 @@ function Invoke-Uninstall {
   }
   # 2. The files this script placed, then its two folders only if nothing else is left in them.
   if ($PSCmdlet.ShouldProcess($DataDir, 'close and remove the control folder (links in it are removed as links, never followed), remove worker.env, the launcher and the manifest, then the two folders if empty')) {
-    if (Test-Path -LiteralPath $ControlDir) {
+    if (Test-Present $ControlDir) {
       Set-Acl -LiteralPath $ControlDir -AclObject (New-ProtectedSecurity @(@{ Who = $SidSystem; Rights = 'FullControl'; Scope = 'All' }, @{ Who = $SidAdmins; Rights = 'FullControl'; Scope = 'All' }))
       Remove-TreeNoFollow $ControlDir
     }
-    foreach ($f in @($EnvFile, $launcher, $ManifestPath)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
+    foreach ($f in @($EnvFile, $launcher, $ManifestPath)) { if (Test-Present $f) { Remove-Item -LiteralPath $f -Force } }
     foreach ($d in @($DataDir, $InstallDir)) {
-      if (-not (Test-Path -LiteralPath $d)) { continue }
+      if (-not (Test-Present $d)) { continue }
       if (@(Get-ChildItem -LiteralPath $d -Force).Count -eq 0) { [System.IO.Directory]::Delete($d, $false) } else { Say "Left $d in place: it holds files this script did not make." }
     }
   }
