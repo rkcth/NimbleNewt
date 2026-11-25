@@ -1,7 +1,7 @@
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
-import { checkWindowsHostPath, overlapsWin } from "./windows-plan.js";
+import { checkWindowsHostPath, foldWin, isWindowsDeviceName, overlapsWin } from "./windows-plan.js";
 
 /*
  * Card A03b, the native Windows launcher: everything about how one launch becomes a launcher command line, with no operating-system call in it (so it runs, and is tested, on any OS).
@@ -71,6 +71,7 @@ export function checkProgramFolder(label: string, path: unknown): string {
   if (typeof path !== "string" || !/^[A-Za-z]:\\/.test(path) || win32.normalize(path) !== path || /[<>"|?*\u0000-\u001f]/.test(path) || path.endsWith("\\") || path.indexOf(":", 2) !== -1) return bad(`${label}: must be a local absolute normalised path such as C:\\dir\\sub: ${String(path)}`);
   // Windows drops a trailing dot or space and expands a short (8.3) name, so `C:\dir.` or `C:\PROGRA~1` names another folder than the text says, and the overlap checks (plain text comparisons) would miss it.
   if (path.split("\\").slice(1).some((s) => s === "" || s === "." || s === ".." || /~\d/.test(s) || /[. ]$/.test(s))) return bad(`${label}: no "..", trailing dot or space, or short-name (~1) part: ${path}`);
+  if (path.split("\\").slice(1).some(isWindowsDeviceName)) return bad(`${label}: ${path} has a part Windows opens as a device (CON, NUL, COM1 and the like)`);
   return path;
 }
 
@@ -110,7 +111,7 @@ export function checkNativeRecipe(recipe: NormalizedRecipe, settings: NativeSett
 }
 
 /** Whether `path` is `dir` or lies inside it (case-insensitive, whole path segments). */
-const insideOrSame = (path: string, dir: string): boolean => { const p = path.toLowerCase(), d = dir.toLowerCase(); return p === d || p.startsWith(d + "\\"); };
+const insideOrSame = (path: string, dir: string): boolean => { const p = foldWin(path), d = foldWin(dir); return p === d || p.startsWith(d + "\\"); };
 
 /**
  * Every folder the container is given, narrowest right first. The workspace is `modify-root` (modify without DELETE on the folder itself, so the agent cannot rename or delete the folder it runs in);
@@ -134,7 +135,7 @@ export function grantsFor(recipe: NormalizedRecipe, settings: NativeSettings, su
   for (const folder of settings.programFolders) {
     checkProgramFolder("program folder", folder);
     for (const g of guarded) if (insideOrSame(g, folder)) bad(`program folder ${folder} contains the supervisor's own folder ${g}`);
-    for (const t of taskFolders) if (insideOrSame(t, folder) && t.toLowerCase() !== folder.toLowerCase()) bad(`program folder ${folder} contains the task folder ${t}`);
+    for (const t of taskFolders) if (insideOrSame(t, folder) && foldWin(t) !== foldWin(folder)) bad(`program folder ${folder} contains the task folder ${t}`);
     if (taskFolders.some((t) => insideOrSame(folder, t))) continue;
     if (grants.some((g) => g.why === "program" && insideOrSame(folder, g.path))) continue;
     grants.push({ mode: "rx", path: folder, soft: true, why: "program" });
@@ -147,7 +148,7 @@ export function grantsFor(recipe: NormalizedRecipe, settings: NativeSettings, su
  * path (/inputs/..., /opt/...) or /windows (the system folder, which the container reads by the system's own rule). Anything else is refused.
  */
 export function programPath(recipe: NormalizedRecipe, program: string, systemRoot: string): string {
-  const segmentOk = (s: string): boolean => s.length > 0 && !/[<>:"|?*\\\u0000-\u001f]/.test(s) && !/[. ]$/.test(s) && s !== "." && s !== ".." && !/~\d/.test(s);
+  const segmentOk = (s: string): boolean => s.length > 0 && !/[<>:"|?*\\\u0000-\u001f]/.test(s) && !/[. ]$/.test(s) && s !== "." && s !== ".." && !/~\d/.test(s) && !isWindowsDeviceName(s);
   const roots: readonly (readonly [string, string])[] = [["/work", recipe.workdir], ["/home/agent", recipe.home], ["/scratch", recipe.scratch], ["/windows", systemRoot], ...recipe.readOnly.map((m) => [m.guest, m.host] as const)];
   let best: readonly [string, string] | undefined;
   for (const r of roots) if ((program === r[0] || program.startsWith(r[0] + "/")) && (best === undefined || r[0].length > best[0].length)) best = r;

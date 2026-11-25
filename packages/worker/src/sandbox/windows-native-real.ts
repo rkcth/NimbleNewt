@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { NativeHost } from "./windows-native-job.js";
 import type { ProcessResult } from "./windows-host.js";
 
@@ -53,7 +54,12 @@ export function nativeRealHost(): NativeHost {
       } finally { closeSync(fd); }
     },
     writeText: (p, text) => { writeFileSync(p, text); },
-    createExclusive: (p, text) => { try { writeFileSync(p, text, { flag: "wx" }); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return false; throw e; } },
+    // Whole or not at all: the text goes to a private temporary name first and is then linked to the name (a link fails if the name exists), so a reader never sees a lock half written.
+    createExclusive: (p, text) => {
+      const temp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(temp, text, { flag: "wx" });
+      try { linkSync(temp, p); return true; } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return false; throw e; } finally { rmSync(temp, { force: true }); }
+    },
     listDir: (p) => { try { return readdirSync(p); } catch { return []; } },
     remove: (p) => { rmSync(p, { recursive: true, force: true }); },
     fileSystemOf: async (p) => {
