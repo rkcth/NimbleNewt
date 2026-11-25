@@ -48,8 +48,8 @@ export async function windowsConsoleUser(): Promise<string | undefined> {
 
 /**
  * The backend the G05 suite uses on Windows (card A03b): the native launcher, configured from the environment the administrator's install step sets (see `windowsDefaultBackend`). Never throws: where it
- * cannot be configured, or the launcher is not installed, it has no capacity and says why, so every case is reported `not_run` with that reason. The case scripts of the Windows dialect still start
- * programs through cmd.exe, which the container refuses; they must become node programs before the ten cases can give verdicts there (recorded in the A03b notes as not yet done).
+ * cannot be configured, or the launcher is not installed, it has no capacity and says why, so every case is reported `not_run` with that reason. The cases themselves are one node program the container
+ * runs (the `windows-node` dialect, containment-windows-cases.ts), because the container refuses cmd.exe starting programs.
  */
 export function windowsEvidenceBackend(env: NodeJS.ProcessEnv = process.env, _consoleUser?: string): SandboxBackend {
   return windowsDefaultBackend(env, process.platform);

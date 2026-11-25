@@ -513,10 +513,15 @@ struct GrantRecord { spec: GrantSpec, applied: bool, revoked: bool, error: Optio
 /// Holds what was granted so the entries are removed on every path out, including a panic (Drop).
 struct GrantSet { sid: PSID, items: Vec<GrantRecord> }
 impl GrantSet {
+    /// Two passes: every other entry first (newest first), the sealed names LAST. A revoked seal lets the folder inherit again, so while the workspace's own entry for the container were
+    /// still in place the sealed folder would take its write rights back from the parent for a moment; revoking the seals after everything else leaves nothing to inherit.
     fn revoke_all(&mut self) {
-        for g in self.items.iter_mut().rev() {
-            if g.applied && !g.revoked {
-                match change_ace(&g.spec.path, self.sid, g.spec.mode, true) { Ok(()) => g.revoked = true, Err(e) => g.error = Some(e) }
+        for seals in [false, true] {
+            for g in self.items.iter_mut().rev() {
+                if (g.spec.mode == Mode::Seal) != seals { continue; }
+                if g.applied && !g.revoked {
+                    match change_ace(&g.spec.path, self.sid, g.spec.mode, true) { Ok(()) => g.revoked = true, Err(e) => g.error = Some(e) }
+                }
             }
         }
     }

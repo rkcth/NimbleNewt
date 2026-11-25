@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { arch as osArch, release as osRelease, tmpdir } from "node:os";
-import { join, relative, win32 } from "node:path";
+import { basename, dirname, join, relative, win32 } from "node:path";
 import type { SandboxBackend } from "./backend.js";
+import { runWindowsNodeCases } from "./containment-windows-cases.js";
 import { windowsConsoleUser, windowsEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher } from "./launcher.js";
 import { GUEST, type SandboxRecipe } from "./recipe.js";
@@ -199,8 +200,15 @@ export interface SuiteOptions {
   readonly backend?: SandboxBackend;
   /** Tests only: the launcher of the unconfined pairing. Default: a production launcher allowed trusted-host runs for the suite alone. */
   readonly unconfinedLauncher?: SandboxLauncher;
-  /** How the case scripts are written: POSIX `sh` (Linux, macOS) or Windows `cmd` batch files. Default: by this OS. Tests set it to check the Windows cases on any OS. */
-  readonly dialect?: "posix" | "windows";
+  /**
+   * How the cases are written: POSIX `sh` (Linux, macOS), Windows `cmd` batch files (the superseded Windows Sandbox backend) or `windows-node` (card A03b: one plain-JavaScript runner run by node, since the native
+   * container refuses cmd.exe starting programs). Default: `posix`, and `windows-node` on Windows. Tests set it to check the Windows cases on any OS.
+   */
+  readonly dialect?: "posix" | "windows" | "windows-node";
+  /** `windows-node` only. The node program the confined runner uses (default: this one). */
+  readonly nodeExecutable?: string;
+  /** `windows-node` only, tests: the system paths the system-write case tries (default: the host's Windows folders). */
+  readonly systemPaths?: readonly string[];
   readonly timeoutMs?: number;
   /** Tests only: changes a case's script before it runs (both the unconfined pairing and the confined run), to show that a broken probe is reported inconclusive. Never set by `produceReport`'s command line. */
   readonly rewriteScript?: (id: string, script: string) => string;
@@ -217,9 +225,11 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
   const fixture = await buildFixture();
   const originalHome = process.env["HOME"];
   process.env["HOME"] = fixture.home;
-  const win = (options.dialect ?? (process.platform === "win32" ? "windows" : "posix")) === "windows";
-  // Every Windows case starts a fresh Windows Sandbox, which takes far longer than a bubblewrap or Seatbelt start.
-  const timeoutMs = options.timeoutMs ?? (win ? 300_000 : 30_000);
+  const dialect = options.dialect ?? (process.platform === "win32" ? "windows-node" : "posix");
+  const win = dialect === "windows";
+  const nodeWin = dialect === "windows-node";
+  // Every cmd-dialect case starts a fresh Windows Sandbox, which takes far longer than a bubblewrap or Seatbelt start; the node runner makes one confined start for all ten cases.
+  const timeoutMs = options.timeoutMs ?? (win ? 300_000 : nodeWin ? 120_000 : 30_000);
   const rewrite = options.rewriteScript ?? ((_id: string, script: string) => script);
   try {
     const launcher = options.launcher ?? await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined, ...(options.backend === undefined ? {} : { backend: options.backend }) });
@@ -231,6 +241,24 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
     if (options.unconfinedLauncher !== undefined) unconfined = options.unconfinedLauncher;
     else try { unconfined = await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], trustedHost: { authority }, audit: () => undefined }); } catch { unconfined = undefined; }
     let n = 0;
+    const results: CaseResult[] = [];
+    if (nodeWin) {
+      const node = options.nodeExecutable ?? process.execPath;
+      const nodeHostFolder = /^[A-Za-z]:\\/.test(node) ? win32.dirname(node) : dirname(node);
+      const launch = async (mode: "sandboxed" | "trusted-host", recipe: SandboxRecipe, command: string[]): Promise<{ timedOut: boolean; exitCode: number | null; stdout: string; stderr: string }> => {
+        const via = mode === "sandboxed" ? launcher : unconfined;
+        if (via === undefined) throw new Error("no launcher for this mode");
+        const r = await (await via.launch({ recipe, command, timeoutMs, maxOutputBytes: 200_000 })).result;
+        return { timedOut: r.timedOut, exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+      };
+      const found = await runWindowsNodeCases({
+        fixture, secrets: { controller: SECRET_CONTROLLER, key: SECRET_KEY, outside: OUTSIDE_ORIGINAL, git: GIT_ORIGINAL, decoy: OWN_DECOY },
+        nodeGuestPath: `/opt/node/${basename(node.replace(/\\/g, "/"))}`, nodeHostFolder, hostNode: node,
+        systemPaths: options.systemPaths ?? [win32.join(WIN_ROOT, "g05-x"), win32.join(WIN_ROOT, "System32", "g05-x"), "C:\\g05-x", "C:\\Program Files\\g05-x"],
+        launch, canRunFree: unconfined !== undefined, windows: process.platform === "win32", settle: () => settle(100),
+      });
+      for (const c of found) results.push({ id: c.id, category: CATEGORY[c.id]!, verdict: c.verdict, detail: short(c.detail) });
+    }
     // On Windows a case is a batch file in a read-only input (`/inputs/g05`): cmd.exe arguments may not carry quotes or percent signs (A03b refuses them), and the guest cannot change the file before it runs.
     const recipeOf = (): SandboxRecipe => {
       n += 1;
@@ -259,8 +287,8 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
       return { problem: attempt.judge(out) ?? await attempt.host(out), out };
     };
 
-    const results: CaseResult[] = [];
     const record = async (def: CaseDef): Promise<void> => {
+      if (nodeWin) return; // the node runner above made these verdicts
       const category = CATEGORY[def.id]!;
       const push = (verdict: Verdict, detail: string): void => { results.push({ id: def.id, category, verdict, detail: short(detail) }); };
       try {
@@ -428,10 +456,10 @@ export async function runContainmentSuite(options: SuiteOptions = {}): Promise<{
     try {
       fixture.reset();
       const refusing = await SandboxLauncher.create({ protectedPaths: [fixture.controllerDir], audit: () => undefined });
-      const refused = await refusing.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: win ? [win32.join(WIN_ROOT, "System32", "cmd.exe"), "/d", "/c", "exit 0"] : ["/bin/true"], timeoutMs, maxOutputBytes: 100 }).then(async (run) => { await run.result; return false; }, (e: unknown) => (e as { code?: string }).code === "not_authorized");
+      const refused = await refusing.launch({ recipe: { ...recipeOf(), mode: "trusted-host" }, command: nodeWin ? [options.nodeExecutable ?? process.execPath, "-e", "0"] : win ? [win32.join(WIN_ROOT, "System32", "cmd.exe"), "/d", "/c", "exit 0"] : ["/bin/true"], timeoutMs, maxOutputBytes: 100 }).then(async (run) => { await run.result; return false; }, (e: unknown) => (e as { code?: string }).code === "not_authorized");
       if (unconfined === undefined) throw new Error("no trusted-host launcher");
       const exceptionRecipe = { ...recipeOf(), mode: "trusted-host" as const };
-      const run = await unconfined.launch({ recipe: exceptionRecipe, command: commandOf(exceptionRecipe, win ? `type ${wq(fixture.outsideFile)}` : `cat ${quote(fixture.outsideFile)}`), timeoutMs, maxOutputBytes: 1000 });
+      const run = await unconfined.launch({ recipe: exceptionRecipe, command: nodeWin ? [options.nodeExecutable ?? process.execPath, "-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1], 'utf8'))", fixture.outsideFile] : commandOf(exceptionRecipe, win ? `type ${wq(fixture.outsideFile)}` : `cat ${quote(fixture.outsideFile)}`), timeoutMs, maxOutputBytes: 1000 });
       const out = await run.result;
       trustedHost = { mode: "trusted-host", authority, reachesHostFiles: out.stdout.includes(OUTSIDE_ORIGINAL), refusedWithoutAuthority: refused };
     } catch { /* the exception is recorded only when it could be shown */ }
@@ -455,8 +483,8 @@ export async function produceReport(repo: string, options: SuiteOptions = {}): P
   if (platform !== "linux" && platform !== "darwin" && platform !== "win32") throw new Error(`no containment evidence is defined for ${platform}`);
   const commit = git(repo, "rev-parse", "HEAD");
   const dirty = git(repo, "status", "--porcelain").length > 0;
-  // Windows: the launcher has no default backend there, so the Windows Sandbox backend is built here (see containment-windows.ts for the join point with card A03b).
-  // The owner and share account default to the console user there, as in windows-real.test.ts (containment-windows.ts).
+  // Windows: the backend is the native launcher (windowsEvidenceBackend, card A03b), configured from the environment of the administrator's install step; the cases are the node runner's
+  // (containment-windows-cases.ts). Where the launcher is not installed every case is reported not_run with that reason.
   const suite = await runContainmentSuite(platform === "win32" && options.launcher === undefined && options.backend === undefined ? { ...options, backend: windowsEvidenceBackend(process.env, await windowsConsoleUser()) } : options);
   const macos = macosProductVersion();
   return {

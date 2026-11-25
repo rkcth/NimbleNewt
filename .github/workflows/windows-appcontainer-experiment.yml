@@ -105,6 +105,21 @@ jobs:
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode firewall --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/firewall.md" ]; then cat "$RUNNER_TEMP/appc-out/firewall.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
+      # Card A03b slice 2: the ten containment cases of card G05 through the PRODUCT backend (windowsNativeBackend, the launcher built above), run by the node case runner inside the container.
+      # The report is redacted (names, paths and SIDs replaced) and uploaded with the rest. Nothing here is a release gate: a hosted run does not prove the service-account, non-administrator or Home items.
+      - name: G05 containment cases through the native backend (one confined start, node runner)
+        shell: bash
+        if: always()
+        timeout-minutes: 20
+        env:
+          NIMBLENEWT_WIN_LAUNCHER: ${{ github.workspace }}\experiments\windows-appcontainer\launcher\target\release\nn-appc-launcher.exe
+          NIMBLENEWT_WIN_CONTROL_DIR: ${{ runner.temp }}\nn-native
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out/g05-native"
+          rc=0
+          node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
+          { echo "## G05 containment cases, native backend (hosted Windows)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

@@ -1957,6 +1957,37 @@ test("the launcher source (round 4): the layered layouts are built by hand in a 
   for (const banned of ["CreateProcessAsUser", "CreateProcessWithToken", "BREAKAWAY"]) assert.ok(!src.includes(banned), banned);
 });
 
+test("the launcher source (A03b slice 2): the revoke takes the sealed names LAST, in a second pass after every other entry, and still revokes every applied entry once", () => {
+  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const body = /fn revoke_all\(&mut self\) \{([\s\S]*?)\n    \}\n    fn json/.exec(src);
+  assert.ok(body, "revoke_all not found");
+  // two passes (the non-seals first, then the seals), each newest first
+  assert.match(body[1], /for seals in \[false, true\] \{\s*for g in self\.items\.iter_mut\(\)\.rev\(\) \{\s*if \(g\.spec\.mode == Mode::Seal\) != seals \{ continue; \}/);
+  // each applied entry is still revoked exactly once and a failure is recorded, not dropped
+  assert.equal(body[1].match(/change_ace\(/g).length, 1);
+  assert.match(body[1], /if g\.applied && !g\.revoked/);
+  assert.match(body[1], /Ok\(\(\)\) => g\.revoked = true, Err\(e\) => g\.error = Some\(e\)/);
+  // the order is the same for the `revoke` command, the end of `run` and the Drop (all go through revoke_all)
+  assert.equal(src.match(/\.revoke_all\(\)/g).length, 3);
+  assert.ok(!/items\.iter_mut\(\)\.rev\(\)[^\n]*\n\s*if g\.applied/.test(src), "a single reverse pass is back");
+});
+
+test("the experiment workflow (A03b slice 2): the product containment cases run in the hosted job after the launcher build, through the built launcher, redacted, never on a push", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  assert.match(wf, /^on:\n  workflow_dispatch:/m);
+  assert.ok(!/^\s+(push|pull_request|schedule):/m.test(wf), "only started by hand");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const step = hosted.slice(hosted.indexOf("- name: G05 containment cases through the native backend"));
+  assert.ok(step.length > 0 && hosted.indexOf("Build the launcher") < hosted.indexOf("G05 containment cases through the native backend"));
+  assert.match(step, /NIMBLENEWT_WIN_LAUNCHER: [^\n]*launcher\\target\\release\\nn-appc-launcher\.exe/);
+  assert.match(step, /NIMBLENEWT_WIN_CONTROL_DIR: \$\{\{ runner\.temp \}\}/);
+  assert.match(step, /node --import \.\/scripts\/offline-guard\.mjs scripts\/containment-evidence\.mjs run --out [^\n]*--redact [^\n]*redact-log\.mjs/);
+  assert.match(step, /if: always\(\)/);
+  assert.ok(!step.slice(0, step.indexOf("run: |")).includes("secrets."), "no secret");
+  // its report is inside the folder the job uploads
+  assert.match(step, /--out "\$RUNNER_TEMP\/appc-out\/g05-native"/);
+});
+
 test("spawn ladder variants: unique ids, the dimensions the brief names are all there, the native steps use no libuv", () => {
   const all = spawnVariants();
   assert.equal(new Set(all.map((v) => v.id)).size, all.length);
