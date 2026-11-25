@@ -126,6 +126,31 @@ test("stats and sessions readers keep only named figures, never fail the run, an
   assert.deepEqual(await readSessions(broken, ["a"]), []);
 });
 
+test("the stats and sessions readers drop what they do not name: other clients' conversations, nested values and unnamed stats fields never reach the evidence", async () => {
+  const fake = fakeRadiance({ key: SECRET });
+  const ours = "nn-ours0123456789";
+  const shaped: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    if (path === "/sessions") {
+      return new Response(JSON.stringify({ sessions: [
+        { id: 1, label: ours, tokens: 10, snapshots: 2, prompt: { text: "nested" } },
+        { id: 2, label: "someone-else", tokens: 99, title: "another client's chat" },
+        { id: 3, tokens: 5 },
+      ] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (path === "/stats") {
+      return new Response(JSON.stringify({ version: "x", running: 3, waiting: 1, clients: [{ name: "another client" }], last_prompt: "private text", cards: [{ index: 0, vram_used: 1, vram_total: 2, owner: "x" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return fake.fetch(input, init);
+  }) as typeof fetch;
+  const env: LiveEnv = { ...envFor(fake), fetch: shaped };
+  assert.deepEqual(await readSessions(env, [ours]), [{ id: 1, label: ours, tokens: 10, snapshots: 2 }]);
+  const s = await readStats(env);
+  assert.deepEqual(Object.keys(s).filter((k) => s[k] !== undefined).sort(), ["at", "cards", "running", "version", "waiting"]);
+  assert.deepEqual(s["cards"], [{ index: 0, vramUsed: 1, vramTotal: 2 }]);
+  assert.ok(!JSON.stringify(s).includes("another client") && !JSON.stringify(s).includes("private text"));
+});
+
 test("fixtures keep the usage, timings and a short answer; a refusal keeps only its error; neither carries an id or the key", () => {
   const body = fixtureBody({ id: "chatcmpl-abc", model: MODEL, system_fingerprint: "x", choices: [{ message: { content: "amber-123".repeat(30) }, finish_reason: "stop" }], usage: { prompt_tokens: 5, prompt_tokens_details: { cached_tokens: 0 } }, timings: { cache_n: 0, prompt_n: 5 } }) as Record<string, unknown>;
   assert.deepEqual(Object.keys(body).sort(), ["choices", "model", "object", "timings", "usage"]);
@@ -152,10 +177,35 @@ test("heads are synthetic, differ every time, and hold their facts; the transpor
 
 test("the committed live fixtures hold no key-like text, no id and no address", () => {
   const dir = join(here, "..", "..", "controller", "test-fixtures", "g10-radiance-live");
-  let files: string[] = [];
-  try { files = readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { /* the live run has not been captured yet */ }
+  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  assert.equal(files.length, 17, "the 17 captured responses are all present (a missing folder must not pass as clean)");
   for (const f of files) {
     const text = readFileSync(join(dir, f), "utf8");
     assert.ok(!/Bearer |sk-|chatcmpl-|\d+\.\d+\.\d+\.\d+|localhost|127\.0\.0\.1/.test(text), f);
   }
+});
+
+test("the committed live evidence holds no key-like text or address, and every /sessions entry in it is one of the run's own conversations", () => {
+  const dir = join(here, "..", "..", "..", "docs", "nimblenewt", "implementation-plan", "evidence");
+  const files = ["g10-radiance-run2.json", "g10-radiance-run3.json", "g10-radiance-run4.json"];
+  let sessions = 0;
+  for (const f of files) {
+    const text = readFileSync(join(dir, f), "utf8");
+    assert.ok(!/Bearer |Authorization|sk-|chatcmpl-|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|localhost|https?:\/\/|@[a-z0-9-]+\.[a-z]/i.test(text), f);
+    const walk = (o: unknown): void => {
+      if (Array.isArray(o)) { o.forEach(walk); return; }
+      if (o === null || typeof o !== "object") return;
+      const r = o as Record<string, unknown>;
+      if (Array.isArray(r["sessions"])) {
+        for (const s of r["sessions"] as Record<string, unknown>[]) {
+          sessions++;
+          assert.match(String(s["label"]), /^nn-[A-Za-z0-9_-]+$/, `${f}: a session that is not the run's own`);
+          assert.ok(Object.values(s).every((v) => typeof v !== "object"), `${f}: a session entry keeps only plain figures`);
+        }
+      }
+      Object.values(r).forEach(walk);
+    };
+    walk(JSON.parse(text));
+  }
+  assert.ok(sessions > 0, "the evidence lists the run's conversations");
 });

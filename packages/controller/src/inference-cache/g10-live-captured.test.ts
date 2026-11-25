@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CacheAdapter, type HttpRequest, type HttpResponse, type Transport } from "./adapter.js";
@@ -9,9 +10,9 @@ import { profileFor } from "./profiles.js";
 // Card G10, second run: the Radiance profile (C06) and the production CacheAdapter re-tested against responses captured from the running server on 2026-11-25 (version 2.2.0, shared with other clients) by
 // packages/integration/src/g10-radiance-live-bench.ts. See ../../test-fixtures/g10-radiance-live/README.md. Nothing here calls a server.
 
-const DIR = fileURLToPath(new URL("../../test-fixtures/g10-radiance-live/", import.meta.url));
+const DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "test-fixtures", "g10-radiance-live");
 interface Fixture { readonly status: number; readonly body: unknown }
-const load = (name: string): Fixture => JSON.parse(readFileSync(`${DIR}${name}.json`, "utf8")) as Fixture;
+const load = (name: string): Fixture => JSON.parse(readFileSync(join(DIR, `${name}.json`), "utf8")) as Fixture;
 const profile = (): CacheProfile => profileFor({ kind: "radiance", model: "qwen3.8-flash-next-iq4r", options: { hostTier: true, hybrid: true } });
 const usageOf = (b: unknown): { prompt_tokens: number; prompt_tokens_details: { cached_tokens: number } } => (b as { usage: { prompt_tokens: number; prompt_tokens_details: { cached_tokens: number } } }).usage;
 const STEP = 2048;
