@@ -7,11 +7,15 @@
 //   - `grant-*` modes add ONE explicit allow entry for the container's SID to the DACL of the launcher's current window station and/or desktop (the objects of this logon session,
 //     opened by name with READ_CONTROL and WRITE_DAC), and take that entry out again on every path out (Drop), reading the DACL back; the count left is in the JSON line. The objects
 //     last as long as the logon session that owns them; if this program is killed between the grant and the revoke, the entry stays until that session ends or `desktop-revoke` is run.
+//     Refused (nothing written): an interactive or unreadable window station (WinSta0 of a signed-in session is never changed: deskrules::may_change_launcher_objects), a SID that is not
+//     one AppContainer profile's (deskrules::is_profile_sid), and a NULL DACL (merging into it would replace "everyone" with one entry). The DACL is copied BEFORE the grant; after the
+//     revoke it is compared entry by entry with that copy: the same entries in another order are put back from the copy, any other difference is reported and not written.
 //   - `new-desktop` creates a desktop in the current window station (and grants the station); `new-station` creates a window station and a desktop in it, both with an entry for the container.
 //     Both are closed when the run ends (an object with no handle left is destroyed). The launcher's process window station is switched for the moment of the desktop creation and switched back.
 //   - Nothing is written to the registry, no persistent machine setting is touched.
 use super::*;
 use crate::args::DesktopMode;
+use crate::deskrules::{self, AclCompare};
 use windows_sys::Win32::System::StationsAndDesktops::*;
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
@@ -25,6 +29,9 @@ pub(crate) const STATION_FULL: u32 = READ_CONTROL_BIT | 0x037F;
 // Desktop rights: "read" is the documented GENERIC_READ mapping (READ_CONTROL, DESKTOP_READOBJECTS 0x1, DESKTOP_ENUMERATE 0x40); "full" is every DESKTOP_* right (0x1FF) plus READ_CONTROL.
 pub(crate) const DESKTOP_READ: u32 = READ_CONTROL_BIT | 0x0001 | 0x0040;
 pub(crate) const DESKTOP_FULL: u32 = READ_CONTROL_BIT | 0x01FF;
+/// Private codes (outside the Win32 range used here): the object has a NULL DACL, so no entry is merged into it; the SID is not one AppContainer profile's.
+pub(crate) const ERR_NULL_DACL: u32 = 0x2000_0002;
+pub(crate) const ERR_NOT_PROFILE_SID: u32 = 0x2000_0003;
 
 /// What one mode does: the level of the entry on the CURRENT station and desktop (None: no entry), whether to create objects, and what lpDesktop holds.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -108,6 +115,8 @@ fn add_entry(h: HANDLE, sid: PSID, mask: u32) -> Result<(), u32> {
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         let rc = GetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut old, null_mut(), &mut sd);
         if rc != 0 { return Err(rc); }
+        // A NULL DACL grants everyone everything; SetEntriesInAclW with no old ACL would make a DACL holding only this entry, which would shut everyone else out. Refused.
+        if old.is_null() { LocalFree(sd as *mut c_void); return Err(ERR_NULL_DACL); }
         let mut ea: EXPLICIT_ACCESS_W = zeroed();
         ea.grfAccessPermissions = mask;
         ea.grfAccessMode = GRANT_ACCESS;
@@ -153,8 +162,32 @@ fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
     }
 }
 
-/// One object the launcher changed or made, and what became of it.
-struct Touched { what: &'static str, name: String, mask: u32, applied: bool, error: Option<u32>, revoked: bool, left: i64, handle: HANDLE, owned: bool, is_station: bool, created: bool }
+/// A copy of a DACL (aligned for the ACL structure), taken before the grant.
+struct AclCopy { buf: Vec<usize>, len: usize }
+impl AclCopy {
+    fn bytes(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const u8, self.len) } }
+}
+
+/// The object's DACL as a copy (Ok(None): a NULL DACL). `h` needs READ_CONTROL.
+fn acl_copy(h: HANDLE) -> Result<Option<AclCopy>, u32> {
+    unsafe {
+        let mut acl: *mut ACL = null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
+        let rc = GetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut acl, null_mut(), &mut sd);
+        if rc != 0 { return Err(rc); }
+        if acl.is_null() { LocalFree(sd as *mut c_void); return Ok(None); }
+        let len = (*acl).AclSize as usize;
+        let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
+        std::ptr::copy_nonoverlapping(acl as *const u8, buf.as_mut_ptr() as *mut u8, len);
+        LocalFree(sd as *mut c_void);
+        Ok(Some(AclCopy { buf, len }))
+    }
+}
+
+/// One object the launcher changed or made, and what became of it. `original`: the DACL before the grant (objects the launcher did not make); `matches`: whether the DACL after the revoke
+/// has the same entries as `original` (None: not compared); `reordered`: the entries came back in another order and the copy was written back.
+struct Touched { what: &'static str, name: String, mask: u32, applied: bool, error: Option<u32>, revoked: bool, left: i64, handle: HANDLE, owned: bool, is_station: bool, created: bool,
+    original: Option<AclCopy>, matches: Option<bool>, reordered: bool }
 
 /// Everything round 5 does to window objects for one run. Dropping it undoes the entries and closes what it opened or made.
 pub(crate) struct Desk { sid: PSID, items: Vec<Touched>, pub(crate) lp_desktop: Option<Vec<u16>>, pub(crate) lp_text: String, pub(crate) failed: Option<String> }
@@ -167,11 +200,20 @@ impl Desk {
 
     fn grant(&mut self, what: &'static str, is_station: bool, name: String, mask: u32) {
         let h = if is_station { open_station(&name, READ_CONTROL_BIT | WRITE_DAC_BIT) } else { open_desktop(&name, READ_CONTROL_BIT | WRITE_DAC_BIT) };
-        let mut t = Touched { what, name: name.clone(), mask, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station, created: false };
+        let open_error = unsafe { GetLastError() };
+        let mut t = Touched { what, name: name.clone(), mask, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station, created: false, original: None, matches: None, reordered: false };
         log(&format!("before grant {what} {name} mask 0x{mask:x}"));
-        if h.is_null() { t.error = Some(unsafe { GetLastError() }); }
+        if h.is_null() { t.error = Some(open_error); }
         else {
-            match add_entry(h, self.sid, mask) { Ok(()) => t.applied = true, Err(e) => t.error = Some(e) }
+            // The copy to compare with after the revoke; no copy (or a NULL DACL), no write.
+            match acl_copy(h) {
+                Err(e) => t.error = Some(e),
+                Ok(None) => t.error = Some(ERR_NULL_DACL),
+                Ok(Some(c)) => {
+                    t.original = Some(c);
+                    match add_entry(h, self.sid, mask) { Ok(()) => t.applied = true, Err(e) => t.error = Some(e) }
+                }
+            }
         }
         log(&format!("after grant {what} {name}: applied {} error {:?}", t.applied, t.error));
         if !t.applied && self.failed.is_none() { self.failed = Some(format!("window objects: the entry on the {what} {name} could not be added (error {})", t.error.unwrap_or(0))); }
@@ -188,8 +230,25 @@ impl Desk {
             DesktopMode::Winsta0 => { self.lp_desktop = Some(wide("WinSta0\\Default")); self.lp_text = "WinSta0\\Default".into(); }
             _ => {}
         }
+        if p.station.is_none() && p.desktop.is_none() && p.create == Create::No { return; }
+        // Only the SID of one AppContainer profile ever gets an entry (never a group, an account, a capability).
+        if !deskrules::is_profile_sid(&sid_string(self.sid)) {
+            self.failed = Some(format!("window objects: refused: the SID is not one AppContainer profile's (error {ERR_NOT_PROFILE_SID})"));
+            return;
+        }
+        // The launcher's own station and desktop are changed only when the station is a non-interactive (service) one: never WinSta0 of a signed-in session.
+        if p.station.is_some() || p.desktop.is_some() {
+            let flags = station_flags(unsafe { GetProcessWindowStation() } as HANDLE);
+            if let Err(e) = deskrules::may_change_launcher_objects(&station, flags) {
+                log(&format!("no grant: {e}"));
+                self.failed = Some(format!("window objects: {e}"));
+                return;
+            }
+        }
         if let Some(mask) = p.station { self.grant("window station", true, station.clone(), mask); }
         if let Some(mask) = p.desktop { self.grant("desktop", false, desktop.clone(), mask); }
+        // A failed entry on the current objects stops here: nothing is created and the run does not start (run_inner checks `failed`).
+        if self.failed.is_some() { return; }
         let pid = unsafe { GetCurrentProcessId() };
         match p.create {
             Create::No => {}
@@ -197,7 +256,7 @@ impl Desk {
                 let name = format!("nn-appc-d{pid}");
                 log(&format!("before create desktop {name} in {station}"));
                 let h = unsafe { CreateDesktopW(wide(&name).as_ptr(), null(), null(), 0, 0x01FF | READ_CONTROL_BIT | WRITE_DAC_BIT, null()) } as HANDLE;
-                let mut t = Touched { what: "new desktop", name: name.clone(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true };
+                let mut t = Touched { what: "new desktop", name: name.clone(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
                 if h.is_null() { t.error = Some(unsafe { GetLastError() }); }
                 else { match add_entry(h, self.sid, DESKTOP_FULL) { Ok(()) => t.applied = true, Err(e) => t.error = Some(e) } }
                 log(&format!("after create desktop {name}: applied {} error {:?}", t.applied, t.error));
@@ -210,7 +269,7 @@ impl Desk {
                 let dname = "nn-appc-d";
                 log(&format!("before create window station {sname}"));
                 let hs = unsafe { CreateWindowStationW(wide(&sname).as_ptr(), 0, 0x37F | READ_CONTROL_BIT | WRITE_DAC_BIT, null()) } as HANDLE;
-                let mut ts = Touched { what: "new window station", name: sname.clone(), mask: STATION_FULL, applied: false, error: None, revoked: false, left: -1, handle: hs, owned: true, is_station: true, created: true };
+                let mut ts = Touched { what: "new window station", name: sname.clone(), mask: STATION_FULL, applied: false, error: None, revoked: false, left: -1, handle: hs, owned: true, is_station: true, created: true, original: None, matches: None, reordered: false };
                 if hs.is_null() { ts.error = Some(unsafe { GetLastError() }); }
                 else { match add_entry(hs, self.sid, STATION_FULL) { Ok(()) => ts.applied = true, Err(e) => ts.error = Some(e) } }
                 log(&format!("after create window station {sname}: applied {} error {:?}", ts.applied, ts.error));
@@ -227,7 +286,7 @@ impl Desk {
                     let hd = if switched { (unsafe { CreateDesktopW(wide(dname).as_ptr(), null(), null(), 0, 0x01FF | READ_CONTROL_BIT | WRITE_DAC_BIT, null()) }) as HANDLE } else { null_mut() };
                     let create_error = unsafe { GetLastError() };
                     if switched { unsafe { SetProcessWindowStation(original) }; }
-                    let mut td = Touched { what: "new desktop", name: dname.to_string(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: hd, owned: true, is_station: false, created: true };
+                    let mut td = Touched { what: "new desktop", name: dname.to_string(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: hd, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
                     if hd.is_null() { td.error = Some(if switched { create_error } else { create_error.max(1) }); }
                     else { match add_entry(hd, self.sid, DESKTOP_FULL) { Ok(()) => td.applied = true, Err(e) => td.error = Some(e) } }
                     log(&format!("after create desktop {dname}: applied {} error {:?}", td.applied, td.error));
@@ -243,11 +302,27 @@ impl Desk {
     pub(crate) fn finish(&mut self) {
         for t in self.items.iter_mut() {
             if t.handle.is_null() { continue; }
-            if t.applied && !t.created && !t.revoked {
+            // Every object whose DACL was copied before the grant is cleaned, applied or not (a removal with nothing to remove writes nothing).
+            if t.original.is_some() && !t.created && !t.revoked {
                 log(&format!("before revoke {} {}", t.what, t.name));
                 match remove_entries(t.handle, self.sid) { Ok(()) => t.revoked = true, Err(e) => t.error = Some(e) }
                 t.left = object_entries(t.handle, self.sid).map(|n| n as i64).unwrap_or(-1);
-                log(&format!("after revoke {} {}: revoked {} entries left {}", t.what, t.name, t.revoked, t.left));
+                if let Some(orig) = &t.original {
+                    let now = acl_copy(t.handle);
+                    let cmp = match &now { Ok(Some(c)) => deskrules::compare_acls(orig.bytes(), c.bytes()), _ => AclCompare::Different };
+                    if cmp == AclCompare::Reordered {
+                        // The same entries in another order: write the copy taken before the grant back (it holds nothing anyone else added) and compare again.
+                        let mut copy = AclCopy { buf: orig.buf.clone(), len: orig.len };
+                        let rc = unsafe { SetSecurityInfo(t.handle, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), copy.buf.as_mut_ptr() as *mut ACL, null_mut()) };
+                        t.reordered = rc == 0;
+                        if rc != 0 { t.error = Some(rc); }
+                        let again = acl_copy(t.handle);
+                        t.matches = Some(matches!(&again, Ok(Some(c)) if deskrules::compare_acls(orig.bytes(), c.bytes()) == AclCompare::Same));
+                    } else {
+                        t.matches = Some(cmp == AclCompare::Same);
+                    }
+                }
+                log(&format!("after revoke {} {}: revoked {} entries left {} same as before {:?} order restored {}", t.what, t.name, t.revoked, t.left, t.matches, t.reordered));
             }
             if t.owned {
                 unsafe { if t.is_station { CloseWindowStation(t.handle as HWINSTA); } else { CloseDesktop(t.handle as HDESK); } }
@@ -256,7 +331,8 @@ impl Desk {
         }
     }
 
-    pub(crate) fn all_reverted(&self) -> bool { self.items.iter().all(|t| !t.applied || t.created || (t.revoked && t.left == 0)) }
+    /// Every object the launcher did not make is back as it was: no entry left and the same entries as before the grant (objects never copied were never written).
+    pub(crate) fn all_reverted(&self) -> bool { self.items.iter().all(|t| t.created || t.original.is_none() || (t.revoked && t.left == 0 && t.matches == Some(true))) }
 
     pub(crate) fn json(&self, mode: DesktopMode) -> String {
         let mut o = Json::new();
@@ -268,6 +344,8 @@ impl Desk {
             let mut i = Json::new();
             i.s("object", t.what); i.s("name", &t.name); i.n("mask", t.mask as i64); i.b("applied", t.applied); i.b("created", t.created);
             i.n("error", t.error.map(|e| e as i64).unwrap_or(0)); i.b("revoked", t.revoked); i.n("entriesLeft", t.left);
+            match t.matches { Some(m) => i.b("matchesOriginal", m), None => i.raw("matchesOriginal", "null".into()) }
+            i.b("orderRestored", t.reordered);
             i.render()
         }).collect();
         o.raw("objects", format!("[{}]", items.join(",")));
@@ -318,26 +396,41 @@ pub(crate) fn context(j: &mut Json) {
     let sname = object_name(station);
     let dname = object_name(desktop);
     let hs = open_station(&sname, READ_CONTROL_BIT);
+    let hs_error = unsafe { GetLastError() };
     let hd = open_desktop(&dname, READ_CONTROL_BIT);
-    j.s("windowStationSddl", &if hs.is_null() { format!("open error {}", unsafe { GetLastError() }) } else { object_sddl(hs) });
-    j.s("desktopSddl", &if hd.is_null() { format!("open error {}", unsafe { GetLastError() }) } else { object_sddl(hd) });
+    let hd_error = unsafe { GetLastError() };
+    j.s("windowStationSddl", &if hs.is_null() { format!("open error {hs_error}") } else { object_sddl(hs) });
+    j.s("desktopSddl", &if hd.is_null() { format!("open error {hd_error}") } else { object_sddl(hd) });
     unsafe { if !hs.is_null() { CloseWindowStation(hs as HWINSTA); } if !hd.is_null() { CloseDesktop(hd as HDESK); } }
     j.n("integrityRid", integrity_rid());
     let (major, minor, build) = os_version();
     j.n("osMajor", major); j.n("osMinor", minor); j.n("osBuild", build);
 }
 
+/// The SID of the profile with this name, DERIVED from the name (no profile is created: `desktop-revoke` must not leave one behind).
+pub(crate) fn derived_sid(name: &str) -> Result<Sid, String> {
+    unsafe {
+        let mut sid: PSID = null_mut();
+        let hr = DeriveAppContainerSidFromAppContainerName(wide(name).as_ptr(), &mut sid);
+        if hr != 0 || sid.is_null() { return Err(format!("DeriveAppContainerSidFromAppContainerName failed: 0x{:08x}", hr as u32)); }
+        Ok(Sid(sid))
+    }
+}
+
 /// `desktop-revoke`: removes the container's explicit entries from the launcher's current window station and desktop (the clean-up after a launcher that was killed in a `grant-*` run) and
-/// reports how many are left.
+/// reports how many are left. Idempotent: with no entry for the SID nothing is written. Only the SID of one AppContainer profile is accepted.
 pub(crate) fn revoke_current(j: &mut Json, sid: PSID) -> bool {
+    if !deskrules::is_profile_sid(&sid_string(sid)) { j.s("error", "refused: the SID is not one AppContainer profile's"); return false; }
     let sname = current_station_name();
     let dname = current_desktop_name();
     let mut ok = true;
     let hs = open_station(&sname, READ_CONTROL_BIT | WRITE_DAC_BIT);
+    let hs_error = unsafe { GetLastError() };
     let hd = open_desktop(&dname, READ_CONTROL_BIT | WRITE_DAC_BIT);
-    for (key, h, station) in [("windowStation", hs, true), ("desktop", hd, false)] {
+    let hd_error = unsafe { GetLastError() };
+    for (key, h, station, open_error) in [("windowStation", hs, true, hs_error), ("desktop", hd, false, hd_error)] {
         let mut o = Json::new();
-        if h.is_null() { o.n("openError", unsafe { GetLastError() } as i64); ok = false; }
+        if h.is_null() { o.n("openError", open_error as i64); ok = false; }
         else {
             let r = remove_entries(h, sid);
             o.b("removed", r.is_ok());

@@ -22,6 +22,11 @@ import { aclReadBack, buildChildEnv, buildCommandLine, buildFixturePlan, parseLa
 export const SESSION0_SCHEMA = "nn-appc-session0-1";
 /** The limit of one step. */
 export const SESSION0_STEP_TIMEOUT_MS = 15_000;
+/** No step is STARTED when it could end after this much time since the start (its own limit plus the harness's margin of 60 s), so the clean-up (desktop-revoke, the read-back, the
+ * profile) runs well before the workflow step's own limit (25 min) would kill the harness and skip it. The steps not started are reported as `not-started`. */
+export const SESSION0_BUDGET_MS = 19 * 60_000;
+/** The desktop modes that write a DACL of the launcher's own window station or desktop: after such a step that did not report everything reverted, `desktop-revoke` runs at once. */
+export const WRITING_DESKTOP_MODES = ["grant-read", "grant-full", "grant-station", "grant-desktop", "new-desktop"];
 export const DLL_INIT_FAILED = -1073741502; // 0xC0000142 as the signed exit code the launcher reports
 
 export const DESKTOP_MODES = ["inherit", "empty", "winsta0", "grant-read", "grant-full", "grant-station", "grant-desktop", "new-desktop", "new-station"];
@@ -269,7 +274,7 @@ export function collectContext({ exec, launcherPath, ps, tools, sysRoot, readFil
     const table = safe(() => peImports(readFile(path)));
     imports[name] = table === undefined ? { error: "not readable as a PE file" } : { user32: [...table.normal, ...table.delay].includes("user32.dll"), win32u: [...table.normal, ...table.delay].includes("win32u.dll"), normal: table.normal, delay: table.delay };
   }
-  const facts = ps === undefined ? undefined : parseJson(safe(() => ps(FACTS_SCRIPT).stdout));
+  const facts = ps === undefined ? undefined : boundFacts(parseJson(safe(() => ps(FACTS_SCRIPT).stdout)));
   return { launcher, imports, facts: facts ?? { note: "machine facts were not read" }, startedAt: since };
 }
 
@@ -277,7 +282,34 @@ export function collectContext({ exec, launcherPath, ps, tools, sysRoot, readFil
 export function collectEvents({ ps, since }) {
   if (ps === undefined) return { note: "events were not read" };
   const r = parseJson(safe(() => ps(eventsScript(since)).stdout));
-  return r ?? { note: "events were not read" };
+  return r === undefined ? { note: "events were not read" } : boundEvents(r);
+}
+
+/** Folder names under a user profile in event and product text become `<account>` (the event messages of code integrity name the files they are about, which can lie in ANY account's
+ * profile, including the signed-in owner's, which the harness's own names do not cover). At most 40 entries per log and 180 characters per text; product names at most 8 of 80 characters. */
+export function scrubUserPaths(text) {
+  // A profile folder name may hold spaces: everything up to the next separator, quote or line end goes (more than the name at worst, never less).
+  return String(text).replace(/([\\/]Users[\\/])[^\\/"'\r\n]+/gi, "$1<account>").replace(/([\\/]home[\\/])[^\\/"'\r\n]+/g, "$1<account>");
+}
+
+export function boundEvents(r) {
+  if (r === null || typeof r !== "object") return { note: "events were not read" };
+  const out = {};
+  for (const [log, list] of Object.entries(r).slice(0, 4)) {
+    out[log] = Array.isArray(list)
+      ? list.slice(0, 40).map((e) => ({ id: Number.isInteger(e?.id) ? e.id : null, level: String(e?.level ?? "").slice(0, 20), text: scrubUserPaths(String(e?.text ?? "")).slice(0, 180) }))
+      : { error: String(list?.error ?? "unreadable").slice(0, 80) };
+  }
+  return out;
+}
+
+export function boundFacts(f) {
+  if (f === null || typeof f !== "object") return undefined;
+  const out = { ...f };
+  if (Array.isArray(f.antivirus)) out.antivirus = f.antivirus.slice(0, 8).map((n) => scrubUserPaths(String(n)).slice(0, 80));
+  else if (f.antivirus !== undefined) out.antivirus = [scrubUserPaths(String(f.antivirus)).slice(0, 80)];
+  if (f.edition !== undefined) out.edition = String(f.edition).slice(0, 80);
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------- the runner
@@ -288,11 +320,13 @@ export async function runSession0(opts) {
   const profileName = opts.profileName ?? "NimbleNewtExperiment";
   const now = (opts.now ?? (() => new Date().toISOString()))();
   const timeoutMs = opts.timeoutMs ?? SESSION0_STEP_TIMEOUT_MS;
+  const budgetMs = opts.budgetMs ?? SESSION0_BUDGET_MS;
+  const clock = opts.clock ?? (() => Date.now());
   const tmpBase = opts.tmpBase ?? os.tmpdir();
   const progress = opts.progress ?? (() => {});
   const names = { root: undefined, home: os.homedir(), tmp: tmpBase, user: safe(() => os.userInfo().username), host: os.hostname() };
-  const t0 = Date.now();
-  const say = (m) => progress(`${Date.now() - t0} ms ${m}`);
+  const t0 = clock();
+  const say = (m) => progress(`${clock() - t0} ms ${m}`);
   const notes = [];
   // The container must exist for the grants; `info` creates it (and tells session and elevation).
   const info = parseLauncherLine(safe(() => opts.exec(opts.launcherPath, ["info", "--name", profileName], { timeoutMs: 60_000 }).stdout) ?? "");
@@ -332,6 +366,11 @@ export async function runSession0(opts) {
     }
     for (const step of selectSession0Steps(opts.stepSpec)) {
       const files = stepFiles(step, plan);
+      // The time budget: a step that could end after it is not started (the clean-up below must run before the workflow's limit).
+      if (!opts.dryRun && clock() - t0 + timeoutMs + 60_000 > budgetMs) {
+        results.push({ id: step.id, group: step.group, program: step.program, desktop: step.desktop, creation: step.creation, outcome: "not-started", detail: `time budget: ${Math.round(budgetMs / 60_000)} min reached before this step` });
+        continue;
+      }
       say(`ATTEMPT step ${step.id}`);
       let rec;
       if (opts.dryRun) rec = { id: step.id, group: step.group, program: step.program, desktop: step.desktop, creation: step.creation, outcome: "not-started", detail: "dry run: the launcher was not started" };
@@ -350,11 +389,20 @@ export async function runSession0(opts) {
         const left = (line?.grants ?? []).filter((g) => g.applied && (g.revoked !== true || (typeof g.entriesLeft === "number" && g.entriesLeft > 0)));
         if (left.length > 0) rec.aclLeftAfterRun = left.map((g) => ({ path: g.path, mode: g.mode, entriesLeft: g.entriesLeft ?? null }));
         if (line?.desktop && line.desktop.allReverted === false) rec.desktopNotReverted = true;
+        // A step that wrote a DACL of the launcher's own objects and did not report everything reverted (no line: the launcher was killed or crashed) is cleaned up at once, so the next
+        // step does not run with its entry still in place.
+        if (WRITING_DESKTOP_MODES.includes(step.desktop) && line?.desktop?.allReverted !== true) {
+          const after = revoke();
+          rec.revokeAfterStep = after === undefined ? { ok: false, note: "desktop-revoke gave no line" } : { ok: after.ok === true, windowStation: after.windowStation?.entriesLeft ?? null, desktop: after.desktop?.entriesLeft ?? null };
+          if (rec.revokeAfterStep.ok !== true) notes.push(`desktop-revoke after step ${step.id} did not report success`);
+        }
       }
       results.push(rec);
       say(`RESULT step ${step.id} ${rec.outcome}${rec.exitHex && rec.outcome !== "works" ? ` ${rec.exitHex}` : ""}`);
       partial(false);
     }
+    const skipped = results.filter((r) => r.outcome === "not-started" && /^time budget/.test(r.detail ?? "")).length;
+    if (skipped > 0) { notes.push(`${skipped} steps were not started: the time budget (${Math.round(budgetMs / 60_000)} min) was reached`); say(`RESULT budget ${skipped} steps not started`); }
   } finally {
     if (!opts.dryRun) {
       desktopAfter = revoke();

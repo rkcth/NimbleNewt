@@ -2273,6 +2273,7 @@ test("own-runner hand-off review: hashes read from standard input, no empty or p
 import {
   CREATION_MODES, DESKTOP_MODES, DLL_INIT_FAILED, FACTS_SCRIPT, OUTCOME_MEANINGS, PROGRAMS, SESSION0_SCHEMA, buildSession0Args, collectContext, eventsScript, fileProgress, hex32, interpretSession0,
   judgeSession0, peImports, programCommand, renderSession0Markdown, runSession0, selectSession0Steps, session0Steps, stepFiles as s0StepFiles, summarizeSession0,
+  SESSION0_BUDGET_MS, WRITING_DESKTOP_MODES, boundEvents, boundFacts, collectEvents, scrubUserPaths,
 } from "../experiments/windows-appcontainer/round5.mjs";
 
 const s0Plan = { workspace: "C:\\r\\ws", home: "C:\\r\\home", scratch: "C:\\r\\scratch", probeDir: "C:\\r\\probe", outDir: "C:\\r\\out", binDir: "C:\\r\\ws\\bin", npmCache: "C:\\r\\scratch\\npmcache" };
@@ -2614,14 +2615,14 @@ test("the launcher source (round 5): the window objects are touched only in the 
   assert.match(desk, /impl Drop for Desk \{ fn drop\(&mut self\) \{ self\.finish\(\); \} \}/);
   assert.match(desk, /remove_entries\(t\.handle, self\.sid\)/);
   assert.match(desk, /t\.left = object_entries\(t\.handle, self\.sid\)/);
-  assert.match(desk, /if t\.applied && !t\.created && !t\.revoked \{/);
+  assert.match(desk, /if t\.original\.is_some\(\) && !t\.created && !t\.revoked \{/);
   assert.match(desk, /fn all_reverted\(&self\) -> bool/);
   assert.match(win, /desk\.finish\(\); j\.raw\("desktop", desk\.json\(a\.desktop\)\);/);
   assert.match(win, /"desktop-revoke" => \{/);
   assert.match(win, /"context" => \{/);
   // a set-up that failed stops the run before anything starts
   assert.match(win, /if let Some\(e\) = &desk\.failed \{ return Err\(\("grant", e\.clone\(\)\)\);/);
-  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 4, "every set-up failure message starts with the marker the harness looks for");
+  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 6, "every set-up failure message starts with the marker the harness looks for");
   // before and after lines on standard error for each step of the set-up
   for (const phrase of ["before grant", "after grant", "before create desktop", "after create desktop", "before create window station", "after create window station", "before revoke", "after revoke"]) assert.ok(desk.includes(phrase), phrase);
   // no registry, no service, no persistent setting
@@ -2667,4 +2668,136 @@ test("the experiment workflow (round 5): the session 0 step runs second in the h
   // the own runner still builds nothing and still checks hashes from standard input
   assert.ok(!/cargo|rustup/.test(own));
   assert.ok(own.includes("check \"$src/nn-appc-launcher.exe\" \"$EXPECT_EXPERIMENT\""));
+});
+
+test("round 5 review: a step that wrote a window-object DACL and did not report it reverted (killed, crashed, not reverted) is followed at once by desktop-revoke; others are not", async () => {
+  const base = tmp();
+  const calls = [];
+  const inner = session0Fake(() => ({ exit: DLL_INIT_FAILED }), { calls });
+  const killed = "B-node-installed-grant-full-no-window";
+  const notReverted = "B-node-installed-grant-station-no-window";
+  const reverted = "B-node-installed-grant-read-no-window";
+  const noWrite = "B-node-installed-empty-no-window";
+  const exec = (p, a) => {
+    if (a[0] === "run") {
+      const id = basename(a[a.indexOf("--stdout") + 1]).replace(/\.out\.txt$/, "");
+      if (id === killed) { calls.push(a); return { status: null, stdout: "", stderr: "" }; } // the launcher was killed: no line
+      if (id === notReverted) { calls.push(a); return { status: 0, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: true, childStarted: true, childExitCode: DLL_INIT_FAILED, desktop: { allReverted: false }, grants: [] })}\n`, stderr: "" }; }
+    }
+    return inner.exec(p, a);
+  };
+  const ids = ["A-node-installed-inherit-no-window", killed, notReverted, reverted, noWrite];
+  const order = session0Steps().map((x) => x.id);
+  ids.sort((x, y) => order.indexOf(x) - order.indexOf(y));
+  const r = await runSession0({ launcherPath: "fake", exec, tmpBase: base, tools: { nodeExe: "C:\\n\\node.exe", programDirs: [] }, platform: "linux", systemRoot: "C:\\Windows", stepSpec: ids.join(","), copyFile: () => {}, ps: () => ({ stdout: "{}" }), readFile: () => Buffer.alloc(1) });
+  const seq = calls.map((a) => (a[0] === "run" ? basename(a[a.indexOf("--stdout") + 1]).replace(/\.out\.txt$/, "") : a[0]));
+  const after = (id) => seq[seq.indexOf(id) + 1];
+  assert.equal(after(killed), "desktop-revoke", "after a killed grant step");
+  assert.equal(after(notReverted), "desktop-revoke", "after a step that reported allReverted false");
+  assert.notEqual(after(reverted), "desktop-revoke", "not after a grant step that reverted everything");
+  assert.notEqual(after(noWrite), "desktop-revoke", "not after a mode that writes nothing");
+  assert.notEqual(after("A-node-installed-inherit-no-window"), "desktop-revoke");
+  const by = Object.fromEntries(r.report.steps.map((x) => [x.id, x]));
+  assert.deepEqual(by[killed].revokeAfterStep, { ok: true, windowStation: 0, desktop: 0 });
+  assert.equal(by[reverted].revokeAfterStep, undefined);
+  assert.deepEqual(WRITING_DESKTOP_MODES, ["grant-read", "grant-full", "grant-station", "grant-desktop", "new-desktop"], "new-station writes no DACL of the launcher's own objects");
+  // a revoke that fails is a note in the report
+  const bad = await runSession0({ launcherPath: "fake", exec: (p, a) => (a[0] === "desktop-revoke" ? { stdout: "" } : exec(p, a)), tmpBase: base, tools: { nodeExe: "n", programDirs: [] }, platform: "linux", systemRoot: "C:\\Windows", stepSpec: killed, copyFile: () => {}, ps: () => ({ stdout: "{}" }), readFile: () => Buffer.alloc(1) });
+  assert.ok(bad.report.notes.some((n) => n.includes(`desktop-revoke after step ${killed} did not report success`)));
+});
+
+test("round 5 review: the time budget stops starting steps so the clean-up still runs before the workflow step's limit", async () => {
+  assert.ok(SESSION0_BUDGET_MS + 6 * 60_000 <= 25 * 60_000, "budget plus the clean-up's own limits fit in the 25-minute workflow step");
+  const base = tmp();
+  const calls = [];
+  let now = 1_000_000;
+  const inner = session0Fake(() => ({ exit: DLL_INIT_FAILED }), { calls });
+  const exec = (p, a) => { if (a[0] === "run") now += 5 * 60_000; return inner.exec(p, a); }; // every step "takes" five minutes
+  const ids = session0Steps().slice(0, 6).map((x) => x.id);
+  const lines = [];
+  const r = await runSession0({ launcherPath: "fake", exec, clock: () => now, budgetMs: 16 * 60_000, timeoutMs: 15_000, progress: (l) => lines.push(l), tmpBase: base, tools: { nodeExe: "n", programDirs: [] }, platform: "linux", systemRoot: "C:\\Windows", stepSpec: ids.join(","), copyFile: () => {}, ps: () => ({ stdout: "{}" }), readFile: () => Buffer.alloc(1) });
+  // 0 + 75 s <= 16 min: run (now 5 min); 5 + 1.25 <= 16: run (10); 10 + 1.25 <= 16: run (15); 15 + 1.25 > 16: the rest are not started
+  assert.equal(calls.filter((a) => a[0] === "run").length, 3);
+  assert.deepEqual(r.report.steps.map((x) => x.outcome), ["dll-init-failed", "dll-init-failed", "dll-init-failed", "not-started", "not-started", "not-started"]);
+  assert.match(r.report.steps[3].detail, /^time budget: 16 min/);
+  assert.ok(r.report.notes.some((n) => /3 steps were not started: the time budget \(16 min\)/.test(n)));
+  assert.ok(lines.some((l) => /RESULT budget 3 steps not started/.test(l)));
+  const order = calls.map((a) => a[0]);
+  assert.ok(order.lastIndexOf("desktop-revoke") > order.lastIndexOf("run"), "the clean-up still runs");
+  assert.equal(order.at(-1), "delete-profile");
+});
+
+test("round 5 review: event texts and product names are bounded and lose the folder names under any user profile", () => {
+  assert.equal(scrubUserPaths("blocked \\Device\\HarddiskVolume3\\Users\\Jane Doe\\AppData\\x.dll"), "blocked \\Device\\HarddiskVolume3\\Users\\<account>\\AppData\\x.dll");
+  assert.equal(scrubUserPaths("C:/Users/jdoe/a and /home/jdoe/b"), "C:/Users/<account>/a and /home/<account>/b");
+  assert.equal(scrubUserPaths("c:\\users\\Ann"), "c:\\users\\<account>");
+  assert.equal(scrubUserPaths("C:\\Users\\Rob attempted to load"), "C:\\Users\\<account>", "a name with spaces: more is removed, never less");
+  const long = "C:\\Users\\Someone\\" + "y".repeat(400);
+  const ev = boundEvents({ "Microsoft-Windows-CodeIntegrity/Operational": Array.from({ length: 60 }, (_, i) => ({ id: 3033, level: "Warning", text: i === 0 ? long : "x", extra: "dropped" })), "Microsoft-Windows-AppLocker/EXE and DLL": { error: "EventLogNotFoundException" } });
+  const ci = ev["Microsoft-Windows-CodeIntegrity/Operational"];
+  assert.equal(ci.length, 40);
+  assert.ok(ci[0].text.length <= 180 && !ci[0].text.includes("Someone"));
+  assert.deepEqual(Object.keys(ci[1]), ["id", "level", "text"]);
+  assert.deepEqual(ev["Microsoft-Windows-AppLocker/EXE and DLL"], { error: "EventLogNotFoundException" });
+  assert.deepEqual(boundEvents(null), { note: "events were not read" });
+  assert.deepEqual(collectEvents({ ps: () => ({ stdout: JSON.stringify({ L: [{ id: 1, level: "Error", text: "C:\\Users\\Owner\\z" }] }) }), since: "2026-11-25T00:00:00Z" }), { L: [{ id: 1, level: "Error", text: "C:\\Users\\<account>\\z" }] });
+  const f = boundFacts({ antivirus: Array.from({ length: 12 }, (_, i) => `Product ${i} ${"z".repeat(100)}`), edition: "Microsoft Windows 11 Pro" });
+  assert.equal(f.antivirus.length, 8);
+  assert.ok(f.antivirus.every((n) => n.length <= 80));
+  assert.deepEqual(boundFacts({ antivirus: "One" }).antivirus, ["One"]);
+  assert.equal(boundFacts(undefined), undefined);
+  const c = collectContext({ exec: () => ({ stdout: "" }), launcherPath: "x", ps: () => ({ stdout: JSON.stringify({ antivirus: ["A".repeat(200)] }) }), tools: {}, readFile: () => Buffer.alloc(1), since: "x" });
+  assert.equal(c.facts.antivirus[0].length, 80, "the context uses the bounded facts");
+});
+
+test("round 5 review: desk.rs refuses the interactive station, a SID that is not one profile's and a NULL DACL, compares the DACL with its copy before writing anything back, and desktop-revoke makes no profile", () => {
+  const desk = readFileSync(join(root, "native", "nn-launcher", "src", "desk.rs"), "utf8");
+  const win = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const rules = readFileSync(join(root, "native", "nn-launcher", "src", "deskrules.rs"), "utf8");
+  const prepare = desk.slice(desk.indexOf("pub(crate) fn prepare"), desk.indexOf("pub(crate) fn finish"));
+  // the guards come before the first grant, and a failed grant stops before anything is created
+  const guard = prepare.indexOf("deskrules::may_change_launcher_objects(&station, flags)");
+  const sidCheck = prepare.indexOf("deskrules::is_profile_sid(&sid_string(self.sid))");
+  const firstGrant = prepare.indexOf("self.grant(");
+  assert.ok(sidCheck > 0 && guard > sidCheck && firstGrant > guard, "SID check, then the station check, then the grants");
+  assert.ok(prepare.indexOf("if self.failed.is_some() { return; }") > firstGrant && prepare.indexOf("if self.failed.is_some() { return; }") < prepare.indexOf("CreateDesktopW"));
+  // a NULL DACL is never merged into, and the copy is taken before the entry is added
+  const add = desk.slice(desk.indexOf("fn add_entry"), desk.indexOf("fn remove_entries"));
+  assert.ok(add.indexOf("if old.is_null() {") > 0 && add.indexOf("if old.is_null() {") < add.indexOf("SetEntriesInAclW(1,"));
+  const grant = desk.slice(desk.indexOf("fn grant("), desk.indexOf("pub(crate) fn prepare"));
+  assert.ok(grant.indexOf("acl_copy(h)") > 0 && grant.indexOf("acl_copy(h)") < grant.indexOf("add_entry(h"));
+  assert.match(grant, /Ok\(None\) => t\.error = Some\(ERR_NULL_DACL\)/);
+  // after the revoke: written back only when the entries are the same in another order
+  const finish = desk.slice(desk.indexOf("pub(crate) fn finish"), desk.indexOf("pub(crate) fn all_reverted"));
+  assert.equal((finish.match(/SetSecurityInfo\(/g) ?? []).length, 1);
+  assert.ok(finish.indexOf("if cmp == AclCompare::Reordered {") < finish.indexOf("SetSecurityInfo("));
+  assert.equal((finish.match(/if cmp == AclCompare::Reordered \{/g) ?? []).length, 1, "written back only for the same entries in another order");
+  assert.ok(!/cmp != AclCompare::Same|AclCompare::Different =>/.test(finish), "never written back for a difference in the entries");
+  assert.match(finish, /\} else \{\n\s+t\.matches = Some\(cmp == AclCompare::Same\);/);
+  assert.match(desk, /t\.created \|\| t\.original\.is_none\(\) \|\| \(t\.revoked && t\.left == 0 && t\.matches == Some\(true\)\)/);
+  // desktop-revoke: derived SID (no CreateAppContainerProfile), only a profile SID
+  const revokeCmd = win.slice(win.indexOf('"desktop-revoke" => {'), win.indexOf('"revoke" => {'));
+  assert.match(revokeCmd, /desk::derived_sid\(&a\.name\)/);
+  assert.ok(!revokeCmd.includes("container_sid("));
+  assert.match(desk, /fn derived_sid[^]*?DeriveAppContainerSidFromAppContainerName/);
+  assert.ok(!desk.includes("CreateAppContainerProfile"));
+  const revoke = desk.slice(desk.indexOf("pub(crate) fn revoke_current"));
+  assert.ok(revoke.indexOf("deskrules::is_profile_sid") < revoke.indexOf("open_station"));
+  // the rules themselves have Rust unit tests that run on every platform
+  for (const t of ["fn only_a_non_interactive_station_whose_flags_were_read_may_be_changed", "fn only_the_sid_of_one_profile_is_accepted", "fn the_dacl_after_the_revoke_is_compared_entry_by_entry_with_the_one_before"]) assert.ok(rules.includes(t), t);
+  assert.match(rules, /if station\.eq_ignore_ascii_case\("winsta0"\)/);
+  assert.match(rules, /if flags & WSF_VISIBLE != 0/);
+  assert.match(rules, /parts\.len\(\) == 7/);
+});
+
+test("round 5 review: the own-runner clean-up runs desktop-revoke for the experiment's container with the re-hashed launcher, before the profiles are removed", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const code = wf.replace(/^\s*#.*$/gm, "");
+  const own = code.slice(code.indexOf("  own-runner:"));
+  const clean = own.slice(own.indexOf("Remove the container profiles this job made"), own.indexOf("actions/upload-artifact@"));
+  const hash = clean.indexOf('if [ "$got" != "$EXPECT_EXPERIMENT" ]; then');
+  const revoke = clean.indexOf('"$exe" desktop-revoke --name NimbleNewtExperiment');
+  assert.ok(hash > 0 && revoke > hash && revoke < clean.indexOf("delete-profile"));
+  assert.equal((clean.match(/"\$exe" desktop-revoke/g) ?? []).length, 1);
+  assert.match(clean, /^Remove[^\n]*\n\s+shell: bash\n\s+if: \$\{\{ always\(\) && steps\.verify\.outcome == 'success' \}\}/);
 });

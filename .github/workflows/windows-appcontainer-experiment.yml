@@ -379,6 +379,10 @@ jobs:
           exe=experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe
           got="$(sha256sum -b < "$exe" | cut -d' ' -f1)"
           if [ "$got" != "$EXPECT_EXPERIMENT" ]; then echo "::error::$exe has SHA-256 $got, the hosted job built $EXPECT_EXPERIMENT; not run"; exit 1; fi
+          # Round 5: if the session 0 harness was stopped before its own clean-up, an entry for the experiment's container can remain on this service's window station and desktop. desktop-revoke
+          # removes only that container's entries (the SID is derived from the name, no profile is made; with nothing to remove nothing is written).
+          rc=0; out="$("$exe" desktop-revoke --name NimbleNewtExperiment 2>/dev/null)" || rc=$?
+          if [ "$rc" -eq 0 ]; then echo "window station and desktop: no entry left for the experiment container"; else echo "::warning::desktop-revoke ended with exit $rc: $(printf '%s\n' "$out" | node scripts/redact-log.mjs | tail -n 1)"; fi
           for n in NimbleNewtProductCheck NimbleNewtOwnRunnerG05; do
             rc=0; out="$("$exe" delete-profile --name "$n" 2>&1)" || rc=$?
             if [ "$rc" -eq 0 ]; then echo "removed the container profile $n"; else echo "::warning::the container profile $n was not removed (exit $rc): $(printf '%s\n' "$out" | node scripts/redact-log.mjs | tail -n 1)"; fi

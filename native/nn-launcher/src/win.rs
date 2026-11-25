@@ -918,11 +918,12 @@ pub fn main() {
         }
         #[cfg(feature = "experiment")]
         "desktop-revoke" => {
-            // Removes the container's explicit entries from the launcher's current window station and desktop (after a killed `--desktop grant-*` run).
+            // Removes the container's explicit entries from the launcher's current window station and desktop (after a killed `--desktop grant-*` run). The SID is derived from the name:
+            // this command never creates a profile.
             let mut j = j;
-            match container_sid(&a.name) {
+            match desk::derived_sid(&a.name) {
                 Err(e) => fail(j, "container", &e),
-                Ok((sid, _)) => { let ok = desk::revoke_current(&mut j, sid.0); j.b("ok", ok); Outcome { j, code: if ok { 0 } else { EXIT_LAUNCHER_FAILED } } }
+                Ok(sid) => { let ok = desk::revoke_current(&mut j, sid.0); j.b("ok", ok); Outcome { j, code: if ok { 0 } else { EXIT_LAUNCHER_FAILED } } }
             }
         }
         "revoke" => {

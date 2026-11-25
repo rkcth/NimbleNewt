@@ -116,8 +116,17 @@ test("the capabilities the backend sends are exactly the ones the PRODUCT build 
 test("the product build is the default: the feature is off, the binary is named nn-launcher, and the experiment crate is the only one that turns the feature on", () => {
   const cargo = crate("Cargo.toml");
   assert.match(cargo, /^\[\[bin\]\]\nname = "nn-launcher"/m);
-  // The feature only switches on extra windows-sys modules that the experiment build's code calls (round 5); it adds no dependency and no default.
-  assert.match(cargo, /^experiment = \[(?:"windows-sys\/[A-Za-z0-9_]+"(?:, )?)*\]$/m);
+  // The feature only switches on these extra windows-sys modules that the experiment build's code calls (round 5): no dependency (`dep:`, another crate's feature), no other module, no default.
+  // Any change to this list is a change to this test.
+  assert.match(cargo, /^experiment = \["windows-sys\/Win32_System_StationsAndDesktops", "windows-sys\/Win32_Graphics_Gdi", "windows-sys\/Win32_System_SystemInformation", "windows-sys\/Wdk_System_SystemServices"\]$/m);
+  assert.equal(cargo.match(/^experiment\s*=/gm)?.length, 1, "one definition of the feature");
+  // The product's dependency table is exactly windows-sys: the feature cannot reach an optional dependency because there is none.
+  const deps = /^\[dependencies\]\n([^[]*)/m.exec(cargo)?.[1] ?? "";
+  assert.deepEqual(deps.split("\n").filter((l) => /^[A-Za-z0-9_-]+\s*=/.test(l)).map((l) => l.split("=")[0]!.trim()), ["windows-sys"]);
+  assert.ok(!/optional\s*=\s*true/.test(cargo), "no optional dependency");
+  // Round 5's window-object code (desk.rs) and its rules (deskrules.rs) are compiled only into the experiment build (deskrules also into the unit tests), never into the product binary.
+  assert.match(crate("src/lib.rs"), /#\[cfg\(any\(test, feature = "experiment"\)\)\]\nmod deskrules;/);
+  assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n#\[path = "desk\.rs"\]\nmod desk;/);
   assert.ok(!/^default\s*=/m.test(cargo), "no default features");
   assert.ok(args.includes('pub(crate) const EXPERIMENT: bool = cfg!(feature = "experiment");'));
   assert.ok(/#\[cfg\(not\(feature = "experiment"\)\)\]\s*#\[test\]\s*fn the_product_build_refuses_every_experiment_option/.test(args), "the product build's refusals have a Rust unit test of their own");

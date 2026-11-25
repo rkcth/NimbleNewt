@@ -5,6 +5,9 @@
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 mod args;
+// Round 5 (experiment build and tests only): the pure rules for the window-object entries; not in the product binary.
+#[cfg(any(test, feature = "experiment"))]
+mod deskrules;
 #[cfg(windows)]
 mod win;
 
