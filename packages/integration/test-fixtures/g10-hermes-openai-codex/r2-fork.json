@@ -1,0 +1,21 @@
+{
+ "step": "fork",
+ "repeat": 2,
+ "usage": {
+  "input_tokens": 4500,
+  "output_tokens": 6,
+  "cache_read_tokens": 19840,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "api_calls": 1,
+  "model": "gpt-6.1-sol",
+  "provider": "openai-codex",
+  "completed": true,
+  "failed": false,
+  "auxiliary": {
+   "api_calls": 1
+  }
+ },
+ "answer": "Otter",
+ "expected": "Otter"
+}
