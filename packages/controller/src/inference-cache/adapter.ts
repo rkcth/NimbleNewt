@@ -235,6 +235,9 @@ export class CacheAdapter {
         isolation = isolationRequired ? "cache-prompt-off-isolation-required" : "cache-prompt-off-no-slot";
       } else if (this.#state.holder.get(slot) !== context.scopeKey) {
         // The slot's last holder was another project, or is unknown (a start, a release, a call without a slot): its KV may still be there.
+        // From here on the slot may hold this call's prompt even if the call fails or is cut off (an error status, a lost connection, an abort after the server read it): the old holder is forgotten now, and
+        // only a call that completes records this project, so the old holder's next call is never sent with reuse on over a prompt this one may have left.
+        this.#state.holder.delete(slot);
         let cleared = false;
         // An erase empties the slot, not a host prompt cache beside it: where the server may keep one (not attested off) a call across a project boundary is sent with reuse off instead.
         const eraseSound = this.#profile.eraseIsolation !== "unattested";
@@ -243,7 +246,7 @@ export class CacheAdapter {
           const res = await this.#send(r.body, {}, r.path, r.method);
           cleared = res.status < 400;
           slotCleared = cleared;
-          if (cleared) { this.#state.holder.delete(slot); isolation = this.#profile.eraseIsolation === "attested" ? "erase-host-cache-attested-off" : "erase"; }
+          if (cleared) { isolation = this.#profile.eraseIsolation === "attested" ? "erase-host-cache-attested-off" : "erase"; }
           else isolation = "cache-prompt-off-erase-failed";
         } else isolation = this.#freshSlot === "off" || this.#profile.clearSlotRequest === undefined ? "cache-prompt-off-configured" : "cache-prompt-off-host-cache-not-attested";
         if (!cleared) ctxUsed = { ...context, reuseOff: true };
@@ -258,11 +261,11 @@ export class CacheAdapter {
     // When the refusal names cache_prompt on a slotted server there is no safe way to say "do not reuse", so the error is returned instead of a retry that would reuse by similarity.
     if (refusal !== undefined && this.#profile.refusedCacheSetting({ status: sent.status, message: refusal }) && !(this.#profile.slotted && /\bcache_prompt\b/.test(refusal.toLowerCase()))) {
       const plain = this.#profile.prepare(request, { ...context, plain: true });
+      // The plain retry names no slot, so the server places it wherever it likes: no slot's holder is known any more. Forgotten before it is sent, so a retry that fails or is cut off leaves nothing known either.
+      if (this.#profile.slotted) { this.#state.forget(); placed = false; isolation = "cache-prompt-off-no-slot"; }
       const again = await this.#send(plain.body, plain.headers);
       fallback = { reason: failureMessage(sent.body) || "the endpoint refused a cache setting", refusedStatus: sent.status, removed: first.applied };
       sent = again; used = plain;
-      // The plain retry names no slot, so the server placed it wherever it liked: no slot's holder is known any more.
-      if (this.#profile.slotted) { this.#state.forget(); placed = false; isolation = "cache-prompt-off-no-slot"; }
     }
     if (slotted && slot !== undefined && placed && sent.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, context.scopeKey);
     const hit = sent.status < 400 ? this.#profile.read(sent.body) : this.#profile.read(undefined);
@@ -284,6 +287,8 @@ export class CacheAdapter {
       // A save writes whatever the slot holds into a file under this project's marker, and a later restore makes the project that slot's holder (it then reuses with cache_prompt true): so only the slot's
       // recorded holder may save it. After a start, a release or a call without a slot the holder is unknown and the save is refused (the project's next call into the slot makes it the holder again).
       if (action === "save" && this.#profile.slotted && this.#state.holder.get(slot) !== scopeKey) return undefined;
+      // A restore overwrites the slot, and one that fails or is cut off may already have loaded the file: the old holder is forgotten before it is sent, and only a restore that completes records this project.
+      if (action === "restore" && this.#profile.slotted) this.#state.holder.delete(slot);
       const epoch = this.#state.epoch;
       const out = await this.#send(r.body, {}, r.path, r.method);
       if (action === "restore" && this.#profile.slotted && out.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, scopeKey);
@@ -291,7 +296,7 @@ export class CacheAdapter {
     });
     if (res === undefined) return { ok: false, reason: "not saved: this project is not the slot's recorded holder (the slot may hold another project's prompt)" };
     if (res.status >= 400) return { ok: false, reason: `status ${res.status}: ${failureMessage(res.body) || "refused"}` };
-    const b =(res.body !== null && typeof res.body === "object" ? res.body : {}) as Record<string, unknown>;
+    const b = (res.body !== null && typeof res.body === "object" ? res.body : {}) as Record<string, unknown>;
     const n = action === "save" ? b["n_saved"] : b["n_restored"];
     const t = (b["timings"] !== null && typeof b["timings"] === "object" ? b["timings"] : {}) as Record<string, unknown>;
     const ms = action === "save" ? t["save_ms"] : t["restore_ms"];

@@ -609,3 +609,141 @@ test("erase isolation: the residual a same-project call carries on an unattested
   assert.equal(on.caveats.some((c) => c.startsWith("Not closed")), false);
   assert.deepEqual([off.slotCount, profileFor({ kind: "llama-cpp", model: "m" }).slotCount], [2, undefined]);
 });
+
+// ---- C06e second review: holder bookkeeping when a call, a retry or a restore fails after the server may already have written the slot ---------------------------------------------------------------
+/** A transport that lets the stand-in process the request (so the slot is written) and then fails: an error status, or a thrown error (a lost connection, an abort, a timeout). */
+const failingAfterWrite = (sim: LlamaSim, when: (r: HttpRequest) => boolean, how: "status" | "throw"): Transport => ({
+  send: async (r) => { const out = await sim.send(r); if (!when(r)) return out; if (how === "throw") throw new Error("connection lost"); return refuse(500, "server error after the prompt was processed"); },
+});
+
+test("failure paths: a call across a project boundary that fails after the server wrote the slot leaves the slot's holder unknown, so the previous holder's next call is not sped up by it", async () => {
+  for (const attested of [false, true]) for (const how of ["status", "throw"] as const) for (const fresh of ["erase", "off", "erase-refused"] as const) {
+    const label = `${attested ? "attested" : "unattested"} ${how} ${fresh}`;
+    const sim = new LlamaSim(2);
+    const state = new CacheEndpoints().state("http://fail:1");
+    const base = (t: Transport) => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, ...(attested ? { hostPromptCacheOff: true } : {}) } }), t, { state, ...(fresh === "off" ? { freshSlot: "off" as const } : {}) });
+    await base(sim).call(convo("b", 1), ctx({ scopeKey: scopeB, slot: 0 }));
+    assert.equal(state.holder.get(0), scopeB, label);
+    // A's call: the erase (where sent) is refused in the "erase-refused" case; the chat itself is processed by the server and then fails
+    const failing = failingAfterWrite(sim, (r) => r.path.startsWith("/v1/"), how);
+    const t: Transport = fresh === "erase-refused" ? { send: (r) => (r.path.includes("erase") ? Promise.resolve(refuse(404, "no erase")) : failing.send(r)) } : failing;
+    const a = base(t).call(convo("shared", 3), ctx({ scopeKey: scopeA, slot: 0 }));
+    if (how === "throw") await assert.rejects(a, /connection lost/, label); else assert.equal((await a).status, 500, label);
+    assert.deepEqual(sim.slots[0], tokensOf(convo("shared", 3)), `${label}: the stand-in really holds A's prompt in slot 0`);
+    assert.notEqual(state.holder.get(0), scopeB, `${label}: B is no longer recorded as slot 0's holder`);
+    // B's next call into slot 0, with a prompt that starts like A's, is a hand-over: no reuse of A's prompt
+    const next = await base(sim).call(convo("shared", 5), ctx({ scopeKey: scopeB, slot: 0 }));
+    assert.notEqual(next.isolation, "same-project", label);
+    assert.equal(next.hit.cachedTokens, 0, `${label}: B reused none of A's prompt`);
+  }
+});
+
+test("failure paths: the plain retry after a refused id_slot forgets every holder before it is sent, so a retry that fails still leaves nothing known", async () => {
+  const sim = new LlamaSim(2);
+  const state = new CacheEndpoints().state("http://retry:1");
+  const make = (t: Transport) => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2 } }), t, { state, freshSlot: "off" });
+  await make(sim).call(convo("b", 1), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.equal(state.holder.get(0), scopeB);
+  // A asks for slot 1; the first attempt is refused for id_slot, the plain retry is placed by the server (the stand-in: slot 0) and the connection is then lost
+  const t: Transport = { send: async (r) => { if ("id_slot" in r.body) return refuse(400, "unknown field id_slot"); await sim.send(r); throw new Error("connection lost"); } };
+  await assert.rejects(make(t).call(convo("shared", 3), ctx({ scopeKey: scopeA, slot: 1 })), /connection lost/);
+  assert.equal(state.holder.size, 0, "every holder is forgotten: the retry may have landed in any slot");
+  const next = await make(sim).call(convo("shared", 5), ctx({ scopeKey: scopeB, slot: 0 }));
+  assert.deepEqual([next.isolation, next.hit.cachedTokens], ["cache-prompt-off-configured", 0]);
+});
+
+test("failure paths: a restore that fails (an error status or a lost connection) leaves the slot's holder unknown, since the file may already be in the slot", async () => {
+  for (const how of ["status", "throw"] as const) {
+    const sim = new LlamaSim(2);
+    const state = new CacheEndpoints().state("http://restore:1");
+    const make = (t: Transport) => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true, hostPromptCacheOff: true } }), t, { state });
+    await make(sim).call(convo("b", 1), ctx({ scopeKey: scopeB, slot: 0 }));
+    // A's own file (written while A held a slot), restored into B's slot 0; the server loads it and then the call fails
+    sim.files.set("nn-aaaaaaaa2345.bin", tokensOf(convo("shared", 3)));
+    const t = failingAfterWrite(sim, (r) => r.path.includes("action=restore"), how);
+    const restore = make(t).slot("restore", 0, slotFile("nn-aaaaaaaa2345.bin"), scopeA);
+    if (how === "throw") await assert.rejects(restore, /connection lost/); else assert.equal((await restore).ok, false);
+    assert.equal(state.holder.has(0), false, `${how}: slot 0's holder is unknown`);
+    const next = await make(sim).call(convo("shared", 5), ctx({ scopeKey: scopeB, slot: 0 }));
+    assert.deepEqual([next.isolation, next.hit.cachedTokens], ["erase-host-cache-attested-off", 0], how);
+  }
+  // a restore that succeeds still makes the project the holder
+  const sim = new LlamaSim(2);
+  const state = new CacheEndpoints().state("http://restore:2");
+  sim.files.set("nn-aaaaaaaa2345.bin", tokensOf(convo("shared", 3)));
+  assert.equal((await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true } }), sim, { state }).slot("restore", 0, slotFile("nn-aaaaaaaa2345.bin"), scopeA)).ok, true);
+  assert.equal(state.holder.get(0), scopeA);
+});
+
+test("failure paths: a call refused before it wrote anything does not make its project the slot's holder, so its next call does not reuse the other project's prompt left there", async () => {
+  for (const attested of [false, true]) {
+    const sim = new LlamaSim(2);
+    const state = new CacheEndpoints().state("http://refused:1");
+    const make = (t: Transport) => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, ...(attested ? { hostPromptCacheOff: true } : {}) } }), t, { state });
+    await make(sim).call(convo("shared", 3), ctx({ scopeKey: scopeB, slot: 0 }));
+    // the erase is refused and the chat answered 400 before the server touched the slot (a prompt too long, say): slot 0 still holds B's prompt
+    const refusing: Transport = { send: async (r) => (r.path.startsWith("/v1/") ? refuse(400, "the request exceeds the available context size") : refuse(404, "no erase")) };
+    assert.equal((await make(refusing).call(convo("other", 1), ctx({ scopeKey: scopeA, slot: 0 }))).status, 400);
+    assert.notEqual(state.holder.get(0), scopeA, attested ? "attested" : "unattested");
+    const next = await make(sim).call(convo("shared", 5), ctx({ scopeKey: scopeA, slot: 0 }));
+    assert.notEqual(next.isolation, "same-project");
+    assert.equal(next.hit.cachedTokens, 0, "none of B's prompt is reused");
+  }
+});
+
+test("turns: a wipe of what is known by another slot's call while a call is running (the plain retry after a refusal, placed by the server) is not overwritten by the running call's holder", async () => {
+  const sim = new LlamaSim(2);
+  const state = new CacheEndpoints().state("http://wipe:1");
+  let releaseA!: () => void; const heldA = new Promise<void>((r) => { releaseA = r; });
+  let aWritten!: () => void; const written = new Promise<void>((r) => { aWritten = r; });
+  let holdNext = true;
+  const t: Transport = {
+    send: async (r) => {
+      if (r.path.startsWith("/v1/") && r.body["id_slot"] === 1) return refuse(400, "unknown field id_slot"); // B's slot is refused; its plain retry is placed by the server (the stand-in: slot 0)
+      const out = await sim.send(r);
+      if (holdNext && r.path.startsWith("/v1/") && r.body["id_slot"] === 0) { holdNext = false; aWritten(); await heldA; } // A's call wrote slot 0, and its answer is still on the way
+      return out;
+    },
+  };
+  const make = () => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), t, { state });
+  const a = make().call(convo("a", 1), ctx({ scopeKey: scopeA, slot: 0 }));
+  await written;
+  const b = await make().call(convo("shared", 3), ctx({ scopeKey: scopeB, slot: 1 }));
+  assert.equal(b.fallback?.refusedStatus, 400);
+  assert.deepEqual(sim.slots[0], tokensOf(convo("shared", 3)), "B's retry landed in slot 0 after A's prompt");
+  releaseA();
+  assert.equal((await a).status, 200);
+  assert.equal(state.holder.has(0), false, "A's call ended after the wipe, so it records nothing");
+  const next = await make().call(convo("shared", 5), ctx({ scopeKey: scopeA, slot: 0 }));
+  assert.deepEqual([next.isolation, next.hit.cachedTokens], ["erase-host-cache-attested-off", 0]);
+});
+
+test("turns: a call that names no slot starts only after every running slot call has ended, and a later slot call starts only after it", async () => {
+  const sim = new LlamaSim(2);
+  const events: string[] = [];
+  let release!: () => void; const held = new Promise<void>((r) => { release = r; });
+  let first = true;
+  const t: Transport = {
+    send: async (r) => {
+      const tag = r.path.startsWith("/v1/") ? `chat ${String(r.body["id_slot"])}` : r.path;
+      events.push(`start ${tag}`);
+      if (first && r.path.startsWith("/v1/")) { first = false; await held; }
+      const out = await sim.send(r);
+      events.push(`end ${tag}`);
+      return out;
+    },
+  };
+  const state = new CacheEndpoints().state("http://turns:1");
+  const make = () => new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), t, { state });
+  const p1 = make().call(convo("a", 1), ctx({ scopeKey: scopeA, slot: 1 }));
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const p2 = make().call(convo("b", 1), ctx({ scopeKey: scopeB })); // no slot: the whole server's turn
+  const p3 = make().call(convo("c", 1), ctx({ scopeKey: scopeA, slot: 0 }));
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(events, ["start /slots/1?action=erase", "end /slots/1?action=erase", "start chat 1"], "nothing else starts while slot 1's call runs");
+  release();
+  await Promise.all([p1, p2, p3]);
+  const at = (e: string): number => events.indexOf(e);
+  assert.ok(at("end chat 1") < at("start chat undefined"), events.join());
+  assert.ok(at("end chat undefined") < at("start /slots/0?action=erase"), events.join());
+});

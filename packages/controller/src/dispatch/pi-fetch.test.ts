@@ -69,6 +69,23 @@ test("a project never reuses another project's prompt: separate slots when there
   assert.equal(seen.filter((r) => r.path.startsWith("/slots/")).length, 2);
 });
 
+test("C06e, the default endpoint (host prompt cache not attested off): a hand-over is sent with cache_prompt false and no erase, so the other project's prompt is never reused; the same project then reuses its own", async () => {
+  const unattested = { "llama/local": { url: URL_LLAMA, config: { kind: "llama-cpp" as const, model: "local", route: "llama/local", options: { slots: 1 } } } };
+  const policies = new CachePolicies({ secret: SECRET, state: new CacheEndpoints(), principal, endpoints: unattested });
+  const server = new LlamaSim(1, { hostCache: true }); const seen: HttpRequest[] = [];
+  const x = await policies.forAttempt({ projectId: A, route: "llama/local" });
+  const y = await policies.forAttempt({ projectId: B, route: "llama/local" });
+  const fx = x.policy.fetch!(simulatedFetch(server, seen)); const fy = y.policy.fetch!(simulatedFetch(server, seen));
+  await drain(await post(fx, chat(3)));
+  await drain(await post(fy, chat(3)));
+  await drain(await post(fx, chat(5)));
+  assert.equal((await x.takeUsage())!.cachedTokens, 0, "the first call after B's: B sent the same head, the host cache still holds it, and none of it is reused");
+  await drain(await post(fx, chat(7)));
+  assert.ok((await x.takeUsage())!.cachedTokens > 0, "the next call of the same project reuses its own prompt");
+  assert.deepEqual(seen.filter((r) => r.path === "/v1/chat/completions").map((r) => [r.body["id_slot"], r.body["cache_prompt"]]), [[0, false], [undefined, false], [0, false], [0, true]]);
+  assert.equal(seen.filter((r) => r.path.startsWith("/slots/")).length, 0, "no erase is sent: on this server it would not isolate");
+});
+
 test("calls into one slot take turns, even when Pi has its answer before the stream has ended; calls into different slots run side by side", async () => {
   const policies = make(2);
   const a = await policies.forAttempt({ projectId: A, route: "llama/local" });
