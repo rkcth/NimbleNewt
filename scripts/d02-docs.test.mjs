@@ -63,7 +63,7 @@ for (const guide of GUIDES) {
     for (const raw of tokens) {
       const token = raw.trim();
       // A path in the repository.
-      if (/^(packages|scripts|docs|\.github|benchmarks)\/[\w./-]+$/.test(token) && !token.includes("...")) {
+      if (/^(packages|scripts|docs|\.github|benchmarks|native|experiments)\/[\w./-]+$/.test(token) && !token.includes("...")) {
         const path = token.replace(/\/$/, "");
         if (!existsSync(join(root, ...path.split("/")))) bad.push(`path ${token}`);
         continue;
@@ -152,7 +152,7 @@ test("CONTRIBUTING.md records the three things a non-TypeScript component needs,
   assert.ok(/Linux, macOS \*\*and\*\* Windows/.test(section));
   for (const script of ["clean", "check:deps", "licenses:check", "licenses:write", "api:docs:write", "roadmap:check", "test:changed", "test:fast", "test:shard", "test"]) assert.ok(packageJson.scripts[script] !== undefined, `package.json has no ${script}`);
   // the non-TypeScript files the guide names are the ones that exist
-  const others = walk(root, (n) => /\.(py|rs|go|c|cc|cpp|java|rb|sh)$/.test(n)).map((f) => relative(root, f).split(sep).join("/"));
+  const others = walk(root, (n) => /\.(py|rs|go|c|cc|cpp|java|rb|sh|ps1)$/.test(n)).map((f) => relative(root, f).split(sep).join("/"));
   for (const file of others) assert.ok(text.includes(file.startsWith("benchmarks/") ? "benchmarks/nimblenewt-harness/" : file), `${file} exists but CONTRIBUTING.md does not account for it`);
   assert.ok(existsSync(join(root, "LICENSE")) && /MIT License/.test(read("LICENSE")) && text.includes("MIT"));
 });

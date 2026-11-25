@@ -16,7 +16,7 @@ service, it needs UAC and it is Pro-only.
 | `round4.mjs` | Round 4: the child-program ladder (`--mode spawn`) and the step script that runs inside the container. |
 | `npm.mjs` | Round 3b: why `npm ci --offline` fails in the container and which variant makes it pass (`--mode npm`). |
 | `round3.mjs` | Round 3: the git ladder, the junction/ACL-propagation check and the timing measurement (and the reader of the NUL device's security descriptor). |
-| `launcher/` | A small Rust program (`nn-appc-launcher`, one dependency: `windows-sys`) that creates or reuses the container profile, grants and later revokes ACL entries, starts one program in the container and the job, and prints one JSON line. |
+| `launcher/` | A thin crate (`nn-appc-launcher`) that builds the PRODUCT launcher's source (`native/nn-launcher/`, A03b slice 3) with the cargo feature `experiment`, which adds the measuring options below (the product build refuses them). It creates or reuses the container profile, grants and later revokes ACL entries, starts one program in the container and the job, and prints one JSON line. |
 | `probe.mjs` | The script that runs **inside** the container (Node's own modules only). It attempts the ten containment cases and the tool and network checks. |
 | `ladder.mjs` | Round 2: the smoke ladder (variants of the container and the programs tried in each) and the firewall mini-experiment. Tested on Linux with fakes. |
 | `lib.mjs` | The harness's pure logic (argument building, fixtures, verdicts, report schema, markdown). Tested on Linux. |
@@ -71,6 +71,8 @@ Link fixtures: directory links are junctions (no privilege); file links need the
 the link is recorded as not planted and its attempts are skipped, so the case is `inc`, never `pass`.
 
 ## The launcher
+
+The source is the product's (`native/nn-launcher/src/win.rs`, moved there in A03b slice 3); this folder's crate depends on it with the cargo feature `experiment`. Everything below that the product refuses (`deny-write`/`deny-strong`, pipes, NUL, `dump`, `grant`, `delete-profile`, `open-test`, the hang diagnosis) exists only in this build.
 
 ```
 nn-appc-launcher run --exe PATH --cmdline "TEXT" --cwd PATH --stdout FILE --stderr FILE

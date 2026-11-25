@@ -1,4 +1,12 @@
 // The Windows part of the launcher. See ../README.md for the list of Win32 calls and what each is for.
+//
+// One source, two builds. The PRODUCT build (`nn-launcher.exe`, no cargo feature) speaks only what the worker's native Windows backend needs: the commands run, check, revoke and
+// info; grant modes ro, rx, modify, modify-root and seal; standard input from a FILE; standard output and error to FILES; kill-on-close always on. Every other option below is an
+// EXPERIMENT option (the measuring probes of experiments/windows-appcontainer): the product build refuses it at the argument check ("not in this build") and does not contain
+// the NUL-device test or the hang diagnosis at all. The experiment's own crate (experiments/windows-appcontainer/launcher) builds this same source with the feature `experiment`.
+const EXPERIMENT: bool = cfg!(feature = "experiment");
+/// The value of the `tool` field: the protocol identifier the TypeScript side matches (a test pins it). It is not the program's file name.
+const TOOL: &str = "nn-appc-launcher";
 use std::ffi::{c_void, OsStr};
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
@@ -10,6 +18,7 @@ use windows_sys::Win32::Security::Authorization::*;
 use windows_sys::Win32::Security::Isolation::*;
 use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::*;
+#[cfg(feature = "experiment")]
 use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
 use windows_sys::Win32::System::JobObjects::*;
 use windows_sys::Win32::System::Pipes::CreatePipe;
@@ -140,6 +149,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         let mut value = |what: &str| -> Result<String, String> { it.next().cloned().ok_or(format!("{what} needs a value")) };
         match flag.as_str() {
             "--name" => a.name = value("--name")?,
+            "--win32k-off" | "--no-kill-on-close" | "--keep-profile" | "--stdout-pipe" | "--stderr-pipe" | "--stdout-nul-rw" | "--stderr-nul-rw" | "--dump" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
             "--exe" => a.exe = Some(value("--exe")?),
             "--cmdline" => a.cmdline = Some(value("--cmdline")?),
             "--cwd" => a.cwd = Some(value("--cwd")?),
@@ -155,6 +165,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 let spec = value("--grant")?;
                 let (m, p) = spec.split_once(':').ok_or("--grant needs MODE:PATH")?;
                 let mode = Mode::parse(m).ok_or("grant mode must be ro, rx, modify, deny-write, deny-strong, seal or modify-root")?;
+                if !EXPERIMENT && matches!(mode, Mode::DenyWrite | Mode::DenyStrong) { return Err(format!("grant mode {} is an experiment option and is not in this build", mode.name())); }
                 a.grants.push(GrantSpec { mode, path: p.to_string(), soft: flag == "--grant-soft" });
             }
             // none: no attribute (a plain AppContainer). optout: the LPAC form. optin: the attribute present with the default value.
@@ -166,7 +177,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--ui-limits" => a.ui_limits = true,
             "--timeout-ms" => a.timeout_ms = value("--timeout-ms")?.parse().map_err(|_| "--timeout-ms is not a number")?,
             "--keep-profile" => a.keep_profile = true,
-            "--stdin" => { let v = value("--stdin")?; if !(matches!(v.as_str(), "nul" | "nul-rw" | "pipe" | "pipe-open") || v.starts_with("file:")) { return Err("--stdin: nul, nul-rw, file:PATH, pipe or pipe-open".into()); } a.stdin = v; }
+            "--stdin" => { let v = value("--stdin")?; if !EXPERIMENT && !v.starts_with("file:") { return Err("--stdin: only file:PATH is in this build (the NUL device is refused to the container and pipes made for it hang)".into()); } if !(matches!(v.as_str(), "nul" | "nul-rw" | "pipe" | "pipe-open") || v.starts_with("file:")) { return Err("--stdin: nul, nul-rw, file:PATH, pipe or pipe-open".into()); } a.stdin = v; }
             "--stdout-pipe" => a.stdout_pipe = true,
             "--stderr-pipe" => a.stderr_pipe = true,
             "--stdout-nul-rw" => a.stdout_nul = true,
@@ -176,6 +187,7 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown option {other}")),
         }
     }
+    if !EXPERIMENT && !matches!(a.command.as_str(), "run" | "check" | "revoke" | "info") { return Err(format!("command {} is not in this build (run, check, revoke, info)", a.command)); }
     Ok(a)
 }
 
@@ -666,6 +678,7 @@ fn run(a: &Args, j: Json) -> Outcome {
     j.s("profile", if created { "created" } else { "reused" });
     let (Some(exe), Some(cmdline), Some(cwd)) = (a.exe.as_deref(), a.cmdline.as_deref(), a.cwd.as_deref()) else { return fail(j, "arguments", "run needs --exe, --cmdline and --cwd") };
     let (Some(out_path), Some(err_path)) = (a.stdout.as_deref(), a.stderr.as_deref()) else { return fail(j, "arguments", "run needs --stdout and --stderr") };
+    if !EXPERIMENT && !a.stdin.starts_with("file:") { return fail(j, "arguments", "run needs --stdin file:PATH in this build"); }
 
     let mut grants = GrantSet { sid: sid.0, items: Vec::new() };
     let result = run_inner(a, &mut j, &sid, &mut grants, exe, cmdline, cwd, out_path, err_path);
@@ -769,7 +782,12 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
 
         let waited = WaitForSingleObject(process.0, a.timeout_ms);
         let timed_out = waited == WAIT_TIMEOUT;
-        if timed_out { j.raw("hang", hang_report(process.0, job.0, pi.dwProcessId)); TerminateJobObject(job.0, 1); WaitForSingleObject(process.0, 5000); }
+        if timed_out {
+            #[cfg(feature = "experiment")]
+            j.raw("hang", hang_report(process.0, job.0, pi.dwProcessId));
+            TerminateJobObject(job.0, 1);
+            WaitForSingleObject(process.0, 5000);
+        }
         let leftover = active_processes(job.0);
         let mut code = 0u32;
         GetExitCodeProcess(process.0, &mut code);
@@ -790,6 +808,7 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
     }
 }
 
+#[cfg(feature = "experiment")]
 /// FILETIME pairs of a process or thread as milliseconds of kernel and user CPU time.
 fn cpu_ms(kernel: FILETIME, user: FILETIME) -> (i64, i64) {
     let ms = |f: FILETIME| (((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) / 10_000) as i64;
@@ -799,6 +818,7 @@ fn cpu_ms(kernel: FILETIME, user: FILETIME) -> (i64, i64) {
 /// A short diagnosis of a child that did not end in time, taken BEFORE the job is ended: is it still alive, how many processes does the job hold, how much CPU
 /// time did the process and each of its threads use, and did any thread use CPU in the one second between two samples (busy) or none (waiting). It cannot
 /// name what a thread waits on (that needs a debugger or the system information calls this launcher does not use); no CPU in a second means it is waiting.
+#[cfg(feature = "experiment")]
 fn hang_report(process: HANDLE, job: HANDLE, pid: u32) -> String {
     unsafe {
         let mut h = Json::new();
@@ -856,12 +876,14 @@ fn describe(a: &Args, mut j: Json) -> Json {
 // ---------------------------------------------------------------------------------------------------------------- the NUL device open test
 
 // The C runtime's own open (what git for Windows' mingw_open calls for "/dev/null"): declared here because windows-sys has no C runtime bindings.
+#[cfg(feature = "experiment")]
 extern "C" {
     fn _wopen(path: *const u16, oflag: i32, pmode: i32) -> i32;
     fn _close(fd: i32) -> i32;
     fn _errno() -> *mut i32;
 }
 
+#[cfg(feature = "experiment")]
 /// `open-test`: meant to be started AS THE CHILD inside the container (run --exe <this program> --cmdline "<this program> open-test"). It opens the NUL device with the flag
 /// combinations that git's start-up could use and prints the result of each (GetLastError, or the C runtime's errno) as one JSON line. It writes nothing and holds no secrets.
 fn open_test() -> String {
@@ -914,7 +936,7 @@ fn open_test() -> String {
         }
     }
     let mut j = Json::new();
-    j.s("tool", "nn-appc-launcher");
+    j.s("tool", TOOL);
     j.s("command", "open-test");
     j.b("ok", true);
     j.raw("opens", format!("[{}]", results.join(",")));
@@ -923,12 +945,13 @@ fn open_test() -> String {
 
 pub fn main() {
     let raw: Vec<String> = std::env::args().collect();
+    #[cfg(feature = "experiment")]
     if raw.get(1).map(String::as_str) == Some("open-test") {
         println!("{}", open_test());
         std::process::exit(0);
     }
     let mut j = Json::new();
-    j.s("tool", "nn-appc-launcher");
+    j.s("tool", TOOL);
     j.n("version", 1);
     let a = match parse_args(&raw) {
         Ok(a) => a,
@@ -962,6 +985,7 @@ pub fn main() {
                 }
             }
         }
+        #[cfg(feature = "experiment")]
         "grant" => {
             // Applies each --grant and LEAVES the entries in place (for the junction experiment: grant, check what the targets inherited, then revoke). A failed grant is reported.
             let mut j = j;
@@ -996,6 +1020,7 @@ pub fn main() {
                 }
             }
         }
+        #[cfg(feature = "experiment")]
         "dump" => {
             // Read-only: the DACL of each --dump path as SDDL.
             let mut j = j;
@@ -1003,6 +1028,7 @@ pub fn main() {
             j.b("ok", true);
             Outcome { j, code: 0 }
         }
+        #[cfg(feature = "experiment")]
         "delete-profile" => {
             let mut j = j;
             let hr = unsafe { DeleteAppContainerProfile(wide(&a.name).as_ptr()) };

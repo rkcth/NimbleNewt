@@ -105,6 +105,49 @@ jobs:
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode firewall --timeout-ms 45000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/firewall.md" ]; then cat "$RUNNER_TEMP/appc-out/firewall.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
+      # Card A03b slice 3: the PRODUCT launcher (native/nn-launcher, no cargo feature) with the toolchain its rust-toolchain.toml pins, built `--locked`; `info` must work; an experiment-only command must be
+      # refused ("not in this build"); the release record is made and verified. The experiment launcher above is the same source with the `experiment` feature. Unsigned: a hosted build is never a release.
+      - name: "Product launcher (native/nn-launcher), locked build, info, refusal of experiment commands, release record"
+        shell: bash
+        if: always()
+        timeout-minutes: 20
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal 2>&1 | node scripts/redact-log.mjs
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          cd native/nn-launcher
+          RUSTFLAGS="--remap-path-prefix=$PWD=/nn-launcher -C link-arg=/Brepro" cargo build --release --locked 2>&1 | node ../../scripts/redact-log.mjs
+          ./target/release/nn-launcher.exe info --name NimbleNewtProductCheck > "$RUNNER_TEMP/product-info.json"
+          node ../../scripts/redact-log.mjs < "$RUNNER_TEMP/product-info.json"
+          grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"
+          rc=0; ./target/release/nn-launcher.exe dump --dump . > "$RUNNER_TEMP/product-refused.json" || rc=$?
+          grep -q 'not in this build' "$RUNNER_TEMP/product-refused.json"
+          test "$rc" -eq 125
+          node ../../scripts/native-launcher.mjs record --file target/release/nn-launcher.exe --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
+          node ../../scripts/native-launcher.mjs verify --file target/release/nn-launcher.exe --record "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
+      # Card A03b slice 3: the administrator installer script is parsed by PowerShell and run with -WhatIf and Verify. Neither changes the machine: the checks below fail the step if an account or a folder appeared.
+      - name: "Installer script (parse, -WhatIf and Verify; changes nothing)"
+        shell: powershell
+        if: always()
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $f = (Resolve-Path 'native\install\Install-NimbleNewtLauncher.ps1').Path
+          $errors = $null; $tokens = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output "::error::$($_.Message)" }; exit 1 }
+          $tmp = Join-Path $env:RUNNER_TEMP 'nn-whatif'; New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+          Copy-Item 'native\nn-launcher\target\release\nn-launcher.exe' (Join-Path $tmp 'nn-launcher.exe')
+          $h = (Get-FileHash (Join-Path $tmp 'nn-launcher.exe') -Algorithm SHA256).Hash
+          & $f -Action Install -LauncherPath (Join-Path $tmp 'nn-launcher.exe') -ExpectedSha256 $h -AllowUnsigned -AccountName nn-whatif-check -WhatIf
+          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { Write-Output "::error::-WhatIf install ended with $LASTEXITCODE"; exit 1 }
+          if (Get-LocalUser -Name nn-whatif-check -ErrorAction SilentlyContinue) { Write-Output '::error::-WhatIf made the account'; exit 1 }
+          if (Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')) { Write-Output '::error::-WhatIf made the install folder'; exit 1 }
+          if (Test-Path (Join-Path $env:ProgramData 'NimbleNewt')) { Write-Output '::error::-WhatIf made the data folder'; exit 1 }
+          # Verify on a machine with nothing installed must run to its end and report failures (exit 1), never crash.
+          $out = & $f -Action Verify 2>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch 'FAIL  the account exists' -or $out -notmatch 'RESULT:') { Write-Output '::error::Verify did not report on an empty machine'; exit 1 }
+          exit 0
       # Card A03b slice 2: the ten containment cases of card G05 through the PRODUCT backend (windowsNativeBackend, the launcher built above), run by the node case runner inside the container.
       # The report is redacted (names, paths and SIDs replaced) and uploaded with the rest. Nothing here is a release gate: a hosted run does not prove the service-account, non-administrator or Home items.
       - name: G05 containment cases through the native backend (one confined start, node runner)
@@ -112,7 +155,7 @@ jobs:
         if: always()
         timeout-minutes: 20
         env:
-          NIMBLENEWT_WIN_LAUNCHER: ${{ github.workspace }}\experiments\windows-appcontainer\launcher\target\release\nn-appc-launcher.exe
+          NIMBLENEWT_WIN_LAUNCHER: ${{ github.workspace }}\native\nn-launcher\target\release\nn-launcher.exe
           NIMBLENEWT_WIN_CONTROL_DIR: ${{ runner.temp }}\nn-native
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out/g05-native"

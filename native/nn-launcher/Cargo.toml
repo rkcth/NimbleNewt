@@ -1,0 +1,41 @@
+[package]
+name = "nn-launcher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "NimbleNewt native Windows launcher: starts one program inside a low-privilege AppContainer and a Job Object (Windows only)."
+license = "MIT"
+
+[lib]
+name = "nn_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nn-launcher"
+path = "src/main.rs"
+
+[features]
+# The measuring options of experiments/windows-appcontainer (deny-write and deny-strong grants, pipes, the NUL device, dump, grant, delete-profile, open-test, hang
+# diagnosis). NEVER on in a release build: the product is built with no features.
+experiment = []
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+] }
+
+[profile.release]
+opt-level = "s"
+panic = "unwind"
+codegen-units = 1
+debug = false

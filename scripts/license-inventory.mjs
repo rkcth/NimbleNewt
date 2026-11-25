@@ -1,7 +1,9 @@
 // Builds a license inventory of locked third-party packages from package-lock.json.
 //   node scripts/license-inventory.mjs --write   regenerate the inventory document
 //   node scripts/license-inventory.mjs --check   fail if the document is stale or a license is not allowed
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const ALLOWED_LICENSES = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "Unlicense"];
@@ -76,6 +78,42 @@ export function render(entries) {
   return lines.join("\n");
 }
 
+// The Rust launcher's dependencies (native/nn-launcher/Cargo.lock). A lock file carries no license, so the crates' licenses are recorded in cargo-licenses.json (name@version -> SPDX expression, copied
+// from each crate's own Cargo.toml by `--write` when the crate sources are in the local cargo registry). The check: the recorded set equals the lock file's third-party set and every license is allowed.
+const CARGO_LOCK = fileURLToPath(new URL("../native/nn-launcher/Cargo.lock", import.meta.url));
+const CARGO_LICENSES = fileURLToPath(new URL("../native/nn-launcher/cargo-licenses.json", import.meta.url));
+
+/** The third-party crates of a Cargo.lock (those with a registry source), as sorted `name@version` keys. */
+export function cargoPackages(lockText) {
+  return [...lockText.matchAll(/\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\nsource = "registry\+/g)].map((m) => `${m[1]}@${m[2]}`).sort(compare);
+}
+
+/** Problems between a Cargo.lock's crates and the recorded licenses (empty: consistent and allowed). */
+export function cargoProblems(lockText, recorded) {
+  const problems = [];
+  const keys = cargoPackages(lockText);
+  for (const key of keys) {
+    if (typeof recorded[key] !== "string") problems.push(`${key}: no license recorded in cargo-licenses.json (run npm run licenses:write)`);
+    else if (!licenseAllowed(recorded[key])) problems.push(`${key}: license ${recorded[key]} is not on the allow list`);
+  }
+  for (const key of Object.keys(recorded)) if (!keys.includes(key)) problems.push(`${key}: recorded in cargo-licenses.json but not in Cargo.lock (stale)`);
+  return problems;
+}
+
+/** The license of each crate from the local cargo registry's sources (undefined where a crate is not there). */
+function readCargoLicenses(keys) {
+  const base = join(process.env.CARGO_HOME ?? join(homedir(), ".cargo"), "registry", "src");
+  const out = {};
+  if (!existsSync(base)) return undefined;
+  for (const index of readdirSync(base)) {
+    for (const key of keys) {
+      const file = join(base, index, key.replace("@", "-"), "Cargo.toml");
+      if (existsSync(file)) { const m = /^license = "([^"]+)"/m.exec(readFileSync(file, "utf8")); if (m !== null) out[key] = m[1]; }
+    }
+  }
+  return keys.every((k) => out[k] !== undefined) ? out : undefined;
+}
+
 const DOC = fileURLToPath(new URL("../docs/nimblenewt/implementation-plan/license-inventory.md", import.meta.url));
 const LOCK = fileURLToPath(new URL("../package-lock.json", import.meta.url));
 
@@ -83,12 +121,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const mode = process.argv[2];
   const entries = inventory(JSON.parse(readFileSync(LOCK, "utf8")));
   const problems = violations(entries);
-  if (mode === "--write") writeFileSync(DOC, render(entries));
+  const lockText = readFileSync(CARGO_LOCK, "utf8");
+  if (mode === "--write") {
+    writeFileSync(DOC, render(entries));
+    const found = readCargoLicenses(cargoPackages(lockText));
+    if (found !== undefined) writeFileSync(CARGO_LICENSES, `${JSON.stringify(Object.fromEntries(Object.entries(found).sort(([a], [b]) => compare(a, b))), null, 2)}\n`);
+    else console.error("note: the crate sources are not in the local cargo registry; cargo-licenses.json was left as it is");
+  }
   else if (mode === "--check") {
     let current = "";
     try { current = readFileSync(DOC, "utf8"); } catch { /* missing counts as stale */ }
     if (current !== render(entries)) problems.push("license-inventory.md is stale; run npm run licenses:write");
+    problems.push(...cargoProblems(lockText, JSON.parse(readFileSync(CARGO_LICENSES, "utf8"))));
   } else { console.error("usage: license-inventory.mjs --write|--check"); process.exit(2); }
   if (problems.length > 0) { for (const p of problems) console.error(p); process.exit(1); }
-  console.log(`license inventory ok (${entries.length} packages)`);
+  console.log(`license inventory ok (${entries.length} packages, ${cargoPackages(readFileSync(CARGO_LOCK, "utf8")).length} Rust crates)`);
 }

@@ -439,7 +439,7 @@ test("command line and tool discovery", () => {
 // ------------------------------------------------------------------------------------------------ guards on the launcher source and the workflow
 
 test("the launcher source: every Win32 call it makes is documented in the README, and it has no fallback path to an unconfined child", () => {
-  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   const calls = ["CreateAppContainerProfile", "DeriveAppContainerSidFromAppContainerName", "DeleteAppContainerProfile", "ConvertSidToStringSidW", "GetNamedSecurityInfoW", "SetEntriesInAclW", "SetNamedSecurityInfoW",
     "CreateJobObjectW", "SetInformationJobObject", "QueryInformationJobObject", "TerminateJobObject", "InitializeProcThreadAttributeList", "UpdateProcThreadAttribute", "DeleteProcThreadAttributeList",
@@ -467,7 +467,7 @@ test("the launcher source: every Win32 call it makes is documented in the README
   assert.match(src, /j\.n\("entriesLeft"/);
   assert.match(src, /"check" => \{/);
   assert.match(src, /j\.raw\("hang", hang_report\(/);
-  assert.ok(readFileSync(join(exp, "launcher", "Cargo.toml"), "utf8").includes('"Win32_System_Diagnostics_ToolHelp"'));
+  assert.ok(readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8").includes('"Win32_System_Diagnostics_ToolHelp"'));
   // The attribute list's buffer is pointer-aligned, and a failed step after the start keeps childStarted.
   assert.ok(!/vec!\[0u8; size\]/.test(src));
   assert.match(src, /vec!\[0usize; size\.div_ceil\(size_of::<usize>\(\)\)\]/);
@@ -1446,7 +1446,7 @@ test("the offline npm project can hold many local packages (the lockfile names e
 });
 
 test("the launcher's round 3 additions: standard handles as NUL read-write, a file or pipes, output pipes drained to files, a grant command that leaves entries, inherited entries read back", () => {
-  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   for (const c of ["CreatePipe", "SetHandleInformation", "ReadFile"]) { assert.ok(src.includes(`${c}(`), c); assert.ok(readme.includes(c), `${c} missing in README`); }
   assert.match(src, /"--stdin" =>/);
@@ -1459,7 +1459,7 @@ test("the launcher's round 3 additions: standard handles as NUL read-write, a fi
   assert.match(src, /j\.n\("inheritedEntries"/);
   assert.match(src, /if a\.stdout_pipe \{ drop\(out\); \}/, "the launcher's copy of the write end is closed, or the copy thread never sees the end");
   assert.equal(src.match(/CreateProcessW\(/g).length, 1);
-  const cargo = readFileSync(join(exp, "launcher", "Cargo.toml"), "utf8");
+  const cargo = readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8");
   assert.ok(cargo.includes('"Win32_System_Pipes"') && cargo.includes('"Win32_System_IO"'));
   assert.match(readme, /Round 3/);
 });
@@ -1769,7 +1769,7 @@ test("git: the all-NUL variants pass the launcher's flags and judge by exit code
 });
 
 test("the launcher source: an open-test command (CreateFileW flag combinations and the C runtime's _wopen, no new crate), and the standard output and error can be the NUL device", () => {
-  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   assert.match(src, /fn open_test\(\) -> String/);
   assert.match(src, /raw\.get\(1\)\.map\(String::as_str\) == Some\("open-test"\)/);
@@ -1777,7 +1777,7 @@ test("the launcher source: an open-test command (CreateFileW flag combinations a
   assert.match(src, /"--stdout-nul-rw" => a\.stdout_nul = true/);
   assert.match(src, /"--stderr-nul-rw" => a\.stderr_nul = true/);
   for (const doc of ["open-test", "_wopen", "--stdout-nul-rw", "FILE_SHARE_DELETE"]) assert.ok(readme.includes(doc), `README: ${doc}`);
-  assert.ok(!/^\s*\[dependencies\][\s\S]*(libc|winapi)\s*=/m.test(readFileSync(join(exp, "launcher", "Cargo.toml"), "utf8")), "no new crate");
+  assert.ok(!/^\s*\[dependencies\][\s\S]*(libc|winapi)\s*=/m.test(readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8")), "no new crate");
 });
 
 // ------------------------------------------------------------------------------------------------ round 3b: firewall assumptions and the loopback exemption by name
@@ -1934,7 +1934,7 @@ test("round 4 DACL dumps: the container's own SID is named before the scrubber t
 });
 
 test("the launcher source (round 4): the layered layouts are built by hand in a fixed order, a sealed folder inherits nothing, the DACLs can be dumped, every new call is documented", () => {
-  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   for (const c of ["InitializeAcl", "AddAce", "AddAccessAllowedAceEx", "AddAccessDeniedAceEx", "GetLengthSid", "ConvertSecurityDescriptorToStringSecurityDescriptorW"]) { assert.ok(src.includes(`${c}(`), `${c} not used`); assert.ok(readme.includes(c), `${c} missing in README`); }
   assert.match(src, /"deny-strong" => Some\(Mode::DenyStrong\), "seal" => Some\(Mode::Seal\), "modify-root" => Some\(Mode::ModifyRoot\)/);
@@ -1958,7 +1958,7 @@ test("the launcher source (round 4): the layered layouts are built by hand in a 
 });
 
 test("the launcher source (A03b slice 2): the revoke takes the sealed names LAST, in a second pass after every other entry and only when every other entry is gone, and still revokes every applied entry once", () => {
-  const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
+  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const body = /fn revoke_all\(&mut self\) \{([\s\S]*?)\n    \}\n    fn json/.exec(src);
   assert.ok(body, "revoke_all not found");
   // two passes (the non-seals first, then the seals), each newest first
@@ -1980,8 +1980,8 @@ test("the experiment workflow (A03b slice 2): the product containment cases run 
   assert.ok(!/^\s+(push|pull_request|schedule):/m.test(wf), "only started by hand");
   const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
   const step = hosted.slice(hosted.indexOf("- name: G05 containment cases through the native backend"));
-  assert.ok(step.length > 0 && hosted.indexOf("Build the launcher") < hosted.indexOf("G05 containment cases through the native backend"));
-  assert.match(step, /NIMBLENEWT_WIN_LAUNCHER: [^\n]*launcher\\target\\release\\nn-appc-launcher\.exe/);
+  assert.ok(step.length > 0 && hosted.indexOf("Product launcher (native/nn-launcher)") < hosted.indexOf("G05 containment cases through the native backend"));
+  assert.match(step, /NIMBLENEWT_WIN_LAUNCHER: [^\n]*native\\nn-launcher\\target\\release\\nn-launcher\.exe/);
   assert.match(step, /NIMBLENEWT_WIN_CONTROL_DIR: \$\{\{ runner\.temp \}\}/);
   assert.match(step, /node --import \.\/scripts\/offline-guard\.mjs scripts\/containment-evidence\.mjs run --out [^\n]*--redact [^\n]*redact-log\.mjs/);
   assert.match(step, /if: always\(\)/);

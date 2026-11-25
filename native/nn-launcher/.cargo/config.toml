@@ -1,0 +1,3 @@
+# A reproducible Windows link: no timestamp in the PE header. (Path remapping is passed in RUSTFLAGS by the release steps: RELEASE.md.)
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/Brepro"]

@@ -6,6 +6,13 @@ version = 4
 name = "nn-appc-launcher"
 version = "0.1.0"
 dependencies = [
+ "nn-launcher",
+]
+
+[[package]]
+name = "nn-launcher"
+version = "0.1.0"
+dependencies = [
  "windows-sys",
 ]
 
