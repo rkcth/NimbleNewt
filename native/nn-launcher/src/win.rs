@@ -599,7 +599,11 @@ fn private_wanted(a: &Args) -> bool {
 /// `info` and `check`: can this account make (and close) a private window station for the container? Writes `windowStationOk`, and `windowStationError` when not. Err: the message.
 fn report_private_station(j: &mut Json, sid: PSID) -> Result<(), String> {
     match privdesk::PrivateDesktop::create(sid) {
-        Ok(mut p) => { p.close(); j.b("windowStationOk", true); Ok(()) }
+        Ok(mut p) => {
+            if p.close() { j.b("windowStationOk", true); return Ok(()); }
+            let e = format!("window objects: the private window station or desktop could not be closed (error {})", p.close_error().unwrap_or(0));
+            j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e)
+        }
         Err(e) => { j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e) }
     }
 }

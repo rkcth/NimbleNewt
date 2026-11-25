@@ -6,8 +6,8 @@
 // `Service-0x0-<logon id>$`, and no DACL of the launcher's own objects is written.
 //
 // The new objects get the launcher's default token DACL (the creating account and SYSTEM; CreateWindowStationW with no security attributes), the measured configuration. The container's entry is added
-// with the same byte-exact builder the experiment used (winobj::with_allow_entry, masks 131967 and 131583), and the DACL is READ BACK and checked (winobj::private_acl_ok: the exact entry for
-// the container and no allow entry for Everyone, Users, Authenticated Users, ALL APPLICATION PACKAGES, another container or a capability). A failed step is a typed failure and the run does not start.
+// with the same byte-exact builder the experiment used (winobj::with_allow_entry, masks 131967 and 131583), and the DACL is READ BACK and checked (winobj::private_acl_ok, an allow list: exactly one
+// entry for the container, otherwise only SYSTEM, Administrators, OWNER RIGHTS, a logon-session SID and the launcher's own token user and owner). The station is made with CWF_CREATE_ONLY. A failed step is a typed failure and the run does not start.
 //
 // CreateDesktopW makes a desktop in the CALLING PROCESS's window station, so the launcher switches its own process window station to the new one for that single call and back at once
 // (SetProcessWindowStation). The switch back is checked, and a guard restores the original station on every other path out (an early return or a panic) too.
@@ -25,6 +25,8 @@ pub(crate) const ERR_BAD_ACL: u32 = 0x2000_0004;
 pub(crate) const ERR_STATION_SWITCH_BACK: u32 = 0x2000_0005;
 /// A window object with that name already exists (never adopted: its DACL is not the launcher's).
 const ERR_NAME_TAKEN: u32 = 0x2000_0006;
+/// The launcher's own token user or owner was not a well-formed SID.
+const ERR_OWN_SID: u32 = 0x2000_0007;
 
 /// The binary form of a SID (None: not a valid SID).
 pub(crate) fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
@@ -90,6 +92,27 @@ fn random_seed() -> u64 {
     h.finish()
 }
 
+/// The launcher's own token user and token owner (binary SIDs): the principals its default token DACL is made for, the only accounts the read-back check accepts besides the fixed ones.
+fn own_principals() -> Result<Vec<Vec<u8>>, u32> {
+    unsafe {
+        let mut tok: HANDLE = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return Err(GetLastError()); }
+        let tok = Handle(tok);
+        let mut out = Vec::new();
+        for class in [TokenUser, TokenOwner] {
+            let mut need = 0u32;
+            GetTokenInformation(tok.0, class, null_mut(), 0, &mut need);
+            if need == 0 { return Err(GetLastError()); }
+            let mut buf = vec![0usize; (need as usize).div_ceil(size_of::<usize>())];
+            if GetTokenInformation(tok.0, class, buf.as_mut_ptr() as *mut c_void, need, &mut need) == 0 { return Err(GetLastError()); }
+            // TOKEN_USER starts with SID_AND_ATTRIBUTES (its Sid first) and TOKEN_OWNER with Owner: both a PSID at offset 0.
+            let sid = *(buf.as_ptr() as *const PSID);
+            out.push(sid_bytes(sid).ok_or(ERR_OWN_SID)?);
+        }
+        Ok(out)
+    }
+}
+
 fn trouble(what: &str, code: u32) -> String { format!("window objects: the private {what} (error {code})") }
 
 /// The launcher's own process window station, put back on every path out of a scope (an early return or a panic included).
@@ -113,7 +136,7 @@ impl StationSwitch {
 impl Drop for StationSwitch { fn drop(&mut self) { self.restore(); } }
 
 /// One run's private window station and desktop. Dropping it closes both (the desktop first).
-pub(crate) struct PrivateDesktop { station: HANDLE, desktop: HANDLE, station_name: String, desktop_name: String, lp: Vec<u16>, closed: bool }
+pub(crate) struct PrivateDesktop { station: HANDLE, desktop: HANDLE, station_name: String, desktop_name: String, lp: Vec<u16>, own: Vec<Vec<u8>>, closed: bool, close_error: Option<u32> }
 
 impl PrivateDesktop {
     /// Makes the objects for the container with this SID. Err: a message that starts with "window objects:" (nothing is left open).
@@ -121,14 +144,16 @@ impl PrivateDesktop {
         let text = sid_string(sid);
         if !winobj::is_profile_sid(&text) { return Err(format!("window objects: refused: the SID is not one AppContainer profile's (error {ERR_NOT_PROFILE_SID})")); }
         let Some(sid_b) = sid_bytes(sid) else { return Err(format!("window objects: refused: the SID is not well formed (error {ERR_NOT_PROFILE_SID})")) };
+        let own = own_principals().map_err(|e| format!("window objects: the launcher's own account could not be read (error {e})"))?;
         let (station_name, desktop_name) = winobj::private_names(random_seed());
         let lp = wide(&winobj::desktop_path(&station_name, &desktop_name));
         let (wstation, wdesktop) = (wide(&station_name), wide(&desktop_name));
-        let mut p = PrivateDesktop { station: null_mut(), desktop: null_mut(), station_name, desktop_name, lp, closed: false };
+        let mut p = PrivateDesktop { station: null_mut(), desktop: null_mut(), station_name, desktop_name, lp, own, closed: false, close_error: None };
         unsafe {
             // The station. A name that already exists is never adopted (its DACL is not ours).
+            // CWF_CREATE_ONLY: an existing station of that name makes the call fail instead of opening it (the error code alone is not documented for that case).
             SetLastError(0);
-            let hs = CreateWindowStationW(wstation.as_ptr(), 0, STATION_RIGHTS | WRITE_DAC_BIT, null()) as HANDLE;
+            let hs = CreateWindowStationW(wstation.as_ptr(), winobj::STATION_CREATE_ONLY, STATION_RIGHTS | WRITE_DAC_BIT, null()) as HANDLE;
             let e = GetLastError();
             if hs.is_null() { return Err(trouble("window station could not be made", e)); }
             p.station = hs;
@@ -157,22 +182,27 @@ impl PrivateDesktop {
         match acl_copy(h) {
             Err(e) => Err(trouble(&format!("{what}'s access list could not be read back"), e)),
             Ok(None) => Err(trouble(&format!("{what} has no access list"), ERR_NULL_DACL)),
-            Ok(Some(c)) => winobj::private_acl_ok(c.bytes(), sid_b, mask).map_err(|why| format!("window objects: the private {what}'s access list is not acceptable: {why} (error {ERR_BAD_ACL})")),
+            Ok(Some(c)) => winobj::private_acl_ok(c.bytes(), sid_b, mask, &self.own).map_err(|why| format!("window objects: the private {what}'s access list is not acceptable: {why} (error {ERR_BAD_ACL})")),
         }
     }
 
     /// The `lpDesktop` text, NUL-terminated, for STARTUPINFO.
     pub(crate) fn lp_desktop(&self) -> Vec<u16> { self.lp.clone() }
 
-    /// Closes the desktop and then the station. Safe to call twice.
-    pub(crate) fn close(&mut self) {
-        if self.closed { return; }
+    /// Closes the desktop and then the station. Safe to call twice. False (with the first error kept for the JSON line) when a close failed: that handle then stays open until the
+    /// launcher exits a moment later, when the system closes it (an object with no handle left is destroyed), so it is reported, not retried.
+    pub(crate) fn close(&mut self) -> bool {
+        if self.closed { return self.close_error.is_none(); }
         self.closed = true;
         unsafe {
-            if !self.desktop.is_null() { CloseDesktop(self.desktop as HDESK); self.desktop = null_mut(); }
-            if !self.station.is_null() { CloseWindowStation(self.station as HWINSTA); self.station = null_mut(); }
+            if !self.desktop.is_null() { if CloseDesktop(self.desktop as HDESK) == 0 { self.close_error.get_or_insert(GetLastError()); } self.desktop = null_mut(); }
+            if !self.station.is_null() { if CloseWindowStation(self.station as HWINSTA) == 0 { self.close_error.get_or_insert(GetLastError()); } self.station = null_mut(); }
         }
+        self.close_error.is_none()
     }
+
+    /// The first error of a failed close (None: closed cleanly, or not closed yet).
+    pub(crate) fn close_error(&self) -> Option<u32> { self.close_error }
 
     /// The part of the launcher's JSON line that names the objects (their names are not secret: the DACL is what protects them).
     pub(crate) fn json(&self) -> String {
@@ -180,9 +210,10 @@ impl PrivateDesktop {
         o.s("mode", "private");
         o.s("station", &self.station_name);
         o.s("desktop", &self.desktop_name);
-        o.b("closed", self.closed);
+        o.b("closed", self.closed && self.close_error.is_none());
+        if let Some(e) = self.close_error { o.n("closeError", e as i64); }
         o.render()
     }
 }
 
-impl Drop for PrivateDesktop { fn drop(&mut self) { self.close(); } }
+impl Drop for PrivateDesktop { fn drop(&mut self) { let _ = self.close(); } }

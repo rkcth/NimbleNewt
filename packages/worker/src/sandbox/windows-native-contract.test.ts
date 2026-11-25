@@ -196,12 +196,19 @@ test("the private window station code never touches an object of the launcher's 
   assert.equal(priv.match(/\bwrite_dacl\(/g)!.length, 2, "its definition and its one call, in add_entry");
   assert.equal(priv.match(/\badd_entry\(/g)!.length, 2, "its definition and its one call, in give");
   assert.equal(priv.match(/\bgive\(/g)!.length, 3, "the definition and the two calls (the station, the desktop)");
-  assert.match(priv, /CreateWindowStationW\(wstation\.as_ptr\(\), 0, STATION_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/, "the station is made with no security attributes (the token's default DACL, the measured configuration)");
+  assert.match(priv, /CreateWindowStationW\(wstation\.as_ptr\(\), winobj::STATION_CREATE_ONLY, STATION_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/, "the station is made with no security attributes (the token's default DACL, the measured configuration) and CWF_CREATE_ONLY (an existing station of that name is never opened)");
+  assert.match(pure, /pub\(crate\) const STATION_CREATE_ONLY: u32 = 0x0000_0001;/, "CWF_CREATE_ONLY is 1 (winuser.h)");
   assert.match(priv, /CreateDesktopW\(wdesktop\.as_ptr\(\), null\(\), null\(\), 0, DESKTOP_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/);
   // the masks are the measured ones; the DACL read back must pass the check; the process station is put back and that is checked
   assert.match(pure, /STATION_RIGHTS: u32 = 0x0002_037F;/);
   assert.match(pure, /DESKTOP_RIGHTS: u32 = 0x0002_01FF;/);
-  assert.match(priv, /winobj::private_acl_ok\(c\.bytes\(\), sid_b, mask\)/);
+  assert.match(priv, /winobj::private_acl_ok\(c\.bytes\(\), sid_b, mask, &self\.own\)/, "the read-back is checked against the launcher's own token user and owner");
+  assert.match(priv, /for class in \[TokenUser, TokenOwner\]/);
+  const create = between(priv, "pub(crate) fn create(sid: PSID)", "fn give(");
+  assert.ok(create.indexOf("let own = own_principals()") > 0 && create.indexOf("let own = own_principals()") < create.indexOf("CreateWindowStationW("), "the own principals are read before anything is made");
+  // the check is an allow list: anything that is not the container, a fixed trusted principal, a logon SID or the launcher's own is refused
+  assert.match(pure, /const ALWAYS_TRUSTED: \[&str; 3\] = \["S-1-5-18", "S-1-5-32-544", "S-1-3-4"\];/);
+  assert.match(pure, /return Err\(format!\("\{text\} holds an allow entry \(only the container/);
   assert.match(priv, /impl Drop for StationSwitch \{ fn drop\(&mut self\) \{ self\.restore\(\); \} \}/);
   assert.match(priv, /if !restored \{ return Err\(trouble\("launcher could not switch back/);
   assert.ok(priv.indexOf("let restored = back.restore();") < priv.indexOf("p.give(hd, sid"), "back on its own station before anything else is done");
@@ -219,6 +226,7 @@ test("`info` and `check` report whether a private window station can be made (in
   const check = between(w, '"check" => {', "other => fail(j");
   assert.match(check, /if private_wanted\(&a\) \{ let _ = report_private_station\(&mut j, sid\.0\); \}/, "check reports it and does not fail on it");
   const report = between(w, "fn report_private_station", "fn run(");
+  assert.match(report, /if p\.close\(\) \{ j\.b\("windowStationOk", true\); return Ok\(\(\)\); \}/, "ok only when the objects were also closed");
   for (const k of ["windowStationOk", "windowStationError"]) assert.ok(report.includes(`"${k}"`), k);
   assert.ok(/j\.s\("windowStation", "private"\)/.test(w), "the product names the mode");
   const ok = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true, windowStation: "private", windowStationOk: true }));
