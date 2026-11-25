@@ -116,7 +116,8 @@ test("the capabilities the backend sends are exactly the ones the PRODUCT build 
 test("the product build is the default: the feature is off, the binary is named nn-launcher, and the experiment crate is the only one that turns the feature on", () => {
   const cargo = crate("Cargo.toml");
   assert.match(cargo, /^\[\[bin\]\]\nname = "nn-launcher"/m);
-  assert.match(cargo, /^experiment = \[\]$/m);
+  // The feature only switches on extra windows-sys modules that the experiment build's code calls (round 5); it adds no dependency and no default.
+  assert.match(cargo, /^experiment = \[(?:"windows-sys\/[A-Za-z0-9_]+"(?:, )?)*\]$/m);
   assert.ok(!/^default\s*=/m.test(cargo), "no default features");
   assert.ok(args.includes('pub(crate) const EXPERIMENT: bool = cfg!(feature = "experiment");'));
   assert.ok(/#\[cfg\(not\(feature = "experiment"\)\)\]\s*#\[test\]\s*fn the_product_build_refuses_every_experiment_option/.test(args), "the product build's refusals have a Rust unit test of their own");

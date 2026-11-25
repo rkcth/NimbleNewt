@@ -62,6 +62,18 @@ jobs:
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode spawn --timeout-ms 15000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/spawn.md" ]; then cat "$RUNNER_TEMP/appc-out/spawn.md" >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
+      # Round 5 (README, notes "round 5"): the own hardware showed 0xC0000142 for every program that needs user32, as a service. Each step has an ATTEMPT and a RESULT line; results survive a hang.
+      - name: Session 0 diagnostic, round 5 (15 s per step; window station, desktop, creation flag, program, folder grant)
+        shell: bash
+        if: always()
+        timeout-minutes: 25
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail). With no summary (the harness was killed) the progress lines go to the summary.
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode session0 --timeout-ms 15000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/session0.md" ]; then cat "$RUNNER_TEMP/appc-out/session0.md" >> "$GITHUB_STEP_SUMMARY"; elif [ -f "$RUNNER_TEMP/appc-out/session0.progress" ]; then tail -n 80 "$RUNNER_TEMP/appc-out/session0.progress" | node scripts/redact-log.mjs >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
       - name: Containment cases in fifteen configurations (90 s per cell)
         shell: bash
         if: always()
@@ -301,6 +313,18 @@ jobs:
           rc=0
           node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode cases --timeout-ms 90000 2>&1 | node scripts/redact-log.mjs || rc=$?
           if [ -f "$RUNNER_TEMP/appc-out/cases.md" ]; then cat "$RUNNER_TEMP/appc-out/cases.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          exit "$rc"
+      # Round 5: the run that answers why the container's programs end with 0xC0000142 as a service; gated on the verify step like every step that starts a launcher.
+      - name: Session 0 diagnostic, round 5, as the runner service
+        shell: bash
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
+        timeout-minutes: 25
+        run: |
+          mkdir -p "$RUNNER_TEMP/appc-out"
+          # The summary is written even when the harness ends non-zero; the step then keeps the harness's exit code (pipefail). With no summary (the harness was killed) the progress lines go to the summary.
+          rc=0
+          node experiments/windows-appcontainer/run-experiment.mjs --out "$RUNNER_TEMP/appc-out" --mode session0 --timeout-ms 15000 2>&1 | node scripts/redact-log.mjs || rc=$?
+          if [ -f "$RUNNER_TEMP/appc-out/session0.md" ]; then cat "$RUNNER_TEMP/appc-out/session0.md" >> "$GITHUB_STEP_SUMMARY"; elif [ -f "$RUNNER_TEMP/appc-out/session0.progress" ]; then tail -n 80 "$RUNNER_TEMP/appc-out/session0.progress" | node scripts/redact-log.mjs >> "$GITHUB_STEP_SUMMARY"; fi
           exit "$rc"
       - name: Child-program ladder as the runner service
         shell: bash

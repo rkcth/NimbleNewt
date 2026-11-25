@@ -1,8 +1,9 @@
 // NimbleNewt experiment (not product code): the harness. It builds fresh fixtures for each cell of the matrix, starts the launcher (which runs probe.mjs inside
 // a low-privilege AppContainer), judges what came back with the host's own witnesses, and writes results.json and results.md.
-//   node run-experiment.mjs [--mode matrix|ladder|firewall|cases|git|npm|links|timing] [--out DIR] [--launcher PATH] [--cells all|id,id] [--variants all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
+//   node run-experiment.mjs [--mode matrix|ladder|firewall|cases|git|npm|links|timing|spawn|session0] [--out DIR] [--launcher PATH] [--cells all|id,id] [--variants all|id,id] [--profile NAME] [--timeout-ms N] [--dry-run]
 //   --mode matrix (default): round 1's containment matrix. --mode ladder: round 2's smoke ladder (which programs start in which container variant). --mode firewall: round 2's
 //   "network cut by firewall" mini-experiment (needs administrator rights for the firewall rule). --timeout-ms is the per-cell (matrix) or per-step (ladder, firewall) limit.
+//   Round 5: --mode session0 [--steps id,id] is the session 0 diagnostic (window station and desktop of the child, creation flag, program, folder grant; see round5.mjs).
 //   Round 4: --mode spawn is the child-program ladder (which stdio mode, job limits and program let a program inside the container start another one); --mode cases now also runs
 //   the protected-name layouts (deny-write, deny-strong, seal), the workspace folder entry modify-root and a no-limits cell, and keeps each cell under 90 s.
 //   Round 3: --mode cases runs the ten cases, the extra probes (junctions, protected-name operations), the diagnostics and the tools in seven container configurations (ac-nocap,
@@ -25,6 +26,7 @@ import { STEP_TIMEOUT_MS, netSetup, netTeardown, runFirewall, runLadder } from "
 import { runNpmLadder } from "./npm.mjs";
 import { SPAWN_STEP_TIMEOUT_MS, runSpawnLadder } from "./round4.mjs";
 import { runGitLadder, runLinks, runTiming } from "./round3.mjs";
+import { SESSION0_STEP_TIMEOUT_MS, fileProgress, runSession0 } from "./round5.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -204,7 +206,7 @@ export function namedDacls(list, packageSid) {
 
 function safe(fn) { try { return fn(); } catch { return undefined; } }
 
-export const MODES = ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall", "spawn"];
+export const MODES = ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall", "spawn", "session0"];
 
 export function parseCli(argv) {
   const o = { mode: "matrix", variantSpec: undefined, out: resolve("nn-appc-results"), launcherPath: join(here, "launcher", "target", "release", `nn-appc-launcher${process.platform === "win32" ? ".exe" : ""}`), cellSpec: "all", dryRun: false };
@@ -216,6 +218,7 @@ export function parseCli(argv) {
     else if (a === "--cells") o.cellSpec = v();
     else if (a === "--mode") { o.mode = v(); if (!MODES.includes(o.mode)) throw new Error(`--mode: ${MODES.join(", ")}`); }
     else if (a === "--variants") o.variantSpec = v();
+    else if (a === "--steps") o.stepSpec = v();
     else if (a === "--profile") o.profileName = v();
     else if (a === "--timeout-ms") o.limits = { ...(o.limits ?? {}), timeoutMs: Number(v()) };
     else if (a === "--dry-run") o.dryRun = true;
@@ -234,6 +237,16 @@ async function main() {
   if (o.mode === "git") { stem = "git"; result = await runGitLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell }); }
   else if (o.mode === "npm") { stem = "npm"; result = await runNpmLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? STEP_TIMEOUT_MS, exec: execLauncher }); }
   else if (o.mode === "spawn") { stem = "spawn"; result = await runSpawnLadder({ ...common, timeoutMs: o.limits?.timeoutMs ?? SPAWN_STEP_TIMEOUT_MS, exec: execLauncher }); }
+  else if (o.mode === "session0") {
+    stem = "session0";
+    // Round 5: every step has an ATTEMPT line before it and a RESULT line after it, in the console and in session0.progress; the results so far are rewritten to session0.partial.json after each step.
+    const early = { home: os.homedir(), tmp: os.tmpdir(), user: safe(() => os.userInfo().username), host: os.hostname() };
+    result = await runSession0({
+      ...common, timeoutMs: o.limits?.timeoutMs ?? SESSION0_STEP_TIMEOUT_MS, exec: execLauncher, ps: execPowerShell,
+      progress: fileProgress(join(o.out, "session0.progress")),
+      writePartial: (r) => writeFileSync(join(o.out, "session0.partial.json"), scrubText(`${JSON.stringify(r, null, 2)}\n`, early)),
+    });
+  }
   else if (o.mode === "links") { stem = "links"; result = await runLinks({ ...common, exec: execLauncher, ps: execPowerShell }); }
   else if (o.mode === "timing") { stem = "timing"; result = await runTiming({ ...common, exec: execLauncher, spawn: spawnSync }); }
   else if (o.mode === "cases") { stem = "cases"; result = await runExperiment({ ...common, cells: selectCells(o.cellSpec, configCells()), ps: execPowerShell, exec: execLauncher }); }

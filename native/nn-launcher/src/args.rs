@@ -24,6 +24,32 @@ impl Mode {
     pub(crate) fn is_deny(self) -> bool { matches!(self, Mode::DenyWrite | Mode::DenyStrong) }
 }
 
+/// Round 5 (EXPERIMENT only): which window station and desktop the child is attached to, and what the launcher does to make the container able to use them. The default, `inherit`, is the
+/// product's behaviour (lpDesktop NULL: the child takes the launcher's own window station and desktop). Every other value is refused by the product build.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub(crate) enum DesktopMode { #[default] Inherit, Empty, Winsta0, GrantRead, GrantFull, GrantStation, GrantDesktop, NewDesktop, NewStation }
+
+impl DesktopMode {
+    pub(crate) const ALL: [(&'static str, DesktopMode); 9] = [("inherit", DesktopMode::Inherit), ("empty", DesktopMode::Empty), ("winsta0", DesktopMode::Winsta0), ("grant-read", DesktopMode::GrantRead), ("grant-full", DesktopMode::GrantFull),
+        ("grant-station", DesktopMode::GrantStation), ("grant-desktop", DesktopMode::GrantDesktop), ("new-desktop", DesktopMode::NewDesktop), ("new-station", DesktopMode::NewStation)];
+    pub(crate) fn parse(s: &str) -> Option<DesktopMode> { Self::ALL.iter().find(|(n, _)| *n == s).map(|(_, m)| *m) }
+    #[cfg_attr(not(feature = "experiment"), allow(dead_code))]
+    pub(crate) fn name(self) -> &'static str { Self::ALL.iter().find(|(_, m)| *m == self).map(|(n, _)| *n).unwrap_or("inherit") }
+}
+
+/// Round 5 (EXPERIMENT only): the process creation flag that decides how a console is given to the child. `no-window` (CREATE_NO_WINDOW) is the product's behaviour.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub(crate) enum Creation { #[default] NoWindow, Detached, NoFlag, NewConsole }
+
+impl Creation {
+    pub(crate) const ALL: [(&'static str, Creation); 4] = [("no-window", Creation::NoWindow), ("detached", Creation::Detached), ("none", Creation::NoFlag), ("new-console", Creation::NewConsole)];
+    pub(crate) fn parse(s: &str) -> Option<Creation> { Self::ALL.iter().find(|(n, _)| *n == s).map(|(_, m)| *m) }
+    #[cfg_attr(not(feature = "experiment"), allow(dead_code))]
+    pub(crate) fn name(self) -> &'static str { Self::ALL.iter().find(|(_, m)| *m == self).map(|(n, _)| *n).unwrap_or("no-window") }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GrantSpec { pub(crate) mode: Mode, pub(crate) path: String, pub(crate) soft: bool }
 
@@ -52,6 +78,8 @@ pub(crate) struct Args {
     pub(crate) stdout_nul: bool, // the child's standard output is the NUL device opened for reading and writing by the launcher (nothing is captured)
     pub(crate) stderr_nul: bool,
     pub(crate) capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
+    pub(crate) desktop: DesktopMode, // round 5, experiment only
+    pub(crate) creation: Creation,   // round 5, experiment only
     pub(crate) dump: Vec<String>, // paths whose DACL is printed as SDDL after the grants are applied and again after the child ended (repeatable --dump)
 }
 
@@ -63,7 +91,7 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
         let mut value = |what: &str| -> Result<String, String> { it.next().cloned().ok_or(format!("{what} needs a value")) };
         match flag.as_str() {
             "--name" => a.name = value("--name")?,
-            "--win32k-off" | "--no-kill-on-close" | "--keep-profile" | "--stdout-pipe" | "--stderr-pipe" | "--stdout-nul-rw" | "--stderr-nul-rw" | "--dump" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
+            "--win32k-off" | "--no-kill-on-close" | "--keep-profile" | "--stdout-pipe" | "--stderr-pipe" | "--stdout-nul-rw" | "--stderr-nul-rw" | "--dump" | "--desktop" | "--creation" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
             "--exe" => a.exe = Some(value("--exe")?),
             "--cmdline" => a.cmdline = Some(value("--cmdline")?),
             "--cwd" => a.cwd = Some(value("--cwd")?),
@@ -97,6 +125,8 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--stdout-nul-rw" => a.stdout_nul = true,
             "--stderr-nul-rw" => a.stderr_nul = true,
             "--dump" => a.dump.push(value("--dump")?),
+            "--desktop" => a.desktop = DesktopMode::parse(&value("--desktop")?).ok_or("--desktop: inherit, empty, winsta0, grant-read, grant-full, grant-station, grant-desktop, new-desktop or new-station")?,
+            "--creation" => a.creation = Creation::parse(&value("--creation")?).ok_or("--creation: no-window, detached, none or new-console")?,
             "--capability" => {
                 let c = value("--capability")?;
                 if c.is_empty() { return Err("--capability is empty".into()); }
@@ -134,6 +164,8 @@ mod tests {
              "--stdin", "file:C:\\c\\in", "--stdout", "C:\\c\\out", "--stderr", "C:\\c\\err", "--cwd", "C:\\w", "--env", "PATH=C:\\node", "--exe", "C:\\node\\node.exe", "--cmdline", "node x.js"]
     }
     const EXPERIMENT_FLAGS: [&str; 8] = ["--win32k-off", "--no-kill-on-close", "--keep-profile", "--stdout-pipe", "--stderr-pipe", "--stdout-nul-rw", "--stderr-nul-rw", "--dump"];
+    /// Round 5 options that take a value: each is refused by the product build, whatever the value.
+    const ROUND5_OPTIONS: [(&str, &str); 2] = [("--desktop", "grant-full"), ("--creation", "detached")];
 
     #[test]
     fn the_backends_own_argument_list_is_accepted_by_every_build() {
@@ -177,11 +209,19 @@ mod tests {
                 assert!(e.contains("not in this build"), "{mode}: {e}");
             }
         }
+        for (flag, value) in ROUND5_OPTIONS {
+            let mut v = product_run();
+            v.extend([flag, value]);
+            assert!(parse(&v).unwrap_err().contains("not in this build"), "{flag}");
+            let mut inherit = product_run();
+            inherit.extend([flag, if flag == "--desktop" { "inherit" } else { "no-window" }]);
+            assert!(parse(&inherit).unwrap_err().contains("not in this build"), "{flag} even with the product's own value");
+        }
         for stdin in ["nul", "nul-rw", "pipe", "pipe-open", "NUL", "", "File:C:\\x"] {
             let e = parse(&["run", "--stdin", stdin]).err().unwrap_or_else(|| panic!("--stdin {stdin} was accepted"));
             assert!(e.contains("only file:PATH"), "{stdin}: {e}");
         }
-        for command in ["grant", "dump", "delete-profile", "open-test", "Run", "RUN", "help", ""] {
+        for command in ["grant", "dump", "delete-profile", "open-test", "context", "desktop-revoke", "Run", "RUN", "help", ""] {
             let e = parse(&[command]).err().unwrap_or_else(|| panic!("command {command:?} was accepted"));
             assert!(e.contains("not in this build"), "{command}: {e}");
         }
@@ -231,6 +271,31 @@ mod tests {
         assert!(parse(&["grant", "--grant", "deny-strong:C:\\x"]).is_ok());
         assert!(parse(&["run", "--stdin", "pipe-open"]).is_ok());
         assert!(parse(&["run", "--capability", "internetClient", "--aap-policy", "optin"]).is_ok(), "the experiment measures other capabilities and policies");
-        for command in ["grant", "dump", "delete-profile"] { assert!(parse(&[command]).is_ok(), "{command}"); }
+        for command in ["grant", "dump", "delete-profile", "context", "desktop-revoke"] { assert!(parse(&[command]).is_ok(), "{command}"); }
+    }
+
+    #[test]
+    fn the_defaults_are_the_products_behaviour() {
+        let a = parse(&product_run()).expect("the backend's run line");
+        assert_eq!(a.desktop, DesktopMode::Inherit, "lpDesktop stays NULL");
+        assert_eq!(a.creation, Creation::NoWindow, "CREATE_NO_WINDOW stays on");
+    }
+
+    #[cfg(feature = "experiment")]
+    #[test]
+    fn round_5_options_take_exactly_their_named_values() {
+        for (name, mode) in DesktopMode::ALL {
+            let a = parse(&["run", "--desktop", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(a.desktop, mode);
+            assert_eq!(mode.name(), name);
+        }
+        for (name, mode) in Creation::ALL {
+            let a = parse(&["run", "--creation", name]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(a.creation, mode);
+            assert_eq!(mode.name(), name);
+        }
+        for bad in ["Inherit", "GRANT-FULL", "grant", "", "winsta0\\default", "new_station"] { assert!(parse(&["run", "--desktop", bad]).is_err(), "--desktop {bad:?}"); }
+        for bad in ["No-Window", "detach", "", "CREATE_NO_WINDOW"] { assert!(parse(&["run", "--creation", bad]).is_err(), "--creation {bad:?}"); }
+        assert!(parse(&["run", "--desktop"]).unwrap_err().ends_with("needs a value"));
     }
 }

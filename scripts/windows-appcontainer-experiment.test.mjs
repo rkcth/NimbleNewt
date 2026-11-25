@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { classifyError, isEntryPoint, isolatedStuck, runProbes, spawnIsolated, summarize, REPORT_PREFIX } from "../experiments/windows-appcontainer/probe.mjs";
@@ -22,7 +22,7 @@ import {
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** The launcher's source (native/nn-launcher): the Windows part and the platform-neutral command line (src/args.rs, since A03b slice 3 review). */
-const launcherSource = () => readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8") + "\n" + readFileSync(join(root, "native", "nn-launcher", "src", "args.rs"), "utf8");
+const launcherSource = () => readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8") + "\n" + readFileSync(join(root, "native", "nn-launcher", "src", "args.rs"), "utf8") + "\n" + readFileSync(join(root, "native", "nn-launcher", "src", "desk.rs"), "utf8");
 const exp = join(root, "experiments", "windows-appcontainer");
 const tmp = () => mkdtempSync(join(os.tmpdir(), "nnac-"));
 
@@ -538,9 +538,9 @@ test("the workflow runs only by hand, pins its actions, gates the own-runner job
   assert.equal([...wf.matchAll(/timeout-minutes: 45/g)].length >= 1, true);
   assert.ok(wf.includes("scripts/redact-log.mjs"));
   // Both run steps keep the harness's exit code through the redaction pipe and still write the summary.
-  // six hosted steps (round 4: spawn first; cases, npm, links, timing, firewall) and two own-runner steps (cases, spawn); each keeps the harness's exit code and writes its summary
-  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 8);
-  for (const mode of ["spawn", "npm", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (15000|45000|90000|120000)`));
+  // seven hosted steps (round 4: spawn first; round 5: session0; cases, npm, links, timing, firewall) and three own-runner steps (cases, session0, spawn); each keeps the harness's exit code and writes its summary
+  assert.equal([...wf.matchAll(/run-experiment\.mjs --out "\$RUNNER_TEMP\/appc-out"[^|\n]*2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?\n.*GITHUB_STEP_SUMMARY.*\n\s+exit "\$rc"/g)].length, 10);
+  for (const mode of ["spawn", "session0", "npm", "cases", "links", "timing", "firewall"]) assert.match(wf, new RegExp(`--mode ${mode} --timeout-ms (15000|45000|90000|120000)`));
   assert.match(wf, /own_runner:\n\s+description:[^\n]*\n\s+type: boolean\n\s+default: false/);
   assert.ok(!/secrets\./.test(wf));
   assert.ok(wf.includes("actions/upload-artifact@"));
@@ -1193,7 +1193,7 @@ test("a probe that stopped early shows where: the partial report names the step 
 });
 
 test("command line: the new modes, no default variant list for the firewall, and the firewall's default variant carries the capabilities its name says", async () => {
-  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall", "spawn"]);
+  assert.deepEqual(MODES, ["matrix", "cases", "ladder", "git", "npm", "links", "timing", "firewall", "spawn", "session0"]);
   for (const m of ["cases", "git", "npm", "links", "timing", "spawn"]) assert.equal(parseCli(["--mode", m]).mode, m);
   assert.equal(parseCli([]).variantSpec, undefined);
   // round 2 ran this experiment WITHOUT the capabilities because "all" was passed on and the first variant (no capability) was taken
@@ -1225,9 +1225,10 @@ test("the workflow has one step per mode, each after the first with if: always()
   const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
   assert.match(hosted, /timeout-minutes: 75/);
   const steps = hosted.split(/\n {6}- /).filter((x) => /run-experiment\.mjs/.test(x));
-  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["spawn", "cases", "npm", "links", "timing", "firewall"]);
+  assert.deepEqual(steps.map((x) => x.match(/--mode (\w+)/)[1]), ["spawn", "session0", "cases", "npm", "links", "timing", "firewall"]);
   steps.forEach((st, i) => assert.equal(/\n\s+if: always\(\)/.test(st), i > 0, `step ${i}`));
-  assert.match(steps[1], /--mode cases --timeout-ms 90000/);
+  assert.match(steps[2], /--mode cases --timeout-ms 90000/);
+  assert.match(steps[1], /--mode session0 --timeout-ms 15000/);
   assert.match(steps[0], /--mode spawn --timeout-ms 15000/);
   assert.ok(steps.every((st) => /timeout-minutes: \d+/.test(st)));
   const own = wf.slice(wf.indexOf("  own-runner:"));
@@ -2265,4 +2266,405 @@ test("own-runner hand-off review: hashes read from standard input, no empty or p
   // the download takes only this run's one named artifact: no run id, token, other repository, pattern or merge
   const dl = own.slice(own.indexOf("actions/download-artifact@"), own.indexOf("id: verify"));
   assert.ok(!/run-id|github-token|repository:|pattern:|merge-multiple/.test(dl), dl);
+});
+
+// ------------------------------------------------------------------------------------------------ round 5: the session 0 diagnostic
+
+import {
+  CREATION_MODES, DESKTOP_MODES, DLL_INIT_FAILED, FACTS_SCRIPT, OUTCOME_MEANINGS, PROGRAMS, SESSION0_SCHEMA, buildSession0Args, collectContext, eventsScript, fileProgress, hex32, interpretSession0,
+  judgeSession0, peImports, programCommand, renderSession0Markdown, runSession0, selectSession0Steps, session0Steps, stepFiles as s0StepFiles, summarizeSession0,
+} from "../experiments/windows-appcontainer/round5.mjs";
+
+const s0Plan = { workspace: "C:\\r\\ws", home: "C:\\r\\home", scratch: "C:\\r\\scratch", probeDir: "C:\\r\\probe", outDir: "C:\\r\\out", binDir: "C:\\r\\ws\\bin", npmCache: "C:\\r\\scratch\\npmcache" };
+const s0Ctx = { profileName: "P", nodeExe: "C:\\Program Files\\nodejs\\node.exe", programDirs: ["C:\\Program Files\\nodejs"], systemRoot: "C:\\Windows", pathDirs: ["C:\\Windows\\System32"] };
+const stepById = (id) => session0Steps().find((s) => s.id === id);
+
+test("round 5 steps: unique ids, a baseline, every desktop mode and creation flag appears, and each non-baseline step differs from the baseline in the dimensions its group allows", () => {
+  const all = session0Steps();
+  assert.equal(new Set(all.map((s) => s.id)).size, all.length);
+  assert.ok(stepById("A-node-installed-inherit-no-window"), "the baseline");
+  for (const d of DESKTOP_MODES) assert.ok(all.some((s) => s.desktop === d), d);
+  for (const c of CREATION_MODES) assert.ok(all.some((s) => s.creation === c), c);
+  for (const p of PROGRAMS) assert.ok(all.some((s) => s.program === p), p);
+  // A: the program varies alone; B: only the desktop (and the program); C: the creation flag, with the baseline desktop or the full entry; D: the folder grant, with the baseline desktop or the full entry
+  for (const s of all.filter((x) => x.group === "A")) assert.ok(s.desktop === "inherit" && s.creation === "no-window", s.id);
+  for (const s of all.filter((x) => x.group === "B")) assert.ok(s.desktop !== "inherit" && s.creation === "no-window", s.id);
+  for (const s of all.filter((x) => x.group === "C")) assert.ok(s.creation !== "no-window" && ["inherit", "grant-full"].includes(s.desktop), s.id);
+  for (const s of all.filter((x) => x.group === "D")) assert.ok(s.program === "node-nogrant" && s.creation === "no-window", s.id);
+  // each desktop mode is tried with a console program, a GUI program and the program that failed in the field
+  for (const d of DESKTOP_MODES.filter((x) => x !== "inherit")) for (const p of ["node-installed", "gui-wscript", "hostname"]) assert.ok(all.some((s) => s.group === "B" && s.desktop === d && s.program === p), `${d} ${p}`);
+  assert.equal(selectSession0Steps("all").length, all.length);
+  assert.equal(selectSession0Steps("A-node-installed-inherit-no-window,A-cmd-exit-inherit-no-window").length, 2);
+  assert.throws(() => selectSession0Steps("nope"), /unknown session0 step/);
+});
+
+test("round 5 launcher arguments: the desktop mode and creation flag are passed as asked, the product's job limits stay, and only the nogrant step leaves the program folder out", () => {
+  const step = stepById("B-node-installed-grant-full-no-window");
+  const files = s0StepFiles(step, s0Plan);
+  const args = buildSession0Args(step, s0Plan, s0Ctx, files);
+  const at = (flag) => args[args.indexOf(flag) + 1];
+  assert.equal(args[0], "run");
+  assert.equal(at("--desktop"), "grant-full");
+  assert.equal(at("--creation"), "no-window");
+  assert.equal(at("--memory-mb"), "4096");
+  assert.equal(at("--active-processes"), "64");
+  assert.ok(args.includes("--ui-limits"));
+  assert.equal(at("--aap-policy"), "none");
+  assert.equal(at("--timeout-ms"), "15000");
+  assert.ok(args.includes("rx:C:\\Program Files\\nodejs"));
+  assert.equal(at("--exe"), s0Ctx.nodeExe);
+  const none = buildSession0Args(stepById("D-node-nogrant-inherit-no-window"), s0Plan, s0Ctx, s0StepFiles(stepById("D-node-nogrant-inherit-no-window"), s0Plan));
+  assert.ok(!none.includes("--grant-soft"), "no grant on the program folder");
+  assert.equal(none[none.indexOf("--exe") + 1], s0Ctx.nodeExe);
+  const detached = buildSession0Args(stepById("C-hostname-grant-full-detached"), s0Plan, s0Ctx, s0StepFiles(stepById("C-hostname-grant-full-detached"), s0Plan));
+  assert.equal(detached[detached.indexOf("--creation") + 1], "detached");
+  assert.equal(detached[detached.indexOf("--exe") + 1], "C:\\Windows\\System32\\hostname.exe");
+  // the programs
+  const f = (p) => programCommand(p, s0Plan, s0Ctx, { marker: "C:\\m" });
+  assert.deepEqual(f("cmd-exit"), { exe: "C:\\Windows\\System32\\cmd.exe", args: ["/c", "exit", "0"] });
+  assert.equal(f("node-copy").exe, "C:\\r\\ws\\bin\\node.exe");
+  assert.equal(f("cmd-copy").exe, "C:\\r\\ws\\bin\\cmd.exe");
+  assert.equal(f("gui-wscript").exe, "C:\\Windows\\System32\\wscript.exe");
+  assert.ok(f("gui-wscript").args.includes("C:\\r\\probe\\quit.js"));
+  assert.deepEqual(f("cmd-runs-node").args, ["/c", s0Ctx.nodeExe, "-e", "0"]);
+  assert.equal(f("node-installed").marker, true);
+  assert.equal(f("hostname").marker, undefined);
+  assert.equal(f("nope"), undefined);
+});
+
+test("round 5 judging: works, a missing marker, 0xC0000142, other exit codes in hex, a hang, a desktop set-up failure and no answer", () => {
+  const step = stepById("A-node-installed-inherit-no-window");
+  const line = (o) => ({ ok: true, childStarted: true, elapsedMs: 40, ...o });
+  assert.equal(judgeSession0(step, line({ childExitCode: 0 }), true).outcome, "works");
+  assert.equal(judgeSession0(step, line({ childExitCode: 0 }), false).outcome, "ran-no-marker");
+  assert.equal(judgeSession0(step, line({ childExitCode: 0 }), undefined).outcome, "works");
+  const init = judgeSession0(step, line({ childExitCode: DLL_INIT_FAILED }), false);
+  assert.equal(init.outcome, "dll-init-failed");
+  assert.equal(init.exitHex, "0xC0000142");
+  assert.equal(hex32(1), "0x00000001");
+  assert.equal(hex32(-1073741502), "0xC0000142");
+  assert.equal(judgeSession0(step, line({ childExitCode: 1 }), undefined).outcome, "exit-1 (0x00000001)");
+  assert.equal(judgeSession0(step, line({ childExitCode: 124, timedOut: true }), undefined).outcome, "hang");
+  const d = judgeSession0(stepById("B-node-installed-new-station-no-window"), { ok: false, childStarted: false, stage: "grant", error: "window objects: the window station could not be made", desktop: { mode: "new-station" } }, undefined);
+  assert.equal(d.outcome, "desktop-setup-failed");
+  assert.match(d.detail, /grant: window objects: the window station could not be made/);
+  assert.equal(judgeSession0(step, { ok: false, childStarted: false, stage: "grant", error: "x" }, undefined).outcome, "launcher-refused");
+  assert.equal(judgeSession0(step, undefined, undefined).outcome, "launcher-refused");
+  assert.equal(judgeSession0(step, line({ childExitCode: 0, desktop: { lpDesktop: "Service-0x0-3e7$\\Default" } }), true).lpDesktop, "Service-0x0-3e7$\\Default");
+});
+
+/** A results list for the interpretation tests: every step fails with 0xC0000142 unless `fixes` says which (program, desktop, creation) works. */
+function s0Results(fixes = () => false) {
+  return session0Steps().map((s) => ({ id: s.id, group: s.group, program: s.program, desktop: s.desktop, creation: s.creation, outcome: fixes(s) ? "works" : s.program === "cmd-exit" ? "works" : "dll-init-failed" }));
+}
+
+test("round 5 interpretation: each outcome pattern points to the ranked explanation it belongs to, and says when it did not reproduce", () => {
+  const text = (r) => interpretSession0(r).join(" | ");
+  // H1: the entries (and the made objects) fix node; read level is not enough, both objects are needed
+  const h1 = text(s0Results((s) => s.group === "B" && ["grant-full", "new-station", "new-desktop"].includes(s.desktop)));
+  assert.match(h1, /H1 supported: node\.exe starts once the container is given access[^|]*grant-full, new-desktop, new-station/);
+  assert.match(h1, /both objects are needed/);
+  assert.match(h1, /the read level[^|]*is not enough/);
+  assert.match(h1, /objects made for the run work/);
+  assert.match(text(s0Results((s) => s.group === "B" && s.desktop === "grant-station")), /window station entry alone is enough/);
+  assert.match(text(s0Results((s) => s.group === "B" && s.desktop === "grant-desktop")), /desktop entry alone is enough/);
+  assert.match(text(s0Results((s) => s.group === "B" && ["grant-read", "grant-full"].includes(s.desktop))), /read level is enough \(the smallest/);
+  // only another program starting with the entry (node still failing) is not H1
+  const onlyHostname = text(s0Results((s) => s.group === "B" && s.desktop === "grant-full" && s.program === "hostname"));
+  assert.ok(!/H1 supported/.test(onlyHostname), onlyHostname);
+  assert.match(onlyHostname, /no window station or desktop variant made node\.exe start/);
+  // H2 and H3
+  assert.match(text(s0Results((s) => s.group === "B" && s.desktop === "empty")), /H2: node\.exe starts with lpDesktop empty/);
+  assert.match(text(s0Results((s) => s.group === "C" && s.creation === "detached" && s.desktop === "inherit")), /H3: node\.exe starts with the creation flag detached/);
+  // H4 and its weakening
+  assert.match(text(s0Results((s) => s.program === "node-copy" && s.group === "A")), /H4 pointer/);
+  assert.match(text(s0Results()), /H4 weakened/);
+  // nothing changes anything: H5/H6 stay, and the user32 split is named
+  const none = text(s0Results());
+  assert.match(none, /H5\/H6 remain/);
+  assert.match(none, /no window station or desktop variant made node\.exe start/);
+  assert.match(none, /the split matches the user32 explanation/);
+  assert.match(none, /no grant on node's folder gives the same outcome/);
+  // not reproduced
+  assert.match(text(s0Results(() => true)), /NOT reproduced/);
+  assert.match(interpretSession0([]).join(" "), /baseline step .* did not run/);
+  const sum = summarizeSession0(s0Results((s) => s.desktop === "grant-full"));
+  assert.ok(sum.byDesktop["grant-full"].works > 0 && sum.byDesktop.inherit.works >= 1);
+  assert.ok(Array.isArray(sum.interpretation) && sum.interpretation.length > 0);
+});
+
+/** A tiny 64-bit PE image in memory: one .idata section holding the named imports (and delay imports), laid out as the loader expects. */
+function fakePe({ imports = [], delay = [], pe32 = false } = {}) {
+  const sectionRva = 0x1000;
+  const names = [...imports, ...delay];
+  const idesc = (imports.length + 1) * 20;
+  const ddesc = delay.length > 0 ? (delay.length + 1) * 32 : 0;
+  let cursor = idesc + ddesc;
+  const nameOff = new Map();
+  for (const n of names) { nameOff.set(n, cursor); cursor += n.length + 1; }
+  const data = Buffer.alloc(cursor);
+  imports.forEach((n, i) => data.writeUInt32LE(sectionRva + nameOff.get(n), i * 20 + 12));
+  delay.forEach((n, i) => data.writeUInt32LE(sectionRva + nameOff.get(n), idesc + i * 32 + 4));
+  for (const n of names) data.write(n, nameOff.get(n), "latin1");
+  const optSize = pe32 ? 224 : 240;
+  const headers = Buffer.alloc(0x200);
+  headers.writeUInt16LE(0x5a4d, 0);
+  headers.writeUInt32LE(0x80, 0x3c);
+  headers.writeUInt32LE(0x4550, 0x80);
+  headers.writeUInt16LE(1, 0x80 + 6); // one section
+  headers.writeUInt16LE(optSize, 0x80 + 20);
+  const opt = 0x80 + 24;
+  headers.writeUInt16LE(pe32 ? 0x10b : 0x20b, opt);
+  const dirs = opt + (pe32 ? 96 : 112);
+  headers.writeUInt32LE(sectionRva, dirs + 1 * 8);
+  headers.writeUInt32LE(idesc, dirs + 1 * 8 + 4);
+  if (delay.length > 0) headers.writeUInt32LE(sectionRva + idesc, dirs + 13 * 8);
+  const sec = opt + optSize;
+  headers.write(".idata", sec, "latin1");
+  headers.writeUInt32LE(data.length, sec + 8);
+  headers.writeUInt32LE(sectionRva, sec + 12);
+  headers.writeUInt32LE(data.length, sec + 16);
+  headers.writeUInt32LE(0x200, sec + 20);
+  return Buffer.concat([headers, data]);
+}
+
+test("round 5 PE import reader: normal and delay-load DLL names, both PE formats, and nothing for a file that is not a PE image", () => {
+  const a = peImports(fakePe({ imports: ["KERNEL32.dll", "USER32.dll"], delay: ["ole32.dll"] }));
+  assert.deepEqual(a, { normal: ["kernel32.dll", "user32.dll"], delay: ["ole32.dll"] });
+  assert.deepEqual(peImports(fakePe({ imports: ["ntdll.dll"], pe32: true })), { normal: ["ntdll.dll"], delay: [] });
+  assert.deepEqual(peImports(fakePe({})), { normal: [], delay: [] });
+  assert.equal(peImports(Buffer.from("not a program")), undefined);
+  assert.equal(peImports(undefined), undefined);
+  const bad = fakePe({ imports: ["a.dll"] });
+  bad.writeUInt32LE(0xffffff, 0x3c);
+  assert.equal(peImports(bad), undefined);
+  const trunc = fakePe({ imports: ["a.dll"] }).subarray(0, 0x90);
+  assert.equal(peImports(trunc), undefined);
+});
+
+test("round 5 context: the launcher's own line (window station, desktop, DACLs, session, build) and the import tables are recorded, with a service station and a visible station told apart", () => {
+  const ctxLine = (o) => JSON.stringify({ tool: "nn-appc-launcher", ok: true, elevated: true, sessionId: 0, windowStation: "Service-0x0-3e7$", windowStationFlags: 0, desktop: "Default", windowStationSddl: "D:(A;;GA;;;SY)", desktopSddl: "D:(A;;GA;;;SY)", integrityRid: 12288, osMajor: 10, osMinor: 0, osBuild: 26200, ...o });
+  const calls = [];
+  const exec = (p, a) => { calls.push(a); return { stdout: ctxLine({}) }; };
+  const readFile = (p) => (/node\.exe$/i.test(p) ? fakePe({ imports: ["KERNEL32.dll", "USER32.dll"] }) : /cmd\.exe$/i.test(p) ? fakePe({ imports: ["KERNEL32.dll"] }) : Buffer.from("x"));
+  const ps = (script) => ({ stdout: JSON.stringify({ antivirus: ["Example AV"], smartAppControlState: 0 }) });
+  const c = collectContext({ exec, launcherPath: "x", ps, tools: { nodeExe: "C:\\n\\node.exe" }, sysRoot: "C:\\Windows", readFile, since: "2026-11-25T00:00:00Z" });
+  assert.deepEqual(calls, [["context"]], "context needs no container and no other option");
+  assert.equal(c.launcher.serviceStation, true);
+  assert.equal(c.launcher.interactiveStation, false);
+  assert.equal(c.launcher.osBuild, 26200);
+  assert.equal(c.launcher.sessionId, 0);
+  assert.equal(c.imports["node.exe"].user32, true);
+  assert.equal(c.imports["cmd.exe"].user32, false);
+  assert.match(c.imports["hostname.exe"].error, /not readable/);
+  assert.deepEqual(c.facts.antivirus, ["Example AV"]);
+  const vis = collectContext({ exec: () => ({ stdout: ctxLine({ windowStation: "WinSta0", windowStationFlags: 1, sessionId: 2 }) }), launcherPath: "x", tools: {}, sysRoot: undefined, readFile, since: "x" });
+  assert.equal(vis.launcher.serviceStation, false);
+  assert.equal(vis.launcher.interactiveStation, true);
+  assert.match(vis.facts.note, /not read/);
+  const none = collectContext({ exec: () => ({ stdout: "" }), launcherPath: "x", tools: {}, readFile, since: "x" });
+  assert.equal(none.launcher.ok, false);
+});
+
+test("round 5 scripts: fixed read-only PowerShell; the events script takes only an ISO time and has no write verb", () => {
+  assert.ok(!/\$\{/.test(FACTS_SCRIPT));
+  for (const script of [FACTS_SCRIPT, eventsScript("2026-11-25T14:50:27Z")]) {
+    assert.ok(!/\b(Set|New|Remove|Add|Clear|Stop|Start|Invoke|Out-File|Disable|Enable|Restart)-[A-Z]/.test(script.replace("New-Object", "")), "no changing verb");
+    assert.match(script, /Get-/);
+  }
+  assert.match(eventsScript("2026-11-25T14:50:27.123Z"), /\[DateTime\]::Parse\('2026-11-25T14:50:27\.123Z'\)/);
+  for (const bad of ["", "now", "2026-11-25", "2026-11-25T14:50:27Z'; Remove-Item x; '", "2026-11-25T14:50:27+01:00"]) assert.throws(() => eventsScript(bad), /not an ISO time/, bad);
+  assert.match(eventsScript("2026-11-25T14:50:27Z"), /CodeIntegrity\/Operational/);
+});
+
+/** A fake launcher for the whole round 5 flow. `behave(step)` returns { exit, timedOut, stage, error }; calls are recorded. */
+function session0Fake(behave, { calls = [], context = {} } = {}) {
+  const arg = (a, k) => a[a.indexOf(k) + 1];
+  const exec = (p, a) => {
+    calls.push(a);
+    const say = (o) => ({ status: 0, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ...o })}\n`, stderr: "" });
+    const cmd = a[0];
+    if (cmd === "info") return say({ ok: true, profile: "created", elevated: true, sessionId: 0, containerSid: "S-1-15-2-1-2-3" });
+    if (cmd === "context") return say({ ok: true, elevated: true, sessionId: 0, windowStation: "Service-0x0-3e7$", windowStationFlags: 0, desktop: "Default", windowStationSddl: "D:", desktopSddl: "D:", integrityRid: 12288, osMajor: 10, osMinor: 0, osBuild: 26200, ...context });
+    if (cmd === "desktop-revoke") return say({ ok: true, windowStation: { removed: true, entriesLeft: 0 }, desktop: { removed: true, entriesLeft: 0 } });
+    if (cmd === "check") return say({ ok: true, clean: true, grants: a.filter((x) => x.startsWith("ro:")).map((x) => ({ path: x.slice(3), mode: "ro", entriesLeft: 0 })) });
+    if (cmd === "revoke") return say({ ok: true, grants: [] });
+    if (cmd === "delete-profile") return say({ ok: true });
+    if (cmd === "run") {
+      const id = basename(arg(a, "--stdout")).replace(/\.out\.txt$/, "");
+      const step = session0Steps().find((s) => s.id === id);
+      const b = behave(step, a);
+      if (b.stage) return say({ ok: false, childStarted: false, stage: b.stage, error: b.error ?? "window objects: x", desktop: { mode: arg(a, "--desktop") } });
+      if (b.exit === 0 && programCommand(step.program, { ...s0Plan, binDir: "x" }, s0Ctx, { marker: "m" })?.marker) writeFileSync(join(dirname(arg(a, "--cwd")), "scratch", `s0-${id}.marker`), "ran");
+      if (b.stderr) writeFileSync(arg(a, "--stderr"), b.stderr);
+      return { status: b.exit, stdout: `${JSON.stringify({ tool: "nn-appc-launcher", ok: true, childStarted: true, childExitCode: b.exit, timedOut: b.timedOut === true, elapsedMs: 30, desktop: { mode: arg(a, "--desktop"), lpDesktop: "(null)", allReverted: true }, grants: [] })}\n`, stderr: step.desktop === "inherit" ? "" : "nn-desktop: before grant window station X mask 0x2037f\nnn-desktop: after grant window station X: applied true error None\n" };
+    }
+    return say({ ok: false, stage: "arguments", error: `unknown ${cmd}` });
+  };
+  return { exec, calls };
+}
+
+test("round 5 flow: an ATTEMPT line before and a RESULT line after every step, partial results after every step, the revoke at the start and the end, everything removed afterwards", async () => {
+  const base = tmp();
+  const lines = [];
+  const partials = [];
+  const calls = [];
+  const fake = session0Fake((step) => (step.desktop === "grant-full" || step.program === "cmd-exit" ? { exit: 0 } : step.program === "hostname" ? { exit: 1, stderr: "Access is denied.\n" } : step.id === "B-node-installed-new-desktop-no-window" ? { timedOut: true, exit: 124 } : step.id === "B-node-installed-new-station-no-window" ? { stage: "grant", error: "window objects: no access" } : { exit: DLL_INIT_FAILED }), { calls });
+  const stepOrder = session0Steps().map((x) => x.id);
+  const ids = ["A-node-installed-inherit-no-window", "A-cmd-exit-inherit-no-window", "A-hostname-inherit-no-window", "B-node-installed-grant-full-no-window", "B-node-installed-new-desktop-no-window", "B-node-installed-new-station-no-window", "D-node-nogrant-inherit-no-window"].sort((a, b) => stepOrder.indexOf(a) - stepOrder.indexOf(b));
+  const r = await runSession0({ launcherPath: "fake", exec: fake.exec, tmpBase: base, tools: { nodeExe: "C:\\n\\node.exe", programDirs: ["C:\\n"] }, platform: "linux", systemRoot: "C:\\Windows", now: () => "2026-11-26T00:00:00.000Z", stepSpec: ids.join(","), progress: (l) => lines.push(l), writePartial: (p) => partials.push(JSON.parse(JSON.stringify(p))), copyFile: () => {}, ps: () => ({ stdout: "{}" }), readFile: () => Buffer.from("x") });
+  assert.equal(r.ranAtAll, true);
+  assert.equal(r.report.schema, SESSION0_SCHEMA);
+  const text = lines.map((l) => l.replace(/^\d+ ms /, ""));
+  // context first, then for each step exactly ATTEMPT then RESULT, in order
+  assert.ok(text[0].startsWith("ATTEMPT context") && text[1].startsWith("RESULT context station=Service-0x0-3e7$"));
+  const stepLines = text.slice(2);
+  assert.equal(stepLines.length, ids.length * 2);
+  ids.forEach((id, i) => { assert.equal(stepLines[2 * i], `ATTEMPT step ${id}`); assert.ok(stepLines[2 * i + 1].startsWith(`RESULT step ${id} `), stepLines[2 * i + 1]); });
+  assert.ok(lines.every((l) => /^\d+ ms (ATTEMPT|RESULT) /.test(l)));
+  // the outcomes
+  const by = Object.fromEntries(r.report.steps.map((s) => [s.id, s]));
+  assert.equal(by["A-node-installed-inherit-no-window"].outcome, "dll-init-failed");
+  assert.equal(by["A-node-installed-inherit-no-window"].exitHex, "0xC0000142");
+  assert.equal(by["A-cmd-exit-inherit-no-window"].outcome, "works");
+  assert.equal(by["A-hostname-inherit-no-window"].outcome, "exit-1 (0x00000001)");
+  assert.deepEqual(by["A-hostname-inherit-no-window"].stderrHead, ["Access is denied."]);
+  assert.equal(by["B-node-installed-grant-full-no-window"].outcome, "works");
+  assert.equal(by["B-node-installed-grant-full-no-window"].marker, true);
+  assert.ok(by["B-node-installed-grant-full-no-window"].desktopLog.length === 2, "the launcher's before/after lines are kept");
+  assert.equal(by["B-node-installed-new-desktop-no-window"].outcome, "hang");
+  assert.equal(by["B-node-installed-new-station-no-window"].outcome, "desktop-setup-failed");
+  assert.equal(by["A-node-installed-inherit-no-window"].desktopLog, undefined, "the inherit mode touches no window object");
+  // partial results after every step (growing), the last one marked done
+  assert.equal(partials.length, ids.length + 1);
+  assert.deepEqual(partials.slice(0, ids.length).map((p) => p.steps.length), [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(partials.at(-1).done, true);
+  assert.equal(partials[0].done, false);
+  // the revoke runs at the start (before the first step) and at the end (after the last), then the profile is deleted
+  const order = calls.map((a) => a[0]);
+  const firstRun = order.indexOf("run");
+  assert.ok(order.indexOf("desktop-revoke") < firstRun);
+  assert.ok(order.lastIndexOf("desktop-revoke") > order.lastIndexOf("run"));
+  assert.equal(order.at(-1), "delete-profile");
+  assert.ok(order.indexOf("context") < order.indexOf("desktop-revoke"));
+  assert.deepEqual(r.report.cleanup.desktopEntriesLeftAfter, { windowStation: 0, desktop: 0 });
+  assert.equal(r.report.cleanup.profileDeleted, true);
+  assert.equal(r.report.cleanup.grantsLeft, 0);
+  assert.equal(existsSync(r.names.root), false, "the fixture folder is gone");
+  // the summary and report text
+  assert.ok(r.report.summary.byDesktop["grant-full"]);
+  assert.match(r.markdown, /^# Windows AppContainer experiment, round 5/);
+  for (const part of ["## Context", "## Steps", "## What worked", "## What the outcomes point to", "## What each outcome would mean", "## Steps that did not work", "## Clean-up", "0xC0000142"]) assert.ok(r.markdown.includes(part), part);
+  for (const m of OUTCOME_MEANINGS) assert.ok(r.markdown.includes(m), m.slice(0, 20));
+});
+
+test("round 5 flow: a launcher that cannot make the container starts nothing; a dry run starts nothing; a step that throws is recorded, not fatal", async () => {
+  const base = tmp();
+  const refused = await runSession0({ launcherPath: "fake", exec: () => ({ stdout: JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "container" }) }), tmpBase: base, tools, platform: "linux" });
+  assert.equal(refused.ranAtAll, false);
+  assert.equal(refused.markdown, "");
+  assert.match(refused.report.notes[0], /could not create or find the container/);
+  const calls = [];
+  const dry = await runSession0({ launcherPath: "fake", exec: session0Fake(() => ({ exit: 0 }), { calls }).exec, tmpBase: base, tools: { nodeExe: "n", programDirs: [] }, platform: "linux", systemRoot: "C:\\Windows", dryRun: true, stepSpec: "A-node-installed-inherit-no-window" });
+  assert.equal(dry.report.steps[0].outcome, "not-started");
+  assert.ok(!calls.some((a) => a[0] === "run" || a[0] === "desktop-revoke" || a[0] === "delete-profile"));
+  const inner = session0Fake(() => ({ exit: 0 }));
+  const exec = (p, a) => { if (a[0] === "run") throw new Error("spawn failed"); return inner.exec(p, a); };
+  const thrown = await runSession0({ launcherPath: "fake", exec, tmpBase: base, tools: { nodeExe: "n", programDirs: [] }, platform: "linux", systemRoot: "C:\\Windows", stepSpec: "A-node-installed-inherit-no-window", copyFile: () => {}, ps: () => ({ stdout: "{}" }), readFile: () => Buffer.alloc(1) });
+  assert.equal(thrown.report.steps[0].outcome, "launcher-refused");
+  assert.equal(thrown.report.cleanup.profileDeleted, true);
+});
+
+test("round 5 command line and progress sink: --mode session0 with --steps, a sink that prints and appends, and the report text names every dimension", () => {
+  const o = parseCli(["--mode", "session0", "--steps", "A-node-installed-inherit-no-window", "--timeout-ms", "15000"]);
+  assert.equal(o.mode, "session0");
+  assert.equal(o.stepSpec, "A-node-installed-inherit-no-window");
+  assert.equal(o.limits.timeoutMs, 15000);
+  assert.throws(() => parseCli(["--mode", "session9"]), /--mode/);
+  const dir = tmp();
+  const printed = [];
+  const sink = fileProgress(join(dir, "p.txt"), (m) => printed.push(m));
+  sink("1 ms ATTEMPT a");
+  sink("2 ms RESULT a works");
+  assert.deepEqual(readFileSync(join(dir, "p.txt"), "utf8").split("\n").filter(Boolean), ["1 ms ATTEMPT a", "2 ms RESULT a works"]);
+  assert.deepEqual(printed, ["1 ms ATTEMPT a", "2 ms RESULT a works"]);
+  const md = renderSession0Markdown({ generatedAt: "t", host: { platform: "win32", release: "10.0.26200", elevated: true, sessionId: 0 }, steps: [], context: {}, notes: ["a note"], cleanup: {} });
+  assert.match(md, /session id: 0/);
+  assert.match(md, /- a note/);
+});
+
+test("the launcher source (round 5): the window objects are touched only in the experiment build, every entry is removed and read back, the default is the product's behaviour, and every new call is documented", () => {
+  const win = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const desk = readFileSync(join(root, "native", "nn-launcher", "src", "desk.rs"), "utf8");
+  const args = readFileSync(join(root, "native", "nn-launcher", "src", "args.rs"), "utf8");
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  // desk.rs is a module of the experiment build only; the product has neither the module, the lpDesktop assignment nor the other creation flags
+  assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n#\[path = "desk\.rs"\]\nmod desk;/);
+  assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n\s*if !lp_desktop\.is_empty\(\) \{ si\.StartupInfo\.lpDesktop = lp_desktop\.as_mut_ptr\(\); \}/);
+  assert.equal(win.match(/lpDesktop =/g).length, 1, "lpDesktop is assigned in one place");
+  assert.ok(win.includes('#[cfg(not(feature = "experiment"))]\n    { let _ = a; base | CREATE_NO_WINDOW }'), "the product always uses CREATE_NO_WINDOW");
+  assert.match(win, /Creation::NoWindow => CREATE_NO_WINDOW, Creation::Detached => DETACHED_PROCESS, Creation::NoFlag => 0, Creation::NewConsole => CREATE_NEW_CONSOLE/);
+  assert.equal(win.match(/CreateProcessW\(/g).length, 1);
+  assert.match(win, /creation_flags\(a\), env\.as_ptr\(\)/);
+  // the defaults are the product's behaviour (a Rust test pins it as well)
+  assert.match(args, /pub\(crate\) enum DesktopMode \{ #\[default\] Inherit,/);
+  assert.match(args, /pub\(crate\) enum Creation \{ #\[default\] NoWindow,/);
+  assert.match(args, /"--stderr-nul-rw" \| "--dump" \| "--desktop" \| "--creation" if !EXPERIMENT => return Err\(format!\("\{flag\} is an experiment option and is not in this build"\)\)/);
+  // an entry is added with one SetSecurityInfo and removed by hand; Drop removes what is left; the read-back count is reported and a second finish does nothing
+  assert.match(desk, /impl Drop for Desk \{ fn drop\(&mut self\) \{ self\.finish\(\); \} \}/);
+  assert.match(desk, /remove_entries\(t\.handle, self\.sid\)/);
+  assert.match(desk, /t\.left = object_entries\(t\.handle, self\.sid\)/);
+  assert.match(desk, /if t\.applied && !t\.created && !t\.revoked \{/);
+  assert.match(desk, /fn all_reverted\(&self\) -> bool/);
+  assert.match(win, /desk\.finish\(\); j\.raw\("desktop", desk\.json\(a\.desktop\)\);/);
+  assert.match(win, /"desktop-revoke" => \{/);
+  assert.match(win, /"context" => \{/);
+  // a set-up that failed stops the run before anything starts
+  assert.match(win, /if let Some\(e\) = &desk\.failed \{ return Err\(\("grant", e\.clone\(\)\)\);/);
+  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 4, "every set-up failure message starts with the marker the harness looks for");
+  // before and after lines on standard error for each step of the set-up
+  for (const phrase of ["before grant", "after grant", "before create desktop", "after create desktop", "before create window station", "after create window station", "before revoke", "after revoke"]) assert.ok(desk.includes(phrase), phrase);
+  // no registry, no service, no persistent setting
+  for (const banned of ["RegSetValue", "RegCreateKey", "CreateService", "SetNamedSecurityInfo", "Wow64", "SetSystem", "SetUserObjectInformation"]) assert.ok(!desk.includes(banned), banned);
+  // the one handle-open in desk.rs asks for READ_CONTROL and WRITE_DAC only, never all access
+  assert.ok(!/GENERIC_ALL|MAXIMUM_ALLOWED/.test(desk));
+  for (const c of ["GetProcessWindowStation", "GetThreadDesktop", "GetUserObjectInformationW", "OpenWindowStationW", "OpenDesktopW", "CreateWindowStationW", "CreateDesktopW", "SetProcessWindowStation", "CloseWindowStation", "CloseDesktop", "GetSecurityInfo", "SetSecurityInfo", "RtlGetVersion", "GetSidSubAuthority", "TokenIntegrityLevel"]) {
+    assert.ok(desk.includes(`${c}`), `${c} not used in desk.rs`);
+    assert.ok(readme.includes(c), `${c} missing in README`);
+  }
+});
+
+test("the launcher crate (round 5): the extra windows-sys modules come only with the experiment feature, and the product's own dependency list is unchanged", () => {
+  const toml = readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8");
+  const feature = /^experiment = \[([^\]]*)\]/m.exec(toml);
+  assert.ok(feature, "experiment feature");
+  const extra = [...feature[1].matchAll(/"windows-sys\/([A-Za-z0-9_]+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_Graphics_Gdi", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"]);
+  const deps = /^windows-sys = \{ version = "0\.59", features = \[([^\]]*)\]/m.exec(toml)[1];
+  const listed = [...deps.matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(listed, ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_Threading"]);
+  assert.ok(!/^default = /m.test(toml), "no default features");
+  assert.ok(!/features = \["experiment"\]/.test(readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8")));
+});
+
+test("the experiment workflow (round 5): the session 0 step runs second in the hosted job and in the own-runner job after the hash check, gated like every launcher step", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const code = wf.replace(/^\s*#.*$/gm, "");
+  const hosted = code.slice(code.indexOf("  hosted:"), code.indexOf("  own-runner:"));
+  const own = code.slice(code.indexOf("  own-runner:"));
+  const h = hosted.slice(hosted.indexOf("- name: Session 0 diagnostic"));
+  assert.match(h, /^- name: Session 0 diagnostic, round 5 \(15 s per step[^\n]*\n\s+shell: bash\n\s+if: always\(\)\n\s+timeout-minutes: 25\n/);
+  assert.ok(hosted.indexOf("--mode spawn") < hosted.indexOf("--mode session0") && hosted.indexOf("--mode session0") < hosted.indexOf("--mode cases"));
+  assert.ok(hosted.indexOf("id: build_experiment") < hosted.indexOf("--mode session0"), "built before it runs, so the new code ships through the staged artifact");
+  const o = own.slice(own.indexOf("- name: Session 0 diagnostic"));
+  assert.match(o, /^- name: Session 0 diagnostic, round 5, as the runner service\n\s+shell: bash\n\s+if: \$\{\{ !cancelled\(\) && steps\.verify\.outcome == 'success' \}\}\n\s+timeout-minutes: 25\n/);
+  assert.ok(own.indexOf("id: verify") < own.indexOf("--mode session0"));
+  for (const part of [h, o]) {
+    assert.match(part, /--mode session0 --timeout-ms 15000 2>&1 \| node scripts\/redact-log\.mjs \|\| rc=\$\?/);
+    assert.match(part, /session0\.md/);
+    assert.match(part, /session0\.progress/);
+  }
+  // the own runner still builds nothing and still checks hashes from standard input
+  assert.ok(!/cargo|rustup/.test(own));
+  assert.ok(own.includes("check \"$src/nn-appc-launcher.exe\" \"$EXPECT_EXPERIMENT\""));
 });

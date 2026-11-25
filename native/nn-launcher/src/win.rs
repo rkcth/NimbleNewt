@@ -5,6 +5,8 @@
 // EXPERIMENT option (the measuring probes of experiments/windows-appcontainer): the product build refuses it at the argument check ("not in this build") and does not contain
 // the NUL-device test or the hang diagnosis at all. The experiment's own crate (experiments/windows-appcontainer/launcher) builds this same source with the feature `experiment`.
 use crate::args::{parse_args, Args, GrantSpec, Mode, AAP_OPT_IN, AAP_OPT_OUT, EXPERIMENT};
+#[cfg(feature = "experiment")]
+use crate::args::Creation;
 /// The value of the `tool` field: the protocol identifier the TypeScript side matches (a test pins it). It is not the program's file name.
 const TOOL: &str = "nn-appc-launcher";
 use std::ffi::{c_void, OsStr};
@@ -39,6 +41,11 @@ const HR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32; // HRESULT_FROM_WIN32(ERRO
 const SE_GROUP_ENABLED_BIT: u32 = 0x4; // SE_GROUP_ENABLED: the attribute of a capability SID in SECURITY_CAPABILITIES
 const EXIT_LAUNCHER_FAILED: i32 = 125;
 const EXIT_TIMED_OUT: i32 = 124;
+
+// Round 5 (experiment build only): the window station and desktop of the child, and the `context` and `desktop-revoke` commands.
+#[cfg(feature = "experiment")]
+#[path = "desk.rs"]
+mod desk;
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -587,8 +594,14 @@ fn run(a: &Args, j: Json) -> Outcome {
     if !EXPERIMENT && !a.stdin.starts_with("file:") { return fail(j, "arguments", "run needs --stdin file:PATH in this build"); }
 
     let mut grants = GrantSet { sid: sid.0, items: Vec::new() };
-    let result = run_inner(a, &mut j, &sid, &mut grants, exe, cmdline, cwd, out_path, err_path);
+    #[cfg(feature = "experiment")]
+    let mut desk = desk::Desk::new(sid.0);
+    #[cfg(feature = "experiment")]
+    desk.prepare(a.desktop);
+    let result = run_inner(a, &mut j, &sid, &mut grants, exe, cmdline, cwd, out_path, err_path, #[cfg(feature = "experiment")] &desk);
     grants.revoke_all();
+    #[cfg(feature = "experiment")]
+    { desk.finish(); j.raw("desktop", desk.json(a.desktop)); }
     j.raw("grants", grants.json());
     j.b("allGrantsRevoked", grants.items.iter().all(|g| !g.applied || g.revoked));
     match result {
@@ -598,7 +611,10 @@ fn run(a: &Args, j: Json) -> Outcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str, cmdline: &str, cwd: &str, out_path: &str, err_path: &str) -> Result<i32, (&'static str, String)> {
+fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str, cmdline: &str, cwd: &str, out_path: &str, err_path: &str, #[cfg(feature = "experiment")] desk: &desk::Desk) -> Result<i32, (&'static str, String)> {
+    // Stage `grant`: an entry on a window object is a grant too (the message starts with "window objects:"; the product's stage list stays as it is).
+    #[cfg(feature = "experiment")]
+    if let Some(e) = &desk.failed { return Err(("grant", e.clone())); }
     // 1. Grants. A hard grant that fails stops the run before anything starts. A soft grant that fails is recorded and the run goes on.
     for spec in &a.grants {
         grants.items.push(GrantRecord { spec: spec.clone(), applied: false, revoked: false, error: None });
@@ -669,12 +685,17 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         si.StartupInfo.hStdInput = nul.0; si.StartupInfo.hStdOutput = out.0; si.StartupInfo.hStdError = err.0;
         si.lpAttributeList = list;
+        // lpDesktop: NULL in the product (the child takes the launcher's window station and desktop). Round 5 (experiment build) can pass an empty string, a named station and desktop, or the made ones.
+        #[cfg(feature = "experiment")]
+        let mut lp_desktop: Vec<u16> = desk.lp_desktop.clone().unwrap_or_default();
+        #[cfg(feature = "experiment")]
+        if !lp_desktop.is_empty() { si.StartupInfo.lpDesktop = lp_desktop.as_mut_ptr(); }
         let wexe = wide(exe);
         let mut wcmd = wide(cmdline); // CreateProcessW may write into this buffer
         let wcwd = wide(cwd);
         let mut pi: PROCESS_INFORMATION = zeroed();
         let started = Instant::now();
-        let ok = CreateProcessW(wexe.as_ptr(), wcmd.as_mut_ptr(), null(), null(), 1, EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env.as_ptr() as *const c_void, wcwd.as_ptr(), &si.StartupInfo, &mut pi);
+        let ok = CreateProcessW(wexe.as_ptr(), wcmd.as_mut_ptr(), null(), null(), 1, creation_flags(a), env.as_ptr() as *const c_void, wcwd.as_ptr(), &si.StartupInfo, &mut pi);
         let create_error = GetLastError();
         DeleteProcThreadAttributeList(list);
         if ok == 0 { return Err(("create-process", format!("CreateProcessW failed: {create_error}"))); }
@@ -712,6 +733,15 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         if waited != WAIT_OBJECT_0 && !timed_out { return Err(("wait", format!("WaitForSingleObject returned {waited}"))); }
         Ok(if timed_out { EXIT_TIMED_OUT } else { code as i32 })
     }
+}
+
+/// The process creation flags: the product always uses CREATE_NO_WINDOW; the experiment build can use another console flag (round 5).
+fn creation_flags(a: &Args) -> u32 {
+    let base = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    #[cfg(feature = "experiment")]
+    { base | match a.creation { Creation::NoWindow => CREATE_NO_WINDOW, Creation::Detached => DETACHED_PROCESS, Creation::NoFlag => 0, Creation::NewConsole => CREATE_NEW_CONSOLE } }
+    #[cfg(not(feature = "experiment"))]
+    { let _ = a; base | CREATE_NO_WINDOW }
 }
 
 #[cfg(feature = "experiment")]
@@ -776,6 +806,8 @@ fn describe(a: &Args, mut j: Json) -> Json {
     j.b("uiLimits", a.ui_limits);
     j.n("timeoutMs", a.timeout_ms as i64);
     j.s("profileName", &a.name);
+    #[cfg(feature = "experiment")]
+    j.s("creation", a.creation.name());
     j
 }
 
@@ -876,6 +908,23 @@ pub fn main() {
             }
         }
         "run" => run(&a, j),
+        #[cfg(feature = "experiment")]
+        "context" => {
+            // Read-only: where the launcher itself runs (window station, desktop, session, integrity, OS build). No container is made.
+            let mut j = j;
+            desk::context(&mut j);
+            j.b("ok", true);
+            Outcome { j, code: 0 }
+        }
+        #[cfg(feature = "experiment")]
+        "desktop-revoke" => {
+            // Removes the container's explicit entries from the launcher's current window station and desktop (after a killed `--desktop grant-*` run).
+            let mut j = j;
+            match container_sid(&a.name) {
+                Err(e) => fail(j, "container", &e),
+                Ok((sid, _)) => { let ok = desk::revoke_current(&mut j, sid.0); j.b("ok", ok); Outcome { j, code: if ok { 0 } else { EXIT_LAUNCHER_FAILED } } }
+            }
+        }
         "revoke" => {
             // Removes the container's explicit entries from each --grant path (for cleanup after a crashed run).
             let mut j = j;
