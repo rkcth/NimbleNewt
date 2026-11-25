@@ -24,6 +24,17 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const exp = join(root, "experiments", "windows-appcontainer");
 const tmp = () => mkdtempSync(join(os.tmpdir(), "nnac-"));
 
+/** The second listening address of the firewall tests: 127.0.0.2 where the machine has it (Linux, Windows), else the machine's own non-loopback IPv4 address (macOS has no 127.0.0.2 on its loopback, so a listen there fails with EADDRNOTAVAIL). */
+async function bindableOutboundHost() {
+  const candidates = ["127.0.0.2", ...Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === "IPv4" && !a.internal).map((a) => a.address)];
+  for (const host of candidates) {
+    const ok = await new Promise((res) => { const sv = net.createServer(); sv.once("error", () => res(false)); sv.listen(0, host, () => sv.close(() => res(true))); });
+    if (ok) return host;
+  }
+  return "127.0.0.2";
+}
+const OUTBOUND_HOST = await bindableOutboundHost();
+
 // ------------------------------------------------------------------------------------------------ command lines
 
 test("argument quoting follows the Windows rules (spaces, quotes, trailing backslashes)", () => {
@@ -808,7 +819,7 @@ test("firewall run: the container reaches the outbound listener only while no ru
   const base = tmp();
   const fake = firewallFake();
   try {
-    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"] });
+    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"] });
     assert.equal(r.report.verdict, "pass", r.report.why);
     assert.equal(r.report.rule.name, "nn-appc-block-0a1b2c3d");
     assert.equal(r.report.rule.added, true);
@@ -827,7 +838,7 @@ test("firewall run: without administrator rights the rule is not added, the verd
   const base = tmp();
   const fake = firewallFake({ addFails: true });
   try {
-    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"] });
+    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"] });
     assert.equal(r.report.verdict, "inconclusive");
     assert.match(r.report.why, /could not be added.*Access is denied/);
     assert.ok(fake.state.removeCalls >= 1);
@@ -839,7 +850,7 @@ test("firewall run: if anything throws while the rule exists, the rule is remove
   const base = tmp();
   const fake = firewallFake();
   try {
-    await assert.rejects(runFirewall({ launcherPath: "fake", exec: fake.exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"],
+    await assert.rejects(runFirewall({ launcherPath: "fake", exec: fake.exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"],
       log: (m) => { if (/inside-with-rule/.test(m) && fake.state.rule) throw new Error("boom"); } }), /boom/);
     assert.equal(fake.state.rule, false);
     assert.ok(fake.state.removeCalls >= 1);
@@ -847,12 +858,38 @@ test("firewall run: if anything throws while the rule exists, the rule is remove
   } finally { removeTree(base); }
 });
 
+test("a second listener that cannot be made (no such address on this machine, as 127.0.0.2 on macOS) leaves no listener open, so the process can end (the macOS shard hang)", () => {
+  const dir = tmp();
+  try {
+    const script = `import { runFirewall } from ${JSON.stringify(pathToFileURL(join(exp, "ladder.mjs")).href)};
+import { runExperiment } from ${JSON.stringify(pathToFileURL(join(exp, "run-experiment.mjs")).href)};
+const unbindable = { host: "203.0.113.9", local: true }; // a documentation address no machine has
+const line = (o) => ({ status: 0, stdout: JSON.stringify({ tool: "nn-appc-launcher", ...o }) + "\\n", stderr: "" });
+const exec = (_p, args) => line(args[0] === "info" ? { ok: true, elevated: true, sessionId: 2, profile: "created", containerSid: "S-1-15-2-9-8-7-6-5-4-3" } : { ok: true });
+const tools = { nodeExe: process.execPath, gitExe: "git", gitDir: "/usr/bin", programDirs: ["/usr"] };
+const outcomes = [];
+for (const run of [
+  () => runFirewall({ launcherPath: "fake", exec, ps: () => ({ status: 0, stdout: "", stderr: "" }), tmpBase: ${JSON.stringify(dir)}, tools, outbound: unbindable, systemRoot: "C:\\\\Windows", settleMs: 20, clients: ["curl"] }),
+  () => runExperiment({ launcherPath: "fake", exec, tmpBase: ${JSON.stringify(dir)}, tools, cellSpec: "baseline-no-protect", systemPaths: [], systemFolder: ${JSON.stringify(dir)}, outbound: unbindable }),
+]) { try { await run(); outcomes.push("returned"); } catch (e) { outcomes.push(e.code ?? e.message); } }
+console.log(JSON.stringify(outcomes));
+`;
+    writeFileSync(join(dir, "listen.mjs"), script);
+    const r = spawnSync(process.execPath, [join(dir, "listen.mjs")], { encoding: "utf8", timeout: 20_000 });
+    assert.equal(r.error, undefined, "the process ended by itself (a listener left open keeps it alive until the limit)");
+    assert.equal(r.status, 0, r.stderr);
+    const outcomes = JSON.parse(r.stdout.trim().split("\n").pop());
+    assert.equal(outcomes.length, 2);
+    assert.ok(outcomes.every((o) => o !== "returned"), `both runs refuse (EADDRNOTAVAIL, or the offline guard's own refusal): ${outcomes}`);
+  } finally { removeTree(dir); }
+});
+
 test("firewall run: a rule that leaks (the container still connects) is a failure, and a container that cannot be made starts nothing", async () => {
   const base = tmp();
   try {
     const fake = firewallFake();
     const leaky = (p, a) => { const keep = fake.state.rule; if (a[0] === "run") fake.state.rule = false; try { return fake.exec(p, a); } finally { fake.state.rule = keep; } };
-    const r = await runFirewall({ launcherPath: "fake", exec: leaky, ps: fake.ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"] });
+    const r = await runFirewall({ launcherPath: "fake", exec: leaky, ps: fake.ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"] });
     assert.equal(r.report.verdict, "fail");
     assert.equal(fake.state.rule, false);
     const calls = [];
@@ -1164,7 +1201,7 @@ test("command line: the new modes, no default variant list for the firewall, and
     const runs = [];
     try {
       const exec = (p, a) => { if (a[0] === "run") runs.push(a); return fake.exec(p, a); };
-      const r = await runFirewall({ launcherPath: "fake", exec, ps: fake.ps, tmpBase: base, tools, variantSpec: spec, outbound: { host: "127.0.0.2", local: true }, settleMs: 20, systemRoot: "C:\\Windows", clients: ["node"] });
+      const r = await runFirewall({ launcherPath: "fake", exec, ps: fake.ps, tmpBase: base, tools, variantSpec: spec, outbound: { host: OUTBOUND_HOST, local: true }, settleMs: 20, systemRoot: "C:\\Windows", clients: ["node"] });
       assert.equal(r.report.variant, "ac-inet-private");
       assert.deepEqual(r.report.capabilitiesSeen, ["internetClient", "privateNetworkClientServer"]);
       assert.ok(runs.length > 0 && runs.every((a) => a.includes("--capability")));
@@ -1175,7 +1212,7 @@ test("command line: the new modes, no default variant list for the firewall, and
   const fake = firewallFake();
   try {
     const exec = (p, a) => { const out = fake.exec(p, a); if (a[0] !== "run") return out; return { ...out, stdout: out.stdout.replace(/"capabilities":\[[^\]]*\],?/, "") }; };
-    const r = await runFirewall({ launcherPath: "fake", exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, settleMs: 20, systemRoot: "C:\\Windows", clients: ["node"] });
+    const r = await runFirewall({ launcherPath: "fake", exec, ps: fake.ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, settleMs: 20, systemRoot: "C:\\Windows", clients: ["node"] });
     assert.equal(r.report.verdict, "inconclusive");
     assert.match(r.report.why, /did not apply the capabilities/);
   } finally { removeTree(base); }
@@ -1804,7 +1841,7 @@ test("firewall run with the exemption by name: it is added and read back, the sa
     return fake.ps(script);
   };
   try {
-    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"], exemptByName: true, profileName: "NimbleNewtExperiment" });
+    const r = await runFirewall({ launcherPath: "fake", exec: fake.exec, ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"], exemptByName: true, profileName: "NimbleNewtExperiment" });
     assert.deepEqual(r.report.phases.map((p) => p.phase), ["control-before-rule", "inside-without-rule", "inside-with-name-exemption", "inside-with-rule", "control-with-rule", "inside-after-removal"]);
     assert.equal(r.report.exemption.confirmed, true);
     assert.equal(r.report.exemption.removed, true);
@@ -1814,7 +1851,7 @@ test("firewall run with the exemption by name: it is added and read back, the sa
     assert.equal(ex.on, false);
     assert.equal(r.report.assumptions.length, 3);
     // a throw while the exemption exists: removed in the finally path
-    await assert.rejects(runFirewall({ launcherPath: "fake", exec: fake.exec, ps, tmpBase: base, tools, outbound: { host: "127.0.0.2", local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"], exemptByName: true, profileName: "NimbleNewtExperiment",
+    await assert.rejects(runFirewall({ launcherPath: "fake", exec: fake.exec, ps, tmpBase: base, tools, outbound: { host: OUTBOUND_HOST, local: true }, systemRoot: "C:\\Windows", randomHex: () => "0a1b2c3d", settleMs: 20, clients: ["curl"], exemptByName: true, profileName: "NimbleNewtExperiment",
       log: (m) => { if (/inside-with-name-exemption/.test(m) && ex.on) throw new Error("boom"); } }), /boom/);
     assert.equal(ex.on, false);
     assert.deepEqual(readdirSync(base), []);

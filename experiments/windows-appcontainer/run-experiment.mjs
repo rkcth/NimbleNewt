@@ -98,7 +98,9 @@ export async function runExperiment(opts) {
   const loop = await listener("127.0.0.1");
   const outbound = opts.outbound ?? pickOutboundHost(os.networkInterfaces());
   // The non-loopback witness listens on that one address only (not on all interfaces); with no such address nothing listens and the outbound probe is weak evidence.
-  const wide = outbound.local ? await listener(outbound.host) : { port: 9, count: () => 0, close: async () => {} };
+  // A second listener that cannot be made must not leave the first one open (an open listener keeps the process alive for ever).
+  let wide;
+  try { wide = outbound.local ? await listener(outbound.host) : { port: 9, count: () => 0, close: async () => {} }; } catch (error) { await loop.close(); throw error; }
   if (!outbound.local) notes.push("no non-loopback IPv4 address: the outbound probe aimed at a documentation address, so its refusals are weak evidence");
   const resultsCells = [];
   let foldersRemoved = 0;

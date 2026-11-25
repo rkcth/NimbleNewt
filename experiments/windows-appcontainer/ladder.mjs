@@ -444,7 +444,9 @@ export async function runFirewall(opts) {
   const tools = opts.tools;
   const outbound = opts.outbound;
   const loop = await listen("127.0.0.1");
-  const wide = outbound.local ? await listen(outbound.host) : { port: 9, count: () => 0, close: async () => {} };
+  // A second listener that cannot be made (macOS has no 127.0.0.2 address) must not leave the first one open: an open listener keeps the process alive for ever.
+  let wide;
+  try { wide = outbound.local ? await listen(outbound.host) : { port: 9, count: () => 0, close: async () => {} }; } catch (error) { await loop.close(); throw error; }
   const root = mkdtempSync(join(tmpBase, "nn-appc-"));
   names.root = root;
   const plan = ladderPlan(root, platform === "win32" ? win32 : { join, dirname, basename: (p) => p });
