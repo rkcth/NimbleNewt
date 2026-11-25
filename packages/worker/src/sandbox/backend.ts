@@ -40,6 +40,11 @@ export interface SandboxBackend {
    * backend without it (Seatbelt shares the host's loopback; the Windows guest's networking is not proven private) refuses a recipe that has a route: another process on the machine could otherwise use the proxy of this task's grants.
    */
   readonly privateNetwork?: boolean;
+  /**
+   * False when the confined program cannot be given the controller's own pipes (the native Windows backend: a container cannot make pipes, so standard handles are files). A request for a streamed run
+   * (`stream`: a long-lived program that talks to its caller over standard input and output) is then refused with a typed reason instead of hanging. Absent or true: pipes work.
+   */
+  readonly interactiveInput?: boolean;
   /** Proves, by really starting a confined probe, that this backend confines on this host right now. */
   health(): Promise<BackendHealth>;
   /** `runId` is the launch's own id (the launcher plans twice for one launch and passes the same id both times), for a mechanism that keeps per-launch state. */

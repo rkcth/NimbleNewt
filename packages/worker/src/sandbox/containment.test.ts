@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
 import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, runContainmentSuite, runOutcome, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
-import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend } from "./containment-windows.js";
+import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, windowsSandboxEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher, type LaunchRequest, type RunResult } from "./launcher.js";
 import { bubblewrapBackend } from "./linux.js";
 
@@ -334,14 +334,18 @@ describe("G05 containment suite, Windows cases (recorded launchers, any OS)", ()
     if (process.platform !== "win32") assert.equal(await windowsConsoleUser(), undefined);
   });
 
-  test("the Windows evidence backend never throws: off Windows, or misconfigured, it has no capacity and says why", async () => {
-    // On Windows this health check would be the real one (it may start a sandbox), so the off-Windows part runs only elsewhere.
+  test("the Windows evidence backend never throws: off Windows, or not installed, it has no capacity and says why; the superseded Windows Sandbox variant keeps that contract", async () => {
+    // On Windows the real health check may start a container, so the off-Windows part runs only elsewhere.
     if (process.platform !== "win32") {
-      const off = await windowsEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u", NIMBLENEWT_G05_WSB_BASE: "C:\\nn-g05" }).health();
+      const off = await windowsEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u" }).health();
       assert.equal(off.healthy, false);
-      assert.match(off.reason ?? "", /could not be configured|only on Windows/);
+      assert.equal(off.backend, "windows-native");
+      assert.match(off.reason ?? "", /only on Windows|could not be configured/);
+      const legacy = await windowsSandboxEvidenceBackend({ USERDOMAIN: "D", USERNAME: "u", NIMBLENEWT_G05_WSB_BASE: "C:\\nn-g05" }).health();
+      assert.equal(legacy.healthy, false);
+      assert.match(legacy.reason ?? "", /could not be configured|only on Windows/);
     }
-    const bad = await windowsEvidenceBackend({ NIMBLENEWT_G05_WSB_BASE: "relative\\path" }).health();
+    const bad = await windowsSandboxEvidenceBackend({ NIMBLENEWT_G05_WSB_BASE: "relative\\path" }).health();
     assert.equal(bad.healthy, false);
     assert.match(bad.reason ?? "", /could not be configured|only on Windows/);
     const stub = unavailableBackend("windows-sandbox", "why");

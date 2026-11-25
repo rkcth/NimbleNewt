@@ -470,7 +470,7 @@ describe("failing closed", () => {
   test("an OS with no backend yet has no capacity; macOS has Seatbelt, which a machine without it cannot use", async () => {
     const windows = await SandboxLauncher.create({ platform: "win32", protectedPaths: [], audit });
     assert.equal(windows.capacity.available, false);
-    assert.match(windows.capacity.reason ?? "", /no sandbox backend for win32/);
+    assert.match(windows.capacity.reason ?? "", /native Windows/);
     await assert.rejects(windows.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable");
     // Asking for the macOS backend on a machine that is not a Mac finds no sandbox-exec and so no capacity.
     if (process.platform !== "darwin") {

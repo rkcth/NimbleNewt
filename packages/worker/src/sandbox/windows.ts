@@ -64,7 +64,10 @@ const PROBE_SCRIPT = [
 ].join("\r\n");
 
 /**
- * The Windows backend (card A03b): Windows Sandbox through its `wsb` client. Each job gets a fresh sandbox with no network and only its listed folders, started and ended by a
+ * SUPERSEDED (2026-11-25, card A03b): Windows Sandbox is not the Windows plan; the native launcher (windows-native.ts) is, and `SandboxLauncher` and the containment suite no longer select this backend.
+ * It is kept only because other cards' tests and the owner-hardware diagnostics (scripts/wsb-*.mjs, windows-real.test.ts) still exercise it; nothing new should depend on it.
+ *
+ * The retired Windows backend: Windows Sandbox through its `wsb` client. Each job gets a fresh sandbox with no network and only its listed folders, started and ended by a
  * supervisor runner process that lives outside everything the guest can write. It is session-dependent: it works only while the owner is signed in at the console (or, by the
  * owner's explicit opt-in, in the auto-login and lock mode), and says so in its health result and every launch record.
  */

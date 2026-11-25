@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { bubblewrapBackend } from "./linux.js";
 import { seatbeltBackend } from "./seatbelt.js";
+import { windowsDefaultBackend } from "./windows-native.js";
 import { SandboxError } from "./errors.js";
 import { ResourceWatch, measureDirs, psSampler, type LimitExceeded, type UsageSampler, type WatchLimits } from "./resource-watch.js";
 import { DEFAULT_HEADROOM, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, nextCoreOffset, type Headroom, type LimitCapabilities, type LimitEnforcement, type ResourceLimits } from "./limits.js";
@@ -148,7 +149,8 @@ const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_STDIN_BYTES = 1024 * 1024;
 
 function defaultBackend(platform: NodeJS.Platform): SandboxBackend | undefined {
-  return platform === "linux" ? bubblewrapBackend() : platform === "darwin" ? seatbeltBackend() : undefined;
+  // Windows: the native launcher (card A03b); Windows Sandbox is no longer selected. Without the administrator's install step it has no capacity and says why; nothing runs unconfined instead.
+  return platform === "linux" ? bubblewrapBackend() : platform === "darwin" ? seatbeltBackend() : platform === "win32" ? windowsDefaultBackend(process.env, platform) : undefined;
 }
 
 /**
@@ -242,6 +244,7 @@ export class SandboxLauncher {
       if (this.#backend === undefined || !this.#capacity.available) throw new SandboxError("unavailable", `no confined launch is possible: ${this.#capacity.reason ?? "no capacity"}`);
       backendName = this.#backend.name;
       const backend = this.#backend;
+      if (request.stream !== undefined && backend.interactiveInput === false) throw new SandboxError("unavailable", `stream: the ${backend.name} backend cannot give a confined program the controller's pipes (a pipe made for a program inside the container hangs), so a program that talks over standard input and output is refused; use a request without \`stream\` (standard handles are files)`);
       if (recipe.route !== undefined && backend.privateNetwork !== true) throw new SandboxError("invalid_recipe", `route: the ${backend.name} backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused`);
       makePlan = () => backend.plan(recipe, command, runId);
     }
