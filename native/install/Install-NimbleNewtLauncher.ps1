@@ -92,6 +92,16 @@ function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.
 # looks at runs through Invoke-Read (it sets $WhatIfPreference to $false inside its own scope only), and the file hash is computed with .NET alone (Get-Sha256Hex). Everything that
 # changes the machine stays inside $PSCmdlet.ShouldProcess, so -WhatIf still changes nothing.
 function Invoke-Read([scriptblock] $Block) { $WhatIfPreference = $false; & $Block }
+# STRICT-MODE SAFETY (found by the first real Verify on Windows PowerShell 5.1 after a real Install, StrictMode 3: 'The property 'PasswordNeverExpires' cannot be found on this object'; that name is a
+# PARAMETER of New-LocalUser, not a property of the object Get-LocalUser returns). Under StrictMode 3 reading a property an object does not have throws, and so does reading a member of $null.
+# Get-Prop reads a property that may be absent (an optional property, an object from a file, one of several action types) and returns $null when the object or the property is not there.
+# Properties that the documentation guarantees on the cmdlet's object (LocalUser: Name, SID, Enabled, Description, PasswordExpires, ...) are read directly; a test pins every such name.
+function Get-Prop($Object, [string] $Name) {
+  if ($null -eq $Object) { return $null }
+  $p = $Object.PSObject.Properties[$Name]
+  if ($null -eq $p) { return $null }
+  return $p.Value
+}
 # The SHA-256 of a file as upper-case hex, with .NET only (no cmdlet can honour -WhatIf). A relative path is resolved against the PowerShell location, as the cmdlets would.
 function Get-Sha256Hex([string] $Path) {
   $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
@@ -288,11 +298,14 @@ function Invoke-Verify {
   $sid = $null
   if ($null -ne $user) {
     $sid = $user.SID
-    Say "  sid $($user.SID.Value); enabled $($user.Enabled); password never expires $($user.PasswordNeverExpires); description: $($user.Description)"
+    # Get-LocalUser has no PasswordNeverExpires property (that is a parameter of the cmdlet that creates a user). Creating the user with that switch (what Install does) leaves PasswordExpires empty ($null), so "never" is printed when it is empty.
+    # Informational only (not PASS/FAIL): the README does not make this a requirement, and a policy applied later by an administrator is not this script's fault.
+    $expires = $user.PasswordExpires
+    Say "  sid $($user.SID.Value); enabled $($user.Enabled); password expires: $(if ($null -eq $expires) { 'never' } else { $expires }); description: $($user.Description)"
     Check ($user.Description -eq $AccountMarker) 'it is the account this script made (marker in its description)'
     $groups = @(Invoke-Read { Get-LocalGroup | Where-Object { (Get-LocalGroupMember -Group $_ -ErrorAction SilentlyContinue | Where-Object { $_.SID -eq $user.SID }) } | ForEach-Object { $_.Name } })
     Say "  member of: $($groups -join ', ')"
-    Check ($groups.Count -eq 1 -and (Invoke-Read { Get-LocalGroup -SID $SidUsers }).Name -eq $groups[0]) 'it is a member of Users only (not Administrators, not any other group)'
+    Check ($groups.Count -eq 1 -and (Get-Prop (Invoke-Read { Get-LocalGroup -SID $SidUsers }) 'Name') -eq $groups[0]) 'it is a member of Users only (not Administrators, not any other group)'
     if (Test-Admin) {
       Initialize-NnLsa
       $rights = [NnLsa]::List($user.SID.Value)
@@ -341,12 +354,13 @@ function Invoke-Verify {
     $acts = @(@($task.Actions) | Where-Object { $null -ne $_ })
     Say "  principal $($tp.UserId); logon type $logon; run level $level"
     Say "  triggers: $($tt -join ', ')"
-    foreach ($a in $acts) { Say "  action: $($a.Execute) $($a.Arguments)  (working directory $($a.WorkingDirectory))" }
+    # Only the exec action type (MSFT_TaskExecAction) has Execute, Arguments and WorkingDirectory; a COM-handler or e-mail action does not, so they are read with Get-Prop.
+    foreach ($a in $acts) { Say "  action: $(Get-Prop $a 'Execute') $(Get-Prop $a 'Arguments')  (working directory $(Get-Prop $a 'WorkingDirectory'))" }
     Check (@('S4U', '2') -contains $logon) 'the task logs on with S4U (no stored password; no network or encrypted-file access)'
     Check (@('Limited', '0') -contains $level) 'the task runs with the limited run level (LeastPrivilege)'
     Check (($tp.UserId -ieq $AccountName) -or ($tp.UserId -ieq "$env:COMPUTERNAME\$AccountName")) "the task runs as the local account '$AccountName'"
     Check (($tt.Count -ge 1) -and (@($tt | Where-Object { $_ -ne 'MSFT_TaskBootTrigger' }).Count -eq 0)) 'its trigger is a boot trigger only (nobody needs to be signed in)'
-    Check (($acts.Count -eq 1) -and (@($acts | Where-Object { "$($_.Arguments)".IndexOf("--env-file=$EnvFile", [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -eq 1)) 'it has one action, which starts node with the environment file worker.env'
+    Check (($acts.Count -eq 1) -and (@($acts | Where-Object { "$(Get-Prop $_ 'Arguments')".IndexOf("--env-file=$EnvFile", [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -eq 1)) 'it has one action, which starts node with the environment file worker.env'
   }
   Say $(if ($script:bad -eq 0) { 'RESULT: everything this script manages is as designed.' } else { "RESULT: $($script:bad) check(s) failed (see FAIL lines)." })
   if ($script:bad -gt 0) { exit 1 }
@@ -433,21 +447,25 @@ function Invoke-Uninstall {
   if (-not (Invoke-Read { Test-Path -LiteralPath $ManifestPath })) { throw "No manifest at $($ManifestPath): this script did not make what is here, so it removes nothing. Nothing was changed." }
   Assert-SafeItem $ManifestPath $false
   $m = Invoke-Read { Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json }
-  if ($m.schema -ne 'nimblenewt.native-install/1') { throw 'The manifest is not one this script wrote. Nothing was changed.' }
+  # The manifest is a file: any field may be missing or empty (a damaged or foreign file), and under StrictMode a missing property throws, so every field is read with Get-Prop and checked.
+  if ((Get-Prop $m 'schema') -ne 'nimblenewt.native-install/1') { throw 'The manifest is not one this script wrote. Nothing was changed.' }
+  $mAccount = Get-Prop $m 'account'
+  $mSid = Get-Prop $m 'accountSid'
+  if ($mAccount -isnot [string] -or $mAccount -notmatch '^[A-Za-z][A-Za-z0-9_-]{0,19}$' -or $mSid -isnot [string] -or $mSid -notmatch '^S-1-5-21(-[0-9]+)+$') { throw 'The manifest does not name a valid account and SID. Nothing was changed.' }
   $launcher = Join-Path $InstallDir $ExeName
-  foreach ($pair in @(@($m.installDir, $InstallDir), @($m.dataDir, $DataDir), @($m.controlDir, $ControlDir), @($m.launcher, $launcher))) {
+  foreach ($pair in @(@((Get-Prop $m 'installDir'), $InstallDir), @((Get-Prop $m 'dataDir'), $DataDir), @((Get-Prop $m 'controlDir'), $ControlDir), @((Get-Prop $m 'launcher'), $launcher))) {
     if (-not (Test-SamePath $pair[0] $pair[1])) { throw "The manifest names '$($pair[0])' where this run expects '$($pair[1])' (pass the -InstallDir/-DataDir the install used). Nothing was changed." }
   }
   foreach ($d in @($InstallDir, $ControlDir)) { Assert-SafeItem $d $true }
   foreach ($f in @($launcher, $EnvFile)) { Assert-SafeItem $f $false }
   $running = Invoke-Read { Get-Process -Name 'nn-launcher' -ErrorAction SilentlyContinue }
   if ($running) { throw 'nn-launcher.exe is running (a job is in progress). Stop the worker first. Nothing was changed.' }
-  $user = Invoke-Read { Get-LocalUser -Name $m.account -ErrorAction SilentlyContinue }
-  if ($null -ne $user -and ($user.Description -ne $AccountMarker -or $user.SID.Value -ne $m.accountSid)) { throw "The user '$($m.account)' is not the one this script made. Nothing was changed." }
+  $user = Invoke-Read { Get-LocalUser -Name $mAccount -ErrorAction SilentlyContinue }
+  if ($null -ne $user -and ($user.Description -ne $AccountMarker -or $user.SID.Value -ne $mSid)) { throw "The user '$mAccount' is not the one this script made. Nothing was changed." }
 
   # 1. The account first (the manifest stays until the end, so a rerun can finish an interrupted removal).
   if ($null -ne $user) {
-    if ($PSCmdlet.ShouldProcess($m.account, 'remove every account right it holds, delete its profile (and with it the AppContainer profile it made), and delete the user')) {
+    if ($PSCmdlet.ShouldProcess($mAccount, 'remove every account right it holds, delete its profile (and with it the AppContainer profile it made), and delete the user')) {
       Initialize-NnLsa
       [NnLsa]::RemoveAll($user.SID.Value)
       Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $user.SID.Value } | Remove-CimInstance

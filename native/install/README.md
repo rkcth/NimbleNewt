@@ -75,6 +75,15 @@ The owner's first real run (Windows PowerShell 5.1, elevated, StrictMode 3) of `
 
 Only a Windows run can confirm that the repair works; Linux tests check the shape (no such cmdlet, the helper, the wrapping, the workflow).
 
+## Reading the Verify output (property names; found by the owner's first real Verify)
+
+The owner's first real `-Action Verify` (Windows PowerShell 5.1, StrictMode 3, after a real Install) printed `PASS  the account exists` and then stopped with `The property 'PasswordNeverExpires' cannot be found on this object`. `PasswordNeverExpires` is a parameter of the command that creates a user; the object `Get-LocalUser` returns has `PasswordExpires` (a date, or empty when the password never expires), not that name. Under StrictMode 3 a missing property is an error. What changed:
+
+- The account line now reads `sid ...; enabled ...; password expires: never; description: ...`. Install creates the user with the never-expires switch, which leaves `PasswordExpires` empty, and Verify prints `never` when it is empty and the date otherwise. It is information, not a PASS or FAIL line: nothing in this README requires it, and an administrator may set a policy later.
+- Every other property read on a command's result was checked against the documentation. A property that some objects of the kind lack is read through `Get-Prop`, which returns empty when the object or the property is absent: the worker task's action fields (`Execute`, `Arguments`, `WorkingDirectory`, which only the exec action type has), the manifest's fields (`schema`, `account`, `accountSid`, the folders) and the name of the Users group. Uninstall now checks that the manifest names a valid account name and a local SID before using either.
+- A Linux test reads the script and checks every property read on a command's result against a table of the documented names (a wrong name such as the one above fails it; ten deliberate breakages are caught).
+- The hosted workflow has a step that makes a real throw-away local user (hosted runner only, removed in `finally`), marks it with the installer's marker and runs Verify against it, so the account lines run on a real object. Verify on an empty machine, and `-WhatIf`, never reach those lines.
+
 ## The standard-account probe
 
 Status: WRITTEN, NOT RUN. `Probe-NimbleNewtWorker.ps1` answers the two open questions of plan 12.3 for the installer's non-administrator account, by running the product launcher once AS that account: (a) can its S4U task create the container profile, and (b) can it make the private window station (`info` asks both)? It also runs `check` and records the facts of the token the task really had. Nothing about this is known yet: every earlier measurement was elevated.
@@ -111,7 +120,7 @@ Then paste the block between `PASTE THIS BLOCK BACK` and `END OF BLOCK`. It carr
 
 ## What is NOT proven (stays listed in the implementation notes)
 
-- Nothing here has run on Windows. The script's syntax is parsed by PowerShell on the hosted runner (and its brackets and strings are checked on Linux); the LSA calls, the folder creation with its access list, `Set-Acl` on `Program Files`, `New-LocalUser`, the read-back comparison of `Verify` after a real install, the link-safe removal and the profile removal are untested on any machine.
+- Nothing here has run on Windows. The script's syntax is parsed by PowerShell on the hosted runner (and its brackets and strings are checked on Linux); the LSA calls, the folder creation with its access list, `Set-Acl` on `Program Files`, `New-LocalUser`, the read-back comparison of `Verify` after a real install (the account lines are now run by the hosted throw-away-account step; the file, access-list, launcher and manifest lines still need a real install), the link-safe removal and the profile removal are untested on any machine.
 - Whether a task for this account with logon type S4U can start `nn-launcher.exe`, create the AppContainer profile and start a container in Session 0 with nobody signed in, including after logout and reboot, is unproven. If S4U does not work the fallback needs the stored-password form (the password is then kept by Windows in the task's credential store, which this script does not do) or a service host; that is a new decision, not a quiet change.
 - That the account is not an administrator is the design; a hosted run cannot show it (the hosted account is an administrator).
 - Windows Home, and the controller's channel to the container.

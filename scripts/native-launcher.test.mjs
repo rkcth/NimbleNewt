@@ -243,10 +243,10 @@ test("worker.env carries exactly the four names and defaults the TypeScript back
 
 test("uninstall removes what install made, from a manifest, and nothing it did not make", () => {
   const un = fn("Invoke-Uninstall");
-  for (const part of ["$ManifestPath", "nimblenewt.native-install/1", "RemoveAll", "Remove-CimInstance", "Remove-LocalUser", "Get-Process -Name 'nn-launcher'", "$m.accountSid", "Assert-SafeItem $ManifestPath $false", "Assert-SafeItem $DataDir $true", "Test-SamePath $pair[0] $pair[1]", "Remove-TreeNoFollow $ControlDir"]) assert.ok(un.includes(part), part);
+  for (const part of ["$ManifestPath", "nimblenewt.native-install/1", "RemoveAll", "Remove-CimInstance", "Remove-LocalUser", "Get-Process -Name 'nn-launcher'", "$user.SID.Value -ne $mSid", "Assert-SafeItem $ManifestPath $false", "Assert-SafeItem $DataDir $true", "Test-SamePath $pair[0] $pair[1]", "Remove-TreeNoFollow $ControlDir"]) assert.ok(un.includes(part), part);
   // the manifest only confirms this run's own folders; it never supplies a path to remove
-  for (const field of ["installDir", "dataDir", "controlDir", "launcher"]) assert.ok(un.includes(`@($m.${field}, `), `the manifest's ${field} is compared with this run's`);
-  assert.ok(!/Remove-Item[^\n]*\$m\.|Delete\([^\n]*\$m\.|Remove-TreeNoFollow \$m\./.test(un), "nothing is removed by a path read from the manifest");
+  for (const field of ["installDir", "dataDir", "controlDir", "launcher"]) assert.ok(un.includes(`@((Get-Prop $m '${field}'), `), `the manifest's ${field} is compared with this run's`);
+  assert.ok(!/Remove-Item[^\n]*\$m\.|Delete\([^\n]*\$m\.|Remove-TreeNoFollow \$m\.|Remove-Item[^\n]*Get-Prop \$m/.test(un), "nothing is removed by a path read from the manifest");
   // the control folder is closed to the account before it is walked, and the two top folders go only when empty
   assert.ok(un.indexOf("Set-Acl -LiteralPath $ControlDir") < un.indexOf("Remove-TreeNoFollow $ControlDir"));
   assert.ok(un.includes(".Count -eq 0) { [System.IO.Directory]::Delete($d, $false) }"));
@@ -504,4 +504,114 @@ test("no product-launcher call in the workflow uses a fixed profile name: each t
   assert.match(read("native", "nn-launcher", "src", "profile.rs"), /RUN_PREFIX: &str = "NimbleNewtRun-"[^]*RUN_HEX_LEN: usize = 16/);
   // the record folder exists before the first use (the launcher creates the file, never the folder)
   assert.equal((code.match(/mkdir -p "\$RUNNER_TEMP\/profile-records"/g) ?? []).length, 2);
+});
+
+// ------------------------------------------------------------------------------------------------ A03b: property names on cmdlet objects (found by the owner's first real Verify)
+// The owner's first real `-Action Verify` (Windows PowerShell 5.1, StrictMode 3, after a real Install) stopped with "The property 'PasswordNeverExpires' cannot be found on this object": that name is a
+// PARAMETER of New-LocalUser, and the object Get-LocalUser returns has no such property. Under StrictMode 3 a missing property throws. Linux cannot run PowerShell, so this test reads the script and
+// checks every `$variable.Property` and `(cmdlet ...).Property` against the properties Microsoft documents for the object that variable holds. Sources (documentation, not guesses):
+//   LocalUser           learn.microsoft.com/powershell/module/microsoft.powershell.localaccounts/get-localuser (Microsoft.PowerShell.Commands.LocalUser)
+//   LocalGroup          .../get-localgroup ; LocalPrincipal (Get-LocalGroupMember): Name, SID, ObjectClass, PrincipalSource
+//   FileSecurity        System.Security.AccessControl.FileSystemSecurity + Get-Acl's note properties (Path, Owner, Group, Access, Sddl)
+//   Signature           Get-AuthenticodeSignature: Status, StatusMessage, SignerCertificate, TimeStamperCertificate, SignatureType, Path, IsOSBinary
+//   ScheduledTask       MSFT_ScheduledTask: TaskName, TaskPath, Principal, Triggers, Actions, Settings, State, Description, URI, Author, Source, Date, Documentation, Version
+//   TaskPrincipal       MSFT_TaskPrincipal2: UserId, LogonType, RunLevel, GroupId, Id, DisplayName, ProcessTokenSidType, RequiredPrivilege
+//   SecurityIdentifier  System.Security.Principal.SecurityIdentifier: Value, BinaryLength, AccountDomainSid
+// A property the documentation does not guarantee on EVERY object of its kind (the exec action's Execute, Arguments and WorkingDirectory are absent from other action types; every field of a JSON file) is
+// read with Get-Prop, never with a dot, and this test forbids the dotted form.
+const DOCUMENTED = {
+  LocalUser: ["AccountExpires", "Description", "Enabled", "FullName", "PasswordChangeableDate", "PasswordExpires", "UserMayChangePassword", "PasswordRequired", "PasswordLastSet", "LastLogon", "Name", "SID", "PrincipalSource", "ObjectClass"],
+  LocalGroup: ["Description", "Name", "SID", "PrincipalSource", "ObjectClass"],
+  FileSecurity: ["Path", "Owner", "Group", "Access", "Sddl", "AreAccessRulesProtected", "AreAccessRulesCanonical", "AreAuditRulesProtected", "AccessRightType", "AccessRuleType", "AuditRuleType"],
+  Signature: ["Status", "StatusMessage", "SignerCertificate", "TimeStamperCertificate", "SignatureType", "Path", "IsOSBinary"],
+  ScheduledTask: ["TaskName", "TaskPath", "Principal", "Triggers", "Actions", "Settings", "State", "Description", "URI", "Author", "Source", "Date", "Documentation", "Version"],
+  TaskPrincipal: ["UserId", "LogonType", "RunLevel", "GroupId", "Id", "DisplayName", "ProcessTokenSidType", "RequiredPrivilege"],
+  SecurityIdentifier: ["Value", "BinaryLength", "AccountDomainSid"],
+};
+// variable name in the script -> the kind of object it holds (every variable assigned from one of these cmdlets must be listed: the test below checks that)
+const HOLDERS = { user: "LocalUser", existing: "LocalUser", acl: "FileSecurity", sig: "Signature", task: "ScheduledTask", tp: "TaskPrincipal", sid: "SecurityIdentifier" };
+const CMDLET_KIND = { "Get-LocalUser": "LocalUser", "Get-LocalGroup": "LocalGroup", "Get-AuthenticodeSignature": "Signature", "Get-Acl": "FileSecurity", "Get-ScheduledTask": "ScheduledTask" };
+// `$_` inside a pipeline: the union of what the script's pipelines iterate (members, group members, access rules, tasks' triggers, files, user profiles, hashtable plan entries). Execute, Arguments,
+// WorkingDirectory and the manifest's fields are deliberately NOT here: they go through Get-Prop.
+const PIPE_PROPS = ["SID", "Name", "FullName", "IdentityReference", "FileSystemRights", "InheritanceFlags", "PropagationFlags", "AccessControlType", "Value", "Who", "Rights", "Scope", "Why", "Path", "CimClass", "CimClassName"];
+const OPTIONAL_PROPS = ["Execute", "Arguments", "WorkingDirectory", "schema", "account", "accountSid", "installDir", "dataDir", "controlDir", "launcher", "PasswordNeverExpires"];
+
+function propertyProblems(src) {
+  const body = src.replace(/<#[\s\S]*?#>/, "").split("\n").filter((l) => !/^\s*#/.test(l)).map((l) => l.replace(/\s#\s.*$/, "")).join("\n");
+  const problems = [];
+  const known = new Set(Object.values(DOCUMENTED).flat());
+  for (const m of body.matchAll(/\$([A-Za-z_]\w*)\.([A-Za-z_]\w*)(\()?/g)) {
+    const [, variable, prop, call] = m;
+    if (call || prop === "Count" || prop === "Length") continue; // a method, or the intrinsic Count/Length every value has (an array is held in $task until its first element is taken)
+    if (variable === "_") {
+      if (!PIPE_PROPS.includes(prop)) problems.push(`$_.${prop}: not a documented property of anything the pipelines carry`);
+    } else if (HOLDERS[variable]) {
+      if (!DOCUMENTED[HOLDERS[variable]].includes(prop)) problems.push(`$${variable}.${prop}: ${HOLDERS[variable]} has no property ${prop}`);
+    } else if (/^(a|m|manifest|acts)$/.test(variable) && OPTIONAL_PROPS.includes(prop)) {
+      problems.push(`$${variable}.${prop}: optional property read with a dot (use Get-Prop)`);
+    }
+  }
+  for (const m of body.matchAll(/\(\s*(?:Invoke-Read \{\s*)?(Get-LocalUser|Get-LocalGroup|Get-AuthenticodeSignature|Get-Acl)\b[^()]*\)\.([A-Za-z_]\w*)(\()?/g)) {
+    if (!m[3] && !DOCUMENTED[CMDLET_KIND[m[1]]].includes(m[2])) problems.push(`(${m[1]} ...).${m[2]}: not a documented property`);
+  }
+  // any dotted use of a name that is a parameter or an optional property, anywhere
+  for (const m of body.matchAll(/\.(PasswordNeverExpires|Execute|Arguments|WorkingDirectory)\b(?!\()/g)) problems.push(`.${m[1]}: absent or optional on some objects (Get-Prop)`);
+  // every variable assigned from one of these cmdlets must be a holder the table knows (so a new variable cannot slip past)
+  for (const m of body.matchAll(/\$([A-Za-z_]\w*) = [^\n]*?\b(Get-LocalUser|Get-AuthenticodeSignature|Get-ScheduledTask)\b/g)) if (!HOLDERS[m[1]]) problems.push(`$${m[1]} is assigned from ${m[2]} but is not in the table`);
+  void known;
+  return problems;
+}
+
+test("A03b: every property read on a cmdlet object is one Microsoft documents for it (the owner's Verify stopped on PasswordNeverExpires)", () => {
+  assert.deepEqual(propertyProblems(ps), []);
+  // the repair itself: the printed line uses PasswordExpires, says never when it is empty, and the parameter name appears only as New-LocalUser's parameter
+  assert.match(code, /\$expires = \$user\.PasswordExpires/);
+  assert.match(code, /password expires: \$\(if \(\$null -eq \$expires\) \{ 'never' \}/);
+  assert.equal([...code.matchAll(/PasswordNeverExpires/g)].length, 1);
+  assert.match(code, /New-LocalUser [^\n]*-PasswordNeverExpires /);
+  assert.ok(ps.includes("leaves PasswordExpires empty") && ps.includes("Informational only"), "the comment states the intent and that the line is informational");
+  assert.ok(!/Check[^\n]*PasswordExpires/.test(code), "informational, not a PASS/FAIL line (the README makes no such claim)");
+  // the helper: null object, absent property, present property; and it is used for the optional ones
+  const g = fn("Get-Prop");
+  assert.ok(g.includes("$null -eq $Object") && g.includes("$Object.PSObject.Properties[$Name]") && g.includes("$p.Value"));
+  assert.ok((code.match(/Get-Prop /g) ?? []).length >= 10, "the optional properties and the manifest fields are read with Get-Prop");
+  // Uninstall: the manifest is validated before any use
+  const un = fn("Invoke-Uninstall");
+  assert.ok(un.includes("(Get-Prop $m 'schema')") && un.includes("$mAccount -notmatch") && un.includes("$mSid -notmatch") && !/\$m\.\w/.test(un));
+});
+
+test("A03b: the property check catches at least eight deliberate breakages, and the installer file is untouched by them", async () => {
+  const { createHash } = await import("node:crypto");
+  const file = join(root, "native", "install", "Install-NimbleNewtLauncher.ps1");
+  const sha = () => createHash("sha256").update(readFileSync(file)).digest("hex");
+  const before = sha();
+  const mutations = [
+    ["the wrong name the owner hit", (s) => s.replace("$user.PasswordExpires", "$user.PasswordNeverExpires")],
+    ["a misspelt property of the signature", (s) => s.replace("$sig.Status)", "$sig.Statuz)")],
+    ["a wrong property of the access list", (s) => s.replace("$acl.AreAccessRulesProtected)", "$acl.AreRulesProtected)")],
+    ["a wrong property of the task principal", (s) => s.replace("$tp.UserId -ieq $AccountName", "$tp.User -ieq $AccountName")],
+    ["a pipeline property that nothing has", (s) => s.replace("$_.SID -eq $user.SID", "$_.Sid2 -eq $user.SID")],
+    ["a dotted read of the manifest's account", (s) => s.replace("-Name $mAccount", "-Name $m.account")],
+    ["a dotted read of an action's Execute", (s) => s.replace("$(Get-Prop $a 'Execute')", "$($a.Execute)")],
+    ["a wrong name on a parenthesised cmdlet result", (s) => s.replace("(Get-Prop (Invoke-Read { Get-LocalGroup -SID $SidUsers }) 'Name')", "(Invoke-Read { Get-LocalGroup -SID $SidUsers }).Nam")],
+    ["a user property that is a parameter name", (s) => s.replace("$existing.Description -ne", "$existing.AccountNeverExpires -ne")],
+    ["a new variable from Get-LocalUser that the table does not know", (s) => s.replace("$existing = Invoke-Read {", "$found = Invoke-Read {")],
+  ];
+  for (const [what, mutate] of mutations) {
+    const changed = mutate(ps);
+    assert.notEqual(changed, ps, `the mutation applies: ${what}`);
+    assert.ok(propertyProblems(changed).length > 0, `caught: ${what}`);
+  }
+  assert.equal(sha(), before, "the installer file on disk was not touched");
+});
+
+test("A03b: the hosted workflow's real-account step is the only place a user is made, and it is hosted-only", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const live = wf.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  assert.equal([...live.matchAll(/New-LocalUser/g)].length, 1, "one place makes a user");
+  assert.ok(hosted.includes("New-LocalUser") && !wf.slice(wf.indexOf("  own-runner:")).includes("New-LocalUser"));
+  assert.ok(hosted.includes("RUNNER_ENVIRONMENT -ne 'github-hosted'") && hosted.includes("Remove-LocalUser -Name $name"));
+  assert.equal([...wf.matchAll(/^\s*permissions:/gm)].length, 1, "one permissions block");
+  assert.ok(wf.includes("permissions:\n  contents: read\n"), "permissions unchanged");
 });
