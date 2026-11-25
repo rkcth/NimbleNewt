@@ -470,7 +470,8 @@ describe("failing closed", () => {
 
   test("an OS with no backend yet has no capacity; macOS has Seatbelt, which a machine without it cannot use", async () => {
     // The Windows default backend is the native launcher: off Windows it says it exists only there; on Windows without the install step it says the launcher is missing. Either way: no capacity, nothing runs.
-    const windows = await SandboxLauncher.create({ platform: "win32", backend: windowsDefaultBackend({ NIMBLENEWT_WIN_LAUNCHER: "Z:\\nonexistent\\nn-launcher.exe", NIMBLENEWT_WIN_CONTROL_DIR: "Z:\\nonexistent\\control" }, "win32"), protectedPaths: [], audit });
+    // The launcher sits in its own folder, away from the control and probe folders, so the missing launcher is the one thing wrong (a launcher directly inside the probe's parent is a placement error, tested below).
+    const windows = await SandboxLauncher.create({ platform: "win32", backend: windowsDefaultBackend({ NIMBLENEWT_WIN_LAUNCHER: "Z:\\nonexistent\\bin\\nn-launcher.exe", NIMBLENEWT_WIN_CONTROL_DIR: "Z:\\nonexistent\\control" }, "win32"), protectedPaths: [], audit });
     assert.equal(windows.capacity.available, false);
     assert.match(windows.capacity.reason ?? "", process.platform === "win32" ? /launcher was not found/ : /native Windows/);
     await assert.rejects(windows.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable");

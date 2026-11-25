@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import path, { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, test } from "node:test";
 import { REQUIRED_CASE_IDS, runContainmentSuite } from "./containment.js";
@@ -166,7 +166,12 @@ describe("A03b slice 2: the result file is read as data", () => {
 
 /** A host that answers from a table, so the witnesses can be tested without files. */
 function fakeProbe(files: Record<string, string | undefined>, folders: string[], connections = 0): HostProbe {
-  return { exists: (p) => p in files && files[p] !== undefined, readText: (p) => files[p], isRealFolder: (p) => folders.includes(p), connections: () => connections };
+  // The witnesses build their paths with the host's own join (a backslash on Windows, a slash elsewhere); the fake's table is written with slashes, so both sides are put in one form before comparing.
+  // Windows-style names (a drive letter, backslashes) compare the same way on every OS.
+  const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  const table = new Map(Object.entries(files).map(([k, v]) => [norm(k), v] as const));
+  const dirs = folders.map(norm);
+  return { exists: (p) => table.get(norm(p)) !== undefined, readText: (p) => table.get(norm(p)), isRealFolder: (p) => dirs.includes(norm(p)), connections: () => connections };
 }
 const CFG: WindowsCaseConfig = {
   resultFile: "/r", workspace: "/w", home: "/h", scratch: "/s", decoy: { path: "/w/decoy", content: "d" }, systemPaths: ["/sys/a", "/sys/b"],
@@ -212,6 +217,27 @@ describe("A03b slice 2: the host's witnesses (fake host)", () => {
     assert.match(p("deny-write-protected-name", { ...done, "/w/.git": "still here" })!, /not deleted/);
     assert.equal(p("deny-network-loopback", done, 1), undefined);
     assert.match(p("deny-network-loopback", done, 0)!, /saw no connection/);
+  });
+});
+
+describe("A03b slice 2: the witnesses with Windows-style paths on any OS (fake host)", () => {
+  // Every path in the table and the config is a Windows path made with path.win32, whatever OS runs the test. The fake compares in one separator form.
+  const W = path.win32;
+  const wcfg: WindowsCaseConfig = {
+    resultFile: "C:\\r", workspace: "C:\\w", home: "C:\\h", scratch: "C:\\s", decoy: { path: "C:\\w\\decoy", content: "d" }, systemPaths: ["C:\\sys\\a"],
+    hostWrite: { file: "C:\\o\\victim", dirs: ["C:\\o", "C:\\c"], created: "made" }, links: { read: [], write: [{ name: "link-dir", kind: "dir", path: "C:\\w\\link-dir", planted: true }] },
+    credential: { file: "C:\\k\\key", secret: "s", dir: "C:\\k", entry: "key" }, controller: { file: "C:\\c\\db", secret: "s", dir: "C:\\c", entry: "db" },
+    network: { host: "127.0.0.1", port: 1, timeoutMs: 100 }, protectedName: { dir: "C:\\w\\.git", config: "C:\\w\\.git\\config", hook: "C:\\w\\.git\\hook", scratchTarget: "C:\\s" },
+  };
+  test("confined and unconfined witnesses give the same answers as with slash paths", () => {
+    const clean: Record<string, string | undefined> = { [W.join("C:\\o", "victim")]: "OUT", [W.join("C:\\w", ".git", "config")]: "GIT", [W.join("C:\\w", "c-work")]: "x", [W.join("C:\\h", "c-home")]: "x", [W.join("C:\\s", "c-scratch")]: "x" };
+    const folders = [W.join("C:\\w", ".git")];
+    assert.equal(confinedWitness("control-write-own-directories", wcfg, ORIG, fakeProbe(clean, folders), 0), undefined);
+    assert.match(confinedWitness("control-write-own-directories", wcfg, ORIG, fakeProbe({ ...clean, [W.join("C:\\h", "c-home")]: undefined }, folders), 0)!, /could not write its own/);
+    assert.match(confinedWitness("deny-write-host-path", wcfg, ORIG, fakeProbe({ ...clean, [W.join("C:\\c", "made")]: "x" }, folders), 0)!, /created/);
+    const done: Record<string, string | undefined> = { [W.join("C:\\o", "victim")]: "overwritten", [W.join("C:\\o", "made")]: "x", [W.join("C:\\c", "made")]: "x" };
+    assert.equal(freeProof("deny-write-host-path", wcfg, ORIG, fakeProbe(done, []), 0), undefined);
+    assert.ok(freeProof("deny-write-host-path", wcfg, ORIG, fakeProbe({ ...done, [W.join("C:\\o", "made")]: undefined }, []), 0) !== undefined);
   });
 });
 

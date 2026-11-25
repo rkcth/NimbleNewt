@@ -642,6 +642,16 @@ describe("A03b native launcher: health is a real confined start", () => {
     }
   });
 
+  test("the placement check comes before the missing-launcher check: a launcher inside the probe's folder is refused as a configuration error, and a launcher in a folder of its own that is missing is reported as missing (same answer on every OS, win32 paths and an injected host)", async () => {
+    const host = new SimHost();
+    // the probe folder is the control folder plus "-probe", so a launcher in the control folder's parent has the probe folder inside its own folder (the case the Windows hosted run hit)
+    assert.throws(() => windowsNativeBackend(options(host, { launcher: "Z:\\nonexistent\\nn-launcher.exe", controlDir: "Z:\\nonexistent\\control" })), /the supervisor's code .* may not sit in the probe's container-writable folder/);
+    const apart = windowsNativeBackend(options(host, { launcher: "Z:\\nonexistent\\bin\\nn-launcher.exe", controlDir: "Z:\\nonexistent\\control" }));
+    const h = await apart.health();
+    assert.equal(h.healthy, false);
+    assert.match(h.reason ?? "", /launcher was not found/);
+  });
+
   test("unhealthy and never unconfined when: not Windows, the launcher is not installed, a volume is not NTFS, the container cannot be made, a run left entries behind", async () => {
     const off = new SimHost();
     (off as { platform: string }).platform = "linux";
