@@ -34,6 +34,23 @@ pub(crate) fn is_app_sid_text(text: &str) -> bool {
 /// The text of a record file: tag line, then `name SID`.
 pub(crate) fn format_record(name: &str, sid: &str) -> String { format!("{RECORD_TAG}\n{name} {sid}\n") }
 
+/// Creates the record file `path` WHOLE or not at all, and never over an existing one: the text goes to a temporary file of its own (create-new, written and flushed to disk), which is then
+/// hard-linked to the record's name (a link fails when the name exists: create-new), and the temporary name is removed on every path. A launcher killed half way therefore leaves no record, or
+/// a complete one, never a half-written record that the supervisor could not read (and would have to keep reporting for ever, which stops every run). Plain std calls, so it is tested on every OS.
+pub(crate) fn create_whole(path: &str, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let temp = format!("{path}.{}.{nanos}.tmp", std::process::id());
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()
+    })();
+    let linked = written.and_then(|_| std::fs::hard_link(&temp, path));
+    let _ = std::fs::remove_file(&temp);
+    linked.map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { format!("the profile record could not be created (create-new): it exists: {e}") } else { format!("the profile record could not be written: {e}") })
+}
+
 /// The name and SID of a record file, or None when it is not exactly the format above (a tag line, one `name SID` line, nothing else of substance; a trailing newline is fine).
 pub(crate) fn parse_record(text: &str) -> Option<(String, String)> {
     let mut lines = text.lines();
@@ -97,6 +114,35 @@ mod tests {
             "nn-run-profile v1\nNimbleNewtRun-0123456789abcdef S-1-15-2-1-2-3-4-5-6-7 extra\n", "nn-run-profile v1\nNimbleNewtRun-0123456789abcdef S-1-15-2-1-2-3-4-5-6-7\nsecond\n"] {
             assert_eq!(parse_record(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_record_is_created_whole_never_over_an_existing_one_and_leaves_no_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("nn-rec-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("NimbleNewtRun-0123456789abcdef.sid");
+        let p = path.to_str().unwrap();
+        let text = format_record("NimbleNewtRun-0123456789abcdef", SID);
+        create_whole(p, &text).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // create-new: a second create of the same name fails and leaves the first text as it was
+        let e = create_whole(p, "other").unwrap_err();
+        assert!(e.contains("create-new"), "{e}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        // a name that is there already, whatever it holds (a half-written file of an older launcher), is never overwritten
+        let half = dir.join("half.sid");
+        std::fs::write(&half, "nn-run-pro").unwrap();
+        assert!(create_whole(half.to_str().unwrap(), &text).is_err());
+        assert_eq!(std::fs::read_to_string(&half).unwrap(), "nn-run-pro");
+        // a folder that cannot be written: an error, and nothing at the name
+        let missing = dir.join("no-such-folder").join("x.sid");
+        assert!(create_whole(missing.to_str().unwrap(), &text).unwrap_err().contains("could not be written"));
+        assert!(!missing.exists());
+        // only the record names are left: no temporary file on any path
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, vec!["NimbleNewtRun-0123456789abcdef.sid".to_string(), "half.sid".to_string()]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -16,7 +16,7 @@ import type { NormalizedRecipe } from "./recipe.js";
 import type { ProcessResult } from "./windows-host.js";
 import type { ChannelFs, ChannelJob, ChannelPorts } from "./windows-native-channel.js";
 import { FILE_CHANNEL_ENV, encodeFrame, openWorkerFileChannel } from "@nimblenewt/contracts";
-import { jobFile, launcherSid, probeProfile, profilesDir, readProfileRecord, readRecord, recordsDir, retireProfile, revokeAndReadBack, runNativeJob, runProfileFor, slotDir, sweepLeftovers, sweepLeftoversLocked, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
+import { jobFile, launcherSid, probeProfile, profilesDir, readProfileRecord, readRecord, recordsDir, retireProfile, revokeAndReadBack, runNativeJob, runProfileFor, slotDir, sweepLeftovers, sweepLeftoversLocked, type JobOutcome, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
 import {
   DEFAULT_JOB_LIMITS, EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, LPAC_CAPABILITIES, NATIVE_MODE, NODE_PRESERVE_OPTIONS, REFUSED_ROUTE, checkNativeRecipe, failureKindOf, grantsFor, grantsLeft, isRunProfileName, launcherArgs, nativeEnv, newRunProfileName,
   parseLauncherLine, programPath, quoteWindowsArg, softRefusals, type NativeGrant, type NativeSettings,
@@ -65,6 +65,8 @@ interface Script {
   err?: string;
   /** The delete of the per-run profile fails (the profile stays; `delete-profile` fails too). */
   profileStuck?: boolean;
+  /** `delete-profile` answers ok and deleted but NOT gone (a self-contradicting answer: never taken as gone). */
+  deleteNotGone?: boolean;
   /** The run's own line says it deleted the profile, but a later check finds it (the supervisor must ask again). */
   profileNotGoneInLine?: boolean;
   /** What the "program" does with the paths it was given (the probe program). */
@@ -138,6 +140,7 @@ class SimHost implements NativeHost {
       const rec = recordPath === undefined ? undefined : this.readText(recordPath);
       if (rec === undefined) return line({ command: "delete-profile", ok: false, stage: "profile", error: "there is no record of this profile in the control folder, so it is not proven to be this launcher's: nothing is deleted" });
       if (rec !== `nn-run-profile v1\n${name} ${sid}\n`) return line({ command: "delete-profile", ok: false, stage: "profile", error: "the profile record names another profile or SID: nothing is deleted" });
+      if (this.script.deleteNotGone) return line({ command: "delete-profile", ok: true, containerSid: sid, profileDeleted: true, profileGone: false });
       const done = deleteIt();
       return line({ command: "delete-profile", ok: done.profileDeleted && done.profileGone, containerSid: sid, ...done });
     }
@@ -2084,5 +2087,155 @@ describe("A03b per-run container profile: how many runs at once, never in one wo
     // the environment: absent or empty keeps one; anything else outside 1..4 is a reason, never a throw
     for (const bad of ["0", "5", "two", "1.5", "-1", " 2", "0x2", "00000002"]) assert.match((await windowsDefaultBackend({ NIMBLENEWT_WIN_MAX_RUNS: bad }, "win32").health()).reason ?? "", /NIMBLENEWT_WIN_MAX_RUNS must be a whole number from 1 to 4/, bad);
     for (const good of ["", "1", "2", "4"]) assert.doesNotMatch((await windowsDefaultBackend({ NIMBLENEWT_WIN_MAX_RUNS: good }, "win32").health()).reason ?? "", /MAX_RUNS/, good);
+  });
+});
+
+describe("A03b per-run container profile, second clean-context review: nothing new blocks every run, inputs never inside another run's task folders, records made whole", () => {
+  const CLAIMS = `${CONTROL}\\claims`;
+  const PROFILES = `${CONTROL}\\profiles`;
+  const ws = (n: string, extra: Partial<NormalizedRecipe> = {}): NormalizedRecipe => recipe({ workdir: `C:\\Tasks\\${n}\\work`, home: `C:\\Tasks\\${n}\\home`, scratch: `C:\\Tasks\\${n}\\scratch`, ...extra });
+  const planned = (host: SimHost, r: NormalizedRecipe, id: string, extra: Partial<WindowsNativeOptions> = {}): { job: NativeJob; jobDir: string } => {
+    const plan = windowsNativeBackend(options(host, extra)).plan(r, ["/inputs/tools/tool.exe"], id);
+    const jobDir = plan.env["NIMBLENEWT_NATIVE_JOB"]!;
+    return { job: JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob, jobDir };
+  };
+  const probeRecord = (host: SimHost, name: string, pid: number, at: string): void => {
+    host.mkdirp(PROFILES);
+    host.writeText(`${PROFILES}\\${name}.json`, JSON.stringify({ version: 1, name, runId: `probe-${name}`, jobDir: "", pid, at, grants: [], folders: [] }));
+    host.writeText(`${PROFILES}\\${name}.sid`, `nn-run-profile v1\n${name} ${simSid(name)}\n`);
+    host.profiles.add(name);
+  };
+
+  test("the health check's probe profile, in progress in the controller's process, does not stop a run in a runner's process (default limit 1); once its writer is gone it is swept", async () => {
+    const host = new SimHost();
+    const controller = 700;
+    host.alive.add(controller);
+    host.procs = [{ pid: controller, parent: 1, started: new Date(Date.now() - 600_000).toISOString() }];
+    const probe = "NimbleNewtRun-00000000000000aa";
+    probeRecord(host, probe, controller, new Date(Date.now() - 1000).toISOString());
+    const { job, jobDir } = jobFor(host);
+    const out = await runNativeJob(host, job, undefined, jobDir);
+    assert.equal(out.exitCode, 0, out.stderr);
+    assert.ok(host.profiles.has(probe) && host.exists(`${PROFILES}\\${probe}.json`), "the probe's own profile and record are left to the probe");
+    assert.ok(host.calls.every((c) => c.args[c.args.indexOf("--name") + 1] !== probe), "nothing was revoked or deleted for it");
+    // a live record WITH grants or folders is still a run in progress, and with one slot a run does not start next to it (as before)
+    const other = jobFor(host);
+    markStarted(host, other.job, other.jobDir, { runnerPid: controller, runId: other.job.runId, startedAt: new Date(Date.now() - 1000).toISOString() });
+    host.remove(`${other.jobDir}\\status.json`);
+    host.remove(other.jobDir);
+    const third = planned(host, ws("c"), "run-0003-cccc");
+    const refused = await runNativeJob(host, third.job, undefined, third.jobDir);
+    assert.match(refused.stderr, /may still be running/);
+    // the controller has gone: both are swept
+    host.alive.delete(controller);
+    host.procs = [];
+    assert.equal((await runNativeJob(host, third.job, undefined, third.jobDir)).exitCode, 0);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(host.listDir(PROFILES), []);
+  });
+
+  test("with two runs allowed, a run whose input is inside or around another run's task folder is refused (its grant would rewrite access lists in that workspace); two runs reading the same input run at once", async () => {
+    const host = new SimHost();
+    const opt = { maxConcurrentRuns: 3 };
+    const a = planned(host, ws("a"), "run-0001-aaaa", opt);
+    const readsInside = planned(host, ws("b", { readOnly: [{ host: "C:\\Tasks\\a\\work\\.git", guest: "/inputs/tools" }] }), "run-0002-bbbb", opt);
+    const readsAround = planned(host, ws("c", { readOnly: [{ host: "C:\\Tasks\\a", guest: "/inputs/tools" }] }), "run-0003-cccc", opt);
+    const writesInsideInput = planned(host, ws("d", { workdir: "C:\\Tools\\inputs\\work", readOnly: [{ host: "C:\\Tools\\other", guest: "/inputs/tools" }] }), "run-0004-dddd", opt);
+    const sameInput = planned(host, ws("e"), "run-0005-eeee", opt);
+    const g = { count: 0, open: (): void => undefined };
+    const closed = new Promise<void>((resolve) => { g.open = resolve; });
+    host.script = { onProgram: async () => { g.count++; await closed; } };
+    const safety = setTimeout(() => g.open(), 5000); // a run that is wrongly let through must fail the test below, not hang it
+    const pa = runNativeJob(host, a.job, undefined, a.jobDir);
+    for (let i = 0; i < 400 && g.count < 1; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(g.count, 1);
+    for (const [label, x, why] of [["an input inside the other run's workspace", readsInside, /a run's inputs may not be another run's task folders/], ["an input around it", readsAround, /a run's inputs may not be another run's task folders/], ["a workspace inside the other run's input", writesInsideInput, /one run at a time per workspace/]] as const) {
+      const out = await Promise.race([runNativeJob(host, x.job, undefined, x.jobDir), new Promise<JobOutcome>((r) => setTimeout(() => r({ exitCode: -1, stdout: "", stderr: "it was let through to its program" }), 2000))]);
+      assert.equal(out.exitCode, EXIT_BUSY, `${label}: ${out.stderr}`);
+      assert.match(out.stderr, why, label);
+    }
+    assert.equal(host.calls.filter((c) => c.args[0] === "run").length, 1, "none of them reached the launcher");
+    // the same read-only input in two runs at once is fine (each adds and removes its own SID's entry, under the launcher's lock)
+    const pe = runNativeJob(host, sameInput.job, undefined, sameInput.jobDir);
+    for (let i = 0; i < 400 && g.count < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(g.count, 2, "the second run on the same input is in its program");
+    g.open();
+    clearTimeout(safety);
+    assert.deepEqual([(await pa).exitCode, (await pe).exitCode], [0, 0]);
+    assert.deepEqual(host.listDir(CLAIMS), []);
+  });
+
+  test("an entry that cannot be removed keeps the profile AND both records (the backend never deletes before a clean read-back), and a later sweep revokes by that SID first, then deletes", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    let stuck = true;
+    host.script = { stubborn: (p) => stuck && key(p) === key(`${TASK}\\home`) };
+    const out = await runNativeJob(host, job, undefined, jobDir);
+    assert.match(out.stderr, new RegExp(`^${FAILURE_PREFIX}: revoke: `));
+    assert.equal(host.calls.filter((c) => c.args[0] === "delete-profile").length, 0, "no delete while an entry is left");
+    assert.ok(host.profiles.has(job.profile.name));
+    assert.ok(host.exists(`${PROFILES}\\${job.profile.name}.json`) && host.exists(job.profile.record), "both records stay: they are how the sweep finds the SID");
+    assert.deepEqual(record(host, job).profile, { name: job.profile.name, sid: simSid(job.profile.name), deleted: false, gone: false });
+    // the entry can be removed now: the sweep revokes by the run's SID, reads back, and only then deletes
+    stuck = false;
+    host.script = {};
+    const before = host.calls.length;
+    assert.deepEqual((await sweepLeftoversLocked(host, job.settings)).problems, []);
+    const order = host.calls.slice(before).map((c) => c.args[0]);
+    assert.ok(order.indexOf("revoke") >= 0 && order.indexOf("delete-profile") > order.lastIndexOf("check"), order.join(","));
+    assert.deepEqual(hasEntries(host), []);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(host.listDir(PROFILES), []);
+  });
+
+  test("only deleted AND gone lets the records go, whatever 'ok' says; a sweep (locked, or a run's own) leaves no claim of its own behind", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    host.script = { profileNotGoneInLine: true, deleteNotGone: true };
+    const out = await runNativeJob(host, job, undefined, jobDir);
+    assert.match(out.stderr, new RegExp(`^${FAILURE_PREFIX}: profile: `));
+    assert.ok(host.exists(`${PROFILES}\\${job.profile.name}.json`) && host.exists(job.profile.record), "the records stay");
+    // the locked sweep retires it (under a claim of its own) and gives that claim back
+    host.script = {};
+    assert.deepEqual((await sweepLeftoversLocked(host, job.settings)).problems, []);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(host.listDir(CLAIMS), [], "the sweep's claim is given back");
+    // and a run's own sweep of an earlier leftover too
+    const old = jobFor(host);
+    markStarted(host, old.job, old.jobDir, { runnerPid: 900, runId: old.job.runId });
+    const next = planned(host, ws("n"), "run-0009-nnnn");
+    const claimsDuring: string[][] = [];
+    host.script = { onProgram: () => { claimsDuring.push(host.listDir(CLAIMS)); } };
+    assert.equal((await runNativeJob(host, next.job, undefined, next.jobDir)).exitCode, 0);
+    assert.deepEqual(claimsDuring, [[`${next.job.runId}.json`]], "while the program runs, only the run's own claim exists");
+    assert.deepEqual(host.listDir(CLAIMS), []);
+  });
+
+  test("a claim whose writer is gone is removed by the next claim (no pile of dead claims, no process listing for each on every run); a live one and one rewritten meanwhile stay", async () => {
+    const host = new SimHost();
+    const old = new Date(Date.now() - 60_000).toISOString();
+    host.mkdirp(CLAIMS);
+    for (const n of ["dead-1", "dead-2"]) host.writeText(`${CLAIMS}\\${n}.json`, JSON.stringify({ pid: 901, runId: n, owner: n, at: old, folders: ["C:\\Tasks\\zz\\work"] }));
+    host.alive.add(555);
+    host.procs = [{ pid: 555, parent: 1, started: new Date(Date.now() - 120_000).toISOString() }];
+    const live = JSON.stringify({ pid: 555, runId: "live-1", owner: "live-1", at: old, folders: ["C:\\Tasks\\yy\\work"] });
+    host.writeText(`${CLAIMS}\\live-1.json`, live);
+    const { job, jobDir } = jobFor(host);
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, 0);
+    assert.deepEqual(host.listDir(CLAIMS), ["live-1.json"], "the dead claims are gone, the live one stays");
+    // a dead claim that is rewritten between the reading and the removal (the same id claimed again) is not removed on the older reading
+    host.writeText(`${CLAIMS}\\dead-3.json`, JSON.stringify({ pid: 902, runId: "dead-3", owner: "dead-3", at: old, folders: ["C:\\Tasks\\xx\\work"] }));
+    const fresh = JSON.stringify({ pid: 555, runId: "dead-3", owner: "dead-3", at: new Date().toISOString(), folders: ["C:\\Tasks\\xx\\work"] });
+    const list = host.processes.bind(host);
+    const read = host.readText.bind(host);
+    let judged = false;
+    let rewritten = false;
+    // dead-3 is read with its old text, then (while its writer is being looked up) the same id claims again: the old reading must not remove the new claim
+    host.readText = (p: string, max?: number): string | undefined => { const t = read(p, max); if (key(p) === key(`${CLAIMS}\\dead-3.json`) && t !== undefined && t !== fresh) judged = true; return t; };
+    host.processes = async () => { if (judged && !rewritten) { rewritten = true; host.writeText(`${CLAIMS}\\dead-3.json`, fresh); } return list(); };
+    const next = planned(host, ws("n"), "run-0009-nnnn");
+    assert.equal((await runNativeJob(host, next.job, undefined, next.jobDir)).exitCode, 0);
+    assert.ok(rewritten, "the rewrite happened between the reading and the removal");
+    assert.equal(host.readText(`${CLAIMS}\\dead-3.json`), fresh, "the claim written meanwhile is kept");
   });
 });

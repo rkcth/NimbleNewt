@@ -204,11 +204,8 @@ impl ProfileLife {
         let sid = derived_sid(name)?;
         let text = sid_string(sid.0);
         if !crate::profile::is_app_sid_text(&text) { return Err(format!("the derived SID {text} is not an AppContainer SID")); }
-        {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(record).map_err(|e| format!("the profile record could not be created (create-new): {e}"))?;
-            if let Err(e) = f.write_all(profile::format_record(name, &text).as_bytes()).and_then(|_| f.sync_all()) { drop(f); let _ = std::fs::remove_file(record); return Err(format!("the profile record could not be written: {e}")); }
-        }
+        // Whole or not at all, create-new (profile.rs create_whole): a launcher killed while writing leaves no half-written record that would stop every later run.
+        profile::create_whole(record, &profile::format_record(name, &text))?;
         unsafe {
             let mut made: PSID = null_mut();
             let wdisp = wide("NimbleNewt run");

@@ -286,8 +286,14 @@ test("per-run profiles: the name the backend makes is exactly the name the produ
 test("per-run profiles: the launcher writes its record BEFORE it makes the profile, never adopts an existing one, deletes only with proof, and check and revoke make nothing", () => {
   const w = code(win);
   const begin = between(w, "fn begin(name: &str, record: &str)", "fn finish(&self");
-  assert.ok(begin.indexOf("create_new(true)") > 0 && begin.indexOf("create_new(true)") < begin.indexOf("CreateAppContainerProfile("), "record first (create-new), then the profile");
-  assert.ok(begin.indexOf("derived_sid(name)") < begin.indexOf("create_new(true)"), "the SID is derived (and so written into the record) before the profile exists");
+  const rec = "profile::create_whole(record, &profile::format_record(name, &text))?;";
+  assert.ok(begin.indexOf(rec) > 0 && begin.indexOf(rec) < begin.indexOf("CreateAppContainerProfile("), "record first (whole, create-new), then the profile");
+  assert.ok(begin.indexOf("derived_sid(name)") < begin.indexOf(rec), "the SID is derived (and so written into the record) before the profile exists");
+  assert.ok(!begin.includes("write_all("), "no plain write of the record: a launcher killed mid-write would leave a half-written record that stops every run");
+  // the record is made whole: a temporary file of its own (create-new, flushed), hard-linked to the name (fails when the name exists), the temporary name removed on every path
+  const whole = between(profileRs, "pub(crate) fn create_whole(", "pub(crate) fn parse_record(");
+  assert.ok(whole.indexOf("create_new(true)") > 0 && whole.indexOf("sync_all()") > whole.indexOf("create_new(true)") && whole.indexOf("std::fs::hard_link(&temp, path)") > whole.indexOf("sync_all()"), "temporary file, flushed, then linked");
+  assert.ok(whole.indexOf("let _ = std::fs::remove_file(&temp);") > whole.indexOf("hard_link"), "the temporary name goes on every path");
   assert.match(begin, /HR_ALREADY_EXISTS \{ "a profile with this name already exists: it is not adopted"/);
   assert.equal(w.match(/CreateAppContainerProfile\(/g)!.length, 2, "only the shared-name container_sid (experiment) and the per-run begin make a profile");
   // the delete call is in one place for the product, behind the proof; the experiment's own arm is the only other
@@ -320,5 +326,12 @@ test("per-run profiles: every DACL write the launcher makes is under one machine
   // Without a prefix the name would be per Terminal Services session (a signed-in launcher and the worker's session-0 launcher would hold two different locks): the global namespace, explicitly.
   assert.ok(w.includes('pub(crate) const ACL_LOCK_NAME: &str = "Global\\\\NimbleNewtAclWrite";'), "the Global\\ prefix");
   assert.equal(w.match(/CreateMutexW\(/g)!.length, 1, "one named mutex, the lock");
+  // every path of the take: no handle (nothing to close), taken (also when ABANDONED: each DACL write is one SetNamedSecurityInfo call, nothing is left half done), or a timeout or failure that
+  // closes the handle before it reports; the wait is bounded (two minutes, then the grant or revoke fails closed)
+  const take = between(w, "fn take() -> Result<AclLock, u32> {", "impl Drop for AclLock");
+  assert.match(take, /if h\.is_null\(\) \{ return Err\(GetLastError\(\)\); \}/);
+  assert.match(take, /match WaitForSingleObject\(h, 120_000\) \{/);
+  assert.match(take, /WAIT_OBJECT_0 \| WAIT_ABANDONED => Ok\(AclLock\(h\)\),/, "an abandoned lock is taken (WAIT_ABANDONED means this thread now owns it)");
+  assert.match(take, /other => \{ let e = if other == WAIT_TIMEOUT \{ WAIT_TIMEOUT \} else \{ GetLastError\(\) \}; CloseHandle\(h\); Err\(e\) \}/, "the handle is closed on the paths that do not take the lock");
   assert.equal(w.match(/SetNamedSecurityInfoW\(/g)!.length, 3, "the three DACL writers are all inside change_ace's callees (remove_explicit, layered_acl, the grant itself)");
 });

@@ -242,8 +242,8 @@ async function takeSlot(host: NativeHost, settings: NativeSettings, runId: strin
 }
 const dropSlot = (host: NativeHost, slot: Slot, runId: string): void => { LIVE_HERE.delete(runId); dropLock(host, slot.dir, slot.n, runId); };
 
-/** One run's claim on its task folders (`claims\\<id>.json`). */
-interface Claim { readonly pid: number; readonly runId: string; readonly owner: string; readonly at: string; readonly folders: readonly string[] }
+/** One run's claim on its task folders (`claims\\<id>.json`): `folders` the run writes (its task folders), `reads` every other path it grants (inputs, program folders). */
+interface Claim { readonly pid: number; readonly runId: string; readonly owner: string; readonly at: string; readonly folders: readonly string[]; readonly reads?: readonly string[] }
 
 /**
  * Claims folders for a run so that two runs in progress never share a workspace. Two runs have two container SIDs, but the same workspace folder would be written by both launchers: the protected
@@ -253,15 +253,18 @@ interface Claim { readonly pid: number; readonly runId: string; readonly owner: 
  * `writerAlive`) is not counted (the sweep deals with what it left); claims with the same `owner` are one run's (its own sweep of an earlier run's leftovers may name that run's folders).
  * The claim is created WHOLE (`createExclusive`: a private temporary file linked to the name), like the slot files, so a writer that stops mid-write never leaves a half-written claim that every later
  * run would have to count as held. Never throws: anything that goes wrong is a reason (busy), and the claim is gone again.
+ * `reads` are the paths the run grants itself only to read (inputs, program folders): one inside or around ANOTHER run's task folder is refused too (its grant would rewrite access lists inside that
+ * run's workspace, sealed names included: the same combination one run's own plan refuses), while two runs reading the same input do not conflict. A claim whose writer is gone is removed (its
+ * leftovers are found through the profile records, never through claims), so dead claims do not pile up and cost a process listing on every later run.
  * Returns undefined when the claim is held, otherwise the reason it was refused (and the claim is gone again).
  */
-async function claimFolders(host: NativeHost, settings: NativeSettings, id: string, owner: string, folders: readonly string[]): Promise<string | undefined> {
+async function claimFolders(host: NativeHost, settings: NativeSettings, id: string, owner: string, folders: readonly string[], reads: readonly string[] = []): Promise<string | undefined> {
   const dir = claimsDir(settings);
   const file = `${dir}\\${id}.json`;
   const refuse = (reason: string): string => { try { host.remove(file); } catch { /* a claim whose writer is gone is never counted */ } return reason; };
   try {
     host.mkdirp(dir);
-    const mine: Claim = { pid: host.pid, runId: owner, owner, at: new Date().toISOString(), folders };
+    const mine: Claim = { pid: host.pid, runId: owner, owner, at: new Date().toISOString(), folders, reads };
     // `id` is this run's (or this sweep's) own: a file of that name is an earlier attempt of the same id that stopped, never another run's claim.
     host.remove(file);
     if (!host.createExclusive(file, JSON.stringify(mine))) return refuse("the folder claim could not be written (its name was taken meanwhile)");
@@ -271,12 +274,20 @@ async function claimFolders(host: NativeHost, settings: NativeSettings, id: stri
       let other: Claim;
       try { other = JSON.parse(text ?? "") as Claim; if (typeof other !== "object" || other === null || !Array.isArray(other.folders)) throw new Error("not a claim"); } catch { return refuse(`a folder claim (${name}) cannot be read, so it counts as held`); }
       if (other.owner === owner) continue;
-      if (!(await writerAlive(host, other.pid, other.at, other.runId))) continue;
-      for (const f of folders) for (const g of other.folders) if (overlapsWin(f, g)) return refuse(`another run in progress uses ${g}, which is the same as or inside or around ${f}: one run at a time per workspace`);
+      if (!(await writerAlive(host, other.pid, other.at, other.runId))) {
+        // Gone: removed, but only while it is still the text that was judged (a claim of that name written meanwhile is never removed on an older reading).
+        try { if (host.readText(`${dir}\\${name}`) === text) host.remove(`${dir}\\${name}`); } catch { /* not counted either way */ }
+        continue;
+      }
+      const otherReads = Array.isArray(other.reads) ? other.reads.filter((x): x is string => typeof x === "string") : [];
+      for (const f of folders) for (const g of [...other.folders, ...otherReads]) if (overlapsWin(f, g)) return refuse(`another run in progress uses ${g}, which is the same as or inside or around ${f}: one run at a time per workspace`);
+      for (const r of reads) for (const g of other.folders) if (overlapsWin(r, g)) return refuse(`another run in progress writes ${g}, and this run would be granted ${r}, which is the same as or inside or around it: a run's inputs may not be another run's task folders`);
     }
     return undefined;
   } catch (error) { return refuse(`the folder claim could not be made: ${(error as Error).message}`); }
 }
+/** The paths of a grant list (a record read from disk may hold anything: only strings count). */
+const grantPaths = (grants: readonly NativeGrant[]): string[] => grants.map((g) => (g as { path?: unknown } | null)?.path).filter((p): p is string => typeof p === "string");
 const dropClaim = (host: NativeHost, settings: NativeSettings, id: string): void => { try { host.remove(`${claimsDir(settings)}\\${id}.json`); } catch { /* a dead claim is never counted */ } };
 
 /** What the backend records about a run's profile BEFORE the launcher makes it (`profiles\\<name>.json`): enough to revoke and delete it without the job folder, after any crash. */
@@ -351,7 +362,7 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
   const slot = await takeSlot(host, settings, job.runId);
   if (slot === undefined) return { exitCode: EXIT_BUSY, stdout: "", stderr: `${FAILURE_PREFIX}: busy: ${settings.maxConcurrentRuns > 1 ? `all ${settings.maxConcurrentRuns} native run slots are in use` : "another native run is in progress"}, or the last one's launcher may still be running (or the process list cannot be read to tell); ${settings.maxConcurrentRuns > 1 ? `${settings.maxConcurrentRuns} at a time` : "one at a time"}\n` };
   // The task's folders are claimed before anything else is done to them (a second run on the same or an overlapping workspace is refused as busy: its seal and workspace entries would meet this run's).
-  const claimed = await claimFolders(host, settings, job.runId, job.runId, job.claim);
+  const claimed = await claimFolders(host, settings, job.runId, job.runId, job.claim, grantPaths(job.grants));
   if (claimed !== undefined) { dropSlot(host, slot, job.runId); return { exitCode: EXIT_BUSY, stdout: "", stderr: `${FAILURE_PREFIX}: busy: ${claimed}\n` }; }
   // The job file stays for the sweep (it needs the grants), but the launcher's argument list carries the recipe's environment values: once read they are not left on disk.
   try { host.writeText(jobFile(jobDir), JSON.stringify({ ...job, args: [] })); } catch { /* the control folder is the supervisor's own; a failed rewrite leaves the file as it was */ }
@@ -503,7 +514,7 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
   /** Retires one record under a claim on its folders; true when it is clean (gone). */
   const retire = async (record: ProfileRecord, where: string): Promise<boolean> => {
     const id = `${owner}~${claims++}`;
-    const held = await claimFolders(host, settings, id, owner, record.folders);
+    const held = await claimFolders(host, settings, id, owner, record.folders, grantPaths(record.grants));
     if (held !== undefined) { problems.push(`${where}: ${held}; its entries are kept for a later sweep`); return false; }
     try {
       const found = await retireProfile(host, settings, record);
@@ -553,7 +564,9 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
       if (record.runId === owner || (except !== undefined && record.jobDir.toLowerCase() === except.toLowerCase())) continue;
       // A record whose job folder was in the list above was dealt with there (retired, or reported as live); only records with no listed job folder are handled here.
       if (record.jobDir !== "" && dirs.some((d) => d.toLowerCase() === record.jobDir.toLowerCase())) continue;
-      if (await writerAlive(host, record.pid, record.at, record.runId)) { live.push(name); continue; }
+      // A live record with no grants and no folders (the health probe's `info` profile) can reach nothing of any run: it is left to its writer, and it does not count as a run in progress (with
+      // the default one slot, counting it would refuse every run started while the health check is making its probe profile).
+      if (await writerAlive(host, record.pid, record.at, record.runId)) { if (record.grants.length > 0 || record.folders.length > 0) live.push(name); continue; }
       if (!mayRevoke) { problems.push(`${name}: another native run holds the run slot, so its profile is kept for a later sweep`); continue; }
       if (await retire(record, name)) { released++; if (record.jobDir !== "" && overlapsWin(record.jobDir, jobsDir(settings)) && record.jobDir.toLowerCase() !== jobsDir(settings).toLowerCase()) host.remove(record.jobDir); }
     }
