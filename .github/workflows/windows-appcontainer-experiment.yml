@@ -208,7 +208,11 @@ jobs:
           else echo "::warning::the comparison itself failed (exit $rc); see the output above"; fi
           exit 0
       # Card A03b slice 3: the administrator installer script is parsed by PowerShell and run with -WhatIf and Verify. Neither changes the machine: the checks below fail the step if an account or a folder appeared.
+      # The owner's first real run (Windows PowerShell 5.1, elevated, `-File`, a relative -LauncherPath, the default account name) failed in the hash step. This step now runs EXACTLY that command (the product
+      # nn-launcher.exe built above, its sha256, `powershell.exe -ExecutionPolicy Bypass -File ... -Action Install -LauncherPath .\nn-launcher.exe -ExpectedSha256 <hash> -AllowUnsigned -WhatIf`) under Windows
+      # PowerShell 5.1 AND under PowerShell 7 (pwsh), and fails on any error text, a missing dry-run line, a non-zero exit, or anything the dry run changed.
       - name: "Installer script (parse, -WhatIf and Verify; changes nothing)"
+        id: installer_whatif
         shell: powershell
         if: always()
         timeout-minutes: 10
@@ -220,17 +224,51 @@ jobs:
           if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output "::error::$($_.Message)" }; exit 1 }
           $tmp = Join-Path $env:RUNNER_TEMP 'nn-whatif'; New-Item -ItemType Directory -Path $tmp -Force | Out-Null
           Copy-Item 'native\nn-launcher\target\release\nn-launcher.exe' (Join-Path $tmp 'nn-launcher.exe')
-          $h = (Get-FileHash (Join-Path $tmp 'nn-launcher.exe') -Algorithm SHA256).Hash
-          & $f -Action Install -LauncherPath (Join-Path $tmp 'nn-launcher.exe') -ExpectedSha256 $h -AllowUnsigned -AccountName nn-whatif-check -WhatIf
-          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { Write-Output "::error::-WhatIf install ended with $LASTEXITCODE"; exit 1 }
-          if (Get-LocalUser -Name nn-whatif-check -ErrorAction SilentlyContinue) { Write-Output '::error::-WhatIf made the account'; exit 1 }
-          if (Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')) { Write-Output '::error::-WhatIf made the install folder'; exit 1 }
-          if (Test-Path (Join-Path $env:ProgramData 'NimbleNewt')) { Write-Output '::error::-WhatIf made the data folder'; exit 1 }
-          # Verify on a machine with nothing installed must run to its end and report failures (exit 1), never crash.
-          # *>&1: the script prints with Write-Host, which is the information stream (6) in Windows PowerShell 5.1; 2>&1 alone would capture nothing.
-          $out = & $f -Action Verify *>&1 | Out-String
-          Write-Output $out
-          if ($out -notmatch 'FAIL  the account exists' -or $out -notmatch 'RESULT:') { Write-Output '::error::Verify did not report on an empty machine'; exit 1 }
+          # the hash with .NET alone, not with the installer's own helper, so a fault in the helper cannot hide itself
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $bytes = $sha.ComputeHash([System.IO.File]::ReadAllBytes((Join-Path $tmp 'nn-launcher.exe')))
+          $h = (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+          if ($h.Length -ne 64) { Write-Output '::error::the hash was not computed'; exit 1 }
+          $account = 'nimblenewt-worker'
+          function Assert-Untouched([string] $when) {
+            if (Get-LocalUser -Name $account -ErrorAction SilentlyContinue) { Write-Output "::error::$when : the account $account exists"; exit 1 }
+            if (Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')) { Write-Output "::error::$when : the install folder exists"; exit 1 }
+            if (Test-Path (Join-Path $env:ProgramData 'NimbleNewt')) { Write-Output "::error::$when : the data folder exists"; exit 1 }
+          }
+          Assert-Untouched 'before the dry run'
+          # One dry run: the child shell runs the script with -File (as the owner did); its output (host lines and errors) goes to a file, then the checks read it.
+          function Invoke-DryRun([string] $label, [string] $shellExe, [string[]] $shellArgs, [string[]] $scriptArgs) {
+            $outFile = Join-Path $tmp "$label.txt"
+            $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            Push-Location $tmp
+            try { & $shellExe @shellArgs -File $f @scriptArgs *> $outFile; $code = $LASTEXITCODE } finally { Pop-Location; $ErrorActionPreference = $old }
+            $text = (Get-Content -LiteralPath $outFile -Raw) | Out-String
+            Write-Output "---- $label (exit $code) ----"; Write-Output $text
+            return @{ Code = $code; Text = $text }
+          }
+          # Dry-run lines that must appear: what -WhatIf says it WOULD do, and the unsigned warning. Error text that must not.
+          $mustSay = @('What if: Performing the operation "create a local standard user', 'What if: Performing the operation "grant SeBatchLogonRight', 'create (if absent) and set a protected access list', 'place nn-launcher.exe', 'write the four NIMBLENEWT_WIN_', 'WARNING: installing an UNSIGNED launcher', 'Install finished')
+          $mustNot = @('PropertyNotFound', 'cannot be found on this object', 'Retrieve the value for property', 'Exception', 'Nothing was changed', 'FullyQualifiedErrorId')
+          function Assert-Dry($r, [string] $label) {
+            if ($r.Code -ne 0) { Write-Output "::error::$label : exit $($r.Code)"; exit 1 }
+            foreach ($m in $mustSay) { if ($r.Text.IndexOf($m, [System.StringComparison]::Ordinal) -lt 0) { Write-Output "::error::$label : the dry-run line is missing: $m"; exit 1 } }
+            foreach ($m in $mustNot) { if ($r.Text.IndexOf($m, [System.StringComparison]::Ordinal) -ge 0) { Write-Output "::error::$label : unexpected text: $m"; exit 1 } }
+            Assert-Untouched $label
+          }
+          $common = @('-Action', 'Install', '-ExpectedSha256', $h, '-AllowUnsigned', '-WhatIf')
+          # Windows PowerShell 5.1, with a RELATIVE launcher path from its own folder: the owner's command
+          $r51 = Invoke-DryRun 'install-whatif-ps51' 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass') ($common + @('-LauncherPath', '.\nn-launcher.exe'))
+          Assert-Dry $r51 'Install -WhatIf, Windows PowerShell 5.1'
+          # PowerShell 7, with the full path
+          $r7 = Invoke-DryRun 'install-whatif-pwsh' 'pwsh' @('-NoProfile', '-ExecutionPolicy', 'Bypass') ($common + @('-LauncherPath', (Join-Path $tmp 'nn-launcher.exe')))
+          Assert-Dry $r7 'Install -WhatIf, PowerShell 7'
+          # Verify on a machine with nothing installed must run to its end and report failures (exit 1), never crash; also with -WhatIf (a read must not be silenced by it).
+          foreach ($extra in @(@(), @('-WhatIf'))) {
+            $v = Invoke-DryRun ('verify' + $extra.Count) 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass') (@('-Action', 'Verify') + $extra)
+            if ($v.Text -notmatch 'FAIL  the account exists' -or $v.Text -notmatch 'RESULT:' -or $v.Code -ne 1) { Write-Output "::error::Verify did not report on an empty machine (exit $($v.Code))"; exit 1 }
+            foreach ($m in $mustNot) { if ($v.Text.IndexOf($m, [System.StringComparison]::Ordinal) -ge 0) { Write-Output "::error::Verify: unexpected text: $m"; exit 1 } }
+          }
+          Assert-Untouched 'after Verify'
           exit 0
       # Card A03b slice 2: the ten containment cases of card G05 through the PRODUCT backend (windowsNativeBackend, the launcher built above), run by the node case runner inside the container.
       # The report is redacted (names, paths and SIDs replaced) and uploaded with the rest. Nothing here is a release gate: a hosted run does not prove the service-account, non-administrator or Home items.

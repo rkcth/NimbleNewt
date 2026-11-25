@@ -86,6 +86,26 @@ $SynchronizeBit = 0x100000   # .NET adds SYNCHRONIZE to every allow entry it wri
 
 function Say([string] $text) { Write-Host $text }
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+# WHAT-IF SAFETY (found by the first real run on Windows PowerShell 5.1, elevated, StrictMode 3: with -WhatIf the script's own file-hash cmdlet printed 'What if: Performing the operation
+# "Retrieve the value for property 'ProviderPath'"' and returned nothing, and '.Hash' then failed). -WhatIf sets $WhatIfPreference for EVERYTHING the script calls, including the cmdlets
+# written in PowerShell inside Windows PowerShell 5.1, which can honour it in their own internals. A read must never be silenced, so every read-only cmdlet whose result the script
+# looks at runs through Invoke-Read (it sets $WhatIfPreference to $false inside its own scope only), and the file hash is computed with .NET alone (Get-Sha256Hex). Everything that
+# changes the machine stays inside $PSCmdlet.ShouldProcess, so -WhatIf still changes nothing.
+function Invoke-Read([scriptblock] $Block) { $WhatIfPreference = $false; & $Block }
+# The SHA-256 of a file as upper-case hex, with .NET only (no cmdlet can honour -WhatIf). A relative path is resolved against the PowerShell location, as the cmdlets would.
+function Get-Sha256Hex([string] $Path) {
+  $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $stream = $null
+  try {
+    $stream = [System.IO.File]::OpenRead($full)
+    $bytes = $sha.ComputeHash($stream)
+    return (($bytes | ForEach-Object { $_.ToString('X2') }) -join '')
+  } finally {
+    if ($null -ne $stream) { $stream.Dispose() }
+    $sha.Dispose()
+  }
+}
 function Assert-Admin { if (-not (Test-Admin)) { throw "$Action needs an elevated (administrator) PowerShell. Nothing was changed." } }
 # The attributes of the item itself, or $null when nothing has that name. A link or junction is NOT followed (GetFileAttributes reports the link), so a dangling link counts as
 # present; Test-Path and Get-Item follow links on Windows PowerShell 5.1 and would call it absent. Any other failure (access denied, a bad name) is thrown: fail closed.
@@ -219,7 +239,7 @@ function Assert-SafeItem([string] $path, [bool] $folder) {
   # right to change its list).
   if (Test-Reparse $path) { throw "$path is a link or junction; remove it (as an administrator) and run again. Nothing more was changed." }
   if ((Test-FolderItem $path) -ne $folder) { throw "$path exists but is not a $(if ($folder) { 'folder' } else { 'file' }). Nothing more was changed." }
-  $acl = Get-Acl -LiteralPath $path
+  $acl = Invoke-Read { Get-Acl -LiteralPath $path }
   $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
   if ($TrustedOwners -notcontains $owner.Value) { throw "$path already exists and is owned by $($owner.Value), not by an administrator. Remove it or choose another -DataDir/-InstallDir. Nothing more was changed." }
   # A folder this script made never inherits its parent's list. One that does was made by someone else (for example an administrator by hand in %ProgramData%), and while it carried the
@@ -248,7 +268,7 @@ function Remove-TreeNoFollow([string] $path) {
     return
   }
   if ($isFolder) {
-    foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) { Remove-TreeNoFollow $child.FullName }
+    foreach ($child in @(Invoke-Read { Get-ChildItem -LiteralPath $path -Force })) { Remove-TreeNoFollow $child.FullName }
     [System.IO.File]::SetAttributes($path, [IO.FileAttributes]::Directory)
     [System.IO.Directory]::Delete($path, $false)
   } else {
@@ -262,7 +282,7 @@ function Invoke-Verify {
   $script:bad = 0
   function Check([bool] $ok, [string] $what) { if ($ok) { Say "  PASS  $what" } else { Say "  FAIL  $what"; $script:bad++ } }
   Say "NimbleNewt native launcher: what is set on this machine ($(Get-Date -Format s))"
-  $user = Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue
+  $user = Invoke-Read { Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue }
   Say "Account '$AccountName':"
   Check ($null -ne $user) 'the account exists'
   $sid = $null
@@ -270,9 +290,9 @@ function Invoke-Verify {
     $sid = $user.SID
     Say "  sid $($user.SID.Value); enabled $($user.Enabled); password never expires $($user.PasswordNeverExpires); description: $($user.Description)"
     Check ($user.Description -eq $AccountMarker) 'it is the account this script made (marker in its description)'
-    $groups = @(Get-LocalGroup | Where-Object { (Get-LocalGroupMember -Group $_ -ErrorAction SilentlyContinue | Where-Object { $_.SID -eq $user.SID }) } | ForEach-Object { $_.Name })
+    $groups = @(Invoke-Read { Get-LocalGroup | Where-Object { (Get-LocalGroupMember -Group $_ -ErrorAction SilentlyContinue | Where-Object { $_.SID -eq $user.SID }) } | ForEach-Object { $_.Name } })
     Say "  member of: $($groups -join ', ')"
-    Check ($groups.Count -eq 1 -and (Get-LocalGroup -SID $SidUsers).Name -eq $groups[0]) 'it is a member of Users only (not Administrators, not any other group)'
+    Check ($groups.Count -eq 1 -and (Invoke-Read { Get-LocalGroup -SID $SidUsers }).Name -eq $groups[0]) 'it is a member of Users only (not Administrators, not any other group)'
     if (Test-Admin) {
       Initialize-NnLsa
       $rights = [NnLsa]::List($user.SID.Value)
@@ -285,8 +305,8 @@ function Invoke-Verify {
   Say 'Files and access lists (owner, inheritance, then each entry with its reason):'
   $plan = if ($null -ne $sid) { New-AclPlan $sid } else { @() }
   foreach ($item in $plan) {
-    if (-not (Test-Path -LiteralPath $item.Path)) { Check $false "$($item.Path) exists"; continue }
-    try { $acl = Get-Acl -LiteralPath $item.Path } catch { Check $false "$($item.Path): its access list is readable (run Verify elevated: only administrators may read it)"; continue }
+    if (-not (Invoke-Read { Test-Path -LiteralPath $item.Path })) { Check $false "$($item.Path) exists"; continue }
+    try { $acl = Invoke-Read { Get-Acl -LiteralPath $item.Path } } catch { Check $false "$($item.Path): its access list is readable (run Verify elevated: only administrators may read it)"; continue }
     Say "  $($item.Path)   owner $($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value)   inherited entries: $(-not $acl.AreAccessRulesProtected)"
     foreach ($a in $acl.Access) { Say "      $($a.AccessControlType) $($a.IdentityReference.Value) $($a.FileSystemRights)" }
     foreach ($r in $item.Rules) { Say "      expected: $($r.Who.Value) $($r.Rights) ($($r.Scope)): $($r.Why)" }
@@ -298,18 +318,18 @@ function Invoke-Verify {
     Check ((@($expected | Where-Object { $actual -notcontains $_ }).Count -eq 0) -and (@($actual | Where-Object { $expected -notcontains $_ }).Count -eq 0)) "$($item.Path): the entry list is exactly the expected one"
   }
   $exe = Join-Path $InstallDir $ExeName
-  if (Test-Path -LiteralPath $exe) {
-    $sig = Get-AuthenticodeSignature -LiteralPath $exe
-    Say "Launcher: $exe  sha256 $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)  signature $($sig.Status)"
+  if (Invoke-Read { Test-Path -LiteralPath $exe }) {
+    $sig = Invoke-Read { Get-AuthenticodeSignature -LiteralPath $exe }
+    Say "Launcher: $exe  sha256 $(Get-Sha256Hex $exe)  signature $($sig.Status)"
     Check (-not (Test-Reparse $exe)) 'the launcher is a plain file, not a link'
   } else { Check $false "$exe exists" }
-  if (Test-Path -LiteralPath $ManifestPath) { Say "Manifest ($ManifestPath):"; Get-Content -LiteralPath $ManifestPath | ForEach-Object { Say "  $_" } } else { Check $false 'the install manifest exists' }
-  if (Test-Path -LiteralPath $EnvFile) { Say "Worker environment file ($EnvFile; no secret in it):"; Get-Content -LiteralPath $EnvFile | ForEach-Object { Say "  $_" } } else { Check $false 'worker.env exists' }
+  if (Invoke-Read { Test-Path -LiteralPath $ManifestPath }) { Say "Manifest ($ManifestPath):"; Invoke-Read { Get-Content -LiteralPath $ManifestPath } | ForEach-Object { Say "  $_" } } else { Check $false 'the install manifest exists' }
+  if (Invoke-Read { Test-Path -LiteralPath $EnvFile }) { Say "Worker environment file ($EnvFile; no secret in it):"; Invoke-Read { Get-Content -LiteralPath $EnvFile } | ForEach-Object { Say "  $_" } } else { Check $false 'worker.env exists' }
   Say "How the service gets these: start the worker with 'node --env-file=$EnvFile ...' (the worker's task unit names this file); with the default folders the worker finds the same values without it."
   # The worker's scheduled task is registered by an administrator, never by this script. If it exists, report (read only) who it runs as, how it logs on and what starts it; if it does not, say so (not a failure).
   Say "Worker task '$WorkerTaskName' (registered by an administrator; this script only reads it):"
   # Only the root folder ('\'): the unit's steps register there, and -TaskName alone would also return tasks of the same name in other folders.
-  $task = @(Get-ScheduledTask -TaskPath '\' -TaskName $WorkerTaskName -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ })
+  $task = @(Invoke-Read { Get-ScheduledTask -TaskPath '\' -TaskName $WorkerTaskName -ErrorAction SilentlyContinue } | Where-Object { $null -ne $_ })
   if ($task.Count -eq 0) { Say '  not registered (see README.md, "The worker task"); nothing to check' }
   else {
     $task = $task[0]
@@ -344,12 +364,13 @@ function New-RandomSecureString {
 }
 function Invoke-Install {
   Assert-Admin
-  if (-not $LauncherPath -or -not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) { throw '-LauncherPath must name the built nn-launcher.exe.' }
+  if (-not $LauncherPath -or -not (Invoke-Read { Test-Path -LiteralPath $LauncherPath -PathType Leaf })) { throw '-LauncherPath must name the built nn-launcher.exe.' }
   if (-not $ExpectedSha256) { throw '-ExpectedSha256 is required: the hash recorded by the release (native/nn-launcher/RELEASE.md).' }
+  $LauncherPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LauncherPath)   # one full path for every .NET call below (they resolve against the process folder, not the PowerShell location)
   if (Test-Reparse $LauncherPath) { throw '-LauncherPath is a link; name the file itself.' }
-  $hash = (Get-FileHash -LiteralPath $LauncherPath -Algorithm SHA256).Hash
+  $hash = Get-Sha256Hex $LauncherPath
   if ($hash -ne $ExpectedSha256.ToUpperInvariant()) { throw "The file's SHA-256 is $hash, not the expected $ExpectedSha256. Nothing was changed." }
-  $sig = Get-AuthenticodeSignature -LiteralPath $LauncherPath
+  $sig = Invoke-Read { Get-AuthenticodeSignature -LiteralPath $LauncherPath }
   if ($sig.Status -ne 'Valid') {
     if (-not $AllowUnsigned) { throw "The launcher's Authenticode signature is '$($sig.Status)'. A release is signed. For a build of your own or from the hosted CI, add -AllowUnsigned (and understand what you are installing). Nothing was changed." }
     Say "WARNING: installing an UNSIGNED launcher (-AllowUnsigned): its identity rests on the SHA-256 you gave."
@@ -357,7 +378,7 @@ function Invoke-Install {
   # Before any change: nothing under our names is a link or belongs to someone else (each is checked again right before it is written).
   foreach ($d in @($InstallDir, $DataDir, $ControlDir)) { Assert-SafeItem $d $true }
   foreach ($f in @((Join-Path $InstallDir $ExeName), $EnvFile, $ManifestPath)) { Assert-SafeItem $f $false }
-  $existing = Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue
+  $existing = Invoke-Read { Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue }
   if ($null -ne $existing -and $existing.Description -ne $AccountMarker) { throw "A user named '$AccountName' exists that this script did not make. Choose another -AccountName. Nothing was changed." }
 
   # 1. The account.
@@ -368,7 +389,7 @@ function Invoke-Install {
       try { Add-LocalGroupMember -SID $SidUsers -Member $AccountName } catch [Microsoft.PowerShell.Commands.MemberExistsException] { }
     }
   }
-  $sid = if ($WhatIfPreference -and $null -eq $existing) { New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-21-0-0-0-1000' } else { (Get-LocalUser -Name $AccountName).SID }
+  $sid = if ($WhatIfPreference -and $null -eq $existing) { New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-21-0-0-0-1000' } else { (Invoke-Read { Get-LocalUser -Name $AccountName }).SID }
   # 2. The account rights (only these; Verify lists them).
   if ($PSCmdlet.ShouldProcess($AccountName, "grant $($RightsGranted -join ', ') and deny $($RightsDenied -join ', ')")) {
     Initialize-NnLsa
@@ -386,9 +407,9 @@ function Invoke-Install {
   $target = Join-Path $InstallDir $ExeName
   if ($PSCmdlet.ShouldProcess($target, 'place nn-launcher.exe')) {
     Assert-SafeItem $target $false
-    if (-not (Test-Path -LiteralPath $target) -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash) { Copy-Item -LiteralPath $LauncherPath -Destination $target -Force }
+    if (-not (Invoke-Read { Test-Path -LiteralPath $target }) -or (Get-Sha256Hex $target) -ne $hash) { Copy-Item -LiteralPath $LauncherPath -Destination $target -Force }
     # the source may have changed after it was hashed: the placed file is what counts, and a wrong one is not left in place
-    if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash) { Remove-Item -LiteralPath $target -Force; throw 'The placed launcher did not match the expected hash and was removed.' }
+    if ((Get-Sha256Hex $target) -ne $hash) { Remove-Item -LiteralPath $target -Force; throw 'The placed launcher did not match the expected hash and was removed.' }
   }
   # 5. worker.env and the manifest: paths and names only. No password, token or key exists anywhere in this script, so none can be written.
   if ($PSCmdlet.ShouldProcess($EnvFile, 'write the four NIMBLENEWT_WIN_* names')) {
@@ -409,9 +430,9 @@ function Invoke-Uninstall {
   # The manifest sits in the data folder, which only administrators can write once installed; it is still only allowed to CONFIRM what this run would remove anyway: the folders of this
   # run (-InstallDir/-DataDir or their defaults) and the account it made. It can never aim a removal at another folder or another account.
   Assert-SafeItem $DataDir $true
-  if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "No manifest at $($ManifestPath): this script did not make what is here, so it removes nothing. Nothing was changed." }
+  if (-not (Invoke-Read { Test-Path -LiteralPath $ManifestPath })) { throw "No manifest at $($ManifestPath): this script did not make what is here, so it removes nothing. Nothing was changed." }
   Assert-SafeItem $ManifestPath $false
-  $m = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+  $m = Invoke-Read { Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json }
   if ($m.schema -ne 'nimblenewt.native-install/1') { throw 'The manifest is not one this script wrote. Nothing was changed.' }
   $launcher = Join-Path $InstallDir $ExeName
   foreach ($pair in @(@($m.installDir, $InstallDir), @($m.dataDir, $DataDir), @($m.controlDir, $ControlDir), @($m.launcher, $launcher))) {
@@ -419,9 +440,9 @@ function Invoke-Uninstall {
   }
   foreach ($d in @($InstallDir, $ControlDir)) { Assert-SafeItem $d $true }
   foreach ($f in @($launcher, $EnvFile)) { Assert-SafeItem $f $false }
-  $running = Get-Process -Name 'nn-launcher' -ErrorAction SilentlyContinue
+  $running = Invoke-Read { Get-Process -Name 'nn-launcher' -ErrorAction SilentlyContinue }
   if ($running) { throw 'nn-launcher.exe is running (a job is in progress). Stop the worker first. Nothing was changed.' }
-  $user = Get-LocalUser -Name $m.account -ErrorAction SilentlyContinue
+  $user = Invoke-Read { Get-LocalUser -Name $m.account -ErrorAction SilentlyContinue }
   if ($null -ne $user -and ($user.Description -ne $AccountMarker -or $user.SID.Value -ne $m.accountSid)) { throw "The user '$($m.account)' is not the one this script made. Nothing was changed." }
 
   # 1. The account first (the manifest stays until the end, so a rerun can finish an interrupted removal).
@@ -442,7 +463,7 @@ function Invoke-Uninstall {
     foreach ($f in @($EnvFile, $launcher, $ManifestPath)) { if (Test-Present $f) { Remove-Item -LiteralPath $f -Force } }
     foreach ($d in @($DataDir, $InstallDir)) {
       if (-not (Test-Present $d)) { continue }
-      if (@(Get-ChildItem -LiteralPath $d -Force).Count -eq 0) { [System.IO.Directory]::Delete($d, $false) } else { Say "Left $d in place: it holds files this script did not make." }
+      if (@(Invoke-Read { Get-ChildItem -LiteralPath $d -Force }).Count -eq 0) { [System.IO.Directory]::Delete($d, $false) } else { Say "Left $d in place: it holds files this script did not make." }
     }
   }
   Say 'Uninstall finished. Run -Action Verify to see that nothing is left (it will say the account and folders are missing).'

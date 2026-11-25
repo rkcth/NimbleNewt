@@ -65,6 +65,16 @@ The generator accepts only an account name the installer's `-AccountName` accept
 
 UNPROVEN: whether an S4U task of this non-administrator account can create the AppContainer profile and run the launcher with its private window station. See "The non-administrator proof" in `docs/nimblenewt/windows-isolation-plan.md` section 12.3: what to run on Rob's own hardware after an explicit go-ahead, and what each outcome means.
 
+## -WhatIf and the read-only cmdlets (found by the first real run)
+
+The owner's first real run (Windows PowerShell 5.1, elevated, StrictMode 3) of `-Action Install -LauncherPath .\nn-launcher.exe -ExpectedSha256 <hash> -AllowUnsigned -WhatIf` printed `What if: Performing the operation "Retrieve the value for property 'ProviderPath'"` and then stopped with `The property 'Hash' cannot be found on this object` (PropertyNotFoundStrict). The script supports `-WhatIf`, which sets `$WhatIfPreference` for everything it calls. Windows PowerShell 5.1's file-hash cmdlet is written in PowerShell and its internals ask the same question, so under `-WhatIf` it returned nothing. What changed:
+
+- No file-hash cmdlet is used. `Get-Sha256Hex` computes the SHA-256 with .NET only (`File.OpenRead`, `SHA256.ComputeHash`, both disposed in `finally`) and returns upper-case hex, as before. A relative path is resolved against the PowerShell location.
+- Every read-only cmdlet whose result the script looks at (`Get-LocalUser`, `Get-LocalGroup`, `Get-LocalGroupMember`, `Get-Acl`, `Get-AuthenticodeSignature`, `Get-ScheduledTask`, `Get-Content`, `Get-ChildItem`, `Get-Process`, `Test-Path`, `ConvertFrom-Json`) runs inside `Invoke-Read { ... }`, which sets `$WhatIfPreference = $false` in its own scope only. This is deliberately conservative: most of them do not ask the question, but the cost of being wrong is a silent empty result. Everything that changes the machine is still inside `$PSCmdlet.ShouldProcess`, so `-WhatIf` still changes nothing.
+- The hosted workflow step now runs the same command under Windows PowerShell 5.1 (relative `-LauncherPath`) and PowerShell 7, and Verify under 5.1 with and without `-WhatIf`; it fails on error text, a missing dry-run line, a non-zero exit, or an account or folder left behind.
+
+Only a Windows run can confirm that the repair works; Linux tests check the shape (no such cmdlet, the helper, the wrapping, the workflow).
+
 ## What is NOT proven (stays listed in the implementation notes)
 
 - Nothing here has run on Windows. The script's syntax is parsed by PowerShell on the hosted runner (and its brackets and strings are checked on Linux); the LSA calls, the folder creation with its access list, `Set-Acl` on `Program Files`, `New-LocalUser`, the read-back comparison of `Verify` after a real install, the link-safe removal and the profile removal are untested on any machine.
