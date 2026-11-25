@@ -33,7 +33,8 @@ if (shardFlag !== undefined) {
   console.log(`SHARD ${m[1]}/${m[2]}: ${files.length} of ${all.length} test files`);
 }
 if (fast && notSlow !== all.length) console.log(`FAST TIER: ${all.length - notSlow} slow test file(s) left out of ${all.length}; run \`npm test\` for the full suite`);
-if (files.length === 0 && shardFlag === undefined) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
+// A shard may be empty, but a package with no compiled tests at all is a build fault, sharded or not: otherwise every slice would pass with nothing run.
+if (all.length === 0 || (files.length === 0 && shardFlag === undefined)) { console.error("no compiled test files found in dist/; did the build run?"); process.exit(1); }
 if (files.length === 0) { console.log("this shard has no test files in this package"); process.exit(0); }
 const guard = pathToFileURL(fileURLToPath(new URL("./offline-guard.mjs", import.meta.url))).href;
 process.exit(spawnSync(process.execPath, ["--import", guard, "--test", `--test-timeout=${timeoutMs}`, ...files], { stdio: "inherit" }).status ?? 1);
