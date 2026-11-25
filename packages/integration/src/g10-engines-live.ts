@@ -254,21 +254,26 @@ export async function idleRun(env: EngineEnv, opts: { gapsS: readonly number[]; 
 
 // ---- E: eviction by other conversations (the cliff) -----------------------------------------------------------------------------------------------------------------------------------------
 /**
- * One head is read, then `others` distinct heads of the same size are read in groups; after each group the first head is asked again. `cliffAt` is the first group size after which less than
- * half of it came from cache (undefined: not reached within `levels`). A probe that misses re-reads the head, so later probes ask about a re-warmed head; the evidence says so per step.
+ * One head is read, then distinct heads of the same size are read until `levels[i]` others have been read in total; after each level the first head is asked again. `cliffAtOtherHeads` is the
+ * first cumulative level at which less than half of it came from cache (undefined: not reached within `levels`); the ladder stops there. Every probe, hit or miss, reads the head again, so what
+ * pushed it out is the number of OTHER heads read since its last use (the previous probe): `cliffOtherHeadsSinceLastUse` (level minus the previous level), and `lastKeptOtherHeadsSinceLastUse` for
+ * the last probe that still hit.
  */
 export async function evictionRun(env: EngineEnv, opts: { lines: number; levels: readonly number[] }): Promise<PhaseResult> {
   const steps: Step[] = []; const base = makeHead(opts.lines);
   const first = await send(env, "eviction", "warm-first-head", base, 0); steps.push(first.step);
   let inserted = 0; let cliffAt: number | undefined; let prompt = first.step.promptTokens;
+  let lastUsedAt = 0; let cliffSince: number | undefined; let keptSince: number | undefined;
   for (const level of opts.levels) {
     while (inserted < level) { inserted += 1; const r = await send(env, "eviction", `other-head-${inserted}`, makeHead(opts.lines), 0, { noMetrics: true }); steps.push(r.step); prompt = Math.max(prompt, r.step.promptTokens); }
     const probe = await send(env, "eviction", `first-head-after-${level}-others`, base, 1); steps.push(probe.step);
-    if (reuse(probe.step) < REUSED) { cliffAt = level; break; }
+    const since = inserted - lastUsedAt; lastUsedAt = inserted;
+    if (reuse(probe.step) < REUSED) { cliffAt = level; cliffSince = since; break; }
+    keptSince = since;
   }
   const probes = steps.filter((s) => s.step.startsWith("first-head-after-"));
   const checks = { firstHeadWasWarm: probes.length > 0 && probes[0] !== undefined && (reuse(probes[0]) >= REUSED || cliffAt === opts.levels[0]), allAnswersCorrect: steps.every((s) => s.correct) };
-  return { steps, checks, fixtures: [], notes: { levels: [...opts.levels], cliffReached: cliffAt !== undefined, ...(cliffAt === undefined ? {} : { cliffAtOtherHeads: cliffAt }), tokensPerHeadAbout: prompt, otherTokensInsertedAtEnd: inserted * prompt } };
+  return { steps, checks, fixtures: [], notes: { levels: [...opts.levels], cliffReached: cliffAt !== undefined, ...(cliffAt === undefined ? {} : { cliffAtOtherHeads: cliffAt, cliffOtherHeadsSinceLastUse: cliffSince }), ...(keptSince === undefined ? {} : { lastKeptOtherHeadsSinceLastUse: keptSince }), tokensPerHeadAbout: prompt, otherTokensInsertedAtEnd: inserted * prompt } };
 }
 
 // ---- C: concurrency ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -335,10 +340,11 @@ export async function extrasRun(env: EngineEnv, opts: { lines: number; saveFile?
     } else notes["slotSaveRestore"] = { saveStatus: saved, outcome: "not available (the server needs --slot-save-path)" };
   } else {
     // vLLM: cache_salt partitions the prefix cache (isolation): the same head under another salt, and with no salt, must be computed again.
-    const salted = makeHead(opts.lines);
-    await add("salt-a-warm", salted, 0, { cache_salt: "nn-a" });
-    const sameSalt = await add("salt-a-again", salted, 1, { cache_salt: "nn-a" });
-    const otherSalt = await add("salt-b-same-head", salted, 0, { cache_salt: "nn-b" });
+    // The salts are new for every run, so no earlier run's blocks can be found under them.
+    const salted = makeHead(opts.lines); const saltA = `nn-a-${randomBytes(6).toString("hex")}`; const saltB = `nn-b-${randomBytes(6).toString("hex")}`;
+    await add("salt-a-warm", salted, 0, { cache_salt: saltA });
+    const sameSalt = await add("salt-a-again", salted, 1, { cache_salt: saltA });
+    const otherSalt = await add("salt-b-same-head", salted, 0, { cache_salt: saltB });
     const noSalt = await add("no-salt-same-head", salted, 1);
     if (sameSalt.status === 200 && otherSalt.status === 200) {
       checks["sameSaltReused"] = reuse(sameSalt) >= REUSED;
