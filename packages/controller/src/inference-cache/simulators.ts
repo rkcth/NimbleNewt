@@ -13,6 +13,9 @@ export const refuse = (status: number, message: string): HttpResponse => ({ stat
  * llama-server: one prompt per slot; `id_slot` picks the slot, otherwise slot 0; cache_prompt reuses the longest common prefix; slot files save and restore.
  * With `hostCache: true` (the server's default `--cache-ram`) a prompt that leaves a slot is also kept beside the slots, a slot erase does not touch those, and a call with `cache_prompt: true` reuses the longest
  * prefix of the slot's prompt or of any kept prompt (the behaviour measured in G10, `g10-llamacpp-run1.json`: 6,469 of 6,470 tokens reused after an erase); `cache_prompt: false` reuses nothing. `hostCache: false` is `--cache-ram 0`.
+ * The host model is deliberately **leakier than measured**: it serves any kept prompt to any slot, while run 1's `slot1-same-head` (an empty slot 1, the head kept from slot 0) reused only 4 tokens; the rule
+ * by which the real server chooses to load a kept prompt was not measured. A test that the adapter leaks nothing under this model therefore holds under the measured behaviour too, not the other way round
+ * (`adapter.test.ts`, "G10 replay", checks the model against every committed extras row).
  */
 export class LlamaSim implements Transport {
   readonly slots: string[][];

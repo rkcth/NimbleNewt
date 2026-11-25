@@ -123,8 +123,11 @@ export type CacheOutcome =
  * `same-project`: the slot's last holder was this project, so its own prompt is reused. `erase`: the slot was cleared and the call reused. `erase-host-cache-attested-off`: cleared and reused, on a server the endpoint's
  * configuration attests runs with `--cache-ram 0`. `cache-prompt-off-host-cache-not-attested`: the call crossed a project boundary on a server not attested to keep no host prompt cache, so it was sent with `cache_prompt: false`.
  * `cache-prompt-off-configured`: the same by the adapter's `freshSlot: "off"` setting. `cache-prompt-off-erase-failed`: the clear was refused, so reuse was turned off.
+ * Calls that reach no named slot: `cache-prompt-off-no-slot` (a slotted server, a call sent without `id_slot`: none given, outside the configured slots, or the plain retry after a refusal; the server places it, so every
+ * holder is forgotten), `cache-prompt-off-isolation-required` (the project requires isolation: no cache settings and no slot), `reuse-slots-not-configured` (llama.cpp without `slots`: the server places the call by
+ * similarity with reuse on and the adapter keeps no holder, so there is no hand-over protection at all).
  */
-export type IsolationMode = "same-project" | "erase" | "erase-host-cache-attested-off" | "cache-prompt-off-host-cache-not-attested" | "cache-prompt-off-configured" | "cache-prompt-off-erase-failed";
+export type IsolationMode = "same-project" | "erase" | "erase-host-cache-attested-off" | "cache-prompt-off-host-cache-not-attested" | "cache-prompt-off-configured" | "cache-prompt-off-erase-failed" | "cache-prompt-off-no-slot" | "cache-prompt-off-isolation-required" | "reuse-slots-not-configured";
 
 export interface CallResult {
   readonly status: number;
@@ -196,12 +199,24 @@ export class CacheAdapter {
   async call(request: WireRequest, context: CacheContext, expectedCachedTokens = 0): Promise<CallResult> {
     if (!Number.isSafeInteger(expectedCachedTokens) || expectedCachedTokens < 0) throw new DomainError("invalid_command", "expectedCachedTokens: must be a whole number from 0", { field: "expectedCachedTokens" });
     if (!this.#profile.slotted) return this.#call(request, context, expectedCachedTokens);
-    // A plain call names no slot whatever the context says (its body has no id_slot), so it is placed by the server and takes the whole server's turn like any call without a slot.
-    const slot = context.plain === true ? undefined : context.slot;
+    const slot = this.#namedSlot(context);
     // A call into a slot takes that slot's turn; a call that names no slot (it may land anywhere) takes the whole server's turn.
-    return slot !== undefined && Number.isSafeInteger(slot) && slot >= 0
+    return slot !== undefined
       ? this.#state.slot(slot, () => this.#call(request, context, expectedCachedTokens))
       : this.#state.exclusive(() => this.#call(request, context, expectedCachedTokens));
+  }
+
+  /**
+   * The slot the request will really name (`id_slot`), or undefined when it is sent without one and the server places it: a plain call, a project that requires isolation on a backend that cannot keep projects
+   * apart (its call carries no cache settings), and a slot that is not a whole number inside the configured count. Such a call must never be recorded as the named slot's holder.
+   */
+  #namedSlot(context: CacheContext): number | undefined {
+    if (context.plain === true) return undefined;
+    if (context.isolationRequired === true && this.#profile.capabilities.isolation === "none") return undefined;
+    const s = context.slot;
+    if (s === undefined || !Number.isSafeInteger(s) || s < 0) return undefined;
+    if (this.#profile.slotCount !== undefined && s >= this.#profile.slotCount) return undefined;
+    return s;
   }
 
   async #call(request: WireRequest, context: CacheContext, expectedCachedTokens: number): Promise<CallResult> {
@@ -210,11 +225,14 @@ export class CacheAdapter {
     let isolation: IsolationMode | undefined;
     const epoch = this.#state.epoch;
     const slotted = this.#profile.slotted;
-    const slot = context.plain !== true && context.slot !== undefined && Number.isSafeInteger(context.slot) && context.slot >= 0 ? context.slot : undefined;
+    const slot = slotted ? this.#namedSlot(context) : undefined;
+    const isolationRequired = context.isolationRequired === true && this.#profile.capabilities.isolation === "none";
+    if (!slotted && this.#profile.eraseIsolation !== undefined) isolation = isolationRequired ? "cache-prompt-off-isolation-required" : "reuse-slots-not-configured";
     if (slotted) {
       if (slot === undefined) {
         // The server will place this call by prompt similarity, possibly in another project's slot, and the slot it lands in now holds this prompt: nothing is known about any slot afterwards.
         this.#state.forget();
+        isolation = isolationRequired ? "cache-prompt-off-isolation-required" : "cache-prompt-off-no-slot";
       } else if (this.#state.holder.get(slot) !== context.scopeKey) {
         // The slot's last holder was another project, or is unknown (a start, a release, a call without a slot): its KV may still be there.
         let cleared = false;
@@ -244,7 +262,7 @@ export class CacheAdapter {
       fallback = { reason: failureMessage(sent.body) || "the endpoint refused a cache setting", refusedStatus: sent.status, removed: first.applied };
       sent = again; used = plain;
       // The plain retry names no slot, so the server placed it wherever it liked: no slot's holder is known any more.
-      if (this.#profile.slotted) { this.#state.forget(); placed = false; }
+      if (this.#profile.slotted) { this.#state.forget(); placed = false; isolation = "cache-prompt-off-no-slot"; }
     }
     if (slotted && slot !== undefined && placed && sent.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, context.scopeKey);
     const hit = sent.status < 400 ? this.#profile.read(sent.body) : this.#profile.read(undefined);
@@ -262,14 +280,18 @@ export class CacheAdapter {
     if (marker === undefined || marker.kind !== "slot-file" || marker.handle === undefined) throw new DomainError("invalid_command", "marker: save and restore need a resolved slot-file marker", { field: "marker" });
     const r = this.#profile.slotRequest(action, slot, marker.handle);
     // The holder is recorded inside the slot's turn (and only if nothing wiped what is known meanwhile): after a restore the slot holds this project's state, the marker having been resolved for it.
-    const res = await this.#state.slot(slot, async () => {
+    const res = await this.#state.slot(slot, async (): Promise<HttpResponse | undefined> => {
+      // A save writes whatever the slot holds into a file under this project's marker, and a later restore makes the project that slot's holder (it then reuses with cache_prompt true): so only the slot's
+      // recorded holder may save it. After a start, a release or a call without a slot the holder is unknown and the save is refused (the project's next call into the slot makes it the holder again).
+      if (action === "save" && this.#profile.slotted && this.#state.holder.get(slot) !== scopeKey) return undefined;
       const epoch = this.#state.epoch;
       const out = await this.#send(r.body, {}, r.path, r.method);
       if (action === "restore" && this.#profile.slotted && out.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, scopeKey);
       return out;
     });
+    if (res === undefined) return { ok: false, reason: "not saved: this project is not the slot's recorded holder (the slot may hold another project's prompt)" };
     if (res.status >= 400) return { ok: false, reason: `status ${res.status}: ${failureMessage(res.body) || "refused"}` };
-    const b = (res.body !== null && typeof res.body === "object" ? res.body : {}) as Record<string, unknown>;
+    const b =(res.body !== null && typeof res.body === "object" ? res.body : {}) as Record<string, unknown>;
     const n = action === "save" ? b["n_saved"] : b["n_restored"];
     const t = (b["timings"] !== null && typeof b["timings"] === "object" ? b["timings"] : {}) as Record<string, unknown>;
     const ms = action === "save" ? t["save_ms"] : t["restore_ms"];

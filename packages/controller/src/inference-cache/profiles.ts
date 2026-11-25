@@ -94,7 +94,7 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
     kind: "llama-cpp", label: "llama.cpp (llama-server)", model, wire: "openai-chat", capabilities, tuning, minPrefixTokens: 1, defaultLifetimeMs: 3_600_000,
     basis: "llama.cpp tools/server README and source as audited in backend-protocol-audit.md (2026-10-16); not measured here",
     hitFields: ["timings.cache_n", "timings.prompt_n"],
-    caveats: ["Slot save and restore wait for an idle slot; they cannot snapshot a running decode.", "Slot files are specific to the model and build that wrote them.", "A short unrelated request may take a slot another agent's prompt was kept in; leave a spare slot for one-shot calls.", o.hostPromptCacheOff === true ? "Isolation between projects rests on the attestation that this server runs with --cache-ram 0 (hostPromptCacheOff); a slot is erased before another project uses it and the call then reuses only its own prompt. The setting is not detectable from the server, and the evidence is one run on one build." : "The server may keep a host prompt cache (--cache-ram, on by default) that a slot erase does not clear, so a call that crosses a project boundary is sent with cache_prompt false (no reuse). Run the server with --cache-ram 0 and set hostPromptCacheOff to keep reuse after an erase."],
+    caveats: ["Slot save and restore wait for an idle slot; they cannot snapshot a running decode.", "Slot files are specific to the model and build that wrote them.", "A short unrelated request may take a slot another agent's prompt was kept in; leave a spare slot for one-shot calls.", o.hostPromptCacheOff === true ? "Isolation between projects rests on the attestation that this server runs with --cache-ram 0 (hostPromptCacheOff); a slot is erased before another project uses it and the call then reuses only its own prompt. The setting is not detectable from the server, and the evidence is one run on one build." : "The server may keep a host prompt cache (--cache-ram, on by default) that a slot erase does not clear, so a call that crosses a project boundary is sent with cache_prompt false (no reuse). Run the server with --cache-ram 0 and set hostPromptCacheOff to keep reuse after an erase.", ...(o.hostPromptCacheOff === true ? [] : ["Not closed without --cache-ram 0: a later call of the same project is sent with cache_prompt true (llama-server has no request field that turns off only the host cache), and the server may then serve it a prompt another project left in the host cache when that prompt matches the new one further than the slot's own (identical tokens only: the other project's text never reaches this call, but the speed-up shows that it was sent). A project that requires isolation is never sent cache_prompt true, but other projects' later calls can still be sped up by its prompts. Not measured; only --cache-ram 0 (with hostPromptCacheOff) or a server of its own removes it."])],
     neverCall: [],
     prepare(request, ctx): Prepared {
       const body = copy(request); const applied: string[] = []; const skipped: string[] = [];
@@ -111,6 +111,7 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
     read: (response) => readTimings(response),
     refusedCacheSetting: refusedBy(/\b(id_slot|cache_prompt)\b/),
     slotted: o.slots !== undefined,
+    ...(o.slots === undefined ? {} : { slotCount: o.slots }),
     eraseIsolation: o.hostPromptCacheOff === true ? "attested" : "unattested",
     slotRequest: (action, slot, filename) => {
       if (o.slotSave !== true) throw new DomainError("invalid_command", "slot save and restore are not configured for this endpoint", { field: "slotSave" });
@@ -483,7 +484,7 @@ export function profileFor(config: EndpointConfig): CacheProfile {
       if (inner.kind === "llama-cpp") { body["cache_prompt"] = false; applied.push("cache_prompt=false"); }
       // Strata cannot switch reuse off per request; the most we can do is not leave checkpoints or a pin of this project's prompt behind. Only a route of its own isolates on Strata.
       if (inner.kind === "strata") { body["strata_checkpoint"] = false; applied.push("strata_checkpoint=false"); }
-      return { body, headers: plain.headers, applied, skipped: [...plain.skipped, `no cache settings: this project requires isolation and ${inner.label} cannot keep projects apart${inner.kind === "llama-cpp" ? "" : " (its own cache may still run; only a route of its own isolates)"}`], expects: "no" };
+      return { body, headers: plain.headers, applied, skipped: [...plain.skipped, `no cache settings: this project requires isolation and ${inner.label} cannot keep projects apart${inner.kind === "llama-cpp" ? (inner.eraseIsolation === "attested" ? "" : " (its host prompt cache is not attested off, so other projects' later calls may still be sped up by this prompt; only --cache-ram 0 with hostPromptCacheOff, or a server of its own, isolates)") : " (its own cache may still run; only a route of its own isolates)"}`], expects: "no" };
     },
   };
 }

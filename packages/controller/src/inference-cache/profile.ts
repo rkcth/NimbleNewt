@@ -157,6 +157,8 @@ export interface CacheProfile {
   refusedCacheSetting(failure: { readonly status: number; readonly message: string }): boolean;
   /** The server runs a known number of slots and a call must name one: a call with no slot is sent with reuse off. */
   readonly slotted: boolean;
+  /** The configured number of slots (a slotted profile): a slot outside it is not sent (`id_slot` left out), so the adapter treats such a call as one that names no slot. */
+  readonly slotCount?: number;
   /** Request pieces for slot save and restore (files on the server), where the backend has them. */
   slotRequest?(action: "save" | "restore", slot: number, filename?: string): { readonly method: "POST"; readonly path: string; readonly body: WireRequest };
   /** Clears one slot's in-memory KV cache (llama.cpp `?action=erase`). It does **not** delete any saved file: llama.cpp has no API for that. Present only where the backend can do it. */
