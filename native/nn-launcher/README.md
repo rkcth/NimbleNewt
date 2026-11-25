@@ -29,9 +29,9 @@ The measuring options of the experiment are not in the product build: grants `de
 
 ## Build, release, install
 
-- Build and release (locked dependencies, pinned toolchain, reproducible build (a goal, not yet shown), the hash record, signing): [RELEASE.md](RELEASE.md).
+- Build and release (locked dependencies, pinned toolchain, reproducible build (identical once, for one pair of folders on one runner image; not shown more widely), the hash record, signing): [RELEASE.md](RELEASE.md).
 - The one-time administrator install (account, folders, access lists, uninstall, verify): [../install/README.md](../install/README.md).
-- Reproducibility: the hosted job builds the launcher a second time from another folder and compares the two files (`scripts/pe-diff.mjs`; a report, not a gate). Not yet shown to be identical: nothing claims reproducibility until a hosted run prints `identical`. What is and is not measured, and how the unsigned hash and the signed file relate, is in [RELEASE.md](RELEASE.md).
+- Reproducibility: the hosted job builds the launcher a second time from another folder and compares the two files (`scripts/pe-diff.mjs`; a report, not a gate). One hosted run (2026-11-25) printed `identical` for one pair of folders on one runner image; nothing claims more than that yet. What is and is not measured, and how the unsigned hash and the signed file relate, is in [RELEASE.md](RELEASE.md).
 - Dependency licenses: `cargo-licenses.json` is checked against `Cargo.lock` by `npm run licenses:check`.
 - Tests: the command line (`src/args.rs`, the only platform-neutral part) has Rust unit tests for both builds: `cargo test --locked` (the product build refuses every experiment-only option, mode, input and command, and misspelled, abbreviated or joined forms are unknown) and `cargo test --locked --features experiment` (the experiment build accepts them). They run on Linux, macOS and Windows; the hosted Windows step runs both.
 

@@ -58,7 +58,7 @@ test("the toolchain is pinned to an exact version, the same one the workflow ins
   // reproducible-build inputs are all in the documented steps
   const rel = read("native", "nn-launcher", "RELEASE.md");
   for (const word of ["--locked", "--remap-path-prefix", "/Brepro", "native-launcher.mjs record", "native-launcher.mjs verify", "-AllowUnsigned", "signtool verify"]) assert.ok(rel.includes(word), word);
-  assert.ok(/NOT yet shown/.test(rel), "the reproducibility claim is stated as unproven");
+  assert.ok(/NOT yet shown more widely/.test(rel) && rel.includes("e7ac4337c77d57a093d615a7906d37bc2452754df24ca9bb08b47ef4322cf902"), "the reproducibility claim is stated as measured once and unproven more widely");
   assert.ok(!/password|secret key|\.pfx/i.test(rel.replace(/nothing secret|never copied/gi, "")) || /never (copied|stored)/.test(rel), "the signing text stores no secret");
 });
 

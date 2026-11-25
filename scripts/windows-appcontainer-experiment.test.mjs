@@ -2877,6 +2877,6 @@ test("the reproducibility step builds the product launcher a second time from an
   assert.ok(!/uses: [^\n@]+@(?![0-9a-f]{40}\b)/.test(wf), "every action is pinned to a commit");
   assert.ok(step.indexOf("cargo build") < step.indexOf("pe-diff.mjs"));
   const rel = readFileSync(join(root, "native", "nn-launcher", "RELEASE.md"), "utf8");
-  assert.ok(rel.includes("Is the build reproducible?") && /reproducibility is NOT claimed/.test(rel), "RELEASE.md states what is measured and that nothing is claimed yet");
+  assert.ok(rel.includes("Is the build reproducible?") && /Reproducibility is NOT claimed beyond the one measurement/.test(rel), "RELEASE.md states what is measured and that nothing more is claimed");
   assert.ok(rel.includes("nn-launcher.signed.record.json") && rel.includes("unsigned"), "RELEASE.md says how the signed file and the unsigned hash relate");
 });
