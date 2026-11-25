@@ -16,7 +16,7 @@ import {
   parseLauncherLine, programPath, quoteWindowsArg, softRefusals, type NativeGrant, type NativeSettings,
 } from "./windows-native-plan.js";
 import { main as runnerMain, readAllStdin } from "./windows-native-runner.js";
-import { nativeRealHost, parseProcessLines } from "./windows-native-real.js";
+import { isLinkOrJunctionWith, nativeRealHost, parseProcessLines } from "./windows-native-real.js";
 import { PROBE_SCRIPT, unavailableNative, windowsDefaultBackend, windowsNativeBackend, type WindowsNativeOptions } from "./windows-native.js";
 
 // These tests run on every OS with a simulated Windows host and a simulated launcher: they prove the rules (the command line, what is refused, what is recorded, what is revoked and read back on every path out)
@@ -725,7 +725,8 @@ describe("A03b native launcher: wiring, the runner and the real host", () => {
   });
 
   test("the real host: file calls, an exclusive create, a bounded read, a process list that parses and one that skips junk", async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nn-native-host-")));
+    // The canonical (long-name) form: a hosted Windows runner's temp folder is a short name (RUNNER~1), which the host rightly counts as a link.
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-native-host-")));
     try {
       const host = nativeRealHost();
       const file = join(dir, "a.txt");
@@ -749,6 +750,22 @@ describe("A03b native launcher: wiring, the runner and the real host", () => {
       if (process.platform !== "win32") { assert.equal(await host.processes(), undefined); assert.equal(await host.fileSystemOf("C:\\x"), undefined); }
       assert.deepEqual(parseProcessLines("1 0 2026-01-01T00:00:00.0000000Z\nnoise\n 22  1 2026-01-02T00:00:00.0000000Z \r\n"), [{ pid: 1, parent: 0, started: "2026-01-01T00:00:00.0000000Z" }, { pid: 22, parent: 1, started: "2026-01-02T00:00:00.0000000Z" }]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("link or junction rule on the Windows branch (run on every OS with injected probes): a short name or a junction higher up counts as a link, case alone does not, an unreadable real path fails closed", () => {
+    const yes = (): boolean => true;
+    const no = (): boolean => false;
+    const rule = (path: string, real: string | Error, exists: boolean = true, symlink: boolean = false): boolean =>
+      isLinkOrJunctionWith(path, "win32", () => symlink, () => { if (real instanceof Error) throw real; return real; }, () => exists);
+    assert.equal(rule("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\a.txt", "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\a.txt"), true, "short name");
+    assert.equal(rule("D:\\work\\link\\a.txt", "D:\\elsewhere\\a.txt"), true, "junction higher up");
+    assert.equal(rule("d:\\Work\\A.txt", "D:\\work\\a.txt"), false, "case only");
+    assert.equal(rule("D:\\work\\a.txt", "D:\\work\\a.txt"), false);
+    assert.equal(rule("D:\\work\\a.txt", "D:\\work\\a.txt", true, true), true, "a symbolic link");
+    assert.equal(rule("D:\\work\\a.txt", new Error("EACCES")), true, "fails closed");
+    assert.equal(rule("D:\\work\\none", new Error("ENOENT"), false), false, "missing is not a link");
+    assert.equal(isLinkOrJunctionWith("/a/b", "linux", no, () => "/a/b", yes), false);
+    assert.equal(isLinkOrJunctionWith("/a/b", "linux", no, () => "/private/a/b", yes), true);
   });
 
   test("review 2026-11-25: input folders whose text Windows would read as another folder (trailing dot or space, short name) are refused, so the overlap checks see the real folder", () => {

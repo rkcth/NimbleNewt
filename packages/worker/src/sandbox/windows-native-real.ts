@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { win32 } from "node:path";
 import type { NativeHost } from "./windows-native-job.js";
 import type { ProcessResult } from "./windows-host.js";
 
@@ -12,6 +13,19 @@ export function parseProcessLines(text: string): { pid: number; parent: number; 
     if (m !== null) out.push({ pid: Number(m[1]), parent: Number(m[2]), started: m[3]! });
   }
   return out;
+}
+
+/**
+ * Whether a path is, or passes through, a link or junction. The real path must read the same as the path given (on Windows after normalising and ignoring case, so a short name such as RUNNER~1 or a junction higher up counts as a link: the seal must land on the folder named).
+ * A path that exists but whose real path cannot be found counts as a link (fails closed). The probes are injectable so the Windows rule is tested on every OS.
+ */
+export function isLinkOrJunctionWith(path: string, platform: NodeJS.Platform, isSymlink: (p: string) => boolean, realPath: (p: string) => string, exists: (p: string) => boolean): boolean {
+  if (!exists(path)) return false;
+  try {
+    if (isSymlink(path)) return true;
+    const real = realPath(path);
+    return platform === "win32" ? win32.normalize(real).toLowerCase() !== win32.normalize(path).toLowerCase() : real !== path;
+  } catch { return true; }
 }
 
 const POWERSHELL = (env: (n: string) => string | undefined): string => `${env("SystemRoot") ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
@@ -35,13 +49,7 @@ export function nativeRealHost(): NativeHost {
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } },
     exists: (p) => existsSync(p),
     isDirectory: (p) => { try { return lstatSync(p).isDirectory(); } catch { return false; } },
-    isLinkOrJunction: (p) => {
-      try {
-        if (lstatSync(p).isSymbolicLink()) return true;
-        const real = realpathSync.native(p);
-        return process.platform === "win32" ? real.toLowerCase() !== p.toLowerCase() : real !== p;
-      } catch { return false; }
-    },
+    isLinkOrJunction: (p) => isLinkOrJunctionWith(p, process.platform, (q) => lstatSync(q).isSymbolicLink(), (q) => realpathSync.native(q), (q) => existsSync(q)),
     mkdirp: (p) => { mkdirSync(p, { recursive: true }); },
     readText: (p, maxBytes = 1024 * 1024) => {
       let fd: number;

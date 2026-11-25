@@ -9,6 +9,7 @@ import { SandboxError } from "./errors.js";
 import { groupKillSafe, SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
 import type { SandboxRecipe } from "./recipe.js";
 import { seatbeltBackend } from "./seatbelt.js";
+import { windowsDefaultBackend } from "./windows-native.js";
 import { bubblewrapBackend } from "./linux.js";
 
 // These tests start real confined processes. On a machine without bubblewrap they are skipped, unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in
@@ -468,10 +469,16 @@ describe("failing closed", () => {
   });
 
   test("an OS with no backend yet has no capacity; macOS has Seatbelt, which a machine without it cannot use", async () => {
-    const windows = await SandboxLauncher.create({ platform: "win32", protectedPaths: [], audit });
+    // The Windows default backend is the native launcher: off Windows it says it exists only there; on Windows without the install step it says the launcher is missing. Either way: no capacity, nothing runs.
+    const windows = await SandboxLauncher.create({ platform: "win32", backend: windowsDefaultBackend({ NIMBLENEWT_WIN_LAUNCHER: "Z:\\nonexistent\\nn-launcher.exe", NIMBLENEWT_WIN_CONTROL_DIR: "Z:\\nonexistent\\control" }, "win32"), protectedPaths: [], audit });
     assert.equal(windows.capacity.available, false);
-    assert.match(windows.capacity.reason ?? "", /native Windows/);
+    assert.match(windows.capacity.reason ?? "", /native Windows|launcher was not found/);
     await assert.rejects(windows.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable");
+    // An OS with no backend at all.
+    const other = await SandboxLauncher.create({ platform: "freebsd", protectedPaths: [], audit });
+    assert.equal(other.capacity.available, false);
+    assert.match(other.capacity.reason ?? "", /no sandbox backend for freebsd/);
+    await assert.rejects(other.launch({ recipe: recipe(), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable");
     // Asking for the macOS backend on a machine that is not a Mac finds no sandbox-exec and so no capacity.
     if (process.platform !== "darwin") {
       const mac = await SandboxLauncher.create({ platform: "darwin", protectedPaths: [], audit });
