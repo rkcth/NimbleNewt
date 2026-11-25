@@ -31,7 +31,9 @@ export function checkRecord(record, bytes) {
   if (record?.schema !== RECORD_SCHEMA) problems.push("not a release record");
   if (record?.sha256 !== sha256(bytes)) problems.push(`the file's SHA-256 is ${sha256(bytes)}, the record says ${record?.sha256}`);
   if (record?.size !== bytes.length) problems.push(`the file's size is ${bytes.length}, the record says ${record?.size}`);
-  if (Array.isArray(record?.features) && record.features.length > 0) problems.push(`the record names cargo features (${record.features.join(", ")}): a release is built with none`);
+  // fails closed: a missing or malformed list is not "no features"
+  if (!Array.isArray(record?.features)) problems.push("the record does not list its cargo features (a release record says features: [])");
+  else if (record.features.length > 0) problems.push(`the record names cargo features (${record.features.join(", ")}): a release is built with none`);
   return problems;
 }
 

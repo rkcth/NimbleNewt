@@ -39,6 +39,10 @@ test("a record is refused without a full commit, and a file must match it exactl
   assert.match(checkRecord({ ...record, size: 9 }, bytes).join(), /size/);
   assert.match(checkRecord({ ...record, features: ["experiment"] }, bytes).join(), /features/);
   assert.match(checkRecord({ schema: "other" }, bytes).join(), /not a release record/);
+  // a record without its feature list, or with a malformed one, is not "built with no feature"
+  const { features: _omitted, ...noFeatures } = record;
+  assert.match(checkRecord(noFeatures, bytes).join(), /does not list its cargo features/);
+  assert.match(checkRecord({ ...record, features: "experiment" }, bytes).join(), /does not list its cargo features/);
 });
 
 test("the toolchain is pinned to an exact version, the same one the workflow installs, and the lock file belongs to the product crate", () => {
@@ -69,6 +73,12 @@ test("the Rust crates of Cargo.lock each have a recorded, allowed license, and a
   assert.match(cargoProblems(LOCK, { ...recorded, "gone@1.0.0": "MIT" }).join(), /stale/);
   const added = `${LOCK}\n[[package]]\nname = "newcrate"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n`;
   assert.match(cargoProblems(added, recorded).join(), /newcrate@1\.0\.0: no license recorded/);
+  // a crate from a git repository, a lock file with Windows line endings, and fields in another order are all still checked
+  const fromGit = `${LOCK}\n[[package]]\nname = "gitcrate"\nversion = "0.1.0"\nsource = "git+https://example.invalid/x#0123"\n`;
+  assert.match(cargoProblems(fromGit, recorded).join(), /gitcrate@0\.1\.0: no license recorded/);
+  assert.deepEqual(cargoPackages(LOCK.replace(/\n/g, "\r\n")), keys);
+  assert.deepEqual(cargoPackages(`${LOCK}\n[[package]]\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nversion = "2.0.0"\nname = "reordered"\n`), [...keys, "reordered@2.0.0"].sort());
+  assert.throws(() => cargoPackages(`${LOCK}\n[[package]]\nsource = "registry+x"\n`), /without a name and version/);
 });
 
 // ------------------------------------------------------------------------------------------------ the installer script, read as text
@@ -103,19 +113,26 @@ function insideShouldProcess(lines, i) {
 }
 
 test("every line that changes the machine sits inside a ShouldProcess question, and Verify changes nothing", () => {
-  const mutating = [/\bNew-LocalUser\b/, /\bAdd-LocalGroupMember\b/, /\bRemove-LocalUser\b/, /\[NnLsa\]::(Add|Remove|RemoveAll)\(/, /\bSet-Acl\b/, /\bCopy-Item\b/, /\bRemove-Item\b/, /\bSet-Content\b/, /\bNew-Item\b/, /\bRemove-CimInstance\b/, /\bSet-ProtectedAcl \$/];
+  const mutating = [/\bNew-LocalUser\b/, /\bAdd-LocalGroupMember\b/, /\bRemove-LocalUser\b/, /\[NnLsa\]::(Add|Remove|RemoveAll)\(/, /\bSet-Acl\b/, /\bCopy-Item\b/, /\bRemove-Item\b/, /\bSet-Content\b/, /\bNew-Item\b/, /\bRemove-CimInstance\b/, /\bSet-ProtectedAcl \$/, /\bRemove-TreeNoFollow \$/, /\[System\.IO\.(Directory|File)\]::(Delete|CreateDirectory|Move)\(/, /FileSystemAclExtensions\]::Create\(/];
   const lines = code.split("\n");
+  // The two helpers that write are checked at their call sites (which must each sit inside a ShouldProcess question), not inside their own bodies.
+  const helperLines = new Set();
+  for (const helper of ["Set-ProtectedAcl", "Remove-TreeNoFollow"]) {
+    const start = lines.findIndex((l) => l.startsWith(`function ${helper}(`));
+    assert.ok(start >= 0, helper);
+    for (let i = start; i < lines.length && !(i > start && /^}/.test(lines[i - 1])); i++) helperLines.add(i);
+  }
   let seen = 0;
   lines.forEach((line, i) => {
-    if (/^\s*function /.test(line)) return;
+    if (/^\s*function /.test(line) || helperLines.has(i)) return;
     for (const re of mutating) {
       if (!re.test(line)) continue;
       seen++;
-      if (/\bSet-Acl\b/.test(line)) { assert.ok(/function Set-ProtectedAcl/.test(ps)); continue; } // its only call site is checked below
       assert.ok(insideShouldProcess(lines, i), `not inside a ShouldProcess block: ${line.trim()}`);
     }
   });
-  assert.ok(seen >= 12, `${seen} mutating lines found`);
+  assert.ok(seen >= 14, `${seen} mutating lines found`);
+  assert.ok(!/\bNew-Item\b|-Recurse\b/.test(code), "folders are made with their list in one call, and nothing is removed with a recursive delete that could follow a link");
   assert.equal(code.match(/Set-ProtectedAcl \$item\.Path/g).length, 1, "one call site");
   assert.ok(/ShouldProcess\(\$item\.Path[^\n]*\n(?:[^\n]*\n){0,3}[^\n]*Set-ProtectedAcl \$item\.Path/.test(code), "that call site is inside its ShouldProcess");
   for (const re of mutating) assert.ok(!re.test(fn("Invoke-Verify")), `Verify must not contain ${re}`);
@@ -124,19 +141,33 @@ test("every line that changes the machine sits inside a ShouldProcess question, 
 
 test("least privilege: each access-list entry has its reason, no broad group is granted, the account never gets more than read/execute on the program and Modify on its control folder, inheritance is off", () => {
   const plan = fn("New-AclPlan");
-  const entries = [...plan.matchAll(/@\{ Who = (\$\w+); Rights = '(\w+)'; Why = '([^']+)'/g)];
-  assert.equal(entries.length, 9, "three folders, three entries each");
-  for (const e of entries) assert.ok(e[3].length > 25, `reason for ${e[1]} ${e[2]}`);
+  const entries = [...plan.matchAll(/@\{ Who = (\$\w+); Rights = '([\w, ]+)'; Scope = '(All|Folder|Below)'; Why = '([^']+)'/g)];
+  assert.equal(entries.length, 10, "three folders: three entries each, and the account's two on its control folder");
+  for (const e of entries) assert.ok(e[4].length > 25, `reason for ${e[1]} ${e[2]}`);
   assert.equal(plan.match(/Rights = /g).length, plan.match(/Why = /g).length, "no entry without its reason");
   const byFolder = plan.split("@{ Path = ").slice(1);
   assert.deepEqual(byFolder.map((f) => f.split("\n")[0].trim()), ["$InstallDir; Rules = @(", "$DataDir; Rules = @(", "$ControlDir; Rules = @("]);
-  const account = (f) => [...f.matchAll(/Who = \$account; Rights = '(\w+)'/g)].map((m) => m[1]);
-  assert.deepEqual(byFolder.map(account), [["ReadAndExecute"], ["ReadAndExecute"], ["Modify"]]);
+  const account = (f) => [...f.matchAll(/Who = \$account; Rights = '([\w, ]+)'; Scope = '(\w+)'/g)].map((m) => `${m[1]} (${m[2]})`);
+  // the control folder: the account may create in it and delete what is inside, but holds no Delete on the folder itself (it cannot remove or rename it)
+  assert.deepEqual(byFolder.map(account), [["ReadAndExecute (All)"], ["ReadAndExecute (All)"], ["ReadAndExecute, Write (Folder)", "Modify (Below)"]]);
+  assert.ok(/'Below' \{ return @\('ContainerInherit, ObjectInherit', 'InheritOnly'\) \}/.test(ps) && /'Folder' \{ return @\('None', 'None'\) \}/.test(ps), "the scopes map to the right inheritance flags");
   assert.ok(!/Who = \$(SidUsers|account); Rights = '(FullControl|Write|TakeOwnership|ChangePermissions)'/.test(plan));
   for (const broad of [/Everyone/i, /S-1-1-0/, /Authenticated Users/i, /S-1-5-11/, /BUILTIN\\Users/i, /ALL APPLICATION PACKAGES/i, /S-1-15-2/]) assert.ok(!broad.test(plan), `${broad} must not be granted`);
-  const acl = fn("Set-ProtectedAcl");
+  const acl = fn("New-ProtectedSecurity");
   assert.ok(acl.includes("SetAccessRuleProtection($true, $false)") && acl.includes("SetOwner($SidAdmins)") && acl.includes("'Allow'") && !acl.includes("'Deny'"));
-  assert.ok(fn("Assert-SafeFolder").includes("Test-Reparse") && /not by an administrator/.test(fn("Assert-SafeFolder")), "a pre-made folder or link under our name is refused");
+  const safe = fn("Assert-SafeItem");
+  assert.ok(safe.includes("Test-Reparse") && /not by an administrator/.test(safe) && safe.includes("$TrustedOwners -notcontains"), "a pre-made folder, file or link under our names is refused");
+  assert.ok(!safe.includes("ManifestPath"), "no exemption: a planted manifest file must not make a foreign folder acceptable");
+  // the folder is made WITH its list (one call), then checked (a race winner's folder is refused), then the list is written
+  const set = fn("Set-ProtectedAcl");
+  assert.ok(set.indexOf("CreateDirectory($path, $security)") < set.indexOf("Assert-SafeItem $path $true") && set.indexOf("Assert-SafeItem $path $true") < set.indexOf("Set-Acl -LiteralPath $path"));
+  const install = fn("Invoke-Install");
+  assert.ok(/foreach \(\$d in @\(\$InstallDir, \$DataDir, \$ControlDir\)\) \{ Assert-SafeItem \$d \$true \}/.test(install) && /Assert-SafeItem \$f \$false/.test(install), "every name is checked before any change");
+  assert.ok(install.indexOf("Assert-SafeItem $d $true") < install.indexOf("ShouldProcess("), "the checks come before the first change");
+  // Verify compares rights with SYNCHRONIZE normalised on both sides, and inheritance too
+  const verify = fn("Invoke-Verify");
+  assert.equal(verify.match(/-bor \$SynchronizeBit/g)?.length, 2);
+  assert.ok(verify.includes("[int]$_.InheritanceFlags") && verify.includes("[int]$_.PropagationFlags"));
 });
 
 test("the account is a local standard user: in Users only, batch logon granted, interactive, remote-desktop and network logon denied, and no right outside the managed list", () => {
@@ -179,7 +210,16 @@ test("worker.env carries exactly the four names and defaults the TypeScript back
 
 test("uninstall removes what install made, from a manifest, and nothing it did not make", () => {
   const un = fn("Invoke-Uninstall");
-  for (const part of ["$ManifestPath", "nimblenewt.native-install/1", "RemoveAll", "Remove-CimInstance", "Remove-LocalUser", "Remove-Item -LiteralPath $p -Recurse -Force", "-Leaf $p) -ne 'NimbleNewt'", "Test-Reparse $p", "Get-Process -Name 'nn-launcher'", "$m.accountSid"]) assert.ok(un.includes(part), part);
+  for (const part of ["$ManifestPath", "nimblenewt.native-install/1", "RemoveAll", "Remove-CimInstance", "Remove-LocalUser", "Get-Process -Name 'nn-launcher'", "$m.accountSid", "Assert-SafeItem $ManifestPath $false", "Assert-SafeItem $DataDir $true", "Test-SamePath $pair[0] $pair[1]", "Remove-TreeNoFollow $ControlDir"]) assert.ok(un.includes(part), part);
+  // the manifest only confirms this run's own folders; it never supplies a path to remove
+  for (const field of ["installDir", "dataDir", "controlDir", "launcher"]) assert.ok(un.includes(`@($m.${field}, `), `the manifest's ${field} is compared with this run's`);
+  assert.ok(!/Remove-Item[^\n]*\$m\.|Delete\([^\n]*\$m\.|Remove-TreeNoFollow \$m\./.test(un), "nothing is removed by a path read from the manifest");
+  // the control folder is closed to the account before it is walked, and the two top folders go only when empty
+  assert.ok(un.indexOf("Set-Acl -LiteralPath $ControlDir") < un.indexOf("Remove-TreeNoFollow $ControlDir"));
+  assert.ok(un.includes(".Count -eq 0) { [System.IO.Directory]::Delete($d, $false) }"));
+  const walk = fn("Remove-TreeNoFollow");
+  assert.ok(walk.indexOf("ReparsePoint") < walk.indexOf("Get-ChildItem") && /ReparsePoint\) \{\n\s+if \(\$item\.PSIsContainer\) \{ \[System\.IO\.Directory\]::Delete\(\$path, \$false\) \}[^\n]*\n\s+return/.test(walk), "a link is removed as the link and not descended into");
+  assert.ok(/Assert-NimbleNewtPath \$InstallDir '-InstallDir'\nAssert-NimbleNewtPath \$DataDir '-DataDir'\nswitch \(\$Action\)/.test(ps), "the folder parameters are checked before any action");
   const made = fn("Invoke-Install");
   for (const part of ["New-LocalUser", "[NnLsa]::Add(", "Set-ProtectedAcl", "Copy-Item", "Set-Content -LiteralPath $EnvFile", "$manifest = [ordered]@"]) assert.ok(made.includes(part), part);
   // idempotent: the account and the launcher are checked before they are made or copied
@@ -194,6 +234,62 @@ test("the installer's README states what is not proven, and the contribution gui
   for (const file of ["native/nn-launcher/src/lib.rs", "native/nn-launcher/src/main.rs", "native/nn-launcher/src/win.rs", "native/nn-launcher/Cargo.toml", "native/install/Install-NimbleNewtLauncher.ps1", "experiments/windows-appcontainer/launcher/src/main.rs"]) assert.ok(contributing.includes(file), file);
 });
 
+/** The brackets of a PowerShell script, outside comments and strings (single-quoted with '' escapes, double-quoted with backtick escapes and $( ) inside, here-strings):
+ *  the first mismatch as "line N: ...", or "" when every bracket closes in order. Not a full parser (the hosted run parses it with PowerShell's own); it catches what a Linux cell can. */
+export function psBracketProblem(text) {
+  const close = { ")": "(", "}": "{", "]": "[" };
+  const stack = [];
+  let line = 1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const skipTo = (end) => { const j = text.indexOf(end, i); if (j < 0) return false; line += text.slice(i, j).split("\n").length - 1; i = j + end.length - 1; return true; };
+    if (c === "\n") { line++; continue; }
+    if (text.startsWith("<#", i)) { if (!skipTo("#>")) return `line ${line}: unclosed block comment`; continue; }
+    if ((text.startsWith("@'\n", i) || text.startsWith("@'\r\n", i))) { if (!skipTo("\n'@")) return `line ${line}: unclosed here-string`; continue; }
+    if ((text.startsWith('@"\n', i) || text.startsWith('@"\r\n', i))) { if (!skipTo('\n"@')) return `line ${line}: unclosed here-string`; continue; }
+    if (c === "#") { const j = text.indexOf("\n", i); i = (j < 0 ? text.length : j) - 1; continue; }
+    if (c === "'") {
+      let j = i + 1;
+      for (;;) { if (j >= text.length) return `line ${line}: unclosed '-string`; if (text[j] === "'") { if (text[j + 1] === "'") { j += 2; continue; } break; } if (text[j] === "\n") line++; j++; }
+      i = j; continue;
+    }
+    if (c === '"') {
+      let j = i + 1; let depth = 0;
+      for (;;) {
+        if (j >= text.length) return `line ${line}: unclosed "-string`;
+        if (text[j] === "`") { j += 2; continue; }
+        if (text.startsWith("$(", j)) { depth++; j += 2; continue; }
+        if (text[j] === ")" && depth > 0) { depth--; j++; continue; }
+        if (text[j] === '"' && depth === 0) break;
+        if (text[j] === "\n") line++;
+        j++;
+      }
+      i = j; continue;
+    }
+    if (c === "(" || c === "{" || c === "[") stack.push([c, line]);
+    else if (c in close) {
+      const top = stack.pop();
+      if (top === undefined || top[0] !== close[c]) return `line ${line}: '${c}' closes ${top === undefined ? "nothing" : `'${top[0]}' of line ${top[1]}`}`;
+    }
+  }
+  return stack.length === 0 ? "" : `line ${stack.at(-1)[1]}: '${stack.at(-1)[0]}' is never closed`;
+}
+
+test("the installer's brackets and strings close in order (Linux cells cannot run PowerShell; the hosted run parses it with PowerShell itself)", () => {
+  assert.equal(psBracketProblem(ps), "");
+  // the checker itself: the slice-3 shape that closed a list before its last table, and a few others, are found
+  assert.match(psBracketProblem("@(\n  @{ Why = 'a' }) })\n"), /closes '\{'|never closed|closes nothing/);
+  assert.match(psBracketProblem("@{ Rules = @(\n  @{ Why = 'x') })\n)\n"), /line 2: '\)' closes '\{'/);
+  assert.match(psBracketProblem("Say \"$($a\"\n"), /unclosed/);
+  assert.equal(psBracketProblem("Say 'it''s (not a bracket'; Say \"x $(f ')') y\" # ) comment\n@'\n{ here\n'@\n"), "");
+});
+
+test("the installer uses Windows PowerShell 5.1 syntax only (no PowerShell 7 operators or parameters)", () => {
+  const plain = code.replace(/@'\n[\s\S]*?\n'@/g, "").replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"`]|`.)*"/g, '""');
+  for (const re of [/\?\?=?/, /\?\./, /&&/, /\|\|/, /\s\?\s[^\n]*\s:\s/, /-Parallel\b/, /-AsHashtable\b/, /-AsByteStream\b/, /\$PSStyle\b/, /\bclean\s*\{/, /-SkipCertificateCheck\b/]) assert.ok(!re.test(plain), `${re} is not Windows PowerShell 5.1`);
+  assert.ok(ps.includes("[System.IO.Directory].GetMethod('CreateDirectory'"), "the .NET Framework call is used when it exists, the .NET one otherwise");
+});
+
 // ------------------------------------------------------------------------------------------------ the workflow steps
 
 test("the hand-started workflow builds the product launcher --locked after the experiment build and before the containment cases, and runs the installer without changing the machine", () => {
@@ -204,7 +300,8 @@ test("the hand-started workflow builds the product launcher --locked after the e
   assert.ok(at("Build the launcher (locked dependencies)") < at("Product launcher (native/nn-launcher)") && at("Product launcher (native/nn-launcher)") < at("Installer script (parse") && at("Installer script (parse") < at("G05 containment cases through the native backend"));
   const product = hosted.slice(at("Product launcher (native/nn-launcher)"), at("Installer script (parse"));
   for (const part of ["cargo build --release --locked", "--remap-path-prefix", "/Brepro", "nn-launcher.exe info", "grep -q '\"ok\":true'", "not in this build", 'test "$rc" -eq 125', "native-launcher.mjs record", "native-launcher.mjs verify", "if: always()"]) assert.ok(product.includes(part), part);
-  assert.ok(!product.includes("--features"), "the product build enables no feature");
+  assert.ok(!product.replace("cargo test --locked --features experiment", "").includes("--features"), "the product build enables no feature (only the argument tests of the experiment build name one)");
+  assert.ok(product.includes("cargo test --locked 2>&1") && product.indexOf("cargo build --release --locked") < product.indexOf("cargo test --locked"), "the argument tests run after the release build, so the tested release file is the built one");
   const installer = hosted.slice(at("Installer script (parse"), at("G05 containment cases through the native backend"));
   for (const part of ["Parser]::ParseFile", "-WhatIf", "-Action Verify", "-AllowUnsigned", "if (Get-LocalUser -Name nn-whatif-check", "Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')"]) assert.ok(installer.includes(part), part);
   assert.ok(!/-Action (Install|Uninstall)(?![^\n]*-WhatIf)/.test(installer.replace(/-Action Verify/g, "")), "Install is only ever run with -WhatIf there");

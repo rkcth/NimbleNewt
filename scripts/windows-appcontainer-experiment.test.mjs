@@ -21,6 +21,8 @@ import {
 } from "../experiments/windows-appcontainer/ladder.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+/** The launcher's source (native/nn-launcher): the Windows part and the platform-neutral command line (src/args.rs, since A03b slice 3 review). */
+const launcherSource = () => readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8") + "\n" + readFileSync(join(root, "native", "nn-launcher", "src", "args.rs"), "utf8");
 const exp = join(root, "experiments", "windows-appcontainer");
 const tmp = () => mkdtempSync(join(os.tmpdir(), "nnac-"));
 
@@ -439,7 +441,7 @@ test("command line and tool discovery", () => {
 // ------------------------------------------------------------------------------------------------ guards on the launcher source and the workflow
 
 test("the launcher source: every Win32 call it makes is documented in the README, and it has no fallback path to an unconfined child", () => {
-  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const src = launcherSource();
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   const calls = ["CreateAppContainerProfile", "DeriveAppContainerSidFromAppContainerName", "DeleteAppContainerProfile", "ConvertSidToStringSidW", "GetNamedSecurityInfoW", "SetEntriesInAclW", "SetNamedSecurityInfoW",
     "CreateJobObjectW", "SetInformationJobObject", "QueryInformationJobObject", "TerminateJobObject", "InitializeProcThreadAttributeList", "UpdateProcThreadAttribute", "DeleteProcThreadAttributeList",
@@ -1446,7 +1448,7 @@ test("the offline npm project can hold many local packages (the lockfile names e
 });
 
 test("the launcher's round 3 additions: standard handles as NUL read-write, a file or pipes, output pipes drained to files, a grant command that leaves entries, inherited entries read back", () => {
-  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const src = launcherSource();
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   for (const c of ["CreatePipe", "SetHandleInformation", "ReadFile"]) { assert.ok(src.includes(`${c}(`), c); assert.ok(readme.includes(c), `${c} missing in README`); }
   assert.match(src, /"--stdin" =>/);
@@ -1769,7 +1771,7 @@ test("git: the all-NUL variants pass the launcher's flags and judge by exit code
 });
 
 test("the launcher source: an open-test command (CreateFileW flag combinations and the C runtime's _wopen, no new crate), and the standard output and error can be the NUL device", () => {
-  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const src = launcherSource();
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   assert.match(src, /fn open_test\(\) -> String/);
   assert.match(src, /raw\.get\(1\)\.map\(String::as_str\) == Some\("open-test"\)/);
@@ -1934,7 +1936,7 @@ test("round 4 DACL dumps: the container's own SID is named before the scrubber t
 });
 
 test("the launcher source (round 4): the layered layouts are built by hand in a fixed order, a sealed folder inherits nothing, the DACLs can be dumped, every new call is documented", () => {
-  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const src = launcherSource();
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   for (const c of ["InitializeAcl", "AddAce", "AddAccessAllowedAceEx", "AddAccessDeniedAceEx", "GetLengthSid", "ConvertSecurityDescriptorToStringSecurityDescriptorW"]) { assert.ok(src.includes(`${c}(`), `${c} not used`); assert.ok(readme.includes(c), `${c} missing in README`); }
   assert.match(src, /"deny-strong" => Some\(Mode::DenyStrong\), "seal" => Some\(Mode::Seal\), "modify-root" => Some\(Mode::ModifyRoot\)/);
@@ -1958,7 +1960,7 @@ test("the launcher source (round 4): the layered layouts are built by hand in a 
 });
 
 test("the launcher source (A03b slice 2): the revoke takes the sealed names LAST, in a second pass after every other entry and only when every other entry is gone, and still revokes every applied entry once", () => {
-  const src = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
+  const src = launcherSource();
   const body = /fn revoke_all\(&mut self\) \{([\s\S]*?)\n    \}\n    fn json/.exec(src);
   assert.ok(body, "revoke_all not found");
   // two passes (the non-seals first, then the seals), each newest first

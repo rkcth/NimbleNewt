@@ -4,6 +4,7 @@
 // The contract with the TypeScript side (packages/worker/src/sandbox/windows-native-plan.ts) is pinned by a test, windows-native-contract.test.ts.
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
+mod args;
 #[cfg(windows)]
 mod win;
 

@@ -21,6 +21,8 @@ function findRepoRoot(): string {
 const root = findRepoRoot();
 const crate = (name: string): string => readFileSync(join(root, "native", "nn-launcher", name), "utf8").replace(/\r\n/g, "\n");
 const win = crate("src/win.rs");
+/** The command line (Args, Mode, parse_args): platform-neutral, with its own Rust unit tests for both builds (cargo test, cargo test --features experiment). */
+const args = crate("src/args.rs");
 const here = (file: string): string => readFileSync(join(dirname(fileURLToPath(import.meta.url)), file), "utf8");
 
 const sorted = (s: Iterable<string>): string[] => [...new Set(s)].sort();
@@ -78,7 +80,8 @@ test("the failure stages the crate reports are all stages the backend maps to a 
 test("every option and command the backend sends is accepted by the PRODUCT build (not an experiment-only option)", () => {
   const flagsSent = sorted([...between(here("windows-native-plan.js"), "export function launcherArgs", "/** The grants as the launcher").matchAll(/"(--[a-z0-9-]+)"/g)].map((m) => m[1]!).concat([...between(here("windows-native-plan.js"), "export function grantArgs", "export function parseLauncherLine").matchAll(/"(--[a-z0-9-]+)"/g)].map((m) => m[1]!)));
   assert.ok(flagsSent.includes("--grant") && flagsSent.includes("--stdin") && flagsSent.includes("--cmdline"), flagsSent.join(","));
-  const parse = between(win, "fn parse_args", "// ---------------------------------------------------------------------------------------------------------------- small owners");
+  assert.ok(!win.includes("fn parse_args"), "the arguments are parsed in one place only (args.rs)");
+  const parse = between(args, "fn parse_args", "// ---- end of parse_args");
   const accepted = sorted([...parse.matchAll(/"(--[a-z0-9-]+)"/g)].map((m) => m[1]!));
   const experimentOnly = sorted([...(/"--win32k-off" \|([^=]+)=> return Err/.exec(parse)?.[0] ?? "").matchAll(/"(--[a-z0-9-]+)"/g)].map((m) => m[1]!));
   assert.ok(experimentOnly.length >= 7, experimentOnly.join(","));
@@ -95,9 +98,9 @@ test("every option and command the backend sends is accepted by the PRODUCT buil
 test("the grant modes the backend sends are the ones the product build accepts; deny modes are refused there", () => {
   const sent = sorted([...here("windows-native-plan.js").matchAll(/mode: "([a-z-]+)"/g)].map((m) => m[1]!));
   assert.deepEqual(sent, ["modify", "modify-root", "rx", "seal"]);
-  const parsed = sorted([...between(win, "fn parse(s: &str)", "fn name(self)").matchAll(/"([a-z-]+)" =>/g)].map((m) => m[1]!));
+  const parsed = sorted([...between(args, "fn parse(s: &str)", "fn name(self)").matchAll(/"([a-z-]+)" =>/g)].map((m) => m[1]!));
   for (const m of sent) assert.ok(parsed.includes(m), `mode ${m}`);
-  assert.ok(/if !EXPERIMENT && matches!\(mode, Mode::DenyWrite \| Mode::DenyStrong\)/.test(win), "deny-write and deny-strong are refused unless the experiment feature is on");
+  assert.ok(/if !EXPERIMENT && matches!\(mode, Mode::DenyWrite \| Mode::DenyStrong\)/.test(args), "deny-write and deny-strong are refused unless the experiment feature is on");
 });
 
 test("the product build is the default: the feature is off, the binary is named nn-launcher, and the experiment crate is the only one that turns the feature on", () => {
@@ -105,7 +108,8 @@ test("the product build is the default: the feature is off, the binary is named 
   assert.match(cargo, /^\[\[bin\]\]\nname = "nn-launcher"/m);
   assert.match(cargo, /^experiment = \[\]$/m);
   assert.ok(!/^default\s*=/m.test(cargo), "no default features");
-  assert.ok(win.includes('const EXPERIMENT: bool = cfg!(feature = "experiment");'));
+  assert.ok(args.includes('pub(crate) const EXPERIMENT: bool = cfg!(feature = "experiment");'));
+  assert.ok(/#\[cfg\(not\(feature = "experiment"\)\)\]\s*#\[test\]\s*fn the_product_build_refuses_every_experiment_option/.test(args), "the product build's refusals have a Rust unit test of their own");
   assert.ok(readFileSync(join(root, "experiments", "windows-appcontainer", "launcher", "Cargo.toml"), "utf8").includes('features = ["experiment"]'));
   // The experiment-only code is compiled out of the product binary, not just refused.
   for (const item of ["fn open_test()", "fn hang_report(", "fn cpu_ms(", 'extern "C" {']) {

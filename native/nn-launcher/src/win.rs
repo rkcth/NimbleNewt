@@ -4,7 +4,7 @@
 // info; grant modes ro, rx, modify, modify-root and seal; standard input from a FILE; standard output and error to FILES; kill-on-close always on. Every other option below is an
 // EXPERIMENT option (the measuring probes of experiments/windows-appcontainer): the product build refuses it at the argument check ("not in this build") and does not contain
 // the NUL-device test or the hang diagnosis at all. The experiment's own crate (experiments/windows-appcontainer/launcher) builds this same source with the feature `experiment`.
-const EXPERIMENT: bool = cfg!(feature = "experiment");
+use crate::args::{parse_args, Args, GrantSpec, Mode, AAP_OPT_IN, AAP_OPT_OUT, EXPERIMENT};
 /// The value of the `tool` field: the protocol identifier the TypeScript side matches (a test pins it). It is not the program's file name.
 const TOOL: &str = "nn-appc-launcher";
 use std::ffi::{c_void, OsStr};
@@ -33,9 +33,6 @@ const ATTR_SECURITY_CAPABILITIES: usize = 0x0002_0009;
 const ATTR_HANDLE_LIST: usize = 0x0002_0002;
 const ATTR_JOB_LIST: usize = 0x0002_000D;
 const ATTR_ALL_APPLICATION_PACKAGES_POLICY: usize = 0x0002_000F;
-// PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT / _OPT_IN
-const AAP_OPT_OUT: u32 = 0x1;
-const AAP_OPT_IN: u32 = 0x0;
 // PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON (1 << 28)
 const WIN32K_DISABLE_ALWAYS_ON: u64 = 1u64 << 28;
 const HR_ALREADY_EXISTS: i32 = 0x8007_00B7u32 as i32; // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
@@ -82,16 +79,8 @@ impl Json {
 
 // ---------------------------------------------------------------------------------------------------------------- arguments
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode { Ro, Rx, Modify, DenyWrite, DenyStrong, Seal, ModifyRoot }
-
+// The arguments (Args, Mode, parse_args) live in ../args.rs, which builds and is unit-tested on every operating system.
 impl Mode {
-    fn parse(s: &str) -> Option<Mode> {
-        match s { "ro" => Some(Mode::Ro), "rx" => Some(Mode::Rx), "modify" => Some(Mode::Modify), "deny-write" => Some(Mode::DenyWrite), "deny-strong" => Some(Mode::DenyStrong), "seal" => Some(Mode::Seal), "modify-root" => Some(Mode::ModifyRoot), _ => None }
-    }
-    fn name(self) -> &'static str {
-        match self { Mode::Ro => "ro", Mode::Rx => "rx", Mode::Modify => "modify", Mode::DenyWrite => "deny-write", Mode::DenyStrong => "deny-strong", Mode::Seal => "seal", Mode::ModifyRoot => "modify-root" }
-    }
     fn mask(self) -> u32 {
         match self {
             Mode::Ro => FILE_GENERIC_READ,
@@ -106,89 +95,6 @@ impl Mode {
             Mode::ModifyRoot => FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
         }
     }
-    /// A mode that only takes rights away (a deny entry) rather than granting them.
-    fn is_deny(self) -> bool { matches!(self, Mode::DenyWrite | Mode::DenyStrong) }
-}
-
-#[derive(Clone, Debug)]
-struct GrantSpec { mode: Mode, path: String, soft: bool }
-
-#[derive(Default, Debug)]
-struct Args {
-    command: String,
-    name: String,
-    exe: Option<String>,
-    cmdline: Option<String>,
-    cwd: Option<String>,
-    stdout: Option<String>,
-    stderr: Option<String>,
-    env: Vec<(String, String)>,
-    grants: Vec<GrantSpec>,
-    aap: Option<u32>, // None: the policy attribute is not set at all
-    win32k_off: bool,
-    kill_on_close: bool,
-    memory_mb: u64,
-    active_processes: u32,
-    ui_limits: bool,
-    timeout_ms: u32,
-    keep_profile: bool,
-    stdin: String, // nul (read-only NUL, the default), nul-rw, file:PATH, pipe (an empty pipe: end of input at once), pipe-open (a pipe whose write end stays open until the child ends)
-    stdout_pipe: bool, // the child's output goes through an anonymous pipe that the launcher copies into the file
-    stderr_pipe: bool,
-    stdout_nul: bool, // the child's standard output is the NUL device opened for reading and writing by the launcher (nothing is captured)
-    stderr_nul: bool,
-    capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
-    dump: Vec<String>, // paths whose DACL is printed as SDDL after the grants are applied and again after the child ended (repeatable --dump)
-}
-
-fn parse_args(raw: &[String]) -> Result<Args, String> {
-    let mut a = Args { name: "NimbleNewtExperiment".into(), kill_on_close: true, timeout_ms: 120_000, stdin: "nul".into(), ..Default::default() };
-    let mut it = raw.iter().skip(1);
-    a.command = it.next().cloned().ok_or("no command (run, info, revoke, check, delete-profile)")?;
-    while let Some(flag) = it.next() {
-        let mut value = |what: &str| -> Result<String, String> { it.next().cloned().ok_or(format!("{what} needs a value")) };
-        match flag.as_str() {
-            "--name" => a.name = value("--name")?,
-            "--win32k-off" | "--no-kill-on-close" | "--keep-profile" | "--stdout-pipe" | "--stderr-pipe" | "--stdout-nul-rw" | "--stderr-nul-rw" | "--dump" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
-            "--exe" => a.exe = Some(value("--exe")?),
-            "--cmdline" => a.cmdline = Some(value("--cmdline")?),
-            "--cwd" => a.cwd = Some(value("--cwd")?),
-            "--stdout" => a.stdout = Some(value("--stdout")?),
-            "--stderr" => a.stderr = Some(value("--stderr")?),
-            "--env" => {
-                let kv = value("--env")?;
-                let (k, v) = kv.split_once('=').ok_or("--env needs NAME=VALUE")?;
-                if k.is_empty() { return Err("--env name is empty".into()); }
-                a.env.push((k.to_string(), v.to_string()));
-            }
-            "--grant" | "--grant-soft" => {
-                let spec = value("--grant")?;
-                let (m, p) = spec.split_once(':').ok_or("--grant needs MODE:PATH")?;
-                let mode = Mode::parse(m).ok_or("grant mode must be ro, rx, modify, deny-write, deny-strong, seal or modify-root")?;
-                if !EXPERIMENT && matches!(mode, Mode::DenyWrite | Mode::DenyStrong) { return Err(format!("grant mode {} is an experiment option and is not in this build", mode.name())); }
-                a.grants.push(GrantSpec { mode, path: p.to_string(), soft: flag == "--grant-soft" });
-            }
-            // none: no attribute (a plain AppContainer). optout: the LPAC form. optin: the attribute present with the default value.
-            "--aap-policy" => a.aap = match value("--aap-policy")?.as_str() { "none" => None, "optout" => Some(AAP_OPT_OUT), "optin" => Some(AAP_OPT_IN), _ => return Err("--aap-policy: none, optout or optin".into()) },
-            "--win32k-off" => a.win32k_off = true,
-            "--no-kill-on-close" => a.kill_on_close = false,
-            "--memory-mb" => a.memory_mb = value("--memory-mb")?.parse().map_err(|_| "--memory-mb is not a number")?,
-            "--active-processes" => a.active_processes = value("--active-processes")?.parse().map_err(|_| "--active-processes is not a number")?,
-            "--ui-limits" => a.ui_limits = true,
-            "--timeout-ms" => a.timeout_ms = value("--timeout-ms")?.parse().map_err(|_| "--timeout-ms is not a number")?,
-            "--keep-profile" => a.keep_profile = true,
-            "--stdin" => { let v = value("--stdin")?; if !EXPERIMENT && !v.starts_with("file:") { return Err("--stdin: only file:PATH is in this build (the NUL device is refused to the container and pipes made for it hang)".into()); } if !(matches!(v.as_str(), "nul" | "nul-rw" | "pipe" | "pipe-open") || v.starts_with("file:")) { return Err("--stdin: nul, nul-rw, file:PATH, pipe or pipe-open".into()); } a.stdin = v; }
-            "--stdout-pipe" => a.stdout_pipe = true,
-            "--stderr-pipe" => a.stderr_pipe = true,
-            "--stdout-nul-rw" => a.stdout_nul = true,
-            "--stderr-nul-rw" => a.stderr_nul = true,
-            "--dump" => a.dump.push(value("--dump")?),
-            "--capability" => { let c = value("--capability")?; if c.is_empty() { return Err("--capability is empty".into()); } a.capabilities.push(c); }
-            other => return Err(format!("unknown option {other}")),
-        }
-    }
-    if !EXPERIMENT && !matches!(a.command.as_str(), "run" | "check" | "revoke" | "info") { return Err(format!("command {} is not in this build (run, check, revoke, info)", a.command)); }
-    Ok(a)
 }
 
 // ---------------------------------------------------------------------------------------------------------------- small owners

@@ -6,13 +6,13 @@
   TEXT ONLY UNTIL AN ADMINISTRATOR RUNS IT. This file has been read and checked by tests on Linux (native/install/README.md says which); it has NEVER been run on a Windows
   machine by the people who wrote it. Run it first with -WhatIf and read every line it prints.
 
-  What it makes (and nothing else; Uninstall removes exactly this, from the manifest it wrote):
+  What it makes (and nothing else; Uninstall removes exactly this, and only when the manifest it wrote names the same folders as the run of Uninstall):
     1. A local standard user (default "nimblenewt-worker"): not an administrator, a long random password that is generated in memory, handed to Windows once and never stored,
        shown or written anywhere (the service runs without a password: see "Password" below), with the right to log on as a batch job and the rights to log on interactively,
        through Remote Desktop and over the network DENIED.
     2. "%ProgramFiles%\NimbleNewt\" holding nn-launcher.exe, writable only by SYSTEM and Administrators; the account may read and run it.
     3. "%ProgramData%\NimbleNewt\" (manifest and worker.env, written by an administrator; the account may read) and its sub-folder "native" (the supervisor's control folder, where
-       the account writes its job records; nobody else has any access).
+       the account writes its job records and may delete them, but may not delete or rename the folder itself; no other user has any access).
     4. worker.env: the four NIMBLENEWT_WIN_* names the worker reads (no secret in it).
   What it does NOT do: it does not register or start the worker (the service unit is the release's own step), it never touches a task, workspace or data folder of the product,
   it does not change a firewall, a policy other than the five account rights above, or any other account, and it does not need the network.
@@ -38,9 +38,9 @@
 .PARAMETER ServiceLogon
   Also grant "log on as a service" (only for a future service host; a scheduled task does not need it).
 .PARAMETER InstallDir
-  Default %ProgramFiles%\NimbleNewt.
+  Default %ProgramFiles%\NimbleNewt. Must be a full local path (drive letter) whose last part is NimbleNewt.
 .PARAMETER DataDir
-  Default %ProgramData%\NimbleNewt.
+  Default %ProgramData%\NimbleNewt. The same rule.
 .EXAMPLE
   .\Install-NimbleNewtLauncher.ps1 -Action Install -LauncherPath .\nn-launcher.exe -ExpectedSha256 <hash> -WhatIf
 .EXAMPLE
@@ -76,11 +76,22 @@ $SidUsers = 'S-1-5-32-545'
 $RightsGranted = @('SeBatchLogonRight') + $(if ($ServiceLogon) { @('SeServiceLogonRight') } else { @() })
 $RightsDenied = @('SeDenyInteractiveLogonRight', 'SeDenyRemoteInteractiveLogonRight', 'SeDenyNetworkLogonRight')
 $RightsAll = @('SeBatchLogonRight', 'SeServiceLogonRight') + $RightsDenied
+# Owners an existing folder or file under our names may have (SYSTEM, Administrators, TrustedInstaller). Anything else was made by someone else and is never adopted.
+# The administrator running this script is trusted too: with the policy "default owner: object creator" the files it writes are owned by that user, not by the Administrators group.
+$TrustedOwners = @($SidSystem.Value, $SidAdmins.Value, 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+$SynchronizeBit = 0x100000   # .NET adds SYNCHRONIZE to every allow entry it writes, so a read-back carries it; both sides of a comparison are normalised with it
 
 function Say([string] $text) { Write-Host $text }
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 function Assert-Admin { if (-not (Test-Admin)) { throw "$Action needs an elevated (administrator) PowerShell. Nothing was changed." } }
 function Test-Reparse([string] $path) { (Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint }
+function Test-SamePath([string] $a, [string] $b) { (-not [string]::IsNullOrEmpty($a)) -and (-not [string]::IsNullOrEmpty($b)) -and ([IO.Path]::GetFullPath($a).TrimEnd('\') -ieq [IO.Path]::GetFullPath($b).TrimEnd('\')) }
+function Assert-NimbleNewtPath([string] $path, [string] $what) {
+  # A full local path, already normal (no "..", no relative part, no share), ending in \NimbleNewt: the only shape Install makes and Uninstall removes.
+  if ($path -notmatch '^[A-Za-z]:\\[^:*?"<>|]+$' -or $path.TrimEnd('\') -ne [IO.Path]::GetFullPath($path).TrimEnd('\') -or (Split-Path -Leaf $path.TrimEnd('\')) -ne 'NimbleNewt') {
+    throw "$what must be a full local path ending in \NimbleNewt (it is '$path'). Nothing was changed."
+  }
+}
 
 # ---- the local security policy (account rights) through the LSA API; no tool to install ---------------------------------------------------------------------------------
 if (-not ('NnLsa' -as [type])) {
@@ -99,11 +110,13 @@ public static class NnLsa {
   [DllImport("advapi32.dll")] static extern uint LsaFreeMemory(IntPtr buffer);
   [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr policy);
   [DllImport("advapi32.dll")] static extern int LsaNtStatusToWinError(uint status);
-  // POLICY_LOOKUP_NAMES (0x800) | POLICY_CREATE_ACCOUNT (0x10): the least access that reads and changes one account's rights.
-  const uint Access = 0x810;
-  static IntPtr Open() {
+  // POLICY_LOOKUP_NAMES (0x800) | POLICY_CREATE_ACCOUNT (0x10): the least access that changes one account's rights; reading them (List, used by Verify) asks POLICY_LOOKUP_NAMES only.
+  const uint ChangeAccess = 0x810;
+  const uint ReadAccess = 0x800;
+  static IntPtr Open() { return Open(ChangeAccess); }
+  static IntPtr Open(uint access) {
     var a = new ObjectAttributes(); a.Length = Marshal.SizeOf(typeof(ObjectAttributes)); IntPtr p;
-    uint s = LsaOpenPolicy(IntPtr.Zero, ref a, Access, out p);
+    uint s = LsaOpenPolicy(IntPtr.Zero, ref a, access, out p);
     if (s != 0) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(s));
     return p;
   }
@@ -129,7 +142,7 @@ public static class NnLsa {
     try { uint s = LsaRemoveAccountRights(p, Bytes(sid), true, null, 0); if (s != 0 && s != 0xC0000034) throw new System.ComponentModel.Win32Exception(LsaNtStatusToWinError(s)); } finally { LsaClose(p); }
   }
   public static string[] List(string sid) {
-    IntPtr p = Open();
+    IntPtr p = Open(ReadAccess);
     try {
       IntPtr buf; uint count; uint s = LsaEnumerateAccountRights(p, Bytes(sid), out buf, out count);
       if (s == 0xC0000034) return new string[0];
@@ -150,40 +163,79 @@ public static class NnLsa {
 # ---- access lists ------------------------------------------------------------------------------------------------------------------------------------------------------
 # Every access-list line below carries its reason ("why"), and Verify prints the same table. An entry is allow-only. Inheritance from the parent folder is switched OFF (the parent's
 # defaults, for example "Users may create and read" in %ProgramData%, must not apply), the owner is set to Administrators, and the entry list is replaced as a whole, so a rerun
-# repairs a drifted list and never adds to it.
+# repairs a drifted list and never adds to it. Scope: All (the folder and everything in it), Folder (the folder itself only), Below (only what is inside it, not the folder).
 function New-AclPlan([System.Security.Principal.SecurityIdentifier] $account) {
   @(
     @{ Path = $InstallDir; Rules = @(
-        @{ Who = $SidSystem; Rights = 'FullControl'; Why = 'SYSTEM maintains the machine; it is not the account the launcher runs as' },
-        @{ Who = $SidAdmins; Rights = 'FullControl'; Why = 'only administrators may replace the launcher (this is what makes the folder admin-only-writable)' },
-        @{ Who = $account; Rights = 'ReadAndExecute'; Why = 'the service account must run nn-launcher.exe; read and execute, never write or delete, so it cannot replace its own launcher' }) },
+        @{ Who = $SidSystem; Rights = 'FullControl'; Scope = 'All'; Why = 'SYSTEM maintains the machine; it is not the account the launcher runs as' },
+        @{ Who = $SidAdmins; Rights = 'FullControl'; Scope = 'All'; Why = 'only administrators may replace the launcher (this is what makes the folder admin-only-writable)' },
+        @{ Who = $account; Rights = 'ReadAndExecute'; Scope = 'All'; Why = 'the service account must run nn-launcher.exe; read and execute, never write or delete, so it cannot replace its own launcher' }) },
     @{ Path = $DataDir; Rules = @(
-        @{ Who = $SidSystem; Rights = 'FullControl'; Why = 'SYSTEM maintains the machine' },
-        @{ Who = $SidAdmins; Rights = 'FullControl'; Why = 'administrators write the manifest and worker.env' },
-        @{ Who = $account; Rights = 'ReadAndExecute'; Why = 'the account reads worker.env and walks down to its control folder; read only, so it cannot change its own settings' }) },
+        @{ Who = $SidSystem; Rights = 'FullControl'; Scope = 'All'; Why = 'SYSTEM maintains the machine' },
+        @{ Who = $SidAdmins; Rights = 'FullControl'; Scope = 'All'; Why = 'administrators write the manifest and worker.env' },
+        @{ Who = $account; Rights = 'ReadAndExecute'; Scope = 'All'; Why = 'the account reads worker.env and walks down to its control folder; read only, so it cannot change its own settings' }) },
     @{ Path = $ControlDir; Rules = @(
-        @{ Who = $SidSystem; Rights = 'FullControl'; Why = 'SYSTEM maintains the machine' },
-        @{ Who = $SidAdmins; Rights = 'FullControl'; Why = 'administrators can inspect and clear leftovers' },
-        @{ Who = $account; Rights = 'Modify'; Why = 'the supervisor writes job records here and removes them; Modify is not FullControl: it cannot change this list or take ownership. No container is ever granted this folder') })
+        @{ Who = $SidSystem; Rights = 'FullControl'; Scope = 'All'; Why = 'SYSTEM maintains the machine' },
+        @{ Who = $SidAdmins; Rights = 'FullControl'; Scope = 'All'; Why = 'administrators can inspect and clear leftovers' },
+        @{ Who = $account; Rights = 'ReadAndExecute, Write'; Scope = 'Folder'; Why = 'the supervisor lists the folder and makes its job records in it; no Delete on the folder itself, so the account cannot remove it' },
+        @{ Who = $account; Rights = 'Modify'; Scope = 'Below'; Why = 'the supervisor writes and removes its own job records; Modify is not FullControl: it cannot change this list or take ownership. No container is ever granted this folder' }) }
   )
 }
-function Set-ProtectedAcl([string] $path, $rules) {
+function Get-Inheritance([string] $scope) {
+  switch ($scope) {
+    'All' { return @('ContainerInherit, ObjectInherit', 'None') }
+    'Folder' { return @('None', 'None') }
+    'Below' { return @('ContainerInherit, ObjectInherit', 'InheritOnly') }
+    default { throw "unknown access-list scope '$scope'" }
+  }
+}
+function New-ProtectedSecurity($rules) {
   $acl = New-Object System.Security.AccessControl.DirectorySecurity
   $acl.SetAccessRuleProtection($true, $false)            # no inheritance from the parent, and none of the parent's entries copied
   $acl.SetOwner($SidAdmins)
   foreach ($r in $rules) {
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($r.Who, [System.Security.AccessControl.FileSystemRights]$r.Rights, 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+    $flags = Get-Inheritance $r.Scope
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($r.Who, [System.Security.AccessControl.FileSystemRights]$r.Rights, [System.Security.AccessControl.InheritanceFlags]$flags[0], [System.Security.AccessControl.PropagationFlags]$flags[1], 'Allow')
     $acl.AddAccessRule($rule)
   }
-  Set-Acl -LiteralPath $path -AclObject $acl
+  return $acl
 }
-function Assert-SafeFolder([string] $path) {
+function Assert-SafeItem([string] $path, [bool] $folder) {
   if (-not (Test-Path -LiteralPath $path)) { return }
-  # %ProgramData% lets any user make a folder. A pre-made folder, a link or a junction under our name must never be adopted.
-  if (Test-Reparse $path) { throw "$path is a link or junction; remove it (as an administrator) and run again. Nothing was changed." }
+  # %ProgramData% lets any user make a folder. A pre-made folder or file, a link or a junction under our names must never be adopted (the owner of a thing keeps the right to change its list).
+  if (Test-Reparse $path) { throw "$path is a link or junction; remove it (as an administrator) and run again. Nothing more was changed." }
+  if ((Get-Item -LiteralPath $path -Force).PSIsContainer -ne $folder) { throw "$path exists but is not a $(if ($folder) { 'folder' } else { 'file' }). Nothing more was changed." }
   $owner = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier])
-  $trusted = @($SidSystem.Value, $SidAdmins.Value, 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') # SYSTEM, Administrators, TrustedInstaller
-  if ((-not (Test-Path -LiteralPath $ManifestPath)) -and ($trusted -notcontains $owner.Value)) { throw "$path already exists and is owned by $($owner.Value), not by an administrator. Remove it or choose another -DataDir/-InstallDir. Nothing was changed." }
+  if ($TrustedOwners -notcontains $owner.Value) { throw "$path already exists and is owned by $($owner.Value), not by an administrator. Remove it or choose another -DataDir/-InstallDir. Nothing more was changed." }
+}
+# Makes the folder WITH its protected list in one call when it is absent (no moment with the parent's default list), then checks what is there and writes the list as a whole. If someone
+# else made the folder first (a race in %ProgramData%), the check after the call sees their ownership or their link and stops.
+function Set-ProtectedAcl([string] $path, $rules) {
+  $security = New-ProtectedSecurity $rules
+  if (-not (Test-Path -LiteralPath $path)) {
+    if ($null -ne [System.IO.Directory].GetMethod('CreateDirectory', [type[]]@([string], [System.Security.AccessControl.DirectorySecurity]))) { [void][System.IO.Directory]::CreateDirectory($path, $security) }   # Windows PowerShell 5.1
+    else { [void][System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo $path), $security) }                                                                                         # PowerShell 7
+  }
+  Assert-SafeItem $path $true
+  Set-Acl -LiteralPath $path -AclObject $security
+  if (Test-Reparse $path) { throw "$path became a link while its access list was set. Stop and inspect it." }
+}
+# Removes a folder tree WITHOUT following any link or junction in it: a link is removed as the link itself, never what it points to (Windows PowerShell 5.1's Remove-Item -Recurse follows
+# directory links, and the account can make a junction in its control folder).
+function Remove-TreeNoFollow([string] $path) {
+  $item = Get-Item -LiteralPath $path -Force
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    if ($item.PSIsContainer) { [System.IO.Directory]::Delete($path, $false) } else { [System.IO.File]::Delete($path) }
+    return
+  }
+  if ($item.PSIsContainer) {
+    foreach ($child in @(Get-ChildItem -LiteralPath $path -Force)) { Remove-TreeNoFollow $child.FullName }
+    $item.Attributes = [IO.FileAttributes]::Directory
+    [System.IO.Directory]::Delete($path, $false)
+  } else {
+    $item.Attributes = [IO.FileAttributes]::Normal
+    [System.IO.File]::Delete($path)
+  }
 }
 
 # ---- Verify ------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -214,14 +266,15 @@ function Invoke-Verify {
   $plan = if ($null -ne $sid) { New-AclPlan $sid } else { @() }
   foreach ($item in $plan) {
     if (-not (Test-Path -LiteralPath $item.Path)) { Check $false "$($item.Path) exists"; continue }
-    $acl = Get-Acl -LiteralPath $item.Path
+    try { $acl = Get-Acl -LiteralPath $item.Path } catch { Check $false "$($item.Path): its access list is readable (run Verify elevated: only administrators may read it)"; continue }
     Say "  $($item.Path)   owner $($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value)   inherited entries: $(-not $acl.AreAccessRulesProtected)"
     foreach ($a in $acl.Access) { Say "      $($a.AccessControlType) $($a.IdentityReference.Value) $($a.FileSystemRights)" }
-    foreach ($r in $item.Rules) { Say "      expected: $($r.Who.Value) $($r.Rights): $($r.Why)" }
+    foreach ($r in $item.Rules) { Say "      expected: $($r.Who.Value) $($r.Rights) ($($r.Scope)): $($r.Why)" }
     Check ($acl.AreAccessRulesProtected) "$($item.Path): inheritance is off"
     Check ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]) -eq $SidAdmins) "$($item.Path): owned by Administrators"
-    $expected = @($item.Rules | ForEach-Object { "$($_.Who.Value)|$([int][System.Security.AccessControl.FileSystemRights]$_.Rights)" })
-    $actual = @($acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { "$($_.IdentityReference.Value)|$([int]$_.FileSystemRights)" })
+    # who | rights (with SYNCHRONIZE, which .NET adds to every allow entry) | inheritance | propagation | allow
+    $expected = @($item.Rules | ForEach-Object { $f = Get-Inheritance $_.Scope; "$($_.Who.Value)|$(([int][System.Security.AccessControl.FileSystemRights]$_.Rights) -bor $SynchronizeBit)|$([int][System.Security.AccessControl.InheritanceFlags]$f[0])|$([int][System.Security.AccessControl.PropagationFlags]$f[1])|Allow" })
+    $actual = @($acl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { "$($_.IdentityReference.Value)|$(([int]$_.FileSystemRights) -bor $SynchronizeBit)|$([int]$_.InheritanceFlags)|$([int]$_.PropagationFlags)|$($_.AccessControlType)" })
     Check ((@($expected | Where-Object { $actual -notcontains $_ }).Count -eq 0) -and (@($actual | Where-Object { $expected -notcontains $_ }).Count -eq 0)) "$($item.Path): the entry list is exactly the expected one"
   }
   $exe = Join-Path $InstallDir $ExeName
@@ -259,7 +312,9 @@ function Invoke-Install {
     if (-not $AllowUnsigned) { throw "The launcher's Authenticode signature is '$($sig.Status)'. A release is signed. For a build of your own or from the hosted CI, add -AllowUnsigned (and understand what you are installing). Nothing was changed." }
     Say "WARNING: installing an UNSIGNED launcher (-AllowUnsigned): its identity rests on the SHA-256 you gave."
   }
-  foreach ($d in @($InstallDir, $DataDir)) { Assert-SafeFolder $d }
+  # Before any change: nothing under our names is a link or belongs to someone else (each is checked again right before it is written).
+  foreach ($d in @($InstallDir, $DataDir, $ControlDir)) { Assert-SafeItem $d $true }
+  foreach ($f in @((Join-Path $InstallDir $ExeName), $EnvFile, $ManifestPath)) { Assert-SafeItem $f $false }
   $existing = Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue
   if ($null -ne $existing -and $existing.Description -ne $AccountMarker) { throw "A user named '$AccountName' exists that this script did not make. Choose another -AccountName. Nothing was changed." }
 
@@ -267,7 +322,8 @@ function Invoke-Install {
   if ($null -eq $existing) {
     if ($PSCmdlet.ShouldProcess($AccountName, 'create a local standard user (random password held in memory only, never stored; no admin rights)')) {
       New-LocalUser -Name $AccountName -Password (New-RandomSecureString) -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description $AccountMarker | Out-Null
-      Add-LocalGroupMember -SID $SidUsers -Member $AccountName   # Users: so it can read Node and the system folders; NOT Administrators
+      # Users: so it can read Node and the system folders; NOT Administrators. (Some Windows versions already add a new user to Users: that is not an error.)
+      try { Add-LocalGroupMember -SID $SidUsers -Member $AccountName } catch [Microsoft.PowerShell.Commands.MemberExistsException] { }
     }
   }
   $sid = if ($WhatIfPreference -and $null -eq $existing) { New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-21-0-0-0-1000' } else { (Get-LocalUser -Name $AccountName).SID }
@@ -276,27 +332,29 @@ function Invoke-Install {
     [NnLsa]::Add($sid.Value, $RightsGranted + $RightsDenied)
     if (-not $ServiceLogon) { [NnLsa]::Remove($sid.Value, @('SeServiceLogonRight')) }
   }
-  # 3. Folders: made empty with the protected list in place BEFORE anything is copied in, so there is no moment when a default list applies.
+  # 3. Folders: made with the protected list in the same call (Set-ProtectedAcl), in order, so each parent is closed before its child is made or checked.
   $plan = New-AclPlan $sid
   foreach ($item in $plan) {
     if ($PSCmdlet.ShouldProcess($item.Path, 'create (if absent) and set a protected access list: ' + (($item.Rules | ForEach-Object { "$($_.Who.Value) $($_.Rights)" }) -join '; '))) {
-      if (-not (Test-Path -LiteralPath $item.Path)) { New-Item -ItemType Directory -Path $item.Path | Out-Null }
       Set-ProtectedAcl $item.Path $item.Rules
     }
   }
   # 4. The launcher: copied only when it differs, then re-hashed at its place.
   $target = Join-Path $InstallDir $ExeName
   if ($PSCmdlet.ShouldProcess($target, 'place nn-launcher.exe')) {
+    Assert-SafeItem $target $false
     if (-not (Test-Path -LiteralPath $target) -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash) { Copy-Item -LiteralPath $LauncherPath -Destination $target -Force }
-    if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash) { throw 'The placed launcher does not match the expected hash.' }
+    # the source may have changed after it was hashed: the placed file is what counts, and a wrong one is not left in place
+    if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $hash) { Remove-Item -LiteralPath $target -Force; throw 'The placed launcher did not match the expected hash and was removed.' }
   }
   # 5. worker.env and the manifest: paths and names only. No password, token or key exists anywhere in this script, so none can be written.
   if ($PSCmdlet.ShouldProcess($EnvFile, 'write the four NIMBLENEWT_WIN_* names')) {
     foreach ($v in @($target, $ControlDir, $Container, $ProfileName)) { if ($v -match '[\r\n"=]') { throw "a value for worker.env has a character that is not allowed: $v" } }
+    foreach ($f in @($EnvFile, $ManifestPath)) { Assert-SafeItem $f $false }
     $lines = @("NIMBLENEWT_WIN_LAUNCHER=$target", "NIMBLENEWT_WIN_CONTROL_DIR=$ControlDir", "NIMBLENEWT_WIN_CONTAINER=$Container", "NIMBLENEWT_WIN_PROFILE=$ProfileName")
     Set-Content -LiteralPath $EnvFile -Value $lines -Encoding ascii
     $manifest = [ordered]@{ schema = 'nimblenewt.native-install/1'; installedAt = (Get-Date).ToUniversalTime().ToString('o'); account = $AccountName; accountSid = $sid.Value; installDir = $InstallDir; dataDir = $DataDir
-      controlDir = $ControlDir; launcher = $target; launcherSha256 = $hash; signature = [string]$sig.Status; rightsGranted = $RightsGranted; rightsDenied = $RightsDenied; madeFolders = @($InstallDir, $DataDir) }
+      controlDir = $ControlDir; launcher = $target; launcherSha256 = $hash; signature = [string]$sig.Status; rightsGranted = $RightsGranted; rightsDenied = $RightsDenied }
     $manifest | ConvertTo-Json | Set-Content -LiteralPath $ManifestPath -Encoding ascii
   }
   Say 'Install finished. Run -Action Verify (elevated) to print what was set.'
@@ -305,30 +363,49 @@ function Invoke-Install {
 # ---- Uninstall ---------------------------------------------------------------------------------------------------------------------------------------------------------
 function Invoke-Uninstall {
   Assert-Admin
-  if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "No manifest at $ManifestPath: this script did not make what is here, so it removes nothing. Nothing was changed." }
+  # The manifest sits in the data folder, which only administrators can write once installed; it is still only allowed to CONFIRM what this run would remove anyway: the folders of this
+  # run (-InstallDir/-DataDir or their defaults) and the account it made. It can never aim a removal at another folder or another account.
+  Assert-SafeItem $DataDir $true
+  if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "No manifest at $($ManifestPath): this script did not make what is here, so it removes nothing. Nothing was changed." }
+  Assert-SafeItem $ManifestPath $false
   $m = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-  if ($m.schema -ne 'nimblenewt.native-install/1') { throw 'The manifest is not one this script wrote.' }
-  # Only paths the manifest names AND that sit where this script would have put them are removed (a hand-edited manifest cannot aim the delete elsewhere).
-  foreach ($p in @($m.installDir, $m.dataDir)) {
-    if ((Split-Path -Leaf $p) -ne 'NimbleNewt' -or (Test-Reparse $p)) { throw "The manifest names $p, which is not a NimbleNewt folder this script made. Nothing was changed." }
+  if ($m.schema -ne 'nimblenewt.native-install/1') { throw 'The manifest is not one this script wrote. Nothing was changed.' }
+  $launcher = Join-Path $InstallDir $ExeName
+  foreach ($pair in @(@($m.installDir, $InstallDir), @($m.dataDir, $DataDir), @($m.controlDir, $ControlDir), @($m.launcher, $launcher))) {
+    if (-not (Test-SamePath $pair[0] $pair[1])) { throw "The manifest names '$($pair[0])' where this run expects '$($pair[1])' (pass the -InstallDir/-DataDir the install used). Nothing was changed." }
   }
+  foreach ($d in @($InstallDir, $ControlDir)) { Assert-SafeItem $d $true }
+  foreach ($f in @($launcher, $EnvFile)) { Assert-SafeItem $f $false }
   $running = Get-Process -Name 'nn-launcher' -ErrorAction SilentlyContinue
   if ($running) { throw 'nn-launcher.exe is running (a job is in progress). Stop the worker first. Nothing was changed.' }
-  if ($PSCmdlet.ShouldProcess($m.dataDir, 'remove the control folder, worker.env, the manifest and the data folder')) {
-    foreach ($p in @($m.dataDir, $m.installDir)) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }
-  }
   $user = Get-LocalUser -Name $m.account -ErrorAction SilentlyContinue
+  if ($null -ne $user -and ($user.Description -ne $AccountMarker -or $user.SID.Value -ne $m.accountSid)) { throw "The user '$($m.account)' is not the one this script made. Nothing was changed." }
+
+  # 1. The account first (the manifest stays until the end, so a rerun can finish an interrupted removal).
   if ($null -ne $user) {
-    if ($user.Description -ne $AccountMarker -or $user.SID.Value -ne $m.accountSid) { throw "The user '$($m.account)' is not the one this script made. It was left alone; the folders above were removed." }
     if ($PSCmdlet.ShouldProcess($m.account, 'remove every account right it holds, delete its profile (and with it the AppContainer profile it made), and delete the user')) {
       [NnLsa]::RemoveAll($user.SID.Value)
       Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $user.SID.Value } | Remove-CimInstance
       Remove-LocalUser -SID $user.SID
     }
   }
+  # 2. The files this script placed, then its two folders only if nothing else is left in them.
+  if ($PSCmdlet.ShouldProcess($DataDir, 'close and remove the control folder (links in it are removed as links, never followed), remove worker.env, the launcher and the manifest, then the two folders if empty')) {
+    if (Test-Path -LiteralPath $ControlDir) {
+      Set-Acl -LiteralPath $ControlDir -AclObject (New-ProtectedSecurity @(@{ Who = $SidSystem; Rights = 'FullControl'; Scope = 'All' }, @{ Who = $SidAdmins; Rights = 'FullControl'; Scope = 'All' }))
+      Remove-TreeNoFollow $ControlDir
+    }
+    foreach ($f in @($EnvFile, $launcher, $ManifestPath)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
+    foreach ($d in @($DataDir, $InstallDir)) {
+      if (-not (Test-Path -LiteralPath $d)) { continue }
+      if (@(Get-ChildItem -LiteralPath $d -Force).Count -eq 0) { [System.IO.Directory]::Delete($d, $false) } else { Say "Left $d in place: it holds files this script did not make." }
+    }
+  }
   Say 'Uninstall finished. Run -Action Verify to see that nothing is left (it will say the account and folders are missing).'
 }
 
+Assert-NimbleNewtPath $InstallDir '-InstallDir'
+Assert-NimbleNewtPath $DataDir '-DataDir'
 switch ($Action) {
   'Verify' { Invoke-Verify }
   'Install' { Invoke-Install }

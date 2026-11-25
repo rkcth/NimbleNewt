@@ -116,6 +116,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/appc-out"
           cd native/nn-launcher
           RUSTFLAGS="--remap-path-prefix=$PWD=/nn-launcher -C link-arg=/Brepro" cargo build --release --locked 2>&1 | node ../../scripts/redact-log.mjs
+          # the argument tests: the product build refuses every experiment-only option, the experiment build accepts them (src/args.rs)
+          cargo test --locked 2>&1 | node ../../scripts/redact-log.mjs
+          cargo test --locked --features experiment 2>&1 | node ../../scripts/redact-log.mjs
           ./target/release/nn-launcher.exe info --name NimbleNewtProductCheck > "$RUNNER_TEMP/product-info.json"
           node ../../scripts/redact-log.mjs < "$RUNNER_TEMP/product-info.json"
           grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"

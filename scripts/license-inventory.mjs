@@ -83,9 +83,19 @@ export function render(entries) {
 const CARGO_LOCK = fileURLToPath(new URL("../native/nn-launcher/Cargo.lock", import.meta.url));
 const CARGO_LICENSES = fileURLToPath(new URL("../native/nn-launcher/cargo-licenses.json", import.meta.url));
 
-/** The third-party crates of a Cargo.lock (those with a registry source), as sorted `name@version` keys. */
+/** The third-party crates of a Cargo.lock (every package with a `source`: a registry, a git repository or anything else; only the local path crates have none), as sorted
+ *  `name@version` keys. Each `[[package]]` block is read on its own, whatever the order of its lines or its line endings, so a crate cannot drop out of the check by its layout.
+ *  A block without a name and a version is an error (the check then fails rather than skip it). */
 export function cargoPackages(lockText) {
-  return [...lockText.matchAll(/\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"\nsource = "registry\+/g)].map((m) => `${m[1]}@${m[2]}`).sort(compare);
+  const keys = [];
+  for (const block of lockText.replace(/\r\n?/g, "\n").split(/^\[\[package\]\]$/m).slice(1)) {
+    const body = block.split(/^\[/m)[0];
+    const field = (name) => new RegExp(`^${name} = "([^"]*)"$`, "m").exec(body)?.[1];
+    const [name, version, source] = [field("name"), field("version"), field("source")];
+    if (!name || !version) throw new Error(`Cargo.lock has a [[package]] entry without a name and version: ${body.trim().split("\n")[0] ?? ""}`);
+    if (source !== undefined) keys.push(`${name}@${version}`);
+  }
+  return keys.sort(compare);
 }
 
 /** Problems between a Cargo.lock's crates and the recorded licenses (empty: consistent and allowed). */
