@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { fakeEngine, type FakeOptions } from "./g10-engines-fake.js";
 import { concurrencyRun, evictionRun, extrasRun, idleRun, makeHead, parseMetrics, readCache, readEngineInfo, readMetrics, realEngineEnv, send, sharedRun, type EngineEnv } from "./g10-engines-live.js";
 
@@ -80,7 +82,7 @@ test("idle gaps: every gap is waited (0 is not), each gap has its own head, and 
 test("eviction cliff: both engines keep the first head through a few others and lose it past their capacity; the cliff is recorded, or 'not reached'", async () => {
   // vLLM: 20,000 tokens of cache; a head of 120 rules is about 2,444 tokens, so eight heads fit and nine do not. Each probe also refreshes the first head, so the cliff is the number of OTHER heads read since the previous probe that no longer fits beside it (here 8 others between the probes at 8 and 16).
   let { env } = envFor({ kind: "vllm", capacityTokens: 20_000 });
-  let r = await evictionRun(env, { lines: LINES, levels: [1, 2, 4, 8, 16] });
+  let r = await evictionRun(env, { lines: LINES, levels: [1, 2, 4, 8, 16, 32] });
   assert.equal(r.notes["cliffReached"], true);
   assert.equal(r.notes["cliffAtOtherHeads"], 16);
   const probes = r.steps.filter((s) => s.step.startsWith("first-head-after-"));
@@ -91,6 +93,10 @@ test("eviction cliff: both engines keep the first head through a few others and 
   ({ env } = envFor({ kind: "llamacpp", slots: 4 }));
   r = await evictionRun(env, { lines: LINES, levels: [1, 2, 4, 8] });
   assert.equal(r.notes["cliffAtOtherHeads"], 8);
+  // With a host-memory prompt cache the first head outlives its slot: no cliff within the same ladder, and the cliff moves out to what the host cache holds (about 4 heads here).
+  ({ env } = envFor({ kind: "llamacpp", slots: 4, hostCacheTokens: 4 * 2444 }));
+  r = await evictionRun(env, { lines: LINES, levels: [1, 2, 4, 8, 16] });
+  assert.equal(r.notes["cliffAtOtherHeads"], 16);
   // A capacity that is not reached within the ladder is said so.
   ({ env } = envFor({ kind: "vllm", capacityTokens: 4_000_000 }));
   r = await evictionRun(env, { lines: LINES, levels: [1, 2, 4] });
@@ -107,6 +113,11 @@ test("concurrency 1, 2, 4 and 8: every warm request reuses the head, cold ones a
     assert.ok(fake.inFlightMax() >= 8, `${name}: at least 8 requests were in flight together (saw ${fake.inFlightMax()})`);
     // Each cold group sends one new head to n conversations at once: the first computes, so at most n-1 of them can reuse.
     assert.ok(r.levels.every((l) => l.coldReusedCount <= l.level - 1), name);
+  }
+  {
+    const { env, fake } = envFor({ kind: "vllm" });
+    await concurrencyRun(env, { levels: [4], lines: LINES });
+    assert.deepEqual(fake.chatStarts, [1, 1, 2, 3, 4, 1, 2, 3, 4], "the prime call alone, then 4 warm and 4 cold requests each arriving while the earlier ones are still in flight");
   }
   const { env } = envFor({ kind: "vllm", details: false });
   const r = await concurrencyRun(env, { levels: [2], lines: LINES });
@@ -128,18 +139,26 @@ test("refused or failing requests are recorded, not thrown", async () => {
 });
 
 test("extras, llama.cpp: an unknown setting is refused and the plain retry answers; slots keep their own cache; cache_prompt false computes all; save, erase and restore bring the head back", async () => {
-  const { env, fake } = envFor({ kind: "llamacpp", slots: 4 });
+  const { env, fake } = envFor({ kind: "llamacpp", slots: 4, strict: true });
   const r = await extrasRun(env, { lines: LINES, saveFile: "nn-test.bin" });
-  assert.deepEqual(r.checks, { plainRetryAnswered: true, sameSlotReused: true, cachePromptFalseComputedAll: true, restoreBroughtTheHeadBack: true, allAnswersCorrect: true });
+  assert.deepEqual(r.checks, { plainRetryAnswered: true, sameSlotReused: true, cachePromptFalseComputedAll: true, eraseRemovedTheHead: true, restoreGaveTheHeadBack: true, allAnswersCorrect: true });
   assert.deepEqual(r.notes["unknownCacheSetting"], { outcome: "refused", status: 400, message: "unknown field nn_unknown_cache_setting" });
   assert.equal(r.notes["otherSlotReusedHead"], false, "a second slot starts empty: nothing is shared across slots");
   const sr = r.notes["slotSaveRestore"] as { saveStatus: number; afterEraseReusedFraction: number; afterRestoreReusedFraction: number };
   assert.deepEqual([sr.saveStatus, sr.afterEraseReusedFraction < 0.5, sr.afterRestoreReusedFraction >= 0.5], [200, true, true]);
   assert.deepEqual(fake.requests.filter((q) => q.path.startsWith("/slots/")).map((q) => q.path), ["/slots/0?action=save", "/slots/0?action=erase", "/slots/0?action=restore"]);
+  // The real server of the 2026-11-25 run ignored the unknown field: the default stand-in does too.
+  const lenient = await extrasRun(envFor({ kind: "llamacpp", slots: 4 }).env, { lines: LINES });
+  assert.deepEqual(lenient.notes["unknownCacheSetting"], { outcome: "ignored", status: 200 });
   const noSave = envFor({ kind: "llamacpp", saveEnabled: false }).env;
   const r2 = await extrasRun(noSave, { lines: LINES });
   assert.deepEqual(r2.notes["slotSaveRestore"], { saveStatus: 501, outcome: "not available (the server needs --slot-save-path)" });
-  assert.equal("restoreBroughtTheHeadBack" in r2.checks, false);
+  assert.equal("restoreGaveTheHeadBack" in r2.checks, false);
+  // A server with a host-memory prompt cache (--cache-ram) still serves the head after the slot is erased: said, not hidden.
+  const withHost = envFor({ kind: "llamacpp", slots: 4, hostCacheTokens: 100_000 }).env;
+  const r3 = await extrasRun(withHost, { lines: LINES, saveFile: "nn-test.bin" });
+  assert.deepEqual([r3.checks["eraseRemovedTheHead"], r3.checks["restoreGaveTheHeadBack"]], [false, true]);
+  assert.equal((r3.notes["slotSaveRestore"] as { afterEraseReusedFraction: number }).afterEraseReusedFraction >= 0.5, true);
 });
 
 test("extras, vLLM: an unknown setting is ignored; cache_salt partitions the cache (same salt reuses, another salt and none do not); an older build that refuses cache_salt is recorded", async () => {
@@ -168,4 +187,19 @@ test("evidence holds usage and timing fields only: no ledger text, no nonce, no 
   const spy: EngineEnv = { ...env, fetch: (async (u: string, init?: { headers?: Record<string, string> }) => { seen.push(init?.headers ?? {}); return new Response("{}", { status: 404 }); }) as unknown as typeof fetch };
   await send(spy, "p", "s", head, 0);
   assert.ok(seen.every((h) => Object.keys(h).every((k) => k.toLowerCase() === "content-type")), "only a content type is sent");
+});
+
+test("captured responses (2026-11-25, Qwen3-8B on a rented GPU) read right with the same reader the bench uses", () => {
+  const read = (name: string): { status: number; body: { usage: { prompt_tokens: number; prompt_tokens_details?: { cached_tokens: number } }; timings?: { cache_n: number; prompt_n: number } } } =>
+    JSON.parse(readFileSync(fileURLToPath(new URL(`../test-fixtures/g10-engines/${name}.json`, import.meta.url)), "utf8"));
+  const vCold = readCache("vllm", read("vllm-cold").body); const vHit = readCache("vllm", read("vllm-shared-hit").body);
+  assert.deepEqual([vCold.reported, vCold.cachedTokens, vHit.reported, vHit.promptTokens], [true, 0, true, 6470]);
+  assert.ok(vHit.cachedTokens! > 0.98 * vHit.promptTokens && vHit.cachedTokens! % 64 === 0, "vLLM reuses whole 64-token blocks on this build");
+  const lCold = readCache("llamacpp", read("llamacpp-cold").body); const lHit = readCache("llamacpp", read("llamacpp-shared-hit").body);
+  assert.ok(lCold.reported && lCold.cachedTokens! < 0.01 * lCold.promptTokens, "a cold llama.cpp call still shows a handful of cached tokens (the shared chat-template start)");
+  assert.deepEqual([lHit.cachedTokens, lHit.computedTokens, lHit.promptTokens], [6454, 18, 6472]);
+  const raw = read("llamacpp-shared-hit").body;
+  assert.equal(raw.timings!.cache_n + raw.timings!.prompt_n, raw.usage.prompt_tokens, "cache_n + prompt_n is the prompt");
+  assert.equal(raw.usage.prompt_tokens_details!.cached_tokens, raw.timings!.cache_n, "this build repeats cache_n in usage");
+  for (const n of ["vllm-cold", "vllm-shared-hit", "llamacpp-cold", "llamacpp-shared-hit"]) assert.ok(!/content|ledger|Rule/.test(JSON.stringify(read(n))), `${n}: no text`);
 });

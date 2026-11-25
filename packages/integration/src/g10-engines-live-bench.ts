@@ -20,7 +20,7 @@ const nums = (name: string, fallback: string): number[] => arg(name, fallback).s
 const GAPS = nums("gaps", "0,15,30,60,120"); const LEVELS = nums("levels", "1,2,4,8"); const EVICT = nums("evict-levels", "1,2,4,8,16,32");
 if (GAPS.some((g) => !(g >= 0 && g <= 3600)) || !(LINES >= 20 && LINES <= 450) || LEVELS.some((l) => !(l >= 1 && l <= 16)) || EVICT.some((l) => !(l >= 1 && l <= 200))) { process.stderr.write("--gaps 0..3600 s, --lines 20..450, --levels 1..16, --evict-levels 1..200\n"); process.exit(2); }
 const metaText = arg("meta", "") === "" ? "{}" : readFileSync(arg("meta", ""), "utf8");
-if (/(sk-|bearer |api[_-]?key|token|password|secret)/i.test(metaText)) { process.stderr.write("the meta file looks like it holds a credential; refused\n"); process.exit(2); }
+if (/(sk-[A-Za-z0-9]|bearer\s|api[_-]?key|\btoken\b|password|secret)/i.test(metaText)) { process.stderr.write("the meta file looks like it holds a credential; refused\n"); process.exit(2); }
 
 const env = realEngineEnv(ENGINE as EngineKind, globalThis.fetch, ROOT, MODEL, (l) => process.stdout.write(`${l}\n`));
 const evidence: Record<string, unknown> = { startedAt: new Date().toISOString(), engine: ENGINE, model: MODEL, parts: PARTS, lines: LINES, gapsS: GAPS, levels: LEVELS, evictLevels: EVICT, meta: JSON.parse(metaText) as unknown, engineInfo: await readEngineInfo(env), metricsAtStart: await readMetrics(env) };

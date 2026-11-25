@@ -329,7 +329,9 @@ export async function extrasRun(env: EngineEnv, opts: { lines: number; saveFile?
       const restored = await call("restore", { filename: file });
       const afterRestore = await add("slot0-after-restore", slotHead, 1, { id_slot: 0, cache_prompt: true });
       notes["slotSaveRestore"] = { saveStatus: saved, eraseStatus: erased, restoreStatus: restored, afterEraseReusedFraction: probeCold.reusedFraction ?? null, afterRestoreReusedFraction: afterRestore.reusedFraction ?? null };
-      checks["restoreBroughtTheHeadBack"] = restored === 200 && reuse(afterRestore) >= REUSED && reuse(probeCold) < REUSED;
+      // Two separate answers: did the erase really remove the head (a server with a host-memory prompt cache can still serve it), and did the restore give it back.
+      checks["eraseRemovedTheHead"] = reuse(probeCold) < REUSED;
+      checks["restoreGaveTheHeadBack"] = restored === 200 && reuse(afterRestore) >= REUSED;
     } else notes["slotSaveRestore"] = { saveStatus: saved, outcome: "not available (the server needs --slot-save-path)" };
   } else {
     // vLLM: cache_salt partitions the prefix cache (isolation): the same head under another salt, and with no salt, must be computed again.

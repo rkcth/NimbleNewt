@@ -1,0 +1,1 @@
+{"status":200,"body":{"object":"chat.completion","model":"Qwen/Qwen3-8B","usage":{"prompt_tokens":6470,"total_tokens":6477,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":0,"created_cache_tokens":6464}}}}

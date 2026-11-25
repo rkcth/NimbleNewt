@@ -17,15 +17,17 @@ export interface FakeOptions {
   readonly capacityTokens?: number;
   /** vLLM: report cached_tokens (the engine's flag). Default true. */
   readonly details?: boolean;
-  /** llama.cpp: refuse unknown request fields. Default true. vLLM ignores them. */
+  /** llama.cpp: refuse unknown request fields. Default false: the real llama-server and vLLM both ignored an unknown field in the 2026-11-25 runs; a refusing server is scripted with `strict: true` to test the fallback record. */
   readonly strict?: boolean;
+  /** llama.cpp: size of the host-memory prompt cache in tokens (`--cache-ram`); slot contents that are replaced or erased are kept there and found again by prefix. Default 0 (off). */
+  readonly hostCacheTokens?: number;
   /** llama.cpp: slot files allowed (--slot-save-path). Default true. */
   readonly saveEnabled?: boolean;
   /** vLLM: refuse `cache_salt` (an older build). */
   readonly noSalt?: boolean;
 }
 export interface FakeRequest { readonly method: string; readonly path: string; readonly body?: Record<string, unknown> }
-export interface Fake { readonly fetch: typeof globalThis.fetch; readonly requests: FakeRequest[]; forget(): void; readonly inFlightMax: () => number }
+export interface Fake { readonly fetch: typeof globalThis.fetch; readonly requests: FakeRequest[]; forget(): void; readonly inFlightMax: () => number; /** For each chat request, how many requests (itself included) were in flight when it arrived. */ readonly chatStarts: number[] }
 
 const BLOCK = 16;
 const words = (s: string): string[] => s.split(/\s+/).filter((w) => w !== "");
@@ -41,13 +43,17 @@ function answerFor(messages: { role: string; content: string }[]): string {
 
 export function fakeEngine(options: FakeOptions): Fake {
   const requests: FakeRequest[] = [];
+  const chatStarts: number[] = [];
   const kind = options.kind;
-  const strict = options.strict ?? true;
+  const strict = options.strict ?? false;
   let tick = 0; let inFlight = 0; let inFlightMax = 0;
   // llama.cpp state
   const slotCount = options.slots ?? 4;
   const slots: { tokens: string[]; used: number }[] = Array.from({ length: slotCount }, () => ({ tokens: [], used: 0 }));
   const files = new Map<string, string[]>();
+  const hostCap = options.hostCacheTokens ?? 0;
+  let host: string[][] = [];
+  const keep = (t: string[]): void => { if (hostCap > 0 && t.length > 0) { host.push(t); let sum = host.reduce((a, h) => a + h.length, 0); while (sum > hostCap && host.length > 0) sum -= host.shift()!.length; } };
   // vLLM state: block chain keys in LRU order
   const blocks = new Map<string, number>();
   const capacityBlocks = Math.floor((options.capacityTokens ?? 20_000) / BLOCK);
@@ -71,6 +77,11 @@ export function fakeEngine(options: FakeOptions): Fake {
       else { id = 0; let best = Number.NEGATIVE_INFINITY; slots.forEach((s, i) => { const raw = common(s.tokens, tokens); const c = raw / Math.max(1, tokens.length) >= 0.1 ? raw : 0; const score = c * 1_000_000 - s.used; if (score > best) { best = score; id = i; } }); }
       const slot = slots[id]!;
       cached = reuse ? Math.min(common(slot.tokens, tokens), prompt - 1) : 0;
+      if (reuse && hostCap > 0) {
+        const best = host.reduce<{ n: number; i: number }>((b, h, i) => { const n = common(h, tokens); return n > b.n ? { n, i } : b; }, { n: 0, i: -1 });
+        if (best.n > cached && best.n / prompt >= 0.1) { cached = Math.min(best.n, prompt - 1); host.splice(best.i, 1); }
+      }
+      if (slot.tokens.length > 0 && common(slot.tokens, tokens) < slot.tokens.length) keep(slot.tokens);
       computed = prompt - cached;
       slot.tokens = tokens; slot.used = tick;
     } else {
@@ -107,6 +118,7 @@ export function fakeEngine(options: FakeOptions): Fake {
     const body = init?.body === undefined ? undefined : (JSON.parse(init.body) as Record<string, unknown>);
     requests.push({ method, path: url.pathname + url.search, ...(body === undefined ? {} : { body }) });
     inFlight += 1; inFlightMax = Math.max(inFlightMax, inFlight);
+    if (url.pathname === "/v1/chat/completions") chatStarts.push(inFlight);
     try {
       await Promise.resolve();
       if (url.pathname === "/v1/chat/completions" && method === "POST") return chat(body ?? {});
@@ -118,7 +130,7 @@ export function fakeEngine(options: FakeOptions): Fake {
       if (kind === "llamacpp" && m && method === "POST") {
         const slot = slots[Number(m[1])]; const action = url.searchParams.get("action");
         if (slot === undefined) return json(404, { error: { message: "no such slot" } });
-        if (action === "erase") { slot.tokens = []; return json(200, { id_slot: Number(m[1]), n_erased: 1 }); }
+        if (action === "erase") { keep(slot.tokens); slot.tokens = []; return json(200, { id_slot: Number(m[1]), n_erased: 1 }); }
         if (options.saveEnabled === false) return json(501, { error: { message: "This server does not support slot save/restore. Start it with --slot-save-path" } });
         const filename = String(body?.["filename"] ?? "");
         if (action === "save") { files.set(filename, slot.tokens.slice()); return json(200, { id_slot: Number(m[1]), filename, n_saved: slot.tokens.length }); }
@@ -128,5 +140,5 @@ export function fakeEngine(options: FakeOptions): Fake {
     } finally { inFlight -= 1; }
   }) as unknown as typeof globalThis.fetch;
 
-  return { fetch: fakeFetch, requests, forget: () => { blocks.clear(); for (const s of slots) s.tokens = []; }, inFlightMax: () => inFlightMax };
+  return { fetch: fakeFetch, requests, forget: () => { host = []; blocks.clear(); for (const s of slots) s.tokens = []; }, inFlightMax: () => inFlightMax, chatStarts };
 }
