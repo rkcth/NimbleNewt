@@ -73,6 +73,9 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
     assert.equal(judgeWindowsCase(p, forged, free, undefined).verdict, "inconclusive");
     // the junction step skipped although the move away was not reported (or was itself skipped) is a probe that did not run
     assert.equal(judgeWindowsCase(p, res(p.id, att("edit", "denied"), att("create", "denied"), att("delete", "denied"), att("replace-move-away", "skipped"), att("replace-with-junction", "skipped", { skippable: true })), free, undefined).verdict, "inconclusive");
+    // with no move-away step at all (in both runs, so the pairing matches), the junction step may not be left out: the unconfined run never showed it works
+    const noMove = (o: RunnerAttempt["outcome"]) => res(p.id, att("edit", o), att("create", o), att("delete", o), att("replace-with-junction", "skipped", { skippable: true }));
+    assert.equal(judgeWindowsCase(p, noMove("denied"), { result: noMove("allowed"), proofMissing: undefined }, undefined).verdict, "inconclusive");
     // a skippable step that got through is a leak
     assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "allowed", { skippable: true })), free, undefined).verdict, "fail");
     // unconfined, the move away got through, so the junction step had to be made: skipping it there shows nothing
