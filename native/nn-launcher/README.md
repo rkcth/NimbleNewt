@@ -30,4 +30,4 @@ The measuring options of the experiment are not in the product build: grants `de
 
 ## Not proven yet
 
-Launching from the service account in Session 0 with nobody signed in (also after logout and reboot), a non-administrator account, Windows Home, the controller's channel across the container boundary, and everything on the owner's own hardware. Only a hosted interactive administrator session on Windows Server has run this program.
+Launching from the service account in Session 0 with nobody signed in (also after logout and reboot), a non-administrator account, Windows Home, the controller's channel across the container boundary (built as a file relay in the supervisor, tested only with a simulated launcher; how a real container treats its two files is unmeasured), and everything on the owner's own hardware. Only a hosted interactive administrator session on Windows Server has run this program.
