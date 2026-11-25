@@ -377,3 +377,15 @@ test("verify started through a link still checks the file (a link once made the 
     assert.match(good.stdout, /matches the record/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("the hosted product-launcher step and the own-runner info step both require the private window station to be made (Session 0 fix)", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const hosted = wf.slice(wf.indexOf('- name: "Product launcher (native/nn-launcher)'), wf.indexOf("node ../../scripts/native-launcher.mjs record"));
+  const ownAt = wf.indexOf("- name: Product launcher info as the runner service");
+  const own = wf.slice(ownAt, wf.indexOf("\n      - name:", ownAt + 10));
+  for (const [name, text] of [["hosted", hosted], ["own runner", own]]) {
+    assert.ok(text.length > 200, name);
+    assert.ok(text.includes(`grep -q '"windowStation":"private"'`), `${name}: the product names the private station`);
+    assert.ok(text.includes(`grep -q '"windowStationOk":true'`), `${name}: a private station was made and closed`);
+  }
+});

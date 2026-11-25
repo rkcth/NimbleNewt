@@ -151,6 +151,9 @@ jobs:
           ./target/release/nn-launcher.exe info --name NimbleNewtProductCheck > "$RUNNER_TEMP/product-info.json"
           node ../../scripts/redact-log.mjs < "$RUNNER_TEMP/product-info.json"
           grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"
+          # the private window station each run gets can be made and closed on this host (README "Window station")
+          grep -q '"windowStation":"private"' "$RUNNER_TEMP/product-info.json"
+          grep -q '"windowStationOk":true' "$RUNNER_TEMP/product-info.json"
           rc=0; ./target/release/nn-launcher.exe dump --dump . > "$RUNNER_TEMP/product-refused.json" || rc=$?
           grep -q 'not in this build' "$RUNNER_TEMP/product-refused.json"
           test "$rc" -eq 125
@@ -351,6 +354,9 @@ jobs:
           { echo "## Product launcher info (own Windows runner, service)"; echo '```'; cat "$RUNNER_TEMP/appc-out/product-info.redacted.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
           grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"
+          # as a service in session 0 this is the check that matters: a private window station and desktop can be made for the container
+          grep -q '"windowStation":"private"' "$RUNNER_TEMP/product-info.json"
+          grep -q '"windowStationOk":true' "$RUNNER_TEMP/product-info.json"
       - name: G05 containment cases through the native backend (one confined start, node runner)
         shell: bash
         if: ${{ !cancelled() && steps.verify.outcome == 'success' }}

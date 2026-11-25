@@ -25,14 +25,15 @@ impl Mode {
 }
 
 /// Round 5 (EXPERIMENT only): which window station and desktop the child is attached to, and what the launcher does to make the container able to use them. The default, `inherit`, is the
-/// product's behaviour (lpDesktop NULL: the child takes the launcher's own window station and desktop). Every other value is refused by the product build.
+/// MEASURED BASELINE that fails from a service (lpDesktop NULL: the child takes the launcher's own window station and desktop; 0xC0000142). The PRODUCT build does not read this option: it always
+/// uses `private` (a window station and desktop made for the run, the same code as `--desktop private` here). Every value is refused by the product build.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub(crate) enum DesktopMode { #[default] Inherit, Empty, Winsta0, GrantRead, GrantFull, GrantStation, GrantDesktop, NewDesktop, NewStation }
+pub(crate) enum DesktopMode { #[default] Inherit, Empty, Winsta0, GrantRead, GrantFull, GrantStation, GrantDesktop, NewDesktop, NewStation, Private }
 
 impl DesktopMode {
-    pub(crate) const ALL: [(&'static str, DesktopMode); 9] = [("inherit", DesktopMode::Inherit), ("empty", DesktopMode::Empty), ("winsta0", DesktopMode::Winsta0), ("grant-read", DesktopMode::GrantRead), ("grant-full", DesktopMode::GrantFull),
-        ("grant-station", DesktopMode::GrantStation), ("grant-desktop", DesktopMode::GrantDesktop), ("new-desktop", DesktopMode::NewDesktop), ("new-station", DesktopMode::NewStation)];
+    pub(crate) const ALL: [(&'static str, DesktopMode); 10] = [("inherit", DesktopMode::Inherit), ("empty", DesktopMode::Empty), ("winsta0", DesktopMode::Winsta0), ("grant-read", DesktopMode::GrantRead), ("grant-full", DesktopMode::GrantFull),
+        ("grant-station", DesktopMode::GrantStation), ("grant-desktop", DesktopMode::GrantDesktop), ("new-desktop", DesktopMode::NewDesktop), ("new-station", DesktopMode::NewStation), ("private", DesktopMode::Private)];
     pub(crate) fn parse(s: &str) -> Option<DesktopMode> { Self::ALL.iter().find(|(n, _)| *n == s).map(|(_, m)| *m) }
     #[cfg_attr(not(feature = "experiment"), allow(dead_code))]
     pub(crate) fn name(self) -> &'static str { Self::ALL.iter().find(|(_, m)| *m == self).map(|(n, _)| *n).unwrap_or("inherit") }
@@ -125,7 +126,7 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--stdout-nul-rw" => a.stdout_nul = true,
             "--stderr-nul-rw" => a.stderr_nul = true,
             "--dump" => a.dump.push(value("--dump")?),
-            "--desktop" => a.desktop = DesktopMode::parse(&value("--desktop")?).ok_or("--desktop: inherit, empty, winsta0, grant-read, grant-full, grant-station, grant-desktop, new-desktop or new-station")?,
+            "--desktop" => a.desktop = DesktopMode::parse(&value("--desktop")?).ok_or("--desktop: inherit, empty, winsta0, grant-read, grant-full, grant-station, grant-desktop, new-desktop, new-station or private")?,
             "--creation" => a.creation = Creation::parse(&value("--creation")?).ok_or("--creation: no-window, detached, none or new-console")?,
             "--capability" => {
                 let c = value("--capability")?;
@@ -275,9 +276,9 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_products_behaviour() {
+    fn the_experiment_defaults_stay_the_measured_baseline() {
         let a = parse(&product_run()).expect("the backend's run line");
-        assert_eq!(a.desktop, DesktopMode::Inherit, "lpDesktop stays NULL");
+        assert_eq!(a.desktop, DesktopMode::Inherit, "the experiment's own default stays the measured baseline; the product build does not read it (win.rs private_wanted)");
         assert_eq!(a.creation, Creation::NoWindow, "CREATE_NO_WINDOW stays on");
     }
 

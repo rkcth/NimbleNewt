@@ -1,5 +1,10 @@
 // Round 5 of the Windows AppContainer experiment (EXPERIMENT build and tests only; not compiled into the product launcher): the pure rules desk.rs follows before and after it writes the DACL
-// of a window station or desktop. They are kept apart from the Win32 calls so they are tested on every platform.
+// of a window station or desktop of the launcher's OWN session (the grant modes). They are kept apart from the Win32 calls so they are tested on every platform. The pieces the product
+// launcher shares (the entry builder, the SID checks) are in winobj.rs.
+#[allow(unused_imports)]
+use crate::winobj::{acl_entries, build_acl, names_sid_explicitly, sid_ok};
+#[cfg(test)]
+use crate::winobj::{is_profile_sid, with_allow_entry};
 
 /// WSF_VISIBLE in USEROBJECTFLAGS.dwFlags: only the interactive window station has it.
 pub(crate) const WSF_VISIBLE: i64 = 1;
@@ -14,77 +19,6 @@ pub(crate) fn may_change_launcher_objects(station: &str, flags: i64) -> Result<(
     Ok(())
 }
 
-/// Is this the SID string of one AppContainer profile (S-1-15-2 followed by exactly seven sub-authorities, the form DeriveAppContainerSidFromAppContainerName returns)? Not the group SIDs
-/// ALL APPLICATION PACKAGES (S-1-15-2-1) or ALL RESTRICTED APPLICATION PACKAGES (S-1-15-2-2), not a capability (S-1-15-3-...), not an account or a well-known group.
-pub(crate) fn is_profile_sid(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix("S-1-15-2-") else { return false };
-    let parts: Vec<&str> = rest.split('-').collect();
-    parts.len() == 7 && parts.iter().all(|p| !p.is_empty() && p.len() <= 10 && p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u64>().is_ok_and(|v| v <= u32::MAX as u64))
-}
-
-/// The entries of a raw ACL (8-byte header: revision, Sbz1, AclSize, AceCount, Sbz2; each entry starts with type, flags and its size as a little-endian u16). None when the bytes are not a
-/// well-formed ACL. Only the entries count; the slack after them (AclSize can be larger than what the entries use) does not.
-pub(crate) fn acl_entries(acl: &[u8]) -> Option<(u8, Vec<&[u8]>)> {
-    if acl.len() < 8 { return None; }
-    let size = u16::from_le_bytes([acl[2], acl[3]]) as usize;
-    let count = u16::from_le_bytes([acl[4], acl[5]]) as usize;
-    if size < 8 || size > acl.len() { return None; }
-    let mut at = 8;
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        if at + 4 > size { return None; }
-        let len = u16::from_le_bytes([acl[at + 2], acl[at + 3]]) as usize;
-        if len < 4 || at + len > size { return None; }
-        out.push(&acl[at..at + len]);
-        at += len;
-    }
-    Some((acl[0], out))
-}
-
-const ACE_ALLOWED: u8 = 0; // ACCESS_ALLOWED_ACE_TYPE
-const ACE_DENIED: u8 = 1; // ACCESS_DENIED_ACE_TYPE
-const ACE_INHERITED: u8 = 0x10; // INHERITED_ACE
-/// The largest ACL: AclSize is a 16-bit count of bytes and an ACL is a whole number of DWORDs.
-const ACL_MAX: usize = 0xFFFC;
-
-/// A SID in binary form (revision 1, at most 15 sub-authorities, 8 bytes plus 4 per sub-authority, exactly).
-pub(crate) fn sid_ok(sid: &[u8]) -> bool { sid.len() >= 8 && sid[0] == 1 && sid[1] <= 15 && sid.len() == 8 + 4 * sid[1] as usize }
-
-/// An ACL built from a revision and its entries, with no slack (None: too large, or an entry whose size is not a whole number of DWORDs).
-fn build_acl(revision: u8, entries: &[&[u8]]) -> Option<Vec<u8>> {
-    let size = 8 + entries.iter().map(|e| e.len()).sum::<usize>();
-    if size > ACL_MAX || entries.len() > u16::MAX as usize || entries.iter().any(|e| e.len() % 4 != 0) { return None; }
-    let mut v = Vec::with_capacity(size);
-    v.extend([revision, 0]);
-    v.extend((size as u16).to_le_bytes());
-    v.extend((entries.len() as u16).to_le_bytes());
-    v.extend([0, 0]);
-    for e in entries { v.extend_from_slice(e); }
-    Some(v)
-}
-
-/// Is this entry an explicit (not inherited) allow or deny entry for exactly this SID? (ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE: header, mask, then the SID at byte 8.)
-fn names_sid_explicitly(entry: &[u8], sid: &[u8]) -> bool {
-    (entry[0] == ACE_ALLOWED || entry[0] == ACE_DENIED) && entry[1] & ACE_INHERITED == 0 && entry.len() >= 8 + sid.len() && &entry[8..8 + sid.len()] == sid
-}
-
-/// The ACL with ONE allow entry (no flags) for the SID added and nothing else changed: every existing entry keeps its bytes and its place relative to the others. The new entry goes where
-/// SetEntriesInAclW documents that it puts a new allow entry, just before the first existing allow entry (so after the deny entries that lead the list), or last when there is none.
-/// Unlike SetEntriesInAclW, nothing is merged, re-sorted or rewritten, so removing the entry again (`without_explicit_entries`) gives back exactly the entries that were there, whoever
-/// removes it (this launcher at its end, or `desktop-revoke` after this launcher was killed). None: a malformed ACL or SID, an entry for the SID already present, or no room.
-pub(crate) fn with_allow_entry(acl: &[u8], sid: &[u8], mask: u32) -> Option<Vec<u8>> {
-    if !sid_ok(sid) { return None; }
-    let (revision, entries) = acl_entries(acl)?;
-    if entries.iter().any(|e| names_sid_explicitly(e, sid)) { return None; }
-    let mut ace = vec![ACE_ALLOWED, 0];
-    ace.extend(((8 + sid.len()) as u16).to_le_bytes());
-    ace.extend(mask.to_le_bytes());
-    ace.extend_from_slice(sid);
-    let at = entries.iter().position(|e| e[0] == ACE_ALLOWED).unwrap_or(entries.len());
-    let mut out: Vec<&[u8]> = entries.clone();
-    out.insert(at, &ace);
-    build_acl(revision, &out)
-}
 
 /// The ACL without any explicit allow or deny entry for the SID (inherited ones and every other entry kept in order), and how many were taken out. None: a malformed ACL or SID.
 pub(crate) fn without_explicit_entries(acl: &[u8], sid: &[u8]) -> Option<(Vec<u8>, usize)> {

@@ -5,6 +5,8 @@
 #![cfg_attr(not(windows), allow(dead_code, unused_imports))]
 
 mod args;
+// The pure rules of the private window station and desktop each run gets, and the DACL entry builder (both builds).
+mod winobj;
 // Round 5 (experiment build and tests only): the pure rules for the window-object entries; not in the product binary.
 #[cfg(any(test, feature = "experiment"))]
 mod deskrules;

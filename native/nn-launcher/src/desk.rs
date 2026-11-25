@@ -1,4 +1,5 @@
-// Round 5 of the Windows AppContainer experiment (EXPERIMENT build only; this file is not compiled into the product launcher): the window station and the desktop of the child.
+// Round 5 of the Windows AppContainer experiment (EXPERIMENT build only; this file is not compiled into the product launcher): the window station and the desktop of the child. The product launcher's
+// own private window station (privdesk.rs) is the fix this round led to; the modes below stay as the measuring options.
 // A child that is created from a Windows service (session 0) and is not given a window station of its own takes the launcher's: a non-interactive one named `Service-0x0-<logon id>$` with
 // the desktop `Default`. Own-hardware run 45634597880 (host build 26200, service, elevated) showed every container child that needs user32 ending with 0xC0000142 (STATUS_DLL_INIT_FAILED).
 // One suspect is that the container's SID has no access to that window station and desktop; this file lets the experiment vary that ONE thing (see the notes, "round 5").
@@ -8,7 +9,7 @@
 //     opened by name with READ_CONTROL and WRITE_DAC), and take that entry out again on every path out (Drop), reading the DACL back; the count left is in the JSON line. The objects
 //     last as long as the logon session that owns them; if this program is killed between the grant and the revoke, the entry stays until that session ends or `desktop-revoke` is run.
 //     Refused (nothing written): an interactive or unreadable window station (WinSta0 of a signed-in session is never changed: deskrules::may_change_launcher_objects), a SID that is not
-//     one AppContainer profile's (deskrules::is_profile_sid), and a NULL DACL (merging into it would replace "everyone" with one entry). The DACL is copied BEFORE the grant; after the
+//     one AppContainer profile's (crate::winobj::is_profile_sid), and a NULL DACL (merging into it would replace "everyone" with one entry). The DACL is copied BEFORE the grant; after the
 //     revoke it is compared entry by entry with that copy: the same entries in another order are put back from the copy, any other difference is reported and not written.
 //   - `new-desktop` creates a desktop in the current window station (and grants the station); `new-station` creates a window station and a desktop in it, both with an entry for the container.
 //     Both are closed when the run ends (an object with no handle left is destroyed). The launcher's process window station is switched for the moment of the desktop creation and switched back.
@@ -20,8 +21,8 @@ use windows_sys::Win32::System::StationsAndDesktops::*;
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
 
+use super::privdesk::{acl_copy, add_entry, sid_bytes, write_dacl, AclCopy, ERR_BAD_ACL, ERR_NOT_PROFILE_SID, ERR_NULL_DACL, ERR_STATION_SWITCH_BACK, WRITE_DAC_BIT};
 pub(crate) const READ_CONTROL_BIT: u32 = 0x0002_0000;
-pub(crate) const WRITE_DAC_BIT: u32 = 0x0004_0000;
 // Window station rights (Microsoft: Window Station Security and Access Rights). "read" is the documented GENERIC_READ mapping of a NON-interactive window station: READ_CONTROL,
 // WINSTA_ENUMDESKTOPS (0x1), WINSTA_READATTRIBUTES (0x2), WINSTA_ENUMERATE (0x100). "full" is WINSTA_ALL_ACCESS (0x37F) plus READ_CONTROL.
 pub(crate) const STATION_READ: u32 = READ_CONTROL_BIT | 0x0001 | 0x0002 | 0x0100;
@@ -29,14 +30,6 @@ pub(crate) const STATION_FULL: u32 = READ_CONTROL_BIT | 0x037F;
 // Desktop rights: "read" is the documented GENERIC_READ mapping (READ_CONTROL, DESKTOP_READOBJECTS 0x1, DESKTOP_ENUMERATE 0x40); "full" is every DESKTOP_* right (0x1FF) plus READ_CONTROL.
 pub(crate) const DESKTOP_READ: u32 = READ_CONTROL_BIT | 0x0001 | 0x0040;
 pub(crate) const DESKTOP_FULL: u32 = READ_CONTROL_BIT | 0x01FF;
-/// Private codes (outside the Win32 range used here): the object has a NULL DACL, so no entry is merged into it; the SID is not one AppContainer profile's.
-pub(crate) const ERR_NULL_DACL: u32 = 0x2000_0002;
-pub(crate) const ERR_NOT_PROFILE_SID: u32 = 0x2000_0003;
-/// The DACL read was not a well-formed ACL, already held an explicit entry for the SID, or the new one would not fit: nothing written.
-pub(crate) const ERR_BAD_ACL: u32 = 0x2000_0004;
-/// The launcher could not switch back to its own window station after making a desktop in the new one.
-pub(crate) const ERR_STATION_SWITCH_BACK: u32 = 0x2000_0005;
-
 /// What one mode does: the level of the entry on the CURRENT station and desktop (None: no entry), whether to create objects, and what lpDesktop holds.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Create { No, Desktop, Station }
@@ -45,7 +38,7 @@ pub(crate) struct Plan { pub(crate) station: Option<u32>, pub(crate) desktop: Op
 
 pub(crate) fn plan(mode: DesktopMode) -> Plan {
     match mode {
-        DesktopMode::Inherit | DesktopMode::Empty | DesktopMode::Winsta0 => Plan { station: None, desktop: None, create: Create::No },
+        DesktopMode::Inherit | DesktopMode::Empty | DesktopMode::Winsta0 | DesktopMode::Private => Plan { station: None, desktop: None, create: Create::No },
         DesktopMode::GrantRead => Plan { station: Some(STATION_READ), desktop: Some(DESKTOP_READ), create: Create::No },
         DesktopMode::GrantFull => Plan { station: Some(STATION_FULL), desktop: Some(DESKTOP_FULL), create: Create::No },
         DesktopMode::GrantStation => Plan { station: Some(STATION_FULL), desktop: None, create: Create::No },
@@ -112,40 +105,6 @@ fn object_entries(h: HANDLE, sid: PSID) -> Result<u32, u32> {
     }
 }
 
-/// The binary form of a SID (None: not a valid SID).
-fn sid_bytes(sid: PSID) -> Option<Vec<u8>> {
-    unsafe {
-        if sid.is_null() || IsValidSid(sid) == 0 { return None; }
-        let n = GetLengthSid(sid) as usize;
-        let v = std::slice::from_raw_parts(sid as *const u8, n).to_vec();
-        if deskrules::sid_ok(&v) { Some(v) } else { None }
-    }
-}
-
-/// Writes an ACL built by deskrules as the object's DACL (an aligned copy, checked with IsValidAcl first; DACL_SECURITY_INFORMATION alone, so the protection bit of the
-/// descriptor is not changed: a window object has no parent to inherit from). `h` needs WRITE_DAC.
-fn write_dacl(h: HANDLE, acl: &[u8]) -> Result<(), u32> {
-    unsafe {
-        let mut buf = vec![0usize; acl.len().div_ceil(size_of::<usize>())];
-        std::ptr::copy_nonoverlapping(acl.as_ptr(), buf.as_mut_ptr() as *mut u8, acl.len());
-        let p = buf.as_mut_ptr() as *mut ACL;
-        if IsValidAcl(p) == 0 { return Err(ERR_BAD_ACL); }
-        let rc = SetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), p, null_mut());
-        if rc != 0 { Err(rc) } else { Ok(()) }
-    }
-}
-
-/// Adds one explicit allow entry (no inheritance flags: the desktops of a station do not take it over) for the SID, with every other entry left byte for byte where it was
-/// (deskrules::with_allow_entry; not SetEntriesInAclW, which rebuilds the list and may merge or re-sort entries, so that a removal by `desktop-revoke` after a killed run could not put
-/// the order back). `h` needs READ_CONTROL and WRITE_DAC.
-fn add_entry(h: HANDLE, sid: PSID, mask: u32) -> Result<(), u32> {
-    let sid = sid_bytes(sid).ok_or(ERR_NOT_PROFILE_SID)?;
-    // A NULL DACL grants everyone everything; a DACL made of this one entry would shut everyone else out. Refused (acl_copy reports a NULL DACL as None).
-    let old = acl_copy(h)?.ok_or(ERR_NULL_DACL)?;
-    let new = deskrules::with_allow_entry(old.bytes(), &sid, mask).ok_or(ERR_BAD_ACL)?;
-    write_dacl(h, &new)
-}
-
 /// Removes every explicit entry that names the SID and keeps every other entry in its order (deskrules::without_explicit_entries); with none there, nothing is written.
 fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
     let sid_b = sid_bytes(sid).ok_or(ERR_NOT_PROFILE_SID)?;
@@ -154,28 +113,6 @@ fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
     if removed == 0 { return Ok(()); }
     write_dacl(h, &new)?;
     match object_entries(h, sid) { Ok(0) => Ok(()), Ok(_) => Err(ERR_STILL_PRESENT), Err(e) => Err(e) }
-}
-
-/// A copy of a DACL (aligned for the ACL structure), taken before the grant.
-struct AclCopy { buf: Vec<usize>, len: usize }
-impl AclCopy {
-    fn bytes(&self) -> &[u8] { unsafe { std::slice::from_raw_parts(self.buf.as_ptr() as *const u8, self.len) } }
-}
-
-/// The object's DACL as a copy (Ok(None): a NULL DACL). `h` needs READ_CONTROL.
-fn acl_copy(h: HANDLE) -> Result<Option<AclCopy>, u32> {
-    unsafe {
-        let mut acl: *mut ACL = null_mut();
-        let mut sd: PSECURITY_DESCRIPTOR = null_mut();
-        let rc = GetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut acl, null_mut(), &mut sd);
-        if rc != 0 { return Err(rc); }
-        if acl.is_null() { LocalFree(sd as *mut c_void); return Ok(None); }
-        let len = (*acl).AclSize as usize;
-        let mut buf = vec![0usize; len.div_ceil(size_of::<usize>())];
-        std::ptr::copy_nonoverlapping(acl as *const u8, buf.as_mut_ptr() as *mut u8, len);
-        LocalFree(sd as *mut c_void);
-        Ok(Some(AclCopy { buf, len }))
-    }
 }
 
 /// One object the launcher changed or made, and what became of it. `original`: the DACL before the grant (objects the launcher did not make); `matches`: whether the DACL after the revoke
@@ -226,7 +163,7 @@ impl Desk {
         }
         if p.station.is_none() && p.desktop.is_none() && p.create == Create::No { return; }
         // Only the SID of one AppContainer profile ever gets an entry (never a group, an account, a capability).
-        if !deskrules::is_profile_sid(&sid_string(self.sid)) {
+        if !crate::winobj::is_profile_sid(&sid_string(self.sid)) {
             self.failed = Some(format!("window objects: refused: the SID is not one AppContainer profile's (error {ERR_NOT_PROFILE_SID})"));
             return;
         }
@@ -412,7 +349,7 @@ pub(crate) fn derived_sid(name: &str) -> Result<Sid, String> {
 /// `desktop-revoke`: removes the container's explicit entries from the launcher's current window station and desktop (the clean-up after a launcher that was killed in a `grant-*` run) and
 /// reports how many are left. Idempotent: with no entry for the SID nothing is written. Only the SID of one AppContainer profile is accepted.
 pub(crate) fn revoke_current(j: &mut Json, sid: PSID) -> bool {
-    if !deskrules::is_profile_sid(&sid_string(sid)) { j.s("error", "refused: the SID is not one AppContainer profile's"); return false; }
+    if !crate::winobj::is_profile_sid(&sid_string(sid)) { j.s("error", "refused: the SID is not one AppContainer profile's"); return false; }
     let sname = current_station_name();
     let dname = current_desktop_name();
     // The same rule as for the grant: an interactive (or unreadable) window station is never written, also not to remove entries (the grant never added any there). Its entries for

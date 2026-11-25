@@ -109,7 +109,7 @@ class SimHost implements NativeHost {
     const grants = (a: readonly string[]): { mode: string; path: string; soft: boolean }[] => a.flatMap((x, i) => (x === "--grant" || x === "--grant-soft" ? [{ mode: a[i + 1]!.slice(0, a[i + 1]!.indexOf(":")), path: a[i + 1]!.slice(a[i + 1]!.indexOf(":") + 1), soft: x === "--grant-soft" }] : []));
     const line = (o: Record<string, unknown>): ProcessResult => ok(`noise\n${JSON.stringify({ tool: "nn-appc-launcher", version: 1, ...o })}\n`);
     const gl = (g: { mode: string; path: string; soft: boolean }[], extra: (p: string) => Record<string, unknown>): unknown[] => g.map((x) => ({ path: x.path, mode: x.mode, soft: x.soft, ...extra(x.path), entriesLeft: this.entries.get(key(x.path)) ?? 0 }));
-    if (args[0] === "info") return line({ command: "info", ok: true, containerSid: "S-1-15-2-1", profile: "reused" });
+    if (args[0] === "info") return line({ command: "info", ok: true, containerSid: "S-1-15-2-1", profile: "reused", windowStation: "private", windowStationOk: true });
     if (args[0] === "check") return line({ command: "check", ok: true, clean: true, grants: gl(grants(args), () => ({ applied: false, revoked: false })) });
     if (args[0] === "revoke") { for (const g of grants(args)) this.entries.set(key(g.path), this.script.stubborn?.(g.path) ? 1 : 0); return line({ command: "revoke", ok: true, grants: gl(grants(args), () => ({ applied: true, revoked: true })) }); }
     // run
@@ -630,6 +630,7 @@ describe("A03b native launcher: health is a real confined start", () => {
     assert.equal(h.backend, "windows-native");
     assert.ok((h.notes ?? []).some((n) => n.includes(NATIVE_MODE)));
     assert.ok((h.notes ?? []).some((n) => /not yet proven/.test(n)));
+    assert.ok((h.notes ?? []).some((n) => /private window station and desktop made for it/.test(n)), "the probe says each run gets its own window station");
     assert.ok(host.calls.some((c) => c.args[0] === "info"));
     assert.equal(host.listDir(`${CONTROL}-probe`).length, 0, "the probe's folders are removed");
     assert.deepEqual(hasEntries(host), []);
@@ -670,6 +671,15 @@ describe("A03b native launcher: health is a real confined start", () => {
     const noContainer = new SimHost();
     noContainer.run = async () => ok("garbage");
     assert.match((await healthy(noContainer).health()).reason ?? "", /could not make the container profile/);
+    // a host that cannot make the private window station: the launcher's `info` says so and the reason is named (not "the container profile")
+    const noStation = new SimHost();
+    const realRun = noStation.run.bind(noStation);
+    noStation.run = async (file: string, args: readonly string[], o?: { readonly signal?: AbortSignal }): Promise<ProcessResult> => (args[0] === "info"
+      ? ok(`${JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "grant", error: "window objects: the private window station could not be made (error 5)", windowStation: "private", windowStationOk: false, windowStationError: "window objects: the private window station could not be made (error 5)" })}\n`)
+      : realRun(file, args, o));
+    const refused = await healthy(noStation).health();
+    assert.equal(refused.healthy, false);
+    assert.match(refused.reason ?? "", /could not make a private window station and desktop for the container \(window objects: the private window station could not be made \(error 5\)\)/);
     const dirty = new SimHost();
     dirty.script = { stubborn: () => true };
     const { dir, job } = ((): { dir: string; job: NativeJob } => { const j = jobFor(dirty).job; const d = `${CONTROL}\\jobs\\old-run-0001`; dirty.writeText(jobFile(d), JSON.stringify(j)); dirty.writeText(`${d}\\status.json`, JSON.stringify({ runnerPid: 7 })); return { dir: d, job: j }; })();

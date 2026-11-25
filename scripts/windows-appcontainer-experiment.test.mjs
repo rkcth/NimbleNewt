@@ -2597,17 +2597,19 @@ test("round 5 command line and progress sink: --mode session0 with --steps, a si
 test("the launcher source (round 5): the window objects are touched only in the experiment build, every entry is removed and read back, the default is the product's behaviour, and every new call is documented", () => {
   const win = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const desk = readFileSync(join(root, "native", "nn-launcher", "src", "desk.rs"), "utf8");
+  const priv = readFileSync(join(root, "native", "nn-launcher", "src", "privdesk.rs"), "utf8");
   const args = readFileSync(join(root, "native", "nn-launcher", "src", "args.rs"), "utf8");
   const readme = readFileSync(join(exp, "README.md"), "utf8");
-  // desk.rs is a module of the experiment build only; the product has neither the module, the lpDesktop assignment nor the other creation flags
+  // desk.rs is a module of the experiment build only; the product has neither the module nor the other creation flags. Its lpDesktop is the private window station's (privdesk.rs, A03b Session 0 fix),
+  // and the experiment's own modes replace it only when there is no private one.
   assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n#\[path = "desk\.rs"\]\nmod desk;/);
-  assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n\s*if !lp_desktop\.is_empty\(\) \{ si\.StartupInfo\.lpDesktop = lp_desktop\.as_mut_ptr\(\); \}/);
+  assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n\s*if lp_desktop\.is_empty\(\) \{ lp_desktop = desk\.lp_desktop\.clone\(\)\.unwrap_or_default\(\); \}\n\s*if !lp_desktop\.is_empty\(\) \{ si\.StartupInfo\.lpDesktop = lp_desktop\.as_mut_ptr\(\); \}/);
   assert.equal(win.match(/lpDesktop =/g).length, 1, "lpDesktop is assigned in one place");
   assert.ok(win.includes('#[cfg(not(feature = "experiment"))]\n    { let _ = a; base | CREATE_NO_WINDOW }'), "the product always uses CREATE_NO_WINDOW");
   assert.match(win, /Creation::NoWindow => CREATE_NO_WINDOW, Creation::Detached => DETACHED_PROCESS, Creation::NoFlag => 0, Creation::NewConsole => CREATE_NEW_CONSOLE/);
   assert.equal(win.match(/CreateProcessW\(/g).length, 1);
   assert.match(win, /creation_flags\(a\), env\.as_ptr\(\)/);
-  // the defaults are the product's behaviour (a Rust test pins it as well)
+  // the experiment's defaults are the measured baseline (a Rust test pins it as well); the product does not read the desktop option (win.rs private_wanted)
   assert.match(args, /pub\(crate\) enum DesktopMode \{ #\[default\] Inherit,/);
   assert.match(args, /pub\(crate\) enum Creation \{ #\[default\] NoWindow,/);
   assert.match(args, /"--stderr-nul-rw" \| "--dump" \| "--desktop" \| "--creation" if !EXPERIMENT => return Err\(format!\("\{flag\} is an experiment option and is not in this build"\)\)/);
@@ -2630,7 +2632,7 @@ test("the launcher source (round 5): the window objects are touched only in the 
   // the one handle-open in desk.rs asks for READ_CONTROL and WRITE_DAC only, never all access
   assert.ok(!/GENERIC_ALL|MAXIMUM_ALLOWED/.test(desk));
   for (const c of ["GetProcessWindowStation", "GetThreadDesktop", "GetUserObjectInformationW", "OpenWindowStationW", "OpenDesktopW", "CreateWindowStationW", "CreateDesktopW", "SetProcessWindowStation", "CloseWindowStation", "CloseDesktop", "GetSecurityInfo", "SetSecurityInfo", "RtlGetVersion", "GetSidSubAuthority", "TokenIntegrityLevel", "IsValidSid", "GetLengthSid", "IsValidAcl"]) {
-    assert.ok(desk.includes(`${c}`), `${c} not used in desk.rs`);
+    assert.ok(desk.includes(`${c}`) || priv.includes(`${c}`), `${c} not used in desk.rs or privdesk.rs`);
     assert.ok(readme.includes(c), `${c} missing in README`);
   }
 });
@@ -2640,10 +2642,11 @@ test("the launcher crate (round 5): the extra windows-sys modules come only with
   const feature = /^experiment = \[([^\]]*)\]/m.exec(toml);
   assert.ok(feature, "experiment feature");
   const extra = [...feature[1].matchAll(/"windows-sys\/([A-Za-z0-9_]+)"/g)].map((m) => m[1]).sort();
-  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_Graphics_Gdi", "Win32_System_StationsAndDesktops", "Win32_System_SystemInformation"]);
+  // (Win32_Graphics_Gdi and Win32_System_StationsAndDesktops became the product's own with the private window station fix)
+  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_System_SystemInformation"]);
   const deps = /^windows-sys = \{ version = "0\.59", features = \[([^\]]*)\]/m.exec(toml)[1];
   const listed = [...deps.matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(listed, ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_Threading"]);
+  assert.deepEqual(listed, ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Threading"]);
   assert.ok(!/^default = /m.test(toml), "no default features");
   assert.ok(!/features = \["experiment"\]/.test(readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8")));
 });
@@ -2769,24 +2772,28 @@ test("round 5 review: desk.rs refuses the interactive station, a SID that is not
   const desk = readFileSync(join(root, "native", "nn-launcher", "src", "desk.rs"), "utf8");
   const win = readFileSync(join(root, "native", "nn-launcher", "src", "win.rs"), "utf8");
   const rules = readFileSync(join(root, "native", "nn-launcher", "src", "deskrules.rs"), "utf8");
+  const priv = readFileSync(join(root, "native", "nn-launcher", "src", "privdesk.rs"), "utf8");
+  const winobj = readFileSync(join(root, "native", "nn-launcher", "src", "winobj.rs"), "utf8");
   const prepare = desk.slice(desk.indexOf("pub(crate) fn prepare"), desk.indexOf("pub(crate) fn finish"));
   // the guards come before the first grant, and a failed grant stops before anything is created
   const guard = prepare.indexOf("deskrules::may_change_launcher_objects(&station, flags)");
-  const sidCheck = prepare.indexOf("deskrules::is_profile_sid(&sid_string(self.sid))");
+  const sidCheck = prepare.indexOf("crate::winobj::is_profile_sid(&sid_string(self.sid))");
   const firstGrant = prepare.indexOf("self.grant(");
   assert.ok(sidCheck > 0 && guard > sidCheck && firstGrant > guard, "SID check, then the station check, then the grants");
   assert.ok(prepare.indexOf("if self.failed.is_some() { return; }") > firstGrant && prepare.indexOf("if self.failed.is_some() { return; }") < prepare.indexOf("CreateDesktopW"));
   // a NULL DACL is never merged into, and the copy is taken before the entry is added
-  const add = desk.slice(desk.indexOf("fn add_entry"), desk.indexOf("fn remove_entries"));
-  assert.match(add, /let old = acl_copy\(h\)\?\.ok_or\(ERR_NULL_DACL\)\?;\n\s+let new = deskrules::with_allow_entry\(old\.bytes\(\), &sid, mask\)\.ok_or\(ERR_BAD_ACL\)\?;\n\s+write_dacl\(h, &new\)/);
+  // (add_entry, write_dacl and acl_copy moved to privdesk.rs, which both builds compile, with the same text)
+  const add = priv.slice(priv.indexOf("pub(crate) fn add_entry"), priv.indexOf("/// 64 random bits"));
+  assert.match(add, /let old = acl_copy\(h\)\?\.ok_or\(ERR_NULL_DACL\)\?;\n\s+let new = winobj::with_allow_entry\(old\.bytes\(\), &sid, mask\)\.ok_or\(ERR_BAD_ACL\)\?;\n\s+write_dacl\(h, &new\)/);
   const grant = desk.slice(desk.indexOf("fn grant("), desk.indexOf("pub(crate) fn prepare"));
   assert.ok(grant.indexOf("acl_copy(h)") > 0 && grant.indexOf("acl_copy(h)") < grant.indexOf("add_entry(h"));
   assert.match(grant, /Ok\(None\) => t\.error = Some\(ERR_NULL_DACL\)/);
   // second review: the window objects' DACLs are rebuilt by the tested rules only (every other entry kept byte for byte and in order), never by SetEntriesInAclW, and written in ONE
   // place (write_dacl: an aligned copy, IsValidAcl first, DACL_SECURITY_INFORMATION alone)
   assert.ok(!/SetEntriesInAclW\s*\(|EXPLICIT_ACCESS_W|GRANT_ACCESS/.test(desk), "no SetEntriesInAclW on window objects");
-  assert.equal((desk.match(/SetSecurityInfo\(/g) ?? []).length, 1, "one write of a window object's DACL");
-  const write = desk.slice(desk.indexOf("fn write_dacl"), desk.indexOf("fn add_entry"));
+  assert.equal((desk.match(/SetSecurityInfo\(/g) ?? []).length + (priv.match(/SetSecurityInfo\(/g) ?? []).length, 1, "one write of a window object's DACL, in privdesk.rs");
+  assert.ok(!/SetEntriesInAclW\s*\(|EXPLICIT_ACCESS_W|GRANT_ACCESS/.test(priv), "no SetEntriesInAclW in privdesk.rs");
+  const write = priv.slice(priv.indexOf("pub(crate) fn write_dacl"), priv.indexOf("pub(crate) fn add_entry"));
   assert.ok(write.indexOf("IsValidAcl(p) == 0") > 0 && write.indexOf("IsValidAcl(p) == 0") < write.indexOf("SetSecurityInfo("));
   assert.match(write, /SetSecurityInfo\(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut\(\), null_mut\(\), p, null_mut\(\)\)/);
   const remove = desk.slice(desk.indexOf("fn remove_entries"), desk.indexOf("struct AclCopy"));
@@ -2809,7 +2816,7 @@ test("round 5 review: desk.rs refuses the interactive station, a SID that is not
   assert.match(desk, /fn derived_sid[^]*?DeriveAppContainerSidFromAppContainerName/);
   assert.ok(!desk.includes("CreateAppContainerProfile"));
   const revoke = desk.slice(desk.indexOf("pub(crate) fn revoke_current"));
-  assert.ok(revoke.indexOf("deskrules::is_profile_sid") < revoke.indexOf("open_station"));
+  assert.ok(revoke.indexOf("crate::winobj::is_profile_sid") < revoke.indexOf("open_station"));
   // second review: desktop-revoke applies the grant's station rule too: on an interactive or unreadable station it only counts (READ_CONTROL) and writes nothing
   const guardAt = revoke.indexOf("deskrules::may_change_launcher_objects(&sname,");
   assert.ok(guardAt > 0 && guardAt < revoke.indexOf("READ_CONTROL_BIT | WRITE_DAC_BIT") && guardAt < revoke.indexOf("remove_entries("));
@@ -2820,7 +2827,7 @@ test("round 5 review: desk.rs refuses the interactive station, a SID that is not
   for (const t of ["fn only_a_non_interactive_station_whose_flags_were_read_may_be_changed", "fn only_the_sid_of_one_profile_is_accepted", "fn the_dacl_after_the_revoke_is_compared_entry_by_entry_with_the_one_before"]) assert.ok(rules.includes(t), t);
   assert.match(rules, /if station\.eq_ignore_ascii_case\("winsta0"\)/);
   assert.match(rules, /if flags & WSF_VISIBLE != 0/);
-  assert.match(rules, /parts\.len\(\) == 7/);
+  assert.match(winobj, /parts\.len\(\) == 7/);
 });
 
 test("round 5 review: the own-runner clean-up runs desktop-revoke for the experiment's container with the re-hashed launcher, before the profiles are removed", () => {

@@ -64,6 +64,7 @@ test("every per-grant field the parser reads is a field the crate writes into ea
 test("a line made of the crate's own field names, with their types, is read back in full", () => {
   const line = {
     tool: "nn-appc-launcher", ok: false, stage: "grant", error: "x", childStarted: true, childExitCode: 3, timedOut: true, leftoverProcesses: 2, allGrantsRevoked: false, clean: true,
+    windowStation: "private", windowStationOk: false, windowStationError: "window objects: the private window station could not be made (error 5)",
     grants: [{ path: "C:\\a", mode: "seal", soft: true, applied: true, revoked: false, errorCode: 5, entriesLeft: 1 }],
   };
   assert.deepEqual(parseLauncherLine(JSON.stringify(line)), { ...Object.fromEntries(Object.entries(line).filter(([k]) => k !== "tool")) });
@@ -117,15 +118,19 @@ test("the product build is the default: the feature is off, the binary is named 
   const cargo = crate("Cargo.toml");
   assert.match(cargo, /^\[\[bin\]\]\nname = "nn-launcher"/m);
   // The feature only switches on these extra windows-sys modules that the experiment build's code calls (round 5): no dependency (`dep:`, another crate's feature), no other module, no default.
-  // Any change to this list is a change to this test.
-  assert.match(cargo, /^experiment = \["windows-sys\/Win32_System_StationsAndDesktops", "windows-sys\/Win32_Graphics_Gdi", "windows-sys\/Win32_System_SystemInformation", "windows-sys\/Wdk_System_SystemServices"\]$/m);
+  // Any change to this list is a change to this test. (The window station and Gdi modules are the product's own since the private window station fix: see the next test.)
+  assert.match(cargo, /^experiment = \["windows-sys\/Win32_System_SystemInformation", "windows-sys\/Wdk_System_SystemServices"\]$/m);
   assert.equal(cargo.match(/^experiment\s*=/gm)?.length, 1, "one definition of the feature");
   // The product's dependency table is exactly windows-sys: the feature cannot reach an optional dependency because there is none.
   const deps = /^\[dependencies\]\n([^[]*)/m.exec(cargo)?.[1] ?? "";
   assert.deepEqual(deps.split("\n").filter((l) => /^[A-Za-z0-9_-]+\s*=/.test(l)).map((l) => l.split("=")[0]!.trim()), ["windows-sys"]);
   assert.ok(!/optional\s*=\s*true/.test(cargo), "no optional dependency");
-  // Round 5's window-object code (desk.rs) and its rules (deskrules.rs) are compiled only into the experiment build (deskrules also into the unit tests), never into the product binary.
+  // Round 5's window-object grant code (desk.rs) and its rules (deskrules.rs) are compiled only into the experiment build (deskrules also into the unit tests), never into the product binary.
+  // The private window station code (privdesk.rs, winobj.rs) is the product's own and is compiled into both.
   assert.match(crate("src/lib.rs"), /#\[cfg\(any\(test, feature = "experiment"\)\)\]\nmod deskrules;/);
+  assert.match(crate("src/lib.rs"), /\nmod winobj;/);
+  assert.match(win, /\n#\[path = "privdesk\.rs"\]\nmod privdesk;/);
+  assert.ok(!/#\[cfg\(feature = "experiment"\)\]\s*#\[path = "privdesk\.rs"\]/.test(win), "privdesk.rs is not behind the experiment feature");
   assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n#\[path = "desk\.rs"\]\nmod desk;/);
   assert.ok(!/^default\s*=/m.test(cargo), "no default features");
   assert.ok(args.includes('pub(crate) const EXPERIMENT: bool = cfg!(feature = "experiment");'));
@@ -144,4 +149,85 @@ test("the program folder, the toolchain pin and the lock file are the reproducib
   assert.match(crate(".cargo/config.toml"), /\/Brepro/);
   assert.match(crate("Cargo.lock"), /name = "nn-launcher"/);
   assert.ok(!/name = "nn-appc-launcher"/.test(crate("Cargo.lock")));
+});
+
+// ---------------------------------------------------------------------------------------------------------------- the private window station (Session 0 fix)
+
+const productFeatures = (): string[] => {
+  const cargo = crate("Cargo.toml");
+  const block = /^windows-sys = \{ version = "0\.59", features = \[([^\]]*)\] \}$/m.exec(cargo)?.[1] ?? "";
+  return [...block.matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1]!);
+};
+const code = (text: string): string => text.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+
+test("the product's windows-sys feature list is exactly this, in this order (the window station modules are there on purpose; any other change is a change to this test)", () => {
+  assert.deepEqual(productFeatures(), [
+    "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Threading",
+  ]);
+  assert.ok(crate("Cargo.toml").includes("CreateDesktopW takes a DEVMODEW"), "the reason the Gdi module is there is written in the manifest");
+});
+
+test("every run of the PRODUCT build is given a private window station and desktop, made before any grant, and a failure to make it is a typed failure that starts nothing", () => {
+  const priv = code(crate("src/privdesk.rs"));
+  const wincode = code(win);
+  assert.match(wincode, /fn private_wanted\(a: &Args\) -> bool \{\n\s*#\[cfg\(feature = "experiment"\)\]\n\s*\{ a\.desktop == crate::args::DesktopMode::Private \}\n\s*#\[cfg\(not\(feature = "experiment"\)\)\]\n\s*\{ let _ = a; true \}/, "the product always wants it");
+  const run = between(wincode, "fn run(a: &Args, j: Json) -> Outcome {", "#[allow(clippy::too_many_arguments)]");
+  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0)") > 0, "created in run");
+  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0)") < run.indexOf("GrantSet { sid: sid.0"), "made before any grant");
+  assert.match(run, /Err\(e\) => return fail\(j, "grant", &e\)/, "the stage is the existing `grant` (STAGE_KIND maps it); the message starts with 'window objects:'");
+  assert.ok(priv.match(/format!\("window objects:/g)!.length >= 3 && /fn trouble\(what: &str, code: u32\) -> String \{ format!\("window objects: /.test(priv), "every message starts with 'window objects:'");
+  const inner = between(wincode, "fn run_inner(", "for spec in &a.grants {");
+  assert.match(inner, /if private_wanted\(a\) && private_desktop\.is_none\(\) \{ return Err\(\("grant", "window objects: /, "no private desktop, no start");
+  assert.match(wincode, /let mut lp_desktop: Vec<u16> = private_desktop\.unwrap_or_default\(\);/);
+  assert.match(wincode, /si\.StartupInfo\.lpDesktop = lp_desktop\.as_mut_ptr\(\);/);
+  assert.ok(wincode.indexOf("p.close(); j.raw(\"windowObjects\", p.json())") > wincode.indexOf("grants.revoke_all();"), "closed after the run, with the report");
+  assert.ok(parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "grant", error: "window objects: x" }))?.stage === "grant");
+});
+
+test("the private window station code never touches an object of the launcher's own session: no WinSta0, no opening of a station or desktop by name, no write to an existing DACL, no broad entry", () => {
+  const priv = code(crate("src/privdesk.rs"));
+  const pure = code(crate("src/winobj.rs").split("#[cfg(test)]")[0]!);
+  for (const text of [priv, pure]) {
+    assert.ok(!/winsta0/i.test(text), "never the interactive station");
+    assert.ok(!/OpenWindowStationW|OpenDesktopW|GetThreadDesktop|SetThreadDesktop|SwitchDesktop|SetEntriesInAclW|SetSecurityDescriptorDacl|SetKernelObjectSecurity/.test(text), "no open by name, no entry builder that rebuilds the list");
+  }
+  // the only writers are on handles of objects this launcher made: write_dacl is called from add_entry only, and add_entry only from PrivateDesktop::give
+  assert.equal(priv.match(/\bwrite_dacl\(/g)!.length, 2, "its definition and its one call, in add_entry");
+  assert.equal(priv.match(/\badd_entry\(/g)!.length, 2, "its definition and its one call, in give");
+  assert.equal(priv.match(/\bgive\(/g)!.length, 3, "the definition and the two calls (the station, the desktop)");
+  assert.match(priv, /CreateWindowStationW\(wstation\.as_ptr\(\), 0, STATION_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/, "the station is made with no security attributes (the token's default DACL, the measured configuration)");
+  assert.match(priv, /CreateDesktopW\(wdesktop\.as_ptr\(\), null\(\), null\(\), 0, DESKTOP_RIGHTS \| WRITE_DAC_BIT, null\(\)\)/);
+  // the masks are the measured ones; the DACL read back must pass the check; the process station is put back and that is checked
+  assert.match(pure, /STATION_RIGHTS: u32 = 0x0002_037F;/);
+  assert.match(pure, /DESKTOP_RIGHTS: u32 = 0x0002_01FF;/);
+  assert.match(priv, /winobj::private_acl_ok\(c\.bytes\(\), sid_b, mask\)/);
+  assert.match(priv, /impl Drop for StationSwitch \{ fn drop\(&mut self\) \{ self\.restore\(\); \} \}/);
+  assert.match(priv, /if !restored \{ return Err\(trouble\("launcher could not switch back/);
+  assert.ok(priv.indexOf("let restored = back.restore();") < priv.indexOf("p.give(hd, sid"), "back on its own station before anything else is done");
+  // objects are closed desktop first, then the station
+  assert.ok(priv.indexOf("CloseDesktop(self.desktop") < priv.indexOf("CloseWindowStation(self.station"));
+  // only an AppContainer profile's SID is ever given an entry
+  assert.match(priv, /if !winobj::is_profile_sid\(&text\)/);
+});
+
+test("`info` and `check` report whether a private window station can be made (info fails with stage grant when it cannot); the fields are the ones the parser reads", () => {
+  const w = code(win);
+  const info = between(w, '"info" => {', '"run" => run(&a, j)');
+  assert.match(info, /if private_wanted\(&a\) \{ if let Err\(e\) = report_private_station\(&mut j, sid\.0\)/);
+  assert.match(info, /finish_main\(fail\(j, "grant", &e\)\)/);
+  const check = between(w, '"check" => {', "other => fail(j");
+  assert.match(check, /if private_wanted\(&a\) \{ let _ = report_private_station\(&mut j, sid\.0\); \}/, "check reports it and does not fail on it");
+  const report = between(w, "fn report_private_station", "fn run(");
+  for (const k of ["windowStationOk", "windowStationError"]) assert.ok(report.includes(`"${k}"`), k);
+  assert.ok(/j\.s\("windowStation", "private"\)/.test(w), "the product names the mode");
+  const ok = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true, windowStation: "private", windowStationOk: true }));
+  assert.deepEqual([ok?.windowStation, ok?.windowStationOk, ok?.windowStationError], ["private", true, undefined]);
+  const bad = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "grant", windowStation: "private", windowStationOk: false, windowStationError: "window objects: x (error 5)" }));
+  assert.deepEqual([bad?.windowStationOk, bad?.windowStationError], [false, "window objects: x (error 5)"]);
+  // an older launcher line (no such fields) and wrong types are tolerated, not errors
+  const old = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true }));
+  assert.deepEqual([old?.windowStation, old?.windowStationOk, old?.windowStationError], [undefined, undefined, undefined]);
+  const odd = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true, windowStation: 1, windowStationOk: "yes", windowStationError: false }));
+  assert.deepEqual([odd?.windowStation, odd?.windowStationOk, odd?.windowStationError], [undefined, undefined, undefined]);
 });

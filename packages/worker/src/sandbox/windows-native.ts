@@ -168,7 +168,11 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     if (swept.problems.length > 0) return no(`a run left access-list entries behind and they could not be undone: ${swept.problems.join("; ")}`);
     let info;
     try { info = parseLauncherLine((await host.run(launcher, ["info", "--name", settings.profileName], { timeoutMs: 60_000 })).stdout); } catch (error) { return no(`the launcher could not be run: ${(error as Error).message}`); }
+    // A launcher that cannot make the private window station each run needs says so itself (stage "grant", message "window objects: ..."): a service on a host that refuses it would otherwise fail
+    // the confinement probe below with an exit code only.
+    if (info !== undefined && !info.ok && info.windowStationOk === false) return no(`the launcher could not make a private window station and desktop for the container (${info.windowStationError ?? info.error ?? "no reason given"})`);
     if (info === undefined || !info.ok) return no(`the launcher could not make the container profile (${info?.error ?? "no answer"})`);
+    if (info.windowStationOk === true) notes.push("each run gets a private window station and desktop made for it (the launcher made and closed one now)");
 
     // The real test: a node program is started inside the container and asked to do what it must not be able to.
     const nonce = randomUUID();

@@ -232,6 +232,11 @@ export interface LauncherLine {
   readonly leftoverProcesses?: number;
   readonly allGrantsRevoked?: boolean;
   readonly clean?: boolean;
+  /** The window station of the child: "private" in the product launcher (card A03b: one made for each run). */
+  readonly windowStation?: string;
+  /** `info` and `check`: whether the launcher could make (and close) a private window station for the container; with `windowStationError` when not. */
+  readonly windowStationOk?: boolean;
+  readonly windowStationError?: string;
   readonly grants: readonly LauncherGrantLine[];
 }
 
@@ -258,6 +263,8 @@ export function parseLauncherLine(text: string): LauncherLine | undefined {
       ...(bool("childStarted") === undefined ? {} : { childStarted: bool("childStarted")! }), ...(num("childExitCode") === undefined ? {} : { childExitCode: num("childExitCode")! }),
       ...(bool("timedOut") === undefined ? {} : { timedOut: bool("timedOut")! }), ...(num("leftoverProcesses") === undefined ? {} : { leftoverProcesses: num("leftoverProcesses")! }),
       ...(bool("allGrantsRevoked") === undefined ? {} : { allGrantsRevoked: bool("allGrantsRevoked")! }), ...(bool("clean") === undefined ? {} : { clean: bool("clean")! }),
+      ...(str("windowStation") === undefined ? {} : { windowStation: str("windowStation")! }), ...(bool("windowStationOk") === undefined ? {} : { windowStationOk: bool("windowStationOk")! }),
+      ...(str("windowStationError") === undefined ? {} : { windowStationError: str("windowStationError")! }),
     };
   }
   return undefined;

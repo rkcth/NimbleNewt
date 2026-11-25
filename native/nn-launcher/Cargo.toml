@@ -16,13 +16,15 @@ path = "src/main.rs"
 
 [features]
 # The measuring options of experiments/windows-appcontainer (deny-write and deny-strong grants, pipes, the NUL device, dump, grant, delete-profile, open-test, hang
-# diagnosis; round 5: the window station and desktop of the child, the creation flag, the `context` and `desktop-revoke` commands, which also switch on the extra windows-sys modules they call).
+# diagnosis; round 5: the window station and desktop modes of the child, the creation flag, the `context` and `desktop-revoke` commands, which also switch on the extra windows-sys modules they call;
+# the product's private window station needs Win32_System_StationsAndDesktops and Win32_Graphics_Gdi (CreateDesktopW takes a DEVMODEW), so the product's own feature list below has them).
 # NEVER on in a release build: the product is built with no features.
-experiment = ["windows-sys/Win32_System_StationsAndDesktops", "windows-sys/Win32_Graphics_Gdi", "windows-sys/Win32_System_SystemInformation", "windows-sys/Wdk_System_SystemServices"]
+experiment = ["windows-sys/Win32_System_SystemInformation", "windows-sys/Wdk_System_SystemServices"]
 
 [dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Isolation",
@@ -32,6 +34,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
   "Win32_System_RemoteDesktop",
+  "Win32_System_StationsAndDesktops",
   "Win32_System_Threading",
 ] }
 

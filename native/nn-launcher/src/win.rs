@@ -42,6 +42,9 @@ const SE_GROUP_ENABLED_BIT: u32 = 0x4; // SE_GROUP_ENABLED: the attribute of a c
 const EXIT_LAUNCHER_FAILED: i32 = 125;
 const EXIT_TIMED_OUT: i32 = 124;
 
+// The private window station and desktop each run gets (both builds; the fix for a launcher that runs as a Windows service, README "Window station").
+#[path = "privdesk.rs"]
+mod privdesk;
 // Round 5 (experiment build only): the window station and desktop of the child, and the `context` and `desktop-revoke` commands.
 #[cfg(feature = "experiment")]
 #[path = "desk.rs"]
@@ -584,6 +587,23 @@ fn fail(mut j: Json, stage: &str, msg: &str) -> Outcome {
     Outcome { j, code: EXIT_LAUNCHER_FAILED }
 }
 
+/// Does this run give the child a private window station and desktop? Always in the product build (it has no other way to start a child); in the experiment build only for `--desktop private`,
+/// so the measured baselines and the other modes stay as they were.
+fn private_wanted(a: &Args) -> bool {
+    #[cfg(feature = "experiment")]
+    { a.desktop == crate::args::DesktopMode::Private }
+    #[cfg(not(feature = "experiment"))]
+    { let _ = a; true }
+}
+
+/// `info` and `check`: can this account make (and close) a private window station for the container? Writes `windowStationOk`, and `windowStationError` when not. Err: the message.
+fn report_private_station(j: &mut Json, sid: PSID) -> Result<(), String> {
+    match privdesk::PrivateDesktop::create(sid) {
+        Ok(mut p) => { p.close(); j.b("windowStationOk", true); Ok(()) }
+        Err(e) => { j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e) }
+    }
+}
+
 fn run(a: &Args, j: Json) -> Outcome {
     let mut j = j;
     let (sid, created) = match container_sid(&a.name) { Ok(v) => v, Err(e) => return fail(j, "container", &e) };
@@ -593,13 +613,20 @@ fn run(a: &Args, j: Json) -> Outcome {
     let (Some(out_path), Some(err_path)) = (a.stdout.as_deref(), a.stderr.as_deref()) else { return fail(j, "arguments", "run needs --stdout and --stderr") };
     if !EXPERIMENT && !a.stdin.starts_with("file:") { return fail(j, "arguments", "run needs --stdin file:PATH in this build"); }
 
+    // The private window station and desktop come first: if they cannot be made nothing else was changed (no grant, no job), and the program does not start.
+    let mut private: Option<privdesk::PrivateDesktop> = None;
+    if private_wanted(a) {
+        match privdesk::PrivateDesktop::create(sid.0) { Ok(p) => private = Some(p), Err(e) => return fail(j, "grant", &e) }
+    }
     let mut grants = GrantSet { sid: sid.0, items: Vec::new() };
     #[cfg(feature = "experiment")]
     let mut desk = desk::Desk::new(sid.0);
     #[cfg(feature = "experiment")]
     desk.prepare(a.desktop);
-    let result = run_inner(a, &mut j, &sid, &mut grants, exe, cmdline, cwd, out_path, err_path, #[cfg(feature = "experiment")] &desk);
+    let result = run_inner(a, &mut j, &sid, &mut grants, exe, cmdline, cwd, out_path, err_path, private.as_ref().map(|p| p.lp_desktop()), #[cfg(feature = "experiment")] &desk);
     grants.revoke_all();
+    // The child and everything it started are gone (the job ended them): the desktop is closed, then the station.
+    if let Some(p) = private.as_mut() { p.close(); j.raw("windowObjects", p.json()); }
     #[cfg(feature = "experiment")]
     { desk.finish(); j.raw("desktop", desk.json(a.desktop)); }
     j.raw("grants", grants.json());
@@ -611,7 +638,9 @@ fn run(a: &Args, j: Json) -> Outcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str, cmdline: &str, cwd: &str, out_path: &str, err_path: &str, #[cfg(feature = "experiment")] desk: &desk::Desk) -> Result<i32, (&'static str, String)> {
+fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str, cmdline: &str, cwd: &str, out_path: &str, err_path: &str, private_desktop: Option<Vec<u16>>, #[cfg(feature = "experiment")] desk: &desk::Desk) -> Result<i32, (&'static str, String)> {
+    // The product never starts a child without its private desktop (the stage is `grant`, the message starts with "window objects:": the stage list stays as it is).
+    if private_wanted(a) && private_desktop.is_none() { return Err(("grant", "window objects: no private window station was made for this run".into())); }
     // Stage `grant`: an entry on a window object is a grant too (the message starts with "window objects:"; the product's stage list stays as it is).
     #[cfg(feature = "experiment")]
     if let Some(e) = &desk.failed { return Err(("grant", e.clone())); }
@@ -685,10 +714,12 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         si.StartupInfo.hStdInput = nul.0; si.StartupInfo.hStdOutput = out.0; si.StartupInfo.hStdError = err.0;
         si.lpAttributeList = list;
-        // lpDesktop: NULL in the product (the child takes the launcher's window station and desktop). Round 5 (experiment build) can pass an empty string, a named station and desktop, or the made ones.
+        // lpDesktop: `station\desktop` of the private objects made for this run (the product always has them: see the check at the top). Without it the child would take the launcher's own
+        // window station, which for a service is a non-interactive one the container has no access to (0xC0000142). Round 5 (experiment build) can pass an empty string, a named station and
+        // desktop, or the made ones instead.
+        let mut lp_desktop: Vec<u16> = private_desktop.unwrap_or_default();
         #[cfg(feature = "experiment")]
-        let mut lp_desktop: Vec<u16> = desk.lp_desktop.clone().unwrap_or_default();
-        #[cfg(feature = "experiment")]
+        if lp_desktop.is_empty() { lp_desktop = desk.lp_desktop.clone().unwrap_or_default(); }
         if !lp_desktop.is_empty() { si.StartupInfo.lpDesktop = lp_desktop.as_mut_ptr(); }
         let wexe = wide(exe);
         let mut wcmd = wide(cmdline); // CreateProcessW may write into this buffer
@@ -806,6 +837,11 @@ fn describe(a: &Args, mut j: Json) -> Json {
     j.b("uiLimits", a.ui_limits);
     j.n("timeoutMs", a.timeout_ms as i64);
     j.s("profileName", &a.name);
+    // The window station of the child: always a private one in the product (see privdesk.rs); the experiment build names its mode.
+    #[cfg(not(feature = "experiment"))]
+    j.s("windowStation", "private");
+    #[cfg(feature = "experiment")]
+    j.s("windowStation", a.desktop.name());
     #[cfg(feature = "experiment")]
     j.s("creation", a.creation.name());
     j
@@ -903,7 +939,12 @@ pub fn main() {
         "info" => {
             let mut j = j;
             match container_sid(&a.name) {
-                Ok((sid, created)) => { j.s("containerSid", &sid_string(sid.0)); j.s("profile", if created { "created" } else { "reused" }); j.b("ok", true); Outcome { j, code: 0 } }
+                Ok((sid, created)) => {
+                    j.s("containerSid", &sid_string(sid.0)); j.s("profile", if created { "created" } else { "reused" });
+                    // A host that cannot make the private window station cannot run a confined program: `info` says so (stage `grant`, "window objects: ...") instead of the first run failing.
+                    if private_wanted(&a) { if let Err(e) = report_private_station(&mut j, sid.0) { finish_main(fail(j, "grant", &e)); } }
+                    j.b("ok", true); Outcome { j, code: 0 }
+                }
                 Err(e) => fail(j, "container", &e),
             }
         }
@@ -970,6 +1011,8 @@ pub fn main() {
                     let set = GrantSet { sid: sid.0, items: a.grants.iter().map(|s| GrantRecord { spec: s.clone(), applied: false, revoked: false, error: None }).collect() };
                     j.raw("grants", set.json());
                     let clean = a.grants.iter().all(|s| matches!(explicit_count(&s.path, sid.0), Ok(0)));
+                    // Reported only: the read-back after a run does not depend on it.
+                    if private_wanted(&a) { let _ = report_private_station(&mut j, sid.0); }
                     j.b("ok", true);
                     j.b("clean", clean);
                     Outcome { j, code: 0 }
@@ -994,6 +1037,10 @@ pub fn main() {
         }
         other => fail(j, "arguments", &format!("unknown command {other}")),
     };
+    finish_main(outcome)
+}
+
+fn finish_main(outcome: Outcome) -> ! {
     println!("{}", outcome.j.render());
     std::process::exit(outcome.code);
 }
