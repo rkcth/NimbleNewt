@@ -148,18 +148,26 @@ jobs:
           # the argument tests: the product build refuses every experiment-only option, the experiment build accepts them (src/args.rs)
           cargo test --locked 2>&1 | node ../../scripts/redact-log.mjs
           cargo test --locked --features experiment 2>&1 | node ../../scripts/redact-log.mjs
-          ./target/release/nn-launcher.exe info --name NimbleNewtProductCheck > "$RUNNER_TEMP/product-info.json"
+          # The product accepts only a per-run profile name (NimbleNewtRun- and 16 lower-case hex digits, a fresh one for every call) and a record file in an EXISTING folder that does not hold that file yet (create-new):
+          # `info` makes a throw-away profile, asks the private window station question and deletes the profile again (native/nn-launcher/README.md, "info").
+          info_name="NimbleNewtRun-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")"
+          mkdir -p "$RUNNER_TEMP/profile-records"
+          ./target/release/nn-launcher.exe info --name "$info_name" --profile-record "$(cygpath -w "$RUNNER_TEMP/profile-records/$info_name.sid")" > "$RUNNER_TEMP/product-info.json"
           node ../../scripts/redact-log.mjs < "$RUNNER_TEMP/product-info.json"
           grep -q '"ok":true' "$RUNNER_TEMP/product-info.json"
           # the private window station each run gets can be made and closed on this host (README "Window station")
           grep -q '"windowStation":"private"' "$RUNNER_TEMP/product-info.json"
           grep -q '"windowStationOk":true' "$RUNNER_TEMP/product-info.json"
+          # the throw-away profile was deleted and is gone (profileGone is the not yet measured reading, README "One container profile per run"): a miss is reported after the later lines of this step ran, so the release record is still made
+          profile_bad=0
+          for k in profileDeleted profileGone; do if ! grep -q "\"$k\":true" "$RUNNER_TEMP/product-info.json"; then echo "::error::info did not report $k true"; profile_bad=1; fi; done
           rc=0; ./target/release/nn-launcher.exe dump --dump . > "$RUNNER_TEMP/product-refused.json" || rc=$?
           grep -q 'not in this build' "$RUNNER_TEMP/product-refused.json"
           test "$rc" -eq 125
           node ../../scripts/native-launcher.mjs record --file target/release/nn-launcher.exe --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
           node ../../scripts/native-launcher.mjs verify --file target/release/nn-launcher.exe --record "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
           echo "sha256=$(sha256sum -b < target/release/nn-launcher.exe | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          exit "$profile_bad"
       # Card A03b reproducibility measurement: the same source, built a second time in a DIFFERENT folder (another path and another name, outside the first checkout) with its own target folder, the same pinned toolchain, the
       # same `--locked` and the same RUSTFLAGS (the path remap names the second folder, so the folder difference must not matter: that is what is measured). The two files are compared by SHA-256 and by scripts/pe-diff.mjs, which says WHERE
       # they differ when they do (header time stamp, debug directory and PDB path, code, constants, resources) and whether the file holds the commit, a build time or either build folder name. It is a REPORT, not a gate:
@@ -388,7 +396,12 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out"
           rc=0
-          "$RUNNER_TEMP/verified-launchers/nn-launcher.exe" info --name NimbleNewtProductCheck > "$RUNNER_TEMP/product-info.json" || rc=$?
+          # a fresh per-run name and a record file in a folder made here (the product accepts nothing else); both are kept in a file so the clean-up step can delete the profile if `info` was stopped before it did
+          info_name="NimbleNewtRun-$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")"
+          mkdir -p "$RUNNER_TEMP/profile-records"
+          info_record="$(cygpath -w "$RUNNER_TEMP/profile-records/$info_name.sid")"
+          printf '%s\n%s\n' "$info_name" "$info_record" > "$RUNNER_TEMP/product-info-run.txt"
+          "$RUNNER_TEMP/verified-launchers/nn-launcher.exe" info --name "$info_name" --profile-record "$info_record" > "$RUNNER_TEMP/product-info.json" || rc=$?
           node scripts/redact-log.mjs < "$RUNNER_TEMP/product-info.json" | tee "$RUNNER_TEMP/appc-out/product-info.redacted.txt"
           { echo "## Product launcher info (own Windows runner, service)"; echo '```'; cat "$RUNNER_TEMP/appc-out/product-info.redacted.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -ne 0 ]; then exit "$rc"; fi
@@ -396,30 +409,34 @@ jobs:
           # as a service in session 0 this is the check that matters: a private window station and desktop can be made for the container
           grep -q '"windowStation":"private"' "$RUNNER_TEMP/product-info.json"
           grep -q '"windowStationOk":true' "$RUNNER_TEMP/product-info.json"
+          # the throw-away profile was deleted again (profileGone is the not yet measured reading, so a miss here fails this step but never hides the lines above)
+          grep -q '"profileDeleted":true' "$RUNNER_TEMP/product-info.json"
+          grep -q '"profileGone":true' "$RUNNER_TEMP/product-info.json"
       - name: G05 containment cases through the native backend (one confined start, node runner)
         shell: bash
         if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         timeout-minutes: 20
-        # A profile name used only by this job (not the product's default NimbleNewtAgent), so the clean-up step below can remove it without touching anything else.
+        # No profile name is set here: the backend makes a fresh NimbleNewtRun-<hex> profile for the run, records it under the control folder, deletes it when the run ends and sweeps a leftover from its own records at the next start
+        # (NIMBLENEWT_WIN_PROFILE is retired and ignored). Nothing here can be cleaned up by name from the workflow, so this job's clean-up step does not try.
         env:
           NIMBLENEWT_WIN_LAUNCHER: ${{ runner.temp }}\verified-launchers\nn-launcher.exe
           NIMBLENEWT_WIN_CONTROL_DIR: ${{ runner.temp }}\nn-native
-          NIMBLENEWT_WIN_PROFILE: NimbleNewtOwnRunnerG05
         run: |
           mkdir -p "$RUNNER_TEMP/appc-out/g05-native"
           rc=0
           node --import ./scripts/offline-guard.mjs scripts/containment-evidence.mjs run --out "$RUNNER_TEMP/appc-out/g05-native" --redact 2>&1 | node scripts/redact-log.mjs | tee "$RUNNER_TEMP/g05-native.log" || rc=$?
           { echo "## G05 containment cases, native backend (own Windows runner, service)"; echo '```'; tail -n 20 "$RUNNER_TEMP/g05-native.log" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
-      # `info` and the G05 backend each create a container profile in the runner service's account and the product launcher never deletes one (the experiment harness steps above remove their own).
-      # Both names are used only by this job; they are removed here with the verified experiment launcher (same source, which has `delete-profile`), hashed once more first, so the run leaves no profile
-      # behind on the owner's machine. A profile that cannot be removed is reported, not fatal.
+      # The experiment harness steps above remove their own profiles. The product `info` step deletes its throw-away per-run profile itself and the G05 backend deletes and sweeps its own, so nothing is removed by a fixed name any
+      # more. This step does two things: it removes a leftover window station entry of the experiment's container (the experiment launcher, hashed again first), and, if the product `info` step was stopped before it deleted its profile,
+      # deletes that one profile with the product launcher (hashed again first) and the proof the launcher requires: its name, its SID (from the JSON `info` printed) and its record file. A profile that cannot be removed is reported, not fatal.
       - name: Remove the container profiles this job made
         shell: bash
         if: ${{ always() && steps.verify.outcome == 'success' }}
         timeout-minutes: 5
         env:
           EXPECT_EXPERIMENT: ${{ needs.hosted.outputs.experiment_sha256 }}
+          EXPECT_PRODUCT: ${{ needs.hosted.outputs.product_sha256 }}
         run: |
           exe=experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe
           got="$(sha256sum -b < "$exe" | cut -d' ' -f1)"
@@ -428,10 +445,17 @@ jobs:
           # removes only that container's entries (the SID is derived from the name, no profile is made; with nothing to remove nothing is written).
           rc=0; out="$("$exe" desktop-revoke --name NimbleNewtExperiment 2>/dev/null)" || rc=$?
           if [ "$rc" -eq 0 ]; then echo "window station and desktop: no entry left for the experiment container"; else echo "::warning::desktop-revoke ended with exit $rc: $(printf '%s\n' "$out" | node scripts/redact-log.mjs | tail -n 1)"; fi
-          for n in NimbleNewtProductCheck NimbleNewtOwnRunnerG05; do
-            rc=0; out="$("$exe" delete-profile --name "$n" 2>&1)" || rc=$?
-            if [ "$rc" -eq 0 ]; then echo "removed the container profile $n"; else echo "::warning::the container profile $n was not removed (exit $rc): $(printf '%s\n' "$out" | node scripts/redact-log.mjs | tail -n 1)"; fi
-          done
+          prod="$RUNNER_TEMP/verified-launchers/nn-launcher.exe"
+          if [ -s "$RUNNER_TEMP/product-info-run.txt" ] && [ -s "$RUNNER_TEMP/product-info.json" ]; then
+            got="$(sha256sum -b < "$prod" | cut -d' ' -f1)"
+            if [ "$got" != "$EXPECT_PRODUCT" ]; then echo "::error::$prod has SHA-256 $got, the hosted job built $EXPECT_PRODUCT; not run"; exit 1; fi
+            pname="$(head -n 1 "$RUNNER_TEMP/product-info-run.txt")"; prec="$(tail -n 1 "$RUNNER_TEMP/product-info-run.txt")"
+            psid="$(node -e "try{const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(j.profileGone===true?'':String(j.containerSid||''))}catch{}" "$RUNNER_TEMP/product-info.json")"
+            if [ -z "$psid" ]; then echo "the product info profile: nothing left to delete"; else
+              rc=0; out="$("$prod" delete-profile --name "$pname" --sid "$psid" --profile-record "$prec" 2>&1)" || rc=$?
+              if [ "$rc" -eq 0 ]; then echo "removed the product info container profile"; else echo "::warning::the product info container profile was not removed (exit $rc): $(printf '%s\n' "$out" | node scripts/redact-log.mjs | tail -n 1)"; fi
+            fi
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

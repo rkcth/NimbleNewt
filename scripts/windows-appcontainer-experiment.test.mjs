@@ -2216,7 +2216,8 @@ test("the own-runner job builds nothing (no cargo, no rustup), downloads the hos
   for (const needle of ["run-experiment.mjs", "nn-launcher.exe\" info", "containment-evidence.mjs"]) assert.ok(at(needle) > verify, needle);
   assert.match(own, /NIMBLENEWT_WIN_LAUNCHER: \$\{\{ runner\.temp \}\}\\verified-launchers\\nn-launcher\.exe/);
   // the service-account answer for the product path: info and the ten cases, and no install step
-  assert.match(own, /nn-launcher\.exe" info --name NimbleNewtProductCheck/);
+  assert.match(own, /nn-launcher\.exe" info --name "\$info_name" --profile-record "\$info_record"/);
+  assert.match(own, /info_name="NimbleNewtRun-\$\(node -e "process\.stdout\.write\(require\('crypto'\)\.randomBytes\(8\)\.toString\('hex'\)\)"\)"/);
   assert.match(own, /containment-evidence\.mjs run --out "\$RUNNER_TEMP\/appc-out\/g05-native" --redact [^\n]*redact-log\.mjs/);
   assert.ok(!/Install-NimbleNewtLauncher|-Action (Install|Uninstall)/.test(own.replace(/^\s*#.*$/gm, "")), "no installer step on the own runner");
   assert.ok(!/secrets\./.test(wf));
@@ -2229,7 +2230,7 @@ test("own-runner hand-off review: hashes read from standard input, no empty or p
   const hosted = code.slice(code.indexOf("  hosted:"), code.indexOf("  own-runner:"));
   // GNU sha256sum writes "\<hash>" for a file name with a backslash (every Windows $RUNNER_TEMP path): every hash in the workflow is read from standard input
   const sums = [...code.matchAll(/sha256sum[^\n|]*/g)].map((m) => m[0]);
-  assert.equal(sums.length, 5, sums.join(" / ")); // two build steps, the staging helper, the verify helper, the clean-up step
+  assert.equal(sums.length, 6, sums.join(" / ")); // two build steps, the staging helper, the verify helper, the clean-up step (experiment launcher, and the product launcher before its delete-profile)
   for (const s of sums) assert.match(s, /^sha256sum -b < "?[^"\s]+"? $/, s);
   // the expected values: non-empty, lower-case hex only, exactly 64 digits, compared whole (never a substring or pattern match)
   const verify = own.slice(own.indexOf("id: verify"), own.indexOf("Containment cases as the runner service"));
@@ -2255,11 +2256,13 @@ test("own-runner hand-off review: hashes read from standard input, no empty or p
   for (const part of ["BUILT_EXPERIMENT: ${{ steps.build_experiment.outputs.sha256 }}", "BUILT_PRODUCT: ${{ steps.build_product.outputs.sha256 }}", 'hex64 "$BUILT_EXPERIMENT" && hex64 "$BUILT_PRODUCT"', 'if [ "$e" = "$BUILT_EXPERIMENT" ] && [ "$p" = "$BUILT_PRODUCT" ]; then']) assert.ok(stage.includes(part), part);
   assert.ok(stage.indexOf('if [ "$e" = "$BUILT_EXPERIMENT" ]') < stage.indexOf("launchers=ok"), "launchers=ok only after the build-time hashes match");
   // the container profiles this job makes have CI-only names and are removed again with the re-hashed verified experiment launcher
-  assert.match(own, /NIMBLENEWT_WIN_PROFILE: NimbleNewtOwnRunnerG05\n/);
+  assert.ok(!/NIMBLENEWT_WIN_PROFILE/.test(own), "the retired shared-profile setting is not set (the backend makes a per-run profile and ignores it)");
   const clean = own.slice(own.indexOf("Remove the container profiles this job made"));
   assert.match(clean, /^Remove[^\n]*\n\s+shell: bash\n\s+if: \$\{\{ always\(\) && steps\.verify\.outcome == 'success' \}\}/);
   assert.ok(clean.indexOf('if [ "$got" != "$EXPECT_EXPERIMENT" ]; then') < clean.indexOf("delete-profile"), "hashed again before it is run");
-  assert.match(clean, /for n in NimbleNewtProductCheck NimbleNewtOwnRunnerG05; do/);
+  assert.ok(clean.indexOf('if [ "$got" != "$EXPECT_PRODUCT" ]; then') > 0 && clean.indexOf('if [ "$got" != "$EXPECT_PRODUCT" ]; then') < clean.indexOf('"$prod" delete-profile'), "the product launcher is hashed again before its delete-profile");
+  assert.ok(!/for n in /.test(clean), "no profile is deleted by a fixed name");
+  assert.match(clean, /"\$prod" delete-profile --name "\$pname" --sid "\$psid" --profile-record "\$prec"/);
   assert.ok(!/NimbleNewtAgent/.test(own), "the product's default profile name is never used (or deleted) on the owner's machine");
   // the job's own steps install nothing, make no account, change no firewall rule or machine setting (the experiment harness's reverted ACL grants are its own, tested above)
   assert.ok(!/New-LocalUser|net user|New-NetFirewallRule|Set-ExecutionPolicy|reg add|sc(\.exe)? create|icacls|setx|msiexec|choco|winget|Install-NimbleNewtLauncher/i.test(own), "no persistent machine change in the own-runner job's own steps");

@@ -413,5 +413,35 @@ test("the hosted product-launcher step and the own-runner info step both require
     assert.ok(text.length > 200, name);
     assert.ok(text.includes(`grep -q '"windowStation":"private"'`), `${name}: the product names the private station`);
     assert.ok(text.includes(`grep -q '"windowStationOk":true'`), `${name}: a private station was made and closed`);
+    // the per-run profile `info` made is reported deleted and gone (README: info prints profileDeleted and profileGone)
+    assert.ok(text.includes("profileDeleted") && text.includes("profileGone"), `${name}: the throw-away profile is checked deleted and gone`);
   }
+  const hostedStep = wf.slice(wf.indexOf('- name: "Product launcher (native/nn-launcher)'), wf.indexOf("# Card A03b reproducibility"));
+  assert.ok(hostedStep.indexOf('echo "sha256=$(sha256sum') > 0 && hostedStep.indexOf('echo "sha256=$(sha256sum') < hostedStep.indexOf('exit "$profile_bad"'), "the hosted step reports a profile miss only after the release record and hash output");
+});
+
+test("no product-launcher call in the workflow uses a fixed profile name: each takes a fresh NimbleNewtRun-<16 hex> name, its record file, and delete-profile also its SID", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const code = wf.replace(/^\s*#.*$/gm, "");
+  // the product refuses any other name (native/nn-launcher/src/args.rs), so a fixed name is a call that exits 125
+  assert.ok(!/NimbleNewtProductCheck|NimbleNewtOwnRunnerG05|NimbleNewtAgent|NIMBLENEWT_WIN_PROFILE/.test(code), "no fixed product profile name is left");
+  const gen = /([a-z_]+)="NimbleNewtRun-\$\(node -e "process\.stdout\.write\(require\('crypto'\)\.randomBytes\(8\)\.toString\('hex'\)\)"\)"/g;
+  const generated = [...code.matchAll(gen)].map((m) => m[1]);
+  assert.deepEqual(generated, ["info_name", "info_name"], "the name is generated (8 random bytes, 16 hex digits) in the hosted and in the own-runner info step");
+  // every line that starts the product launcher with a profile command (the `dump` refusal check has no profile)
+  const calls = code.split("\n").filter((l) => /(nn-launcher\.exe"?|"\$prod") +(run|check|revoke|info|delete-profile)\b/.test(l));
+  assert.equal(calls.length, 3, calls.join("\n")); // hosted info, own-runner info, clean-up delete-profile
+  for (const l of calls) {
+    assert.ok(!/--name +[A-Za-z]/.test(l) && /--name "\$(info_name|pname)"/.test(l), `the name comes from a variable: ${l.trim()}`);
+    const cmd = /(run|check|revoke|info|delete-profile)\b/.exec(l.slice(l.indexOf("nn-launcher.exe") >= 0 ? l.indexOf("nn-launcher.exe") : l.indexOf("$prod")))[1];
+    if (["run", "info", "delete-profile"].includes(cmd)) assert.match(l, /--profile-record /, `${cmd} needs its record file`);
+    if (cmd === "delete-profile") assert.match(l, /--sid "\$psid"/, "delete-profile needs the recorded SID");
+    else assert.ok(!/--sid/.test(l), `${cmd} takes no --sid`);
+  }
+  // the launcher's own rule, read from its source: the same pattern the workflow generates
+  const args = read("native", "nn-launcher", "src", "args.rs");
+  assert.match(args, /--name must be \{\}<\{\} lower-case hex digits>/);
+  assert.match(read("native", "nn-launcher", "src", "profile.rs"), /RUN_PREFIX: &str = "NimbleNewtRun-"[^]*RUN_HEX_LEN: usize = 16/);
+  // the record folder exists before the first use (the launcher creates the file, never the folder)
+  assert.equal((code.match(/mkdir -p "\$RUNNER_TEMP\/profile-records"/g) ?? []).length, 2);
 });
