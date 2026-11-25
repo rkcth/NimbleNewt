@@ -1,4 +1,4 @@
-import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { SandboxRecipe } from "./recipe.js";
 
@@ -26,7 +26,7 @@ export interface RunnerAttempt {
   readonly name: string;
   readonly outcome: Outcome;
   readonly code?: string;
-  /** A step that only runs when an earlier one got through (replacing a folder starts by moving it away): `skipped` is then expected when the earlier one was refused. */
+  /** Written by the runner for a step that only runs when an earlier one got through; informational only: the host ignores it and applies `CaseKind.skippable`. */
   readonly skippable?: boolean;
 }
 export interface RunnerCaseResult { readonly id: string; readonly attempts: readonly RunnerAttempt[] }
@@ -153,7 +153,10 @@ process.stdout.write("g05-end\n");
 export const MAX_RESULT_BYTES = 256 * 1024;
 const printable = (s: string, max: number): string => s.slice(0, max).replace(/[^A-Za-z0-9_.:-]/g, "?");
 
-/** The result file as data: bounded, every field checked; a damaged line (the process ended mid-write) is skipped. The last line for a case wins. */
+/**
+ * The result file as data: bounded, every field checked; a damaged line (the process ended mid-write) is skipped. A case reported on more than one line keeps the attempts of EVERY line (a later line
+ * cannot hide an attempt that got through on an earlier one). The program's own `skippable` flag is dropped: which step may be skipped is the host's rule (`CaseKind.skippable`).
+ */
 export function parseRunnerResults(text: string, known: readonly string[]): Map<string, RunnerCaseResult> {
   const ids = new Set(known);
   const out = new Map<string, RunnerCaseResult>();
@@ -171,9 +174,11 @@ export function parseRunnerResults(text: string, known: readonly string[]): Map<
       if (typeof a !== "object" || a === null) { ok = false; break; }
       const r = a as { name?: unknown; outcome?: unknown; code?: unknown; skippable?: unknown };
       if (typeof r.name !== "string" || !OUTCOMES.includes(r.outcome as Outcome)) { ok = false; break; }
-      attempts.push({ name: printable(r.name, 60), outcome: r.outcome as Outcome, ...(typeof r.code === "string" ? { code: printable(r.code, 24) } : {}), ...(r.skippable === true ? { skippable: true } : {}) });
+      attempts.push({ name: printable(r.name, 60), outcome: r.outcome as Outcome, ...(typeof r.code === "string" ? { code: printable(r.code, 24) } : {}) });
     }
-    if (ok) out.set(o.id, { id: o.id, attempts });
+    if (!ok) continue;
+    const earlier = out.get(o.id);
+    out.set(o.id, { id: o.id, attempts: earlier === undefined ? attempts : [...earlier.attempts, ...attempts] });
   }
   return out;
 }
@@ -244,7 +249,11 @@ export function freeProof(id: string, cfg: WindowsCaseConfig, originals: Origina
 // ---------------------------------------------------------------------------------------------------------------- the verdicts
 
 export type CaseVerdict = "pass" | "fail" | "inconclusive";
-export interface CaseKind { readonly id: string; readonly control: boolean; readonly paired: boolean; readonly network?: boolean }
+export interface CaseKind {
+  readonly id: string; readonly control: boolean; readonly paired: boolean; readonly network?: boolean;
+  /** The host's rule for steps that run only when an earlier one got through: step name -> the step it depends on. Such a step may be `skipped` only when that earlier step was not allowed. */
+  readonly skippable?: Readonly<Record<string, string>>;
+}
 export const WINDOWS_CASES: readonly CaseKind[] = [
   { id: "control-write-own-directories", control: true, paired: false },
   { id: "control-read-own-decoy", control: true, paired: false },
@@ -255,7 +264,7 @@ export const WINDOWS_CASES: readonly CaseKind[] = [
   { id: "deny-credential-read", control: false, paired: true },
   { id: "deny-controller-data-read", control: false, paired: true },
   { id: "deny-network-loopback", control: false, paired: true, network: true },
-  { id: "deny-write-protected-name", control: false, paired: true },
+  { id: "deny-write-protected-name", control: false, paired: true, skippable: { "replace-with-junction": "replace-move-away" } },
 ];
 
 export interface FreeRun {
@@ -265,7 +274,13 @@ export interface FreeRun {
   readonly proofMissing: string | undefined;
 }
 
-const required = (a: readonly RunnerAttempt[]): RunnerAttempt[] => a.filter((x) => x.skippable !== true || x.outcome !== "skipped");
+/** The attempts that count: a `skipped` step is left out only when the host's rule for the case allows it (its earlier step was made and was not allowed). */
+const required = (kind: CaseKind, a: readonly RunnerAttempt[]): RunnerAttempt[] => a.filter((x) => {
+  const after = kind.skippable?.[x.name];
+  if (after === undefined || x.outcome !== "skipped") return true;
+  const prior = a.filter((y) => y.name === after);
+  return !(prior.length > 0 && prior.every((y) => y.outcome !== "allowed" && y.outcome !== "skipped"));
+});
 
 /**
  * The verdict of one case from the confined and unconfined results and the host's witness. Pure. `inconclusive` is returned for everything that cannot be read as the boundary holding or not holding.
@@ -281,26 +296,30 @@ export function judgeWindowsCase(kind: CaseKind, confined: RunnerCaseResult | un
     return witness === undefined ? { verdict: "pass", detail: "held" } : fail(witness);
   }
   let paired = "";
-  if (kind.paired) {
-    if (free.result === "unavailable") return inconclusive("the attempt could not be run without the sandbox to show that it works");
-    if (free.result === undefined) return inconclusive("the attempt did not run to its end without the sandbox");
-    const notThrough = required(free.result.attempts).find((a) => a.outcome !== "allowed");
+  if (kind.paired && typeof free.result === "object") {
+    // The unconfined run ran and shows the probe itself does not work: nothing the confined run shows can be read (the host's witness points at the same broken probe), inconclusive.
+    const notThrough = required(kind, free.result.attempts).find((a) => a.outcome !== "allowed");
     if (free.result.attempts.length === 0) return inconclusive("without the sandbox the case made no attempt, so a refusal would prove nothing");
     if (notThrough !== undefined) return inconclusive(`without the sandbox the same attempt did not get through (${notThrough.name}: ${notThrough.outcome}${notThrough.code === undefined ? "" : ` ${notThrough.code}`}), so a refusal would prove nothing`);
     if (free.proofMissing !== undefined) return inconclusive(`without the sandbox the same attempt did not get through (${free.proofMissing}), so a refusal would prove nothing`);
     paired = "; the same attempt got through without the sandbox";
   }
-  if (confined === undefined) return inconclusive(confinedNote);
-  const through = confined.attempts.find((a) => a.outcome === "allowed");
+  // A leak fails next, even when the unconfined run is missing or did not finish, and even when the runner left the case out: the host saw a change, or an attempt got through in the sandbox.
   if (witness !== undefined) return fail(witness);
-  if (through !== undefined) return fail(`an attempt got through in the sandbox (${through.name})`);
+  const leaked = confined?.attempts.find((a) => a.outcome === "allowed");
+  if (leaked !== undefined) return fail(`an attempt got through in the sandbox (${leaked.name})`);
+  if (kind.paired) {
+    if (free.result === "unavailable") return inconclusive("the attempt could not be run without the sandbox to show that it works");
+    if (free.result === undefined) return inconclusive("the attempt did not run to its end without the sandbox");
+  }
+  if (confined === undefined) return inconclusive(confinedNote);
   if (kind.paired && typeof free.result === "object") {
     // The pairing is per attempt: the confined run must have made exactly the attempts that were shown to work unconfined (a skipped skippable step keeps its name), else a refusal of one attempt
     // could stand for another that was never made. (A leak above fails whatever the attempts were.)
     const names = (a: readonly RunnerAttempt[]): string => [...new Set(a.map((x) => x.name))].sort().join(",");
     if (names(confined.attempts) !== names(free.result.attempts)) return inconclusive("the confined run did not make the same attempts as the unconfined run, so the pairing does not cover it");
   }
-  const attempts = required(confined.attempts);
+  const attempts = required(kind, confined.attempts);
   if (attempts.length === 0) return inconclusive("the case made no attempt");
   const refusedFor = (a: RunnerAttempt): boolean => a.outcome === "denied" || (kind.network === true && a.outcome === "blocked");
   const other = attempts.find((a) => !refusedFor(a));
@@ -414,6 +433,9 @@ export function readResultFile(file: string): string | undefined {
     const s = lstatSync(file);
     if (!s.isFile() || s.isSymbolicLink() || s.nlink > 1 || s.size > MAX_RESULT_BYTES) return undefined;
     fd = openSync(file, "r");
+    // the name must still be the file that was looked at (not swapped for a link or another file between the look and the open)
+    const o = fstatSync(fd);
+    if (!o.isFile() || o.ino !== s.ino || o.dev !== s.dev || o.nlink > 1) return undefined;
     const buf = Buffer.alloc(MAX_RESULT_BYTES + 1);
     let got = 0;
     for (;;) { const n = readSync(fd, buf, got, buf.length - got, null); if (n <= 0) break; got += n; if (got > MAX_RESULT_BYTES) return undefined; }
@@ -468,7 +490,8 @@ export async function runWindowsNodeCases(ctx: NodeSuiteContext): Promise<{ id: 
   } catch (error) { note = `the attempt could not be launched: ${clip((error as Error).message)}`; }
   return WINDOWS_CASES.map((kind) => {
     const freeRun: FreeRun = freeResults === "unavailable" ? { result: "unavailable", proofMissing: undefined } : { result: freeResults.get(kind.id), proofMissing: proofs.get(kind.id) };
-    const witness = cfg === undefined || !results.has(kind.id) ? undefined : confinedWitness(kind.id, cfg, originals, probe, before);
+    // A denial's witness is read even when the runner left the case out (a change the host sees fails the case whatever the runner wrote); a control's only when the case reported.
+    const witness = cfg === undefined || (kind.control && !results.has(kind.id)) ? undefined : confinedWitness(kind.id, cfg, originals, probe, before);
     const verdict = judgeWindowsCase(kind, results.get(kind.id), freeRun, witness, note);
     return { id: kind.id, ...verdict, detail: freeRun.result === undefined && freeNote !== "" && verdict.verdict === "inconclusive" ? `${verdict.detail} (${freeNote})` : verdict.detail };
   });

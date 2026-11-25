@@ -59,20 +59,25 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
     assert.equal(judgeWindowsCase(k, confined, freeOk(k.id, "outside-file", "outside-dir0"), undefined).verdict, "pass");
   });
 
-  test("the system folders are not paired; a skippable step is ignored only when it was skipped", () => {
+  test("the system folders are not paired; a step is skipped only by the host's rule (its earlier step was refused), never by a flag the program sets", () => {
     const sys = kind("deny-write-system");
     assert.equal(judgeWindowsCase(sys, res(sys.id, att("system0", "denied"), att("system1", "denied")), { result: "unavailable", proofMissing: undefined }, undefined).verdict, "pass");
     const p = kind("deny-write-protected-name");
     const free = freeOk(p.id, "edit", "create", "delete", "replace-move-away", "replace-with-junction");
     const confined = (junction: RunnerAttempt) => res(p.id, att("edit", "denied"), att("create", "denied"), att("delete", "denied"), att("replace-move-away", "denied"), junction);
     assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { code: "previous-step-refused", skippable: true })), free, undefined).verdict, "pass");
-    // the same step skipped but not marked skippable is a probe that did not run
-    assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { code: "x" })), free, undefined).verdict, "inconclusive");
+    // the program's flag does not matter: the same step skipped without it is still left out, because the move away was refused
+    assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { code: "x" })), free, undefined).verdict, "pass");
+    // another step the program marks skippable and skips is a probe that did not run
+    const forged = res(p.id, att("edit", "skipped", { skippable: true }), att("create", "denied"), att("delete", "denied"), att("replace-move-away", "denied"), att("replace-with-junction", "skipped", { skippable: true }));
+    assert.equal(judgeWindowsCase(p, forged, free, undefined).verdict, "inconclusive");
+    // the junction step skipped although the move away was not reported (or was itself skipped) is a probe that did not run
+    assert.equal(judgeWindowsCase(p, res(p.id, att("edit", "denied"), att("create", "denied"), att("delete", "denied"), att("replace-move-away", "skipped"), att("replace-with-junction", "skipped", { skippable: true })), free, undefined).verdict, "inconclusive");
     // a skippable step that got through is a leak
     assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "allowed", { skippable: true })), free, undefined).verdict, "fail");
-    // unconfined, the skippable step may have been skipped or allowed
+    // unconfined, the move away got through, so the junction step had to be made: skipping it there shows nothing
     const freeSkipped = res(p.id, att("edit", "allowed"), att("create", "allowed"), att("delete", "allowed"), att("replace-move-away", "allowed"), att("replace-with-junction", "skipped", { skippable: true }));
-    assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { skippable: true })), { result: freeSkipped, proofMissing: undefined }, undefined).verdict, "pass");
+    assert.equal(judgeWindowsCase(p, confined(att("replace-with-junction", "skipped", { skippable: true })), { result: freeSkipped, proofMissing: undefined }, undefined).verdict, "inconclusive");
   });
 
   test("the pairing is per attempt: a confined run that left out an attempt, or made one the unconfined run did not, is inconclusive", () => {
@@ -86,6 +91,21 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
     assert.equal(judgeWindowsCase(k, res(k.id, att("file", "denied"), att("lst", "denied")), free, undefined).verdict, "inconclusive");
     // a leak still fails even when the attempts differ
     assert.equal(judgeWindowsCase(k, res(k.id, att("file", "allowed")), free, undefined).verdict, "fail");
+  });
+
+  test("a leak fails even with no (or an unfinished) unconfined run, or when the runner left the case out; a probe the unconfined run shows broken stays inconclusive", () => {
+    const k = kind("deny-write-host-path");
+    const none: FreeRun = { result: "unavailable", proofMissing: undefined };
+    const unfinished: FreeRun = { result: undefined, proofMissing: undefined };
+    for (const free of [none, unfinished]) {
+      assert.equal(judgeWindowsCase(k, undefined, free, "a host file outside the workspace was changed").verdict, "fail");
+      assert.equal(judgeWindowsCase(k, res(k.id, att("outside-file", "allowed")), free, undefined).verdict, "fail");
+      assert.equal(judgeWindowsCase(k, res(k.id, att("outside-file", "denied")), free, undefined).verdict, "inconclusive");
+    }
+    assert.equal(judgeWindowsCase(k, undefined, freeOk(k.id, "outside-file"), "a host file outside the workspace was changed").verdict, "fail");
+    const broken: FreeRun = { result: res(k.id, att("outside-file", "missing")), proofMissing: undefined };
+    assert.equal(judgeWindowsCase(k, undefined, broken, "a host file outside the workspace was changed").verdict, "inconclusive");
+    assert.equal(judgeWindowsCase(k, res(k.id, att("outside-file", "denied")), { ...freeOk(k.id, "outside-file"), proofMissing: "the outside file was not changed" }, "changed").verdict, "inconclusive");
   });
 
   test("the host reads the result file only when it is one plain file within the bound", () => {
@@ -122,7 +142,7 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
 
 describe("A03b slice 2: the result file is read as data", () => {
   const ids = REQUIRED_CASE_IDS;
-  test("bounded, shape-checked, damaged and unknown lines skipped, text made printable, the last line for a case wins", () => {
+  test("bounded, shape-checked, damaged and unknown lines skipped, text made printable, a case on two lines keeps every attempt", () => {
     const good = JSON.stringify({ id: "deny-credential-read", attempts: [{ name: "file", outcome: "denied", code: "EACCES" }] });
     const parsed = parseRunnerResults([good, "{broken", JSON.stringify({ id: "unknown-case", attempts: [] }), JSON.stringify({ id: "deny-credential-read", attempts: [{ name: "x", outcome: "maybe" }] }), "", JSON.stringify({ id: "control-read-own-decoy", attempts: [{ name: "d‮", outcome: "allowed", code: "A B\n" }] })].join("\n"), ids);
     assert.deepEqual([...parsed.keys()].sort(), ["control-read-own-decoy", "deny-credential-read"]);
@@ -130,7 +150,12 @@ describe("A03b slice 2: the result file is read as data", () => {
     const printable = parsed.get("control-read-own-decoy")!.attempts[0]!;
     assert.doesNotMatch(`${printable.name}${printable.code}`, /[‮\n ]/);
     const twice = parseRunnerResults([JSON.stringify({ id: "deny-credential-read", attempts: [{ name: "a", outcome: "allowed" }] }), good].join("\n"), ids);
-    assert.equal(twice.get("deny-credential-read")!.attempts[0]!.outcome, "denied");
+    // a later line cannot hide an attempt that got through on an earlier one
+    assert.deepEqual(twice.get("deny-credential-read")!.attempts.map((a) => a.outcome), ["allowed", "denied"]);
+    assert.equal(judgeWindowsCase(kind("deny-credential-read"), twice.get("deny-credential-read"), freeOk("deny-credential-read", "a", "file"), undefined).verdict, "fail");
+    // the program's skippable flag is not kept
+    const flagged = parseRunnerResults(JSON.stringify({ id: "deny-credential-read", attempts: [{ name: "file", outcome: "skipped", skippable: true }] }), ids);
+    assert.equal(flagged.get("deny-credential-read")!.attempts[0]!.skippable, undefined);
     assert.equal(parseRunnerResults(`${good}\n${" ".repeat(300 * 1024)}`, ids).size, 0, "a file over the bound is not read");
     assert.equal(parseRunnerResults(JSON.stringify({ id: "deny-credential-read", attempts: new Array(40).fill({ name: "a", outcome: "denied" }) }), ids).size, 0);
   });
@@ -375,6 +400,26 @@ describe("A03b slice 2: the node runner and the host's verdicts, with a simulate
       assert.equal(v["deny-credential-read"], "pass");
       assert.equal(v["deny-network-loopback"], "inconclusive");
       assert.equal(v["deny-write-protected-name"], "inconclusive");
+    } finally { await r.fixture.close(); }
+  });
+
+  test("a case the runner left out still fails when the host sees its leak (the witness is read whatever the result file says)", async (t) => {
+    if (onWindows) return t.skip("the simulated container is POSIX-shaped");
+    const r = await rig();
+    try {
+      const base = r.ctx();
+      const out = await runWindowsNodeCases({ ...base, launch: async (mode, recipe, command) => {
+        const got = await base.launch(mode, recipe, command);
+        if (mode === "sandboxed") { // the host-path case's line is gone and the outside file changed, as a leak the runner did not report would leave it
+          const file = (JSON.parse(readFileSync(command[2]!, "utf8")) as WindowsCaseConfig).resultFile;
+          writeFileSync(file, `${readFileSync(file, "utf8").split("\n").filter((l) => l !== "" && !l.includes("deny-write-host-path")).join("\n")}\n`);
+          writeFileSync(r.fixture.outsideFile, "changed by the confined program");
+        }
+        return got;
+      } });
+      const v = verdicts(out);
+      assert.equal(v["deny-write-host-path"], "fail");
+      assert.equal(v["deny-credential-read"], "pass");
     } finally { await r.fixture.close(); }
   });
 

@@ -515,8 +515,10 @@ struct GrantSet { sid: PSID, items: Vec<GrantRecord> }
 impl GrantSet {
     /// Two passes: every other entry first (newest first), the sealed names LAST. A revoked seal lets the folder inherit again, so while the workspace's own entry for the container were
     /// still in place the sealed folder would take its write rights back from the parent for a moment; revoking the seals after everything else leaves nothing to inherit.
+    /// A seal is KEPT while any other entry could not be removed (the seal is a deny, so keeping it takes nothing from anyone but the container; the caller's read-back sees it left and retries).
     fn revoke_all(&mut self) {
         for seals in [false, true] {
+            if seals && self.items.iter().any(|g| g.spec.mode != Mode::Seal && g.applied && !g.revoked) { break; }
             for g in self.items.iter_mut().rev() {
                 if (g.spec.mode == Mode::Seal) != seals { continue; }
                 if g.applied && !g.revoked {

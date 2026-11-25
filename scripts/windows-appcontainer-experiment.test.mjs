@@ -1957,16 +1957,18 @@ test("the launcher source (round 4): the layered layouts are built by hand in a 
   for (const banned of ["CreateProcessAsUser", "CreateProcessWithToken", "BREAKAWAY"]) assert.ok(!src.includes(banned), banned);
 });
 
-test("the launcher source (A03b slice 2): the revoke takes the sealed names LAST, in a second pass after every other entry, and still revokes every applied entry once", () => {
+test("the launcher source (A03b slice 2): the revoke takes the sealed names LAST, in a second pass after every other entry and only when every other entry is gone, and still revokes every applied entry once", () => {
   const src = readFileSync(join(exp, "launcher", "src", "win.rs"), "utf8");
   const body = /fn revoke_all\(&mut self\) \{([\s\S]*?)\n    \}\n    fn json/.exec(src);
   assert.ok(body, "revoke_all not found");
   // two passes (the non-seals first, then the seals), each newest first
-  assert.match(body[1], /for seals in \[false, true\] \{\s*for g in self\.items\.iter_mut\(\)\.rev\(\) \{\s*if \(g\.spec\.mode == Mode::Seal\) != seals \{ continue; \}/);
+  assert.match(body[1], /for seals in \[false, true\] \{\s*(?:if seals [^\n]*\{ break; \}\s*)?for g in self\.items\.iter_mut\(\)\.rev\(\) \{\s*if \(g\.spec\.mode == Mode::Seal\) != seals \{ continue; \}/);
   // each applied entry is still revoked exactly once and a failure is recorded, not dropped
   assert.equal(body[1].match(/change_ace\(/g).length, 1);
   assert.match(body[1], /if g\.applied && !g\.revoked/);
   assert.match(body[1], /Ok\(\(\)\) => g\.revoked = true, Err\(e\) => g\.error = Some\(e\)/);
+  // the seals pass does not run while any other applied entry is still in place (a failed revoke keeps the seal, as the product's revokeAndReadBack does)
+  assert.match(body[1], /if seals && self\.items\.iter\(\)\.any\(\|g\| g\.spec\.mode != Mode::Seal && g\.applied && !g\.revoked\) \{ break; \}/);
   // the order is the same for the `revoke` command, the end of `run` and the Drop (all go through revoke_all)
   assert.equal(src.match(/\.revoke_all\(\)/g).length, 3);
   assert.ok(!/items\.iter_mut\(\)\.rev\(\)[^\n]*\n\s*if g\.applied/.test(src), "a single reverse pass is back");
