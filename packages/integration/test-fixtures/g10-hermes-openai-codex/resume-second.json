@@ -1,0 +1,21 @@
+{
+ "step": "resume-second",
+ "usage": {
+  "input_tokens": 166,
+  "output_tokens": 6,
+  "cache_read_tokens": 24192,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "api_calls": 1,
+  "model": "gpt-6.1-sol",
+  "provider": "openai-codex",
+  "completed": true,
+  "failed": false,
+  "auxiliary": {
+   "api_calls": 0
+  }
+ },
+ "answer": "Wren",
+ "expected": "Wren",
+ "wallMs": 6236
+}
