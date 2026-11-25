@@ -2841,3 +2841,42 @@ test("round 5 review: the own-runner clean-up runs desktop-revoke for the experi
   assert.equal((clean.match(/"\$exe" desktop-revoke/g) ?? []).length, 1);
   assert.match(clean, /^Remove[^\n]*\n\s+shell: bash\n\s+if: \$\{\{ always\(\) && steps\.verify\.outcome == 'success' \}\}/);
 });
+
+test("the reproducibility step builds the product launcher a second time from another folder with the same flags, reports through pe-diff and never fails the job", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const at = hosted.indexOf("id: repro_product");
+  assert.ok(at > 0 && at > hosted.indexOf("id: build_product") && at < hosted.indexOf("id: stage"), "after the product build, before staging");
+  const step = hosted.slice(hosted.lastIndexOf("\n      - name:", at) + 1, hosted.indexOf("\n      # Card A03b slice 3: the administrator installer", at));
+  // a report, not a gate: always runs, ends 0, has the second guard, is bounded in time, uses no secret
+  assert.match(step, /\n\s+if: always\(\)\n/);
+  assert.match(step, /\n\s+continue-on-error: true\n/);
+  assert.match(step, /\n\s+timeout-minutes: \d+\n/);
+  assert.match(step, /\n\s+set \+e\n/);
+  assert.ok(step.trimEnd().endsWith("exit 0"), "the last command ends the step with 0");
+  assert.ok(!/\bexit [1-9]/.test(step.replace(/^\s*#.*$/gm, "")), "no path ends the step with a failure");
+  assert.ok(step.includes("::warning::reproducibility result: DIFFERENT") && step.includes("reproducibility result: identical"));
+  // the second build: another folder with another name outside the checkout, its own target folder, the same toolchain pin, `--locked`, the same flags with the remap naming the second folder
+  assert.match(step, /second_root="\$RUNNER_TEMP\/repro-second"; second_dir="\$second_root\/a-different-folder-name-for-the-second-build"/);
+  assert.ok(step.includes("tar -c --exclude=./target ."), "the first build's target folder is not copied");
+  assert.match(step, /RUSTFLAGS="--remap-path-prefix=\$crate2_w=\/nn-launcher --remap-path-prefix=\$cargo_w=\/cargo -C link-arg=\/Brepro" cargo build --release --locked/);
+  const first = hosted.slice(hosted.indexOf("id: build_product"), at);
+  assert.match(first, /RUSTFLAGS="--remap-path-prefix=\$crate_w=\/nn-launcher --remap-path-prefix=\$cargo_w=\/cargo -C link-arg=\/Brepro" cargo build --release --locked/);
+  assert.ok(!/CARGO_TARGET_DIR|--target-dir/.test(step), "the second build's target folder is the default one inside its own copy");
+  assert.ok(!/cargo build[^\n]*--features/.test(step), "no feature in the second build either");
+  assert.match(step, /crate2_w="\$\(cygpath -w "\$second_dir"\)"/);
+  // the comparison and its artifacts: machine-readable report, both files, commit and the three build folder names looked for
+  assert.match(step, /node scripts\/pe-diff\.mjs "\$out\/nn-launcher\.first\.exe" "\$out\/nn-launcher\.second\.exe" --json "\$out\/nn-launcher\.repro\.json" --commit "\$GITHUB_SHA"/);
+  for (const n of ["firstCrateFolder=", "secondCrateFolder=", "cargoHome="]) assert.ok(step.includes(`--needle "${n}`), n);
+  assert.ok(step.includes('out="$RUNNER_TEMP/appc-out/repro"'), "under appc-out, which the hosted artifact uploads");
+  assert.ok(hosted.includes("path: ${{ runner.temp }}/appc-out"));
+  // nothing else moved: pins, permissions and the first build's own steps stay
+  assert.match(wf, /^permissions:\n {2}contents: read/m);
+  assert.ok(!/^ {4}permissions:/m.test(wf));
+  assert.ok(!/secrets\./.test(step));
+  assert.ok(!/uses: [^\n@]+@(?![0-9a-f]{40}\b)/.test(wf), "every action is pinned to a commit");
+  assert.ok(step.indexOf("cargo build") < step.indexOf("pe-diff.mjs"));
+  const rel = readFileSync(join(root, "native", "nn-launcher", "RELEASE.md"), "utf8");
+  assert.ok(rel.includes("Is the build reproducible?") && /reproducibility is NOT claimed/.test(rel), "RELEASE.md states what is measured and that nothing is claimed yet");
+  assert.ok(rel.includes("nn-launcher.signed.record.json") && rel.includes("unsigned"), "RELEASE.md says how the signed file and the unsigned hash relate");
+});

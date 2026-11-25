@@ -160,6 +160,45 @@ jobs:
           node ../../scripts/native-launcher.mjs record --file target/release/nn-launcher.exe --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
           node ../../scripts/native-launcher.mjs verify --file target/release/nn-launcher.exe --record "$RUNNER_TEMP/appc-out/nn-launcher.record.json"
           echo "sha256=$(sha256sum -b < target/release/nn-launcher.exe | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      # Card A03b reproducibility measurement: the same source, built a second time in a DIFFERENT folder (another path and another name, outside the first checkout) with its own target folder, the same pinned toolchain, the
+      # same `--locked` and the same RUSTFLAGS (the path remap names the second folder, so the folder difference must not matter: that is what is measured). The two files are compared by SHA-256 and by scripts/pe-diff.mjs, which says WHERE
+      # they differ when they do (header time stamp, debug directory and PDB path, code, constants, resources) and whether the file holds the commit, a build time or either build folder name. It is a REPORT, not a gate:
+      # `set +e`, every failure inside becomes a ::warning:: and the step ends 0 (and `continue-on-error` is a second guard), because reproducibility is not claimed yet (RELEASE.md) and a difference must not hide the other results of this run.
+      # It does not touch the first build's files (the stage step re-checks their hashes); the report and both files are uploaded with the other results.
+      - name: "Product launcher reproducibility (second build from another folder; a report, not a gate)"
+        id: repro_product
+        shell: bash
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          set +e
+          repo="$PWD"
+          out="$RUNNER_TEMP/appc-out/repro"; mkdir -p "$out"
+          first_dir="$repo/native/nn-launcher"
+          first_exe="$first_dir/target/release/nn-launcher.exe"
+          if [ ! -f "$first_exe" ]; then echo "::warning::reproducibility not measured: the first build left no file to compare"; exit 0; fi
+          # a copy of the crate folder (every file the first build reads, byte for byte, without its target folder) under another path and another folder name, outside the checkout
+          second_root="$RUNNER_TEMP/repro-second"; second_dir="$second_root/a-different-folder-name-for-the-second-build"
+          rm -rf "$second_root"; mkdir -p "$second_dir"
+          if ! ( cd "$first_dir" && tar -c --exclude=./target . ) | ( cd "$second_dir" && tar -x ); then echo "::warning::reproducibility not measured: the crate folder could not be copied"; exit 0; fi
+          cd "$second_dir" || exit 0
+          crate_w="$(cygpath -w "$first_dir")"; crate2_w="$(cygpath -w "$second_dir")"; cargo_w="$(cygpath -w "${CARGO_HOME:-$USERPROFILE/.cargo}")"
+          echo "second build folder: ${#crate2_w} characters of path, first: ${#crate_w}; the folder names differ"
+          # the same flags as the first build; only the crate folder named in the remap differs (it is the second folder, mapped to the same /nn-launcher)
+          RUSTFLAGS="--remap-path-prefix=$crate2_w=/nn-launcher --remap-path-prefix=$cargo_w=/cargo -C link-arg=/Brepro" cargo build --release --locked 2>&1 | node "$repo/scripts/redact-log.mjs"
+          second_exe="$second_dir/target/release/nn-launcher.exe"
+          if [ ! -f "$second_exe" ]; then echo "::warning::reproducibility not measured: the second build did not produce a file"; exit 0; fi
+          cp "$first_exe" "$out/nn-launcher.first.exe"; cp "$second_exe" "$out/nn-launcher.second.exe"
+          cd "$repo" || exit 0
+          rc=0
+          node scripts/pe-diff.mjs "$out/nn-launcher.first.exe" "$out/nn-launcher.second.exe" --json "$out/nn-launcher.repro.json" --commit "$GITHUB_SHA" --needle "firstCrateFolder=$crate_w" --needle "secondCrateFolder=$crate2_w" --needle "cargoHome=$cargo_w" > "$out/nn-launcher.repro.txt" 2>&1 || rc=$?
+          node scripts/redact-log.mjs < "$out/nn-launcher.repro.txt"
+          { echo "## Product launcher reproducibility (two builds, two folders; hosted Windows)"; echo '```'; node scripts/redact-log.mjs < "$out/nn-launcher.repro.txt" | head -n 60; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -eq 0 ]; then echo "reproducibility result: identical (the two builds are byte for byte the same)"
+          elif [ "$rc" -eq 1 ]; then echo "::warning::reproducibility result: DIFFERENT - see nn-launcher.repro.json and the why lines above; this is a report, not a gate"
+          else echo "::warning::the comparison itself failed (exit $rc); see the output above"; fi
+          exit 0
       # Card A03b slice 3: the administrator installer script is parsed by PowerShell and run with -WhatIf and Verify. Neither changes the machine: the checks below fail the step if an account or a folder appeared.
       - name: "Installer script (parse, -WhatIf and Verify; changes nothing)"
         shell: powershell
