@@ -1,7 +1,9 @@
 // Card A03b slice 3: the native Windows launcher's release inputs, its Rust dependency licenses, the administrator installer script (read as text: PowerShell is not available on the Linux and macOS
 // cells) and the hand-started workflow's new steps. Nothing here runs the launcher or the installer; what they DO on Windows is judged by the hosted run and, later, the owner's own machine.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -352,4 +354,26 @@ test("the hand-started workflow builds the product launcher --locked after the e
   assert.ok(!/-Action (Install|Uninstall)(?![^\n]*-WhatIf)/.test(installer.replace(/-Action Verify/g, "")), "Install is only ever run with -WhatIf there");
   // the containment cases use the product binary, not the experiment's
   assert.match(hosted.slice(at("G05 containment cases through the native backend")), /NIMBLENEWT_WIN_LAUNCHER: [^\n]*native\\nn-launcher\\target\\release\\nn-launcher\.exe/);
+});
+
+test("verify started through a link still checks the file (a link once made the command a silent no-op that ended 0)", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "nn-nl-"));
+  try {
+    const link = join(dir, "native-launcher.mjs");
+    // a file link needs Developer Mode or an administrator on Windows; without it there is nothing to test there
+    try { symlinkSync(join(root, "scripts", "native-launcher.mjs"), link); } catch (error) { if (process.platform === "win32" && error.code === "EPERM") { t.skip("no file links here"); return; } throw error; }
+    const file = join(dir, "nn-launcher.exe");
+    writeFileSync(file, "MZ pretend executable");
+    const record = join(dir, "record.json");
+    writeFileSync(record, JSON.stringify(makeRecord({ fileName: file, bytes: Buffer.from("MZ another executable"), commit: COMMIT })));
+    const bad = spawnSync(process.execPath, [link, "verify", "--file", file, "--record", record], { encoding: "utf8" });
+    assert.equal(bad.status, 1, `${bad.stdout}${bad.stderr}`);
+    assert.match(bad.stderr, /SHA-256/);
+    const missing = spawnSync(process.execPath, [link, "verify", "--file", file, "--record", join(dir, "none.json")], { encoding: "utf8" });
+    assert.equal(missing.status, 2);
+    writeFileSync(record, JSON.stringify(makeRecord({ fileName: file, bytes: readFileSync(file), commit: COMMIT })));
+    const good = spawnSync(process.execPath, [link, "verify", "--file", file, "--record", record], { encoding: "utf8" });
+    assert.equal(good.status, 0, good.stderr);
+    assert.match(good.stdout, /matches the record/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

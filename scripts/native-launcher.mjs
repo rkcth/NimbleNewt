@@ -4,7 +4,7 @@
 // The record holds no timestamp, no path and no user name, so two builds of the same inputs give the same record (that is the point of a reproducible build). It names the inputs
 // that decide the output: the toolchain pin, the lock file's hash and the source commit.
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,7 +39,17 @@ export function checkRecord(record, bytes) {
 
 function arg(argv, name) { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+/** Started as a program (not imported)? Real paths on both sides: started through a link or a junction (argv[1] is then not the module's resolved path) the command must still run;
+ * a plain string comparison skipped it and ended 0, so `verify` passed without checking anything. */
+function startedAsProgram() {
+  if (!process.argv[1]) return false;
+  try {
+    const a = realpathSync(process.argv[1]), b = realpathSync(fileURLToPath(import.meta.url));
+    return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  } catch { return false; }
+}
+
+if (startedAsProgram()) {
   const [command, ...rest] = process.argv.slice(2);
   const file = arg(rest, "--file");
   try {
