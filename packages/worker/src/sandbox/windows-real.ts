@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchWsb, parseMode, runViaScheduledTask, wsbTaskBase, MODE_VARIABLE } from "./windows-task-launch.js";
+import { isLinkOrJunctionWith } from "./windows-native-real.js";
 import { recordDirProblem } from "./windows-records.js";
 import { SANDBOX_PACKAGES, parseIcaclsWritable, shortStatusMessage } from "./windows-plan.js";
 import type { ProcessResult, WindowsAccessEntry, WindowsAutologon, WindowsHost, WindowsListContext, WindowsLockTask, WindowsPackageInfo, WindowsSession, WindowsSignature } from "./windows-host.js";
@@ -330,11 +331,8 @@ export function windowsRealHost(): WindowsHost {
     runMinimalEnv: (file, args, options) => runBounded(`${sysRoot()}\\System32\\cmd.exe`, [cmdLine(file, args)], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeoutMs: options.timeoutMs, env: minimalEnv(process.env), verbatim: true }, stopTree),
     pidAlive: (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === "EPERM"; } },
     exists: (p) => existsSync(p),
-    isLinkOrJunction: (p) => {
-      if (!existsSync(p)) return false;
-      // Fails closed: a path whose real path cannot be found, or differs from it (a junction higher up, a short name), counts as a link.
-      try { return lstatSync(p).isSymbolicLink() || win32.normalize(realpathSync.native(p)).toLowerCase() !== win32.normalize(p).toLowerCase(); } catch { return true; }
-    },
+    // Fails closed: a path whose real path cannot be found, or differs from it (a junction higher up, a short name), counts as a link; a dangling link counts too (the same rule as the native host).
+    isLinkOrJunction: (p) => isLinkOrJunctionWith(p, "win32", (q) => lstatSync(q).isSymbolicLink(), (q) => realpathSync.native(q), (q) => existsSync(q)),
     rename: (a, b) => { renameSync(a, b); },
     listDir: (p) => { try { return readdirSync(p); } catch { return []; } },
     mkdirp: (p) => { mkdirSync(p, { recursive: true }); },

@@ -17,12 +17,15 @@ export function parseProcessLines(text: string): { pid: number; parent: number; 
 
 /**
  * Whether a path is, or passes through, a link or junction. The real path must read the same as the path given (on Windows after normalising and ignoring case, so a short name such as RUNNER~1 or a junction higher up counts as a link: the seal must land on the folder named).
- * A path that exists but whose real path cannot be found counts as a link (fails closed). The probes are injectable so the Windows rule is tested on every OS.
+ * A path that exists but whose real path cannot be found counts as a link (fails closed). The link probe (lstat, which does not follow a link) is asked first, so a dangling link or junction
+ * (whose target is gone, so an existence check that follows links says "missing") still counts as a link; only when that probe itself fails does a missing path count as no link.
+ * The probes are injectable so the Windows rule is tested on every OS.
  */
 export function isLinkOrJunctionWith(path: string, platform: NodeJS.Platform, isSymlink: (p: string) => boolean, realPath: (p: string) => string, exists: (p: string) => boolean): boolean {
-  if (!exists(path)) return false;
+  let symlink: boolean;
+  try { symlink = isSymlink(path); } catch { return exists(path); }
+  if (symlink) return true;
   try {
-    if (isSymlink(path)) return true;
     const real = realPath(path);
     return platform === "win32" ? win32.normalize(real).toLowerCase() !== win32.normalize(path).toLowerCase() : real !== path;
   } catch { return true; }

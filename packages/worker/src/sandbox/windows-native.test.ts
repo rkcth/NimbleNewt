@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -744,6 +744,9 @@ describe("A03b native launcher: wiring, the runner and the real host", () => {
       host.remove(join(dir, "sub"));
       assert.equal(host.exists(join(dir, "sub")), false);
       assert.equal(host.isLinkOrJunction(file), false);
+      assert.equal(host.isLinkOrJunction(join(dir, "missing")), false);
+      // A dangling link (made off Windows only: a hosted Windows runner may not make symbolic links) counts as a link with the real probes, not as missing.
+      if (process.platform !== "win32") { symlinkSync(join(dir, "gone"), join(dir, "dangling")); assert.equal(host.isLinkOrJunction(join(dir, "dangling")), true, "a dangling link"); }
       assert.equal(host.pidAlive(process.pid), true);
       assert.equal((await host.run(process.execPath, ["-e", "process.stdout.write('x')"], { timeoutMs: 20_000 })).stdout, "x");
       assert.equal((await host.run(process.execPath, ["-e", "setTimeout(()=>{},20000)"], { timeoutMs: 200 })).timedOut, true);
@@ -755,15 +758,21 @@ describe("A03b native launcher: wiring, the runner and the real host", () => {
   test("link or junction rule on the Windows branch (run on every OS with injected probes): a short name or a junction higher up counts as a link, case alone does not, an unreadable real path fails closed", () => {
     const yes = (): boolean => true;
     const no = (): boolean => false;
-    const rule = (path: string, real: string | Error, exists: boolean = true, symlink: boolean = false): boolean =>
-      isLinkOrJunctionWith(path, "win32", () => symlink, () => { if (real instanceof Error) throw real; return real; }, () => exists);
+    // The link probe stands for lstat: it does not follow a link, and it throws for a path that is not there (so a missing path passes `new Error("ENOENT")` for it).
+    const rule = (path: string, real: string | Error, exists: boolean = true, symlink: boolean | Error = false): boolean =>
+      isLinkOrJunctionWith(path, "win32", () => { if (symlink instanceof Error) throw symlink; return symlink; }, () => { if (real instanceof Error) throw real; return real; }, () => exists);
     assert.equal(rule("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\a.txt", "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\a.txt"), true, "short name");
     assert.equal(rule("D:\\work\\link\\a.txt", "D:\\elsewhere\\a.txt"), true, "junction higher up");
     assert.equal(rule("d:\\Work\\A.txt", "D:\\work\\a.txt"), false, "case only");
     assert.equal(rule("D:\\work\\a.txt", "D:\\work\\a.txt"), false);
     assert.equal(rule("D:\\work\\a.txt", "D:\\work\\a.txt", true, true), true, "a symbolic link");
     assert.equal(rule("D:\\work\\a.txt", new Error("EACCES")), true, "fails closed");
-    assert.equal(rule("D:\\work\\none", new Error("ENOENT"), false), false, "missing is not a link");
+    assert.equal(rule("D:\\work\\none", new Error("ENOENT"), false, new Error("ENOENT")), false, "missing is not a link");
+    // Review 2026-11-25: a dangling link or junction (its target gone, so an existence check that follows links says missing) still counts as a link.
+    assert.equal(rule("D:\\work\\.git", new Error("ENOENT"), false, true), true, "a dangling link");
+    // The link probe failing on a path that is there (access refused) fails closed.
+    assert.equal(rule("D:\\work\\a.txt", "D:\\work\\a.txt", true, new Error("EPERM")), true, "an unreadable link probe fails closed");
+    assert.equal(rule("D:/work/a.txt", "D:\\work\\a.txt"), false, "either separator");
     assert.equal(isLinkOrJunctionWith("/a/b", "linux", no, () => "/a/b", yes), false);
     assert.equal(isLinkOrJunctionWith("/a/b", "linux", no, () => "/private/a/b", yes), true);
   });
