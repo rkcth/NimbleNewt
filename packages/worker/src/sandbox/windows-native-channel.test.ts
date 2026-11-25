@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { describe, test } from "node:test";
-import { FILE_CHANNEL_DEFAULTS, FrameDecoder, encodeFrame, type Frame } from "@nimblenewt/contracts";
+import { FILE_CHANNEL_DEFAULTS, FrameDecoder, LineDecoder, encodeFrame, type Frame } from "@nimblenewt/contracts";
 import { ChannelRelay, type ChannelFile, type ChannelPorts } from "./windows-native-channel.js";
 
 // The relay's rules on every OS, with in-memory files: ordering, the bounds, what a damaged outbox does, backpressure, the heartbeat, the end. The worker's own end (contracts) and the whole path through
@@ -215,6 +215,76 @@ describe("A03b slice 4: the supervisor's relay between the controller's pipes an
     clearTimeout(timer);
     assert.match(end.fault!, /did not take the worker's remaining output in time/);
     assert.equal(faults.length, 1);
+  });
+
+  test("second review: a payload with U+2028, U+2029 and multibyte text right at a read boundary reaches the controller as exactly one line, byte for byte; a raw CR does not reach it at all", async () => {
+    const r = rig();
+    r.relay.start();
+    const value = { t: "x", s: "a\u2028b\u2029c é ☃ 😀" };
+    const frame = msg(1, value);
+    // written in two parts that split a four-byte character
+    const cut = frame.indexOf(Buffer.from("😀")) + 2;
+    r.outbox.append(frame.subarray(0, cut));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    r.outbox.append(frame.subarray(cut));
+    await until(() => r.lines.length === 1, "the line");
+    assert.deepEqual(Buffer.from(r.lines[0]!, "utf8"), Buffer.from(`${JSON.stringify(value)}\n`, "utf8"));
+    const got = new LineDecoder().push(r.lines.join(""));
+    assert.deepEqual(got, [value], "the controller's own line reader sees one message");
+    await r.relay.finish(false);
+    const cr = rig();
+    cr.relay.start();
+    const payload = Buffer.from('{\r"t":"x"}', "utf8");
+    cr.outbox.append(Buffer.concat([Buffer.from(`1 m ${payload.length}:`), payload, Buffer.from("\n")]));
+    await until(() => cr.faults.length === 1, "the fault");
+    assert.match(cr.faults[0]!, /spans lines/);
+    assert.deepEqual(cr.lines, []);
+    await cr.relay.finish(false);
+  });
+
+  test("second review: a flood of acknowledgements cannot unpause the controller's input early or be repeated; one past what was sent is a fault", async () => {
+    const r = rig({ windowBytes: 60 });
+    r.relay.start();
+    r.input.write('{"n":1,"pad":"aaaaaaaaaaaaaaaaaaaaaaaa"}\n{"n":2,"pad":"bbbbbbbbbbbbbbbbbbbbbbbb"}\n');
+    await until(() => r.input.isPaused(), "paused");
+    // acknowledging only the first leaves the second (about 42 bytes) waiting: below the window, so it resumes; then an ack for a frame never sent
+    r.outbox.append(encodeFrame(1, "a", "1"));
+    await until(() => !r.input.isPaused(), "resumed");
+    r.outbox.append(encodeFrame(2, "a", "9"));
+    await until(() => r.faults.length === 1, "an ack for a frame never sent");
+    assert.match(r.faults[0]!, /not waiting/);
+    await r.relay.finish(false);
+  });
+
+  test("second review: after finish, no timer of the relay is left (heartbeat, guard, drain, poll), so nothing fires after the grants are revoked and nothing keeps the process alive", async () => {
+    for (const how of ["clean", "faulted", "stalled"] as const) {
+      const timersBefore = process.getActiveResourcesInfo().filter((x) => x === "Timeout").length;
+      // Every interval the relay makes is tracked, referenced or not (an unreferenced one does not show among the active resources).
+      const realSet = globalThis.setInterval; const realClear = globalThis.clearInterval;
+      const live = new Set<unknown>();
+      globalThis.setInterval = ((fn: () => void, ms?: number) => { const h = realSet(fn, ms); live.add(h); return h; }) as typeof setInterval;
+      globalThis.clearInterval = ((h?: Parameters<typeof clearInterval>[0]) => { live.delete(h); realClear(h); }) as typeof clearInterval;
+      try {
+      const inbox = new MemFile(); const outbox = new MemFile(); const input = new PassThrough();
+      const faults: string[] = [];
+      const ports: ChannelPorts = { input, output: { write: how === "stalled" ? () => new Promise<void>(() => undefined) : async () => undefined } };
+      const relay = new ChannelRelay({ inbox, outbox, ports, limits: { ...FILE_CHANNEL_DEFAULTS, heartbeatMs: 10 }, onFault: (x) => { faults.push(x); }, pollMinMs: 1, pollMaxMs: 3, guardMs: 2, drainMs: 30 });
+      relay.start();
+      outbox.append(msg(1, { t: "a" }));
+      if (how === "faulted") outbox.named = false;
+      if (how === "faulted") await until(() => faults.length === 1, "fault");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await relay.finish(false);
+      const heartbeats = inbox.frames().length;
+      const outboxChecks = faults.length;
+      outbox.named = false; // a guard still running would now fault
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      assert.equal(inbox.frames().length, heartbeats, `${how}: no heartbeat after finish`);
+      assert.equal(faults.length, outboxChecks, `${how}: no guard after finish`);
+      assert.equal(process.getActiveResourcesInfo().filter((x) => x === "Timeout").length, timersBefore, `${how}: every timer the relay made is gone`);
+      assert.equal(live.size, 0, `${how}: every interval the relay made was cleared`);
+      } finally { globalThis.setInterval = realSet; globalThis.clearInterval = realClear; }
+    }
   });
 
   test("what a frame names is only text: paths, handles and commands in a payload are passed on as they are and nothing is opened or run", async () => {

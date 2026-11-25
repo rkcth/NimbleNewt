@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
-import { win32 } from "node:path";
+import { closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { posix, win32 } from "node:path";
 import type { NativeHost } from "./windows-native-job.js";
 import type { ProcessResult } from "./windows-host.js";
 import type { ChannelFile, ChannelFs } from "./windows-native-channel.js";
@@ -43,6 +43,21 @@ export function runProgram(file: string, args: readonly string[], options: { rea
   });
 }
 
+/** What `stillNamed` compares (node's BigInt stats: a file number above 2^53 is compared exactly, never rounded). */
+export interface ChannelStat { isFile(): boolean; isSymbolicLink(): boolean; readonly nlink: bigint; readonly ino: bigint; readonly dev: bigint }
+
+/** Why a file just made for the channel cannot be used, or undefined: it must be a plain file with one name and a file number (a file system that gives 0 could not tell it from another file). */
+export function channelFileRefusal(first: ChannelStat): string | undefined {
+  if (!first.isFile() || first.nlink !== 1n) return "the channel file is not a plain file with one name";
+  if (first.ino === 0n) return "the file system gives the channel file no identity to check";
+  return undefined;
+}
+
+/** The name (looked at without following a link) still leads to the file first made: a plain file, one name, the same number on the same volume. */
+export function sameChannelFile(first: ChannelStat, named: ChannelStat): boolean {
+  return named.isFile() && !named.isSymbolicLink() && named.nlink === 1n && first.ino !== 0n && named.ino === first.ino && named.dev === first.dev;
+}
+
 /**
  * The channel's files with node's own calls. A file is made with `wx+` (it must not exist; the handle is the file this call made, so a name the container later swaps for a link or another file is never
  * followed), checked to be a plain file with one name, and read and written by position through that handle. `stillNamed` compares the name now with the file the handle holds.
@@ -52,7 +67,8 @@ export const nodeChannelFs: ChannelFs = {
     let fd: number;
     try { fd = openSync(path, "wx+"); } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return undefined; throw e; }
     const first = fstatSync(fd, { bigint: true });
-    if (!first.isFile() || first.nlink !== 1n) { closeSync(fd); throw new Error("the channel file is not a plain file with one name"); }
+    const refused = channelFileRefusal(first);
+    if (refused !== undefined) { closeSync(fd); throw new Error(refused); }
     let written = 0;
     return {
       size: () => Number(fstatSync(fd).size),
@@ -60,14 +76,55 @@ export const nodeChannelFs: ChannelFs = {
       append: (data) => { let done = 0; while (done < data.length) done += writeSync(fd, data, done, data.length - done, written + done); written += data.length; },
       stillNamed: () => {
         try {
-          const named = lstatSync(path, { bigint: true });
-          return named.isFile() && !named.isSymbolicLink() && named.nlink === 1n && named.ino === first.ino && named.dev === first.dev;
+          return sameChannelFile(first, lstatSync(path, { bigint: true }));
         } catch { return false; }
       },
       close: () => { try { closeSync(fd); } catch { /* closed */ } },
     };
   },
+  removeFolder: (dir, files) => removeChannelFolderWith(dir, files, {
+    lstat: (p) => { try { const s = lstatSync(p); return s.isSymbolicLink() ? "link" : s.isDirectory() ? "dir" : "file"; } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw e; } },
+    unlink: (p) => { unlinkSync(p); },
+    rmdir: (p) => { rmdirSync(p); },
+    throughLink: (p) => isLinkOrJunctionWith(p, process.platform, (q) => lstatSync(q).isSymbolicLink(), (q) => realpathSync.native(q), (q) => existsSync(q)),
+  }),
 };
+
+/** The calls `removeChannelFolderWith` makes; `lstat` never follows a link (on Windows node reports a junction as a link) and is undefined for a name that does not exist. */
+export interface FolderOps {
+  lstat(path: string): "link" | "dir" | "file" | undefined;
+  unlink(path: string): void;
+  rmdir(path: string): void;
+  /** The path is, or passes through, a link or junction (isLinkOrJunctionWith). */
+  throughLink(path: string): boolean;
+}
+
+/**
+ * The channel folder's removal without following anything (see ChannelFs.removeFolder). Only calls that act on one name are used (unlink, and rmdir, which removes a directory link itself on Windows and an
+ * empty folder elsewhere): none of them can remove what a link leads to. The rules are tested on every OS with stand-in calls.
+ */
+export function removeChannelFolderWith(dir: string, files: readonly string[], ops: FolderOps): boolean {
+  const dirname = (p: string): string => (p.includes("\\") ? win32.dirname(p) : posix.dirname(p));
+  const parent = dirname(dir);
+  // A folder reached through a link higher up is not ours to touch: left alone, and reported as left.
+  if (parent !== dir && ops.throughLink(parent)) return ops.lstat(dir) === undefined;
+  const removeName = (p: string): void => {
+    // A link to a folder: unlink may refuse it on Windows (a directory entry); rmdir then removes the link itself, never its target.
+    try { ops.unlink(p); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; ops.rmdir(p); }
+  };
+  const kind = ops.lstat(dir);
+  if (kind === undefined) return true;
+  try {
+    if (kind !== "dir" || ops.throughLink(dir)) { if (kind === "dir") return false; removeName(dir); return ops.lstat(dir) === undefined; }
+    for (const f of files) {
+      if (dirname(f) !== dir) continue;
+      const k = ops.lstat(f);
+      if (k === "file" || k === "link") removeName(f);
+    }
+    ops.rmdir(dir);
+  } catch { /* left: reported below */ }
+  return ops.lstat(dir) === undefined;
+}
 
 /** The real host: node's own file calls, the launcher and PowerShell (for the volume's file system and the process list). Meaningful on Windows; the file calls work anywhere. */
 export function nativeRealHost(): NativeHost {

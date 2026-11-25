@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -22,7 +22,7 @@ import {
   parseLauncherLine, programPath, quoteWindowsArg, softRefusals, type NativeGrant, type NativeSettings,
 } from "./windows-native-plan.js";
 import { main as runnerMain, processPorts, readAllStdin } from "./windows-native-runner.js";
-import { isLinkOrJunctionWith, nodeChannelFs, nativeRealHost, parseProcessLines } from "./windows-native-real.js";
+import { channelFileRefusal, isLinkOrJunctionWith, nodeChannelFs, nativeRealHost, parseProcessLines, removeChannelFolderWith, sameChannelFile, type ChannelStat, type FolderOps } from "./windows-native-real.js";
 import { PROBE_SCRIPT, unavailableNative, windowsDefaultBackend, windowsNativeBackend, type WindowsNativeOptions } from "./windows-native.js";
 
 // These tests run on every OS with a simulated Windows host and a simulated launcher: they prove the rules (the command line, what is refused, what is recorded, what is revoked and read back on every path out)
@@ -1124,11 +1124,12 @@ describe("A03b second review: no second program with the container's SID, seals 
 describe("A03b slice 4: the controller's channel across the container boundary (a file relay), end to end through runNativeJob", () => {
   // Real files on this machine stand in for the container's folder: each simulated Windows path maps to one file in a temporary folder. The "program" is the worker's own channel library (or a real node
   // process that uses it), so the two sides really run at the same time over real files. What a real container does with those files (its access, sharing, caching) is not measured here.
-  const rig = (): { base: string; map: (p: string) => string; fs: ChannelFs; done: () => void } => {
+  const rig = (): { base: string; map: (p: string) => string; fsFor: (host: SimHost) => ChannelFs; done: () => void } => {
     const base = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-chan-")));
     const map = (p: string): string => join(base, createHash("sha1").update(p.toLowerCase()).digest("hex"));
-    const fs: ChannelFs = { create: (p) => nodeChannelFs.create(map(p)) };
-    return { base, map, fs, done: () => rmSync(base, { recursive: true, force: true }) };
+    // The folder itself lives in the simulated host; its two files are real (mapped) files.
+    const fsFor = (host: SimHost): ChannelFs => ({ create: (p) => nodeChannelFs.create(map(p)), removeFolder: (dir, files) => { for (const f of files) rmSync(map(f), { force: true }); host.remove(dir); return true; } });
+    return { base, map, fsFor, done: () => rmSync(base, { recursive: true, force: true }) };
   };
   const SMALL = { maxBytes: 64 * 1024, maxFrames: 1000, maxPayload: 4096, windowBytes: 16 * 1024, heartbeatMs: 1000, stallMs: 30_000 };
   const interactive = (host: SimHost, extra: Partial<WindowsNativeOptions> = {}, r: NormalizedRecipe = recipe()): { job: NativeJob; jobDir: string; backend: SandboxBackend; plan: SpawnPlan; channel: ChannelJob } => {
@@ -1191,7 +1192,7 @@ describe("A03b slice 4: the controller's channel across the container boundary (
     const t = rig();
     try {
       const host = new SimHost();
-      host.channelFs = t.fs;
+      host.channelFs = t.fsFor(host);
       const { job, jobDir, channel } = interactive(host);
       host.script = { exitCode: 0, out: "stray text the program printed\n", onProgram: echoWorker(t.map, channel) };
       const p = ports();
@@ -1223,7 +1224,7 @@ describe("A03b slice 4: the controller's channel across the container boundary (
     const t = rig();
     try {
       const host = new SimHost();
-      host.channelFs = t.fs;
+      host.channelFs = t.fsFor(host);
       const { job, jobDir, channel } = interactive(host);
       const lib = pathToFileURL(createRequire(import.meta.url).resolve("@nimblenewt/contracts")).href;
       const code = `import { openWorkerFileChannel } from ${JSON.stringify(lib)};
@@ -1254,7 +1255,7 @@ try { for await (const l of ch.input) ch.write(JSON.stringify({ t: "echo", n: JS
     const t = rig();
     try {
       const host = new SimHost();
-      host.channelFs = t.fs;
+      host.channelFs = t.fsFor(host);
       const { job, jobDir, channel } = interactive(host);
       let stopped = false;
       host.script = { exitCode: 0, onProgram: async (_a, _h, signal) => { appendFileSync(t.map(channel.outbox), "this is not a frame and is long enough\n"); await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); signal?.addEventListener("abort", () => resolve()); }); stopped = true; } };
@@ -1275,14 +1276,14 @@ try { for await (const l of ch.input) ch.write(JSON.stringify({ t: "echo", n: JS
     try {
       for (const kind of ["fills", "swapped"] as const) {
         const host = new SimHost();
-        host.channelFs = t.fs;
+        host.channelFs = t.fsFor(host);
         const { job, jobDir, channel } = interactive(host);
         host.script = {
           onProgram: async (_a, _h, signal) => {
             const file = t.map(channel.outbox);
             if (kind === "fills") appendFileSync(file, Buffer.concat(Array.from({ length: 400 }, (_, i) => encodeFrame(i + 1, "m", JSON.stringify({ t: "fill", pad: "x".repeat(300) })))));
             else if (process.platform !== "win32") { writeFileSync(`${file}.other`, ""); renameSync(`${file}.other`, file); }
-            else { /* an open file cannot be replaced under its name on Windows: the check is exercised off Windows */ appendFileSync(file, "x".repeat(10) + "\n" + "y".repeat(30)); }
+            else { /* whether a name held open by node (which shares delete) can be replaced on Windows is not measured here: the name check is exercised off Windows */ appendFileSync(file, "x".repeat(10) + "\n" + "y".repeat(30)); }
             await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); signal?.addEventListener("abort", () => resolve()); });
           },
         };
@@ -1300,7 +1301,7 @@ try { for await (const l of ch.input) ch.write(JSON.stringify({ t: "echo", n: JS
     const host = new SimHost();
     const { job, jobDir } = interactive(host);
     let made = 0;
-    host.channelFs = { create: () => { made++; return made === 1 ? { size: () => 0, read: () => Buffer.alloc(0), append: () => undefined, stillNamed: () => true, close: () => undefined } : undefined; } };
+    host.channelFs = { create: () => { made++; return made === 1 ? { size: () => 0, read: () => Buffer.alloc(0), append: () => undefined, stillNamed: () => true, close: () => undefined } : undefined; }, removeFolder: () => true };
     const out = await runNativeJob(host, job, undefined, jobDir, ports().ports);
     assert.equal(out.exitCode, EXIT_FAILED);
     assert.match(out.stderr, /channel: the channel could not be set up: the outbox name is taken/);
@@ -1312,21 +1313,66 @@ try { for await (const l of ch.input) ch.write(JSON.stringify({ t: "echo", n: JS
     const noFs = await runNativeJob(bare, b.job, undefined, b.jobDir, ports().ports);
     assert.match(noFs.stderr, /channel: the channel could not be set up: this host cannot make channel files/);
     const linked = new SimHost();
-    linked.channelFs = { create: () => undefined };
+    linked.channelFs = { create: () => undefined, removeFolder: () => true };
     const l = interactive(linked);
     linked.links.add(key(l.channel.dir));
     assert.match((await runNativeJob(linked, l.job, undefined, l.jobDir, ports().ports)).stderr, /the channel folder is a link/);
     const noPorts = new SimHost();
-    noPorts.channelFs = rig().fs;
+    noPorts.channelFs = rig().fsFor(noPorts);
     const n = interactive(noPorts);
     assert.match((await runNativeJob(noPorts, n.job, undefined, n.jobDir)).stderr, /no pipes of the controller/);
+  });
+
+  test("second review: the channel folder is removed without following links, only after the revoke has been read back; a leftover that cannot be removed that way stops the run before anything starts", async () => {
+    const t = rig();
+    try {
+      const host = new SimHost();
+      const order: string[] = [];
+      const base = t.fsFor(host);
+      let leftAtStart = false;
+      let leftAtEnd = false;
+      host.channelFs = { create: (p) => base.create(p), removeFolder: (dir, files) => { order.push(`remove:${String(host.calls.filter((c) => c.args[0] === "revoke" || c.args[0] === "check").length)}`); if (order.length === 1 ? leftAtStart : leftAtEnd) return false; return base.removeFolder(dir, files); } };
+      const { job, jobDir, channel } = interactive(host);
+      host.script = { exitCode: 0, onProgram: echoWorker(t.map, channel) };
+      const p = ports();
+      const running = runNativeJob(host, job, undefined, jobDir, p.ports);
+      p.input.end();
+      assert.equal((await running).exitCode, 0);
+      const revokes = host.calls.filter((c) => c.args[0] === "revoke" || c.args[0] === "check").length;
+      assert.ok(revokes >= 1, "the revoke was read back");
+      assert.deepEqual(order, ["remove:0", `remove:${String(revokes)}`], "once before the run, once after every revoke");
+      // the end-of-run removal leaves the folder: noted, not a failure
+      const again = new SimHost();
+      order.length = 0; leftAtEnd = true;
+      const b2 = t.fsFor(again);
+      again.channelFs = { create: (q) => b2.create(q), removeFolder: (dir, files) => { order.push("x"); return order.length === 1 ? b2.removeFolder(dir, files) : false; } };
+      const j2 = interactive(again);
+      again.script = { exitCode: 0, onProgram: echoWorker(t.map, j2.channel) };
+      const p2 = ports();
+      const r2 = runNativeJob(again, j2.job, undefined, j2.jobDir, p2.ports);
+      p2.input.end();
+      const o2 = await r2;
+      assert.equal(o2.exitCode, 0);
+      assert.match(record(again, j2.job).channel?.note ?? "", /channel folder was left/);
+      assert.match(o2.stderr, /\[channel\] .*channel folder was left/);
+      // a leftover at the start: refused before the launcher or any grant
+      const third = new SimHost();
+      leftAtStart = true;
+      third.channelFs = { create: () => assert.fail("nothing is made"), removeFolder: () => false };
+      const j3 = interactive(third);
+      const o3 = await runNativeJob(third, j3.job, undefined, j3.jobDir, ports().ports);
+      assert.equal(o3.exitCode, EXIT_FAILED);
+      assert.match(o3.stderr, /channel: the channel could not be set up: a leftover channel folder could not be removed/);
+      assert.equal(third.calls.filter((c) => c.args[0] === "run").length, 0);
+      assert.deepEqual(hasEntries(third), []);
+    } finally { t.done(); }
   });
 
   test("the runner: for a streamed job it does not read the input to its end, relays through the pipes it is given, and writes only a failure line to standard error", async () => {
     const t = rig();
     try {
       const host = new SimHost();
-      host.channelFs = t.fs;
+      host.channelFs = t.fsFor(host);
       const { job, jobDir, channel } = interactive(host);
       host.writeText(jobFile(jobDir), JSON.stringify(job));
       host.script = { exitCode: 3, onProgram: echoWorker(t.map, channel) };
@@ -1392,5 +1438,96 @@ describe("A03b slice 4: the real channel files (node's own calls)", () => {
       g.close();
       assert.equal(existsSync(join(dir, "box2")), true);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("second review: a file's identity is its exact BigInt number on its volume; a file system that gives the number 0 is refused, never trusted", () => {
+    const st = (o: Partial<{ file: boolean; link: boolean; nlink: bigint; ino: bigint; dev: bigint }> = {}): ChannelStat => ({ isFile: () => o.file ?? true, isSymbolicLink: () => o.link ?? false, nlink: o.nlink ?? 1n, ino: o.ino ?? 2n ** 60n + 1n, dev: o.dev ?? 7n });
+    assert.equal(channelFileRefusal(st()), undefined);
+    assert.match(channelFileRefusal(st({ ino: 0n }))!, /no identity/);
+    assert.match(channelFileRefusal(st({ nlink: 2n }))!, /one name/);
+    assert.match(channelFileRefusal(st({ file: false }))!, /plain file/);
+    assert.equal(sameChannelFile(st(), st()), true);
+    // 2^60 and 2^60 + 1 are the same double: compared as numbers they would match
+    assert.equal(Number(2n ** 60n), Number(2n ** 60n + 1n));
+    assert.equal(sameChannelFile(st(), st({ ino: 2n ** 60n })), false, "a file number that differs only beyond 2^53");
+    assert.equal(sameChannelFile(st({ ino: 0n }), st({ ino: 0n })), false, "no number, no match");
+    assert.equal(sameChannelFile(st(), st({ dev: 8n })), false, "another volume");
+    assert.equal(sameChannelFile(st(), st({ nlink: 2n })), false, "a second name");
+    assert.equal(sameChannelFile(st(), st({ link: true })), false, "a link");
+  });
+
+  test("second review: the channel folder's removal never follows a link and never recurses (stand-in calls with Windows paths, so the rules hold on every OS)", () => {
+    const D = "C:\\task\\scratch\\.nn-ch-run-0001-aaa";
+    const files = [`${D}\\to-worker.nnc`, `${D}\\from-worker.nnc`];
+    const sim = (entries: Record<string, "link" | "dir" | "file">, opts: { through?: string[]; unlinkDirLink?: "EPERM" | "ok" } = {}): { ops: FolderOps; calls: string[]; entries: Record<string, "link" | "dir" | "file"> } => {
+      const calls: string[] = [];
+      const e = { ...entries };
+      const has = (p: string): boolean => Object.keys(e).some((k) => k.startsWith(`${p}\\`));
+      const ops: FolderOps = {
+        lstat: (p) => e[p],
+        unlink: (p) => { calls.push(`unlink ${p}`); if (e[p] === undefined) throw Object.assign(new Error("gone"), { code: "ENOENT" }); if (e[p] === "dir" || (e[p] === "link" && opts.unlinkDirLink === "EPERM")) throw Object.assign(new Error("dir"), { code: "EPERM" }); delete e[p]; },
+        rmdir: (p) => { calls.push(`rmdir ${p}`); if (e[p] === "dir" && has(p)) throw Object.assign(new Error("not empty"), { code: "ENOTEMPTY" }); delete e[p]; },
+        throughLink: (p) => (opts.through ?? []).includes(p),
+      };
+      return { ops, calls, entries: e };
+    };
+    // nothing there
+    assert.equal(removeChannelFolderWith(D, files, sim({}).ops), true);
+    // a plain folder with the two files: they and then the folder go
+    const plain = sim({ [D]: "dir", [files[0]!]: "file", [files[1]!]: "file" });
+    assert.equal(removeChannelFolderWith(D, files, plain.ops), true);
+    assert.deepEqual(plain.calls, [`unlink ${files[0]!}`, `unlink ${files[1]!}`, `rmdir ${D}`]);
+    // a junction in the folder's place (unlink refuses a directory link on Windows): only the link itself is removed, nothing behind it is touched
+    const junction = sim({ [D]: "link" }, { unlinkDirLink: "EPERM" });
+    assert.equal(removeChannelFolderWith(D, files, junction.ops), true);
+    assert.deepEqual(junction.calls, [`unlink ${D}`, `rmdir ${D}`]);
+    // something else of the container's in the folder: never removed, and the folder is left (reported)
+    const extra = sim({ [D]: "dir", [files[0]!]: "file", [`${D}\\other`]: "file", [`${D}\\sub`]: "dir", [`${D}\\sub\\x`]: "file" });
+    assert.equal(removeChannelFolderWith(D, files, extra.ops), false);
+    assert.deepEqual(extra.calls, [`unlink ${files[0]!}`, `rmdir ${D}`]);
+    assert.deepEqual(Object.keys(extra.entries).sort(), [D, `${D}\\other`, `${D}\\sub`, `${D}\\sub\\x`].sort());
+    // a folder made under a file's name is not entered
+    const asDir = sim({ [D]: "dir", [files[1]!]: "dir", [`${files[1]!}\\inner`]: "file" });
+    assert.equal(removeChannelFolderWith(D, files, asDir.ops), false);
+    assert.deepEqual(asDir.calls, [`rmdir ${D}`]);
+    // a link under a file's name: the link itself goes
+    const fileLink = sim({ [D]: "dir", [files[0]!]: "link" });
+    assert.equal(removeChannelFolderWith(D, files, fileLink.ops), true);
+    assert.deepEqual(fileLink.calls, [`unlink ${files[0]!}`, `rmdir ${D}`]);
+    // reached through a link higher up, or the folder's real path differs (a junction or short name on the way): nothing is touched
+    const above = sim({ [D]: "dir", [files[0]!]: "file" }, { through: ["C:\\task\\scratch"] });
+    assert.equal(removeChannelFolderWith(D, files, above.ops), false);
+    assert.deepEqual(above.calls, []);
+    const self = sim({ [D]: "dir", [files[0]!]: "file" }, { through: [D] });
+    assert.equal(removeChannelFolderWith(D, files, self.ops), false);
+    assert.deepEqual(self.calls, []);
+    // a name outside the folder is never removed, whatever the caller passes
+    const outside = sim({ [D]: "dir", ["C:\\Windows\\win.ini"]: "file" });
+    assert.equal(removeChannelFolderWith(D, ["C:\\Windows\\win.ini"], outside.ops), true);
+    assert.deepEqual(outside.calls, [`rmdir ${D}`]);
+  });
+
+  test("second review: on this machine's real files, a link to a folder put in the channel folder's place is removed itself and what it leads to is untouched (a junction on Windows)", () => {
+    const base = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-chrm-")));
+    try {
+      const precious = join(base, "precious");
+      mkdirSync(precious);
+      writeFileSync(join(precious, "to-worker.nnc"), "keep");
+      writeFileSync(join(precious, "data"), "keep");
+      const dir = join(base, "ch");
+      symlinkSync(precious, dir, process.platform === "win32" ? "junction" : "dir");
+      assert.equal(nodeChannelFs.removeFolder(dir, [join(dir, "to-worker.nnc"), join(dir, "from-worker.nnc")]), true);
+      assert.equal(existsSync(dir), false, "the link is gone");
+      assert.deepEqual([readFileSync(join(precious, "to-worker.nnc"), "utf8"), readFileSync(join(precious, "data"), "utf8")], ["keep", "keep"], "nothing behind it was removed");
+      // a plain folder with the two files and something else: the two go, the rest and the folder stay
+      mkdirSync(dir);
+      writeFileSync(join(dir, "to-worker.nnc"), "a"); writeFileSync(join(dir, "from-worker.nnc"), "b"); mkdirSync(join(dir, "sub")); writeFileSync(join(dir, "sub", "x"), "x");
+      assert.equal(nodeChannelFs.removeFolder(dir, [join(dir, "to-worker.nnc"), join(dir, "from-worker.nnc")]), false);
+      assert.deepEqual(readdirSync(dir).sort(), ["sub"]);
+      rmSync(join(dir, "sub"), { recursive: true });
+      assert.equal(nodeChannelFs.removeFolder(dir, [join(dir, "to-worker.nnc"), join(dir, "from-worker.nnc")]), true);
+      assert.equal(existsSync(dir), false);
+      assert.equal(nodeChannelFs.removeFolder(dir, []), true, "nothing there");
+    } finally { rmSync(base, { recursive: true, force: true }); }
   });
 });

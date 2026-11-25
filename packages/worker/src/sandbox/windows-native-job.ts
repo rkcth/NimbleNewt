@@ -279,9 +279,15 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
       if (relayEnd.fault !== undefined) failure = { kind: "channel", message: relayEnd.fault + (failure === undefined ? "" : ` (the run was then ended: ${failure.message})`) };
     }
     for (const f of channelFiles) { try { f.close(); } catch { /* released with the process */ } }
-    if (job.channel !== undefined) { try { host.remove(job.channel.dir); } catch { /* the scratch folder is the task's; what is left there is swept with it */ } }
     // Every exit path: the revoke is read back by an independent look (not only the launcher's own report).
     const back: ReadBack = applied ? await revokeAndReadBack(host, settings, job.grants) : { state: "clean", left: [] };
+    // The channel folder is in the container's scratch, so the container may have put a link or junction in its place: it is removed only after the revoke (nothing of the container may still change it)
+    // and without following anything. What cannot be removed that way is left for the task's own cleanup and noted.
+    if (job.channel !== undefined && host.channelFs !== undefined) {
+      let gone = false;
+      try { gone = host.channelFs?.removeFolder(job.channel.dir, [job.channel.inbox, job.channel.outbox]) === true; } catch { /* noted below */ }
+      if (!gone && relayEnd !== undefined) relayEnd = { ...relayEnd, note: `${relayEnd.note === undefined ? "" : `${relayEnd.note}; `}the channel folder was left in the scratch folder (it could not be removed without following a link)` };
+    }
     if (back.state !== "clean" && failure === undefined) failure = { kind: "revoke", message: back.state === "left" ? `the container still has an entry on ${back.left.join(", ")} after the run` : "the access lists could not be read back after the run" };
     else if (back.state !== "clean" && failure !== undefined) failure = { kind: failure.kind, message: `${failure.message}; also ${back.state === "left" ? `an entry for the container is still on ${back.left.join(", ")}` : "the access lists could not be read back"}` };
     const record: RunRecord = {
@@ -313,7 +319,8 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
 function openChannel(host: NativeHost, channel: ChannelJob): { inbox: ReturnType<ChannelFs["create"]> & object; outbox: ReturnType<ChannelFs["create"]> & object } {
   const fs = host.channelFs;
   if (fs === undefined) throw new Error("this host cannot make channel files");
-  host.remove(channel.dir);
+  // A leftover under this name (only a run with the same id could have made one) is removed without following a link; one that cannot be removed that way stops the run.
+  if (!fs.removeFolder(channel.dir, [channel.inbox, channel.outbox])) throw new Error("a leftover channel folder could not be removed");
   host.mkdirp(channel.dir);
   if (host.isLinkOrJunction(channel.dir)) throw new Error("the channel folder is a link");
   const inbox = fs.create(channel.inbox);

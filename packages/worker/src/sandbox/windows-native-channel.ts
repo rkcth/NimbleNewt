@@ -26,6 +26,12 @@ export interface ChannelFile {
 export interface ChannelFs {
   /** Creates the file (it must not exist yet) and keeps it open; undefined when the name is taken. Throws when it cannot be made. */
   create(path: string): ChannelFile | undefined;
+  /**
+   * Removes the channel's folder WITHOUT following any link (the folder is in the container's scratch, where it may have put a link or junction in its place): a link at `dir` is removed itself; a plain
+   * folder has only the named files (or links under those names) removed and is then removed when empty; nothing is ever removed recursively and a folder reached through a link higher up is left alone.
+   * True when nothing is left at `dir`.
+   */
+  removeFolder(dir: string, files: readonly string[]): boolean;
 }
 
 /** What the job file says about the channel (paths are the container's view, the same as the host's). Numbers are bounds, never trusted from the container. */

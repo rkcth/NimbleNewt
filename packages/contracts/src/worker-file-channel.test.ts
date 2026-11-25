@@ -56,6 +56,14 @@ describe("A03b slice 4: the file framing", () => {
       const frame = Buffer.concat([Buffer.from(`1 m ${payload.length}:`), payload, Buffer.from("\n")]);
       assert.throws(() => decoder().push(frame), /not valid text/, raw.join(","));
     }
+    // Raw control bytes, framed with their true length (so only the payload rules can refuse them): a CR between JSON tokens is JSON whitespace, so only the one-line rule refuses it; a raw CR or NUL inside
+    // a string is refused too. U+2028 and U+2029 raw inside a string are valid JSON and not a line break for the controller (it splits on byte 0x0A only): they pass, as one frame.
+    const raw = (payload: Buffer): Buffer => Buffer.concat([Buffer.from(`1 m ${payload.length}:`), payload, Buffer.from("\n")]);
+    for (const [name, payload] of [["a CR between tokens", '{\r"a":1}'], ["a CR inside a string", '{"a":"x\ry"}'], ["a NUL inside a string", '{"a":"x\u0000y"}'], ["a lone CR at the end", '{"a":1}\r']] as const) {
+      assert.throws(() => decoder().push(raw(Buffer.from(payload, "utf8"))), FileChannelError, name);
+    }
+    const seps = decoder().push(raw(Buffer.from('{"a":"x\u2028y\u2029z"}', "utf8")));
+    assert.deepEqual(seps.map((f) => (JSON.parse(f.payload) as { a: string }).a), ["x\u2028y\u2029z"]);
     // An escaped lone surrogate and a __proto__ key are valid JSON text: they pass as plain data (the controller's own message checks apply to them as on a pipe).
     const odd = decoder().push(encodeFrame(1, "m", '{"__proto__":{"x":1},"s":"\\ud800"}'));
     assert.equal(odd.length, 1);
