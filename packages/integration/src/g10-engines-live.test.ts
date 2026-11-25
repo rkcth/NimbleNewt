@@ -218,13 +218,14 @@ test("time to first token is taken at the first non-empty content, not at the en
   let clock = 1000; const enc = new TextEncoder();
   const ev = (o: unknown): Uint8Array => enc.encode(`data: ${JSON.stringify(o)}\n\n`);
   const head = makeHead(20);
-  const streaming = (async () => new Response(new ReadableStream({
+  // A plain response whose stream makes each chunk only when the client asks for it (highWaterMark 0): a Response would read ahead on some Node versions and move the clock early.
+  const streaming = (async () => ({ status: 200, body: new ReadableStream<Uint8Array>({
     async pull(c) {
       if (clock === 1000) { clock += 30; c.enqueue(ev({ choices: [{ delta: { role: "assistant", content: "" } }] })); return; }
       if (clock === 1030) { clock += 20; c.enqueue(ev({ choices: [{ delta: { content: head.code } }] })); return; }
       if (clock === 1050) { clock += 400; c.enqueue(ev({ choices: [], usage: { prompt_tokens: 100 }, timings: { cache_n: 90, prompt_n: 10 } })); c.enqueue(enc.encode("data: [DONE]\n\n")); c.close(); }
     },
-  }), { status: 200 })) as unknown as typeof fetch;
+  }, { highWaterMark: 0 }), text: async () => "" })) as unknown as typeof fetch;
   const env: EngineEnv = { ...realEngineEnv("llamacpp", streaming, "http://e.invalid", "m", () => undefined), now: () => clock, sleep: async () => undefined };
   const r = await send(env, "t", "s", head, 0, { noMetrics: true });
   assert.deepEqual([r.step.clientTtftMs, r.step.wallMs, r.step.correct, r.step.cachedTokens], [50, 450, true, 90], "the empty role event does not count; the usage event at the end is not the first token");
