@@ -1,4 +1,5 @@
 import type { ProcessResult } from "./windows-host.js";
+import { ChannelRelay, type ChannelFs, type ChannelJob, type ChannelPorts, type ChannelStats } from "./windows-native-channel.js";
 import {
   EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, failureKindOf, grantArgs, parseLauncherLine, softRefusals,
   type LauncherLine, type NativeFailure, type NativeGrant, type NativeSettings, type RunFiles,
@@ -24,8 +25,10 @@ export interface NativeHost {
   remove(path: string): void;
   /** The file system of the volume the path is on (`NTFS`), or undefined when it cannot be read. */
   fileSystemOf(path: string): Promise<string | undefined>;
-  /** Starts a program (no shell) and waits for it. */
-  run(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult>;
+  /** Starts a program (no shell) and waits for it. `signal` ends it early (the run then reports as it would for a program that was killed). */
+  run(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<ProcessResult>;
+  /** Creates the channel's two files and keeps them open (card A03b, slice 4). Absent: a job with a channel is refused. */
+  readonly channelFs?: ChannelFs;
   /** Every process now, with its parent and its start time, or undefined where that cannot be read. */
   processes(): Promise<readonly { readonly pid: number; readonly parent: number; readonly started: string }[] | undefined>;
 }
@@ -44,6 +47,8 @@ export interface NativeJob {
   readonly volumes: readonly string[];
   /** The checks before the program starts: refuse unless every volume is NTFS. Tests and the health probe may turn it off for a stand-in host. */
   readonly requireNtfs: boolean;
+  /** Present for a streamed run: the program talks to the controller through two files that the runner relays (see windows-native-channel.ts). */
+  readonly channel?: ChannelJob;
 }
 
 export interface JobOutcome { readonly exitCode: number; readonly stdout: string; readonly stderr: string }
@@ -64,6 +69,8 @@ export interface RunRecord {
   /** The read-back after the run: paths that still carried an entry for the container (empty when everything was removed). */
   readonly entriesLeft: readonly string[];
   readonly readBack: "clean" | "left" | "unreadable";
+  /** A streamed run: how much went through the channel (counts only, never content), and anything the relay noted. */
+  readonly channel?: ChannelStats & { readonly note?: string };
 }
 
 export const RECORDS_KEPT = 200;
@@ -211,7 +218,7 @@ const dropLock = (host: NativeHost, settings: NativeSettings, n: number, runId: 
  * revoke cannot be read back clean; the program's standard output and error come back from the FILES the launcher gave it, and its exit code is passed through. The read-back and the revoke
  * happen on every path out, a failed launch included.
  */
-export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: string | undefined, jobDir: string): Promise<JobOutcome> {
+export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: string | undefined, jobDir: string, ports?: ChannelPorts): Promise<JobOutcome> {
   const { settings } = job;
   if (LIVE_HERE.has(job.runId)) return { exitCode: EXIT_BUSY, stdout: "", stderr: `${FAILURE_PREFIX}: busy: this run is already in progress\n` };
   const lock = await takeLock(host, settings, job.runId);
@@ -222,6 +229,10 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
   let line: LauncherLine | undefined;
   let failure: { kind: NativeFailure; message: string } | undefined;
   let applied = false;
+  let relay: ChannelRelay | undefined;
+  let channelFiles: { close(): void }[] = [];
+  let relayEnd: Awaited<ReturnType<ChannelRelay["finish"]>> | undefined;
+  const abort = new AbortController();
   try {
     // Every run shares the container's SID, so entries an earlier run left on its own task folders (a kill whose cleanup failed, a restart) would reach THIS run's program: they are revoked and
     // read back first, and the run does not start while any is left or another run may still have a program in the container.
@@ -238,9 +249,21 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
       host.writeText(job.files.input, stdin ?? "");
       host.writeText(job.files.out, "");
       host.writeText(job.files.err, "");
+      if (job.channel !== undefined) {
+        // The two files are made here, outside the container and before it starts; the handles stay with the supervisor.
+        try {
+          const made = openChannel(host, job.channel);
+          channelFiles = [made.inbox, made.outbox];
+          if (ports === undefined) throw new Error("the runner has no pipes of the controller to relay");
+          relay = new ChannelRelay({ inbox: made.inbox, outbox: made.outbox, ports, limits: job.channel, drainMs: job.channel.stallMs, onFault: () => { abort.abort(); } });
+        } catch (error) { failure = { kind: "channel", message: `the channel could not be set up: ${(error as Error).message}` }; }
+      }
+    }
+    if (failure === undefined) {
       applied = true; // from here on grants may exist: the read-back below always runs
       let result: ProcessResult | undefined;
-      try { result = await host.run(settings.launcher, job.args, { timeoutMs: settings.maxRunMs + LAUNCHER_GRACE_MS }); } catch (error) { failure = { kind: "launcher", message: `the launcher could not be run: ${(error as Error).message}` }; }
+      relay?.start();
+      try { result = await host.run(settings.launcher, job.args, { timeoutMs: settings.maxRunMs + LAUNCHER_GRACE_MS, ...(relay === undefined ? {} : { signal: abort.signal }) }); } catch (error) { failure = { kind: "launcher", message: `the launcher could not be run: ${(error as Error).message}` }; }
       if (result !== undefined) {
         line = parseLauncherLine(result.stdout);
         if (line === undefined) failure = { kind: "launcher", message: `the launcher gave no answer (exit ${String(result.code)}${result.timedOut ? ", timed out" : ""})` };
@@ -250,8 +273,21 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
       }
     }
   } finally {
+    // The program has ended (or never started): the outbox is read to its end and both files are let go before anything is revoked or reported.
+    if (relay !== undefined) {
+      relayEnd = await relay.finish(line?.ok === true && line.childExitCode === 0 && line.timedOut !== true);
+      if (relayEnd.fault !== undefined) failure = { kind: "channel", message: relayEnd.fault + (failure === undefined ? "" : ` (the run was then ended: ${failure.message})`) };
+    }
+    for (const f of channelFiles) { try { f.close(); } catch { /* released with the process */ } }
     // Every exit path: the revoke is read back by an independent look (not only the launcher's own report).
     const back: ReadBack = applied ? await revokeAndReadBack(host, settings, job.grants) : { state: "clean", left: [] };
+    // The channel folder is in the container's scratch, so the container may have put a link or junction in its place: it is removed only after the revoke (nothing of the container may still change it)
+    // and without following anything. What cannot be removed that way is left for the task's own cleanup and noted.
+    if (job.channel !== undefined && host.channelFs !== undefined) {
+      let gone = false;
+      try { gone = host.channelFs?.removeFolder(job.channel.dir, [job.channel.inbox, job.channel.outbox]) === true; } catch { /* noted below */ }
+      if (!gone && relayEnd !== undefined) relayEnd = { ...relayEnd, note: `${relayEnd.note === undefined ? "" : `${relayEnd.note}; `}the channel folder was left in the scratch folder (it could not be removed without following a link)` };
+    }
     if (back.state !== "clean" && failure === undefined) failure = { kind: "revoke", message: back.state === "left" ? `the container still has an entry on ${back.left.join(", ")} after the run` : "the access lists could not be read back after the run" };
     else if (back.state !== "clean" && failure !== undefined) failure = { kind: failure.kind, message: `${failure.message}; also ${back.state === "left" ? `an entry for the container is still on ${back.left.join(", ")}` : "the access lists could not be read back"}` };
     const record: RunRecord = {
@@ -259,6 +295,7 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
       exitCode: line?.childExitCode ?? null, timedOut: line?.timedOut === true, ...(failure === undefined ? {} : { failure }),
       grants: (line?.grants ?? []).map((g) => ({ path: g.path, mode: g.mode, soft: g.soft, applied: g.applied, revoked: g.revoked, errorCode: g.errorCode ?? null })),
       softRefused: line === undefined ? [] : softRefusals(line), entriesLeft: back.left, readBack: back.state,
+      ...(relayEnd === undefined ? {} : { channel: { ...relayEnd.stats, ...(relayEnd.note === undefined ? {} : { note: relayEnd.note }) } }),
     };
     writeRecord(host, settings, record);
     // A clean run leaves nothing in the job folder but what is removed here; a run whose revoke could not be read back keeps its job file for the sweep.
@@ -270,7 +307,28 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
   const out = host.readText(job.files.out, MAX_OUTPUT_READ) ?? "";
   const err = host.readText(job.files.err, MAX_OUTPUT_READ) ?? "";
   host.remove(job.files.out); host.remove(job.files.err);
+  // A streamed run: the controller's own line stream is the channel, so nothing the program printed on its standard output may reach it (it is untrusted text). It is kept as a clipped note on standard error.
+  if (job.channel !== undefined) {
+    const printed = out.trim() === "" ? "" : `[program standard output, not relayed] ${out.slice(0, 4000).replace(/\r?\n/g, " | ")}\n`;
+    return { exitCode: line?.timedOut === true ? 124 : (line?.childExitCode ?? EXIT_FAILED), stdout: "", stderr: err + printed + (relayEnd?.note === undefined ? "" : `[channel] ${relayEnd.note}\n`) };
+  }
   return { exitCode: line?.timedOut === true ? 124 : (line?.childExitCode ?? EXIT_FAILED), stdout: out, stderr: err };
+}
+
+/** Makes the channel's folder and its two files (the folder must not exist: a name the container left is removed first, and a link there is never followed). */
+function openChannel(host: NativeHost, channel: ChannelJob): { inbox: ReturnType<ChannelFs["create"]> & object; outbox: ReturnType<ChannelFs["create"]> & object } {
+  const fs = host.channelFs;
+  if (fs === undefined) throw new Error("this host cannot make channel files");
+  // A leftover under this name (only a run with the same id could have made one) is removed without following a link; one that cannot be removed that way stops the run.
+  if (!fs.removeFolder(channel.dir, [channel.inbox, channel.outbox])) throw new Error("a leftover channel folder could not be removed");
+  host.mkdirp(channel.dir);
+  if (host.isLinkOrJunction(channel.dir)) throw new Error("the channel folder is a link");
+  const inbox = fs.create(channel.inbox);
+  if (inbox === undefined) throw new Error("the inbox name is taken");
+  let outbox: ReturnType<ChannelFs["create"]>;
+  try { outbox = fs.create(channel.outbox); } catch (error) { inbox.close(); throw error; }
+  if (outbox === undefined) { inbox.close(); throw new Error("the outbox name is taken"); }
+  return { inbox, outbox };
 }
 
 export interface SweepResult { readonly released: number; readonly problems: readonly string[]; /** Folders whose run may still have a program in the container (left alone). */ readonly live: readonly string[] }

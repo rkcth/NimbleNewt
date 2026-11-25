@@ -29,6 +29,12 @@ export interface GuestView {
   readonly inputs: readonly { readonly host: string; readonly guest: string }[];
 }
 
+/** What the launcher tells a backend about the run it plans. */
+export interface PlanOptions {
+  /** The run was asked for with `stream`: the caller keeps talking to the program over standard input and output while it runs. */
+  readonly interactive?: boolean;
+}
+
 /**
  * One OS mechanism for confinement (bubblewrap on Linux; Seatbelt and Windows Sandbox are separate backends). A backend only plans how a
  * confined process starts and proves itself with `health`; the launcher owns audit, capacity, time limits and killing.
@@ -41,14 +47,14 @@ export interface SandboxBackend {
    */
   readonly privateNetwork?: boolean;
   /**
-   * False when the confined program cannot be given the controller's own pipes (the native Windows backend: a container cannot make pipes, so standard handles are files). A request for a streamed run
-   * (`stream`: a long-lived program that talks to its caller over standard input and output) is then refused with a typed reason instead of hanging. Absent or true: pipes work.
+   * False when the confined program cannot carry a streamed run (`stream`: a long-lived program that talks to its caller over standard input and output): the request is then refused with a typed reason instead of
+   * hanging. Absent or true: it can. The native Windows backend (card A03b, slice 4) is true although a container cannot make pipes: its supervisor relays the lines through two files (see windows-native-channel.ts).
    */
   readonly interactiveInput?: boolean;
   /** Proves, by really starting a confined probe, that this backend confines on this host right now. */
   health(): Promise<BackendHealth>;
   /** `runId` is the launch's own id (the launcher plans twice for one launch and passes the same id both times), for a mechanism that keeps per-launch state. */
-  plan(recipe: NormalizedRecipe, command: readonly string[], runId?: string): SpawnPlan;
+  plan(recipe: NormalizedRecipe, command: readonly string[], runId?: string, options?: PlanOptions): SpawnPlan;
   /** Where the agent finds what the recipe gives it. */
   guestView(recipe: NormalizedRecipe): GuestView;
   /** Every process the launched one started, found now, each with its start time (for a mechanism that has no private process list). Optional. */

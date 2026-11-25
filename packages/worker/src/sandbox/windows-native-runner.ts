@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { runNativeJob, type NativeHost, type NativeJob } from "./windows-native-job.js";
+import type { ChannelPorts } from "./windows-native-channel.js";
 import { nativeRealHost } from "./windows-native-real.js";
 import { EXIT_FAILED, EXIT_REFUSED, FAILURE_PREFIX } from "./windows-native-plan.js";
 
@@ -25,7 +26,16 @@ export function readAllStdin(input: NodeJS.ReadableStream, limit = MAX_STDIN_BYT
 export interface RunnerIo { readonly out: (text: string) => void; readonly err: (text: string) => void }
 const PROCESS_IO: RunnerIo = { out: (t) => { process.stdout.write(t); }, err: (t) => { process.stderr.write(t); } };
 
-export async function main(argv: readonly string[], host: NativeHost = nativeRealHost(), stdin: () => Promise<string> = () => readAllStdin(process.stdin), io: RunnerIo = PROCESS_IO): Promise<number> {
+/**
+ * The controller's pipes as the channel's ports (a streamed run): its lines arrive on this process's standard input and leave on its standard output, one write at a time (the write is finished before the
+ * next line is taken from the worker's file, which is the backpressure toward the controller). Standard output carries nothing but relayed lines for such a run.
+ */
+export function processPorts(stdout: NodeJS.WritableStream = process.stdout, stdin: NodeJS.ReadableStream = process.stdin): ChannelPorts {
+  stdout.on("error", () => undefined); // a closed pipe is reported by the pending write, not by an unhandled event
+  return { input: stdin, output: { write: (text) => new Promise<void>((resolve, reject) => { stdout.write(text, (error?: Error | null) => { if (error) reject(error); else resolve(); }); }) } };
+}
+
+export async function main(argv: readonly string[], host: NativeHost = nativeRealHost(), stdin: () => Promise<string> = () => readAllStdin(process.stdin), io: RunnerIo = PROCESS_IO, ports?: () => ChannelPorts): Promise<number> {
   const file = argv[2];
   if (file === undefined) { io.err("usage: windows-native-runner <job file>\n"); return EXIT_FAILED; }
   const text = host.readText(file, 4 * 1024 * 1024);
@@ -33,6 +43,15 @@ export async function main(argv: readonly string[], host: NativeHost = nativeRea
   let job: NativeJob;
   try { job = JSON.parse(text) as NativeJob; } catch { io.err(`${FAILURE_PREFIX}: refused: job file unreadable\n`); return EXIT_REFUSED; }
   if (job.version !== 1) { io.err(`${FAILURE_PREFIX}: refused: unsupported job file\n`); return EXIT_REFUSED; }
+  if (job.channel !== undefined) {
+    const c = job.channel;
+    const numbers = [c.maxBytes, c.maxFrames, c.maxPayload, c.windowBytes, c.heartbeatMs, c.stallMs];
+    if (typeof c.dir !== "string" || typeof c.inbox !== "string" || typeof c.outbox !== "string" || numbers.some((n) => !Number.isSafeInteger(n) || n < 1)) { io.err(`${FAILURE_PREFIX}: refused: job file channel unreadable\n`); return EXIT_REFUSED; }
+    // A streamed run: the controller's pipes are not read to their end; the channel relays them while the program runs, and only relayed lines go to standard output.
+    const streamed = await runNativeJob(host, job, undefined, dirname(file), (ports ?? (() => processPorts()))());
+    io.err(streamed.stderr);
+    return streamed.exitCode;
+  }
   const input = await stdin();
   const out = await runNativeJob(host, job, input, dirname(file));
   io.out(out.stdout);
