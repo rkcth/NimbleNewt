@@ -1,0 +1,21 @@
+{
+ "step": "changed-head",
+ "repeat": 1,
+ "usage": {
+  "input_tokens": 4503,
+  "output_tokens": 9,
+  "cache_read_tokens": 19840,
+  "cache_write_tokens": 0,
+  "reasoning_tokens": 0,
+  "api_calls": 1,
+  "model": "gpt-6.1-sol",
+  "provider": "openai-codex",
+  "completed": true,
+  "failed": false,
+  "auxiliary": {
+   "api_calls": 1
+  }
+ },
+ "answer": "saffron-734",
+ "expected": "saffron-734"
+}
