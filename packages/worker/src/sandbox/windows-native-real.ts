@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { win32 } from "node:path";
 import type { NativeHost } from "./windows-native-job.js";
 import type { ProcessResult } from "./windows-host.js";
+import type { ChannelFile, ChannelFs } from "./windows-native-channel.js";
 
 /** Parses `Get-CimInstance Win32_Process` lines ("pid parent ISO-start"); a line that does not fit is skipped. */
 export function parseProcessLines(text: string): { pid: number; parent: number; started: string }[] {
@@ -33,14 +34,40 @@ export function isLinkOrJunctionWith(path: string, platform: NodeJS.Platform, is
 
 const POWERSHELL = (env: (n: string) => string | undefined): string => `${env("SystemRoot") ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
 
-export function runProgram(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number }): Promise<ProcessResult> {
+export function runProgram(file: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<ProcessResult> {
   return new Promise((resolve) => {
-    execFile(file, [...args], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), timeout: options.timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(file, [...args], { ...(options.cwd === undefined ? {} : { cwd: options.cwd }), ...(options.signal === undefined ? {} : { signal: options.signal }), timeout: options.timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       const e = error as (NodeJS.ErrnoException & { killed?: boolean }) | null;
       resolve({ code: e === null ? 0 : typeof e.code === "number" ? e.code : null, stdout: String(stdout), stderr: String(stderr) || (e === null ? "" : e.message), timedOut: e?.killed === true });
     });
   });
 }
+
+/**
+ * The channel's files with node's own calls. A file is made with `wx+` (it must not exist; the handle is the file this call made, so a name the container later swaps for a link or another file is never
+ * followed), checked to be a plain file with one name, and read and written by position through that handle. `stillNamed` compares the name now with the file the handle holds.
+ */
+export const nodeChannelFs: ChannelFs = {
+  create(path: string): ChannelFile | undefined {
+    let fd: number;
+    try { fd = openSync(path, "wx+"); } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return undefined; throw e; }
+    const first = fstatSync(fd, { bigint: true });
+    if (!first.isFile() || first.nlink !== 1n) { closeSync(fd); throw new Error("the channel file is not a plain file with one name"); }
+    let written = 0;
+    return {
+      size: () => Number(fstatSync(fd).size),
+      read: (offset, max) => { const buffer = Buffer.alloc(max); const n = readSync(fd, buffer, 0, max, offset); return buffer.subarray(0, n); },
+      append: (data) => { let done = 0; while (done < data.length) done += writeSync(fd, data, done, data.length - done, written + done); written += data.length; },
+      stillNamed: () => {
+        try {
+          const named = lstatSync(path, { bigint: true });
+          return named.isFile() && !named.isSymbolicLink() && named.nlink === 1n && named.ino === first.ino && named.dev === first.dev;
+        } catch { return false; }
+      },
+      close: () => { try { closeSync(fd); } catch { /* closed */ } },
+    };
+  },
+};
 
 /** The real host: node's own file calls, the launcher and PowerShell (for the volume's file system and the process list). Meaningful on Windows; the file calls work anywhere. */
 export function nativeRealHost(): NativeHost {
@@ -81,6 +108,7 @@ export function nativeRealHost(): NativeHost {
       return r.code === 0 && /^[A-Za-z0-9]+$/.test(name) ? name : undefined;
     },
     run: runProgram,
+    channelFs: nodeChannelFs,
     processes: async () => {
       if (process.platform !== "win32") return undefined;
       const r = await runProgram(POWERSHELL(env), ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate.ToString('o') }"], { timeoutMs: 20_000 });

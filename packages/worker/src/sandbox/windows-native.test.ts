@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -10,13 +14,15 @@ import { SandboxError } from "./errors.js";
 import { SandboxLauncher, type LaunchRecord } from "./launcher.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import type { ProcessResult } from "./windows-host.js";
+import type { ChannelFs, ChannelJob, ChannelPorts } from "./windows-native-channel.js";
+import { FILE_CHANNEL_ENV, encodeFrame, openWorkerFileChannel } from "@nimblenewt/contracts";
 import { jobFile, readRecord, recordsDir, revokeAndReadBack, runNativeJob, sweepLeftovers, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
 import {
   DEFAULT_JOB_LIMITS, EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, LPAC_CAPABILITIES, NATIVE_MODE, NODE_PRESERVE_OPTIONS, REFUSED_ROUTE, checkNativeRecipe, failureKindOf, grantsFor, grantsLeft, launcherArgs, nativeEnv,
   parseLauncherLine, programPath, quoteWindowsArg, softRefusals, type NativeGrant, type NativeSettings,
 } from "./windows-native-plan.js";
-import { main as runnerMain, readAllStdin } from "./windows-native-runner.js";
-import { isLinkOrJunctionWith, nativeRealHost, parseProcessLines } from "./windows-native-real.js";
+import { main as runnerMain, processPorts, readAllStdin } from "./windows-native-runner.js";
+import { isLinkOrJunctionWith, nodeChannelFs, nativeRealHost, parseProcessLines } from "./windows-native-real.js";
 import { PROBE_SCRIPT, unavailableNative, windowsDefaultBackend, windowsNativeBackend, type WindowsNativeOptions } from "./windows-native.js";
 
 // These tests run on every OS with a simulated Windows host and a simulated launcher: they prove the rules (the command line, what is refused, what is recorded, what is revoked and read back on every path out)
@@ -58,7 +64,7 @@ interface Script {
   out?: string;
   err?: string;
   /** What the "program" does with the paths it was given (the probe program). */
-  onProgram?: (args: readonly string[], host: SimHost) => void | Promise<void>;
+  onProgram?: (args: readonly string[], host: SimHost, signal?: AbortSignal) => void | Promise<void>;
 }
 
 /** A Windows machine in memory with a launcher that behaves as the experiment's measured one does (one JSON line, grants applied and revoked, files for the standard handles). */
@@ -74,6 +80,7 @@ class SimHost implements NativeHost {
   readonly entries = new Map<string, number>();
   readonly seenStdin: string[] = [];
   script: Script = {};
+  channelFs?: ChannelFs;
   procs: { pid: number; parent: number; started: string }[] | undefined = [];
   envVars: Record<string, string> = { SystemRoot: "C:\\Windows", windir: "C:\\Windows" };
   env(n: string): string | undefined { return this.envVars[n]; }
@@ -95,7 +102,7 @@ class SimHost implements NativeHost {
   async fileSystemOf(p: string): Promise<string | undefined> { return this.volumes.get(key(p).slice(0, 2)); }
   async processes(): Promise<readonly { pid: number; parent: number; started: string }[] | undefined> { return this.procs; }
 
-  async run(file: string, args: readonly string[]): Promise<ProcessResult> {
+  async run(file: string, args: readonly string[], options?: { readonly signal?: AbortSignal }): Promise<ProcessResult> {
     this.calls.push({ file, args: [...args] });
     if (key(file) !== key(LAUNCHER)) return ok();
     if (this.script.throws && args[0] === "run") throw new Error("spawn failed");
@@ -126,7 +133,7 @@ class SimHost implements NativeHost {
     this.seenStdin.push(this.readText(stdinPath) ?? "<missing>");
     this.writeText(val("--stdout"), this.script.out ?? "");
     this.writeText(val("--stderr"), this.script.err ?? "");
-    await this.script.onProgram?.(args, this);
+    await this.script.onProgram?.(args, this, options?.signal);
     return render({ ok: true, childStarted: true, childExitCode: this.script.exitCode ?? 0, timedOut: this.script.timedOut === true });
   }
 }
@@ -337,14 +344,14 @@ describe("A03b native launcher: the backend's plan and its refusals", () => {
     assert.equal(NATIVE_MODE, "native process-level, weaker than Linux");
   });
 
-  test("the launcher names the mode in every launch record and refuses a streamed (pipe) request with a typed reason", async () => {
+  test("the launcher names the mode in every launch record and refuses a streamed request on a backend that cannot carry one, with a typed reason", async () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "nn-native-")));
     try {
       const d = (n: string): string => { const p = join(base, n); mkdirSync(p); return p; };
       const r = { mode: "sandboxed" as const, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] };
       const native = windowsNativeBackend(options(new SimHost()));
-      // A stand-in with the native backend's declared behaviour (its audit details and its refusal of pipes) whose health passes and whose plan starts a harmless local program.
-      const stand: SandboxBackend = { ...native, health: async (): Promise<BackendHealth> => ({ healthy: true, backend: native.name }), plan: () => ({ file: process.execPath, args: ["-e", "0"], env: {} }) };
+      // A stand-in with the native backend's audit details and a backend that declares it cannot carry a streamed run (the launcher's generic refusal; the native backend itself now relays, see slice 4 below) whose health passes and whose plan starts a harmless local program.
+      const stand: SandboxBackend = { ...native, interactiveInput: false, health: async (): Promise<BackendHealth> => ({ healthy: true, backend: native.name }), plan: () => ({ file: process.execPath, args: ["-e", "0"], env: {} }) };
       const records: LaunchRecord[] = [];
       const launcher = await SandboxLauncher.create({ backend: stand, protectedPaths: [], audit: (rec) => { records.push(rec); } });
       await assert.rejects(launcher.launch({ recipe: r, command: ["/x"], timeoutMs: 5000, maxOutputBytes: 100, stream: { onStdout: () => undefined } }), (e: unknown) => e instanceof SandboxError && e.code === "unavailable" && /pipe/.test(e.message));
@@ -1110,6 +1117,280 @@ describe("A03b second review: no second program with the container's SID, seals 
       assert.equal(host.createExclusive(p, "second"), false);
       assert.equal(host.readText(p), "first");
       assert.deepEqual(host.listDir(dir), ["1"]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("A03b slice 4: the controller's channel across the container boundary (a file relay), end to end through runNativeJob", () => {
+  // Real files on this machine stand in for the container's folder: each simulated Windows path maps to one file in a temporary folder. The "program" is the worker's own channel library (or a real node
+  // process that uses it), so the two sides really run at the same time over real files. What a real container does with those files (its access, sharing, caching) is not measured here.
+  const rig = (): { base: string; map: (p: string) => string; fs: ChannelFs; done: () => void } => {
+    const base = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-chan-")));
+    const map = (p: string): string => join(base, createHash("sha1").update(p.toLowerCase()).digest("hex"));
+    const fs: ChannelFs = { create: (p) => nodeChannelFs.create(map(p)) };
+    return { base, map, fs, done: () => rmSync(base, { recursive: true, force: true }) };
+  };
+  const SMALL = { maxBytes: 64 * 1024, maxFrames: 1000, maxPayload: 4096, windowBytes: 16 * 1024, heartbeatMs: 1000, stallMs: 30_000 };
+  const interactive = (host: SimHost, extra: Partial<WindowsNativeOptions> = {}, r: NormalizedRecipe = recipe()): { job: NativeJob; jobDir: string; backend: SandboxBackend; plan: SpawnPlan; channel: ChannelJob } => {
+    const backend = windowsNativeBackend(options(host, { channelLimits: SMALL, ...extra }));
+    const plan = backend.plan(r, ["/inputs/tools/tool.exe"], "run-0001-aaaa", { interactive: true });
+    const jobDir = plan.env["NIMBLENEWT_NATIVE_JOB"]!;
+    const job = JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob;
+    return { job, jobDir, backend, plan, channel: job.channel! };
+  };
+  const ports = (): { ports: ChannelPorts; input: PassThrough; lines: string[] } => {
+    const input = new PassThrough(); const lines: string[] = [];
+    return { input, lines, ports: { input, output: { write: async (t) => { lines.push(t); } } } };
+  };
+  const until = async (condition: () => boolean, what: string): Promise<void> => {
+    const end = Date.now() + 10_000;
+    while (!condition()) { if (Date.now() > end) assert.fail(`waited for: ${what}`); await new Promise((r) => setTimeout(r, 2)); }
+  };
+  /** The in-container worker: echoes each line it is sent as `{t:"echo", ...}` until its input ends, then closes. */
+  const echoWorker = (map: (p: string) => string, channel: ChannelJob): (() => Promise<void>) => async () => {
+    const ch = openWorkerFileChannel({ inbox: map(channel.inbox), outbox: map(channel.outbox), pollMinMs: 1, pollMaxMs: 4 });
+    try { for await (const line of ch.input) ch.write(`${JSON.stringify({ t: "echo", got: JSON.parse(line.toString("utf8")) })}\n`); } finally { ch.close(); }
+  };
+
+  test("the plan: a streamed run gets a channel folder in the task's scratch and the two names in its environment (last, so a recipe cannot name others); a plain run gets none; the backend declares it can stream", () => {
+    const host = new SimHost();
+    const backend = windowsNativeBackend(options(host));
+    assert.equal(backend.interactiveInput, true);
+    const plain = prepared(host).job;
+    assert.equal(plain.channel, undefined);
+    assert.ok(!plain.args.join("\n").includes("NIMBLENEWT_CHANNEL"));
+    const { job, channel } = interactive(host, {}, recipe({ env: { LANG: "en", [FILE_CHANNEL_ENV.inbox]: "C:\\Windows\\win.ini" } }));
+    assert.ok(channel.dir.toLowerCase().startsWith(`${TASK}\\scratch\\`.toLowerCase()));
+    assert.deepEqual([channel.inbox, channel.outbox], [`${channel.dir}\\to-worker.nnc`, `${channel.dir}\\from-worker.nnc`]);
+    const envArgs = job.args.filter((a) => a.startsWith("NIMBLENEWT_CHANNEL_"));
+    assert.ok(envArgs.includes(`${FILE_CHANNEL_ENV.inbox}=${channel.inbox}`));
+    assert.ok(envArgs.includes(`${FILE_CHANNEL_ENV.outbox}=${channel.outbox}`));
+    assert.equal(envArgs.filter((a) => a.startsWith(`${FILE_CHANNEL_ENV.inbox}=`)).length, 1, "the recipe's own value is gone");
+    assert.ok(!job.args.join("\n").includes("win.ini"));
+    // the controller's input is not copied into the standard-input file: it travels through the channel
+    assert.throws(() => windowsNativeBackend(options(host, { channelLimits: { maxPayload: 100, windowBytes: 150 } })), /windowBytes/);
+    assert.throws(() => windowsNativeBackend(options(host, { channelLimits: { heartbeatMs: 0 } })), /heartbeatMs/);
+  });
+
+  test("the launcher asks for a channel exactly when the request streams, and the native backend is no longer refused", async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "nn-native-")));
+    try {
+      const d = (n: string): string => { const p = join(base, n); mkdirSync(p); return p; };
+      const r = { mode: "sandboxed" as const, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [] };
+      const native = windowsNativeBackend(options(new SimHost()));
+      const asked: (boolean | undefined)[] = [];
+      const stand: SandboxBackend = { ...native, health: async (): Promise<BackendHealth> => ({ healthy: true, backend: native.name }), plan: (_r, _c, _id, o) => { asked.push(o?.interactive); return { file: process.execPath, args: ["-e", "0"], env: {} }; } };
+      const launcher = await SandboxLauncher.create({ backend: stand, protectedPaths: [], audit: () => undefined });
+      await (await launcher.launch({ recipe: r, command: ["/x"], timeoutMs: 5000, maxOutputBytes: 100, stream: { onStdout: () => undefined } })).result;
+      await (await launcher.launch({ recipe: r, command: ["/x"], timeoutMs: 5000, maxOutputBytes: 100 })).result;
+      assert.deepEqual(asked, [true, true, false, false], "planned twice per launch");
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  test("a conversation: lines go in and come back in order while the program runs; at the end the program's exit code, a clean revoke, a record with counts only and no leftovers", async () => {
+    const t = rig();
+    try {
+      const host = new SimHost();
+      host.channelFs = t.fs;
+      const { job, jobDir, channel } = interactive(host);
+      host.script = { exitCode: 0, out: "stray text the program printed\n", onProgram: echoWorker(t.map, channel) };
+      const p = ports();
+      const running = runNativeJob(host, job, undefined, jobDir, p.ports);
+      p.input.write('{"t":"hello","n":1}\n');
+      await until(() => p.lines.length === 1, "first reply");
+      p.input.write('{"t":"hello","n":2}\n{"t":"hello","n":3}\n');
+      await until(() => p.lines.length === 3, "all replies");
+      assert.deepEqual(p.lines.map((l) => (JSON.parse(l) as { got: { n: number } }).got.n), [1, 2, 3]);
+      p.input.end();
+      const out = await running;
+      assert.equal(out.exitCode, 0);
+      assert.equal(out.stdout, "", "nothing but relayed lines may reach the controller's output");
+      assert.match(out.stderr, /\[program standard output, not relayed\] stray text/);
+      assert.deepEqual(hasEntries(host), []);
+      assert.ok(lockFree(host));
+      const rec = record(host, job);
+      assert.equal(rec.failure, undefined);
+      assert.equal(rec.readBack, "clean");
+      assert.equal(rec.channel?.workerEnded, true);
+      assert.ok((rec.channel?.framesFromWorker ?? 0) >= 5, "three replies, at least one acknowledgement, the end");
+      assert.ok(!JSON.stringify(rec).includes("hello"), "the record holds counts, never content");
+      assert.equal(host.exists(channel.dir), false, "the channel folder is removed");
+      assert.deepEqual(host.seenStdin, [""], "standard input stays an empty file");
+    } finally { t.done(); }
+  });
+
+  test("a real worker process on the other side of the files: round trips, then the end of input ends it", async () => {
+    const t = rig();
+    try {
+      const host = new SimHost();
+      host.channelFs = t.fs;
+      const { job, jobDir, channel } = interactive(host);
+      const lib = pathToFileURL(createRequire(import.meta.url).resolve("@nimblenewt/contracts")).href;
+      const code = `import { openWorkerFileChannel } from ${JSON.stringify(lib)};
+const ch = openWorkerFileChannel({ inbox: process.argv[1], outbox: process.argv[2], pollMinMs: 1, pollMaxMs: 4 });
+try { for await (const l of ch.input) ch.write(JSON.stringify({ t: "echo", n: JSON.parse(l.toString("utf8")).n }) + "\\n"); } finally { ch.close(); }
+`;
+      host.script = {
+        onProgram: () => new Promise<void>((resolve, reject) => {
+          const child = spawn(process.execPath, ["--input-type=module", "-e", code, t.map(channel.inbox), t.map(channel.outbox)], { stdio: ["ignore", "ignore", "pipe"] });
+          let err = "";
+          child.stderr.on("data", (c: Buffer) => { err += c.toString(); });
+          child.on("close", (c) => { if (c === 0) resolve(); else reject(new Error(`worker exit ${String(c)}: ${err}`)); });
+        }),
+      };
+      const p = ports();
+      const running = runNativeJob(host, job, undefined, jobDir, p.ports);
+      for (let n = 1; n <= 20; n++) { p.input.write(`{"n":${n}}\n`); }
+      await until(() => p.lines.length === 20, "twenty replies from the other process");
+      assert.deepEqual(p.lines.map((l) => (JSON.parse(l) as { n: number }).n), Array.from({ length: 20 }, (_, i) => i + 1));
+      p.input.end();
+      const out = await running;
+      assert.deepEqual([out.exitCode, out.stderr], [0, ""]);
+      assert.equal(record(host, job).channel?.workerEnded, true);
+    } finally { t.done(); }
+  });
+
+  test("a program that writes something that is not a frame ends the run as a typed channel failure; the program is stopped, the grants are still revoked and read back", async () => {
+    const t = rig();
+    try {
+      const host = new SimHost();
+      host.channelFs = t.fs;
+      const { job, jobDir, channel } = interactive(host);
+      let stopped = false;
+      host.script = { exitCode: 0, onProgram: async (_a, _h, signal) => { appendFileSync(t.map(channel.outbox), "this is not a frame and is long enough\n"); await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); signal?.addEventListener("abort", () => resolve()); }); stopped = true; } };
+      const p = ports();
+      const out = await runNativeJob(host, job, undefined, jobDir, p.ports);
+      assert.equal(stopped, true, "the launcher was asked to stop");
+      assert.equal(out.exitCode, EXIT_FAILED);
+      assert.match(out.stderr, new RegExp(`^${FAILURE_PREFIX}: channel: .*broke the channel`));
+      assert.equal(record(host, job).failure?.kind, "channel");
+      assert.deepEqual(hasEntries(host), []);
+      assert.ok(lockFree(host));
+      assert.deepEqual(p.lines, []);
+    } finally { t.done(); }
+  });
+
+  test("a program that fills its outbox past the bound, and one whose file is swapped for another under the same name, are both ended", async () => {
+    const t = rig();
+    try {
+      for (const kind of ["fills", "swapped"] as const) {
+        const host = new SimHost();
+        host.channelFs = t.fs;
+        const { job, jobDir, channel } = interactive(host);
+        host.script = {
+          onProgram: async (_a, _h, signal) => {
+            const file = t.map(channel.outbox);
+            if (kind === "fills") appendFileSync(file, Buffer.concat(Array.from({ length: 400 }, (_, i) => encodeFrame(i + 1, "m", JSON.stringify({ t: "fill", pad: "x".repeat(300) })))));
+            else if (process.platform !== "win32") { writeFileSync(`${file}.other`, ""); renameSync(`${file}.other`, file); }
+            else { /* an open file cannot be replaced under its name on Windows: the check is exercised off Windows */ appendFileSync(file, "x".repeat(10) + "\n" + "y".repeat(30)); }
+            await new Promise<void>((resolve) => { if (signal?.aborted) resolve(); signal?.addEventListener("abort", () => resolve()); });
+          },
+        };
+        const out = await runNativeJob(host, job, undefined, jobDir, ports().ports);
+        assert.equal(out.exitCode, EXIT_FAILED, kind);
+        assert.match(out.stderr, kind === "fills" ? /larger than the channel allows/ : process.platform !== "win32" ? /replaced or removed/ : /broke the channel/, kind);
+        assert.equal(record(host, job).failure?.kind, "channel", kind);
+        rmSync(t.map(channel.outbox), { force: true });
+        rmSync(t.map(channel.inbox), { force: true });
+      }
+    } finally { t.done(); }
+  });
+
+  test("names the container left behind are not followed: a taken name stops the run before the program starts and before any grant is made", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = interactive(host);
+    let made = 0;
+    host.channelFs = { create: () => { made++; return made === 1 ? { size: () => 0, read: () => Buffer.alloc(0), append: () => undefined, stillNamed: () => true, close: () => undefined } : undefined; } };
+    const out = await runNativeJob(host, job, undefined, jobDir, ports().ports);
+    assert.equal(out.exitCode, EXIT_FAILED);
+    assert.match(out.stderr, /channel: the channel could not be set up: the outbox name is taken/);
+    assert.equal(host.calls.filter((c) => c.args[0] === "run").length, 0, "the launcher never ran");
+    assert.deepEqual(hasEntries(host), []);
+    // the host cannot make channel files, or the folder is a link: also refused
+    const bare = new SimHost();
+    const b = interactive(bare);
+    const noFs = await runNativeJob(bare, b.job, undefined, b.jobDir, ports().ports);
+    assert.match(noFs.stderr, /channel: the channel could not be set up: this host cannot make channel files/);
+    const linked = new SimHost();
+    linked.channelFs = { create: () => undefined };
+    const l = interactive(linked);
+    linked.links.add(key(l.channel.dir));
+    assert.match((await runNativeJob(linked, l.job, undefined, l.jobDir, ports().ports)).stderr, /the channel folder is a link/);
+    const noPorts = new SimHost();
+    noPorts.channelFs = rig().fs;
+    const n = interactive(noPorts);
+    assert.match((await runNativeJob(noPorts, n.job, undefined, n.jobDir)).stderr, /no pipes of the controller/);
+  });
+
+  test("the runner: for a streamed job it does not read the input to its end, relays through the pipes it is given, and writes only a failure line to standard error", async () => {
+    const t = rig();
+    try {
+      const host = new SimHost();
+      host.channelFs = t.fs;
+      const { job, jobDir, channel } = interactive(host);
+      host.writeText(jobFile(jobDir), JSON.stringify(job));
+      host.script = { exitCode: 3, onProgram: echoWorker(t.map, channel) };
+      const p = ports();
+      const writes: string[] = [];
+      const io = { out: (x: string) => { writes.push(`o:${x}`); }, err: (x: string) => { writes.push(`e:${x}`); } };
+      const never = async (): Promise<string> => assert.fail("a streamed run does not read standard input to its end");
+      const running = runnerMain(["node", "runner", jobFile(jobDir)], host, never, io, () => p.ports);
+      p.input.write('{"q":1}\n');
+      await until(() => p.lines.length === 1, "a reply");
+      p.input.end();
+      assert.equal(await running, 3);
+      assert.deepEqual(writes.filter((w) => w.startsWith("o:")), []);
+      // a streamed job file whose channel is damaged is refused, not guessed
+      host.writeText("C:\\badchan.json", JSON.stringify({ ...job, channel: { ...channel, maxBytes: "x" } }));
+      const refused = await runnerMain(["node", "runner", "C:\\badchan.json"], host, async () => "", { out: () => undefined, err: (x) => { writes.push(x); } }, () => p.ports);
+      assert.equal(refused, 70);
+      assert.match(writes.at(-1)!, /channel unreadable/);
+    } finally { t.done(); }
+  });
+});
+
+describe("A03b slice 4: the real channel files (node's own calls)", () => {
+  test("the runner's ports: a line is written whole and the write is finished before it resolves; a closed pipe rejects the write", async () => {
+    const out = new PassThrough();
+    const seen: string[] = [];
+    out.on("data", (c: Buffer) => { seen.push(c.toString()); });
+    const ports = processPorts(out, new PassThrough());
+    await ports.output.write('{"a":1}\n');
+    assert.deepEqual(seen, ['{"a":1}\n']);
+    out.destroy();
+    await assert.rejects(ports.output.write("late\n"));
+  });
+
+  test("a file is made exclusively and kept open: a taken name is refused, reads and appends are by position, a name swapped for another file or a link is noticed, a hard link is never the file", () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "nn-chfs-")));
+    try {
+      const name = join(dir, "box");
+      const f = nodeChannelFs.create(name)!;
+      assert.equal(nodeChannelFs.create(name), undefined, "an existing name is refused, never opened");
+      f.append(Buffer.from("hello "));
+      f.append(Buffer.from("world"));
+      assert.equal(f.size(), 11);
+      assert.equal(f.read(6, 100).toString(), "world");
+      assert.equal(f.read(0, 5).toString(), "hello");
+      assert.equal(f.read(11, 5).length, 0);
+      assert.equal(f.stillNamed(), true);
+      // another process (the container) appends through its own handle: seen through ours
+      appendFileSync(name, "!");
+      assert.equal(f.size(), 12);
+      if (process.platform !== "win32") {
+        writeFileSync(`${name}.x`, "other"); renameSync(`${name}.x`, name);
+        assert.equal(f.stillNamed(), false, "another file under the name");
+        assert.equal(readFileSync(name, "utf8"), "other", "and we never wrote to it");
+        rmSync(name); symlinkSync(join(dir, "elsewhere"), name);
+        assert.equal(f.stillNamed(), false, "a link under the name");
+      }
+      f.close();
+      f.close();
+      const g = nodeChannelFs.create(join(dir, "box2"))!;
+      linkSync(join(dir, "box2"), join(dir, "box2-link"));
+      assert.equal(g.stillNamed(), false, "a second name for the file");
+      g.close();
+      assert.equal(existsSync(join(dir, "box2")), true);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

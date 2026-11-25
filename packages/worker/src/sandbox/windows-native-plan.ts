@@ -29,7 +29,7 @@ export const EXIT_BUSY = 75;
 export const FAILURE_PREFIX = "nn-native-failure";
 
 /** Why a launch was stopped before or after the program ran. Every kind is a typed reason, never a silent fallback. */
-export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused";
+export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel";
 
 export type ContainerKind = "lpac" | "appcontainer";
 export type GrantMode = "ro" | "rx" | "modify" | "modify-root" | "seal";
