@@ -565,6 +565,7 @@ describe("A03b native launcher: the sweep after a restart, and the cleanup after
     assert.equal(host.exists(jobFile(second.jobDir)), false);
     // Entries that stay make release throw, which the launcher turns into `releaseProblem`.
     const third = prepared(host, recipe(), ["/work/b.exe"]);
+    host.writeText(`${third.jobDir}\\status.json`, JSON.stringify({ runnerPid: 900 })); // its runner had started (only then can a grant exist) and was killed
     for (const g of third.job.grants) host.entries.set(key(g.path), 1);
     host.script = { stubborn: () => true };
     await assert.rejects(third.backend.release!(third.plan), /native Windows cleanup incomplete/);
@@ -736,6 +737,95 @@ describe("A03b native launcher: wiring, the runner and the real host", () => {
       if (process.platform !== "win32") { assert.equal(await host.processes(), undefined); assert.equal(await host.fileSystemOf("C:\\x"), undefined); }
       assert.deepEqual(parseProcessLines("1 0 2026-01-01T00:00:00.0000000Z\nnoise\n 22  1 2026-01-02T00:00:00.0000000Z \r\n"), [{ pid: 1, parent: 0, started: "2026-01-01T00:00:00.0000000Z" }, { pid: 22, parent: 1, started: "2026-01-02T00:00:00.0000000Z" }]);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("review 2026-11-25: input folders whose text Windows would read as another folder (trailing dot or space, short name) are refused, so the overlap checks see the real folder", () => {
+    const check = (r: NormalizedRecipe): void => checkNativeRecipe(r, settings(), SUP, () => undefined, () => false);
+    for (const host of [`${CONTROL}.`, `${CONTROL} `, "C:\\PROGRA~1\\NimbleNewt", "C:\\ProgramData\\NIMBLE~1\\native", "C:\\Tools\\inputs."]) {
+      assert.throws(() => check(recipe({ readOnly: [{ host, guest: "/inputs/tools" }] })), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe", host);
+    }
+    assert.throws(() => grantsFor(recipe(), settings({ programFolders: ["C:\\PROGRA~1\\nodejs"] }), SUP), /short-name/);
+  });
+
+  test("review 2026-11-25: a protected name that is a link or junction is never sealed (the seal would land on the folder it points to)", () => {
+    const host = new SimHost();
+    host.links.add(key(`${TASK}\\work\\.git`));
+    assert.throws(() => windowsNativeBackend(options(host)).plan(recipe(), ["/work/a.exe"], "run-0009-aaaa"), /cannot be sealed/);
+    assert.equal(host.listDir(`${CONTROL}\\jobs`).length, 0);
+    // A name the recipe found missing is not sealed, so it is not looked at either.
+    windowsNativeBackend(options(host)).plan(recipe({ unprotectedSubpaths: [".git"] }), ["/work/a.exe"], "run-0010-aaaa");
+  });
+
+  test("review 2026-11-25: a reused process number does not keep a dead run's lock or its leftover entries alive", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    // The lock was written by process 555 at 10:00; process 555 now is a different program that started at 11:00.
+    host.files.set(key(`${CONTROL}\\native.lock`), JSON.stringify({ pid: 555, runId: "other", at: "2026-11-25T10:00:00.000Z" }));
+    host.alive.add(555);
+    host.procs = [{ pid: 555, parent: 1, started: "2026-11-25T11:00:00.0000000Z" }];
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, 0);
+    // The same holder, still the process that wrote it (started before the lock): busy.
+    host.files.set(key(`${CONTROL}\\native.lock`), JSON.stringify({ pid: 555, runId: "other", at: "2026-11-25T12:00:00.000Z" }));
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, EXIT_BUSY);
+    host.remove(`${CONTROL}\\native.lock`);
+    // A leftover job folder whose runner number now belongs to a later process is swept; one whose runner is the same process is left alone.
+    const sweepHost = new SimHost();
+    const { job: j2 } = jobFor(sweepHost);
+    const add = (id: string, pid: number, startedAt: string): string => {
+      const dir = `${CONTROL}\\jobs\\${id}`;
+      sweepHost.writeText(jobFile(dir), JSON.stringify({ ...j2, runId: id }));
+      sweepHost.writeText(`${dir}\\status.json`, JSON.stringify({ runnerPid: pid, runId: id, startedAt }));
+      return dir;
+    };
+    const reused = add("reused-run-01", 900, "2026-11-25T10:00:00.000Z");
+    const live = add("live-run-0001", 901, "2026-11-25T10:00:00.000Z");
+    sweepHost.alive.add(900); sweepHost.alive.add(901);
+    sweepHost.procs = [{ pid: 900, parent: 1, started: "2026-11-25T11:00:00.0000000Z" }, { pid: 901, parent: 1, started: "2026-11-25T09:59:59.0000000Z" }];
+    for (const g of j2.grants) sweepHost.entries.set(key(g.path), 1);
+    assert.deepEqual(await sweepLeftovers(sweepHost, settings()), { released: 1, problems: [] });
+    assert.equal(sweepHost.exists(jobFile(reused)), false);
+    assert.ok(sweepHost.exists(jobFile(live)));
+    // Where start times cannot be read, a live number is still taken as the holder (nothing of a live run is touched on a guess).
+    sweepHost.procs = undefined;
+    assert.deepEqual(await sweepLeftovers(sweepHost, settings()), { released: 0, problems: [] });
+  });
+
+  test("review 2026-11-25: the release of a run refused as busy revokes nothing (a live run on the same folders keeps its entries)", async () => {
+    const host = new SimHost();
+    const { backend, plan, job, jobDir } = prepared(host);
+    host.files.set(key(`${CONTROL}\\native.lock`), JSON.stringify({ pid: 555, runId: "live" }));
+    host.alive.add(555);
+    for (const g of job.grants) host.entries.set(key(g.path), 1); // the live run's entries on the same task folders
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, EXIT_BUSY);
+    await backend.release!(plan);
+    assert.equal(host.calls.filter((c) => c.args[0] === "revoke" || c.args[0] === "check").length, 0);
+    assert.equal(hasEntries(host).length, job.grants.length);
+    assert.equal(host.exists(jobFile(jobDir)), false);
+  });
+
+  test("review 2026-11-25: the job file kept for the sweep no longer holds the recipe's environment values once the run has begun; the grants stay", async () => {
+    const host = new SimHost();
+    const r = recipe({ env: { LANG: "en", NN_MARKER_VALUE: `marker-${Date.now()}` } });
+    const backend = windowsNativeBackend(options(host));
+    const plan = backend.plan(r, ["/work/a.exe"], "run-0011-aaaa");
+    const jobDir = plan.env["NIMBLENEWT_NATIVE_JOB"]!;
+    const job = JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob;
+    assert.ok(host.readText(jobFile(jobDir))!.includes(r.env["NN_MARKER_VALUE"]!), "the planned job file carries the values for the runner");
+    host.script = { stubborn: (p) => key(p) === key(`${TASK}\\home`) };
+    await runNativeJob(host, job, undefined, jobDir);
+    const kept = host.readText(jobFile(jobDir))!;
+    assert.ok(!kept.includes(r.env["NN_MARKER_VALUE"]!));
+    assert.deepEqual((JSON.parse(kept) as NativeJob).grants, job.grants);
+  });
+
+  test("review 2026-11-25: a launcher answer of success that does not say the program started is a launcher failure, not a pass", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    const real = host.run.bind(host);
+    host.run = async (file: string, args: readonly string[]): Promise<ProcessResult> => (args[0] === "run" ? ok(`${JSON.stringify({ tool: "nn-appc-launcher", ok: true, grants: [] })}\n`) : real(file, args));
+    const out = await runNativeJob(host, job, undefined, jobDir);
+    assert.equal(out.exitCode, EXIT_FAILED);
+    assert.match(out.stderr, new RegExp(`^${FAILURE_PREFIX}: launcher: .*not that the program started`));
   });
 
   test("records are bounded and hold no environment values", async () => {

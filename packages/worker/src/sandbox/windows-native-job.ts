@@ -117,13 +117,28 @@ export function readRecord(host: NativeHost, settings: NativeSettings, runId: st
   try { return JSON.parse(text) as RunRecord; } catch { return undefined; }
 }
 
+/**
+ * Whether the process that wrote a lock or a status file at `since` is still running. Windows reuses process numbers (after a restart almost certainly), so a live number whose process started AFTER
+ * `since` is a later, unrelated process and the writer is gone. Where the start time cannot be read the number alone decides (as before), so nothing of a live run is ever touched on a guess.
+ */
+export async function writerAlive(host: NativeHost, pid: number | undefined, since: string | undefined): Promise<boolean> {
+  if (pid === undefined || !host.pidAlive(pid)) return false;
+  const at = since === undefined ? Number.NaN : Date.parse(since);
+  if (Number.isNaN(at)) return true;
+  let list: Awaited<ReturnType<NativeHost["processes"]>>;
+  try { list = await host.processes(); } catch { return true; }
+  const p = list?.find((x) => x.pid === pid);
+  const started = p === undefined ? Number.NaN : Date.parse(p.started);
+  return Number.isNaN(started) || started <= at;
+}
+
 /** Takes the one run slot (a second run would share the container's SID, so one run's revoke would remove another's grants). A lock whose holder is gone is taken over. */
-function takeLock(host: NativeHost, settings: NativeSettings, runId: string): boolean {
-  const mine = JSON.stringify({ pid: host.pid, runId });
+async function takeLock(host: NativeHost, settings: NativeSettings, runId: string): Promise<boolean> {
+  const mine = JSON.stringify({ pid: host.pid, runId, at: new Date().toISOString() });
   if (host.createExclusive(lockFile(settings), mine)) return true;
-  let holder: { pid?: number } = {};
-  try { holder = JSON.parse(host.readText(lockFile(settings)) ?? "{}") as { pid?: number }; } catch { holder = {}; }
-  if (holder.pid !== undefined && holder.pid !== host.pid && host.pidAlive(holder.pid)) return false;
+  let holder: { pid?: number; at?: string } = {};
+  try { holder = JSON.parse(host.readText(lockFile(settings)) ?? "{}") as { pid?: number; at?: string }; } catch { holder = {}; }
+  if (holder.pid !== undefined && holder.pid !== host.pid && await writerAlive(host, holder.pid, holder.at)) return false;
   host.remove(lockFile(settings));
   return host.createExclusive(lockFile(settings), mine);
 }
@@ -138,7 +153,9 @@ const dropLock = (host: NativeHost, settings: NativeSettings, runId: string): vo
  */
 export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: string | undefined, jobDir: string): Promise<JobOutcome> {
   const { settings } = job;
-  if (!takeLock(host, settings, job.runId)) return { exitCode: EXIT_BUSY, stdout: "", stderr: `${FAILURE_PREFIX}: busy: another native run is in progress; one at a time\n` };
+  if (!(await takeLock(host, settings, job.runId))) return { exitCode: EXIT_BUSY, stdout: "", stderr: `${FAILURE_PREFIX}: busy: another native run is in progress; one at a time\n` };
+  // The job file stays for the sweep (it needs the grants), but the launcher's argument list carries the recipe's environment values: once read they are not left on disk.
+  try { host.writeText(jobFile(jobDir), JSON.stringify({ ...job, args: [] })); } catch { /* the control folder is the supervisor's own; a failed rewrite leaves the file as it was */ }
   const startedAt = new Date().toISOString();
   let line: LauncherLine | undefined;
   let failure: { kind: NativeFailure; message: string } | undefined;
@@ -163,6 +180,7 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
         if (line === undefined) failure = { kind: "launcher", message: `the launcher gave no answer (exit ${String(result.code)}${result.timedOut ? ", timed out" : ""})` };
         else if (!line.ok && line.childStarted !== true) failure = { kind: failureKindOf(line.stage), message: `${line.stage ?? "launcher"}: ${line.error ?? "failed"}` };
         else if (!line.ok) failure = { kind: failureKindOf(line.stage), message: `${line.stage ?? "launcher"}: ${line.error ?? "failed"} (the program had started)` };
+        else if (line.childStarted !== true) failure = { kind: "launcher", message: "the launcher reported success but not that the program started" };
       }
     }
   } finally {
@@ -201,10 +219,12 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
   for (const dir of dirs) {
     // A folder with no status file was planned but its runner never started, so no grant was ever made for it (the backend's `release` removes it); a runner that is still alive owns its folder.
     const statusText = host.readText(statusFile(dir));
-    if (statusText === undefined && only === undefined) continue;
-    let status: { runnerPid?: number } = {};
-    try { status = JSON.parse(statusText ?? "{}") as { runnerPid?: number }; } catch { status = {}; }
-    if (status.runnerPid !== undefined && status.runnerPid !== host.pid && host.pidAlive(status.runnerPid)) continue;
+    // No status file: the runner never got past the lock (planned, refused as busy, or a clean run already removed it), so no grant of this folder's job is on any path. `release` removes the folder
+    // without a revoke: the container's SID is shared, so revoking these paths could remove a live run's entries on the same folders.
+    if (statusText === undefined) { if (only !== undefined) { host.remove(dir); released++; } continue; }
+    let status: { runnerPid?: number; startedAt?: string } = {};
+    try { status = JSON.parse(statusText ?? "{}") as { runnerPid?: number; startedAt?: string }; } catch { status = {}; }
+    if (status.runnerPid !== undefined && status.runnerPid !== host.pid && await writerAlive(host, status.runnerPid, status.startedAt)) continue;
     const text = host.readText(jobFile(dir));
     let grants: NativeGrant[] = [];
     if (text !== undefined) { try { grants = (JSON.parse(text) as { grants?: NativeGrant[] }).grants ?? []; } catch { problems.push(`${dir}: the job file cannot be read, so its grants are not known`); continue; } }

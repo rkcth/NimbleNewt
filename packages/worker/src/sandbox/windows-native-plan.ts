@@ -69,6 +69,8 @@ export const REFUSED_ROUTE = "route: the native Windows backend gives an agent n
 export function checkProgramFolder(label: string, path: unknown): string {
   if (typeof path === "string" && /^[A-Za-z]:\\?$/.test(path)) return bad(`${label}: a drive root cannot be granted`);
   if (typeof path !== "string" || !/^[A-Za-z]:\\/.test(path) || win32.normalize(path) !== path || /[<>"|?*\u0000-\u001f]/.test(path) || path.endsWith("\\") || path.indexOf(":", 2) !== -1) return bad(`${label}: must be a local absolute normalised path such as C:\\dir\\sub: ${String(path)}`);
+  // Windows drops a trailing dot or space and expands a short (8.3) name, so `C:\dir.` or `C:\PROGRA~1` names another folder than the text says, and the overlap checks (plain text comparisons) would miss it.
+  if (path.split("\\").slice(1).some((s) => s === "" || s === "." || s === ".." || /~\d/.test(s) || /[. ]$/.test(s))) return bad(`${label}: no "..", trailing dot or space, or short-name (~1) part: ${path}`);
   return path;
 }
 
@@ -93,6 +95,12 @@ export function checkNativeRecipe(recipe: NormalizedRecipe, settings: NativeSett
   for (const [label, path] of all) {
     for (const g of guarded) if (overlapsWin(path, g)) bad(`${label} (${path}) overlaps the supervisor's own folder ${g}; the container may never reach it`);
     if (isLink(path)) bad(`${label}: ${path} is a link or junction; give the real path`);
+  }
+  // A sealed name gets a protected access list of its own, and the launcher sets it on the path as given, following a junction: one in the workspace would put the seal (and, at the revoke, the
+  // inherited entries) on the folder it points to. The recipe check refused links when it was normalised; this is checked again at the plan.
+  for (const name of recipe.protectedSubpaths) {
+    if (recipe.unprotectedSubpaths.includes(name)) continue;
+    if (isLink(`${recipe.workdir}\\${name}`)) bad(`protectedSubpaths: ${recipe.workdir}\\${name} is a link or junction; it cannot be sealed`);
   }
   for (const name of Object.keys(recipe.env)) {
     if (OWN_ENV.has(name.toUpperCase())) bad(`env: ${name} is set by the launcher`);
