@@ -227,8 +227,12 @@ test("worker.env carries exactly the four names and defaults the TypeScript back
   const ts = read("packages", "worker", "src", "sandbox", "windows-native.ts");
   const plan = read("packages", "worker", "src", "sandbox", "windows-native-plan.ts");
   const names = [...ts.matchAll(/env\["(NIMBLENEWT_WIN_[A-Z_]+)"\]/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(names)].sort(), ["NIMBLENEWT_WIN_CONTAINER", "NIMBLENEWT_WIN_CONTROL_DIR", "NIMBLENEWT_WIN_LAUNCHER", "NIMBLENEWT_WIN_PROFILE"]);
-  for (const n of new Set(names)) assert.ok(fn("Invoke-Install").includes(`"${n}=`), `worker.env writes ${n}`);
+  // The installer writes four. The fifth, NIMBLENEWT_WIN_MAX_RUNS (how many confined runs at once, default 1), is the operator's own and is NOT written by the installer; NIMBLENEWT_WIN_PROFILE is
+  // still written and still read, but ignored (retired: every run makes its own container profile).
+  const installerNames = ["NIMBLENEWT_WIN_CONTAINER", "NIMBLENEWT_WIN_CONTROL_DIR", "NIMBLENEWT_WIN_LAUNCHER", "NIMBLENEWT_WIN_PROFILE"];
+  assert.deepEqual([...new Set(names)].sort(), [...installerNames, "NIMBLENEWT_WIN_MAX_RUNS"].sort());
+  for (const n of installerNames) assert.ok(fn("Invoke-Install").includes(`"${n}=`), `worker.env writes ${n}`);
+  assert.ok(!ps.includes("NIMBLENEWT_WIN_MAX_RUNS"), "the installer never sets the run limit: more than one run at once is an explicit, unmeasured choice");
   assert.equal(code.match(/NIMBLENEWT_[A-Z_]+=/g).length, 4, "no fifth variable");
   // the defaults the backend uses when the file is absent are the places the installer makes
   assert.ok(ts.includes('win32.join(programFiles, "NimbleNewt", "nn-launcher.exe")') && ps.includes("$ExeName = 'nn-launcher.exe'") && ps.includes("Join-Path $env:ProgramFiles 'NimbleNewt'"));

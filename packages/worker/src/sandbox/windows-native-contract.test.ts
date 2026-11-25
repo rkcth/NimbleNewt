@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { LPAC_CAPABILITIES, parseLauncherLine } from "./windows-native-plan.js";
+import { LPAC_CAPABILITIES, RUN_PROFILE_PREFIX, isRunProfileName, parseLauncherLine } from "./windows-native-plan.js";
 
 // Card A03b slice 3: the contract between the TypeScript side (windows-native-plan.ts, windows-native-job.ts) and the Rust launcher crate (native/nn-launcher). The crate cannot run here
 // (Windows only), so these tests read its source and the compiled TypeScript and pin the NAMES that cross the boundary: the `tool` identifier, the JSON field names the parser reads, the
@@ -91,8 +91,9 @@ test("every option and command the backend sends is accepted by the PRODUCT buil
     assert.ok(!experimentOnly.includes(f), `${f} is an experiment-only option: the product build refuses it`);
   }
   const productCommands = sorted([...(/matches!\(a\.command\.as_str\(\), ([^)]+)\)/.exec(parse)?.[1] ?? "").matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!));
-  assert.deepEqual(productCommands, ["check", "info", "revoke", "run"]);
-  const commandsSent = sorted([...here("windows-native-job.js").matchAll(/"(check|revoke|run|info)"/g)].map((m) => m[1]!).concat([...here("windows-native.js").matchAll(/\["(info|run|check|revoke)",/g)].map((m) => m[1]!), ["run"]));
+  assert.deepEqual(productCommands, ["check", "delete-profile", "info", "revoke", "run"]);
+  const commandsSent = sorted([...here("windows-native-job.js").matchAll(/"(check|revoke|run|info|delete-profile)"/g)].map((m) => m[1]!).concat([...here("windows-native.js").matchAll(/\["(info|run|check|revoke|delete-profile)",/g)].map((m) => m[1]!), ["run"]));
+  assert.ok(commandsSent.includes("delete-profile") && commandsSent.includes("info"), "the per-run profile commands are sent");
   for (const c of commandsSent) assert.ok(productCommands.includes(c), `command ${c}`);
 });
 
@@ -172,10 +173,10 @@ test("every run of the PRODUCT build is given a private window station and deskt
   const priv = code(crate("src/privdesk.rs"));
   const wincode = code(win);
   assert.match(wincode, /fn private_wanted\(a: &Args\) -> bool \{\n\s*#\[cfg\(feature = "experiment"\)\]\n\s*\{ a\.desktop == crate::args::DesktopMode::Private \}\n\s*#\[cfg\(not\(feature = "experiment"\)\)\]\n\s*\{ let _ = a; true \}/, "the product always wants it");
-  const run = between(wincode, "fn run(a: &Args, j: Json) -> Outcome {", "#[allow(clippy::too_many_arguments)]");
+  const run = between(wincode, "fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {", "#[allow(clippy::too_many_arguments)]");
   assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0)") > 0, "created in run");
   assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0)") < run.indexOf("GrantSet { sid: sid.0"), "made before any grant");
-  assert.match(run, /Err\(e\) => return fail\(j, "grant", &e\)/, "the stage is the existing `grant` (STAGE_KIND maps it); the message starts with 'window objects:'");
+  assert.match(run, /Err\(e\) => return \(fail\(j, "grant", &e\), true\)/, "the stage is the existing `grant` (STAGE_KIND maps it); the message starts with 'window objects:'");
   assert.ok(priv.match(/format!\("window objects:/g)!.length >= 3 && /fn trouble\(what: &str, code: u32\) -> String \{ format!\("window objects: /.test(priv), "every message starts with 'window objects:'");
   const inner = between(wincode, "fn run_inner(", "for spec in &a.grants {");
   assert.match(inner, /if private_wanted\(a\) && private_desktop\.is_none\(\) \{ return Err\(\("grant", "window objects: /, "no private desktop, no start");
@@ -241,10 +242,11 @@ test("the private window station code never touches an object of the launcher's 
 test("`info` and `check` report whether a private window station can be made (info fails with stage grant when it cannot); the fields are the ones the parser reads", () => {
   const w = code(win);
   const info = between(w, '"info" => {', '"run" => run(&a, j)');
-  assert.match(info, /if private_wanted\(&a\) \{ if let Err\(e\) = report_private_station\(&mut j, sid\.0\)/);
+  assert.match(info, /if private_wanted\(&a\) \{ if let Err\(e\) = report_private_station\(&mut j, sid\.0\)/, "the shared-name path (experiment build) is as it was");
   assert.match(info, /finish_main\(fail\(j, "grant", &e\)\)/);
+  assert.match(info, /let station = if private_wanted\(&a\) \{ report_private_station\(&mut j, sid\.0\) \} else \{ Ok\(\(\)\) \};\s*life\.finish\(&mut j, true\);\s*match station \{ Err\(e\) => fail\(j, "grant", &e\)/, "the per-run info asks, deletes its profile either way, then fails with stage grant when it could not");
   const check = between(w, '"check" => {', "other => fail(j");
-  assert.match(check, /if private_wanted\(&a\) \{ let _ = report_private_station\(&mut j, sid\.0\); \}/, "check reports it and does not fail on it");
+  assert.match(check, /if private_wanted\(&a\) && !profile::is_run_name\(&a\.name\) \{ let _ = report_private_station\(&mut j, sid\.0\); \}/, "check reports it (for the experiment's shared name only: a per-run check derives a SID and makes nothing) and does not fail on it");
   const report = between(w, "fn report_private_station", "fn run(");
   assert.match(report, /if p\.close\(\) \{ j\.b\("windowStationOk", true\); return Ok\(\(\)\); \}/, "ok only when the objects were also closed");
   for (const k of ["windowStationOk", "windowStationError"]) assert.ok(report.includes(`"${k}"`), k);
@@ -258,4 +260,62 @@ test("`info` and `check` report whether a private window station can be made (in
   assert.deepEqual([old?.windowStation, old?.windowStationOk, old?.windowStationError], [undefined, undefined, undefined]);
   const odd = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true, windowStation: 1, windowStationOk: "yes", windowStationError: false }));
   assert.deepEqual([odd?.windowStation, odd?.windowStationOk, odd?.windowStationError], [undefined, undefined, undefined]);
+});
+
+// ---------------------------------------------------------------------------------------------------------------- per-run container profiles
+
+const profileRs = crate("src/profile.rs");
+
+test("per-run profiles: the name the backend makes is exactly the name the product launcher accepts, and the record the launcher writes is the one the backend reads", () => {
+  const plan = here("windows-native-plan.js");
+  assert.match(profileRs, /pub\(crate\) const RUN_PREFIX: &str = "NimbleNewtRun-";/);
+  assert.match(profileRs, /pub\(crate\) const RUN_HEX_LEN: usize = 16;/);
+  assert.match(plan, /export const RUN_PROFILE_PREFIX = "NimbleNewtRun-";/);
+  assert.match(plan, /export const RUN_PROFILE_PATTERN = \/\^NimbleNewtRun-\[0-9a-f\]\{16\}\$\/;/);
+  assert.match(profileRs, /const RECORD_TAG: &str = "nn-run-profile v1";/);
+  assert.ok(here("windows-native-job.js").includes("nn-run-profile v1"), "the backend reads the same tag");
+  // the names the crate's own unit tests accept are accepted by the backend's check, and the near misses are refused by both
+  assert.equal(isRunProfileName("NimbleNewtRun-0123456789abcdef"), true);
+  for (const bad of ["NimbleNewtAgent", "NimbleNewtRun-0123456789ABCDEF", "NimbleNewtRun-0123456789abcde", "NimbleNewtRun-0123456789abcdef0", "NimbleNewtRun-0123456789abcdef\n", ""]) assert.equal(isRunProfileName(bad), false, bad);
+  assert.equal(RUN_PROFILE_PREFIX.length + 16 <= 64, true, "inside CreateAppContainerProfile's 64 characters");
+  // the product refuses every other name, and has no default name
+  assert.match(args, /if !EXPERIMENT && !profile::is_run_name\(&a\.name\) \{ return Err\(/);
+  assert.match(args, /name: if EXPERIMENT \{ "NimbleNewtExperiment"\.into\(\) \} else \{ String::new\(\) \}/);
+});
+
+test("per-run profiles: the launcher writes its record BEFORE it makes the profile, never adopts an existing one, deletes only with proof, and check and revoke make nothing", () => {
+  const w = code(win);
+  const begin = between(w, "fn begin(name: &str, record: &str)", "fn finish(&self");
+  assert.ok(begin.indexOf("create_new(true)") > 0 && begin.indexOf("create_new(true)") < begin.indexOf("CreateAppContainerProfile("), "record first (create-new), then the profile");
+  assert.ok(begin.indexOf("derived_sid(name)") < begin.indexOf("create_new(true)"), "the SID is derived (and so written into the record) before the profile exists");
+  assert.match(begin, /HR_ALREADY_EXISTS \{ "a profile with this name already exists: it is not adopted"/);
+  assert.equal(w.match(/CreateAppContainerProfile\(/g)!.length, 2, "only the shared-name container_sid (experiment) and the per-run begin make a profile");
+  // the delete call is in one place for the product, behind the proof; the experiment's own arm is the only other
+  const arm = between(w, '"delete-profile" => {', 'other => fail(j, "arguments"');
+  assert.ok(arm.indexOf("profile::may_delete(") > 0 && arm.indexOf("profile::may_delete(") < arm.indexOf("delete_profile_verified("), "the proof comes first");
+  assert.match(arm, /Err\(e\) => fail\(j, "profile", &e\)/, "an unproven profile is refused with the stage `profile`");
+  assert.equal(w.match(/DeleteAppContainerProfile\(/g)!.length, 3, "two calls in delete_profile_verified, one in the experiment's arm, none anywhere else");
+  assert.ok(between(w, "fn delete_profile_verified(", "fn report_ended").match(/DeleteAppContainerProfile\(/g)!.length === 2, "the call and its one repeat");
+  // run and info delete only through the guard that knows it made the profile, and run only when every grant is revoked
+  assert.match(w, /fn finish\(&self, j: &mut Json, grants_gone: bool\) \{\n\s*if grants_gone \{ report_ended\(j, &delete_profile_verified\(&self\.name, &self\.sid_text\)\); \}/);
+  assert.match(w, /life\.finish\(&mut outcome\.j, grants_gone\);/);
+  assert.match(w, /let all = grants\.items\.iter\(\)\.all\(\|g\| !g\.applied \|\| g\.revoked\);/);
+  // check and revoke derive the SID and never create a profile
+  const sidFor = between(w, "fn sid_for_entries(", "struct Ended {");
+  assert.ok(sidFor.includes("derived_sid(&a.name)") && !sidFor.includes("CreateAppContainerProfile"), "derive only for a per-run name");
+  for (const [from, to] of [['"revoke" => {', '"grant" => {'], ['"check" => {', '"dump" => {']] as const) {
+    const part = between(w, from, to);
+    assert.ok(part.includes("sid_for_entries(&a)") && !part.includes("container_sid("), `${from} derives the SID`);
+  }
+  // the wording of the typed stage the backend maps
+  assert.match(here("windows-native-plan.js"), /profile: "profile" \}/);
+});
+
+test("per-run profiles: every DACL write the launcher makes is under one machine-wide lock, and the lock is released on every path", () => {
+  const w = code(win);
+  const change = between(w, "fn change_ace(path: &str", "struct GrantRecord");
+  assert.ok(/^fn change_ace\(path: &str, sid: PSID, mode: Mode, revoke: bool\) -> Result<\(\), u32> \{\n\s*let _lock = AclLock::take\(\)\?;/.test(change), "taken first, held (a guard) until the function returns");
+  assert.match(w, /impl Drop for AclLock \{ fn drop\(&mut self\) \{ unsafe \{ ReleaseMutex\(self\.0\); CloseHandle\(self\.0\); \} \} \}/);
+  assert.match(w, /CreateMutexW\(null\(\), 0, wide\("NimbleNewtAclWrite"\)\.as_ptr\(\)\)/, "one fixed name, no Global prefix (per logon session)");
+  assert.equal(w.match(/SetNamedSecurityInfoW\(/g)!.length, 3, "the three DACL writers are all inside change_ace's callees (remove_explicit, layered_acl, the grant itself)");
 });

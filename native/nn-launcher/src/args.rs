@@ -10,6 +10,8 @@ pub(crate) const AAP_OPT_IN: u32 = 0x0;
 /// The capabilities the PRODUCT build accepts (the backend's LPAC_CAPABILITIES in windows-native-plan.ts); the contract test pins the two lists to each other.
 pub(crate) const PRODUCT_CAPABILITIES: [&str; 2] = ["registryRead", "lpacCom"];
 
+use crate::profile;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Mode { Ro, Rx, Modify, DenyWrite, DenyStrong, Seal, ModifyRoot }
 
@@ -82,16 +84,21 @@ pub(crate) struct Args {
     pub(crate) desktop: DesktopMode, // round 5, experiment only
     pub(crate) creation: Creation,   // round 5, experiment only
     pub(crate) dump: Vec<String>, // paths whose DACL is printed as SDDL after the grants are applied and again after the child ended (repeatable --dump)
+    pub(crate) sid: Option<String>, // check, revoke, delete-profile: the SID the backend expects for --name (a cross-check, never a selection: the SID is always derived from the name)
+    pub(crate) profile_record: Option<String>, // run, info, delete-profile with a per-run profile name: the record file of the profile in the supervisor's control folder (see profile.rs)
 }
 
 pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
-    let mut a = Args { name: "NimbleNewtExperiment".into(), kill_on_close: true, timeout_ms: 120_000, stdin: "nul".into(), ..Default::default() };
+    // The experiment's default profile name stays as it was; the product has NO default name: every command needs an explicit per-run name (profile.rs).
+    let mut a = Args { name: if EXPERIMENT { "NimbleNewtExperiment".into() } else { String::new() }, kill_on_close: true, timeout_ms: 120_000, stdin: "nul".into(), ..Default::default() };
     let mut it = raw.iter().skip(1);
     a.command = it.next().cloned().ok_or("no command (run, info, revoke, check, delete-profile)")?;
     while let Some(flag) = it.next() {
         let mut value = |what: &str| -> Result<String, String> { it.next().cloned().ok_or(format!("{what} needs a value")) };
         match flag.as_str() {
             "--name" => a.name = value("--name")?,
+            "--sid" => { let v = value("--sid")?; if !profile::is_app_sid_text(&v) { return Err("--sid is not an AppContainer SID (S-1-15-2 and seven more parts)".into()); } a.sid = Some(v); }
+            "--profile-record" => { let v = value("--profile-record")?; if v.is_empty() { return Err("--profile-record is empty".into()); } a.profile_record = Some(v); }
             "--win32k-off" | "--no-kill-on-close" | "--keep-profile" | "--stdout-pipe" | "--stderr-pipe" | "--stdout-nul-rw" | "--stderr-nul-rw" | "--dump" | "--desktop" | "--creation" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
             "--exe" => a.exe = Some(value("--exe")?),
             "--cmdline" => a.cmdline = Some(value("--cmdline")?),
@@ -138,7 +145,16 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
             other => return Err(format!("unknown option {other}")),
         }
     }
-    if !EXPERIMENT && !matches!(a.command.as_str(), "run" | "check" | "revoke" | "info") { return Err(format!("command {} is not in this build (run, check, revoke, info)", a.command)); }
+    if !EXPERIMENT && !matches!(a.command.as_str(), "run" | "check" | "revoke" | "info" | "delete-profile") { return Err(format!("command {} is not in this build (run, check, revoke, info, delete-profile)", a.command)); }
+    // Per-run profiles (card A03b): the product's only container name is NimbleNewtRun-<16 lower-case hex digits>; there is no shared, default or administrator-chosen name any more.
+    if !EXPERIMENT && !profile::is_run_name(&a.name) { return Err(format!("--name must be {}<{} lower-case hex digits> in this build", profile::RUN_PREFIX, profile::RUN_HEX_LEN)); }
+    if profile::is_run_name(&a.name) {
+        let needs_record = matches!(a.command.as_str(), "run" | "info" | "delete-profile");
+        if needs_record && a.profile_record.is_none() { return Err(format!("{} with a per-run profile needs --profile-record", a.command)); }
+        if !needs_record && a.profile_record.is_some() { return Err(format!("--profile-record is only for run, info and delete-profile, not {}", a.command)); }
+        if a.command == "delete-profile" && a.sid.is_none() { return Err("delete-profile needs --sid (the SID the supervisor recorded for the profile)".into()); }
+        if !matches!(a.command.as_str(), "check" | "revoke" | "delete-profile") && a.sid.is_some() { return Err(format!("--sid is only for check, revoke and delete-profile, not {}", a.command)); }
+    }
     if !EXPERIMENT {
         // The plain AppContainer (the fallback) has no capability at all; the two LPAC capabilities come only with the LPAC policy.
         if !a.capabilities.is_empty() && a.aap != Some(AAP_OPT_OUT) { return Err("--capability is only in this build with --aap-policy optout (the LPAC); the plain AppContainer has none".into()); }
@@ -159,8 +175,10 @@ mod tests {
     fn argv(parts: &[&str]) -> Vec<String> { std::iter::once("nn-launcher").chain(parts.iter().copied()).map(String::from).collect() }
     fn parse(parts: &[&str]) -> Result<Args, String> { parse_args(&argv(parts)) }
     /// The argument list the worker's backend sends (windows-native-plan.ts launcherArgs), LPAC form.
+    const NAME: &str = "NimbleNewtRun-0123456789abcdef";
+    const SID: &str = "S-1-15-2-1-2-3-4-5-6-7";
     fn product_run() -> Vec<&'static str> {
-        vec!["run", "--name", "NimbleNewtAgent", "--grant", "modify-root:C:\\w", "--grant", "seal:C:\\w\\.git", "--grant-soft", "rx:C:\\node", "--aap-policy", "optout",
+        vec!["run", "--name", NAME, "--profile-record", "C:\\c\\p.sid", "--grant", "modify-root:C:\\w", "--grant", "seal:C:\\w\\.git", "--grant-soft", "rx:C:\\node", "--aap-policy", "optout",
              "--capability", "registryRead", "--capability", "lpacCom", "--memory-mb", "2048", "--active-processes", "64", "--ui-limits", "--timeout-ms", "600000",
              "--stdin", "file:C:\\c\\in", "--stdout", "C:\\c\\out", "--stderr", "C:\\c\\err", "--cwd", "C:\\w", "--env", "PATH=C:\\node", "--exe", "C:\\node\\node.exe", "--cmdline", "node x.js"]
     }
@@ -177,7 +195,9 @@ mod tests {
         assert_eq!(a.aap, Some(AAP_OPT_OUT));
         assert!(a.kill_on_close, "kill-on-close is on unless an experiment option turns it off");
         assert_eq!(a.stdin, "file:C:\\c\\in");
-        for command in ["check", "revoke", "info"] { assert!(parse(&[command, "--grant", "seal:C:\\w\\.git"]).is_ok(), "{command}"); }
+        for command in ["check", "revoke"] { assert!(parse(&[command, "--name", NAME, "--grant", "seal:C:\\w\\.git"]).is_ok(), "{command}"); }
+        assert!(parse(&["info", "--name", NAME, "--profile-record", "C:\\c\\p.sid"]).is_ok());
+        assert!(parse(&["delete-profile", "--name", NAME, "--sid", SID, "--profile-record", "C:\\c\\p.sid"]).is_ok());
     }
 
     #[test]
@@ -222,7 +242,7 @@ mod tests {
             let e = parse(&["run", "--stdin", stdin]).err().unwrap_or_else(|| panic!("--stdin {stdin} was accepted"));
             assert!(e.contains("only file:PATH"), "{stdin}: {e}");
         }
-        for command in ["grant", "dump", "delete-profile", "open-test", "context", "desktop-revoke", "Run", "RUN", "help", ""] {
+        for command in ["grant", "dump", "open-test", "context", "desktop-revoke", "Run", "RUN", "help", ""] {
             let e = parse(&[command]).err().unwrap_or_else(|| panic!("command {command:?} was accepted"));
             assert!(e.contains("not in this build"), "{command}: {e}");
         }
@@ -253,12 +273,62 @@ mod tests {
         let i = no_limits.iter().position(|x| *x == "--memory-mb").unwrap();
         no_limits.drain(i..i + 2);
         assert!(parse(&no_limits).is_err(), "a run without --memory-mb");
-        assert!(parse(&["check", "--grant", "seal:C:\\w\\.git"]).is_ok() && parse(&["revoke", "--grant", "rx:C:\\n"]).is_ok(), "check and revoke take no limits");
+        assert!(parse(&["check", "--name", NAME, "--grant", "seal:C:\\w\\.git"]).is_ok() && parse(&["revoke", "--name", NAME, "--grant", "rx:C:\\n"]).is_ok(), "check and revoke take no limits");
         // the refusal does not depend on where the option stands or on what follows it
         let mut v = product_run();
         v.extend(["--keep-profile"]);
         assert!(parse(&v).unwrap_err().contains("not in this build"));
         assert!(parse(&[]).is_err(), "no command");
+    }
+
+
+    #[cfg(not(feature = "experiment"))]
+    #[test]
+    fn the_product_accepts_only_per_run_profile_names_and_no_default_name() {
+        // no name at all: every command needs one (the experiment's default name is not the product's)
+        for command in ["run", "info", "check", "revoke", "delete-profile"] {
+            let e = parse(&[command]).unwrap_err();
+            assert!(e.contains("--name must be NimbleNewtRun-"), "{command}: {e}");
+        }
+        // the old shared names and every near miss are refused, for every command
+        for name in ["NimbleNewtAgent", "NimbleNewtExperiment", "NimbleNewtRun-", "NimbleNewtRun-0123456789ABCDEF", "NimbleNewtRun-0123456789abcde", "NimbleNewtRun-0123456789abcdef0", "Microsoft.Windows.Cortana", ""] {
+            for command in ["check", "revoke"] {
+                let e = parse(&[command, "--name", name]).err().unwrap_or_else(|| panic!("{command} --name {name:?} was accepted"));
+                assert!(e.contains("--name must be NimbleNewtRun-"), "{name:?}: {e}");
+            }
+            let mut v = product_run();
+            let i = v.iter().position(|x| *x == "--name").unwrap();
+            v[i + 1] = name;
+            assert!(parse(&v).unwrap_err().contains("--name must be"), "run --name {name:?}");
+        }
+        // the last --name wins, as for every option: it is validated too
+        assert!(parse(&["check", "--name", NAME, "--name", "NimbleNewtAgent"]).is_err());
+    }
+
+    #[test]
+    fn the_record_and_sid_options_are_only_where_they_are_used() {
+        // run, info and delete-profile need the record file; check and revoke take none
+        for command in ["run", "info", "delete-profile"] {
+            let mut v = vec![command, "--name", NAME];
+            if command == "delete-profile" { v.extend(["--sid", SID]); }
+            assert!(parse(&v).unwrap_err().contains("needs --profile-record"), "{command}");
+        }
+        for command in ["check", "revoke"] {
+            assert!(parse(&[command, "--name", NAME, "--profile-record", "C:\\c\\p.sid"]).unwrap_err().contains("--profile-record is only for"), "{command}");
+        }
+        assert!(parse(&["check", "--name", NAME, "--profile-record"]).unwrap_err().ends_with("needs a value"));
+        assert!(parse(&["check", "--name", NAME, "--profile-record", ""]).unwrap_err().contains("empty"));
+        // delete-profile needs the SID the supervisor recorded; check and revoke may carry it as a cross-check; run and info never
+        assert!(parse(&["delete-profile", "--name", NAME, "--profile-record", "C:\\c\\p.sid"]).unwrap_err().contains("needs --sid"));
+        for command in ["check", "revoke"] { assert!(parse(&[command, "--name", NAME, "--sid", SID]).is_ok(), "{command}"); }
+        let mut v = product_run();
+        v.extend(["--sid", SID]);
+        assert!(parse(&v).unwrap_err().contains("--sid is only for"));
+        assert!(parse(&["info", "--name", NAME, "--profile-record", "C:\\c\\p.sid", "--sid", SID]).unwrap_err().contains("--sid is only for"));
+        // a SID that is not an AppContainer SID is refused whatever the command
+        for bad in ["S-1-5-18", "S-1-15-2-1", "S-1-15-2-1-2-3-4-5-6-7-8", "", "x", "S-1-15-3-1-2-3-4-5-6-7"] {
+            assert!(parse(&["check", "--name", NAME, "--sid", bad]).unwrap_err().contains("not an AppContainer SID"), "{bad:?}");
+        }
     }
 
     #[cfg(feature = "experiment")]

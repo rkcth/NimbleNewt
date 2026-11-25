@@ -5,6 +5,7 @@
 // EXPERIMENT option (the measuring probes of experiments/windows-appcontainer): the product build refuses it at the argument check ("not in this build") and does not contain
 // the NUL-device test or the hang diagnosis at all. The experiment's own crate (experiments/windows-appcontainer/launcher) builds this same source with the feature `experiment`.
 use crate::args::{parse_args, Args, GrantSpec, Mode, AAP_OPT_IN, AAP_OPT_OUT, EXPERIMENT};
+use crate::profile;
 #[cfg(feature = "experiment")]
 use crate::args::Creation;
 /// The value of the `tool` field: the protocol identifier the TypeScript side matches (a test pins it). It is not the program's file name.
@@ -148,6 +149,90 @@ fn container_sid(name: &str) -> Result<(Sid, bool), String> {
             return Err(format!("DeriveAppContainerSidFromAppContainerName failed: 0x{:08x}", hr2 as u32));
         }
         Err(format!("CreateAppContainerProfile failed: 0x{:08x}", hr as u32))
+    }
+}
+
+/// The SID a profile NAME derives to (DeriveAppContainerSidFromAppContainerName): a pure computation, no profile is made and none has to exist. Per-run names are only ever derived for
+/// `check` and `revoke` (the profile may already be deleted: the entries for its SID are still removable), and before `run` makes the profile.
+fn derived_sid(name: &str) -> Result<Sid, String> {
+    unsafe {
+        let mut sid: PSID = null_mut();
+        let hr = DeriveAppContainerSidFromAppContainerName(wide(name).as_ptr(), &mut sid);
+        if hr == 0 && !sid.is_null() { Ok(Sid(sid)) } else { Err(format!("DeriveAppContainerSidFromAppContainerName failed: 0x{:08x}", hr as u32)) }
+    }
+}
+
+/// The SID for a command that only reads or removes entries (`check`, `revoke`): a per-run name is derived (never created; when `--sid` came with it, it must be the derived one), any other
+/// name (the experiment build's own) keeps the old create-or-find behaviour.
+fn sid_for_entries(a: &Args) -> Result<Sid, String> {
+    if !profile::is_run_name(&a.name) { return container_sid(&a.name).map(|(s, _)| s); }
+    let sid = derived_sid(&a.name)?;
+    let text = sid_string(sid.0);
+    if let Some(given) = a.sid.as_deref() { if given != text { return Err("the SID given is not the SID of this profile name".into()); } }
+    Ok(sid)
+}
+
+/// What deleting a per-run profile came to.
+struct Ended { deleted: bool, hr: i32, gone: bool }
+
+/// Deletes a per-run profile and checks that it is gone. DeleteAppContainerProfile succeeds for a profile that does not exist (documented), and when it fails "the status of the profile is
+/// undetermined, call it again", so it is called a second time after a failure. Gone is then read with GetAppContainerFolderPath on the profile's SID: the documentation lists only S_OK and
+/// E_INVALIDARG, so the reading is that a profile that no longer exists has no folder to name and the call fails; a call that still succeeds means the profile is still there and is reported
+/// as not gone (the supervisor then fails the run and keeps the record for its sweep). NOT MEASURED on real Windows. The folder path the call returns is not freed (the process ends at once).
+fn delete_profile_verified(name: &str, sid_text: &str) -> Ended {
+    unsafe {
+        let wname = wide(name);
+        let mut hr = DeleteAppContainerProfile(wname.as_ptr());
+        if hr != 0 { hr = DeleteAppContainerProfile(wname.as_ptr()); }
+        let mut path: *mut u16 = null_mut();
+        let q = GetAppContainerFolderPath(wide(sid_text).as_ptr(), &mut path);
+        Ended { deleted: hr == 0, hr, gone: hr == 0 && q != 0 }
+    }
+}
+
+fn report_ended(j: &mut Json, e: &Ended) {
+    j.b("profileDeleted", e.deleted);
+    j.b("profileGone", e.gone);
+    j.n("profileDeleteHr", e.hr as i64);
+}
+
+/// One run's own profile. `begin` derives the SID from the name, writes the record file (create-new: a name used before is refused), THEN makes the profile and checks it got the derived SID;
+/// a profile that already exists is never adopted (a per-run name is new by construction; one that exists is a collision or a leftover, and not this launcher's to use or delete).
+struct ProfileLife { name: String, sid_text: String }
+impl ProfileLife {
+    fn begin(name: &str, record: &str) -> Result<(Sid, ProfileLife), String> {
+        let sid = derived_sid(name)?;
+        let text = sid_string(sid.0);
+        if !crate::profile::is_app_sid_text(&text) { return Err(format!("the derived SID {text} is not an AppContainer SID")); }
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(record).map_err(|e| format!("the profile record could not be created (create-new): {e}"))?;
+            if let Err(e) = f.write_all(profile::format_record(name, &text).as_bytes()).and_then(|_| f.sync_all()) { drop(f); let _ = std::fs::remove_file(record); return Err(format!("the profile record could not be written: {e}")); }
+        }
+        unsafe {
+            let mut made: PSID = null_mut();
+            let wdisp = wide("NimbleNewt run");
+            let hr = CreateAppContainerProfile(wide(name).as_ptr(), wdisp.as_ptr(), wdisp.as_ptr(), null(), 0, &mut made);
+            if hr != 0 {
+                // Nothing was made, so the record this call wrote is removed with it.
+                let _ = std::fs::remove_file(record);
+                return Err(if hr == HR_ALREADY_EXISTS { "a profile with this name already exists: it is not adopted".to_string() } else { format!("CreateAppContainerProfile failed: 0x{:08x}", hr as u32) });
+            }
+            let same = EqualSid(made, sid.0) != 0;
+            FreeSid(made);
+            if !same {
+                let ended = delete_profile_verified(name, &text);
+                let _ = ended;
+                return Err("the profile that was made has another SID than the one derived from its name: it was deleted".to_string());
+            }
+        }
+        Ok((sid, ProfileLife { name: name.to_string(), sid_text: text }))
+    }
+
+    /// Ends the profile after the run: deleted and checked only when every grant is revoked and read back (otherwise it is kept, named in the line, so the supervisor can revoke by SID first).
+    fn finish(&self, j: &mut Json, grants_gone: bool) {
+        if grants_gone { report_ended(j, &delete_profile_verified(&self.name, &self.sid_text)); }
+        else { j.b("profileDeleted", false); j.b("profileGone", false); j.s("profileKept", "a grant could not be revoked, so the profile is kept for the supervisor's revoke by SID and delete"); }
     }
 }
 
@@ -396,10 +481,30 @@ fn dump_json(paths: &[String]) -> String {
     format!("[{}]", parts.join(","))
 }
 
+/// One machine-wide lock around every DACL read-modify-write this launcher does. Several launchers may run at once (the backend's `maxConcurrentRuns`), and they all write the SAME program
+/// folder's DACL (each adds, then removes, its own container's entry): a write made from a copy read before another launcher's write would lose that entry or bring a removed one back. The named
+/// mutex has no `Global\` prefix, so it is per logon session, which is where every launcher of one service runs; its default security is the creator's. A launcher that cannot take it in two
+/// minutes fails the grant or the revoke (fail closed). NOT MEASURED with two real launchers.
+struct AclLock(HANDLE);
+impl AclLock {
+    fn take() -> Result<AclLock, u32> {
+        unsafe {
+            let h = CreateMutexW(null(), 0, wide("NimbleNewtAclWrite").as_ptr());
+            if h.is_null() { return Err(GetLastError()); }
+            match WaitForSingleObject(h, 120_000) {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(AclLock(h)),
+                other => { let e = if other == WAIT_TIMEOUT { WAIT_TIMEOUT } else { GetLastError() }; CloseHandle(h); Err(e) }
+            }
+        }
+    }
+}
+impl Drop for AclLock { fn drop(&mut self) { unsafe { ReleaseMutex(self.0); CloseHandle(self.0); } } }
+
 /// Adds (GRANT_ACCESS / DENY_ACCESS) or removes (a revoke) the container's explicit entries on a folder or file. Returns a Win32 error code.
 /// A revoke on a path whose DACL holds no explicit entry for the container writes nothing (so it needs no rights and is idempotent), and a revoke
 /// that wrote is checked by reading the DACL back: an entry still there is an error, never a success.
 fn change_ace(path: &str, sid: PSID, mode: Mode, revoke: bool) -> Result<(), u32> {
+    let _lock = AclLock::take()?;
     unsafe {
         let wpath = wide(path);
         let mut old: *mut ACL = null_mut();
@@ -608,36 +713,56 @@ fn report_private_station(j: &mut Json, sid: PSID) -> Result<(), String> {
     }
 }
 
+/// `run`. A per-run profile name (the product's only kind) gets its own profile for this run and has it deleted at the end; any other name (the experiment build's own) keeps the shared,
+/// create-or-find profile exactly as before.
 fn run(a: &Args, j: Json) -> Outcome {
+    if !profile::is_run_name(&a.name) {
+        let mut j = j;
+        let (sid, created) = match container_sid(&a.name) { Ok(v) => v, Err(e) => return fail(j, "container", &e) };
+        j.s("containerSid", &sid_string(sid.0));
+        j.s("profile", if created { "created" } else { "reused" });
+        return run_core(a, j, &sid).0;
+    }
     let mut j = j;
-    let (sid, created) = match container_sid(&a.name) { Ok(v) => v, Err(e) => return fail(j, "container", &e) };
-    j.s("containerSid", &sid_string(sid.0));
-    j.s("profile", if created { "created" } else { "reused" });
-    let (Some(exe), Some(cmdline), Some(cwd)) = (a.exe.as_deref(), a.cmdline.as_deref(), a.cwd.as_deref()) else { return fail(j, "arguments", "run needs --exe, --cmdline and --cwd") };
-    let (Some(out_path), Some(err_path)) = (a.stdout.as_deref(), a.stderr.as_deref()) else { return fail(j, "arguments", "run needs --stdout and --stderr") };
-    if !EXPERIMENT && !a.stdin.starts_with("file:") { return fail(j, "arguments", "run needs --stdin file:PATH in this build"); }
+    let Some(record) = a.profile_record.as_deref() else { return fail(j, "arguments", "run with a per-run profile needs --profile-record") };
+    let (sid, life) = match ProfileLife::begin(&a.name, record) { Ok(v) => v, Err(e) => return fail(j, "container", &e) };
+    j.s("containerSid", &life.sid_text);
+    j.s("profile", "created");
+    let (mut outcome, grants_gone) = run_core(a, j, &sid);
+    // Every path out of the run, a failed one included, ends here: the grants were revoked by run_core, the window objects closed and the job ended, so the profile can be deleted.
+    life.finish(&mut outcome.j, grants_gone);
+    outcome
+}
+
+/// The run itself, with the container's SID already known. Returns the outcome and whether every grant that was applied is revoked and read back.
+fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {
+    let mut j = j;
+    let (Some(exe), Some(cmdline), Some(cwd)) = (a.exe.as_deref(), a.cmdline.as_deref(), a.cwd.as_deref()) else { return (fail(j, "arguments", "run needs --exe, --cmdline and --cwd"), true) };
+    let (Some(out_path), Some(err_path)) = (a.stdout.as_deref(), a.stderr.as_deref()) else { return (fail(j, "arguments", "run needs --stdout and --stderr"), true) };
+    if !EXPERIMENT && !a.stdin.starts_with("file:") { return (fail(j, "arguments", "run needs --stdin file:PATH in this build"), true); }
 
     // The private window station and desktop come first: if they cannot be made nothing else was changed (no grant, no job), and the program does not start.
     let mut private: Option<privdesk::PrivateDesktop> = None;
     if private_wanted(a) {
-        match privdesk::PrivateDesktop::create(sid.0) { Ok(p) => private = Some(p), Err(e) => return fail(j, "grant", &e) }
+        match privdesk::PrivateDesktop::create(sid.0) { Ok(p) => private = Some(p), Err(e) => return (fail(j, "grant", &e), true) }
     }
     let mut grants = GrantSet { sid: sid.0, items: Vec::new() };
     #[cfg(feature = "experiment")]
     let mut desk = desk::Desk::new(sid.0);
     #[cfg(feature = "experiment")]
     desk.prepare(a.desktop);
-    let result = run_inner(a, &mut j, &sid, &mut grants, exe, cmdline, cwd, out_path, err_path, private.as_ref().map(|p| p.lp_desktop()), #[cfg(feature = "experiment")] &desk);
+    let result = run_inner(a, &mut j, sid, &mut grants, exe, cmdline, cwd, out_path, err_path, private.as_ref().map(|p| p.lp_desktop()), #[cfg(feature = "experiment")] &desk);
     grants.revoke_all();
     // The child and everything it started are gone (the job ended them): the desktop is closed, then the station.
     if let Some(p) = private.as_mut() { p.close(); j.raw("windowObjects", p.json()); }
     #[cfg(feature = "experiment")]
     { desk.finish(); j.raw("desktop", desk.json(a.desktop)); }
     j.raw("grants", grants.json());
-    j.b("allGrantsRevoked", grants.items.iter().all(|g| !g.applied || g.revoked));
+    let all = grants.items.iter().all(|g| !g.applied || g.revoked);
+    j.b("allGrantsRevoked", all);
     match result {
-        Ok(code) => { j.b("ok", true); Outcome { j, code } }
-        Err((stage, msg)) => fail(j, stage, &msg),
+        Ok(code) => { j.b("ok", true); (Outcome { j, code }, all) }
+        Err((stage, msg)) => (fail(j, stage, &msg), all),
     }
 }
 
@@ -942,14 +1067,28 @@ pub fn main() {
     let outcome = match a.command.as_str() {
         "info" => {
             let mut j = j;
-            match container_sid(&a.name) {
-                Ok((sid, created)) => {
-                    j.s("containerSid", &sid_string(sid.0)); j.s("profile", if created { "created" } else { "reused" });
-                    // A host that cannot make the private window station cannot run a confined program: `info` says so (stage `grant`, "window objects: ...") instead of the first run failing.
-                    if private_wanted(&a) { if let Err(e) = report_private_station(&mut j, sid.0) { finish_main(fail(j, "grant", &e)); } }
-                    j.b("ok", true); Outcome { j, code: 0 }
+            if profile::is_run_name(&a.name) {
+                // The product's `info` makes a throw-away per-run profile exactly as a run does (record first, then the profile), asks the private window station question, and deletes the profile again.
+                let Some(record) = a.profile_record.as_deref() else { finish_main(fail(j, "arguments", "info with a per-run profile needs --profile-record")) };
+                match ProfileLife::begin(&a.name, record) {
+                    Err(e) => fail(j, "container", &e),
+                    Ok((sid, life)) => {
+                        j.s("containerSid", &life.sid_text); j.s("profile", "created");
+                        let station = if private_wanted(&a) { report_private_station(&mut j, sid.0) } else { Ok(()) };
+                        life.finish(&mut j, true);
+                        match station { Err(e) => fail(j, "grant", &e), Ok(()) => { j.b("ok", true); Outcome { j, code: 0 } } }
+                    }
                 }
-                Err(e) => fail(j, "container", &e),
+            } else {
+                match container_sid(&a.name) {
+                    Ok((sid, created)) => {
+                        j.s("containerSid", &sid_string(sid.0)); j.s("profile", if created { "created" } else { "reused" });
+                        // A host that cannot make the private window station cannot run a confined program: `info` says so (stage `grant`, "window objects: ...") instead of the first run failing.
+                        if private_wanted(&a) { if let Err(e) = report_private_station(&mut j, sid.0) { finish_main(fail(j, "grant", &e)); } }
+                        j.b("ok", true); Outcome { j, code: 0 }
+                    }
+                    Err(e) => fail(j, "container", &e),
+                }
             }
         }
         "run" => run(&a, j),
@@ -972,11 +1111,13 @@ pub fn main() {
             }
         }
         "revoke" => {
-            // Removes the container's explicit entries from each --grant path (for cleanup after a crashed run).
+            // Removes the container's explicit entries from each --grant path (for cleanup after a crashed run). A per-run name is only DERIVED to its SID (no profile is made, and the profile
+            // may be gone already: the entries for its SID are still there to remove).
             let mut j = j;
-            match container_sid(&a.name) {
+            match sid_for_entries(&a) {
                 Err(e) => fail(j, "container", &e),
-                Ok((sid, _)) => {
+                Ok(sid) => {
+                    j.s("containerSid", &sid_string(sid.0));
                     let mut set = GrantSet { sid: sid.0, items: a.grants.iter().map(|s| GrantRecord { spec: s.clone(), applied: true, revoked: false, error: None }).collect() };
                     set.revoke_all();
                     j.raw("grants", set.json());
@@ -1009,14 +1150,15 @@ pub fn main() {
         "check" => {
             // Read-only: how many explicit entries for the container remain on each --grant path (the read-back used after a run).
             let mut j = j;
-            match container_sid(&a.name) {
+            match sid_for_entries(&a) {
                 Err(e) => fail(j, "container", &e),
-                Ok((sid, _)) => {
+                Ok(sid) => {
+                    j.s("containerSid", &sid_string(sid.0));
                     let set = GrantSet { sid: sid.0, items: a.grants.iter().map(|s| GrantRecord { spec: s.clone(), applied: false, revoked: false, error: None }).collect() };
                     j.raw("grants", set.json());
                     let clean = a.grants.iter().all(|s| matches!(explicit_count(&s.path, sid.0), Ok(0)));
                     // Reported only: the read-back after a run does not depend on it.
-                    if private_wanted(&a) { let _ = report_private_station(&mut j, sid.0); }
+                    if private_wanted(&a) && !profile::is_run_name(&a.name) { let _ = report_private_station(&mut j, sid.0); }
                     j.b("ok", true);
                     j.b("clean", clean);
                     Outcome { j, code: 0 }
@@ -1031,13 +1173,30 @@ pub fn main() {
             j.b("ok", true);
             Outcome { j, code: 0 }
         }
-        #[cfg(feature = "experiment")]
         "delete-profile" => {
             let mut j = j;
-            let hr = unsafe { DeleteAppContainerProfile(wide(&a.name).as_ptr()) };
-            j.b("ok", hr == 0);
-            j.n("hresult", hr as i64);
-            Outcome { j, code: if hr == 0 { 0 } else { EXIT_LAUNCHER_FAILED } }
+            if profile::is_run_name(&a.name) {
+                // The only profiles this command deletes are per-run ones with a record this launcher wrote: the name has the per-run form, the record file holds this name and the SID the name
+                // derives to, and the SID the supervisor passed is the same (profile.rs may_delete). Nothing is listed or searched: the profile is named, and proven, or left alone.
+                let derived = match derived_sid(&a.name) { Ok(s) => s, Err(e) => finish_main(fail(j, "container", &e)) };
+                let text = sid_string(derived.0);
+                let record = a.profile_record.as_deref().and_then(|p| std::fs::read_to_string(p).ok());
+                j.s("containerSid", &text);
+                match profile::may_delete(&a.name, record.as_deref(), &text, a.sid.as_deref()) {
+                    Err(e) => fail(j, "profile", &e),
+                    Ok(()) => { let ended = delete_profile_verified(&a.name, &text); report_ended(&mut j, &ended); j.b("ok", ended.deleted && ended.gone); Outcome { j, code: if ended.deleted && ended.gone { 0 } else { EXIT_LAUNCHER_FAILED } } }
+                }
+            } else {
+                #[cfg(feature = "experiment")]
+                {
+                    let hr = unsafe { DeleteAppContainerProfile(wide(&a.name).as_ptr()) };
+                    j.b("ok", hr == 0);
+                    j.n("hresult", hr as i64);
+                    Outcome { j, code: if hr == 0 { 0 } else { EXIT_LAUNCHER_FAILED } }
+                }
+                #[cfg(not(feature = "experiment"))]
+                { fail(j, "arguments", "delete-profile deletes only per-run profiles in this build") }
+            }
         }
         other => fail(j, "arguments", &format!("unknown command {other}")),
     };

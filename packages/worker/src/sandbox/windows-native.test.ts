@@ -16,9 +16,9 @@ import type { NormalizedRecipe } from "./recipe.js";
 import type { ProcessResult } from "./windows-host.js";
 import type { ChannelFs, ChannelJob, ChannelPorts } from "./windows-native-channel.js";
 import { FILE_CHANNEL_ENV, encodeFrame, openWorkerFileChannel } from "@nimblenewt/contracts";
-import { jobFile, readRecord, recordsDir, revokeAndReadBack, runNativeJob, sweepLeftovers, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
+import { jobFile, launcherSid, probeProfile, profilesDir, readProfileRecord, readRecord, recordsDir, retireProfile, revokeAndReadBack, runNativeJob, runProfileFor, slotDir, sweepLeftovers, sweepLeftoversLocked, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
 import {
-  DEFAULT_JOB_LIMITS, EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, LPAC_CAPABILITIES, NATIVE_MODE, NODE_PRESERVE_OPTIONS, REFUSED_ROUTE, checkNativeRecipe, failureKindOf, grantsFor, grantsLeft, launcherArgs, nativeEnv,
+  DEFAULT_JOB_LIMITS, EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, LPAC_CAPABILITIES, NATIVE_MODE, NODE_PRESERVE_OPTIONS, REFUSED_ROUTE, checkNativeRecipe, failureKindOf, grantsFor, grantsLeft, isRunProfileName, launcherArgs, nativeEnv, newRunProfileName,
   parseLauncherLine, programPath, quoteWindowsArg, softRefusals, type NativeGrant, type NativeSettings,
 } from "./windows-native-plan.js";
 import { main as runnerMain, processPorts, readAllStdin } from "./windows-native-runner.js";
@@ -63,6 +63,10 @@ interface Script {
   timedOut?: boolean;
   out?: string;
   err?: string;
+  /** The delete of the per-run profile fails (the profile stays; `delete-profile` fails too). */
+  profileStuck?: boolean;
+  /** The run's own line says it deleted the profile, but a later check finds it (the supervisor must ask again). */
+  profileNotGoneInLine?: boolean;
   /** What the "program" does with the paths it was given (the probe program). */
   onProgram?: (args: readonly string[], host: SimHost, signal?: AbortSignal) => void | Promise<void>;
 }
@@ -78,6 +82,8 @@ class SimHost implements NativeHost {
   readonly volumes = new Map<string, string>([["c:", "NTFS"]]);
   readonly calls: { file: string; args: string[] }[] = [];
   readonly entries = new Map<string, number>();
+  /** The container profiles that exist on the simulated machine (by name). */
+  readonly profiles = new Set<string>();
   readonly seenStdin: string[] = [];
   script: Script = {};
   channelFs?: ChannelFs;
@@ -108,12 +114,36 @@ class SimHost implements NativeHost {
     if (this.script.throws && args[0] === "run") throw new Error("spawn failed");
     const grants = (a: readonly string[]): { mode: string; path: string; soft: boolean }[] => a.flatMap((x, i) => (x === "--grant" || x === "--grant-soft" ? [{ mode: a[i + 1]!.slice(0, a[i + 1]!.indexOf(":")), path: a[i + 1]!.slice(a[i + 1]!.indexOf(":") + 1), soft: x === "--grant-soft" }] : []));
     const line = (o: Record<string, unknown>): ProcessResult => ok(`noise\n${JSON.stringify({ tool: "nn-appc-launcher", version: 1, ...o })}\n`);
+    const opt = (flag: string): string | undefined => { const i = args.indexOf(flag); return i < 0 ? undefined : args[i + 1]; };
+    const name = opt("--name") ?? "";
+    const sid = simSid(name);
+    const recordPath = opt("--profile-record");
+    // The launcher refuses anything but a per-run name, and a --sid that is not the name's own.
+    if (!/^NimbleNewtRun-[0-9a-f]{16}$/.test(name)) return line({ command: args[0], ok: false, stage: "arguments", error: "--name must be NimbleNewtRun-<16 lower-case hex digits> in this build" });
+    if (opt("--sid") !== undefined && opt("--sid") !== sid) return line({ command: args[0], ok: false, stage: "container", error: "the SID given is not the SID of this profile name" });
+    const deleteIt = (): { profileDeleted: boolean; profileGone: boolean } => { if (this.script.profileStuck) return { profileDeleted: false, profileGone: false }; this.profiles.delete(name); return { profileDeleted: true, profileGone: true }; };
+    /** The launcher's own profile start: the record first (create-new), then the profile; never an existing one. */
+    const beginProfile = (): ProcessResult | undefined => {
+      if (recordPath === undefined) return line({ command: args[0], ok: false, stage: "arguments", error: "needs --profile-record" });
+      if (!this.createExclusive(recordPath, `nn-run-profile v1\n${name} ${sid}\n`)) return line({ command: args[0], ok: false, stage: "container", error: "the profile record could not be created (create-new): it exists" });
+      if (this.profiles.has(name)) { this.remove(recordPath); return line({ command: args[0], ok: false, stage: "container", error: "a profile with this name already exists: it is not adopted" }); }
+      this.profiles.add(name);
+      return undefined;
+    };
     const gl = (g: { mode: string; path: string; soft: boolean }[], extra: (p: string) => Record<string, unknown>): unknown[] => g.map((x) => ({ path: x.path, mode: x.mode, soft: x.soft, ...extra(x.path), entriesLeft: this.entries.get(key(x.path)) ?? 0 }));
-    if (args[0] === "info") return line({ command: "info", ok: true, containerSid: "S-1-15-2-1", profile: "reused", windowStation: "private", windowStationOk: true });
-    if (args[0] === "check") return line({ command: "check", ok: true, clean: true, grants: gl(grants(args), () => ({ applied: false, revoked: false })) });
-    if (args[0] === "revoke") { for (const g of grants(args)) this.entries.set(key(g.path), this.script.stubborn?.(g.path) ? 1 : 0); return line({ command: "revoke", ok: true, grants: gl(grants(args), () => ({ applied: true, revoked: true })) }); }
+    if (args[0] === "info") { const early = beginProfile(); if (early !== undefined) return early; return line({ command: "info", ok: true, containerSid: sid, profile: "created", windowStation: "private", windowStationOk: true, ...deleteIt() }); }
+    if (args[0] === "check") return line({ command: "check", ok: true, clean: true, containerSid: sid, grants: gl(grants(args), () => ({ applied: false, revoked: false })) });
+    if (args[0] === "revoke") { for (const g of grants(args)) this.entries.set(key(g.path), this.script.stubborn?.(g.path) ? 1 : 0); return line({ command: "revoke", ok: true, containerSid: sid, grants: gl(grants(args), () => ({ applied: true, revoked: true })) }); }
+    if (args[0] === "delete-profile") {
+      const rec = recordPath === undefined ? undefined : this.readText(recordPath);
+      if (rec === undefined) return line({ command: "delete-profile", ok: false, stage: "profile", error: "there is no record of this profile in the control folder, so it is not proven to be this launcher's: nothing is deleted" });
+      if (rec !== `nn-run-profile v1\n${name} ${sid}\n`) return line({ command: "delete-profile", ok: false, stage: "profile", error: "the profile record names another profile or SID: nothing is deleted" });
+      const done = deleteIt();
+      return line({ command: "delete-profile", ok: done.profileDeleted && done.profileGone, containerSid: sid, ...done });
+    }
     // run
     if (this.script.noAnswer) return ok("nothing useful\n", 125);
+    if (this.script.stage !== "container") { const early = beginProfile(); if (early !== undefined) return early; }
     const g = grants(args);
     const applied: { path: string; mode: string; soft: boolean; applied: boolean; revoked: boolean; errorCode?: number }[] = [];
     let failedStage: string | undefined;
@@ -125,7 +155,13 @@ class SimHost implements NativeHost {
     const after = (): void => {
       for (const a of applied) if (a.applied) { if (this.script.stubborn?.(a.path) || this.script.lingering?.(a.path)) { a.revoked = !this.script.stubborn?.(a.path); if (a.revoked) this.entries.set(key(a.path), 1); } else { this.entries.set(key(a.path), 0); a.revoked = true; } }
     };
-    const render = (o: Record<string, unknown>): ProcessResult => { after(); return line({ command: "run", allGrantsRevoked: applied.every((a) => !a.applied || a.revoked), grants: applied.map((a) => ({ ...a, entriesLeft: this.entries.get(key(a.path)) ?? 0 })), ...o }); };
+    const render = (o: Record<string, unknown>): ProcessResult => {
+      after();
+      const allGone = applied.every((a) => !a.applied || (a.revoked && (this.entries.get(key(a.path)) ?? 0) === 0));
+      // Like the launcher: the profile is deleted (and checked) only when every grant is revoked; a launcher that made none has none to delete.
+      const ended = this.profiles.has(name) ? (allGone ? deleteIt() : { profileDeleted: false, profileGone: false }) : {};
+      return line({ command: "run", containerSid: sid, allGrantsRevoked: applied.every((a) => !a.applied || a.revoked), grants: applied.map((a) => ({ ...a, entriesLeft: this.entries.get(key(a.path)) ?? 0 })), ...ended, ...(this.script.profileNotGoneInLine === true ? { profileGone: false } : {}), ...o });
+    };
     if (failedStage === undefined && this.script.stage !== undefined) failedStage = this.script.stage;
     if (failedStage !== undefined) return render({ ok: false, childStarted: false, stage: failedStage, error: `${failedStage} failed (simulated)` });
     const val = (flag: string): string => args[args.indexOf(flag) + 1]!;
@@ -138,8 +174,11 @@ class SimHost implements NativeHost {
   }
 }
 
+/** A stand-in for the SID a profile name derives to: seven numbers after S-1-15-2, the last taken from the name. */
+const simSid = (name: string): string => `S-1-15-2-1-2-3-4-5-6-${parseInt(createHash("sha256").update(name.toLowerCase()).digest("hex").slice(0, 8), 16)}`;
+const RUN_NAME = /^NimbleNewtRun-[0-9a-f]{16}$/;
 const settings = (extra: Partial<NativeSettings> = {}): NativeSettings => ({
-  launcher: LAUNCHER, controlDir: CONTROL, nodeExecutable: NODE, programFolders: [NODE_DIR], systemRoot: "C:\\Windows", container: "lpac", profileName: "NimbleNewtAgent",
+  launcher: LAUNCHER, controlDir: CONTROL, nodeExecutable: NODE, programFolders: [NODE_DIR], systemRoot: "C:\\Windows", container: "lpac", maxConcurrentRuns: 1,
   memoryMb: DEFAULT_JOB_LIMITS.memoryMb, activeProcesses: DEFAULT_JOB_LIMITS.activeProcesses, maxRunMs: 60_000, ...extra,
 });
 const SUP = { supervisor: [RUNNER.slice(0, RUNNER.lastIndexOf("\\")), "C:\\Program Files\\NimbleNewt"] };
@@ -226,9 +265,10 @@ describe("A03b native launcher: the command line (pure)", () => {
     const r = recipe();
     const grants = grantsFor(r, settings(), SUP);
     const files = { input: `${CONTROL}\\jobs\\x\\in.txt`, out: `${CONTROL}\\jobs\\x\\out.txt`, err: `${CONTROL}\\jobs\\x\\err.txt` };
-    const args = launcherArgs(r, "C:\\Tools\\inputs\\tool.exe", ["a b", "c"], settings(), grants, files, nativeEnv(r, settings()));
+    const profile = runProfileFor(settings(), "NimbleNewtRun-0123456789abcdef");
+    const args = launcherArgs(r, "C:\\Tools\\inputs\\tool.exe", ["a b", "c"], settings(), grants, files, nativeEnv(r, settings()), profile);
     assert.equal(args[0], "run");
-    assert.deepEqual(args.slice(1, 3), ["--name", "NimbleNewtAgent"]);
+    assert.deepEqual(args.slice(1, 5), ["--name", "NimbleNewtRun-0123456789abcdef", "--profile-record", `${CONTROL}\\profiles\\NimbleNewtRun-0123456789abcdef.sid`]);
     const at = (flag: string): string[] => args.flatMap((a, i) => (a === flag ? [args[i + 1]!] : []));
     assert.deepEqual(at("--capability"), [...LPAC_CAPABILITIES]);
     assert.deepEqual(at("--aap-policy"), ["optout"]);
@@ -248,7 +288,7 @@ describe("A03b native launcher: the command line (pure)", () => {
     const text = args.join(" ").toLowerCase();
     for (const forbidden of ["nul", "pipe", "internetclient", "privatenetwork", "loopback", "--win32k-off", "--no-kill-on-close", "nul-rw"]) assert.ok(!text.includes(forbidden), forbidden);
     // The plain AppContainer fallback: no policy value, no capability at all.
-    const plain = launcherArgs(r, "x.exe", [], settings({ container: "appcontainer" }), grants, files, {});
+    const plain = launcherArgs(r, "x.exe", [], settings({ container: "appcontainer" }), grants, files, {}, profile);
     assert.deepEqual(plain.filter((a, i) => plain[i - 1] === "--aap-policy"), ["none"]);
     assert.ok(!plain.includes("--capability"));
   });
@@ -369,6 +409,15 @@ describe("A03b native launcher: the backend's plan and its refusals", () => {
 const jobFor = (host: SimHost, extra: Partial<NativeJob> = {}, grants?: NativeGrant[]): { job: NativeJob; jobDir: string; backend: SandboxBackend; plan: SpawnPlan } => {
   const p = prepared(host);
   return { ...p, job: { ...p.job, ...(grants === undefined ? {} : { grants }), ...extra } };
+};
+/** A run that got as far as its launcher and was then killed: the status file, the backend's profile record, the launcher's record and the profile. */
+const markStarted = (host: SimHost, job: NativeJob, jobDir: string, status: Record<string, unknown>): void => {
+  host.writeText(`${jobDir}\\status.json`, JSON.stringify(status));
+  const name = job.profile.name;
+  host.mkdirp(profilesDir(job.settings));
+  host.writeText(`${profilesDir(job.settings)}\\${name}.json`, JSON.stringify({ version: 1, name, runId: job.runId, jobDir, pid: status["runnerPid"] ?? 0, at: status["startedAt"] ?? new Date().toISOString(), grants: job.grants, folders: job.claim }));
+  host.writeText(job.profile.record, `nn-run-profile v1\n${name} ${simSid(name)}\n`);
+  host.profiles.add(name);
 };
 const record = (host: SimHost, job: NativeJob): RunRecord => readRecord(host, job.settings, job.runId)!;
 const hasEntries = (host: SimHost): string[] => [...host.entries].filter(([, n]) => n > 0).map(([p]) => p);
@@ -521,20 +570,29 @@ describe("A03b native launcher: a run, its files, its record and the revoke read
 
   test("a revoke of an empty grant list reads nothing; unreadable answers are reported as unreadable", async () => {
     const host = new SimHost();
-    assert.deepEqual((await revokeAndReadBack(host, settings(), [])).state, "clean");
+    assert.deepEqual((await revokeAndReadBack(host, settings(), [], { name: "NimbleNewtRun-0123456789abcdef" })).state, "clean");
     host.script = {};
     const silent = { ...host, run: async () => ok("") } as unknown as NativeHost;
-    assert.equal((await revokeAndReadBack(silent, settings(), [{ mode: "modify", path: TASK, soft: false, why: "home" }])).state, "unreadable");
+    assert.equal((await revokeAndReadBack(silent, settings(), [{ mode: "modify", path: TASK, soft: false, why: "home" }], { name: "NimbleNewtRun-0123456789abcdef" })).state, "unreadable");
   });
 });
 
 describe("A03b native launcher: the sweep after a restart, and the cleanup after a kill", () => {
   const leftover = (host: SimHost, runnerPid: number | undefined, id = "old-run-0001"): { dir: string; job: NativeJob } => {
-    const { job } = jobFor(host);
+    const { job: made } = jobFor(host);
     const dir = `${CONTROL}\\jobs\\${id}`;
+    const name = `NimbleNewtRun-${createHash("sha256").update(id).digest("hex").slice(0, 16)}`;
+    const job: NativeJob = { ...made, runId: id, profile: runProfileFor(made.settings, name) };
     host.mkdirp(dir);
-    host.writeText(jobFile(dir), JSON.stringify({ ...job, runId: id }));
-    if (runnerPid !== undefined) host.writeText(`${dir}\\status.json`, JSON.stringify({ runnerPid }));
+    host.writeText(jobFile(dir), JSON.stringify(job));
+    if (runnerPid !== undefined) {
+      host.writeText(`${dir}\\status.json`, JSON.stringify({ runnerPid }));
+      // what a run that got as far as the launcher leaves: the backend's record, the launcher's record and the profile itself
+      host.mkdirp(profilesDir(made.settings));
+      host.writeText(`${profilesDir(made.settings)}\\${name}.json`, JSON.stringify({ version: 1, name, runId: id, jobDir: dir, pid: runnerPid, at: new Date().toISOString(), grants: job.grants, folders: job.claim }));
+      host.writeText(job.profile.record, `nn-run-profile v1\n${name} ${simSid(name)}\n`);
+      host.profiles.add(name);
+    }
     for (const g of job.grants) host.entries.set(key(g.path), 1);
     return { dir, job };
   };
@@ -573,7 +631,7 @@ describe("A03b native launcher: the sweep after a restart, and the cleanup after
   test("release after a killed run: the runner is gone, so the entries are revoked and read back; incomplete cleanup is reported", async () => {
     const host = new SimHost();
     const { backend, plan, job, jobDir } = prepared(host);
-    host.writeText(`${jobDir}\\status.json`, JSON.stringify({ runnerPid: 900 }));
+    markStarted(host, job, jobDir, { runnerPid: 900 });
     for (const g of job.grants) host.entries.set(key(g.path), 1);
     await backend.release!(plan);
     assert.deepEqual(hasEntries(host), []);
@@ -584,7 +642,7 @@ describe("A03b native launcher: the sweep after a restart, and the cleanup after
     assert.equal(host.exists(jobFile(second.jobDir)), false);
     // Entries that stay make release throw, which the launcher turns into `releaseProblem`.
     const third = prepared(host, recipe(), ["/work/b.exe"]);
-    host.writeText(`${third.jobDir}\\status.json`, JSON.stringify({ runnerPid: 900 })); // its runner had started (only then can a grant exist) and was killed
+    markStarted(host, third.job, third.jobDir, { runnerPid: 900 }); // its runner had started (only then can a grant exist) and was killed
     for (const g of third.job.grants) host.entries.set(key(g.path), 1);
     host.script = { stubborn: () => true };
     await assert.rejects(third.backend.release!(third.plan), /native Windows cleanup incomplete/);
@@ -682,7 +740,7 @@ describe("A03b native launcher: health is a real confined start", () => {
     assert.match(refused.reason ?? "", /could not make a private window station and desktop for the container \(window objects: the private window station could not be made \(error 5\)\)/);
     const dirty = new SimHost();
     dirty.script = { stubborn: () => true };
-    const { dir, job } = ((): { dir: string; job: NativeJob } => { const j = jobFor(dirty).job; const d = `${CONTROL}\\jobs\\old-run-0001`; dirty.writeText(jobFile(d), JSON.stringify(j)); dirty.writeText(`${d}\\status.json`, JSON.stringify({ runnerPid: 7 })); return { dir: d, job: j }; })();
+    const { dir, job } = ((): { dir: string; job: NativeJob } => { const j = jobFor(dirty).job; const d = `${CONTROL}\\jobs\\old-run-0001`; dirty.writeText(jobFile(d), JSON.stringify(j)); markStarted(dirty, j, d, { runnerPid: 7 }); return { dir: d, job: j }; })();
     for (const g of job.grants) dirty.entries.set(key(g.path), 1);
     assert.match((await healthy(dirty).health()).reason ?? "", /left access-list entries behind/);
     assert.ok(dir.length > 0);
@@ -839,7 +897,7 @@ describe("A03b native launcher: wiring, the runner and the real host", () => {
     const add = (id: string, pid: number, startedAt: string): string => {
       const dir = `${CONTROL}\\jobs\\${id}`;
       sweepHost.writeText(jobFile(dir), JSON.stringify({ ...j2, runId: id }));
-      sweepHost.writeText(`${dir}\\status.json`, JSON.stringify({ runnerPid: pid, runId: id, startedAt }));
+      markStarted(sweepHost, { ...j2, runId: id } as NativeJob, dir, { runnerPid: pid, runId: id, startedAt });
       return dir;
     };
     const reused = add("reused-run-01", 900, "2026-11-25T10:00:00.000Z");
@@ -917,7 +975,7 @@ describe("A03b second review: no second program with the container's SID, seals 
     // The first run took the slot and started; its runner (900) was then killed, but the launcher it started (901) still runs the program in the container.
     const at = new Date(Date.now() - 60_000).toISOString();
     holdLock(host, { pid: 900, runId: first.job.runId, at });
-    host.writeText(`${first.jobDir}\\status.json`, JSON.stringify({ runnerPid: 900, runId: first.job.runId, startedAt: at }));
+    markStarted(host, first.job, first.jobDir, { runnerPid: 900, runId: first.job.runId, startedAt: at });
     for (const g of first.job.grants) host.entries.set(key(g.path), 1);
     host.procs = [{ pid: 901, parent: 900, started: new Date(Date.now() - 59_000).toISOString() }];
     const later = second(host, "run-0002-bbbb");
@@ -1027,7 +1085,7 @@ describe("A03b second review: no second program with the container's SID, seals 
   test("a run does not start while an earlier run's entries cannot be removed; a removable leftover is swept first", async () => {
     const host = new SimHost();
     const old = jobFor(host);
-    host.writeText(`${old.jobDir}\\status.json`, JSON.stringify({ runnerPid: 900, runId: old.job.runId }));
+    markStarted(host, old.job, old.jobDir, { runnerPid: 900, runId: old.job.runId });
     for (const g of old.job.grants) host.entries.set(key(g.path), 1);
     host.script = { stubborn: (p) => key(p) === key(`${TASK}\\home`) };
     const b = second(host, "run-0002-bbbb");
@@ -1073,7 +1131,7 @@ describe("A03b second review: no second program with the container's SID, seals 
     let during: { error: string; revokes: number; left: number } | undefined;
     host.script = { onProgram: async () => {
       // The earlier run on the same task folders had started (status file) and its runner is gone: its job file still names the same paths the live run has just been granted.
-      host.writeText(`${old.jobDir}\\status.json`, JSON.stringify({ runnerPid: 900, runId: old.job.runId, startedAt: new Date(Date.now() - 60_000).toISOString() }));
+      markStarted(host, old.job, old.jobDir, { runnerPid: 900, runId: old.job.runId, startedAt: new Date(Date.now() - 60_000).toISOString() });
       const before = host.calls.filter((c) => c.args[0] === "revoke" || c.args[0] === "check").length;
       let error = "";
       try { await old.backend.release!(old.plan); } catch (e) { error = (e as Error).message; }
@@ -1539,5 +1597,398 @@ describe("A03b slice 4: the real channel files (node's own calls)", () => {
       assert.equal(existsSync(dir), false);
       assert.equal(nodeChannelFs.removeFolder(dir, []), true, "nothing there");
     } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------- per-run container profiles (card A03b)
+
+describe("A03b per-run container profile: names, the lifecycle order, a delete that fails, the sweep of a crash, a profile with no record", () => {
+  const CLAIMS = `${CONTROL}\\claims`;
+  const PROFILES = `${CONTROL}\\profiles`;
+  const names = (host: SimHost): string[] => host.listDir(PROFILES).map((n) => n.toLowerCase()); // the simulated folder lists lower-case names
+  const runName = (call: { args: string[] }): string => call.args[call.args.indexOf("--name") + 1]!;
+  const cmds = (host: SimHost): string[] => host.calls.map((c) => c.args[0]!);
+  /** A second job on the same task folders with an id (and so a job folder) of its own. */
+  const another = (host: SimHost, id: string): { job: NativeJob; jobDir: string } => {
+    const plan = windowsNativeBackend(options(host)).plan(recipe(), ["/inputs/tools/tool.exe"], id);
+    const jobDir = plan.env["NIMBLENEWT_NATIVE_JOB"]!;
+    return { job: JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob, jobDir };
+  };
+
+  test("the name is 64 random bits as hex after NimbleNewtRun-, 30 characters, and only that form is a run name", () => {
+    const a = newRunProfileName();
+    const b = newRunProfileName();
+    assert.match(a, /^NimbleNewtRun-[0-9a-f]{16}$/);
+    assert.equal(a.length, 30);
+    assert.notEqual(a, b);
+    assert.equal(newRunProfileName(() => Buffer.from("0123456789abcdef", "hex")), "NimbleNewtRun-0123456789abcdef");
+    assert.throws(() => newRunProfileName(() => Buffer.alloc(4)), /8 random bytes/);
+    for (const bad of ["NimbleNewtAgent", "NimbleNewtRun-", "NimbleNewtRun-0123456789ABCDEF", "NimbleNewtRun-0123456789abcdef ", "nimblenewtrun-0123456789abcdef", "NimbleNewtRun-0123456789abcdeg"]) assert.equal(isRunProfileName(bad), false, bad);
+  });
+
+  test("the plan gives every run its own name and record path; the launcher's line carries both and the claim names the task's three folders", () => {
+    const host = new SimHost();
+    const one = prepared(host);
+    const two = prepared(host, recipe(), ["/inputs/tools/tool.exe"], {});
+    assert.match(one.job.profile.name, /^NimbleNewtRun-[0-9a-f]{16}$/);
+    assert.notEqual(one.job.profile.name, two.job.profile.name);
+    assert.equal(one.job.profile.record, `${PROFILES}\\${one.job.profile.name}.sid`);
+    assert.deepEqual(one.job.claim, [`${TASK}\\work`, `${TASK}\\home`, `${TASK}\\scratch`]);
+    assert.deepEqual(one.job.args.slice(1, 5), ["--name", one.job.profile.name, "--profile-record", one.job.profile.record]);
+    assert.equal(one.job.settings.maxConcurrentRuns, 1, "one at a time unless asked");
+    assert.equal("profileName" in one.job.settings, false, "no shared profile name any more");
+  });
+
+  test("a clean run: the records exist while the program runs, the order is run then read-back, the profile and every record are gone afterwards", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    let during: { json: boolean; sid: boolean; profile: boolean; claim: boolean; slot: boolean } | undefined;
+    host.script = { onProgram: () => { during = { json: host.exists(`${PROFILES}\\${job.profile.name}.json`), sid: host.exists(job.profile.record), profile: host.profiles.has(job.profile.name), claim: host.exists(`${CLAIMS}\\${job.runId}.json`), slot: !lockFree(host) }; } };
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, 0);
+    assert.deepEqual(during, { json: true, sid: true, profile: true, claim: true, slot: true });
+    assert.deepEqual(cmds(host), ["run", "check"]);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(names(host), [], "the backend's record and the launcher's record are removed once the profile is shown gone");
+    assert.deepEqual(host.listDir(CLAIMS), []);
+    assert.ok(lockFree(host));
+    const rec = record(host, job);
+    assert.deepEqual(rec.profile, { name: job.profile.name, sid: simSid(job.profile.name), deleted: true, gone: true });
+    assert.equal(rec.failure, undefined);
+    // every call to the launcher used the run's own name; the read-back named the run's own SID
+    for (const c of host.calls) assert.equal(runName(c), job.profile.name);
+    assert.equal(host.calls[1]!.args[host.calls[1]!.args.indexOf("--sid") + 1], simSid(job.profile.name));
+  });
+
+  test("a launcher whose line does not show the profile gone: the backend reads back first, then asks for the delete itself, with the run's name, SID and record", async () => {
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    host.script = { profileNotGoneInLine: true };
+    assert.equal((await runNativeJob(host, job, undefined, jobDir)).exitCode, 0);
+    assert.deepEqual(cmds(host), ["run", "check", "delete-profile"]);
+    const del = host.calls[2]!.args;
+    assert.deepEqual(del, ["delete-profile", "--name", job.profile.name, "--sid", simSid(job.profile.name), "--profile-record", job.profile.record]);
+    assert.deepEqual(names(host), []);
+  });
+
+  test("a delete that fails is a typed failure, the records stay, the next run does not start, and a later sweep finishes the job", async () => {
+    const host = new SimHost();
+    const first = jobFor(host);
+    host.script = { profileStuck: true };
+    const out = await runNativeJob(host, first.job, undefined, first.jobDir);
+    assert.equal(out.exitCode, EXIT_FAILED);
+    assert.match(out.stderr, new RegExp(`^${FAILURE_PREFIX}: profile: .*${first.job.profile.name}`));
+    assert.deepEqual(names(host).sort(), [`${first.job.profile.name}.json`, `${first.job.profile.name}.sid`].map((n) => n.toLowerCase()), "kept for the sweep");
+    assert.ok(host.profiles.has(first.job.profile.name));
+    const rec = record(host, first.job);
+    assert.equal(rec.failure?.kind, "profile");
+    assert.equal(rec.profile?.gone, false);
+    assert.equal(rec.readBack, "clean", "the entries themselves were revoked");
+    assert.ok(lockFree(host) && host.listDir(CLAIMS).length === 0, "the slot and the claim are released on this path too");
+    assert.ok(host.exists(`${first.jobDir}\\status.json`), "the job folder stays too");
+    // still stuck: nothing is removed, the problem is named, and a new run is refused before it makes a profile
+    const swept = await sweepLeftoversLocked(host, first.job.settings);
+    assert.equal(swept.released, 0);
+    assert.match(swept.problems.join(" "), new RegExp(first.job.profile.name));
+    const second = another(host, "run-0002-bbbb");
+    const before = host.calls.length;
+    const refused = await runNativeJob(host, second.job, undefined, second.jobDir);
+    assert.match(refused.stderr, new RegExp(`^${FAILURE_PREFIX}: revoke: an earlier run's entries or container profile`));
+    assert.equal(host.calls.slice(before).filter((c) => c.args[0] === "run").length, 0, "no new run, no new profile");
+    // the delete works again: the next run sweeps the leftover first (delete-profile of the OLD name) and then runs
+    host.script = {};
+    const third = another(host, "run-0003-cccc");
+    assert.equal((await runNativeJob(host, third.job, undefined, third.jobDir)).exitCode, 0);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(names(host), []);
+    assert.ok(host.calls.some((c) => c.args[0] === "delete-profile" && runName(c) === first.job.profile.name));
+    assert.equal(host.exists(`${first.jobDir}\\status.json`), false, "the earlier run's job folder is removed once its profile is shown gone");
+  });
+
+  test("a crashed run's leftovers are swept from the backend's own records: its entries are revoked by ITS SID and read back, then its profile is deleted", async () => {
+    const host = new SimHost();
+    const old = jobFor(host);
+    markStarted(host, old.job, old.jobDir, { runnerPid: 900, runId: old.job.runId });
+    for (const g of old.job.grants) host.entries.set(key(g.path), 1);
+    const swept = await sweepLeftoversLocked(host, old.job.settings);
+    assert.deepEqual(swept, { released: 1, problems: [], live: [] });
+    assert.deepEqual(hasEntries(host), []);
+    const order = cmds(host);
+    assert.equal(order[order.length - 1], "delete-profile", "the profile goes last");
+    assert.ok(order.indexOf("delete-profile") > order.lastIndexOf("revoke") && order.indexOf("delete-profile") > order.lastIndexOf("check"));
+    for (const c of host.calls.filter((x) => x.args[0] !== "delete-profile")) assert.equal(c.args[c.args.indexOf("--sid") + 1], simSid(old.job.profile.name), `${c.args[0]} names the crashed run's SID`);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(names(host), []);
+    assert.equal(host.exists(old.jobDir), false);
+    // a record with no job folder (the folder was removed or never listed) is swept the same way
+    const lone = jobFor(host);
+    markStarted(host, lone.job, lone.jobDir, { runnerPid: 901, runId: lone.job.runId });
+    host.remove(lone.jobDir);
+    for (const g of lone.job.grants) host.entries.set(key(g.path), 1);
+    assert.deepEqual((await sweepLeftoversLocked(host, lone.job.settings)).problems, []);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(names(host), []);
+  });
+
+  test("a live run's profile record is left alone by the sweep (the writer is running)", async () => {
+    const host = new SimHost();
+    const other = jobFor(host);
+    host.alive.add(555);
+    markStarted(host, other.job, other.jobDir, { runnerPid: 555, runId: other.job.runId, startedAt: new Date(Date.now() - 1000).toISOString() });
+    host.procs = [{ pid: 555, parent: 1, started: new Date(Date.now() - 5000).toISOString() }];
+    const swept = await sweepLeftoversLocked(host, other.job.settings);
+    assert.equal(swept.released, 0);
+    assert.deepEqual(swept.live, [other.jobDir]);
+    assert.equal(cmds(host).length, 0, "nothing was revoked or deleted");
+    assert.ok(host.profiles.has(other.job.profile.name));
+  });
+
+  test("nothing is deleted without a record: no launcher record, no backend record, a bad name, a mismatched name, a damaged record", async () => {
+    const host = new SimHost();
+    const s = settings();
+    const mk = (n: string): string => `NimbleNewtRun-${n.repeat(16).slice(0, 16)}`;
+    const dead = { pid: 900, at: new Date(Date.now() - 60_000).toISOString() };
+    const recordOf = (name: string): string => JSON.stringify({ version: 1, name, runId: `r-${name}`, jobDir: "", ...dead, grants: [{ mode: "modify", path: `${TASK}\\home`, soft: false, why: "home" }], folders: [`${TASK}\\work`] });
+    host.mkdirp(PROFILES);
+    // (a) the backend's record but no record of the launcher: the launcher never made a profile, so nothing is revoked or deleted (a profile of that name on the machine is not touched)
+    const a = mk("a");
+    host.writeText(`${PROFILES}\\${a}.json`, recordOf(a));
+    host.profiles.add(a);
+    // (b) the launcher's record but no backend record: not ours to act on
+    const b = mk("b");
+    host.writeText(`${PROFILES}\\${b}.sid`, `nn-run-profile v1\n${b} ${simSid(b)}\n`);
+    host.profiles.add(b);
+    // (c) names that are not run names are never read as records
+    host.writeText(`${PROFILES}\\NimbleNewtAgent.json`, recordOf("NimbleNewtAgent"));
+    host.writeText(`${PROFILES}\\NimbleNewtRun-XYZ.json`, recordOf("NimbleNewtRun-XYZ"));
+    // (d) a record whose own name is another's
+    const d = mk("d");
+    host.writeText(`${PROFILES}\\${d}.json`, recordOf(mk("e")));
+    // (e) a launcher record that is not in the launcher's format
+    const e = mk("f");
+    host.writeText(`${PROFILES}\\${e}.json`, recordOf(e));
+    host.writeText(`${PROFILES}\\${e}.sid`, "NimbleNewtRun-ffffffffffffffff S-1-5-18\n");
+    host.profiles.add(e);
+    const swept = await sweepLeftoversLocked(host, s);
+    assert.equal(host.calls.length, 0, `the launcher was never called: no revoke, no delete: ${JSON.stringify(host.calls)}`);
+    assert.ok([a, b, e].every((n) => host.profiles.has(n)), "no profile was deleted");
+    assert.equal(host.exists(`${PROFILES}\\${a}.json`), false, "(a) the record of a profile that never existed is dropped");
+    assert.ok(host.exists(`${PROFILES}\\${b}.sid`) && host.exists(`${PROFILES}\\NimbleNewtAgent.json`) && host.exists(`${PROFILES}\\NimbleNewtRun-XYZ.json`), "the rest is left as found");
+    assert.equal(readProfileRecord(host, s, d), undefined);
+    assert.equal(launcherSid(host, s, e), undefined);
+    assert.match(swept.problems.join("\n"), new RegExp(`${d}: the profile record is unreadable`));
+    assert.match(swept.problems.join("\n"), new RegExp(`${e}: the launcher's profile record is not in the launcher's format`));
+    assert.equal(swept.released, 1, "only (a): a record whose profile the launcher never made is dropped");
+  });
+
+  test("the retired shared name: the option is refused, the environment's value is ignored with a note, and no launcher call ever carries a name that is not a per-run one", async () => {
+    const host = new SimHost();
+    assert.throws(() => windowsNativeBackend(options(host, { profileName: "NimbleNewtAgent" })), /profileName: retired/);
+    host.script = { onProgram: probeBehaviour() };
+    const backend = windowsNativeBackend(options(host, { ignoredProfileSetting: "NimbleNewtAgent" }));
+    host.files.set(key(LAUNCHER), "exe"); host.files.set(key(RUNNER), "js");
+    const h = await backend.health();
+    assert.ok((h.notes ?? []).some((n) => /NIMBLENEWT_WIN_PROFILE is set but retired/.test(n)));
+    assert.ok(host.calls.length > 0);
+    for (const c of host.calls) assert.match(runName(c), RUN_NAME, c.args[0]);
+    assert.ok(host.calls.every((c) => !c.args.includes("NimbleNewtAgent")));
+  });
+
+  /** What a correct confinement does with the probe program (as the health tests' own helper). */
+  function probeBehaviour(): (args: readonly string[], h: SimHost) => void {
+    return (args, h) => {
+      const cmd = args[args.indexOf("--cmdline") + 1]!;
+      if (!cmd.includes("probe.mjs")) return;
+      const [work] = cmd.split(" ").slice(-3).map((x) => x.replace(/^"|"$/g, "")) as [string, string, string];
+      h.writeText(`${work}\\ok.txt`, "x");
+      h.writeText(args[args.indexOf("--stdout") + 1]!, "confined");
+    };
+  }
+
+  test("health: the probe's own profile is made and deleted like a run's; one that cannot be deleted makes the backend unhealthy and is swept by the next check", async () => {
+    const host = new SimHost();
+    host.files.set(key(LAUNCHER), "exe"); host.files.set(key(RUNNER), "js");
+    host.script = { onProgram: probeBehaviour() };
+    const backend = windowsNativeBackend(options(host));
+    assert.equal((await backend.health()).healthy, true);
+    const info = host.calls.find((c) => c.args[0] === "info")!;
+    assert.match(runName(info), RUN_NAME);
+    assert.equal(info.args[info.args.indexOf("--profile-record") + 1], `${PROFILES}\\${runName(info)}.sid`);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(names(host), []);
+    // stuck: unhealthy with the reason, the records stay
+    host.script = { profileStuck: true, onProgram: probeBehaviour() };
+    const bad = await backend.health();
+    assert.equal(bad.healthy, false);
+    assert.match(bad.reason ?? "", /container profile could not be deleted/);
+    assert.ok(host.profiles.size > 0 && names(host).length > 0);
+    // fixed: the next check sweeps what the probe left (its own record is the proof) and is healthy again
+    host.script = { onProgram: probeBehaviour() };
+    assert.equal((await backend.health()).healthy, true);
+    assert.equal(host.profiles.size, 0);
+    assert.deepEqual(names(host), []);
+  });
+});
+
+describe("A03b per-run container profile: how many runs at once, never in one workspace, the slot and claim released on every path", () => {
+  const CLAIMS = `${CONTROL}\\claims`;
+  const ws = (n: string, extra: Partial<NormalizedRecipe> = {}): NormalizedRecipe => recipe({ workdir: `C:\\Tasks\\${n}\\work`, home: `C:\\Tasks\\${n}\\home`, scratch: `C:\\Tasks\\${n}\\scratch`, ...extra });
+  const planned = (host: SimHost, r: NormalizedRecipe, id: string, extra: Partial<WindowsNativeOptions> = {}): { job: NativeJob; jobDir: string } => {
+    const backend = windowsNativeBackend(options(host, extra));
+    const plan = backend.plan(r, ["/inputs/tools/tool.exe"], id);
+    const jobDir = plan.env["NIMBLENEWT_NATIVE_JOB"]!;
+    return { job: JSON.parse(host.readText(jobFile(jobDir))!) as NativeJob, jobDir };
+  };
+  const slotsFree = (host: SimHost, n: number): boolean => { for (let i = 0; i < n; i++) { const ns = host.listDir(slotDir(settings(), i)).filter((x) => /^\d+$/.test(x)).map(Number); if (ns.length > 0 && host.readText(`${slotDir(settings(), i)}\\${Math.max(...ns)}.released`) === undefined) return false; } return true; };
+  /** Holds every started program until `release()`; `entered()` counts programs inside. */
+  const gate = (host: SimHost): { release: () => void; entered: () => number; whenEntered: (n: number) => Promise<void> } => {
+    let open: () => void = () => undefined;
+    const closed = new Promise<void>((resolve) => { open = resolve; });
+    let count = 0;
+    host.script = { onProgram: async () => { count++; await closed; } };
+    return { release: open, entered: () => count, whenEntered: async (n) => { for (let i = 0; i < 400 && count < n; i++) await new Promise((r) => setTimeout(r, 5)); if (count < n) { open(); throw new Error(`${count} programs entered, ${n} wanted`); } } };
+  };
+
+  test("the default is one at a time: a second run in ANOTHER workspace is busy while the first is in its program, and runs after it", async () => {
+    const host = new SimHost();
+    const a = planned(host, ws("a"), "run-0001-aaaa");
+    const b = planned(host, ws("b"), "run-0002-bbbb");
+    const g = gate(host);
+    const first = runNativeJob(host, a.job, undefined, a.jobDir);
+    await g.whenEntered(1);
+    const busy = await runNativeJob(host, b.job, undefined, b.jobDir);
+    assert.equal(busy.exitCode, EXIT_BUSY);
+    assert.match(busy.stderr, /another native run is in progress.*one at a time/);
+    assert.equal(host.calls.filter((c) => c.args[0] === "run").length, 1, "no second launcher");
+    assert.deepEqual(host.listDir(CLAIMS), [`${a.job.runId}.json`], "the refused run holds no claim");
+    g.release();
+    assert.equal((await first).exitCode, 0);
+    host.script = {};
+    assert.equal((await runNativeJob(host, b.job, undefined, b.jobDir)).exitCode, 0);
+    assert.ok(slotsFree(host, 1) && host.listDir(CLAIMS).length === 0 && host.profiles.size === 0);
+  });
+
+  test("with two runs allowed, two different workspaces run at once, each with its own profile and SID, and each revoke names its own SID", async () => {
+    const host = new SimHost();
+    const a = planned(host, ws("a"), "run-0001-aaaa", { maxConcurrentRuns: 2 });
+    const b = planned(host, ws("b"), "run-0002-bbbb", { maxConcurrentRuns: 2 });
+    assert.equal(a.job.settings.maxConcurrentRuns, 2);
+    const g = gate(host);
+    const pa = runNativeJob(host, a.job, undefined, a.jobDir);
+    await g.whenEntered(1);
+    const pb = runNativeJob(host, b.job, undefined, b.jobDir);
+    await g.whenEntered(2);
+    // both are inside their programs now: two slots, two claims, two profiles
+    assert.equal(host.profiles.size, 2);
+    assert.deepEqual(host.listDir(CLAIMS).sort(), [`${a.job.runId}.json`, `${b.job.runId}.json`]);
+    assert.ok(!slotsFree(host, 2));
+    g.release();
+    assert.deepEqual([(await pa).exitCode, (await pb).exitCode], [0, 0]);
+    const runs = host.calls.filter((c) => c.args[0] === "run");
+    assert.equal(new Set(runs.map((c) => runName(c))).size, 2, "two different profiles");
+    for (const job of [a.job, b.job]) {
+      const mine = host.calls.filter((c) => c.args[c.args.indexOf("--name") + 1] === job.profile.name);
+      assert.deepEqual(mine.map((c) => c.args[0]), ["run", "check"]);
+      assert.equal(mine[1]!.args[mine[1]!.args.indexOf("--sid") + 1], simSid(job.profile.name), "the read-back is by the run's own SID");
+    }
+    assert.ok(slotsFree(host, 2) && host.listDir(CLAIMS).length === 0 && [...host.profiles].length === 0);
+    assert.deepEqual(host.listDir(`${CONTROL}\\profiles`), []);
+  });
+
+  function runName(c: { args: string[] }): string { return c.args[c.args.indexOf("--name") + 1]!; }
+
+  test("with two runs allowed, the SAME workspace and an OVERLAPPING one are refused as busy (the seal and workspace entries would meet), a third run finds no slot", async () => {
+    const host = new SimHost();
+    const opt = { maxConcurrentRuns: 2 };
+    const a = planned(host, ws("a"), "run-0001-aaaa", opt);
+    const same = planned(host, ws("a"), "run-0002-bbbb", opt);
+    const inside = planned(host, ws("x", { workdir: "C:\\Tasks\\a\\work\\inner" }), "run-0003-cccc", opt);
+    const around = planned(host, ws("y", { workdir: "C:\\Tasks\\a" }), "run-0004-dddd", opt);
+    const other = planned(host, ws("b"), "run-0005-eeee", opt);
+    const third = planned(host, ws("c"), "run-0006-ffff", opt);
+    const g = gate(host);
+    const pa = runNativeJob(host, a.job, undefined, a.jobDir);
+    await g.whenEntered(1);
+    for (const x of [same, inside, around]) {
+      const out = await runNativeJob(host, x.job, undefined, x.jobDir);
+      assert.equal(out.exitCode, EXIT_BUSY);
+      assert.match(out.stderr, /one run at a time per workspace/);
+    }
+    assert.equal(host.calls.filter((c) => c.args[0] === "run").length, 1, "none of them reached the launcher");
+    assert.deepEqual(host.listDir(CLAIMS), [`${a.job.runId}.json`], "a refused run leaves no claim");
+    assert.ok(!host.exists(slotDir(settings(), 1) + "\\1") || host.exists(slotDir(settings(), 1) + "\\1.released"), "and gives its slot back");
+    const pb = runNativeJob(host, other.job, undefined, other.jobDir);
+    await g.whenEntered(2);
+    const full = await runNativeJob(host, third.job, undefined, third.jobDir);
+    assert.equal(full.exitCode, EXIT_BUSY);
+    assert.match(full.stderr, /all 2 native run slots are in use.*2 at a time/);
+    g.release();
+    assert.deepEqual([(await pa).exitCode, (await pb).exitCode], [0, 0]);
+    // once the first is over, the same workspace is free again
+    host.script = {};
+    assert.equal((await runNativeJob(host, same.job, undefined, same.jobDir)).exitCode, 0);
+  });
+
+  test("a claim whose writer is gone does not block a workspace (the sweep deals with what it left)", async () => {
+    const host = new SimHost();
+    const a = planned(host, ws("a"), "run-0001-aaaa", { maxConcurrentRuns: 2 });
+    host.mkdirp(CLAIMS);
+    host.writeText(`${CLAIMS}\\dead-run-0001.json`, JSON.stringify({ pid: 900, runId: "dead-run-0001", owner: "dead-run-0001", at: new Date(Date.now() - 60_000).toISOString(), folders: a.job.claim }));
+    assert.equal((await runNativeJob(host, a.job, undefined, a.jobDir)).exitCode, 0);
+    // an unreadable claim counts as held (never guessed away)
+    host.writeText(`${CLAIMS}\\odd.json`, "{half");
+    const b = planned(host, ws("b"), "run-0002-bbbb", { maxConcurrentRuns: 2 });
+    const out = await runNativeJob(host, b.job, undefined, b.jobDir);
+    assert.equal(out.exitCode, EXIT_BUSY);
+    assert.match(out.stderr, /cannot be read, so it counts as held/);
+  });
+
+  test("the slot, the claim and the in-progress mark are released on every path out: refusal, failed grant, no answer, a throwing launcher, a stuck profile, an unwritable record, a volume that is not NTFS", async () => {
+    const cases: [string, (host: SimHost) => void][] = [
+      ["a grant that cannot be made", (h) => { h.script = { refuse: (p) => key(p) === key(`${TASK}\\work`) }; }],
+      ["a launcher that gives no answer", (h) => { h.script = { noAnswer: true }; }],
+      ["a launcher that cannot be run", (h) => { h.script = { throws: true }; }],
+      ["a profile that cannot be deleted", (h) => { h.script = { profileStuck: true }; }],
+      ["a container that cannot be made", (h) => { h.script = { stage: "container" }; }],
+      ["a profile record that cannot be written", (h) => { const write = h.writeText.bind(h); h.writeText = (p: string, t: string): void => { if (p.includes("\\profiles\\")) throw new Error("disk full"); write(p, t); }; }],
+      ["a volume that is not NTFS", (h) => { h.volumes.set("c:", "FAT32"); }],
+    ];
+    for (const [label, arrange] of cases) {
+      const host = new SimHost();
+      const { job, jobDir } = jobFor(host);
+      arrange(host);
+      const out = await runNativeJob(host, job, undefined, jobDir);
+      assert.notEqual(out.exitCode, 0, label);
+      assert.notEqual(out.exitCode, EXIT_BUSY, `${label}: a failure, not a busy answer`);
+      assert.ok(slotsFree(host, 1), `${label}: slot`);
+      assert.deepEqual(host.listDir(CLAIMS), [], `${label}: claim`);
+      // the run id is not left marked as in progress: the same job runs again here (on a machine that works)
+      const fresh = new SimHost();
+      assert.equal((await runNativeJob(fresh, job, undefined, jobDir)).exitCode, 0, `${label}: the id is free`);
+    }
+    // the unwritable record stops the run before anything is granted
+    const host = new SimHost();
+    const { job, jobDir } = jobFor(host);
+    const write = host.writeText.bind(host);
+    host.writeText = (p: string, t: string): void => { if (p.includes("\\profiles\\")) throw new Error("disk full"); write(p, t); };
+    const out = await runNativeJob(host, job, undefined, jobDir);
+    assert.match(out.stderr, new RegExp(`^${FAILURE_PREFIX}: profile: the profile record could not be written`));
+    assert.equal(host.calls.length, 0, "no launcher call, no grant");
+  });
+
+  test("configuration: the limit is a whole number from 1 to 4, one by default, and the audit and health say what is unmeasured", async () => {
+    const host = new SimHost();
+    for (const bad of [0, -1, 5, 1.5, Number.NaN, 100]) assert.throws(() => windowsNativeBackend(options(host, { maxConcurrentRuns: bad })), /maxConcurrentRuns: a whole number from 1 to 4/, String(bad));
+    const one = windowsNativeBackend(options(host));
+    assert.match(String(one.auditDetails!()["concurrency"]), /one confined run at a time/);
+    const two = windowsNativeBackend(options(host, { maxConcurrentRuns: 2 }));
+    assert.match(String(two.auditDetails!()["concurrency"]), /up to 2.*never in the same or an overlapping workspace; unmeasured on real Windows/);
+    host.files.set(key(LAUNCHER), "exe"); host.files.set(key(RUNNER), "js");
+    host.script = { onProgram: () => undefined };
+    const notes = (await two.health()).notes ?? [];
+    assert.ok(notes.some((n) => /up to 2 confined runs at once.*UNMEASURED on real Windows/.test(n)), notes.join(" | "));
+    assert.ok((await one.health()).notes?.some((n) => /one confined run at a time/.test(n)));
+    // the environment: absent or empty keeps one; anything else outside 1..4 is a reason, never a throw
+    for (const bad of ["0", "5", "two", "1.5", "-1", " 2", "0x2", "00000002"]) assert.match((await windowsDefaultBackend({ NIMBLENEWT_WIN_MAX_RUNS: bad }, "win32").health()).reason ?? "", /NIMBLENEWT_WIN_MAX_RUNS must be a whole number from 1 to 4/, bad);
+    for (const good of ["", "1", "2", "4"]) assert.doesNotMatch((await windowsDefaultBackend({ NIMBLENEWT_WIN_MAX_RUNS: good }, "win32").health()).reason ?? "", /MAX_RUNS/, good);
   });
 });

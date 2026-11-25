@@ -7,11 +7,11 @@ import type { BackendHealth, GuestView, PlanOptions, SandboxBackend, SpawnPlan }
 import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
 import type { ChannelJob } from "./windows-native-channel.js";
-import { jobFile, jobsDir, runNativeJob, sweepLeftoversLocked, type NativeHost, type NativeJob } from "./windows-native-job.js";
+import { jobFile, jobsDir, probeProfile, runNativeJob, runProfileFor, sweepLeftoversLocked, type NativeHost, type NativeJob } from "./windows-native-job.js";
 import { nativeRealHost } from "./windows-native-real.js";
 import {
-  DEFAULT_JOB_LIMITS, DEFAULT_PROFILE_NAME, EXIT_BUSY, LPAC_CAPABILITIES, MAX_RUN_MS, NATIVE_BACKEND_NAME, NATIVE_MODE, REFUSED_ROUTE,
-  checkNativeRecipe, checkProgramFolder, grantsFor, launcherArgs, nativeEnv, parseLauncherLine, programPath,
+  DEFAULT_JOB_LIMITS, DEFAULT_MAX_CONCURRENT_RUNS, EXIT_BUSY, LPAC_CAPABILITIES, MAX_CONCURRENT_RUNS_LIMIT, MAX_RUN_MS, NATIVE_BACKEND_NAME, NATIVE_MODE, REFUSED_ROUTE,
+  checkNativeRecipe, checkProgramFolder, grantsFor, launcherArgs, nativeEnv, newRunProfileName, programPath,
   type ContainerKind, type NativeSettings,
 } from "./windows-native-plan.js";
 import { checkWindowsHostPath, overlapsWin } from "./windows-plan.js";
@@ -32,7 +32,12 @@ export interface WindowsNativeOptions {
   readonly runnerScript?: string;
   /** `lpac` (default: the less privileged container with registryRead and lpacCom) or `appcontainer` (the plain one, the fallback if a later run shows the LPAC unusable). */
   readonly container?: ContainerKind;
+  /** RETIRED: every run makes its own container profile (`NimbleNewtRun-<hex>`) and the launcher accepts no other name. Giving this is refused. */
   readonly profileName?: string;
+  /** How many confined runs may be in progress at once (1..MAX_CONCURRENT_RUNS_LIMIT). Default 1: one at a time, exactly the behaviour before per-run profiles. More than 1 is UNMEASURED on real Windows (windows-isolation-plan.md 12.4). Two runs never share a workspace. */
+  readonly maxConcurrentRuns?: number;
+  /** The value of the retired NIMBLENEWT_WIN_PROFILE setting when the environment still carries one (the installer writes it): ignored, and said so in the health notes. */
+  readonly ignoredProfileSetting?: string;
   readonly memoryMb?: number;
   readonly activeProcesses?: number;
   readonly maxRunMs?: number;
@@ -92,6 +97,9 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
   const supervisor = { supervisor: [win32.dirname(runnerScript), win32.dirname(launcher)] };
   if (overlapsWin(controlDir, probeDir)) bad("controlDir and probeDir overlap: the supervisor's files may not sit in container-writable probe folders");
   for (const p of supervisor.supervisor) if (overlapsWin(p, probeDir)) bad(`the supervisor's code (${p}) may not sit in the probe's container-writable folder (${probeDir})`);
+  if (options.profileName !== undefined) bad("profileName: retired; every run makes its own container profile (NimbleNewtRun-<hex>) and the launcher accepts no other name");
+  const maxConcurrentRuns = options.maxConcurrentRuns ?? DEFAULT_MAX_CONCURRENT_RUNS;
+  if (!Number.isSafeInteger(maxConcurrentRuns) || maxConcurrentRuns < 1 || maxConcurrentRuns > MAX_CONCURRENT_RUNS_LIMIT) bad(`maxConcurrentRuns: a whole number from 1 to ${MAX_CONCURRENT_RUNS_LIMIT} (default ${DEFAULT_MAX_CONCURRENT_RUNS}; more than 1 is unmeasured on real Windows)`);
   const memoryMb = options.memoryMb ?? DEFAULT_JOB_LIMITS.memoryMb;
   const activeProcesses = options.activeProcesses ?? DEFAULT_JOB_LIMITS.activeProcesses;
   const maxRunMs = options.maxRunMs ?? MAX_RUN_MS;
@@ -100,9 +108,8 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
   }
   const settings: NativeSettings = {
     launcher, controlDir, nodeExecutable, programFolders: (options.programFolders ?? [win32.dirname(nodeExecutable)]).map((f) => checkProgramFolder("program folder", f)),
-    systemRoot: env("SystemRoot") ?? "C:\\Windows", container, profileName: options.profileName ?? DEFAULT_PROFILE_NAME, memoryMb, activeProcesses, maxRunMs,
+    systemRoot: env("SystemRoot") ?? "C:\\Windows", container, maxConcurrentRuns, memoryMb, activeProcesses, maxRunMs,
   };
-  if (!/^[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(settings.profileName)) bad("profileName: letters, digits, dot, dash and underscore, starting with a letter");
   for (const f of settings.programFolders) for (const g of [controlDir, probeDir]) if (overlapsWin(f, g)) bad(`program folder ${f} overlaps the supervisor's or the probe's folder ${g}`);
   const requireNtfs = options.requireNtfs ?? true;
   let lastHealthy = 0;
@@ -128,12 +135,15 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     const exe = programPath(recipe, program, settingsNow.systemRoot);
     const grants = grantsFor(recipe, settingsNow, supervisor);
     const files = { input: `${jobDir}\\in.txt`, out: `${jobDir}\\out.txt`, err: `${jobDir}\\err.txt` };
+    // This run's own container profile: a name nobody has used (64 random bits), chosen here and only validated by the launcher.
+    const profile = runProfileFor(settingsNow, newRunProfileName());
     const channel = interactive ? channelFor(recipe, runId) : undefined;
     const childEnv = nativeEnv(recipe, settingsNow, (h) => host.isDirectory(h));
     // Set last: nothing the recipe says can name another file for the worker's channel.
     if (channel !== undefined) Object.assign(childEnv, { [FILE_CHANNEL_ENV.inbox]: channel.inbox, [FILE_CHANNEL_ENV.outbox]: channel.outbox, [FILE_CHANNEL_ENV.maxBytes]: String(channel.maxBytes), [FILE_CHANNEL_ENV.maxPayload]: String(channel.maxPayload), [FILE_CHANNEL_ENV.stallMs]: String(channel.stallMs) });
     return {
-      version: 1, runId, settings: settingsNow, grants, args: launcherArgs(recipe, exe, command.slice(1), settingsNow, grants, files, childEnv), files, workdir: recipe.workdir,
+      version: 1, runId, settings: settingsNow, grants, args: launcherArgs(recipe, exe, command.slice(1), settingsNow, grants, files, childEnv, profile), files, workdir: recipe.workdir, profile,
+      claim: [recipe.workdir, recipe.home, recipe.scratch],
       volumes: [recipe.workdir, recipe.home, recipe.scratch, ...recipe.readOnly.map((m) => m.host)], requireNtfs, ...(channel === undefined ? {} : { channel }),
     };
   };
@@ -155,7 +165,9 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
   };
 
   const checkHealth = async (): Promise<BackendHealth> => {
-    const notes = [`mode: ${NATIVE_MODE}`, "the service-account launch from Session 0 with nobody signed in, a non-administrator account, the file relay for the controller's channel inside a real container and Windows Home are not yet proven"];
+    const notes = [`mode: ${NATIVE_MODE}`, "the service-account launch from Session 0 with nobody signed in, a non-administrator account, the file relay for the controller's channel inside a real container and Windows Home are not yet proven",
+      `each run makes and deletes its own container profile (NimbleNewtRun-<hex>); the cost of that and of the check that the profile is gone are not measured on real Windows; ${maxConcurrentRuns === 1 ? "one confined run at a time" : `up to ${maxConcurrentRuns} confined runs at once (different workspaces only; UNMEASURED on real Windows)`}`];
+    if (options.ignoredProfileSetting !== undefined) notes.push("NIMBLENEWT_WIN_PROFILE is set but retired: each run uses its own profile, so the setting is ignored");
     const no = (reason: string): BackendHealth => ({ healthy: false, backend: NATIVE_BACKEND_NAME, reason, notes });
     if (host.platform !== "win32") return no(`the native Windows launcher exists only on Windows, not ${host.platform}`);
     if (!host.exists(launcher)) return no(`the launcher was not found at ${launcher}: the administrator's one-time install step has not been done`);
@@ -166,12 +178,15 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     }
     const swept = await sweepLeftoversLocked(host, settings);
     if (swept.problems.length > 0) return no(`a run left access-list entries behind and they could not be undone: ${swept.problems.join("; ")}`);
-    let info;
-    try { info = parseLauncherLine((await host.run(launcher, ["info", "--name", settings.profileName], { timeoutMs: 60_000 })).stdout); } catch (error) { return no(`the launcher could not be run: ${(error as Error).message}`); }
+    // The launcher's `info` makes a throw-away per-run profile exactly as a run does, asks the private-window-station question and deletes the profile; a profile that cannot be shown gone is a health failure.
+    const probe = await probeProfile(host, settings, newRunProfileName());
+    if (probe.error !== undefined) return no(`the launcher could not be run: ${probe.error}`);
+    const info = probe.line;
     // A launcher that cannot make the private window station each run needs says so itself (stage "grant", message "window objects: ..."): a service on a host that refuses it would otherwise fail
     // the confinement probe below with an exit code only.
     if (info !== undefined && !info.ok && info.windowStationOk === false) return no(`the launcher could not make a private window station and desktop for the container (${info.windowStationError ?? info.error ?? "no reason given"})`);
     if (info === undefined || !info.ok) return no(`the launcher could not make the container profile (${info?.error ?? "no answer"})`);
+    if (probe.problem !== undefined) return no(`the probe's container profile could not be deleted: ${probe.problem}`);
     if (info.windowStationOk === true) notes.push("each run gets a private window station and desktop made for it (the launcher made and closed one now)");
 
     // The real test: a node program is started inside the container and asked to do what it must not be able to.
@@ -233,7 +248,9 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
       network: "none (no network capability, no loopback exemption)",
       jobLimits: `kill-on-close, memory ${memoryMb} MB, ${activeProcesses} active processes`,
       standardHandles: "files (never the NUL device, never a pipe made inside the container)",
-      grants: "the container's SID only; task folders required, program folders soft (a refused one is recorded)",
+      grants: "the run's own container SID only; task folders required, program folders soft (a refused one is recorded)",
+      profile: "one container profile per run, NimbleNewtRun-<64 random bits as hex>, made by the launcher with a record written first, deleted and checked after the run; leftovers are swept from the backend's own records",
+      concurrency: maxConcurrentRuns === 1 ? "one confined run at a time (default)" : `up to ${maxConcurrentRuns} confined runs at once, never in the same or an overlapping workspace; unmeasured on real Windows`,
       channel: "streamed runs: the supervisor relays the controller's lines through two files (poll with offsets); the container's own file semantics are unmeasured",
       unproven: "service-account launch in Session 0, non-administrator account, the file relay inside a real container, Windows Home",
     }),
@@ -263,7 +280,8 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
 
 /**
  * The backend Windows uses by default (the join point the containment suite and the launcher call): the native one, configured from the environment the administrator's install step sets
- * (NIMBLENEWT_WIN_LAUNCHER, NIMBLENEWT_WIN_CONTROL_DIR, NIMBLENEWT_WIN_CONTAINER = lpac or appcontainer, NIMBLENEWT_WIN_PROFILE). Never throws: where it cannot be configured, or off Windows, it has no
+ * (NIMBLENEWT_WIN_LAUNCHER, NIMBLENEWT_WIN_CONTROL_DIR, NIMBLENEWT_WIN_CONTAINER = lpac or appcontainer; NIMBLENEWT_WIN_PROFILE is read and ignored: every run has its own profile; and the operator's own
+ * NIMBLENEWT_WIN_MAX_RUNS, the number of runs at once, default 1, not written by the installer). Never throws: where it cannot be configured, or off Windows, it has no
  * capacity and says why, so nothing runs unconfined instead. Windows Sandbox is no longer selected here.
  */
 export function windowsDefaultBackend(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): SandboxBackend {
@@ -273,11 +291,15 @@ export function windowsDefaultBackend(env: NodeJS.ProcessEnv = process.env, plat
     const programData = env["ProgramData"] ?? "C:\\ProgramData";
     const kind = env["NIMBLENEWT_WIN_CONTAINER"];
     if (kind !== undefined && kind !== "" && kind !== "lpac" && kind !== "appcontainer") return unavailableNative(`NIMBLENEWT_WIN_CONTAINER must be lpac or appcontainer, not ${kind}`);
+    const rawMax = env["NIMBLENEWT_WIN_MAX_RUNS"];
+    const maxRuns = rawMax === undefined || rawMax === "" ? undefined : /^[0-9]{1,3}$/.test(rawMax) ? Number(rawMax) : Number.NaN;
+    if (maxRuns !== undefined && !(maxRuns >= 1 && maxRuns <= MAX_CONCURRENT_RUNS_LIMIT)) return unavailableNative(`NIMBLENEWT_WIN_MAX_RUNS must be a whole number from 1 to ${MAX_CONCURRENT_RUNS_LIMIT}, not ${rawMax}`);
     return windowsNativeBackend({
       launcher: env["NIMBLENEWT_WIN_LAUNCHER"] || win32.join(programFiles, "NimbleNewt", "nn-launcher.exe"),
       controlDir: env["NIMBLENEWT_WIN_CONTROL_DIR"] || win32.join(programData, "NimbleNewt", "native"),
       ...(kind === "lpac" || kind === "appcontainer" ? { container: kind } : {}),
-      ...(env["NIMBLENEWT_WIN_PROFILE"] ? { profileName: env["NIMBLENEWT_WIN_PROFILE"] } : {}),
+      ...(env["NIMBLENEWT_WIN_PROFILE"] ? { ignoredProfileSetting: env["NIMBLENEWT_WIN_PROFILE"] } : {}),
+      ...(maxRuns === undefined ? {} : { maxConcurrentRuns: maxRuns }),
     });
   } catch (error) {
     return unavailableNative(`the native Windows backend could not be configured: ${(error as Error).message}`);

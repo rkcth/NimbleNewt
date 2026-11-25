@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { win32 } from "node:path";
 import { SandboxError } from "./errors.js";
 import type { NormalizedRecipe } from "./recipe.js";
@@ -16,7 +17,25 @@ export const NATIVE_MODE = "native process-level, weaker than Linux";
 export const NODE_PRESERVE_OPTIONS = "--preserve-symlinks --preserve-symlinks-main";
 /** The less privileged kind of container (LPAC) with only these two capabilities passed every case in the round-4 hosted run; no network capability is ever listed. */
 export const LPAC_CAPABILITIES: readonly string[] = Object.freeze(["registryRead", "lpacCom"]);
+/**
+ * RETIRED. The one shared container profile every run used to use. The installer still writes it to worker.env as NIMBLENEWT_WIN_PROFILE, and the backend reads and IGNORES it (every run now makes its own
+ * profile, `NimbleNewtRun-<hex>`; the product launcher refuses any other name). Kept only so the installer and this default stay pinned to each other until the installer drops the line.
+ */
 export const DEFAULT_PROFILE_NAME = "NimbleNewtAgent";
+/** The per-run profile (card A03b): `NimbleNewtRun-` and 16 lower-case hex digits (64 random bits), 30 characters, inside CreateAppContainerProfile's 64 and its pattern [-_. A-Za-z0-9]+. The launcher accepts only this form. */
+export const RUN_PROFILE_PREFIX = "NimbleNewtRun-";
+export const RUN_PROFILE_PATTERN = /^NimbleNewtRun-[0-9a-f]{16}$/;
+export const isRunProfileName = (name: string): boolean => RUN_PROFILE_PATTERN.test(name);
+/** A fresh per-run profile name from 64 random bits (`random` is injectable for tests). */
+export function newRunProfileName(random: (bytes: number) => Buffer = randomBytes): string {
+  const bits = random(8);
+  if (bits.length !== 8) throw new Error("newRunProfileName: 8 random bytes are needed");
+  return `${RUN_PROFILE_PREFIX}${bits.toString("hex")}`;
+}
+/** How many runs may be in progress at once by default: ONE. More is an explicit, unmeasured setting (see windows-isolation-plan.md 12.4). */
+export const DEFAULT_MAX_CONCURRENT_RUNS = 1;
+/** The most the setting accepts: a small number, so a typo cannot open dozens of containers. */
+export const MAX_CONCURRENT_RUNS_LIMIT = 4;
 /** The measured job limits (round 4: with all limits set, files and inherited handles worked). */
 export const DEFAULT_JOB_LIMITS = Object.freeze({ memoryMb: 4096, activeProcesses: 64 });
 export const MAX_RUN_MS = 24 * 60 * 60 * 1000;
@@ -29,7 +48,7 @@ export const EXIT_BUSY = 75;
 export const FAILURE_PREFIX = "nn-native-failure";
 
 /** Why a launch was stopped before or after the program ran. Every kind is a typed reason, never a silent fallback. */
-export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel";
+export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel" | "profile";
 
 export type ContainerKind = "lpac" | "appcontainer";
 export type GrantMode = "ro" | "rx" | "modify" | "modify-root" | "seal";
@@ -44,7 +63,8 @@ export interface NativeSettings {
   readonly programFolders: readonly string[];
   readonly systemRoot: string;
   readonly container: ContainerKind;
-  readonly profileName: string;
+  /** How many confined runs may be in progress at once (1: one at a time, the default). More than 1 is unmeasured on real Windows. */
+  readonly maxConcurrentRuns: number;
   readonly memoryMb: number;
   readonly activeProcesses: number;
   readonly maxRunMs: number;
@@ -195,14 +215,17 @@ export function nativeEnv(recipe: NormalizedRecipe, settings: NativeSettings, in
   return env;
 }
 
+/** The container profile of ONE run: its name (chosen by the backend) and the record file the launcher writes before it makes the profile (the proof that the launcher made it). */
+export interface RunProfile { readonly name: string; readonly record: string }
+
 export interface RunFiles { readonly input: string; readonly out: string; readonly err: string }
 
 /**
  * The launcher's argument list for one run (the experiment launcher's measured command line). Standard input is an empty (or the request's) FILE, standard output and error are FILES: never the NUL device
  * (the container cannot open it) and never a pipe made inside the container (every pipe start hung). The network has no entry at all: no capability and no loopback exemption.
  */
-export function launcherArgs(recipe: NormalizedRecipe, exe: string, programArgs: readonly string[], settings: NativeSettings, grants: readonly NativeGrant[], files: RunFiles, env: Readonly<Record<string, string>>): string[] {
-  const args = ["run", "--name", settings.profileName];
+export function launcherArgs(recipe: NormalizedRecipe, exe: string, programArgs: readonly string[], settings: NativeSettings, grants: readonly NativeGrant[], files: RunFiles, env: Readonly<Record<string, string>>, profile: RunProfile): string[] {
+  const args = ["run", "--name", profile.name, "--profile-record", profile.record];
   for (const g of grants) args.push(g.soft ? "--grant-soft" : "--grant", `${g.mode}:${g.path}`);
   if (settings.container === "lpac") { args.push("--aap-policy", "optout"); for (const c of LPAC_CAPABILITIES) args.push("--capability", c); } else args.push("--aap-policy", "none");
   args.push("--memory-mb", String(settings.memoryMb), "--active-processes", String(settings.activeProcesses), "--ui-limits", "--timeout-ms", String(settings.maxRunMs));
@@ -237,6 +260,11 @@ export interface LauncherLine {
   /** `info` and `check`: whether the launcher could make (and close) a private window station for the container; with `windowStationError` when not. */
   readonly windowStationOk?: boolean;
   readonly windowStationError?: string;
+  /** The container's SID (derived from the profile name; always present for run, info, check, revoke and delete-profile). */
+  readonly containerSid?: string;
+  /** run, info, delete-profile: whether the launcher deleted the per-run profile, and whether it then found it gone (see the launcher's README; the check after the delete is unmeasured). */
+  readonly profileDeleted?: boolean;
+  readonly profileGone?: boolean;
   readonly grants: readonly LauncherGrantLine[];
 }
 
@@ -265,12 +293,14 @@ export function parseLauncherLine(text: string): LauncherLine | undefined {
       ...(bool("allGrantsRevoked") === undefined ? {} : { allGrantsRevoked: bool("allGrantsRevoked")! }), ...(bool("clean") === undefined ? {} : { clean: bool("clean")! }),
       ...(str("windowStation") === undefined ? {} : { windowStation: str("windowStation")! }), ...(bool("windowStationOk") === undefined ? {} : { windowStationOk: bool("windowStationOk")! }),
       ...(str("windowStationError") === undefined ? {} : { windowStationError: str("windowStationError")! }),
+      ...(str("containerSid") === undefined ? {} : { containerSid: str("containerSid")! }),
+      ...(bool("profileDeleted") === undefined ? {} : { profileDeleted: bool("profileDeleted")! }), ...(bool("profileGone") === undefined ? {} : { profileGone: bool("profileGone")! }),
     };
   }
   return undefined;
 }
 
-const STAGE_KIND: Readonly<Record<string, NativeFailure>> = { container: "container", capability: "container", attributes: "container", job: "job", grant: "grant", stdio: "files", "create-process": "start" };
+const STAGE_KIND: Readonly<Record<string, NativeFailure>> = { container: "container", capability: "container", attributes: "container", job: "job", grant: "grant", stdio: "files", "create-process": "start", profile: "profile" };
 /** The typed reason for a launcher stage that failed; an unknown stage is a launcher failure, never ignored. */
 export const failureKindOf = (stage: string | undefined): NativeFailure => (stage === undefined ? "launcher" : STAGE_KIND[stage] ?? "launcher");
 
