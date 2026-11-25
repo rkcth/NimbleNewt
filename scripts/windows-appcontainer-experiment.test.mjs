@@ -84,7 +84,9 @@ test("the child environment is built only from named values and fixture folders"
   assert.equal(env.SystemRoot, "C:\\Windows");
   // round 4: the programs the probe starts get the same Node options as the probe itself (as the product's launcher would set them)
   assert.equal(env.NODE_OPTIONS, "--preserve-symlinks --preserve-symlinks-main");
-  for (const key of Object.keys(process.env)) if (!["PATH", "HOME", "TMPDIR", "TEMP", "TMP"].includes(key.toUpperCase())) assert.ok(!(key in env) || ["SystemRoot", "windir", "ComSpec", "PATHEXT", "NODE_OPTIONS"].includes(key) || key.startsWith("npm_config_") || key.startsWith("GIT_"), `leaked ${key}`);
+  // The profile variables are set on purpose, and only to the fixture's own folders; the machine's own values never reach the child.
+  for (const key of ["USERPROFILE", "APPDATA", "LOCALAPPDATA"]) assert.ok(String(env[key]).startsWith(plan.home), `${key} points outside the fixture: ${env[key]}`);
+  for (const key of Object.keys(process.env)) if (!["PATH", "HOME", "TMPDIR", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"].includes(key.toUpperCase())) assert.ok(!(key in env) || ["SystemRoot", "windir", "ComSpec", "PATHEXT", "NODE_OPTIONS"].includes(key) || key.startsWith("npm_config_") || key.startsWith("GIT_"), `leaked ${key}`);
 });
 
 // ------------------------------------------------------------------------------------------------ fixtures
@@ -132,7 +134,7 @@ test("the tarball is a valid gzip tar with both package files", () => {
     const tgz = makeTarball({ "package/a.txt": "hello", "package/b.txt": "x".repeat(700) });
     const f = join(dir, "t.tgz");
     writeFileSync(f, tgz);
-    const r = spawnSync("tar", ["-tzf", f], { encoding: "utf8" });
+    const r = spawnSync("tar", ["-tzf", "t.tgz"], { encoding: "utf8", cwd: dir }); // a relative name: GNU tar on Windows reads "C:" in an absolute one as a host name
     if (r.error) return; // no tar program here
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(r.stdout.trim().split("\n"), ["package/a.txt", "package/b.txt"]);
@@ -996,7 +998,8 @@ test("the real probe leaves the fixtures as it found them after the protected-na
     assert.ok(!existsSync(`${plan.protectedDir}-renamed`) && !existsSync(`${plan.workspace}-renamed`) && !existsSync(`${plan.protectedDir}-away`));
     // four modes (files with a stdin file, inherit, pipes, ignore): unconfined, every one works
     assert.ok(by["diag-spawn-modes"].attempts.length === 4 && by["diag-spawn-modes"].attempts.every((a) => a.outcome === "allowed"));
-    assert.equal(by["diag-nul-open"].attempts[0].outcome, "skipped"); // not Windows
+    if (process.platform !== "win32") assert.equal(by["diag-nul-open"].attempts[0].outcome, "skipped"); // not Windows
+    else assert.notEqual(by["diag-nul-open"].attempts[0].outcome, "skipped"); // on Windows the NUL device is really opened
     // the tool outputs went to files that were removed again
     assert.deepEqual(readdirSync(plan.scratch).filter((f) => f.startsWith("tool-")), []);
     // the tools take their standard input from an empty FILE and write to files, and are started from a worker thread (round 4: "ignore" makes libuv open the NUL device, which the container cannot)
