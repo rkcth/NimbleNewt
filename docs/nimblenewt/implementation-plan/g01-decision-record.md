@@ -1,5 +1,7 @@
 # G01: accepted scope and experiment prerequisites
 
+> Note 2026-11-25: D5's auto-login-plus-lock route for Windows is superseded. The Windows plan is the native AppContainer launcher (card A03b, decision 5 in `../windows-isolation-plan.md`, taken by delegation and overrulable); this record is kept as signed on 2026-10-22.
+
 Status: **recorded; reviewed by a separate AI session (not a human review); signed off by the owner on 2026-10-22 as it stands, with item 4 below covered by the provisional-defaults review the same day.** This consolidates decisions the owner has already made and states what is still open. It adds no new decisions: where the owner has not decided something, it says so and does not fill the gap. N00 (the implementation scope and budget gate) is **not** opened or closed by this record.
 
 Sources: [design-proposal.md](design-proposal.md) section 3 (D1-D7), [design-decisions.md](../design-decisions.md), [approval.md](approval.md), [windows-unattended-findings.md](windows-unattended-findings.md).

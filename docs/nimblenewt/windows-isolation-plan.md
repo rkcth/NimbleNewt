@@ -356,6 +356,8 @@ The Windows-box agent instructions already tell the agent to be read-only and as
 
 ## 12. Recommendation
 
+> Note 2026-11-25: superseded in part by decision 5 (section 14): Windows Sandbox is not kept as a documented Pro option; no card builds or extends it. The recommendation below is kept as written on 2026-11-24.
+
 **Choose combination 1, built in this order: B (native, Chromium-style) first, A (WSL2) later as an optional stronger tier.** Do not invest further in Windows Sandbox beyond keeping it as a documented Pro option.
 
 Reasons:
@@ -391,6 +393,8 @@ Run order matters; each one is small. "Changes" says what the agent touches. Non
 Report format: for each, "observed" or "not tested", exit codes, durations, the first 20 lines of any error, and the exact access-denied paths. Never print tokens or secrets.
 
 ## 13. What we would tell users
+
+> Note 2026-11-25: draft wording from 2026-11-24, not user documentation. The Home statement is not yet true: no run on a Home edition exists (the hosted runs were a Server edition), so user text may say it only after A03b's Home run. The Pro paragraph's mention of Windows Sandbox is superseded by decision 5.
 
 On **Windows Home**: "NimbleNewt isolates agents on Home with Windows's built-in app sandbox features (a restricted account and file permissions). It is weaker than the Linux isolation, because Windows has no separate private view of your files, so agents can only be kept out of places Windows permissions protect. The Windows Sandbox feature is not available on Home. If you want Linux-level isolation, turn on WSL 2 (needs virtualization and a restart). Until a confined start works on this PC, agents will not run unless you choose the clearly labelled no-isolation mode, which runs them with this account's full rights."
 

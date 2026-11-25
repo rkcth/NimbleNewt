@@ -1,5 +1,7 @@
 # G06 evidence: the Windows implementation on the supplied Windows host (TEMPLATE, not yet filled)
 
+> Note 2026-11-25: this template was written for the Windows Sandbox launcher. Card G06 now qualifies the native AppContainer launcher (A03b, see `../windows-isolation-plan.md`); the job and artifact names below are historical and will be replaced when A03b provides the native job.
+
 Card G06 asks for the crash, output, migration and containment cases to be repeated on the supplied Windows host, with its OS, runtime and filesystem documented, no Mac or Linux substitute, the production implementation invoked (not a test-only state machine), the implementation commit and reproducible evidence attached, and path cases covering Unicode, case-insensitive collisions, drive roots, paths over 260 characters and junctions.
 
 **Status: no evidence is recorded in this file yet.** Every value below that reads `TO FILL` must come from one own-hardware run on the owner's Windows runner (`nimblenewt-windows`). Do not fill it from a hosted runner, a Mac or Linux, or from memory. Nothing in this file is a sign-off.
