@@ -224,6 +224,7 @@ describe("A03b slice 2: the host's witnesses (fake host)", () => {
 const CONTAINER_SIM = String.raw`import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 const cfg = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const real = (p) => { try { return fs.realpathSync(p); } catch { try { return path.join(fs.realpathSync(path.dirname(p)), path.basename(p)); } catch { return path.resolve(p); } } };
@@ -231,7 +232,9 @@ const inside = (p, d) => p === d || p.startsWith(d + path.sep);
 const roots = [cfg.workspace, cfg.home, cfg.scratch].map(real);
 const git = real(cfg.protectedName.dir);
 const tools = real(path.dirname(process.argv[2]));
-const allowed = (p, write) => { const r = real(String(p)); if (inside(r, git)) return !write; if (roots.some((d) => inside(r, d))) return true; if (inside(r, tools)) return !write; return false; };
+// Node 24's module loader reads the entry file with a file: URL (a URL object or its text), Node 22 with a plain path; both mean the same file, and a Buffer is a path too.
+const asPath = (p) => { if (p instanceof URL) return fileURLToPath(p); if (Buffer.isBuffer(p)) return p.toString(); const t = String(p); return t.startsWith("file:") ? fileURLToPath(t) : t; };
+const allowed = (p, write) => { const r = real(asPath(p)); if (inside(r, git)) return !write; if (roots.some((d) => inside(r, d))) return true; if (inside(r, tools)) return !write; return false; };
 const deny = () => Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
 const guard = (name, writes, pick) => { const f = fs[name]; fs[name] = (...a) => { for (const p of pick(a)) if (!allowed(p, writes)) throw deny(); return f(...a); }; };
 guard("writeFileSync", true, (a) => [a[0]]);
@@ -424,6 +427,31 @@ describe("A03b slice 2: the node runner and the host's verdicts, with a simulate
       assert.equal(v["deny-write-host-path"], "fail");
       assert.equal(v["deny-credential-read"], "pass");
     } finally { await r.fixture.close(); }
+  });
+
+  test("the stand-in judges a file given as a file: URL object or a Buffer by the file it names, as the module loader of newer Node versions reads its entry file", async (t) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-a03b2u-")));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    for (const d of ["workspace", "home", "scratch", "git", "outside", "tools"]) mkdirSync(join(root, d));
+    writeFileSync(join(root, "workspace", "mine.txt"), "MINE"); writeFileSync(join(root, "outside", "theirs.txt"), "THEIRS");
+    const cfg = join(root, "tools", "cfg.json");
+    writeFileSync(cfg, JSON.stringify({ workspace: join(root, "workspace"), home: join(root, "home"), scratch: join(root, "scratch"), protectedName: { dir: join(root, "git") } }));
+    writeFileSync(join(root, "container-sim.mjs"), CONTAINER_SIM);
+    const probe = join(root, "tools", "probe.mjs");
+    writeFileSync(probe, `import fs from "node:fs"; import { pathToFileURL } from "node:url";
+const out = {};
+for (const [k, p] of [["own", ${JSON.stringify(join(root, "workspace", "mine.txt"))}], ["other", ${JSON.stringify(join(root, "outside", "theirs.txt"))}]]) {
+  for (const [form, v] of [["plain", p], ["url", pathToFileURL(p)], ["buffer", Buffer.from(p)]]) {
+    try { out[k + "-" + form] = fs.readFileSync(v, "utf8"); } catch (e) { out[k + "-" + form] = e.code; }
+  }
+}
+console.log(JSON.stringify(out));`);
+    const r = await run(process.execPath, ["--import", pathToFileURL(join(root, "container-sim.mjs")).href, probe, cfg]);
+    assert.equal(r.exitCode, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout.trim()), {
+      "own-plain": "MINE", "own-url": "MINE", "own-buffer": "MINE",
+      "other-plain": "EACCES", "other-url": "EACCES", "other-buffer": "EACCES",
+    });
   });
 
   test("the runner itself: a link that was not planted is skipped, a read counts only when the secret was seen, and it ends with the marker", async () => {
