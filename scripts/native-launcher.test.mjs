@@ -107,7 +107,7 @@ test("A03b worker task: Verify only READS the worker's scheduled task (S4U, leas
   const verify = fn("Invoke-Verify");
   assert.match(ps, /\$WorkerTaskName = 'NimbleNewtWorker'/);
   // the root folder only (-TaskName alone also returns same-named tasks of other folders, and an array would make every check below unreliable)
-  assert.ok(verify.includes("@(Get-ScheduledTask -TaskPath '\\' -TaskName $WorkerTaskName -ErrorAction SilentlyContinue | Where-Object { $null -ne $_ })"));
+  assert.ok(verify.includes("@(Invoke-Read { Get-ScheduledTask -TaskPath '\\' -TaskName $WorkerTaskName -ErrorAction SilentlyContinue } | Where-Object { $null -ne $_ })"));
   assert.ok(verify.includes("$task = $task[0]"));
   // enum or number: the text of LogonType (S4U = 2) and RunLevel (Limited = 0) is compared; the UserId is the bare name or THIS computer's, never any domain's
   for (const part of ['$logon = "$($tp.LogonType)"', '$level = "$($tp.RunLevel)"', "@('S4U', '2') -contains $logon", "@('Limited', '0') -contains $level", "MSFT_TaskBootTrigger", "--env-file=$EnvFile", "OrdinalIgnoreCase", "$tp.UserId -ieq $AccountName", '$tp.UserId -ieq "$env:COMPUTERNAME\\$AccountName"', "$acts.Count -eq 1"]) assert.ok(verify.includes(part), part);
@@ -294,7 +294,7 @@ test("second review: the account marker fits New-LocalUser, links are seen witho
 
 test("second review: the hosted installer step captures Verify's Write-Host lines, and the product build remaps the Windows form of its folders", () => {
   const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
-  assert.ok(/\$out = & \$f -Action Verify \*>&1 \| Out-String/.test(wf), "Write-Host is the information stream in 5.1: 2>&1 alone captures nothing and the step would fail on a correct Verify");
+  assert.ok(/& \$shellExe @shellArgs -File \$f @scriptArgs \*> \$outFile/.test(wf), "Write-Host is the information stream in 5.1: 2>&1 alone captures nothing and the step would fail on a correct Verify");
   assert.ok(/function Say\(\[string\] \$text\) \{ Write-Host \$text \}/.test(ps), "the script prints with Write-Host (the reason for *>&1)");
   assert.ok(/crate_w="\$\(cygpath -w "\$PWD"\)"/.test(wf) && /--remap-path-prefix=\$crate_w=\/nn-launcher --remap-path-prefix=\$cargo_w=\/cargo -C link-arg=\/Brepro/.test(wf));
   assert.ok(!/--remap-path-prefix=\$PWD=/.test(wf), "a Git Bash path (/d/a/...) never matches the Windows paths rustc sees");
@@ -363,6 +363,76 @@ test("the installer uses Windows PowerShell 5.1 syntax only (no PowerShell 7 ope
   assert.ok(ps.includes("[System.IO.Directory].GetMethod('CreateDirectory'"), "the .NET Framework call is used when it exists, the .NET one otherwise");
 });
 
+// ------------------------------------------------------------------------------------------------ -WhatIf safety (the owner's first real run on Windows PowerShell 5.1)
+
+// Under -WhatIf, Windows PowerShell 5.1's own file-hash cmdlet printed 'What if: ... Retrieve the value for property ProviderPath' and returned nothing, and '.Hash' failed under StrictMode.
+// Linux cannot run PowerShell, so these tests pin the shape of the repair: no such cmdlet, a .NET-only hash helper, and every read whose result is used goes through Invoke-Read.
+const READ_CMDLETS = /\b(Get-Acl|Get-LocalUser|Get-LocalGroupMember|Get-LocalGroup|Get-AuthenticodeSignature|Get-ScheduledTask|Get-Content|Get-ChildItem|Get-Process|Get-Item|Test-Path|ConvertFrom-Json|Resolve-Path|Get-FileHash)\b/g;
+
+test("the installer has no Get-FileHash anywhere (a PowerShell-written cmdlet honours -WhatIf inside its own steps on Windows PowerShell 5.1)", () => {
+  assert.ok(!/Get-FileHash/.test(ps), "not even in a comment: the next reader must not add it back");
+});
+
+test("Get-Sha256Hex uses .NET only, disposes in finally, and is what every hash comparison calls", () => {
+  const h = fn("Get-Sha256Hex");
+  assert.match(ps, /\nfunction Get-Sha256Hex\(\[string\] \$Path\) \{/, "the helper exists under exactly this name");
+  assert.match(ps, /\nfunction Invoke-Read\(\[scriptblock\] \$Block\) \{/, "Invoke-Read exists under exactly this name");
+  assert.ok(h.includes("[System.IO.File]::OpenRead(") && h.includes("[System.Security.Cryptography.SHA256]::Create()") && h.includes(".ComputeHash("));
+  const fin = h.slice(h.indexOf("finally {"));
+  assert.ok(h.includes("finally {") && fin.includes("$stream.Dispose()") && fin.includes("$sha.Dispose()"), "the stream and the hash object are disposed in finally");
+  assert.ok(h.includes("GetUnresolvedProviderPathFromPSPath"), "a relative path is resolved against the PowerShell location, with a .NET call");
+  assert.ok(h.includes("ToString('X2')"), "upper-case hex: the manifest keeps the form Get-FileHash gave");
+  // no cmdlet call of any kind in the helper except the one pipeline step that formats bytes
+  const calls = [...h.replace(/ForEach-Object/g, "").matchAll(/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/g)].map((m) => m[0]);
+  assert.deepEqual(calls, [], "the helper calls no cmdlet");
+  assert.ok((code.match(/Get-Sha256Hex \$/g) ?? []).length >= 4, "the source, the placed file, the re-hash and Verify all use it");
+  assert.match(code, /\$hash -ne \$ExpectedSha256\.ToUpperInvariant\(\)/, "the comparison stays case-insensitive (-ne) with both sides upper-case");
+});
+
+test("Invoke-Read switches -WhatIf off inside its own scope, and every read-only cmdlet whose result is used runs inside it", () => {
+  const r = fn("Invoke-Read");
+  assert.match(r, /\$WhatIfPreference = \$false;\s*& \$Block/);
+  const lines = code.split("\n");
+  let seen = 0;
+  for (const [n, line] of lines.entries()) {
+    if (line.startsWith("function Invoke-Read")) continue;
+    for (const m of line.matchAll(READ_CMDLETS)) {
+      seen++;
+      const open = line.lastIndexOf("Invoke-Read {", m.index);
+      assert.ok(open >= 0, `line ${n}: ${m[0]} is not inside Invoke-Read: ${line.trim().slice(0, 120)}`);
+      const between = line.slice(open + "Invoke-Read {".length, m.index);
+      const depth = 1 + (between.match(/\{/g) ?? []).length - (between.match(/\}/g) ?? []).length;
+      assert.ok(depth > 0, `line ${n}: ${m[0]} comes after its Invoke-Read block closed`);
+    }
+  }
+  assert.ok(seen >= 20, `the scan saw the read calls (${seen})`);
+});
+
+test("everything that changes the machine stays inside a ShouldProcess question (so -WhatIf still changes nothing)", () => {
+  const install = fn("Invoke-Install");
+  for (const call of ["New-LocalUser", "Add-LocalGroupMember", "[NnLsa]::Add", "Set-ProtectedAcl", "Copy-Item", "Set-Content"]) {
+    const at = install.indexOf(call);
+    assert.ok(at > 0, call);
+    assert.ok(install.lastIndexOf("$PSCmdlet.ShouldProcess(", at) > install.lastIndexOf("Get-Sha256Hex $LauncherPath"), `${call} follows a ShouldProcess question`);
+  }
+  for (const call of ["Remove-LocalUser", "[NnLsa]::RemoveAll", "Remove-TreeNoFollow", "Remove-Item"]) {
+    const un = fn("Invoke-Uninstall");
+    assert.ok(un.lastIndexOf("$PSCmdlet.ShouldProcess(", un.indexOf(call)) >= 0, call);
+  }
+});
+
+test("the dry-run lines the hosted step requires are lines the installer really prints", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const step = wf.slice(wf.indexOf("Installer script (parse"), wf.indexOf("G05 containment cases through the native backend"));
+  const list = /\$mustSay = @\((.*)\)\n/.exec(step);
+  assert.ok(list, "the list of required lines is in the step");
+  const lines = [...list[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+  assert.ok(lines.length >= 6);
+  // the grant line is built from $RightsGranted, whose first entry is SeBatchLogonRight (pinned by the account-rights test)
+  for (const l of lines) assert.ok(ps.includes(l.replace(/^What if: Performing the operation "/, "").replace("grant SeBatchLogonRight", "grant $($RightsGranted -join")), `the installer prints: ${l}`);
+  assert.ok(ps.includes("$RightsGranted = @('SeBatchLogonRight')"));
+});
+
 // ------------------------------------------------------------------------------------------------ the workflow steps
 
 test("the hand-started workflow builds the product launcher --locked after the experiment build and before the containment cases, and runs the installer without changing the machine", () => {
@@ -376,10 +446,38 @@ test("the hand-started workflow builds the product launcher --locked after the e
   assert.ok(!product.replace("cargo test --locked --features experiment", "").includes("--features"), "the product build enables no feature (only the argument tests of the experiment build name one)");
   assert.ok(product.includes("cargo test --locked 2>&1") && product.indexOf("cargo build --release --locked") < product.indexOf("cargo test --locked"), "the argument tests run after the release build, so the tested release file is the built one");
   const installer = hosted.slice(at("Installer script (parse"), at("G05 containment cases through the native backend"));
-  for (const part of ["Parser]::ParseFile", "-WhatIf", "-Action Verify", "-AllowUnsigned", "if (Get-LocalUser -Name nn-whatif-check", "Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')"]) assert.ok(installer.includes(part), part);
-  assert.ok(!/-Action (Install|Uninstall)(?![^\n]*-WhatIf)/.test(installer.replace(/-Action Verify/g, "")), "Install is only ever run with -WhatIf there");
+  for (const part of ["Parser]::ParseFile", "'-WhatIf'", "'Verify'", "'-AllowUnsigned'", "if (Get-LocalUser -Name $account", "Test-Path (Join-Path $env:ProgramFiles 'NimbleNewt')", "Test-Path (Join-Path $env:ProgramData 'NimbleNewt')"]) assert.ok(installer.includes(part), part);
+  assert.ok(!/'Uninstall'/.test(installer), "the hosted step never runs Uninstall");
+  assert.match(installer, /\$common = @\('-Action', 'Install', '-ExpectedSha256', \$h, '-AllowUnsigned', '-WhatIf'\)/, "Install is only ever run with -WhatIf there");
   // the containment cases use the product binary, not the experiment's
   assert.match(hosted.slice(at("G05 containment cases through the native backend")), /NIMBLENEWT_WIN_LAUNCHER: [^\n]*native\\nn-launcher\\target\\release\\nn-launcher\.exe/);
+});
+
+test("the hosted installer step runs the owner's command under Windows PowerShell 5.1 AND PowerShell 7 with the real launcher and its hash, and fails on errors or changes", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const from = hosted.indexOf("Installer script (parse");
+  const step = hosted.slice(from, hosted.indexOf("G05 containment cases through the native backend"));
+  const text = step.replace(/^\s*#.*$/gm, "");
+  assert.ok(hosted.indexOf("id: build_product") < from, "after the product build, so the exe exists");
+  assert.match(step, /shell: powershell\n/, "the step itself is Windows PowerShell 5.1");
+  assert.match(step, /\n\s+if: always\(\)\n/);
+  assert.ok(!/continue-on-error/.test(step), "a gate for this check: the step is allowed to fail the job");
+  // the same file the release record names, its hash, the owner's relative path
+  assert.ok(text.includes("native\\nn-launcher\\target\\release\\nn-launcher.exe") && text.includes("ComputeHash") && text.includes("ReadAllBytes"));
+  assert.ok(text.includes("'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass')") && text.includes("'pwsh' @('-NoProfile', '-ExecutionPolicy', 'Bypass')"), "both shells, started as a program with -ExecutionPolicy Bypass");
+  assert.ok(text.includes("-File $f @scriptArgs"), "with -File, as the owner ran it");
+  assert.ok(text.includes("'-LauncherPath', '.\\nn-launcher.exe'") && text.includes("'-LauncherPath', (Join-Path $tmp 'nn-launcher.exe')"), "the real -LauncherPath: relative under 5.1, full under pwsh");
+  assert.ok(text.includes("'-ExpectedSha256', $h") && text.includes("'-AllowUnsigned', '-WhatIf'"));
+  assert.ok(text.includes("Assert-Dry $r51") && text.includes("Assert-Dry $r7"), "both results are checked");
+  // what is checked: exit code, required lines, forbidden text, nothing made
+  for (const part of ["$r.Code -ne 0", "$mustSay", "$mustNot", "PropertyNotFound", "Retrieve the value for property", "Assert-Untouched $label", "Assert-Untouched 'before the dry run'", "Assert-Untouched 'after Verify'", "$account = 'nimblenewt-worker'"]) assert.ok(text.includes(part), part);
+  assert.ok(text.includes("(@('-Action', 'Verify') + $extra)") && text.includes("foreach ($extra in @(@(), @('-WhatIf')))"), "Verify runs under 5.1 plainly and with -WhatIf");
+  assert.ok(text.includes("-Action', 'Install'") && !/'Uninstall'/.test(text));
+  // read-only checks of what exists afterwards (no cmdlet that changes anything)
+  assert.ok(!/\b(New|Set|Remove|Add|Register|Start|Stop)-[A-Z]\w+/.test(text.replace(/New-Item -ItemType Directory -Path \$tmp -Force|Set-Location|Push-Location|Pop-Location/g, "")), "the step changes nothing but its own temporary folder");
+  // action pins and permissions are untouched by this step
+  assert.ok(!/uses:/.test(step));
 });
 
 test("verify started through a link still checks the file (a link once made the command a silent no-op that ended 0)", (t) => {

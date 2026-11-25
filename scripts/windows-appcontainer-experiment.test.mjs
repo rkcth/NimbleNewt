@@ -2883,3 +2883,16 @@ test("the reproducibility step builds the product launcher a second time from an
   assert.ok(rel.includes("Is the build reproducible?") && /Reproducibility is NOT claimed beyond the one measurement/.test(rel), "RELEASE.md states what is measured and that nothing more is claimed");
   assert.ok(rel.includes("nn-launcher.signed.record.json") && rel.includes("unsigned"), "RELEASE.md says how the signed file and the unsigned hash relate");
 });
+
+test("A03b what-if repair: the hosted installer step runs both shells with the real launcher path and the installer has no Get-FileHash", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const at = hosted.indexOf("id: installer_whatif");
+  assert.ok(at > hosted.indexOf("id: build_product") && at < hosted.indexOf("id: stage"), "after the product build, before staging");
+  const step = hosted.slice(at, hosted.indexOf("G05 containment cases through the native backend"));
+  for (const part of ["'powershell.exe'", "'pwsh'", "-File $f @scriptArgs", "'-LauncherPath'", "'-ExpectedSha256', $h", "'-AllowUnsigned', '-WhatIf'", "PropertyNotFound", "Assert-Untouched"]) assert.ok(step.includes(part), part);
+  assert.ok(!/continue-on-error/.test(step), "the check is a gate");
+  const ps = readFileSync(join(root, "native", "install", "Install-NimbleNewtLauncher.ps1"), "utf8");
+  assert.ok(!ps.includes("Get-FileHash") && ps.includes("function Get-Sha256Hex") && ps.includes("function Invoke-Read"));
+  assert.ok(!/(^|\n)\s+permissions:/.test(step) && !/uses:/.test(step), "pins and permissions are not touched by this step");
+});
