@@ -1,6 +1,6 @@
 # Installing the native Windows launcher (one administrator step)
 
-Status: Install has run cleanly once on the owner's PC (Windows PowerShell 5.1, elevated). Everything else (the rest of Verify, a second Install, ALL of Uninstall) is written and text-checked on Linux, and is proven by the hosted workflow on a disposable virtual machine ONLY once that run has been made and has passed: see "What has run where" below. Run `-WhatIf` first and read what it prints.
+Status: Install has run cleanly once on the owner's PC (Windows PowerShell 5.1, elevated). Everything else (the rest of Verify, a second Install, ALL of Uninstall) is NOT RUN anywhere yet: written and text-checked on Linux, and is proven by the hosted workflow on a disposable virtual machine ONLY once that run has been made and has passed: see "What has run where" below. Run `-WhatIf` first and read what it prints.
 
 Why an administrator is needed at all: the launcher itself needs none to make a container (hosted runs did it as an administrator, but creating a profile and granting folders to its SID are ordinary calls). What needs one, once, is what makes the setup safe to run unattended: a separate non-administrator account, a launcher no one but an administrator can replace, and a control folder only that account can use.
 
