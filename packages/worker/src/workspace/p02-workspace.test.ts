@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -174,6 +174,22 @@ test("a submit's view and its staging wait for the checkout's turn: while anothe
     assert.deepEqual(await view, { base, head: base, mine: ["src/a.ts"], landed: [] });
     assert.deepEqual((await staging).files, ["src/a.ts"]);
     assert.deepEqual(settled, ["view", "stage"], "in the order they were asked");
+  } finally { await w.done(); }
+});
+
+test("a submit's staging: a link is refused as a link before any content is read, and two binary changes of the same size never share a patch ID (card H12n, product launcher, first review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await symlink("/etc/hostname", join(made.checkout, "src", "outside"));
+    await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string }) => e.code === "link_refused" && /"src\/outside" is a link or a submodule entry/.test(e.message), "the listing's mode refuses the link by name");
+    await rm(join(made.checkout, "src", "outside"));
+    const ids: string[] = [];
+    for (const fill of [1, 2]) {
+      await writeFile(join(made.checkout, "src", "blob.bin"), Buffer.concat([Buffer.from([0, 0xff, 0]), Buffer.alloc(4096, fill)]));
+      ids.push((await w.ws.stageWork(scope)).patchId);
+    }
+    assert.notEqual(ids[0], ids[1], "the binary content is part of the patch ID (--binary), not only a 'Binary files differ' line");
   } finally { await w.done(); }
 });
 
