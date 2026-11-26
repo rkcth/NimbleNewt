@@ -50,6 +50,16 @@ test("no variable is assigned under the name of an automatic variable (a PowerSh
   for (const text of [outer.replace(/@'\n[\s\S]*?\n'@/g, ""), stripComments(inner)]) assert.ok(!/\$(profile|switch|args|input|matches|error|host|event|pid|home|foreach|this|true|false|null)\s*=[^=]/i.test(text));
 });
 
+test("no '$name:' followed by a non-name character in any PowerShell text here (PowerShell reads it as a drive-qualified variable and the WHOLE script fails to parse)", () => {
+  // e.g. "(stage $stage: $err)" is a parse error ("Variable reference is not valid. ':' was not followed by a valid variable name character"); write $($stage): instead
+  const bad = /\$[A-Za-z_][A-Za-z0-9_]*:(?![A-Za-z0-9_{])/;
+  for (const [name, text] of [["probe", ps], ["installer", installer]]) {
+    const lines = text.split("\n").filter((l) => !/^\s*#/.test(l) && bad.test(l.replace(/'(?:[^']|'')*'/g, "''")));
+    assert.deepEqual(lines, [], name);
+  }
+  assert.ok(bad.test('"(stage $stage: $err)"') && !bad.test('"(stage $($stage): $err)"') && !bad.test("$env:COMPUTERNAME") && !bad.test("$script:Exit"));
+});
+
 // ------------------------------------------------------------------------------------------------ no password, no work-around
 
 test("no password is asked for, stored or passed: no password parameter, no secure string, no credential, no schtasks", () => {
@@ -70,37 +80,73 @@ test("a refused registration is reported as outcome (c), with the message, and n
   assert.ok(!/Register-ScheduledTask[^\n]*\|\s*Out-Null[^\n]*catch[^\n]*Register-ScheduledTask/.test(outer));
 });
 
-test("exactly one task is touched, by its exact name: no wildcard, no other scheduled-task cmdlet", () => {
+test("exactly one task is touched, by its exact name: no wildcard, no other scheduled-task cmdlet, and the COM calls name the same constant", () => {
   const verbs = new Set([...outer.matchAll(/\b([A-Z][a-z]+)-ScheduledTask(Info)?\b/g)].map((m) => m[0]));
-  assert.deepEqual([...verbs].sort(), ["Get-ScheduledTask", "Get-ScheduledTaskInfo", "Register-ScheduledTask", "Start-ScheduledTask", "Stop-ScheduledTask", "Unregister-ScheduledTask"]);
+  assert.deepEqual([...verbs].sort(), ["Get-ScheduledTask", "Register-ScheduledTask", "Start-ScheduledTask"]);
+  for (const m of outer.matchAll(/\$taskFolder\.(GetTask|DeleteTask|RegisterTask\w*|GetTasks|DeleteFolder)\(([^)]*)\)/g)) {
+    assert.ok(["GetTask", "DeleteTask"].includes(m[1]), `only GetTask and DeleteTask on the folder: ${m[0]}`);
+    assert.ok(m[2] === "$TaskName" || m[2] === "$TaskName, 0", `by the constant: ${m[0]}`);
+  }
+  assert.equal((outer.match(/\$taskFolder\.DeleteTask\(/g) ?? []).length, 1, "one removal call");
+  assert.match(outer, /\$taskFolder = \$service\.GetFolder\('\\'\)/, "the root folder, where the task is registered");
   for (const line of outer.split("\n")) {
     if (!/-ScheduledTask\b|-ScheduledTaskInfo\b/.test(line)) continue;
     assert.ok(line.includes("-TaskName $TaskName"), `names the task by the constant: ${line.trim().slice(0, 100)}`);
     assert.ok(!/[*?]/.test(line.replace(/'(?:[^']|'')*'/g, "''")), `no wildcard: ${line.trim().slice(0, 100)}`);
   }
-  assert.equal((outer.match(/Unregister-ScheduledTask/g) ?? []).length, 1);
-  assert.match(outer, /Unregister-ScheduledTask -TaskName \$TaskName -TaskPath '\\' -Confirm:\$false/);
   assert.ok(!/\$TaskName\s*=[^=]/.test(outer.replace(/\$TaskName = 'NimbleNewtProbe'/, "")), "the name is assigned once, as a constant");
 });
 
-test("the task is removed in a finally block, and only when this run registered it; an existing task of that name is refused, not touched", () => {
-  const un = outer.indexOf("Unregister-ScheduledTask");
-  const fin = outer.lastIndexOf("} finally {", un);
-  assert.ok(fin > 0, "a finally block precedes it");
+// the clean-up block (the finally of the try that does the work)
+const finallyBody = () => {
   const stopped = outer.indexOf("Stopped by an error");
-  assert.ok(stopped > 0 && fin > stopped && fin - stopped < 300, "it is the finally of the try that does the work (right after its catch), not another one");
-  const between = outer.slice(fin + 1, un);
-  assert.ok((between.match(/\{/g) ?? []).length - (between.match(/\}/g) ?? []).length > 0, "the call is inside that finally block");
-  assert.ok(outer.slice(fin, un).includes("if ($registered)"), "only a task this run registered");
-  const reg = outer.indexOf("Register-ScheduledTask");
-  assert.ok(outer.indexOf("$registered = $true", reg) > reg && outer.indexOf("$registered = $true", reg) < reg + 200, "the flag is set only after the registration call succeeded");
+  const fin = outer.indexOf("} finally {", stopped);
+  assert.ok(stopped > 0 && fin > stopped && fin - stopped < 300, "the finally right after the work's catch");
+  let depth = 1; let i = fin + "} finally {".length;
+  for (; i < outer.length && depth > 0; i++) { if (outer[i] === "{") depth++; else if (outer[i] === "}") depth--; }
+  return outer.slice(fin + "} finally {".length, i - 1);
+};
+
+test("the task is removed in a finally block, only when this run tried to register it and the task's text names this run; an existing task of that name is refused, not touched", () => {
+  const f = finallyBody();
+  assert.ok(f.includes("$taskFolder.DeleteTask($TaskName, 0)"));
+  assert.match(f, /if \(\$registerAttempted -and \$null -ne \$taskFolder\)/, "only a task this run tried to register");
+  assert.match(f, /elseif \(-not \(\[string\]\$own\.Xml\)\.Contains\(\$runName\)\)[^\n]*\n[^\n]*left alone/, "a task whose text does not carry this run's random name is left alone");
+  assert.ok(f.indexOf(".Contains($runName)") < f.indexOf("DeleteTask"), "the ownership check comes before the removal");
+  assert.match(f, /if \(\[int\]\$own\.State -eq 4\) \{ \$own\.Stop\(0\) \}/, "a running task is stopped first");
+  assert.match(f, /\$unregistered = \(\$null -eq \$own\) -and \(\$lookup -eq ''\)/, "removed means: read back and not found");
+  assert.match(f, /GetBaseException\(\)\.HResult -ne \$HrFileNotFound/, "only 'not found' counts as gone; another failure is reported");
+  assert.match(ps, /\$HrFileNotFound = -2147024894/);
+  assert.equal(0x80070002 - 2 ** 32, -2147024894);
+  // the flag is set BEFORE the registration call (a stop right after the call still removes the task)
+  const reg = outer.indexOf("Register-ScheduledTask -TaskName");
+  const flag = outer.indexOf("$registerAttempted = $true");
+  assert.ok(flag > 0 && flag < reg && reg - flag < 200, "registerAttempted is set just before Register-ScheduledTask");
   const ctx = fnText("Get-Context");
   assert.match(ctx, /Get-ScheduledTask -TaskPath '\\' -TaskName \$TaskName[\s\S]*A task named \$TaskName already exists\. It is not touched/);
-  // the files: only by exact name, after the task; the result file is kept
-  const fin2 = outer.slice(fin);
-  for (const v of ["$innerPath", "$tmpPath", "$recordPath", "$profilesPath"]) assert.ok(fin2.includes(v), v);
+  // the files: only by exact name; the result file is kept
+  for (const v of ["$innerPath", "$tmpPath", "$recordPath", "$profilesPath"]) assert.ok(f.includes(v), v);
   assert.ok(!/Remove-Item|-Recurse|Directory\]::Delete\([^)]*\$true/.test(outer), "no recursive or wildcard removal");
-  assert.ok(!fin2.includes("Remove-OwnFile $resultPath"), "probe-result.json is kept");
+  assert.ok(!f.includes("$resultPath"), "probe-result.json is kept");
+  assert.match(f, /if \(-not \$profilesExisted\) \{/, "the profiles folder (the backend's too) is removed only if this run made it");
+  assert.ok(outer.indexOf("$profilesExisted = Test-Present $profilesPath") < outer.indexOf("if ($PSCmdlet.ShouldProcess("), "read before anything is made");
+  assert.match(f, /if \(-not \$finished\) \{ \[Console\]::WriteLine\(/, "a stopped run still says what the clean-up did, without the pipeline");
+});
+
+test("the clean-up survives Ctrl+C: no cmdlet, no call of the script's own functions and no pipeline inside the finally block (PowerShell stops the pipeline; output there can end the block)", () => {
+  const f = finallyBody();
+  const code = f.split("\n").map((l) => l.replace(/^\s*#.*$/, "")).join("\n").replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"`]|`.)*"/g, '""');
+  assert.ok(!/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/.test(code), `no cmdlet: ${code.match(/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/)?.[0]}`);
+  const own = [...ps.matchAll(/^function ([A-Za-z-]+)/gm)].map((m) => m[1]);
+  assert.ok(own.length > 10);
+  for (const name of own) assert.ok(!new RegExp(`(^|[\\s(;{])${name}\\b`).test(code), `no call of the script's own function ${name}`);
+  assert.ok(!/\|(?!\|)/.test(code.replace(/-join/g, "")), "no pipeline");
+  assert.ok(!/@\(/.test(code), "no array subexpression (its contents run as a pipeline)");
+  // and every step has its own try, so one failure does not skip the next
+  for (const step of ["$own.Stop(0)", "$taskFolder.DeleteTask(", "[System.IO.File]::Delete($f)", "[System.IO.File]::Delete($recordPath)", "[System.IO.Directory]::Delete($profilesPath, $false)"]) {
+    const at = code.indexOf(step); assert.ok(at > 0, step);
+    assert.ok(code.lastIndexOf("try {", at) > code.lastIndexOf("}", at - 1) - 40 && at - code.lastIndexOf("try {", at) < 60, `${step} is inside its own try`);
+  }
 });
 
 test("every change to the machine is after the ShouldProcess question, so -WhatIf and a declined question change nothing", () => {
@@ -123,7 +169,17 @@ test("it refuses unless elevated, the manifest is the installer's, the account i
   for (const part of ["Test-Admin", "The manifest is not one the installer wrote", "does not have the hash the manifest recorded", "does not exist", "$AccountMarker", "-ne $ManifestSchema"]) assert.ok(ctx.includes(part), part);
   assert.match(ps, /\$SidAdmins = 'S-1-5-32-544'/);
   assert.match(ctx, /Invoke-Read \{ Get-LocalGroupMember -SID \$SidAdmins \}[\s\S]*is a member of Administrators: this probe is only meaningful for a standard account/);
-  assert.match(ctx, /catch \{ throw "Could not read the Administrators group/, "an unreadable group fails closed");
+  // the orphaned-SID fault of Get-LocalGroupMember on 5.1: a second, independent reading of the account's own groups; either naming Administrators refuses; both unreadable refuses
+  assert.match(ctx, /\$sids = Get-AccountGroupSids \$account[\s\S]*if \(\$sids -contains \$SidAdmins\) \{ throw "The account '\$account' is a member of Administrators/);
+  assert.match(ctx, /if \(\$readings -eq 0\) \{ throw "Could not read the Administrators group or the account's groups/, "unreadable fails closed");
+  assert.equal((ctx.match(/\$readings\+\+/g) ?? []).length, 2);
+  for (const c of ctx.match(/\} catch \{ if \(\$_\.Exception\.Message -like '\*is a member of Administrators\*'\) \{ throw \}/g) ?? []) assert.ok(c);
+  assert.equal((ctx.match(/\} catch \{ if \(\$_\.Exception\.Message -like '\*is a member of Administrators\*'\) \{ throw \}/g) ?? []).length, 2, "a membership found is re-thrown, never swallowed as an unreadable group");
+  assert.ok(ctx.indexOf("$readings++", ctx.indexOf("Get-LocalGroupMember")) < ctx.indexOf("foreach ($a in $admins)"), "a reading counts only after the call returned");
+  const g = fnText("Get-AccountGroupSids");
+  assert.match(g, /\[ADSI\]\('WinNT:\/\/' \+ \$env:COMPUTERNAME \+ '\/' \+ \$Account \+ ',user'\)/);
+  assert.match(g, /psbase\.Invoke\('Groups'\)[\s\S]*InvokeMember\('objectSid', 'GetProperty'[\s\S]*SecurityIdentifier\]::new\(\$bytes, 0\)\.Value/);
+  assert.match(ctx, /if \(-not \$testMode -and \$PSVersionTable\.PSEdition -ne 'Desktop'\) \{ throw 'Run this probe from Windows PowerShell 5\.1/, "the .NET Framework file call needs Windows PowerShell");
   assert.match(ctx, /Test-Reparse \$ManifestPath[\s\S]*Test-Reparse \$control[\s\S]*Test-Reparse \$launcher/, "links are refused");
   assert.ok(ctx.indexOf("is a member of Administrators") < ctx.indexOf("A task named"), "the account checks come before the task check");
   assert.match(outer, /try \{ \$ctx = Get-Context \} catch \{[^\n]*REFUSED:[^\n]*exit 2 \}/, "a refusal says nothing was changed and exits 2");
@@ -258,7 +314,7 @@ test("Invoke-Read switches -WhatIf off inside its own scope, and every read cmdl
       assert.ok(1 + (between.match(/\{/g) ?? []).length - (between.match(/\}/g) ?? []).length > 0, `line ${n}: ${m[0]} comes after its Invoke-Read block closed`);
     }
   }
-  assert.ok(seen >= 8, `the scan saw the read calls (${seen})`);
+  assert.ok(seen >= 6, `the scan saw the read calls (${seen})`);
   // the inner program runs as the account, never under -WhatIf, and calls none of them
   // (ConvertFrom-Json there only turns the launcher's own output line into an object; it reads no machine setting)
   assert.equal([...stripComments(inner).matchAll(READ_CMDLETS)].filter((m) => m[0] !== "ConvertFrom-Json").length, 0, "the inner program uses no read cmdlet (.NET only)");
@@ -271,10 +327,20 @@ test("the wait is bounded and conditional (task state and result file, a deadlin
   assert.match(outer, /if \(\[DateTime\]::UtcNow -gt \$deadline\)/);
   assert.match(outer, /Get-Prop \$result 'complete'\) -eq \$true\) \{ break \}/);
   assert.match(outer, /\(\$taskState -eq 'Ready'\) -and \(\$last -ne 267011\) -and \(\$last -ne 267009\)/);
+  // the state is the COM interface's number, named by the documented TASK_STATE values
+  assert.match(ps, /\$TaskStateNames = @\{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' \}/);
+  assert.match(outer, /\$taskState = \[string\]\$TaskStateNames\[\[int\]\$own\.State\]\n\s*\$last = \[int64\]\$own\.LastTaskResult/);
+  assert.match(outer, /\$result = Read-Result \$resultPath \$runName/);
   const sleeps = [...outer.matchAll(/Start-Sleep[^\n]*/g)].map((m) => m[0]);
   assert.equal(sleeps.length, 1);
   assert.match(sleeps[0], /-Milliseconds 500$/, "a short poll inside the bounded loop");
-  assert.match(ps, /\[ValidateRange\(60, 900\)\] \[int\] \$TimeoutSeconds = 240/);
+  assert.match(ps, /\[ValidateRange\(480, 900\)\] \[int\] \$TimeoutSeconds = 540/);
+  // the shortest allowed wait outlasts the task's own worst case (each launcher and whoami call bounded, plus 5 s for each pipe and kill), and the task's limit outlasts the default
+  const bounds = [...inner.matchAll(/Invoke-Native [^\n]*? (\d{4,6})\n/g)].map((m) => Number(m[1]));
+  assert.deepEqual(bounds.sort((x, y) => x - y), [30000, 60000, 60000, 120000], "whoami (in a loop of 3), check, delete-profile, info");
+  const worst = (3 * 30000 + 60000 + 60000 + 120000) / 1000 + 6 * 15;
+  assert.ok(480 >= worst, `480 s covers the inner worst case ${worst} s`);
+  assert.ok(600 > 540, "PT10M outlasts the default wait");
   assert.ok(outer.indexOf("$hashBefore -ne $innerSha") > 0 && outer.indexOf("$hashBefore -ne $innerSha") < outer.indexOf("Start-ScheduledTask"), "the program is re-hashed before the task starts");
 });
 
@@ -286,13 +352,29 @@ test("what the account wrote is read as data: size-bounded, never through a link
   assert.match(fnText("Clean"), /\[regex\]::Replace\(\[string\]\$Value, '\[\^\\x20-\\x7E\]', '\?'\)/);
   assert.match(fnText("Clean"), /\$Max\)/);
   // the program is created new (never over a file or a link that is already there)
-  assert.match(outer, /\[System\.IO\.FileMode\]::CreateNew, \[System\.IO\.FileAccess\]::Write, \[System\.IO\.FileShare\]::None/);
+  assert.match(outer, /\[System\.IO\.FileStream\]::new\(\$innerPath, \[System\.IO\.FileMode\]::CreateNew, \[System\.Security\.AccessControl\.FileSystemRights\]::Write, \[System\.IO\.FileShare\]::None, 4096, \[System\.IO\.FileOptions\]::None, \$security\)/);
+  // only this run's result counts (schema and the random run name), and the size is read inside the try (the file can change while it is read)
+  assert.match(r, /\[string\]\(Get-Prop \$r 'runName'\) -cne \$RunName/);
+  assert.ok(r.indexOf("try {") < r.indexOf("Length -gt $MaxResultBytes"));
+  assert.match(r, /Get-Content -LiteralPath \$Path -Raw -Encoding Ascii/, "read with the encoding it was written in");
+  assert.match(inner, /WriteAllText\(\$Tmp, \(\$Result \| ConvertTo-Json -Depth 8\), \[System\.Text\.Encoding\]::ASCII\)/);
 });
 
 test("the verdict covers every row of plan 12.3's outcome table and the invalid case", () => {
   const v = fnText("Get-Verdict");
-  for (const label of ["(c) registration refused", "(d) task did not start", "(d) task never ran or ended before writing", "invalid probe", "(e) launcher did not answer", "OK: profile and private window station work", "(b) private window station refused", "(a) profile creation failed", "(e) info failed elsewhere"]) assert.ok(v.includes(label), label);
-  assert.match(v, /Risk 6 does not bite for an S4U non-administrator/);
+  for (const label of ["(c) registration refused", "task text refused (a fault in this script)", "(d) task did not start", "(d) task never ran or ended before writing", "invalid probe", "(e) launcher did not answer", "OK: profile and private window station work", "(b) private window station refused", "(a) profile creation failed", "(e) info failed elsewhere"]) assert.ok(v.includes(label), label);
+  assert.match(v, /on this machine and build only/);
+  assert.match(v, /Not shown: the ten G05 cases/, "OK does not claim the ten cases");
+  assert.ok(!/Risk 6 does not bite/.test(v), "no general claim from one run");
+  // a task text Windows cannot read is told apart from plan 12.3 (c)
+  assert.ok(v.indexOf("task text refused") < v.indexOf("(c) registration refused"));
+  // a run the script stopped itself (a refused access list, a changed program) is not blamed on Windows as (d)
+  assert.ok(v.indexOf("(c) registration refused") < v.indexOf("no verdict: the script stopped before the task started") && v.indexOf("no verdict:") < v.indexOf("(d) task did not start"));
+  assert.match(v, /if \(-not \$Started -and \$StartError -eq ''\)/);
+  assert.match(ps, /\$verdict = Get-Verdict \$result \$registerError \$startError \$last \$ctx\.AccountSid \$started\n/);
+  assert.match(v, /\$RegisterError -match '\\\(\\d\+,\\d\+\\\)'/);
+  // what makes the run invalid
+  for (const part of ["administratorRole", "isSystem", "not the account $AccountSid", "administratorsListed", "integrityRid') -ge 12288", "'elevated') -eq $true"]) assert.ok(v.includes(part), part);
   assert.match(v, /stage -eq 'grant' -and \$err -like 'window objects:\*'/);
   assert.match(v, /\$stage -eq 'container' -or \$stage -eq 'profile'/);
   assert.ok(v.indexOf("(c) registration") < v.indexOf("(d) task did not start") && v.indexOf("(d) task did not start") < v.indexOf("(d) task never ran") && v.indexOf("invalid probe") < v.indexOf("OK:"), "registration first, then no result, then the token, then the launcher");
@@ -301,6 +383,36 @@ test("the verdict covers every row of plan 12.3's outcome table and the invalid 
   // the codes it names are the documented ones
   for (const code of ["0x00041303", "0x00041301", "0x80070569", "0x8007052E", "0x80070005"]) assert.ok(fnText("Get-ResultMeaning").includes(code), code);
   assert.match(fnText("Format-Hresult"), /4294967296/, "a negative value is shown as the unsigned code");
+});
+
+test("the program the task runs is created with its own protected access list (the account reads and runs it, never changes, replaces or deletes it), read back before the task is registered", () => {
+  assert.match(outer, /SetSecurityDescriptorSddlForm\('D:P\(A;;FA;;;SY\)\(A;;FA;;;BA\)\(A;;0x1200a9;;;' \+ \$ctx\.AccountSid \+ '\)'\)/, "protected; SYSTEM and Administrators full; the account FILE_GENERIC_READ and FILE_GENERIC_EXECUTE");
+  assert.equal(0x120089 | 0x1200a0, 0x1200a9, "FILE_GENERIC_READ | FILE_GENERIC_EXECUTE");
+  assert.equal(0x1200a9 & 0x500d0156, 0, "and none of the rights that change the file");
+  assert.match(outer, /if \(\$ctx\.AccountSid -notmatch '\^S-1-5-21\(-\[0-9\]\+\)\{4\}\$'\)/, "a real local account SID goes into the SDDL");
+  const order = ["SetSecurityDescriptorSddlForm(", "[System.IO.FileStream]::new($innerPath", "$innerAcl = Test-ProgramAcl $innerPath $ctx.Control $ctx.AccountSid", "if ($innerAcl -ne '') { throw", "$registerAttempted = $true", "Register-ScheduledTask -TaskName", "$hashBefore = Get-Sha256Hex $innerPath", "Start-ScheduledTask"];
+  let at = -1; for (const o of order) { const k = outer.indexOf(o); assert.ok(k > at, `${o} in order`); at = k; }
+  const t = fnText("Test-ProgramAcl");
+  assert.match(t, /\$changeRights = \[int64\]0x500D0156/);
+  assert.equal(0x2 + 0x4 + 0x10 + 0x40 + 0x100 + 0x10000 + 0x40000 + 0x80000 + 0x10000000 + 0x40000000, 0x500D0156, "WriteData, AppendData, WriteEA, DeleteChild, WriteAttributes, Delete, WRITE_DAC, WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE");
+  assert.match(t, /if \(-not \$acl\.AreAccessRulesProtected\) \{ return/);
+  assert.match(t, /if \(\$rule\.IsInherited\) \{ return/);
+  assert.match(t, /if \(\$who -ne \$AccountSid\) \{ return "it has an entry for/, "no entry for anyone else");
+  assert.match(t, /\[System\.IO\.Directory\]::GetAccessControl\(\$Folder\)[\s\S]*0x10000040/, "and no one but SYSTEM and Administrators may delete children of the control folder");
+  assert.match(t, /PropagationFlags\]::InheritOnly/, "the account's inherit-only Modify (for files below) is not the folder's own right");
+  // the installer's control folder grants match: the account's own folder right has no DeleteSubdirectoriesAndFiles
+  assert.match(installer, /@\{ Who = \$account; Rights = 'ReadAndExecute, Write'; Scope = 'Folder'/);
+});
+
+test("the inner program reads the integrity level and Administrators membership from whoami by SID, and the verdict uses them", () => {
+  assert.match(inner, /\$groupsText = \[string\]\$Result\.whoami\['groups'\]\.stdout/);
+  assert.match(inner, /\[regex\]::Match\(\$groupsText, 'S-1-16-\(\[0-9\]\+\)'\)/);
+  assert.match(inner, /administratorsListed = \[regex\]::IsMatch\(\$groupsText, 'S-1-5-32-544\(\?!\[0-9\]\)'\)/);
+  assert.ok(inner.indexOf("$Result.whoamiFacts =") > inner.indexOf("foreach ($flag in @('/user', '/groups', '/priv'))"), "after whoami ran");
+  assert.ok(/whoamiFacts = \$null/.test(inner), "declared with the other fields");
+  assert.ok(new RegExp("S-1-5-32-544(?![0-9])").test("BUILTIN\\Administrators Alias S-1-5-32-544 Group used for deny only"));
+  assert.ok(!new RegExp("S-1-5-32-544(?![0-9])").test("BUILTIN\\Users Alias S-1-5-32-545 Mandatory group"));
+  assert.match(ps, /whoami \/groups read by SID: \$\(Show-Json \(Get-Prop \$result 'whoamiFacts'\)/);
 });
 
 // ------------------------------------------------------------------------------------------------ the launcher calls
