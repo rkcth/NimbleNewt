@@ -72,12 +72,62 @@ test("the workspace opens only when the admission says so: a refusal or a failin
     answer = { admitted: false, reason: "the project has read access only to repository \"garden\", and an agent's workspace is written in; give the project write access to it first" };
     await assert.rejects(w.ws.ensure({ ...scope, attemptId: "att-2" }), /has read access only to repository "garden"/);
     assert.equal(await readFile(join(made.checkout, "src", "a.ts"), "utf8"), "export const a = 2; // work\n");
-    assert.equal(w.ws.locate(scope)?.checkout, made.checkout, "the operations still find the checkout (landing, refresh and quarantine are judged by the controller)");
+    assert.equal(w.ws.locate(scope)?.checkout, made.checkout, "the operations still find the checkout (an integration or a landing asks the admission again; see the next test)");
     answer = { admitted: true, binding: BINDING };
     assert.deepEqual(await w.ws.ensure({ ...scope, attemptId: "att-2" }), made);
     // A host without an admission check opens as before (tests, and a remote host configured by its operator).
     const open = new LocalWorkspaces({ root: join(w.dir, "w2"), git: w.git, shared: () => w.shared, busy: () => [] });
     assert.ok((await open.ensure(scope)).checkout);
+  } finally { await w.done(); }
+});
+
+test("an integration or a landing asks the admission again on the shared folder it would write: refused with nothing written while the binding does not admit it; the other operations are not asked (card P02 review)", { skip }, async () => {
+  let answer: WorkspaceAdmissionAnswer | Error = { admitted: true, binding: BINDING };
+  const asked: string[] = [];
+  const w = await world({ admit: async (c) => { asked.push(c.shared); if (answer instanceof Error) throw answer; return answer; } });
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    asked.length = 0;
+    // An operation that writes only the task's own checkout is not asked (a refresh of a clean checkout, here).
+    answer = { admitted: false, reason: "not admitted now" };
+    const refreshed = await w.ws.port.run(call("refresh"));
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed));
+    assert.deepEqual(asked, []);
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    // Unbound (or narrowed) after the workspace was admitted: an integration and a landing write nothing.
+    answer = { admitted: false, reason: "the project has read access only to repository \"garden\", and an agent's workspace is written in; give the project write access to it first" };
+    for (const operation of ["integration", "landing"] as const) {
+      const out = await w.ws.port.run(call(operation));
+      assert.equal(out.ok, false, operation);
+      assert.match((out as { reason: string }).reason, /^nothing was written to the shared repository: the project has read access only to repository "garden"/, operation);
+    }
+    assert.deepEqual(asked, [w.shared, w.shared], "asked with the shared folder the request would write");
+    assert.equal(sh(w.shared, "status", "--porcelain=v1"), "", "nothing reached the shared repository");
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+    // A failing check is a refusal too.
+    answer = new Error("the store is down");
+    const failed = await w.ws.port.run(call("integration"));
+    assert.equal(failed.ok, false);
+    assert.match((failed as { reason: string }).reason, /could not be checked \(the store is down\)/);
+    assert.equal(sh(w.shared, "status", "--porcelain=v1"), "");
+    // Admitted again: the integration carries the work.
+    answer = { admitted: true, binding: BINDING };
+    assert.equal((await w.ws.port.run(call("integration"))).ok, true);
+    assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
+  } finally { await w.done(); }
+});
+
+test("a start record's file name means one attempt on every filesystem: an ID with a capital letter, a colon or an end dot is kept under a digest of it, and is read back by its ID (card P02 review)", { skip }, async () => {
+  const w = await world();
+  try {
+    await w.ws.ensure(scope);
+    for (const attemptId of ["att-1", "ATT-1", "att:1", "att-1."]) await w.ws.ensure({ ...scope, attemptId });
+    const names = readdirSync(join(w.root, "prj-one", "tsk-one", "starts")).sort();
+    assert.equal(names.length, 4, names.join(", "));
+    assert.ok(names.includes("att-1.json"));
+    for (const n of names) assert.match(n, /^(?:att-1|~[0-9a-f]{40})\.json$/);
+    assert.equal(new Set(names.map((n) => n.toLowerCase())).size, 4, "no two names differ only in case");
+    for (const attemptId of ["att-1", "ATT-1", "att:1", "att-1."]) assert.equal((await w.ws.startState({ ...scope, attemptId }))?.attemptId, attemptId);
   } finally { await w.done(); }
 });
 
