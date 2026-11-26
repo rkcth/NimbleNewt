@@ -57,13 +57,15 @@ export async function readReviewCite(runner: Pick<CommandRunner, "get">, scope: 
  * Card C08 as Q02 asks it: work bound to a superseded decision fails review. Every approval, cited or not, is refused while a decision the task relies on (`decision.link`) is no longer in force: its link was marked
  * superseded, or the decision itself is superseded or disputed (read from the decision, as the C08 guard does, so the time before propagation marks the link is covered too). A rejection or a request for changes is
  * not held to it (it is the right answer to such work). An approval that cites (`named` given) must also name every decision the task relies on. Returns the checks on the reliance record and on each decision read,
- * so a correction or a new link racing the approval lands strictly before or after it.
+ * so a correction or a new link racing the approval lands strictly before or after it, and the decisions the approval was judged against (`relied`, `basisKey` of each link), which the approval keeps so a later
+ * correction takes it back (`approvalOutdated`).
  */
-export async function readApprovalReliance(runner: Pick<CommandRunner, "get">, taskId: string, named: readonly string[] | undefined): Promise<readonly Change[]> {
+export async function readApprovalReliance(runner: Pick<CommandRunner, "get">, taskId: string, named: readonly string[] | undefined): Promise<{ readonly changes: readonly Change[]; readonly relied: readonly string[] }> {
   const found = await runner.get("decision-reliance", relianceIdOf(taskId));
-  if (found === undefined) return [];
+  if (found === undefined) return { changes: [], relied: [] };
   const changes: Change[] = [{ type: "check", ref: { kind: "decision-reliance", id: found.id }, expectedRevision: found.revision }];
   const seen = new Set<string>();
+  const relied: string[] = [];
   for (const l of (found.body as unknown as RelianceBody).links ?? []) {
     const got = await runner.get("decision", l.decisionId);
     const d = got?.body as unknown as OwnerDecisionBody | undefined;
@@ -76,6 +78,11 @@ export async function readApprovalReliance(runner: Pick<CommandRunner, "get">, t
       bad("decisions", `the task relies on decision ${l.decisionId}, which was superseded${by === undefined ? "" : ` by ${by}`}: an approval waits until the owner or the task's agent revalidates the work against the current decision (decision.revalidate); a request for changes or a rejection can be recorded now`);
     }
     if (named !== undefined && !named.includes(l.decisionId)) bad("decisions", `the task relies on decision ${l.decisionId}: name it in decisions (an approval that cites names every decision the task relies on)`);
+    const key = basisKey(l.decisionId, l.version);
+    if (!relied.includes(key)) relied.push(key);
   }
-  return changes;
+  return { changes, relied };
 }
+
+/** One relied-on decision as an approval's basis keeps it (card Q02, stale approvals): the decision ID and the version the task's link was made against. */
+export const basisKey = (decisionId: string, version: number): string => `${decisionId}@${version}`;

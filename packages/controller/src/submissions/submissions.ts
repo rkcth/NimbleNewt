@@ -11,6 +11,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { readApprovalReliance, readReviewCite, shapeReviewCite } from "./review-citation.js";
+import { approvalOutdated, type ApprovalBasis } from "./approval-standing.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -57,6 +58,8 @@ export interface SubmissionBody {
   readonly decisions?: readonly string[];
   readonly decisionVersions?: Readonly<Record<string, number>>;
   readonly unmet?: string;
+  /** An approval only (card Q02, stale approvals): the contract version and the relied-on decisions it was judged against, read by the controller when it was recorded; absent on earlier approvals. */
+  readonly judgedAgainst?: ApprovalBasis;
   readonly decision?: "approve" | "decline";
   readonly report?: string;
   readonly artifactDigest?: string;
@@ -90,13 +93,18 @@ export interface SubmissionApproval {
   readonly reviewId?: string;
   /** Why it is not approved. */
   readonly reason?: string;
+  /**
+   * Set when its newest review is an approval that no longer counts (card Q02): a decision the task relies on, or the task contract's criteria, changed after it was given (`approvalOutdated`). `because` says what changed and
+   * when, in plain words; a new review judged against the current decisions and criteria restores the approval.
+   */
+  readonly outdated?: { readonly reviewId: string; readonly approvedBy: string; readonly approvedAt: string; readonly because: string };
   /** The check evidence the author recorded on the submission (Q01b), each bound to its tree; present only when there is some (P09 fifth slice compares it with the landing gate's own results). */
   readonly evidence?: readonly Evidence[];
   /** What the newest director sign-off of it says (card P09 sixth slice, the `director` required check); present only when a director has signed off on it (either way). */
   readonly director?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string };
 }
 /** The reviews recorded about one submission, oldest first (record kind `submission-verdicts`, keyed by the subject's ID). */
-interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string; readonly cited?: ReviewCited }[] }
+interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string; readonly cited?: ReviewCited; readonly basis?: ApprovalBasis }[] }
 /** What a review cited, as kept with the subject's verdict list and answered by `approvalOf` (card Q02, sixth slice). */
 export interface ReviewCited { readonly criteriaRevision: number; readonly decisions: readonly { readonly id: string; readonly version: number }[]; readonly unmet?: string }
 const VERDICTS = "submission-verdicts";
@@ -442,7 +450,18 @@ export class SubmissionService {
         }
         if (kind === "review" && asked.verdict === "approve") {
           const named = asked.criteriaRevision === undefined ? undefined : asked.decisions ?? [];
-          for (const c of await readApprovalReliance(this.#runner, taskId, named)) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c);
+          const relied = await readApprovalReliance(this.#runner, taskId, named);
+          const more: Change[] = [...relied.changes];
+          // Card Q02 (stale approvals): the approval keeps what it was judged against, so a later correction of a relied-on decision or a change of the criteria takes it back when it is read (`approvalOutdated`).
+          // The contract version is checked by the write too, so a contract change racing the approval lands strictly before (and is recorded) or after it (and takes it back).
+          let criteriaRevision = asked.criteriaRevision;
+          if (criteriaRevision === undefined) {
+            const contract = await this.#runner.get("task-contract", taskId);
+            criteriaRevision = (contract?.body as unknown as { version?: number } | undefined)?.version ?? 0;
+            if (contract !== undefined) more.push({ type: "check", ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision });
+          }
+          for (const c of more) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c);
+          body = { ...body, judgedAgainst: { criteriaRevision, decisions: relied.relied } };
         }
         const ref = { kind: "submission", id };
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
@@ -539,7 +558,7 @@ export class SubmissionService {
     if (list.some((r) => r.id === id)) return [];
     if (list.length >= MAX_VERDICTS) throw new DomainError("unavailable", `submission ${body.subject} already has ${MAX_VERDICTS} reviews; submit the work again for a new review`);
     const cited: ReviewCited | undefined = body.criteriaRevision === undefined ? undefined : { criteriaRevision: body.criteriaRevision, decisions: (body.decisions ?? []).map((d) => ({ id: d, version: body.decisionVersions?.[d] ?? 0 })), ...(body.unmet === undefined ? {} : { unmet: body.unmet }) };
-    const next: VerdictsBody = { reviews: [...list, { id, verdict: body.verdict, by: body.submittedBy, at: body.submittedAt, ...(cited === undefined ? {} : { cited }) }] };
+    const next: VerdictsBody = { reviews: [...list, { id, verdict: body.verdict, by: body.submittedBy, at: body.submittedAt, ...(cited === undefined ? {} : { cited }), ...(body.judgedAgainst === undefined ? {} : { basis: body.judgedAgainst }) }] };
     return [current === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: current.revision, body: next as unknown as JsonObject }];
   }
 
@@ -737,7 +756,7 @@ export class SubmissionService {
       const a = await this.approvalOf(sub.id);
       // An index entry is only a pointer: the submission itself must be this project's code of this task, made at the time the entry says (the time chose it as the task's newest), and, for an agent, its own (as the scan reads them).
       if (a === undefined || a.projectId !== projectId || a.taskId !== taskId || a.submittedAt !== sub.at || (ownOnly && a.submittedBy !== by.id)) return undefined;
-      const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
+      const state: WaitingItem["state"] = !a.approved ? (a.newest === undefined || a.outdated !== undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "ready" : "needs_signoff";
       return { taskId, title: task.title, submissionId: sub.id, submittedBy: a.submittedBy, submittedAt: a.submittedAt, tree: a.tree, state, ...(a.approved && a.approvedBy !== undefined ? { approvedBy: a.approvedBy } : {}) };
     };
     const items: WaitingItem[] = [];
@@ -754,6 +773,8 @@ export class SubmissionService {
    * Whether a code submission is approved, for the controller's own callers (card H12o: the commit of an approved submission). It takes no caller and is not an API operation: whoever asks has been checked already (the
    * workspace request needs `workspace.manage`). Approved means the NEWEST review of it says `approve` (a later `changes` or `reject` takes an approval back; a review of one's own work was refused when it was recorded),
    * or the submission recorded that no review is required because no other agent of the project could review (`review_disabled_single_agent`). `undefined` when there is no such code submission.
+   * Card Q02: an approval stops counting when a decision the task relies on, or the task contract's criteria text, changed after it was given (`approvalOutdated`, read here so every reader of approvals sees it);
+   * the answer is then not approved, with `outdated` and a plain reason, until a new review approves it again.
    */
   async approvalOf(submissionId: string): Promise<SubmissionApproval | undefined> {
     if (typeof submissionId !== "string" || !/^sbm-[a-z2-7]{20}$/.test(submissionId)) return undefined;
@@ -779,6 +800,11 @@ export class SubmissionService {
     const lastSignoff = signoffs[signoffs.length - 1];
     const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
     if (newest !== undefined && ownCarried && newest.verdict === "approve") return { ...base, approved: false, reason: `the approval that would carry over from ${carriedFrom} was given by this submission's own submitter; another reviewer has to approve it` };
+    // Card Q02: an approval given before a decision the task relies on, or the task's criteria, changed no longer counts (read here, so every reader of approvals sees it); a new review restores it.
+    if (newest !== undefined && newest.verdict === "approve") {
+      const because = await approvalOutdated(this.#runner, found.taskId, newest);
+      if (because !== undefined) return { ...base, approved: false, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }), outdated: { reviewId: newest.id, approvedBy: newest.by, approvedAt: newest.at, because }, reason: `the approval by ${newest.by} at ${newest.at} no longer counts: ${because}; a reviewer has to review it again against the current decisions and criteria` };
+    }
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }) } : { ...base, approved: false, newest: newest.verdict, ...(newest.cited === undefined ? {} : { cited: newest.cited }), reason: `its newest review (${newest.id}) says ${newest.verdict}` };
     if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };

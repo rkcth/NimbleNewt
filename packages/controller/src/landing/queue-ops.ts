@@ -47,6 +47,8 @@ export const REFRESH_CAP_DEFAULT = 3;
 /** The repair-cycle limit (card Q04, `review.repairCycles`) when the project's settings cannot be read (the setting's default). */
 export const REPAIR_CYCLES_DEFAULT = 3;
 const SUBMISSION = /^sbm-[a-z2-7]{20}$/;
+/** How many entries, from the first, `list` reads the approval of to say whether each would land now (card Q02); later entries are judged when their turn comes. */
+export const LANDING_QUEUE_HELD_LOOKED = 10;
 const refused = (what: string): DomainError => new DomainError("not_found", `${what} does not exist or is not yours to manage`);
 /** A branch named by a caller: one line of at most 200 characters (the queue's own bound). */
 const branchName = (value: unknown): string => text(value, "branch", { min: 1, max: LANDING_QUEUE_LIMITS.branch, multiline: false });
@@ -262,7 +264,7 @@ export class LandingQueueOps {
    * `others` lists the project's other branches whose queues still hold entries (a branch that was the landing branch before the owner named another, or a task's own landing branch): nothing there lands
    * on the landing branch, and `branch` reads one of them in full. `partial` says the walk over the queues stopped before the end.
    */
-  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean; holdMs: number; releaseMs: number; deferMs: number }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
+  async list(by: Principal, query: { projectId: string; branch?: string }): Promise<{ branch: string; landingBranch: string; items: (LandingQueueEntry & { position: number; reserved?: true; held?: string })[]; reservations: LandingReservation[]; front?: LandingQueueFront & { waitingForApproval: boolean; holdMs: number; releaseMs: number; deferMs: number }; returns: LandingReturns[]; others: { branch: string; entries: number }[]; partial?: true }> {
     onlyKnown(query, ["projectId", "branch"]);
     if (typeof query.projectId !== "string" || !this.#integrator(by, query.projectId)) throw refused("that project");
     const named = query.branch === undefined ? undefined : branchName(query.branch);
@@ -271,7 +273,15 @@ export class LandingQueueOps {
     const branch = named ?? landing;
     const q = branch === undefined ? undefined : await this.#queue.get(query.projectId, branch);
     const reservations = [...(q?.reservations ?? [])];
-    const items = (q?.entries ?? []).map((e, i) => ({ ...e, position: i + 1, ...(reservations.some((r) => r.taskId === e.taskId) ? { reserved: true as const } : {}) }));
+    const listed = (q?.entries ?? []).map((e, i) => ({ ...e, position: i + 1, ...(reservations.some((r) => r.taskId === e.taskId) ? { reserved: true as const } : {}) }));
+    // Card Q02: the first entries say when they would not land now because their approval no longer holds as queued (a decision or the criteria changed since, or a newer review), with the reason; read like a landing reads it.
+    const items: (LandingQueueEntry & { position: number; reserved?: true; held?: string })[] = [];
+    for (const [i, e] of listed.entries()) {
+      if (i >= LANDING_QUEUE_HELD_LOOKED) { items.push(e); continue; }
+      let held: string | undefined;
+      try { const a = await this.#approvalOf(e.submissionId); held = a === undefined ? "its submission cannot be read" : !a.approved ? redactText(a.reason ?? "it is not approved").slice(0, 300) : a.base !== e.base || a.tree !== e.tree ? "its approval is for another base or tree than the one queued" : undefined; } catch { held = "its approval could not be read"; }
+      items.push(held === undefined ? e : { ...e, held });
+    }
     const first = q === undefined ? undefined : frontOf(q);
     const front = q?.front !== undefined && first !== undefined && q.front.taskId === first.taskId ? { ...q.front, waitingForApproval: first.entry === undefined, holdMs: this.#options.holdMs ?? LANDING_HOLD_MS, releaseMs: this.#options.releaseMs ?? LANDING_RESERVATION_RELEASE_MS, deferMs: this.#options.deferMs ?? LANDING_DEFER_MS } : undefined;
     const all = await this.#queue.queuesOf(query.projectId);
