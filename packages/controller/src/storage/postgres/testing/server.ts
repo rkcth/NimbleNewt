@@ -333,3 +333,13 @@ async function commitWhileWaiting<T>(url: string, statements: readonly string[],
 }
 
 export { commitWhileWaiting, withClient };
+
+/** Where the embedded server binaries are (card K04: the replication harness runs `initdb` and `pg_ctl` itself, to copy a stopped server's folder into a standby). Prepares the shared-library links first. */
+export function embeddedPostgresBinaries(): { readonly bin: string; readonly exe: (name: "initdb" | "pg_ctl" | "postgres") => string } {
+  const alternate = process.env["NIMBLENEWT_TEST_POSTGRES_DIR"];
+  const require = createRequire(alternate === undefined || alternate === "" ? import.meta.url : join(resolve(alternate), "package.json"));
+  const embeddedDir = dirname(require.resolve("embedded-postgres"));
+  hydrateSymlinks(join(embeddedDir, ".."));
+  const bin = join(binariesDir(join(embeddedDir, "..")), "native", "bin");
+  return { bin, exe: (name) => join(bin, process.platform === "win32" ? `${name}.exe` : name) };
+}

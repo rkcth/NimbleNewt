@@ -50,3 +50,4 @@ export * from "./transfer/index.js";
 export type { EnvironmentRuntime, TrialInput as EnvironmentTrialInput, TrialResult as EnvironmentTrialResult, ReloadInput as EnvironmentReloadInput, ReloadResult as EnvironmentReloadResult, ValidateInput as EnvironmentValidateInput, ValidateResult as EnvironmentValidateResult } from "./maintenance/index.js";
 export { NetworkGrantService, NetworkRelay, NetworkRefused, WebFetch, WEB_FETCH_TOOL, NETWORK_LIMITS, type NetworkOpener, type NetworkRelayOptions } from "./network/index.js";
 export * from "./admin/index.js";
+export * as recovery from "./recovery/index.js";
