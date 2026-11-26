@@ -19280,3 +19280,47 @@ Plain words first. The H12n and H12t flip audits found that on the launcher's ow
   - api `start-work-end*`: 17 of 17
   - `scripts/*.test.mjs`: 512 passed, 1 skipped, of 513
   - `npm ci --ignore-scripts`, `tsc --build --force`, `check:deps`, `licenses:check` and `roadmap:check` all passed; `api:docs:write` made no change.
+
+**First review (Claude agent, Opus 5.5, 2026-11-26; reviewed `a297b36f`, merged origin/main `9149dab1` cleanly).** Looked at what an agent's submit can put into the staged tree and at the races around it.
+- **Checked, no change.**
+  - Every git call of the staging, the view and the patch ID goes through `GitBridge`: no system or user configuration (`GIT_CONFIG_NOSYSTEM`, an empty global and home), `core.autocrlf=false`, an empty hooks directory, fsmonitor off, no external diff or textconv. The git directory is the host's, outside the sandbox.
+  - A hostile `.gitattributes` in the checkout (`text eol=crlf`, `crlf`, `ident`, `working-tree-encoding=UTF-16LE`, `filter=lfs`, `text=auto`), tried on git 2.53: the staged blobs are the exact bytes, no base file reads as changed, and nothing runs. The host's `info/attributes` outranks the checkout's file.
+  - A link to a file or folder outside the checkout, a nested `.git`, `.GIT` or `GIT~1`: all refused. A FIFO is skipped.
+  - Ignored files are left out and listed. The exec bit is carried as part of the change.
+  - A view refused by the admission reaches the agent only as the generic "base is not known" refusal.
+  - The card text does not name the outcomes. The ending's `submitted` and the attempt's `succeeded` agree with the test and the notes.
+  - No prompt text was added. The remote host is still without submit, as said.
+- **Fixed (Low to Medium): the submit ran outside the checkout's turn.** `LocalWorkspaces.submitView` and `stageWork` ran git on the checkout outside the host's per-checkout queue. That is the queue `run` and `restack` use.
+  - A re-apply (it skips the quiet check, so it runs while the attempt is live), a release or a landing on the same checkout could therefore write the files, the index or the head part-way through a staging.
+  - Most such overlaps failed closed, on `index.lock` or on the overlap check after the staging. But a host request can outlive the controller's timeout on it.
+  - Now both run through `WorkspaceHost.exclusive(checkout, work)`, a new public method on the same queue. Test: `p02-workspace` "wait for the checkout's turn".
+- **Fixed (test only):** the launcher test's own git calls read the machine's and the user's configuration. A `color.ui=always` or `diff.external` would change the diff its expected patch ID is taken from. They now run with no system or global configuration, and with `--no-ext-diff --no-color`.
+- **Tests added** for three checks no test pinned:
+  - a link refused by its listed mode, by name;
+  - two binary changes of the same size give two patch IDs;
+  - a staging on another base than the one checked is refused (`checkout_changed`) before anything is recorded, with or without a landing read.
+- **Breakages** (each alone, on built files; the worker workspace tests, `work-end.test`, and both H12n integration tests; restored and checked by sha256): 12 of 13 caught.
+  - Caught:
+    - staging outside the turn;
+    - the view outside the turn;
+    - admission asked on the checkout folder;
+    - admission asked only after the staging;
+    - `-text` dropped from the neutral attributes;
+    - the link and submodule mode check removed (caught after the new test);
+    - the Git-name walk removed;
+    - the re-read of each staged file removed;
+    - patch ID `--stable`;
+    - the view counting committed files only;
+    - the base re-check after the staging removed;
+    - the staged-base against checked-base check removed (caught after the new test).
+  - Equivalent: `--binary` dropped from the patch-ID diff. On git 2.53 `--full-index` already puts both blob IDs into a binary diff's patch ID, so the IDs are the same with or without it. The new test still pins the property.
+- **Left open.**
+  - Staging has no per-file size limit (the bridge's 8 MB does not apply). A 30 MB file is submitted. Over about 50 MB the patch-ID diff passes git's output buffer, and the ending fails `release_failed` with an empty "git diff failed:" text.
+  - A staging failure's git text, cut and with credentials removed, can name a host path (an `index.lock`) in the owner's `release_failed` blocker. The agent's `work.end` answer is returned before the staging.
+  - The bench's `prepareCheckout` copies dependencies into the checkout. They are staged unless the repository ignores them (bench only).
+- **Runs** (Linux, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, one run at a time through `/tmp/nn-slot.sh`, short TMPDIR). Node 22.23.0 and 24.21.0 gave the same counts:
+  - worker: 862 passed, 2 skipped, of 864
+  - integration (the same 15 files): 26 of 26
+  - api `start-work-end*`: 17 of 17
+  - `scripts/*.test.mjs`: 512 passed, 1 skipped, of 513
+  - `npm ci --ignore-scripts`, `tsc --build --force`, `check:deps`, `licenses:check` and `roadmap:check` passed; `api:docs:write` made no change.
