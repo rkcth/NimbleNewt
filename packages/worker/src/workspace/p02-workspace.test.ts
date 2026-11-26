@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -117,6 +117,155 @@ test("an integration or a landing asks the admission again on the shared folder 
     assert.equal((await w.ws.port.run(call("integration"))).ok, true);
     assert.equal(await readFile(join(w.shared, "src", "a.ts"), "utf8"), "export const a = 2;\n");
   } finally { await w.done(); }
+});
+
+test("a submit's view and its staging ask the admission again on the checkout's shared folder: a binding unbound or narrowed since the workspace opened refuses both, nothing read or staged; admitted again, both answer (card H12n, product launcher)", { skip }, async () => {
+  let answer: WorkspaceAdmissionAnswer | Error = { admitted: true, binding: BINDING };
+  const asked: { taskId: string; projectId: string; shared: string }[] = [];
+  const w = await world({ admit: async (c) => { asked.push(c); if (answer instanceof Error) throw answer; return answer; } });
+  try {
+    assert.equal(await w.ws.submitView(scope), undefined, "no checkout: nothing to say, nothing asked");
+    await assert.rejects(w.ws.stageWork(scope), /holds no checkout/);
+    assert.equal(asked.length, 0);
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    asked.length = 0;
+    const g = gitOf(made);
+    const indexBefore = g("ls-files", "-s");
+    for (const refusal of [{ admitted: false, reason: "the project has read access only to repository \"garden\", and an agent's workspace is written in; give the project write access to it first" } as const, new Error("the store is down"), { admitted: false } as never]) {
+      answer = refusal;
+      await assert.rejects(w.ws.submitView(scope), (e: Error & { code?: string }) => e.code === "unavailable" && /^the work cannot be submitted: /.test(e.message), "the view is refused");
+      await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string }) => e.code === "unavailable" && /^the work cannot be submitted: /.test(e.message), "the staging is refused");
+    }
+    answer = { admitted: false, reason: "the project has read access only to repository \"garden\"" };
+    await assert.rejects(w.ws.stageWork(scope), /read access only to repository "garden"/, "the reason is said");
+    assert.equal(g("ls-files", "-s"), indexBefore, "nothing was staged into the checkout's index");
+    assert.deepEqual(asked.map((a) => [a.taskId, a.projectId, a.shared]), Array.from({ length: 7 }, () => ["tsk-one", "prj-one", w.shared]), "asked with the task, its project and the shared folder the checkout came from");
+    answer = { admitted: true, binding: BINDING };
+    const base = sh(w.shared, "rev-parse", "HEAD");
+    assert.deepEqual(await w.ws.submitView(scope), { base, head: base, mine: ["src/a.ts"], landed: [] });
+    const staged = await w.ws.stageWork(scope);
+    assert.deepEqual([staged.base, staged.files], [base, ["src/a.ts"]]);
+    // A host without an admission check stages as before (the W03 rig, the H12n host test).
+    const open = new LocalWorkspaces({ root: w.root, git: w.git, shared: () => w.shared, busy: () => [] });
+    assert.deepEqual((await open.stageWork(scope)).tree, staged.tree);
+  } finally { await w.done(); }
+});
+
+test("a submit's view and its staging wait for the checkout's turn: while another request of the host holds the checkout (a re-apply, a release, a landing) neither asks, reads nor stages; then both answer (card H12n, product launcher, first review)", { skip }, async () => {
+  const asked: string[] = [];
+  const w = await world({ admit: async (c) => { asked.push(c.shared); return { admitted: true, binding: BINDING }; } });
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    asked.length = 0;
+    const indexBefore = gitOf(made)("ls-files", "-s");
+    let release!: () => void;
+    const held = w.ws.host.exclusive(made.checkout, () => new Promise<void>((r) => { release = r; }));
+    const settled: string[] = [];
+    const view = w.ws.submitView(scope).then((v) => { settled.push("view"); return v; });
+    const staging = w.ws.stageWork(scope).then((s) => { settled.push("stage"); return s; });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual([settled, asked.length], [[], 0], "nothing answered and nothing asked while another request holds the checkout");
+    assert.equal(gitOf(made)("ls-files", "-s"), indexBefore, "nothing was staged while another request holds the checkout");
+    release();
+    await held;
+    const base = sh(w.shared, "rev-parse", "HEAD");
+    assert.deepEqual(await view, { base, head: base, mine: ["src/a.ts"], landed: [] });
+    assert.deepEqual((await staging).files, ["src/a.ts"]);
+    assert.deepEqual(settled, ["view", "stage"], "in the order they were asked");
+  } finally { await w.done(); }
+});
+
+test("a submit's staging: a link is refused as a link before any content is read, and two binary changes of the same size never share a patch ID (card H12n, product launcher, first review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await symlink("/etc/hostname", join(made.checkout, "src", "outside"));
+    await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string }) => e.code === "link_refused" && /"src\/outside" is a link or a submodule entry/.test(e.message), "the listing's mode refuses the link by name");
+    await rm(join(made.checkout, "src", "outside"));
+    const ids: string[] = [];
+    for (const fill of [1, 2]) {
+      await writeFile(join(made.checkout, "src", "blob.bin"), Buffer.concat([Buffer.from([0, 0xff, 0]), Buffer.alloc(4096, fill)]));
+      ids.push((await w.ws.stageWork(scope)).patchId);
+    }
+    assert.notEqual(ids[0], ids[1], "the binary content is part of the patch ID (--binary), not only a 'Binary files differ' line");
+  } finally { await w.done(); }
+});
+
+test("a submit's staging refuses, plainly and with the index left as it was, what a landing could not carry: too many files, a file or a set too large, a name some system cannot hold, two spellings of one file; a change just inside the bounds gets git's own patch ID (card H12n, product launcher, second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    // The base holds names a landing cannot write (made on this system by someone else): deleting them is a change the landing could not carry either.
+    for (const n of ["x.", "K", "k"]) await writeFile(join(w.shared, "docs", n), `${n}\n`);
+    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "odd names");
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    assert.equal(await w.git.patchId({ gitDir: made.gitDir, base: sh(w.shared, "rev-parse", "HEAD") }), undefined, "an index with no change has no patch ID");
+    const g = gitOf(made);
+    const clean = async (): Promise<void> => { for (const n of await readdir(made.checkout)) if (n !== "src" && n !== "docs") await rm(join(made.checkout, n), { recursive: true, force: true }); for (const n of await readdir(join(made.checkout, "src"))) if (n !== "a.ts") await rm(join(made.checkout, "src", n), { force: true }); };
+    const refused = async (label: string, plant: () => Promise<void>, code: string, reason: RegExp): Promise<void> => {
+      await clean(); await plant();
+      const before = g("ls-files", "-s");
+      await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string; tamper?: boolean }) => e.code === code && reason.test(e.message) && e.tamper !== true && !e.message.includes(w.dir), label);
+      assert.equal(g("ls-files", "-s"), before, `${label}: the index is as it was`);
+    };
+    await refused("501 files", async () => { await mkdir(join(made.checkout, "many")); for (let i = 0; i < 501; i++) await writeFile(join(made.checkout, "many", `f${i}`), `${i}\n`); }, "invalid_path", /^the change touches 501 files; a landing carries at most 500 as one step/);
+    await refused("a file over 8 MB", async () => { await writeFile(join(made.checkout, "big.bin"), Buffer.alloc(8 * 1024 * 1024 + 1, 7)); }, "invalid_path", /^"big\.bin" is 8388609 bytes; a landing carries at most 8388608 bytes per file/);
+    await refused("a set over 64 MB", async () => { for (let i = 0; i < 9; i++) await writeFile(join(made.checkout, `p${i}.bin`), Buffer.alloc(7.5 * 1024 * 1024, i)); }, "invalid_path", /^the change's files hold 70778880 bytes; a landing carries at most 67108864 bytes as one step/);
+    for (const [name, why] of [["src/a\nb.ts", /holds a character that is not allowed on every system/], ["src/a\"b.ts", /holds a character that is not allowed on every system/], ["src/CON.ts", /reserved Windows device name/], ["src/x.", /ends in a dot or a space/]] as const) {
+      await refused(JSON.stringify(name), async () => { await writeFile(join(made.checkout, name), "x\n"); }, "invalid_path", new RegExp(`^${JSON.stringify(name).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} cannot be carried: .*${why.source}.*; nothing was staged$`));
+    }
+    await refused("a/B and a/b", async () => { await mkdir(join(made.checkout, "a")); await writeFile(join(made.checkout, "a", "B"), "1\n"); await writeFile(join(made.checkout, "a", "b"), "2\n"); }, "collision", /cannot be carried: "B" collides with "b", which is the same name on a case-insensitive or normalising filesystem/);
+    await refused("src/A.ts beside the base's src/a.ts", async () => { await writeFile(join(made.checkout, "src", "A.ts"), "1\n"); }, "collision", /^"src\/A\.ts" cannot be carried: "A\.ts" collides with "a\.ts"/);
+    await refused("composed and decomposed é", async () => { await writeFile(join(made.checkout, "src", "é.ts"), "1\n"); await writeFile(join(made.checkout, "src", "é.ts"), "2\n"); }, "collision", /collides with/);
+    await refused("deleting the base's docs/x.", async () => { await rm(join(made.checkout, "docs", "x.")); }, "invalid_path", /^the change holds "docs\/x\.", which a landing cannot write \(the name "x\." ends in a dot or a space/);
+    await writeFile(join(made.checkout, "docs", "x."), "x.\n");
+    await refused("deleting both docs/K and docs/k", async () => { await rm(join(made.checkout, "docs", "K")); await rm(join(made.checkout, "docs", "k")); }, "collision", /^the change holds "docs\/K" and "docs\/k", which are one file on a case-insensitive or normalising filesystem/);
+    for (const n of ["K", "k"]) await writeFile(join(made.checkout, "docs", n), `${n}\n`);
+    // Just inside every bound, and past the output buffer the patch ID's diff used to be held in (about 50 MB of change): staged, with git's own ID. Random bytes, so the binary diff does not compress below it.
+    await clean();
+    for (let i = 0; i < 8; i++) await writeFile(join(made.checkout, `p${i}.bin`), randomBytes(Math.floor(7.9 * 1024 * 1024)));
+    await writeFile(join(made.checkout, "-n"), "a leading dash is a plain name\n");
+    const staged = await w.ws.stageWork(scope);
+    assert.equal(staged.files.length, 9);
+    const diff = execFileSync("git", ["--git-dir", made.gitDir, "-c", "core.autocrlf=false", "diff", "--cached", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", staged.base], { maxBuffer: 1 << 30 });
+    assert.ok(diff.length > 64 * 1024 * 1024, `the diff (${diff.length} bytes) is past the old buffer`);
+    assert.equal(staged.patchId, execFileSync("git", ["patch-id", "--verbatim"], { input: diff, encoding: "utf8", maxBuffer: 1 << 20 }).trim().split(/\s+/)[0]);
+    // A diff that fails (a base the git directory does not hold) is a failure with git's reason, never "no change".
+    await assert.rejects(w.git.patchId({ gitDir: made.gitDir, base: "0".repeat(40) }), (e: Error & { code?: string }) => e.code === "unavailable" && /^git diff failed: .*bad (?:object|revision)/i.test(e.message));
+  } finally { await w.done(); }
+});
+
+test("a submit's error names no folder of the host, and a checkout gone while the submit waited for its turn is refused before anything is read or staged (card H12n, product launcher, second review)", { skip }, async () => {
+  const w = await world();
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    // A git process killed part-way leaves the index lock; git's own text names it by its path.
+    await writeFile(join(made.gitDir, "index.lock"), "");
+    await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string }) => e.code === "unavailable" && /^git add failed: .*the task's git directory\/index\.lock/.test(e.message) && !e.message.includes(w.dir) && !/(?<![\w.~-])\//.test(e.message), "the lock is named by what it is");
+    await rm(join(made.gitDir, "index.lock"));
+    let release!: () => void;
+    const held = w.ws.host.exclusive(made.checkout, () => new Promise<void>((r) => { release = r; }));
+    const indexBefore = gitOf(made)("ls-files", "-s");
+    const staging = w.ws.stageWork(scope);
+    const view = w.ws.submitView(scope);
+    staging.catch(() => undefined); view.catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 200));
+    await rm(join(made.checkout, "..", "complete"));
+    release(); await held;
+    for (const [what, p] of [["staging", staging], ["view", view]] as const) await assert.rejects(p, (e: Error & { code?: string }) => e.code === "unavailable" && /the task's checkout is no longer on this host as it was/.test(e.message), what);
+    assert.equal(gitOf(made)("ls-files", "-s"), indexBefore, "nothing was staged");
+  } finally { await w.done(); }
+  // A path that is none of this host's own folders (here in the admission check's failure) is still not shown.
+  let down = false;
+  const w2 = await world({ admit: async () => { if (down) throw new Error("the store at /var/lib/nimblenewt/db is not answering"); return { admitted: true, binding: BINDING }; } });
+  try {
+    const made = await w2.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    down = true;
+    for (const p of [w2.ws.stageWork(scope), w2.ws.submitView(scope)]) await assert.rejects(p, (e: Error & { code?: string }) => e.code === "unavailable" && /could not be checked \(the store at <a host path> is not answering\)/.test(e.message) && !e.message.includes("/var/lib"));
+  } finally { await w2.done(); }
 });
 
 test("a start record's file name means one attempt on every filesystem: an ID with a capital letter, a colon or an end dot is kept under a digest of it, and is read back by its ID (card P02 review)", { skip }, async () => {

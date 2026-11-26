@@ -14,14 +14,16 @@ const DEC = /^dec-[a-z2-7]{20}$/;
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 
 /**
- * The shape of what a review cites, before anything is read. Nothing cited is the old, uncited review (undefined). Decisions or an unmet requirement without a criteria version are refused (a verdict that cites
- * anything cites the version of the acceptance criteria it judged against); a rejection that cites must say which owner requirement is unmet, and no other verdict may carry one.
+ * The shape of what a review cites, before anything is read. Nothing cited is the old, uncited review (undefined). Decisions without a criteria version are refused (a verdict that cites decisions cites the version of
+ * the acceptance criteria it judged against). A rejection may name its unmet owner requirement without a version (card Q02: the version in force is then recorded for it, `unmetOnly`); no other verdict may carry one, and
+ * a rejection that names a version must say which requirement is unmet.
  */
-export function shapeReviewCite(c: { readonly criteriaRevision?: unknown; readonly decisions?: unknown; readonly unmet?: unknown }, verdict: string | undefined): ReviewCite | undefined {
+export function shapeReviewCite(c: { readonly criteriaRevision?: unknown; readonly decisions?: unknown; readonly unmet?: unknown }, verdict: string | undefined): ReviewCite | { readonly unmetOnly: string } | undefined {
   if (c.criteriaRevision === undefined) {
     if (c.decisions !== undefined) bad("decisions", "name the criteria version you judged against too (criteriaRevision)");
-    if (c.unmet !== undefined) bad("unmet", "name the criteria version you judged against too (criteriaRevision)");
-    return undefined;
+    if (c.unmet === undefined) return undefined;
+    if (verdict !== "reject") bad("unmet", "only a rejection names the owner requirement it found unmet");
+    return { unmetOnly: redactText(text(c.unmet, "unmet", { min: 1, max: REVIEW_CITE_LIMITS.unmet, multiline: true })) };
   }
   if (typeof c.criteriaRevision !== "number" || !Number.isSafeInteger(c.criteriaRevision) || c.criteriaRevision < 0) bad("criteriaRevision", "must be the task contract version you judged against (0 when it has none)");
   const decisions = c.decisions === undefined ? [] : c.decisions;
@@ -96,6 +98,18 @@ export async function readApprovalReliance(runner: Pick<CommandRunner, "get">, t
     if (!relied.includes(key)) relied.push(key);
   }
   return { changes, relied };
+}
+
+/**
+ * The decisions a task relies on, as a basis keeps them (`basisKey` of each link), and the checks that order a write against a new link or a correction: for code accepted without a review (card Q02, a one-agent
+ * project), which is never refused here; whether the decisions are still in force is judged when it is read (`approvalOutdated`).
+ */
+export async function relianceBasis(runner: Pick<CommandRunner, "get">, taskId: string): Promise<{ readonly changes: readonly Change[]; readonly relied: readonly string[] }> {
+  const found = await runner.get("decision-reliance", relianceIdOf(taskId));
+  if (found === undefined) return { changes: [], relied: [] };
+  const relied: string[] = [];
+  for (const l of (found.body as unknown as RelianceBody).links ?? []) { const key = basisKey(l.decisionId, l.version); if (!relied.includes(key)) relied.push(key); }
+  return { changes: [{ type: "check", ref: { kind: "decision-reliance", id: found.id }, expectedRevision: found.revision }], relied };
 }
 
 /** One relied-on decision as an approval's basis keeps it (card Q02, stale approvals): the decision ID and the version the task's link was made against. */

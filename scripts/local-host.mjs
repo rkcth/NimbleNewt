@@ -214,6 +214,10 @@ export function localHostBuilder(setup) {
               verify: async (attemptId, scope, request) => { await refreshShared(); return verifyDone(attemptId, scope, request); },
               // The agent's checkout tool (card W09b): each call in a sandbox of its own made from the attempt's, over its checkout only, with no network; the controller has judged and recorded it first.
               checkout: (attemptId, request, signal) => parts.checkout.run(attemptId, request, signal),
+              // A submit (card H12n): what it is checked against (the checkout's base, the landing branch's head, the files on each side) and its staging (tree and patch ID), from the same checkouts. Both ask the P02 admission
+              // again (a repository no longer bound with write access to all of it refuses). Without them every `work.end { submit: true }` here is refused as unavailable.
+              submitView: async (scope) => { await refreshShared(); return workspaces.submitView(scope); },
+              stage: async (scope) => { await refreshShared(); return workspaces.stageWork(scope); },
               capabilities: () => ({ os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", harnesses: [{ name: "pi", version: piAdapter.PINNED_PI_DURABLE_VERSION }], isolation: ["bubblewrap"], tools: [], workspaces: [] }),
             });
             return local;

@@ -88,7 +88,8 @@ for (const backend of backends) {
       await refuses("stale_revision", () => review(rev, { verdict: "approve", criteriaRevision: 1, decisions: [] }), /version 2, not 1/);
       await refuses("stale_revision", () => review(rev, { verdict: "approve", criteriaRevision: 3 }));
       await refuses("invalid_command", () => review(rev, { verdict: "approve", decisions: [dA] }), /criteriaRevision/);
-      await refuses("invalid_command", () => review(rev, { verdict: "reject", unmet: "no tests" }), /criteriaRevision/);
+      // A rejection may name its unmet requirement without a version (card Q02 finish: the version in force is cited for it; q02-dependency-bound.test.ts); another verdict may not name one.
+      await refuses("invalid_command", () => review(rev, { verdict: "changes", unmet: "no tests" }), /only a rejection/);
       await refuses("invalid_command", () => review(rev, { verdict: "changes", criteriaRevision: 2, unmet: "no tests" }), /only a rejection/);
       await refuses("invalid_command", () => review(rev, { verdict: "approve", criteriaRevision: 2, unmet: "x" }), /only a rejection/);
       await refuses("invalid_command", () => review(rev, { verdict: "reject", criteriaRevision: 2 }), /names the owner requirement/);

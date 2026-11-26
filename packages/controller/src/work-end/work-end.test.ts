@@ -641,6 +641,11 @@ test("stagedSubmit with a landing read: the staged files are judged again after 
     assert.ok(e instanceof SubmitRefused); assert.equal(e.head, "h2"); assert.match(e.message, /the checkout moved after the work was staged \(its base is now h0, the staged work's h1\)/); return true;
   });
   assert.equal(recorded.length, 3);
+  // The staging built on another base than the one checked at the request (the checkout moved in between): refused before anything is read or recorded, with or without a landing read (first review, product launcher).
+  for (const landing of [undefined, async () => ({ base: "h1", head: "h1", mine: [], landed: [] })]) {
+    await assert.rejects(mk(["a.ts"], landing)(attempt, "h0", "k6"), (e: unknown) => e instanceof DomainError && e.code === "checkout_changed" && /based on h1, not on h0 that was checked/.test(e.message));
+  }
+  assert.equal(recorded.length, 3);
   // A submission already recorded under the key (a replay) is returned before anything is staged or read; one of another task or kind is not.
   let stages = 0; let reads = 0;
   const withGet = (found: unknown) => stagedSubmit({ stage: async () => { stages++; return { base: "h1", tree: "t".repeat(40), patchId: "p".repeat(40), files: ["a.ts"] }; }, submissions: { record: async () => ({ id: "sub-new" }), get: async () => found } as never, principalOf: async () => ann, landing: async () => { reads++; return undefined; } });

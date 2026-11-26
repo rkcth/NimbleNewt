@@ -80,7 +80,7 @@ test("the owner sets the review policy by chat, reads it back, and the controlle
     const citeWords = "reviewers must cite the criteria version they judged against in every verdict";
     const citeProposed = await turn("m-cite", citeWords, [{ kind: "command", op: "qa.review.policy.set", args: { requireVerdictCitations: true }, evidence: citeWords, basis: "owner" }]);
     assert.equal(citeProposed[0].status, "proposed", JSON.stringify(citeProposed));
-    assert.equal((await call(O, "qa.review.policy.get", { projectId: project })).result.item.requireVerdictCitations, false, "nothing is applied before the owner agrees");
+    assert.equal((await call(O, "qa.review.policy.get", { projectId: project })).result.item.citations, "rejections", "nothing is applied before the owner agrees (the default rule: a rejection names what is unmet)");
     const citeYes = `yes ${citeProposed[0].proposalId}`;
     assert.equal((await turn("m-cite-yes", citeYes, [{ kind: "apply_proposal", proposalId: citeProposed[0].proposalId, evidence: citeYes, basis: "owner" }]))[0].status, "applied");
     assert.equal((await call(O, "qa.review.policy.get", { projectId: project })).result.item.requireVerdictCitations, true);

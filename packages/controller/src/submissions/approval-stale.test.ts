@@ -79,8 +79,8 @@ for (const backend of backends) {
       // 1. An approval judged against decision A and contract version 1 counts and keeps what it was judged against.
       const first = await review({ verdict: "approve" });
       assert.equal((await approval())?.approved, true);
-      assert.deepEqual((await raw("submission-verdicts", code.id)).reviews[0].basis, { criteriaRevision: 1, decisions: [`${dA}@1`] });
-      assert.deepEqual((await raw("submission", first.id)).judgedAgainst, { criteriaRevision: 1, decisions: [`${dA}@1`] });
+      assert.deepEqual((await raw("submission-verdicts", code.id)).reviews[0].basis, { criteriaRevision: 1, decisions: [`${dA}@1`], dependencies: "none" });
+      assert.deepEqual((await raw("submission", first.id)).judgedAgainst, { criteriaRevision: 1, decisions: [`${dA}@1`], dependencies: "none" });
       assert.equal((await reviewCheck()).result, "pass");
       assert.equal((await ops.add(owner, { commandId: cid("q"), submissionId: code.id })).position, 1);
       assert.equal((await queued())?.held, undefined);
