@@ -2231,7 +2231,7 @@ test("own-runner hand-off review: hashes read from standard input, no empty or p
   const hosted = code.slice(code.indexOf("  hosted:"), code.indexOf("  own-runner:"));
   // GNU sha256sum writes "\<hash>" for a file name with a backslash (every Windows $RUNNER_TEMP path): every hash in the workflow is read from standard input
   const sums = [...code.matchAll(/sha256sum[^\n|]*/g)].map((m) => m[0]);
-  assert.equal(sums.length, 6, sums.join(" / ")); // two build steps, the staging helper, the verify helper, the clean-up step (experiment launcher, and the product launcher before its delete-profile)
+  assert.equal(sums.length, 7, sums.join(" / ")); // two build steps, the staging helper, the G05 owner bundle's SHA256SUMS, the verify helper, the clean-up step (experiment launcher, and the product launcher before its delete-profile)
   for (const s of sums) assert.match(s, /^sha256sum -b < "?[^"\s]+"? $/, s);
   // the expected values: non-empty, lower-case hex only, exactly 64 digits, compared whole (never a substring or pattern match)
   const verify = own.slice(own.indexOf("id: verify"), own.indexOf("Containment cases as the runner service"));
@@ -3291,4 +3291,51 @@ test("the home steps give the program the environment an AppContainer launch nee
   assert.match(win, /CreateProcessW\(wexe\.as_ptr\(\), wcmd\.as_mut_ptr\(\), null\(\), null\(\), 1, creation_flags\(a\), env\.as_ptr\(\) as \*const c_void, wcwd\.as_ptr\(\)/);
   const readme = readFileSync(join(exp, "README.md"), "utf8");
   assert.ok(readme.includes("What a result means, and the tool bug of the first hosted run") && readme.includes("LOCALAPPDATA"));
+});
+
+// ------------------------------------------------------------------------------------------------ A03b: the G05 owner bundle (notes "A03b owner bundle for the real-PC ten-case run")
+
+test("A03b owner bundle (workflow): parsed, built from the staged launcher with the official node hash, uploaded for 7 days with the pinned action, digest in the summary, rehearsed de-elevated as a report", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  const from = hosted.indexOf("id: owner_parse");
+  const to = hosted.indexOf("id: installer_real\n");
+  assert.ok(from > hosted.indexOf("name: windows-appcontainer-launchers") && from > hosted.indexOf("id: stage"), "after the staging step and the launchers upload");
+  assert.ok(to > from, "before the real installer step, so the installer gate stays after the staging and the launchers upload");
+  const part = hosted.slice(hosted.lastIndexOf("\n      - ", from), hosted.lastIndexOf("\n      # Card A03b, the owner's first real runs", to));
+  const code = part.replace(/^\s*#.*$/gm, "");
+  const step = (id) => { const i = code.indexOf(`id: ${id}\n`); assert.ok(i > 0, id); const end = code.indexOf("\n      - ", i); return code.slice(code.lastIndexOf("\n      - ", i), end < 0 ? undefined : end); };
+  // parsed by Windows PowerShell 5.1 first
+  const parse = step("owner_parse");
+  assert.match(parse, /shell: powershell\n/);
+  assert.ok(parse.includes("[System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errors)") && parse.includes("owner\\run-g05.ps1") && parse.includes("exit 1"));
+  assert.match(parse, /if: \$\{\{ always\(\) && steps\.stage\.outputs\.launchers == 'ok' \}\}/);
+  // the bundle: only from the staged (hash-checked) launcher, the node version setup-node pins, the official node.exe hash, the commit of this run
+  const bundle = step("owner_bundle");
+  assert.match(bundle, /if: \$\{\{ always\(\) && steps\.stage\.outputs\.launchers == 'ok' && steps\.owner_parse\.outcome == 'success' \}\}/);
+  assert.ok(wf.includes('node-version: "22.19.0"') && bundle.includes('test "$(node -p process.version)" = "v22.19.0"'), "the node in the bundle is the pinned version");
+  const hash = /NODE_EXE_SHA256: "([0-9a-f]{64})"/.exec(bundle);
+  assert.ok(hash, "the official node.exe hash is a real 64-hex value, not a placeholder");
+  assert.equal(hash[1], "995a3fb3cefad590cd3f4b321532a4b9582fb9c6575320ed2e3e894caac3e362", "node v22.19.0 win-x64/node.exe in https://nodejs.org/dist/v22.19.0/SHASUMS256.txt");
+  assert.ok(!/placeholder|TODO|FIXME/i.test(bundle));
+  for (const piece of ["set -euo pipefail", "node scripts/g05-owner-bundle.mjs make --out \"$b\"", '--launcher "$RUNNER_TEMP/launchers/nn-launcher.exe"', '--record "$RUNNER_TEMP/launchers/nn-launcher.record.json"', '--node-sha256 "$NODE_EXE_SHA256"', '--commit "$GITHUB_SHA"', 'sha256sum -b < "$b/SHA256SUMS"', "GITHUB_STEP_SUMMARY"]) assert.ok(bundle.includes(piece), piece);
+  // the upload: the pinned action exactly as elsewhere in the file, 7 days, an error when empty
+  const pin = (action) => { const pins = new Set([...wf.matchAll(new RegExp(`uses: ${action.replace("/", "\\/")}@([0-9a-f]{40}) # (\\S+)`, "g"))].map((m) => `${m[1]} ${m[2]}`)); assert.equal(pins.size, 1, `${action}: one pinned commit in the file`); return [...pins][0].split(" ")[0]; };
+  const upload = code.slice(code.lastIndexOf("\n      - ", code.indexOf("id: owner_bundle_upload")), code.indexOf("\n      - ", code.indexOf("id: owner_bundle_upload")));
+  assert.ok(upload.includes(`uses: actions/upload-artifact@${pin("actions/upload-artifact")}`));
+  assert.match(upload, /name: windows-g05-owner-bundle\n\s+path: \$\{\{ runner\.temp \}\}\/g05-owner-bundle\n\s+if-no-files-found: error\n\s+retention-days: 7\n?/);
+  assert.match(upload, /if: \$\{\{ always\(\) && steps\.owner_bundle\.outcome == 'success' \}\}/);
+  assert.ok(code.includes("DIGEST: ${{ steps.owner_bundle_upload.outputs.artifact-digest }}") && /DIGEST[^\n]*>> "\$GITHUB_STEP_SUMMARY"/.test(code), "the artifact digest goes into the job summary");
+  assert.ok(code.includes(`uses: actions/download-artifact@${pin("actions/download-artifact")}`) && code.includes("name: windows-g05-owner-bundle\n          path: ${{ runner.temp }}/g05-owner-download"), "the rehearsal uses the uploaded copy");
+  // the rehearsal: de-elevated like the home case, under LOCALAPPDATA, redacted log, a report that never fails the job
+  const rehearsal = step("owner_rehearsal");
+  assert.match(rehearsal, /shell: bash\n\s+if: \$\{\{ always\(\) && steps\.owner_bundle\.outcome == 'success' \}\}\n\s+continue-on-error: true\n\s+timeout-minutes: 20\n/);
+  for (const piece of ["set +e", 'r="$(cygpath -u "$LOCALAPPDATA")/nn-g05-rehearsal"', 'cp -r "$RUNNER_TEMP/g05-owner-download" "$r"', '"$exp" deelevate --exe "$ps" -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$r/run-g05.ps1")"', "node scripts/redact-log.mjs <", "GITHUB_STEP_SUMMARY"]) assert.ok(rehearsal.includes(piece), piece);
+  assert.match(rehearsal, /\n\s+exit 0\s*$/);
+  assert.ok(!/cat "\$RUNNER_TEMP\/g05-rehearsal\.txt"/.test(rehearsal), "the raw output is never printed");
+  // nothing privileged, no secret, no permission change, nothing of it in the owner's runner job
+  assert.ok(!/secrets\.|permissions:|New-LocalUser|Install-NimbleNewtLauncher|Set-MpPreference|Add-MpPreference|Set-ExecutionPolicy|netsh|New-NetFirewallRule|sc\.exe|reg(\.exe)? add/.test(code));
+  assert.ok(!own.includes("owner_bundle") && !own.includes("g05-owner") && !own.includes("run-g05.ps1"), "not in the own-runner job");
+  assert.match(hosted, /timeout-minutes: 75/);
 });

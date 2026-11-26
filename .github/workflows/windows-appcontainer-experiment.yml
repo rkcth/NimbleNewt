@@ -493,6 +493,85 @@ jobs:
           path: ${{ runner.temp }}/launchers
           if-no-files-found: error
           retention-days: 7
+      # Card A03b, the G05 owner bundle (notes: "A03b owner bundle for the real-PC ten-case run"): everything the owner needs to run the ten containment cases on his own PC as his normal,
+      # NOT elevated account, with no build there: the product launcher staged above (hash-checked), this runner's node.exe (refused unless it has the official SHA-256 of node v22.19.0 win-x64/node.exe from
+      # https://nodejs.org/dist/v22.19.0/SHASUMS256.txt), the compiled worker and contracts, three scripts, COMMIT and run-g05.ps1, with SHA256SUMS over every file (scripts/g05-owner-bundle.mjs). run-g05.ps1
+      # checks every line of SHA256SUMS before it runs anything. First the script is parsed by Windows PowerShell 5.1 (the owner's shell). Kept 7 days. No secret, nothing privileged.
+      - name: "G05 owner bundle: parse run-g05.ps1 (Windows PowerShell 5.1)"
+        id: owner_parse
+        shell: powershell
+        if: ${{ always() && steps.stage.outputs.launchers == 'ok' }}
+        timeout-minutes: 5
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $f = (Resolve-Path 'experiments\windows-appcontainer\owner\run-g05.ps1').Path
+          $errors = $null; $tokens = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output "::error::run-g05.ps1: $($_.Message)" }; exit 1 }
+          Write-Output 'run-g05.ps1 parses under Windows PowerShell 5.1'
+      - name: "G05 owner bundle (the ten cases on the owner's own PC; no build there)"
+        id: owner_bundle
+        shell: bash
+        if: ${{ always() && steps.stage.outputs.launchers == 'ok' && steps.owner_parse.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          # The official SHA-256 of node v22.19.0 win-x64/node.exe (https://nodejs.org/dist/v22.19.0/SHASUMS256.txt, line "win-x64/node.exe"), the version setup-node pins above.
+          NODE_EXE_SHA256: "995a3fb3cefad590cd3f4b321532a4b9582fb9c6575320ed2e3e894caac3e362"
+        run: |
+          set -euo pipefail
+          test "$(node -p process.version)" = "v22.19.0"
+          b="$RUNNER_TEMP/g05-owner-bundle"; rm -rf "$b"
+          node scripts/g05-owner-bundle.mjs make --out "$b" --launcher "$RUNNER_TEMP/launchers/nn-launcher.exe" --record "$RUNNER_TEMP/launchers/nn-launcher.record.json" --node "$(node -p process.execPath)" --node-sha256 "$NODE_EXE_SHA256" --commit "$GITHUB_SHA" | tee "$RUNNER_TEMP/g05-owner-bundle.txt"
+          sums="$(sha256sum -b < "$b/SHA256SUMS" | cut -d' ' -f1)"
+          echo "sums_sha256=$sums" >> "$GITHUB_OUTPUT"
+          { echo "## G05 owner bundle"; echo "Commit \`$GITHUB_SHA\`; $(head -n 1 "$RUNNER_TEMP/g05-owner-bundle.txt"); SHA-256 of its SHA256SUMS \`$sums\`; node.exe \`$NODE_EXE_SHA256\` (official v22.19.0 win-x64)."; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: owner_bundle_upload
+        if: ${{ always() && steps.owner_bundle.outcome == 'success' }}
+        with:
+          name: windows-g05-owner-bundle
+          path: ${{ runner.temp }}/g05-owner-bundle
+          if-no-files-found: error
+          retention-days: 7
+      - name: "G05 owner bundle: artifact digest"
+        shell: bash
+        if: ${{ always() && steps.owner_bundle.outcome == 'success' }}
+        env:
+          DIGEST: ${{ steps.owner_bundle_upload.outputs.artifact-digest }}
+        run: |
+          echo "windows-g05-owner-bundle artifact digest (SHA-256 of the zip GitHub serves): ${DIGEST:-not reported}"
+          echo "Artifact \`windows-g05-owner-bundle\` digest (SHA-256 of the zip): \`${DIGEST:-not reported}\`" >> "$GITHUB_STEP_SUMMARY"
+      # The REHEARSAL of the owner's run: the uploaded artifact is downloaded again, copied under the runner user's LOCALAPPDATA (a long path, as the owner's will be) and run-g05.ps1 is run
+      # DE-ELEVATED (the experiment launcher's `deelevate`, as in the home-case step: Administrators deny-only, privileges removed, medium integrity), so its refusal to run elevated is not the
+      # reason it stops. A REPORT, not a gate (`continue-on-error`, `exit 0`): a failure shows in the summary and never hides the artifact. Its output goes to the log through redact-log.mjs;
+      # the zip it makes is copied into the hosted artifact.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ always() && steps.owner_bundle.outcome == 'success' }}
+        with:
+          name: windows-g05-owner-bundle
+          path: ${{ runner.temp }}/g05-owner-download
+      - name: "G05 owner bundle rehearsal (run-g05.ps1 de-elevated on this runner; a report, not a gate)"
+        id: owner_rehearsal
+        shell: bash
+        if: ${{ always() && steps.owner_bundle.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          set +e
+          exp="$PWD/experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe"
+          out="$RUNNER_TEMP/appc-out/g05-rehearsal"; mkdir -p "$out"
+          if [ ! -f "$exp" ]; then echo "::warning::the experiment launcher was not built; no rehearsal"; exit 0; fi
+          r="$(cygpath -u "$LOCALAPPDATA")/nn-g05-rehearsal"; rm -rf "$r"
+          cp -r "$RUNNER_TEMP/g05-owner-download" "$r"
+          ps="$(cygpath -w "$(cygpath -W)/System32/WindowsPowerShell/v1.0/powershell.exe")"
+          "$exp" deelevate --exe "$ps" -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$r/run-g05.ps1")" > "$RUNNER_TEMP/g05-rehearsal.txt" 2>&1
+          rc=$?
+          node scripts/redact-log.mjs < "$RUNNER_TEMP/g05-rehearsal.txt" | tee "$out/run-g05.redacted.txt"
+          zip="$(cygpath -u "$USERPROFILE")/Desktop/nn-g05-results.zip"
+          if [ -f "$zip" ]; then cp "$zip" "$out/nn-g05-results.zip"; fi
+          { echo "## G05 owner bundle rehearsal (hosted, de-elevated; exit $rc)"; echo '```'; grep -E 'cases hold|REFUSED|FAILED|bundle check|not elevated|symbolic links|launcher info|leftover|finished|wrote nn-g05' "$out/run-g05.redacted.txt" | head -n 30; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then echo "::warning::the rehearsal of run-g05.ps1 ended with exit $rc (see the summary); the bundle artifact is uploaded either way"; fi
+          exit 0
       # Card A03b, the owner's first real runs found two faults that the text tests, the dry run and Verify on an empty machine could not reach, and the rest of Verify and ALL of Uninstall have never run on any
       # machine. A GitHub-hosted Windows runner is a disposable, elevated virtual machine, so a REAL Install, Verify, a second Install, a refused Uninstall and a real Uninstall can be proven there at no risk to
       # anyone. This step does that with a throw-away account (nnprobe + 6 random lower-case letters or digits) and folders named ...\NimbleNewt under $RUNNER_TEMP (the runner's own Program Files and

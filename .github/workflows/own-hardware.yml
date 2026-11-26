@@ -8,6 +8,11 @@ name: Own hardware
 # Runner labels: `nimblenewt-mac`, `nimblenewt-windows`, `nimblenewt-linux` (see docs/nimblenewt/own-hardware-runners.md).
 on:
   workflow_dispatch:
+    inputs:
+      g05_owner_bundle:
+        description: "Run ONLY the G05 owner bundle (run-g05.ps1: the ten containment cases, AppContainer) on the Windows runner as its signed-in, non-elevated account; the probe and Windows Sandbox jobs are skipped. Leave off for the usual run."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,7 +24,7 @@ concurrency:
 jobs:
   probe:
     name: Probe ${{ matrix.label }}
-    if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
+    if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' && inputs.g05_owner_bundle != true
     runs-on: [self-hosted, "${{ matrix.label }}"]
     # One run of the whole suite takes about 21 minutes on the Mac and about twice that on the Windows runner, and a slow Windows run was
     # cancelled at 60 minutes part way through (CI, 2026-11-19). One limit for both machines: the Mac finishes far below it.
@@ -81,7 +86,7 @@ jobs:
   # `y02-checkpoint.mjs gate`, which still block on what no automation can show (logout and reboot under the service identity, the strict supervisor ACL, a packaged controller).
   sandbox-windows:
     name: Windows Sandbox (real)
-    if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'
+    if: github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' && inputs.g05_owner_bundle != true
     runs-on: [self-hosted, nimblenewt-windows]
     # The Y02 scenario set runs whole controller test files on four storage backends on the owner's PC: allow far more than the Sandbox tests alone need.
     # The job's limit is above the sum of every step's own limit (425 minutes) plus set-up and uploads, so a job timeout never cuts off the cleanup, outcome and upload steps
@@ -342,3 +347,132 @@ jobs:
           path: ${{ runner.temp }}/sandbox-windows-detail
           if-no-files-found: ignore
           retention-days: 7
+
+  # Card A03b, the G05 owner bundle on the owner's own Windows PC (notes: "A03b owner bundle for the real-PC ten-case run"), so the ten cases run there with nothing for the owner to do:
+  # only when the input g05_owner_bundle is ticked (default off), only from main of this repository (the same guards as the jobs above), and then ALONE (the probe and the Windows Sandbox job
+  # are skipped). A GitHub-hosted job builds the bundle (the product launcher with its pinned toolchain, --locked, and its release record; node.exe checked against the official SHA-256;
+  # scripts/g05-owner-bundle.mjs) and hands the SHA-256 of its SHA256SUMS over as a job output (a value the artifact cannot change). The own runner (run.cmd as the signed-in owner, not a
+  # service and not elevated) checks the downloaded SHA256SUMS against that value and runs run-g05.ps1, which checks every file against SHA256SUMS, refuses to run elevated and writes only
+  # redacted, personal-data-checked results. No checkout runs on the owner's machine: only the bundle. No secrets; nothing is installed.
+  g05-bundle-build:
+    name: G05 owner bundle (hosted build)
+    if: ${{ inputs.g05_owner_bundle == true && github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    outputs:
+      sums_sha256: ${{ steps.bundle.outputs.sums_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.19.0"
+      - run: npm ci
+      - run: npm run build
+      # The same product build as windows-appcontainer-experiment.yml (native/nn-launcher/RELEASE.md, step 1): the pinned toolchain, --locked, the path remap; then its release record and the record check.
+      - name: Build the product launcher and its release record
+        shell: bash
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal 2>&1 | node scripts/redact-log.mjs
+          out="$RUNNER_TEMP/launcher"; mkdir -p "$out"
+          cd native/nn-launcher
+          crate_w="$(cygpath -w "$PWD")"; cargo_w="$(cygpath -w "${CARGO_HOME:-$USERPROFILE/.cargo}")"
+          RUSTFLAGS="--remap-path-prefix=$crate_w=/nn-launcher --remap-path-prefix=$cargo_w=/cargo -C link-arg=/Brepro" cargo build --release --locked 2>&1 | node ../../scripts/redact-log.mjs
+          cp target/release/nn-launcher.exe "$out/nn-launcher.exe"
+          node ../../scripts/native-launcher.mjs record --file "$out/nn-launcher.exe" --commit "$GITHUB_SHA" --out "$out/nn-launcher.record.json"
+          node ../../scripts/native-launcher.mjs verify --file "$out/nn-launcher.exe" --record "$out/nn-launcher.record.json"
+      - name: "Parse run-g05.ps1 (Windows PowerShell 5.1)"
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $f = (Resolve-Path 'experiments\windows-appcontainer\owner\run-g05.ps1').Path
+          $errors = $null; $tokens = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errors)
+          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Output "::error::run-g05.ps1: $($_.Message)" }; exit 1 }
+      - name: Lay out the G05 owner bundle
+        id: bundle
+        shell: bash
+        env:
+          # The official SHA-256 of node v22.19.0 win-x64/node.exe (https://nodejs.org/dist/v22.19.0/SHASUMS256.txt, line "win-x64/node.exe").
+          NODE_EXE_SHA256: "995a3fb3cefad590cd3f4b321532a4b9582fb9c6575320ed2e3e894caac3e362"
+        run: |
+          set -euo pipefail
+          test "$(node -p process.version)" = "v22.19.0"
+          b="$RUNNER_TEMP/g05-owner-bundle"; rm -rf "$b"
+          node scripts/g05-owner-bundle.mjs make --out "$b" --launcher "$RUNNER_TEMP/launcher/nn-launcher.exe" --record "$RUNNER_TEMP/launcher/nn-launcher.record.json" --node "$(node -p process.execPath)" --node-sha256 "$NODE_EXE_SHA256" --commit "$GITHUB_SHA"
+          sums="$(sha256sum -b < "$b/SHA256SUMS" | cut -d' ' -f1)"
+          echo "sums_sha256=$sums" >> "$GITHUB_OUTPUT"
+          { echo "## G05 owner bundle (own-hardware)"; echo "Commit \`$GITHUB_SHA\`; SHA-256 of its SHA256SUMS \`$sums\`."; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: g05-owner-bundle-own-hardware
+          path: ${{ runner.temp }}/g05-owner-bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  g05-owner-run:
+    name: G05 owner bundle on the Windows runner (signed-in, not elevated)
+    needs: g05-bundle-build
+    if: ${{ !cancelled() && inputs.g05_owner_bundle == true && github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main' && needs.g05-bundle-build.outputs.sums_sha256 != '' }}
+    runs-on: [self-hosted, nimblenewt-windows]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: g05-owner-bundle-own-hardware
+          path: ${{ runner.temp }}/g05-owner-download
+      # Nothing of the bundle runs before its SHA256SUMS matches the hosted job's output; run-g05.ps1 then checks every file against SHA256SUMS. The bundle is placed under this account's
+      # LOCALAPPDATA (a long path), keeping its control folder from an earlier run so the backend can sweep that run's leftovers. Its output is redacted (the bundle's redact-log.mjs) before
+      # it reaches the log; the zip it made (personal-data checked by run-g05.ps1) and the redacted log are uploaded.
+      - name: Check the bundle, then run run-g05.ps1 as this runner's own account
+        id: g05owner
+        shell: powershell
+        timeout-minutes: 40
+        env:
+          EXPECT_SUMS: ${{ needs.g05-bundle-build.outputs.sums_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECT_SUMS -cnotmatch '^[0-9a-f]{64}$') { Write-Output '::error::no SHA-256 of SHA256SUMS from the hosted job; nothing was run'; exit 1 }
+          $src = Join-Path $env:RUNNER_TEMP 'g05-owner-download'
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $got = (($sha.ComputeHash([System.IO.File]::ReadAllBytes((Join-Path $src 'SHA256SUMS'))) | ForEach-Object { $_.ToString('x2') }) -join '')
+          if ($got -cne $env:EXPECT_SUMS) { Write-Output "::error::the downloaded SHA256SUMS has SHA-256 $got, the hosted job made $($env:EXPECT_SUMS); nothing was run"; exit 1 }
+          $b = Join-Path $env:LOCALAPPDATA 'nn-g05-own-runner'
+          if (Test-Path -LiteralPath $b) { Get-ChildItem -LiteralPath $b -Force | Where-Object { $_.Name -ne 'control' } | Remove-Item -Recurse -Force }
+          New-Item -ItemType Directory -Path $b -Force | Out-Null
+          Copy-Item -Path (Join-Path $src '*') -Destination $b -Recurse -Force
+          $out = Join-Path $env:RUNNER_TEMP 'g05-owner-out'; New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          function Invoke-Piped([string] $exe, [string] $argText, [string] $inFile) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exe; $psi.Arguments = $argText; $psi.UseShellExecute = $false; $psi.WorkingDirectory = $b
+            $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.StandardOutputEncoding = $utf8; $psi.StandardErrorEncoding = $utf8
+            if ($inFile) { $psi.RedirectStandardInput = $true }
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
+            if ($inFile) { $bytes = [System.IO.File]::ReadAllBytes($inFile); $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $p.StandardInput.Close() }
+            $p.WaitForExit()
+            return @{ Code = $p.ExitCode; Text = ($o.Result + $e.Result) }
+          }
+          $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $run = Invoke-Piped $ps ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $b 'run-g05.ps1') + '"') $null
+          $rawFile = Join-Path $env:RUNNER_TEMP 'g05-owner-raw.txt'
+          [System.IO.File]::WriteAllText($rawFile, $run.Text, $utf8)
+          $red = Invoke-Piped (Join-Path $b 'node\node.exe') ('"' + (Join-Path $b 'scripts\redact-log.mjs') + '"') $rawFile
+          Remove-Item -LiteralPath $rawFile -Force
+          [System.IO.File]::WriteAllText((Join-Path $out 'run-g05.redacted.txt'), $red.Text, $utf8)
+          Write-Output $red.Text
+          foreach ($d in @('Desktop', 'Downloads')) { $z = Join-Path (Join-Path $env:USERPROFILE $d) 'nn-g05-results.zip'; if ([System.IO.File]::Exists($z)) { Copy-Item -LiteralPath $z -Destination (Join-Path $out 'nn-g05-results.zip') -Force; break } }
+          $tally = @($red.Text -split "`r?`n" | Where-Object { $_ -match 'cases hold|REFUSED|FAILED|finished' })
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## G05 owner bundle on the own Windows runner (exit $($run.Code))`n``````text`n$($tally -join "`n")`n```````n", $utf8)
+          exit $run.Code
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: g05-owner-results-own-hardware
+          path: ${{ runner.temp }}/g05-owner-out
+          if-no-files-found: warn
+          retention-days: 90

@@ -57,7 +57,10 @@ test("the root-only list is honest: no package source and no other script runs, 
   }
   // A reader need not name the file: listing scripts/ or the workflows, a glob over them, or a path built from a variable reaches files the names above do not show. Each such reader
   // must be checked by hand and listed here with what it reads; none may reach a file on ROOT_ONLY.
-  const CHECKED = new Map([["packages/integration/src/fixed-part-budget.test.ts", "join(repository, \"scripts\", file) over the literal list local-host.mjs and remote-host.mjs"]]);
+  const CHECKED = new Map([
+    ["packages/integration/src/fixed-part-budget.test.ts", "join(repository, \"scripts\", file) over the literal list local-host.mjs and remote-host.mjs"],
+    ["scripts/g05-owner-bundle.mjs", "join(repo, \"scripts\", s) over BUNDLE_SCRIPTS, the literal list containment-evidence.mjs, offline-guard.mjs and redact-log.mjs (none on ROOT_ONLY)"],
+  ]);
   const dynamic = [
     /\b(?:readdir|opendir|glob)(?:Sync)?\s*\([^\n]*(?:["'`/]scripts\b|\.github|workflows)/,
     /\b(?:join|resolve)\s*\([^\n)]*["'`](?:scripts|\.github|workflows)["'`]\s*,\s*[^\s"'`]/,

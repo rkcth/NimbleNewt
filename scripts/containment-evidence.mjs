@@ -7,6 +7,9 @@
 //        --redact [--local DIR]: the written report has account, machine and home names, SIDs and addresses replaced (windows-redact.ts), for a public artifact; with --local the
 //        unredacted report is also written to DIR (keep that folder on the machine). A redacted report that no longer reads as a report is not written.
 //   node scripts/containment-evidence.mjs gate --dir DIR --commit SHA   read every containment-*.json in DIR and list what blocks a release
+//        --prebuilt: the owner bundle (card A03b, experiments/windows-appcontainer/owner/run-g05.ps1): no tsc and no git. The compiled code is the bundle's, built by CI; the commit is read from the file COMMIT at the
+//        bundle's root (next to scripts/), which must hold exactly 40 lower-case hex digits (one trailing line break allowed), else exit 2 before anything runs. The report says dirty: false (the bundle's files are
+//        checked against its SHA256SUMS by run-g05.ps1 before this starts).
 // `run` builds the tree first (tsc --build; the compiled code is not tracked by git, so a stale build would otherwise be reported under HEAD's commit) and needs a committed checkout; the report names the commit and says if the tree was dirty.
 // `gate` exits 1 while anything blocks, so a release step can call it. Reports are read as data: size-bounded and shape-checked.
 import { execFileSync } from "node:child_process";
@@ -17,7 +20,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const [command, ...rest] = process.argv.slice(2);
-if (command === "run") {
+const prebuilt = command === "run" && rest.includes("--prebuilt");
+/** --prebuilt: the commit CI wrote into the bundle. Checked before the worker is loaded, so a bad file stops the run before any code of the bundle runs. */
+let provenance;
+if (prebuilt) {
+  let text;
+  try { text = readFileSync(join(root, "COMMIT"), "latin1"); } catch { text = undefined; }
+  const commit = text === undefined ? undefined : text.replace(/\r?\n$/, "");
+  if (commit === undefined || !/^[0-9a-f]{40}$/.test(commit)) { console.error("--prebuilt: the COMMIT file next to scripts/ is missing or does not hold exactly 40 lower-case hex digits; nothing was run"); process.exit(2); }
+  provenance = { implementationCommit: commit, dirty: false };
+}
+if (command === "run" && !prebuilt) {
   try { execFileSync(process.execPath, [join(root, "node_modules", "typescript", "bin", "tsc"), "--build"], { cwd: root, stdio: "inherit" }); } catch { console.error("the build failed: no evidence is produced from code that does not compile"); process.exit(1); }
 }
 const worker = await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href);
@@ -26,18 +39,18 @@ const flag = (name) => { const i = rest.indexOf(`--${name}`); return i >= 0 ? re
 
 if (command === "run") {
   const out = flag("out");
-  const usage = "usage: run --out DIR [--allow-unavailable] [--windows-summary FILE [--workdir-check FILE]] [--redact [--local DIR]]";
+  const usage = "usage: run --out DIR [--prebuilt] [--allow-unavailable] [--windows-summary FILE [--workdir-check FILE]] [--redact [--local DIR]]";
   const valued = ["--out", "--windows-summary", "--workdir-check", "--local"];
   for (let i = 0; i < rest.length; i++) {
     if (valued.includes(rest[i]) && rest[i + 1] !== undefined && !rest[i + 1].startsWith("--")) { i++; continue; }
-    if (rest[i] === "--allow-unavailable" || rest[i] === "--redact") continue;
+    if (rest[i] === "--allow-unavailable" || rest[i] === "--redact" || rest[i] === "--prebuilt") continue;
     console.error(usage); process.exit(2);
   }
   if (out === undefined || (flag("workdir-check") !== undefined && flag("windows-summary") === undefined) || (flag("local") !== undefined && !rest.includes("--redact"))) { console.error(usage); process.exit(2); }
   // Windows: the owner and share account default to the console user, as in windows-real.test.ts; which default was taken is printed (source words only, never the name).
   const consoleUser = await worker.windowsConsoleUser();
   if (process.platform === "win32") { const id = worker.evidenceIdentity(process.env, consoleUser); console.log(`  Windows Sandbox owner: ${id.ownerSource}; share account: ${id.shareSource} (configured = NIMBLENEWT_WSB_OWNER / NIMBLENEWT_WSB_SHARE_IDENTITY, console = the account signed in at the console, runner = this process's account)`); }
-  let report = await worker.produceReport(root);
+  let report = await worker.produceReport(root, {}, provenance);
   const summaryFile = flag("windows-summary");
   if (summaryFile !== undefined) {
     const read = (f) => { try { return readFileSync(resolve(f), "utf8"); } catch { return undefined; } };
@@ -94,6 +107,6 @@ if (command === "run") {
   console.log(result.ok && problems.length === 0 ? "isolation evidence complete for this commit" : "isolation evidence incomplete: the release is blocked");
   process.exit(result.ok && problems.length === 0 ? 0 : 1);
 } else {
-  console.error("usage: containment-evidence.mjs run --out DIR [--allow-unavailable] | gate --dir DIR --commit SHA");
+  console.error("usage: containment-evidence.mjs run --out DIR [--prebuilt] [--allow-unavailable] | gate --dir DIR --commit SHA");
   process.exit(2);
 }

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
-import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, runContainmentSuite, runOutcome, statesWeakerBoundary, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
+import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, produceReport, runContainmentSuite, runOutcome, statesWeakerBoundary, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
 import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, windowsSandboxEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher, type LaunchRequest, type RunResult } from "./launcher.js";
 import { bubblewrapBackend } from "./linux.js";
@@ -267,6 +267,34 @@ describe("G05 evidence script", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
   test("usage errors exit 2", () => assert.equal(spawnSync(process.execPath, [script], { encoding: "utf8" }).status, 2));
+});
+
+// Card A03b owner bundle: the prebuilt bundle has no git and no checkout, so the commit comes from the bundle's COMMIT file (containment-evidence.mjs --prebuilt) and git must never be run.
+describe("G05 report provenance (the prebuilt owner bundle)", () => {
+  const dead: SandboxBackend = { name: "dead", health: async () => ({ healthy: false, backend: "dead", reason: "broken on purpose" }), plan: () => { throw new Error("never"); }, guestView: () => { throw new Error("never"); } };
+  // a folder that does not exist: any git call there throws, so a report made here proves git was not run
+  const nowhere = (): string => join(tmpdir(), `nn-g05-no-checkout-${process.pid}-${Date.now()}`);
+  test("with provenance the commit and the dirty flag are taken from it and git is never run", async () => {
+    const launcher = await SandboxLauncher.create({ backend: dead, protectedPaths: [], audit: () => undefined });
+    const r = await produceReport(nowhere(), { launcher }, { implementationCommit: "b".repeat(40), dirty: false });
+    assert.equal(r.implementationCommit, "b".repeat(40));
+    assert.equal(r.dirty, false);
+    assert.equal(r.schema, CONTAINMENT_SCHEMA);
+    assert.ok(r.cases.every((c) => c.verdict === "not_run"));
+    assert.ok("report" in parseReport(JSON.stringify(r)), "the report still reads as a report");
+  });
+  test("without provenance outside a checkout it fails (git is what it asks), so the test above is not passing by accident", async () => {
+    const launcher = await SandboxLauncher.create({ backend: dead, protectedPaths: [], audit: () => undefined });
+    await assert.rejects(produceReport(nowhere(), { launcher }));
+  });
+  test("a malformed commit in the provenance is refused before any case runs", async () => {
+    let launched = 0;
+    const counting = { capacity: { available: true, backend: "counted", checkedAt: NOW.toISOString() }, launch: async () => { launched++; throw new Error("never"); } } as unknown as SandboxLauncher;
+    for (const bad of [{ implementationCommit: "HEAD", dirty: false }, { implementationCommit: "B".repeat(40), dirty: false }, { implementationCommit: "b".repeat(41), dirty: false }, { implementationCommit: "b".repeat(40), dirty: "no" as unknown as boolean }]) {
+      await assert.rejects(produceReport(nowhere(), { launcher: counting }, bad), /provenance/, JSON.stringify(bad));
+    }
+    assert.equal(launched, 0);
+  });
 });
 
 // G05 on Windows: the cases are cmd batch files. A GitHub-hosted Windows runner has no Windows Sandbox, so the real Windows run happens only on a host that has it; here the Windows

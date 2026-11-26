@@ -29,7 +29,9 @@ function step(jobText, id) {
 
 test("own-hardware: the Windows evidence job runs only by hand from main, every evidence step continues on error, and the outcome step fails the job if any failed", () => {
   const text = read("own-hardware.yml");
-  assert.match(text, /^on:\n {2}workflow_dispatch:\n\n/m, "started by hand only: no push or pull request trigger");
+  // started by hand only: no push or pull request trigger; the one input (card A03b, the G05 owner bundle) is a boolean that defaults to off
+  const on = text.slice(text.indexOf("\non:\n") + 5, text.indexOf("\npermissions:"));
+  assert.match(on, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}g05_owner_bundle:\n {8}description: "[^"\n]+"\n {8}type: boolean\n {8}default: false\n$/, "started by hand only, with one boolean input that defaults to false");
   assert.doesNotMatch(text, /^ {2}(push|pull_request|pull_request_target):/m);
   const j = job(text, "sandbox-windows");
   assert.match(j, /if: github\.repository == 'rkcth\/NimbleNewt' && github\.ref == 'refs\/heads\/main'/);
@@ -209,4 +211,31 @@ test("own-hardware: the product launcher's one-line wsb list record (card wsb-re
   assert.ok(j.indexOf("id: wsbctx") < j.indexOf("id: wsblist") && j.indexOf("id: wsblist") < j.indexOf("id: wsb\n"));
   assert.doesNotMatch(j.slice(j.indexOf("- name: Job summary and outcome")), /steps\.wsblist\./);
   assert.equal(read("own-hardware.yml").split("node scripts/wsb-list-line.mjs").length - 1, 1);
+});
+
+test("own-hardware (card A03b): the G05 owner bundle runs only when its input is ticked, only from main, alone, built on a hosted runner and checked by hash before anything of it runs on the owner's PC", () => {
+  const text = read("own-hardware.yml");
+  const guard = "github.repository == 'rkcth/NimbleNewt' && github.ref == 'refs/heads/main'";
+  // the usual jobs keep their guards and are skipped when the owner bundle run is asked for
+  for (const name of ["probe", "sandbox-windows"]) assert.ok(job(text, name).includes(`    if: ${guard} && inputs.g05_owner_bundle != true\n`), name);
+  const build = job(text, "g05-bundle-build");
+  const run = job(text, "g05-owner-run");
+  assert.ok(build.includes(`    if: \${{ inputs.g05_owner_bundle == true && ${guard} }}\n`), "the hosted build: the input and the same guards");
+  assert.match(build, /\n {4}runs-on: windows-latest\n/);
+  assert.ok(run.includes(`    if: \${{ !cancelled() && inputs.g05_owner_bundle == true && ${guard} && needs.g05-bundle-build.outputs.sums_sha256 != '' }}\n`), "the owner's runner: the input, the same guards and a bundle hash");
+  assert.match(run, /\n {4}needs: g05-bundle-build\n {4}if: [^\n]+\n {4}runs-on: \[self-hosted, nimblenewt-windows\]\n {4}timeout-minutes: 45\n/);
+  // the build: the product launcher with the pinned toolchain and --locked, its record, the official node hash, the bundle script, the hash of SHA256SUMS as the job output
+  for (const piece of ["rustup toolchain install 1.99.1 --profile minimal", "cargo build --release --locked", "native-launcher.mjs record --file", "native-launcher.mjs verify --file", 'node-version: "22.19.0"', 'NODE_EXE_SHA256: "995a3fb3cefad590cd3f4b321532a4b9582fb9c6575320ed2e3e894caac3e362"', 'test "$(node -p process.version)" = "v22.19.0"', 'node scripts/g05-owner-bundle.mjs make --out "$b"', '--commit "$GITHUB_SHA"', 'echo "sums_sha256=$sums" >> "$GITHUB_OUTPUT"', "sums_sha256: ${{ steps.bundle.outputs.sums_sha256 }}", "ParseFile($f, [ref]$tokens, [ref]$errors)"]) assert.ok(build.includes(piece), piece);
+  // the owner's runner: no checkout (only the bundle runs there), the hash check before anything is copied or run, run-g05.ps1 without elevation, the output redacted before the log
+  assert.ok(!run.includes("actions/checkout@") && !/npm (ci|run)/.test(run), "no checkout and no build on the owner's PC");
+  const code = run.replace(/^\s*#.*$/gm, "");
+  const check = code.indexOf("if ($got -cne $env:EXPECT_SUMS)");
+  assert.ok(code.includes("EXPECT_SUMS: ${{ needs.g05-bundle-build.outputs.sums_sha256 }}") && code.includes("if ($env:EXPECT_SUMS -cnotmatch '^[0-9a-f]{64}$')") && check > 0);
+  for (const later of ["Copy-Item -Path (Join-Path $src '*')", "Invoke-Piped $ps", "(Join-Path $b 'run-g05.ps1')"]) assert.ok(code.indexOf(later) > check, `${later} only after the hash check`);
+  assert.ok(code.includes("('-NoProfile -ExecutionPolicy Bypass -File \"' + (Join-Path $b 'run-g05.ps1') + '\"')"));
+  assert.ok(code.includes("scripts\\redact-log.mjs") && code.indexOf("Write-Output $red.Text") > code.indexOf("$red = Invoke-Piped") && !/Write-Output \$run\.Text/.test(code), "only the redacted text reaches the log");
+  assert.ok(code.includes("$b = Join-Path $env:LOCALAPPDATA 'nn-g05-own-runner'") && code.includes("Where-Object { $_.Name -ne 'control' }"), "the control folder of an earlier run is kept for the sweep");
+  // no secrets, no elevation, nothing installed, no Windows Sandbox in the owner bundle jobs
+  for (const j of [build, run]) assert.ok(!/secrets\.|permissions:|RunAs|Install-NimbleNewtLauncher|New-LocalUser|Set-MpPreference|Set-ExecutionPolicy|wsb|deelevate/.test(j.replace(/^\s*#.*$/gm, "")));
+  for (const m of (build + run).matchAll(/uses: ([^\s]+)/g)) assert.match(m[1], /@[0-9a-f]{40}$/, m[1]);
 });

@@ -484,12 +484,27 @@ function macosProductVersion(): string | undefined {
   try { return execFileSync("/usr/bin/sw_vers", ["-productVersion"], { encoding: "utf8", timeout: 5000 }).trim(); } catch { return undefined; }
 }
 
-/** Runs the suite here and wraps it in a report bound to the checkout's commit. `repo` is a directory inside the checkout the evidence is about. */
-export async function produceReport(repo: string, options: SuiteOptions = {}): Promise<ContainmentReport> {
+/**
+ * Where the evidence's code came from, when it is not a git checkout: the prebuilt owner bundle (card A03b, `containment-evidence.mjs run --prebuilt`) carries the commit CI built it from in a COMMIT file
+ * and has no git and no working tree, so it is never dirty in the git sense (its files are checked against the bundle's SHA256SUMS before anything runs).
+ */
+export interface ReportProvenance {
+  readonly implementationCommit: string;
+  readonly dirty: boolean;
+}
+
+/**
+ * Runs the suite here and wraps it in a report bound to the checkout's commit. `repo` is a directory inside the checkout the evidence is about. With `provenance` the commit and the dirty flag are
+ * taken from it and git is never run (a malformed commit is refused before any case runs).
+ */
+export async function produceReport(repo: string, options: SuiteOptions = {}, provenance?: ReportProvenance): Promise<ContainmentReport> {
   const platform = process.platform;
   if (platform !== "linux" && platform !== "darwin" && platform !== "win32") throw new Error(`no containment evidence is defined for ${platform}`);
-  const commit = git(repo, "rev-parse", "HEAD");
-  const dirty = git(repo, "status", "--porcelain").length > 0;
+  if (provenance !== undefined && (typeof provenance.implementationCommit !== "string" || !COMMIT.test(provenance.implementationCommit) || typeof provenance.dirty !== "boolean")) {
+    throw new Error("provenance: implementationCommit must be 40 lower-case hex digits and dirty true or false");
+  }
+  const commit = provenance === undefined ? git(repo, "rev-parse", "HEAD") : provenance.implementationCommit;
+  const dirty = provenance === undefined ? git(repo, "status", "--porcelain").length > 0 : provenance.dirty;
   // Windows: the backend is the native launcher (windowsEvidenceBackend, card A03b), configured from the environment of the administrator's install step; the cases are the node runner's
   // (containment-windows-cases.ts). Where the launcher is not installed every case is reported not_run with that reason.
   const suite = await runContainmentSuite(platform === "win32" && options.launcher === undefined && options.backend === undefined ? { ...options, backend: windowsEvidenceBackend(process.env, await windowsConsoleUser()) } : options);
