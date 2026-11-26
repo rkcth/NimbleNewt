@@ -13,6 +13,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
+import { CAPABILITY_ID, CAPABILITY_MATURITIES, CLAIM_LIMITS, checkDeclared, cleanText, effectiveRegister, maturityRank, scanText, type CapabilityEntry, type CapabilityMaturity, type CapabilityRegisterBody, type ClaimFlag } from "./doc-claims.js";
 
 /** Who a document is for (card Q03): user and developer documentation, support guidance and promotional assets. A release change flags all four. */
 export const DOC_AUDIENCES = ["user", "developer", "support", "promotional"] as const;
@@ -20,9 +21,23 @@ export type DocAudience = (typeof DOC_AUDIENCES)[number];
 /** `unverified`: never checked against tested work. `verified`: a document change was bound to code that passed its QA gate. `stale`: verified once, but the behaviour or the release changed since. */
 export const DOC_STATES = ["unverified", "verified", "stale"] as const;
 export type DocState = (typeof DOC_STATES)[number];
+/**
+ * What is kept (card Q03): a `document` (user or developer documentation, or any other text), `support_guidance` (what support staff tell customers: help-desk answers, FAQ entries) or a `promotional_asset`
+ * (marketing: a landing page, a store listing, an announcement, an image or video). Each has an owner, audience, version, implementing tasks and a state, and every check (impact, release, landing) treats
+ * them alike; support guidance and promotional assets also name the channel they are published on, and a promotional asset its media type. A record written before kinds existed is a `document`.
+ */
+export const DOC_KINDS = ["document", "support_guidance", "promotional_asset"] as const;
+export type DocKind = (typeof DOC_KINDS)[number];
+export const DOC_MEDIA = ["text", "image", "video", "audio", "other"] as const;
+export type DocMedia = (typeof DOC_MEDIA)[number];
 
 /** A capability a document claims, tied to the task that implements it. A claim is supported only while that task's code passes its QA gate (card Q02). */
-export interface DocClaim { readonly text: string; readonly taskId: string }
+export interface DocClaim {
+  readonly text: string;
+  readonly taskId: string;
+  /** The capability of the project's capability register it claims (required for a claim recorded since the register exists; an older claim without one is flagged when the document is verified). */
+  readonly capabilityId?: string;
+}
 /** The tested artifact a document was checked against for one implementing task: the code submission and the tree its QA gate passed on. */
 export interface DocEvidence { readonly taskId: string; readonly submissionId: string; readonly tree: string }
 
@@ -30,7 +45,9 @@ export interface DocEvidence { readonly taskId: string; readonly submissionId: s
 export type DocReason =
   | { readonly kind: "behavior_changed"; readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly from?: string }
   | { readonly kind: "evidence_lost"; readonly taskId: string; readonly submissionId: string }
-  | { readonly kind: "release_changed"; readonly from: string; readonly to: string };
+  | { readonly kind: "release_changed"; readonly from: string; readonly to: string }
+  /** A capability the document claimed or named when it was verified is now rated lower in the capability register (for example supported, now experimental). */
+  | { readonly kind: "capability_changed"; readonly capabilityId: string; readonly from: CapabilityMaturity; readonly to: CapabilityMaturity };
 
 export interface DocUpdate {
   /** The assigned update task (created by the controller, owned by the document's owner). */
@@ -51,6 +68,12 @@ export interface DocObligationBody {
   /** Where the document lives (a path, an address or an artifact ID), as the recorder gave it. */
   readonly location: string;
   readonly audience: DocAudience;
+  /** Absent on records written before kinds existed: a `document`. */
+  readonly kind?: DocKind;
+  /** Support guidance and promotional assets: where it is published (for example "help desk", "app store listing"). */
+  readonly channel?: string;
+  /** Promotional assets: what it is. Only `text` can be read by the controller; the claims of the others are what the record lists. */
+  readonly mediaType?: DocMedia;
   /** The agent answerable for keeping it current (a principal ID `agent:<id>`): its update tasks are assigned to it. */
   readonly owner: string;
   /** The product version the document applies to, in the project's own words (for example `1.4`). */
@@ -70,7 +93,11 @@ export interface DocObligationBody {
     readonly version: string;
     readonly verifiedBy: string;
     readonly verifiedAt: string;
+    /** The claim check that passed (card Q03): whether the document's text was read, how many of its files, and the maturity each capability it claims or names had then (a later downgrade flags it). */
+    readonly claims?: { readonly scanned: boolean; readonly files: number; readonly capabilities: Readonly<Record<string, CapabilityMaturity>> };
   };
+  /** The last verification refused for its claims (card Q03): when, by whom, with which document change, whether the text was read, and the flags (at most 20; `total` counts all). Cleared by a verification. */
+  readonly claimCheck?: { readonly at: string; readonly by: string; readonly documentSubmissionId: string; readonly scanned: boolean; readonly flags: readonly ClaimFlag[]; readonly total: number };
   /** Why it is flagged since it was last verified or recorded (newest last). An unverified document keeps them too: a verification must then be against the newest tested code named here. */
   readonly reasons?: readonly DocReason[];
   /** A release flagged it: a verification must name this version. */
@@ -103,6 +130,11 @@ export interface DocObligationPorts {
    * or a docs or director agent's check); the owner who asked reads the answer. `commandId` is derived from the check's command, so a notice sent twice is one notice. A failure is not the check's failure.
    */
   readonly notify?: (n: { readonly commandId: string; readonly projectId: string; readonly obligationId: string; readonly text: string }) => Promise<void>;
+  /**
+   * The text of a document change (card Q03): the files of the artifact a `document` submission names, read only when its manifest digest is the one the submission recorded and it belongs to the project; files
+   * that are not text by name or not UTF-8 are listed as skipped. Absent (a controller with no artifact store): no text is read, and a promotional text asset cannot be verified.
+   */
+  readonly readDocument?: (d: { readonly artifactId: string; readonly artifactDigest: string; readonly projectId: string }) => Promise<{ readonly files: readonly { readonly path: string; readonly text: string }[]; readonly skipped: readonly string[] }>;
 }
 
 const DOB = /^dob-[a-z2-7]{20}$/;
@@ -117,7 +149,7 @@ const KEEPERS = ["docs", "director"] as const;
 export const DOC_AUTO_PRINCIPAL: Principal = { id: "service:doc-checks", kind: "owner", name: "doc-checks", grants: [] } as unknown as Principal;
 /** The command ID of the documentation release check a release candidate's submission runs: one per candidate, project and version, so a repeat (or the same candidate submitted again) finds it. */
 export const releaseDocsCommandId = (candidateId: string, projectId: string, version: string): string => `release-docs:${candidateId}:${createHash("sha256").update(`${projectId}\u0000${version}`).digest("hex").slice(0, 24)}`;
-export const DOC_LIMITS = { perProject: 500, title: 200, location: 500, version: 40, refs: 20, claims: 20, claim: 300, updates: 20, reason: 300 } as const;
+export const DOC_LIMITS = { perProject: 500, title: 200, location: 500, version: 40, refs: 20, claims: 20, claim: 300, updates: 20, reason: 300, channel: 100 } as const;
 
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const hidden = (what: string): never => { throw new DomainError("not_found", `no such ${what}`); };
@@ -127,9 +159,9 @@ const only = (command: object, fields: readonly string[]): void => {
   for (const k of Object.keys(command)) if (!fields.includes(k)) bad(k, "is not a field of this command");
 };
 const bare = (agent: string): string => (agent.startsWith("agent:") ? agent.slice("agent:".length) : agent);
-const reasonKey = (r: DocReason): string => (r.kind === "release_changed" ? `release:${r.to}` : `${r.kind}:${r.taskId}:${r.submissionId}`);
+const reasonKey = (r: DocReason): string => (r.kind === "release_changed" ? `release:${r.to}` : r.kind === "capability_changed" ? `capability:${r.capabilityId}:${r.to}` : `${r.kind}:${r.taskId}:${r.submissionId}`);
 /** What an update task is about: one implementing task, or the release. A document gets one open update task per subject; a further reason on the same subject is noted on the record, not given another task. */
-const subjectOf = (r: DocReason): string => (r.kind === "release_changed" ? "release" : `task:${r.taskId}`);
+const subjectOf = (r: DocReason): string => (r.kind === "release_changed" ? "release" : r.kind === "capability_changed" ? `capability:${r.capabilityId}` : `task:${r.taskId}`);
 /** The command that creates a document's update task number `seq`; the task's ID is derived from it by the project service, so it is known before the task exists and a repeat finds it. */
 const createCommandOf = (obligationId: string, seq: number): string => `doc-update:${obligationId}:${seq}`;
 /** A planned flag of one document: the reasons to note (new since it was last verified or recorded) and those that get an update task. */
@@ -198,20 +230,33 @@ export class DocObligationService {
 
   async #task(id: string): Promise<TaskBody | undefined> { return (await this.#runner.get("task", id))?.body as unknown as TaskBody | undefined; }
 
+  async #register(projectId: string): Promise<CapabilityRegisterBody | undefined> { return (await this.#runner.get("doc-capabilities", projectId))?.body as unknown as CapabilityRegisterBody | undefined; }
+
   // ---- recording ------------------------------------------------------------------------------------------------------------
 
   /**
    * Records a documentation obligation, or replaces one (`obligationId` with `expectedRevision`). A change of the implementing tasks, the claims or the version makes it `unverified` again; a change of
    * the title, location or owner keeps its state. Every claim names one of the implementing tasks.
    */
-  async record(by: Principal, command: NoActor & { projectId: string; obligationId?: string; expectedRevision?: number; title: string; location: string; audience: string; owner: string; applicableVersion: string; implementationRefs: readonly string[]; claims?: readonly { text: string; taskId: string }[] }): Promise<{ id: string; revision: number; replayed: boolean; state: DocState }> {
-    only(command, ["commandId", "projectId", "obligationId", "expectedRevision", "title", "location", "audience", "owner", "applicableVersion", "implementationRefs", "claims"]);
+  async record(by: Principal, command: NoActor & { projectId: string; obligationId?: string; expectedRevision?: number; title: string; location: string; audience: string; kind?: string; channel?: string; mediaType?: string; owner: string; applicableVersion: string; implementationRefs: readonly string[]; claims?: readonly { text: string; taskId: string; capabilityId?: string }[] }): Promise<{ id: string; revision: number; replayed: boolean; state: DocState }> {
+    only(command, ["commandId", "projectId", "obligationId", "expectedRevision", "title", "location", "audience", "kind", "channel", "mediaType", "owner", "applicableVersion", "implementationRefs", "claims"]);
     const commandId = checkCommandId(command.commandId);
     // Kept redacted, like the claims: the title and the place reach the update tasks' text, the status view and every reader of the project.
     const title = redactText(text(command.title, "title", { min: 1, max: DOC_LIMITS.title }));
     const location = redactText(text(command.location, "location", { min: 1, max: DOC_LIMITS.location }));
     if (!(DOC_AUDIENCES as readonly unknown[]).includes(command.audience)) bad("audience", `must be one of ${DOC_AUDIENCES.join(", ")}`);
     const audience = command.audience as DocAudience;
+    const kind = (command.kind ?? "document") as DocKind;
+    if (!(DOC_KINDS as readonly unknown[]).includes(kind)) bad("kind", `must be one of ${DOC_KINDS.join(", ")}`);
+    if (kind === "support_guidance" && audience !== "support") bad("kind", "support guidance is for the support audience");
+    if (kind === "promotional_asset" && audience !== "promotional") bad("kind", "a promotional asset is for the promotional audience");
+    // Support guidance and promotional assets say where they are published; a document does not (its location says where it lives).
+    if (kind === "document" && command.channel !== undefined) bad("channel", "only support guidance and promotional assets name a channel");
+    const channel = kind === "document" ? undefined : redactText(text(command.channel, "channel", { min: 1, max: DOC_LIMITS.channel }));
+    if (kind !== "promotional_asset" && command.mediaType !== undefined) bad("mediaType", "only a promotional asset names a media type");
+    const mediaType = kind === "promotional_asset" ? ((command.mediaType ?? "text") as DocMedia) : undefined;
+    if (mediaType !== undefined && !(DOC_MEDIA as readonly unknown[]).includes(mediaType)) bad("mediaType", `must be one of ${DOC_MEDIA.join(", ")}`);
+    const shape = { ...(command.kind === undefined ? {} : { kind }), ...(channel === undefined ? {} : { channel }), ...(mediaType === undefined ? {} : { mediaType }) };
     if (typeof command.owner !== "string" || !AGENT.test(command.owner)) bad("owner", "must be an agent's ID (agent:<id>)");
     const applicableVersion = text(command.applicableVersion, "applicableVersion", { min: 1, max: DOC_LIMITS.version });
     const refs = command.implementationRefs;
@@ -223,10 +268,12 @@ export class DocObligationService {
     const claims: DocClaim[] = rawClaims.map((raw, i) => {
       const o = raw as unknown as Record<string, unknown> | null;
       if (o === null || typeof o !== "object" || Array.isArray(o)) return bad(`claims[${i}]`, "must be an object");
-      for (const k of Object.keys(o)) if (k !== "text" && k !== "taskId") bad(`claims[${i}].${k}`, "is not a field of a claim");
+      for (const k of Object.keys(o)) if (k !== "text" && k !== "taskId" && k !== "capabilityId") bad(`claims[${i}].${k}`, "is not a field of a claim");
       const t = text(o["text"], `claims[${i}].text`, { min: 1, max: DOC_LIMITS.claim });
       if (typeof o["taskId"] !== "string" || !refs.includes(o["taskId"])) bad(`claims[${i}].taskId`, "an unsupported claim: a claim must name one of the document's implementing tasks, whose tested code supports it");
-      return { text: redactText(t), taskId: o["taskId"] as string };
+      // A claim names the capability it claims (card Q03): the register says whether it is supported; a claim of no known capability is refused below, against the register.
+      if (typeof o["capabilityId"] !== "string" || !CAPABILITY_ID.test(o["capabilityId"])) bad(`claims[${i}].capabilityId`, "a claim names the capability it claims, by its ID in the capability register (doc.capability.list)");
+      return { text: redactText(t), taskId: o["taskId"] as string, capabilityId: o["capabilityId"] as string };
     });
     const replacing = command.obligationId !== undefined;
     if (replacing && (typeof command.obligationId !== "string" || !DOB.test(command.obligationId))) bad("obligationId", "is not a documentation obligation ID");
@@ -239,7 +286,7 @@ export class DocObligationService {
     const id = replacing ? command.obligationId! : derivedId("dob", scoped);
     let state: DocState = "unverified";
     const result = await this.#runner.command("doc.obligation.record", { commandId: scoped, actor: by.id }, async () => ({
-      payload: { projectId, ...(replacing ? { obligationId: id, expectedRevision: command.expectedRevision! } : {}), title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims: json(claims) as unknown as JsonObject },
+      payload: { projectId, ...(replacing ? { obligationId: id, expectedRevision: command.expectedRevision! } : {}), title, location, audience, ...shape, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims: json(claims) as unknown as JsonObject },
       build: async () => {
         const owner = (await this.#runner.get("principal", command.owner))?.body as unknown as PrincipalBody | undefined;
         if (owner === undefined || owner.kind !== "agent" || owner.state !== "active") bad("owner", `${command.owner} is not an active agent`);
@@ -248,6 +295,8 @@ export class DocObligationService {
         const keeper = await effectiveOf(this.#runner, { id: command.owner, kind: "agent", name: owner!.name, grants: owner!.grants, asOf } as Principal, asOf);
         if (!allows(keeper, "task.read", projectId, { now: asOf })) bad("owner", `${command.owner} may not read this project's tasks, so it cannot keep this document`);
         for (const r of refs) { const t = await this.#task(r); if (t === undefined || t.projectId !== projectId) bad("implementationRefs", `${r} is not a task of this project`); }
+        const register = effectiveRegister(await this.#register(projectId));
+        for (const [i, c] of claims.entries()) if (!register.some((e) => e.id === c.capabilityId)) bad(`claims[${i}].capabilityId`, `${c.capabilityId} is not in this project's capability register: the owner or a director adds it first (doc.capability.set)`);
         const now = this.#runner.now();
         const changes: Change[] = [];
         if (replacing) {
@@ -257,20 +306,23 @@ export class DocObligationService {
           if (current.revision !== command.expectedRevision) throw new DomainError("stale_revision", `the obligation is at revision ${current.revision}`, { currentRevision: current.revision });
           const b = current.body;
           // Compared field by field: a stored record may come back with its keys in another order.
-          const claimKey = (c: readonly DocClaim[]): string => JSON.stringify(c.map((x) => [x.taskId, x.text]));
-          const same = JSON.stringify(b.implementationRefs) === JSON.stringify(refs) && claimKey(b.claims) === claimKey(claims) && b.applicableVersion === applicableVersion;
+          const claimKey = (c: readonly DocClaim[]): string => JSON.stringify(c.map((x) => [x.taskId, x.text, x.capabilityId ?? null]));
+          // What is checked changes with the kind and the media type (a text asset is read, an image is not), so a change of either is a change like the claims; the channel is like the title.
+          const same = JSON.stringify(b.implementationRefs) === JSON.stringify(refs) && claimKey(b.claims) === claimKey(claims) && b.applicableVersion === applicableVersion && (b.kind ?? "document") === kind && b.mediaType === mediaType;
           state = same ? b.state : "unverified";
           // A replacement keeps what flagged the document (the reasons on tasks it still describes, a release, when): re-recording it does not clear a flag, only a verification against the flagged work does.
-          const reasons = (b.reasons ?? []).filter((r) => r.kind === "release_changed" || refs.includes(r.taskId));
-          const next: DocObligationBody = same ? { ...b, title, location, audience, owner: command.owner, changedAt: now }
-            : { projectId, title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: b.recordedBy, recordedAt: b.recordedAt, changedAt: now, state: "unverified", updates: b.updates, ...(b.updateCount === undefined ? {} : { updateCount: b.updateCount }),
+          const reasons = (b.reasons ?? []).filter((r) => r.kind === "release_changed" || r.kind === "capability_changed" || refs.includes(r.taskId));
+          const { kind: _k, channel: _c, mediaType: _m, ...unshaped } = b;
+          void _k; void _c; void _m;
+          const next: DocObligationBody = same ? { ...unshaped, ...shape, title, location, audience, owner: command.owner, changedAt: now }
+            : { projectId, title, location, audience, ...shape, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: b.recordedBy, recordedAt: b.recordedAt, changedAt: now, state: "unverified", updates: b.updates, ...(b.updateCount === undefined ? {} : { updateCount: b.updateCount }),
               ...(reasons.length === 0 ? {} : { reasons }), ...(b.releaseVersion === undefined ? {} : { releaseVersion: b.releaseVersion }), ...(b.flaggedAt === undefined ? {} : { flaggedAt: b.flaggedAt }) };
           changes.push({ type: "update", ref: { kind: "doc-obligation", id }, expectedRevision: current.revision, body: json(next) });
           return { ref: { kind: "doc-obligation", id }, creates: false, changes, detail: { projectId, state } };
         }
         const index = await this.#index(projectId);
         if (index.body.ids.length >= DOC_LIMITS.perProject) throw new DomainError("unavailable", `a project holds at most ${DOC_LIMITS.perProject} documentation obligations`);
-        const body: DocObligationBody = { projectId, title, location, audience, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: by.id, recordedAt: now, changedAt: now, state: "unverified", updates: [] };
+        const body: DocObligationBody = { projectId, title, location, audience, ...shape, owner: command.owner, applicableVersion, implementationRefs: [...refs], claims, recordedBy: by.id, recordedAt: now, changedAt: now, state: "unverified", updates: [] };
         const nextIndex = json({ ids: [...index.body.ids, id] });
         changes.push({ type: "create", ref: { kind: "doc-obligation", id }, body: json(body) });
         changes.push(index.revision === undefined ? { type: "create", ref: { kind: "doc-obligation-index", id: projectId }, body: nextIndex } : { type: "update", ref: { kind: "doc-obligation-index", id: projectId }, expectedRevision: index.revision, body: nextIndex });
@@ -287,7 +339,7 @@ export class DocObligationService {
    * Binds a document change to tested work. `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project; `evidence` names, for every implementing task, a code
    * submission of that task whose QA gate passes now. The owner or the document's own owner may verify. A release flag must be answered with its version.
    */
-  async verify(by: Principal, command: NoActor & { obligationId: string; expectedRevision: number; documentSubmissionId: string; evidence: readonly string[]; applicableVersion?: string }): Promise<{ id: string; revision: number; replayed: boolean; settled: readonly string[] }> {
+  async verify(by: Principal, command: NoActor & { obligationId: string; expectedRevision: number; documentSubmissionId: string; evidence: readonly string[]; applicableVersion?: string }): Promise<{ id: string; revision: number; replayed: boolean; settled: readonly string[]; verified: boolean; flags: readonly ClaimFlag[]; scanned: boolean }> {
     only(command, ["commandId", "obligationId", "expectedRevision", "documentSubmissionId", "evidence", "applicableVersion"]);
     const commandId = checkCommandId(command.commandId);
     if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) bad("expectedRevision", "must be the obligation's revision");
@@ -299,6 +351,8 @@ export class DocObligationService {
     // A retired document is refused inside the command (second review), not here: a verification made before the retirement and sent again with its command ID is answered with its result.
     if (by.kind !== "owner" && by.id !== ob.owner) throw new DomainError("forbidden", `only the owner or the document's owner ${ob.owner} verifies it`);
     let settled: string[] = [];
+    let flags: ClaimFlag[] = [];
+    let scanned = false;
     const scoped = scopedCommandId(by.id, commandId);
     const result = await this.#runner.command("doc.obligation.verify", { commandId: scoped, actor: by.id }, async () => ({
       payload: { obligationId: command.obligationId, expectedRevision: command.expectedRevision, documentSubmissionId: command.documentSubmissionId, evidence: [...ev], ...(version === undefined ? {} : { applicableVersion: version }) },
@@ -341,16 +395,30 @@ export class DocObligationService {
           throw new DomainError("invalid_command", `the QA gate of ${unsupported.join(", ")} does not pass${claims.length === 0 ? "" : `, so these claims would be unsupported: ${claims.join(", ")}`}`, { field: "evidence" });
         }
         const now = this.#runner.now();
+        // The claims (card Q03): every claim against the capability register, and the document's own text scanned for experimental or unsupported capabilities named without a label.
+        const claimed = await this.#claimCheck(b, doc!);
+        flags = claimed.flags;
+        scanned = claimed.scanned;
+        if (flags.length > 0) {
+          // Refused for its claims, and kept so the owner sees why: the record notes the flags (its state is unchanged); nothing is settled. Fixing the text or the register and verifying again answers it.
+          settled = [];
+          const blocked: DocObligationBody = { ...b, claimCheck: { at: now, by: by.id, documentSubmissionId: command.documentSubmissionId, scanned, flags: flags.slice(0, CLAIM_LIMITS.flags), total: flags.length } };
+          return {
+            ref: { kind: "doc-obligation", id: current.id }, creates: false,
+            changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(blocked) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }],
+            detail: { verified: false, scanned, total: flags.length, flags: json(flags.slice(0, CLAIM_LIMITS.flags)) as unknown as JsonObject },
+          };
+        }
         settled = b.updates.filter((u) => u.state === "open").map((u) => u.taskId);
         const updates = b.updates.map((u) => (u.state === "open" ? { ...u, state: "settled" as const, settledAt: now } : u));
-        const { reasons: _r, releaseVersion: _v, flaggedAt: _f, ...rest } = b;
-        void _r; void _v; void _f;
-        const next: DocObligationBody = { ...rest, applicableVersion: target, state: "verified", verification: { documentSubmissionId: command.documentSubmissionId, artifactDigest: doc!.artifactDigest!, evidence, version: target, verifiedBy: by.id, verifiedAt: now }, updates };
+        const { reasons: _r, releaseVersion: _v, flaggedAt: _f, claimCheck: _c, ...rest } = b;
+        void _r; void _v; void _f; void _c;
+        const next: DocObligationBody = { ...rest, applicableVersion: target, state: "verified", verification: { documentSubmissionId: command.documentSubmissionId, artifactDigest: doc!.artifactDigest!, evidence, version: target, verifiedBy: by.id, verifiedAt: now, claims: { scanned, files: claimed.files, capabilities: claimed.capabilities } }, updates };
         const checks: Change[] = [...bound.values()].filter((r) => r.kind !== "doc-obligation" && !(r.kind === "submission" && r.id === command.documentSubmissionId)).map((r) => ({ type: "check", ref: { kind: r.kind, id: r.id }, expectedRevision: r.revision }));
         return {
           ref: { kind: "doc-obligation", id: current.id }, creates: false,
           changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }, ...checks],
-          detail: { settled },
+          detail: { settled, verified: true, scanned },
           contention: async () => {
             const now = await this.#runner.get("doc-obligation", current.id);
             if (now !== undefined && now.revision !== current.revision) return new DomainError("stale_revision", `the obligation is at revision ${now.revision}`, { currentRevision: now.revision });
@@ -359,8 +427,145 @@ export class DocObligationService {
         };
       },
     }));
-    if (result.replayed) settled = [];
-    return { id: result.id, revision: result.revision, replayed: result.replayed, settled };
+    if (result.replayed) {
+      settled = [];
+      // The same command again: answered as it was (a refusal for claims is a write, so its flags come from its own audit entry).
+      const detail = await this.#recordedDetail(scoped);
+      flags = detail?.["verified"] === false && Array.isArray(detail["flags"]) ? (detail["flags"] as unknown as ClaimFlag[]) : [];
+      scanned = detail?.["scanned"] === true;
+    }
+    return { id: result.id, revision: result.revision, replayed: result.replayed, settled, verified: flags.length === 0, flags, scanned };
+  }
+
+  /**
+   * The claim check of one verification (card Q03). The record's claims against the capability register (each names a capability; unsupported, or experimental without the label, is flagged), the
+   * claims' words and the document's text scanned for experimental or unsupported capabilities named bare. The text is the document change's artifact when it names one and the controller can read it; a
+   * promotional asset of text (the marketing the card means) is verified only when it was read, since what it claims cannot otherwise be checked. An image, video or other medium is not read: its
+   * declared claims are what is checked.
+   */
+  async #claimCheck(b: DocObligationBody, doc: SubmissionBody): Promise<{ flags: ClaimFlag[]; scanned: boolean; files: number; capabilities: Record<string, CapabilityMaturity> }> {
+    const register = effectiveRegister(await this.#register(b.projectId));
+    const declared = checkDeclared(b.claims, register);
+    const flags = [...declared.flags];
+    const capabilities: Record<string, CapabilityMaturity> = { ...declared.capabilities };
+    const add = (r: { flags: ClaimFlag[]; capabilities: Record<string, CapabilityMaturity> }): void => { flags.push(...r.flags); Object.assign(capabilities, r.capabilities); };
+    b.claims.forEach((c, i) => add(scanText(c.text, register.filter((e) => e.id !== c.capabilityId), `claim ${i + 1}`)));
+    let scanned = false;
+    let files = 0;
+    if (doc.artifactId !== undefined && doc.artifactDigest !== undefined && this.#ports.readDocument !== undefined) {
+      const read = await this.#ports.readDocument({ artifactId: doc.artifactId, artifactDigest: doc.artifactDigest, projectId: b.projectId });
+      scanned = read.files.length > 0;
+      files = read.files.length;
+      for (const f of read.files) add(scanText(f.text, register, `file ${cleanText(f.path, true).slice(0, 120)}`));
+    }
+    if (b.audience === "promotional" && (b.mediaType ?? "text") === "text" && !scanned) {
+      bad("documentSubmissionId", doc.artifactId === undefined ? "a promotional text is verified only once its text is read: submit the document change naming its artifact (artifactId)"
+        : this.#ports.readDocument === undefined ? "a promotional text is verified only once its text is read, and this controller keeps no artifacts to read it from"
+        : "a promotional text is verified only once its text is read, and its artifact has no file readable as text");
+    }
+    return { flags, scanned, files, capabilities };
+  }
+
+  /** The audit detail a command recorded (its first entry), or undefined when it cannot be read. */
+  async #recordedDetail(scopedId: string): Promise<JsonObject | undefined> {
+    try {
+      const operationId = operationIdOf(scopedId);
+      const stored = await this.#runner.storage.getOperation(operationId);
+      const seq = stored?.result.auditSeqs[0];
+      if (seq === undefined) return undefined;
+      const entry = (await this.#runner.storage.listAudit({ afterSeq: seq - 1, limit: 1 }))[0];
+      return entry?.seq === seq && entry.operationId === operationId ? entry.detail : undefined;
+    } catch { return undefined; }
+  }
+
+  // ---- the capability register ------------------------------------------------------------------------------------------
+
+  /**
+   * Sets one capability of the project's register (card Q03): its maturity (`supported`, `experimental` or `unsupported`), its name and the names the text scan looks for, and a note. A built-in entry
+   * (the controller's own labels) may be replaced, as a recorded decision. The owner, or an agent holding the director role in the project: not the docs role, so the agent writing a document cannot rate
+   * what it claims. A capability rated lower than when a document was verified (supported to experimental, or either to unsupported) flags that document with an update task for its keeper, like a
+   * release does; a document that names it but was never verified is checked when it is verified. Asked again with the same command ID, the flagging is finished, nothing repeats.
+   */
+  async setCapability(by: Principal, command: NoActor & { projectId: string; capabilityId: string; maturity: string; name?: string; names?: readonly string[]; note?: string }): Promise<{ projectId: string; capabilityId: string; maturity: CapabilityMaturity; from?: CapabilityMaturity; replayed: boolean; flagged: readonly string[]; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[] }> {
+    only(command, ["commandId", "projectId", "capabilityId", "maturity", "name", "names", "note"]);
+    const commandId = checkCommandId(command.commandId);
+    if (typeof command.capabilityId !== "string" || !CAPABILITY_ID.test(command.capabilityId)) bad("capabilityId", "must be lower-case letters, digits and hyphens, starting with a letter (2 to 60)");
+    const capabilityId = command.capabilityId;
+    if (!(CAPABILITY_MATURITIES as readonly unknown[]).includes(command.maturity)) bad("maturity", `must be one of ${CAPABILITY_MATURITIES.join(", ")}`);
+    const maturity = command.maturity as CapabilityMaturity;
+    const nameOf = (v: unknown, field: string): string => {
+      const t = cleanText(text(v, field, { min: CLAIM_LIMITS.nameMin, max: CLAIM_LIMITS.name }), true);
+      if (t.length < CLAIM_LIMITS.nameMin) bad(field, `must have at least ${CLAIM_LIMITS.nameMin} characters that are not marks or spaces`);
+      return t;
+    };
+    const name = command.name === undefined ? undefined : nameOf(command.name, "name");
+    if (command.names !== undefined && (!Array.isArray(command.names) || command.names.length < 1 || command.names.length > CLAIM_LIMITS.names)) bad("names", `must list 1 to ${CLAIM_LIMITS.names} names`);
+    const names = command.names?.map((x, i) => nameOf(x, `names[${i}]`));
+    const note = command.note === undefined ? undefined : redactText(text(command.note, "note", { min: 1, max: CLAIM_LIMITS.note }));
+    if (by.kind !== "owner" && by.kind !== "agent") throw new DomainError("forbidden", `${by.id} may not rate capabilities`);
+    const projectId = await this.#project(by, command.projectId);
+    if (by.kind !== "owner") {
+      const roles = await this.#ports.rolesOf(by.id, { projectId, taskId: "" }, by);
+      if (!roles.includes("director")) throw new DomainError("forbidden", `${by.id} does not hold the director role in this project: the owner or a director rates capabilities`);
+    }
+    const scoped = scopedCommandId(by.id, commandId);
+    let from: CapabilityMaturity | undefined;
+    const result = await this.#runner.command("doc.capability.set", { commandId: scoped, actor: by.id }, async () => ({
+      payload: { projectId, capabilityId, maturity, ...(name === undefined ? {} : { name }), ...(names === undefined ? {} : { names }), ...(note === undefined ? {} : { note }) },
+      build: async () => {
+        const found = await this.#runner.get("doc-capabilities", projectId);
+        const reg = (found?.body as unknown as CapabilityRegisterBody | undefined) ?? { projectId, entries: [], changedAt: "" };
+        const before = effectiveRegister(reg).find((e) => e.id === capabilityId);
+        from = before?.maturity;
+        const own = reg.entries.find((e) => e.id === capabilityId);
+        if (own === undefined && reg.entries.length >= CLAIM_LIMITS.entries) throw new DomainError("unavailable", `a project's capability register holds at most ${CLAIM_LIMITS.entries} capabilities`);
+        const finalName = name ?? before?.name ?? bad("name", "a new capability needs a name");
+        const all = [...new Set([finalName, ...(names ?? before?.names ?? [])])].slice(0, CLAIM_LIMITS.names);
+        const finalNote = note ?? before?.note;
+        const now = this.#runner.now();
+        const entry = { id: capabilityId, name: finalName, names: all, maturity, ...(finalNote === undefined ? {} : { note: finalNote }), setBy: by.id, setAt: now };
+        const entries = [...reg.entries.filter((e) => e.id !== capabilityId), entry].sort((a, b) => (a.id < b.id ? -1 : 1));
+        const body = json({ projectId, entries, changedAt: now });
+        return {
+          ref: { kind: "doc-capabilities", id: projectId }, creates: found === undefined,
+          changes: [found === undefined ? { type: "create", ref: { kind: "doc-capabilities", id: projectId }, body } : { type: "update", ref: { kind: "doc-capabilities", id: projectId }, expectedRevision: found.revision, body }],
+          detail: { projectId, capabilityId, to: maturity, ...(from === undefined ? {} : { from }) },
+        };
+      },
+    }));
+    if (result.replayed) { const d = await this.#recordedDetail(scoped); from = typeof d?.["from"] === "string" ? (d["from"] as CapabilityMaturity) : undefined; }
+    // Documents verified while the capability was rated higher: flagged, also on a repeat (finishing what a stop after the write left). Read from the register as it is now, so a later change wins.
+    const plan = async (): Promise<Planned[]> => {
+      const now = effectiveRegister(await this.#register(projectId)).find((e) => e.id === capabilityId);
+      if (now === undefined) return [];
+      const out: Planned[] = [];
+      for (const id of (await this.#index(projectId)).body.ids) {
+        const found = await this.#runner.get("doc-obligation", id);
+        const b = found?.body as unknown as DocObligationBody | undefined;
+        if (found === undefined || b === undefined || b.retired !== undefined || b.state === "unverified") continue;
+        const was = b.verification?.claims?.capabilities[capabilityId];
+        if (was === undefined || maturityRank(was) <= maturityRank(now.maturity)) continue;
+        const p = this.#planned(id, found.revision, b, [{ kind: "capability_changed", capabilityId, from: was, to: now.maturity }]);
+        if (p !== undefined) out.push(p);
+      }
+      return out;
+    };
+    const flagged = await this.#flag(by, `doc-capability:${createHash("sha256").update(scoped).digest("hex").slice(0, 40)}`, "doc.capability.check", { projectId, capabilityId, maturity }, plan);
+    return { projectId, capabilityId, maturity, ...(from === undefined ? {} : { from }), replayed: result.replayed, flagged: flagged.flagged, tasks: flagged.tasks };
+  }
+
+  /** The capability register claims are checked against (built-in entries, replaced by the project's own), each with how many kept documents claim or name it (a claim, a verification, or a refusal for it). Readers of the project. */
+  async capabilities(by: Principal, projectIdValue: string): Promise<{ projectId: string; items: (CapabilityEntry & { documents: number })[] }> {
+    const projectId = await this.#project(by, projectIdValue);
+    const register = effectiveRegister(await this.#register(projectId));
+    const count = new Map<string, number>();
+    for (const id of (await this.#index(projectId)).body.ids) {
+      const b = (await this.#runner.get("doc-obligation", id))?.body as unknown as DocObligationBody | undefined;
+      if (b === undefined || b.retired !== undefined) continue;
+      const named = new Set([...b.claims.map((c) => c.capabilityId), ...Object.keys(b.verification?.claims?.capabilities ?? {}), ...(b.claimCheck?.flags ?? []).map((f) => f.capabilityId)].filter((x): x is string => x !== undefined));
+      for (const c of named) count.set(c, (count.get(c) ?? 0) + 1);
+    }
+    return { projectId, items: register.map((e) => ({ ...e, documents: count.get(e.id) ?? 0 })) };
   }
 
   // ---- retiring -------------------------------------------------------------------------------------------------------------
@@ -562,7 +767,7 @@ export class DocObligationService {
   }
 
   /** A release of `version`: every document of the project that applies to another version (user, developer, support and promotional alike) is flagged stale with an update task for its owner. */
-  async release(by: Principal, command: NoActor & { projectId: string; version: string }): Promise<{ projectId: string; version: string; flagged: readonly string[]; byAudience: Readonly<Record<DocAudience, number>>; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
+  async release(by: Principal, command: NoActor & { projectId: string; version: string }): Promise<{ projectId: string; version: string; flagged: readonly string[]; byAudience: Readonly<Record<DocAudience, number>>; byKind: Readonly<Record<DocKind, number>>; tasks: readonly { obligationId: string; taskId: string; assigned: boolean }[]; replayed: boolean }> {
     only(command, ["commandId", "projectId", "version"]);
     const commandId = checkCommandId(command.commandId);
     const version = text(command.version, "version", { min: 1, max: DOC_LIMITS.version });
@@ -581,8 +786,9 @@ export class DocObligationService {
     };
     const flagged = await this.#flag(by, commandId, "doc.release.check", { projectId, version }, plan);
     const byAudience: Record<DocAudience, number> = { user: 0, developer: 0, support: 0, promotional: 0 };
-    for (const id of flagged.flagged) { const b = (await this.#runner.get("doc-obligation", id))?.body as unknown as DocObligationBody | undefined; if (b !== undefined) byAudience[b.audience]++; }
-    return { projectId, version, flagged: flagged.flagged, byAudience, tasks: flagged.tasks, replayed: flagged.replayed };
+    const byKind: Record<DocKind, number> = { document: 0, support_guidance: 0, promotional_asset: 0 };
+    for (const id of flagged.flagged) { const b = (await this.#runner.get("doc-obligation", id))?.body as unknown as DocObligationBody | undefined; if (b !== undefined) { byAudience[b.audience]++; byKind[b.kind ?? "document"]++; } }
+    return { projectId, version, flagged: flagged.flagged, byAudience, byKind, tasks: flagged.tasks, replayed: flagged.replayed };
   }
 
   /**
@@ -725,6 +931,7 @@ export class DocObligationService {
 
   #describe(id: string, b: DocObligationBody, r: DocReason): { title: string; description: string } {
     const why = r.kind === "release_changed" ? `Release ${r.to} is coming and this document applies to version ${r.from}.`
+      : r.kind === "capability_changed" ? `Capability ${r.capabilityId}, which it claimed or named when verified, is now ${r.to} (it was ${r.from}): label it as such or take the claim out.`
       : r.kind === "evidence_lost" ? `The tested code it was checked against (submission ${r.submissionId} of task ${r.taskId}) no longer passes its QA gate.`
       : `The behaviour of task ${r.taskId} changed: its tested code is now submission ${r.submissionId} (tree ${r.tree})${r.from === undefined ? "" : `; the document was checked against tree ${r.from}`}.`;
     return {
@@ -796,6 +1003,7 @@ export function docReasonText(r: DocReason): string {
     case "behavior_changed": return `task ${r.taskId} has new tested code (submission ${r.submissionId}, tree ${r.tree.slice(0, 12)})${r.from === undefined ? "" : ` since the document was checked against tree ${r.from.slice(0, 12)}`}`;
     case "evidence_lost": return `the tested code it was checked against (${r.submissionId} of task ${r.taskId}) no longer passes its QA gate`;
     case "release_changed": return `release ${r.to} replaces version ${r.from}`;
+    case "capability_changed": return `capability ${r.capabilityId} is now ${r.to} (it was ${r.from} when the document was verified)`;
   }
 }
 

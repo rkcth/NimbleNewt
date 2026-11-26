@@ -64,6 +64,7 @@ for (const backend of backends) {
       const ann = await agent("ann", ["author"]);
       const quinn = await agent("quinn", ["qa"]);
       const dora = await agent("dora", ["docs"]);
+      await docs.setCapability(owner, { commandId: cid("cap"), projectId: project, capabilityId: "passkey-sign-in", name: "passkey sign-in", maturity: "supported" });
       const code = async (task: string, tree: string, submittedAt = "2026-11-20T09:00:00.000Z"): Promise<string> => {
         const id = derivedId("sbm", cid("code"));
         await plant("submission", id, { taskId: task, projectId: project, kind: "code", role: "author", submittedBy: ann.id, submittedAt, makesCommit: true, base: "c".repeat(40), tree, patchId: "d".repeat(40), evidence: [] });
@@ -83,7 +84,7 @@ for (const backend of backends) {
       };
       const read = async (id: string): Promise<DocObligationBody & { revision: number }> => (await docs.get(owner, id)) as unknown as DocObligationBody & { revision: number };
 
-      const guide = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "User guide", location: "docs/guide.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login }] })).id;
+      const guide = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "User guide", location: "docs/guide.md", audience: "user", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login, capabilityId: "passkey-sign-in" }] })).id;
       const searchDoc = (await docs.record(owner, { commandId: cid("r"), projectId: project, title: "Search help", location: "docs/search.md", audience: "support", owner: dora.id, applicableVersion: "1.0", implementationRefs: [search] })).id;
 
       // The author's self-check never counts for a gate, so it checks nothing.

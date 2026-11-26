@@ -162,7 +162,7 @@ export interface StateApiDeps {
   /** The project review policy and its scheduler (card Q02). */
   readonly qaReview?: Pick<QaReviewService, "get" | "set" | "requests" | "sweep">;
   /** Documentation obligations and their impact (card Q03). */
-  readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "retire" | "impact" | "release" | "list" | "get">;
+  readonly docObligations?: Pick<DocObligationService, "record" | "verify" | "retire" | "impact" | "release" | "list" | "get" | "setCapability" | "capabilities">;
   /** When present, agenda items can be captured, corrected and listed through the API (cards M01 and M03). */
   readonly meetings?: MeetingService;
   /** When present, integration, landing, checkout refresh and quarantine of a task's work can be requested (cards H12l, H12d). */
