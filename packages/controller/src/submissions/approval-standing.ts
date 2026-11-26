@@ -1,13 +1,19 @@
 import type { CommandRunner } from "../domain/runner.js";
 import { relianceIdOf, type DisputeBody, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
 import { basisKey, overriddenFor } from "./review-citation.js";
+import { dependencyChanges, dependencyChangeText } from "./dependency-basis.js";
 
 /**
  * What an approval was judged against (card Q02: "changed dependency invalidates affected review", "work bound to a superseded decision fails review"), kept with the approval in the subject's verdict list:
  * the task contract version in force when it was recorded, and each decision the task relied on then (`basisKey`: the decision ID and the version of the task's link). Approvals recorded before this field have none
  * and are judged by their time instead (`approvalOutdated`).
  */
-export interface ApprovalBasis { readonly criteriaRevision: number; readonly decisions: readonly string[] }
+export interface ApprovalBasis {
+  readonly criteriaRevision: number;
+  readonly decisions: readonly string[];
+  /** The task's recorded dependencies it was judged against (card Q02: a `dependency-snapshot` ID, or `none`); absent on approvals recorded before this was kept, which are judged by their time. */
+  readonly dependencies?: string;
+}
 
 /** How many stored contract versions are read, newest first, to find the one in force when an approval without a basis was recorded; past that the approval is not counted (it cannot be told what it was judged on). */
 export const APPROVAL_CONTRACT_WALK = 20;
@@ -26,6 +32,7 @@ export const APPROVAL_CRITERIA_FIELDS = ["expectedResult", "acceptanceCriteria"]
  * - a decision the task relies on (`decision.link`) was superseded, is disputed, or cannot be read (fail closed);
  * - the task came to rely on a decision it was not judged against (a new link, or the work revalidated against a correcting decision: the approval was given on the old one);
  * - a decision the review cited is no longer in force at the cited version;
+ * - a dependency the task recorded (card C03) changed: recorded again with another observation, or judged changed from the controller's own state (`dependency-basis.ts`);
  * - the task contract's criteria text (`APPROVAL_CRITERIA_FIELDS`: expected result, acceptance criteria) changed. New checks, required evidence, priority, budget or permissions do not take an approval back (the landing
  *   gate's `tests` and `qa` checks judge checks and evidence themselves); a contract version that cannot be read does (fail closed).
  * A dispute the owner settles by keeping the decision makes it count again (the decision it was judged against is unchanged). A new review judged against the current decisions and criteria is the way back.
@@ -70,6 +77,9 @@ export async function approvalOutdated(runner: Pick<CommandRunner, "get">, taskI
     const over = await overriddenFor(runner, taskId, d!);
     if (over.by !== undefined) return `owner decision ${c.id} it cites no longer applies to this task: the owner's task-level decision ${over.by} overrides it`;
   }
+  // Card Q02: a dependency the task recorded changed since it was given (judged against the dependencies it kept, else by its time).
+  const changed = await dependencyChanges(runner, taskId, review.basis?.dependencies, review.at, 1);
+  if (changed.length > 0) return dependencyChangeText(changed[0]!);
   // The criteria: the version it was judged against (kept with it, or cited), else the one in force at its time.
   const now = (await runner.get("task-contract", taskId))?.body as unknown as (Record<string, unknown> & { version?: number }) | undefined;
   const nowVersion = now?.version ?? 0;
