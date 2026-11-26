@@ -744,12 +744,14 @@ test("the home desktop: the product's own documents record what it closes, what 
   assert.ok(s.includes('Owner decision (2026-11-26: "The clipboard is fine")') && s.includes("ACCEPTED exposure"));
   assert.ok(!/open item for the owner|owner must decide|\bOPEN:|for the owner to decide/i.test(s), "no open clipboard question is left for the owner");
   assert.ok(plan.includes("**Correction (2026-11-26).**"), "the earlier claim that the limits close the clipboard is corrected where it was made");
+  assert.ok(s.includes('Owner decision (2026-11-26: "Let\'s require someone to be logged in")') && s.includes("Windows work STOPS when nobody is signed in") && s.includes("TO BE VERIFIED on Windows, not proven"));
+  assert.ok(!/(requires?|needs?) an unattended Session-0 service/i.test(s), "no unattended service identity is described as a requirement");
   const readme = read("native", "nn-launcher", "README.md");
   const w = readme.slice(readme.indexOf("## Window objects: the private station, or the home desktop"), readme.indexOf("## What is not in it"));
-  for (const fact of ["never by an option", "NEVER inherits the user's desktop", "NOTHING is written to WinSta0's access list", "CLIPBOARD", "ATOM table", "did not block the clipboard open", "accepted exposure", "2026-11-26", "The clipboard is fine", "495"]) assert.ok(w.includes(fact), fact);
+  for (const fact of ["never by an option", "NEVER inherits the user's desktop", "NOTHING is written to WinSta0's access list", "CLIPBOARD", "ATOM table", "did not block the clipboard open", "accepted exposure", "2026-11-26", "The clipboard is fine", "495", "Let's require someone to be logged in", "Windows work stops when nobody is signed in", "not a requirement"]) assert.ok(w.includes(fact), fact);
   const notes = read("docs", "nimblenewt", "implementation-plan", "implementation-notes.md");
   const n = notes.slice(notes.indexOf("### A03b: the home desktop in the product launcher"));
-  for (const fact of ["card NOT flipped", "ASSUMPTION:", "NOT done / only Windows can show", "Owner decision (2026-11-26", "ACCEPTED exposure", "did not block the open"]) assert.ok(n.includes(fact), fact);
+  for (const fact of ["card NOT flipped", "ASSUMPTION:", "NOT done / only Windows can show", "Owner decision (2026-11-26", "ACCEPTED exposure", "did not block the open", "Let's require someone to be logged in", "TO BE VERIFIED on Windows, not proven"]) assert.ok(n.includes(fact), fact);
   const contributing = read("CONTRIBUTING.md");
   assert.ok(contributing.includes("private home desktop on WinSta0") && contributing.includes("which mode is used and the home desktop's station rule"));
   // no native file exists without a CONTRIBUTING entry
