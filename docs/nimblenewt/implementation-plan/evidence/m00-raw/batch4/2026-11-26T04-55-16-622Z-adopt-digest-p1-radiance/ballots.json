@@ -1,0 +1,13 @@
+{
+  "ballots": [],
+  "ballotHistory": [],
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Priya: pull Lintwise's default rule manifest on our actual monorepo to confirm whether secret-pattern and vulnerable-dependency rules are enabled by default, run at error severity, and fire without extra configuration.",
+      "Elena: verify in a dry run against a known-bad test commit (hard-coded key) that Lintwise's secret-detection rule set catches it by default, and confirm those findings cannot be downgraded to warning via config or opt-out.",
+      "Sana: run a two-week advisory (non-blocking) pass of Lintwise scoped to two-to-three representative pipeline directories; record per-check false-positive count, true-positive count, wall-clock delta against the 11-minute CI baseline, and readability of finding messages for a junior developer.",
+      "Olga: confirm whether Lintwise finding messages are self-explanatory enough to act on in under a minute without consulting external docs; check with Sana whether her pilot data captures message clarity alongside FP counts."
+    ]
+  }
+}

@@ -1,0 +1,302 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (twenty engineers)",
+  "variant": {
+    "name": "tldr-facts",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70,
+    "chairNotes": true,
+    "chairReminders": 2
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b1",
+      "name": "Ravi",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b2",
+      "name": "Mei",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b3",
+      "name": "Noah",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b4",
+      "name": "Zoe",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b5",
+      "name": "Omar",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b6",
+      "name": "Hana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b7",
+      "name": "Ben",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b8",
+      "name": "Ida",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b9",
+      "name": "Kofi",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b10",
+      "name": "Lena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b11",
+      "name": "Theo",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "b12",
+      "name": "Vera",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on the monorepo, subject to the following conditions: (1) a two-week advisory sprint runs first, with all findings reported non-blocking; (2) enforcement blocks merges solely on critical-severity findings—null-derefs, leaked secrets/tokens, dependency CVEs at CVSS 7+, and unparameterized SQL—while all other rules remain advisory; (3) pre-existing issues are suppressed via a baseline snapshot at adoption; (4) Lintwise runs as a parallel CI job with container cache reuse and a sub-ninety-second wall-clock cap; (5) enforcement is gated on Noah's seeded-secret canary passing in two repos and Sana's SQL/config-key canary passing in two pipeline repos; (6) false-positive rate on blocking-tier rules must start at or below 8 percent, published weekly, with any rule exceeding 10 percent for two consecutive weeks auto-demoted to advisory; (7) security-tier findings route exclusively to a separate logged exception path co-owned by Noah and Elena—no self-service waiver by merge authors; (8) a pre-written rollback demotes Lintwise to advisory within 24 hours if p95 queue wait grows by more than ten seconds over baseline during a 20-PR burst or if either canary fails; (9) every blocking finding carries a per-finding \"why this matters\" message, and a one-page blocking-rules guide is published for new contributors.",
+    "version": 2
+  },
+  "result": {
+    "yes": 20,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a6",
+            "reason": "The motion text still reads \"adopts … as a required pre-merge check on every repository,\" which omits the two-week advisory sprint, baseline suppression, severity-tiered blocking, and Theo's \"the monorepo\" correction we all agreed to; voting on this wording as-is would greenlight immediate enforcement without the safeguards I require to protect test-failure signal from lint noise."
+          },
+          {
+            "id": "a7",
+            "reason": "The motion text says \"every repository\" when we have one monorepo—Theo's fix is still unaddressed—and the bare wording (\"required pre-merge check\") omits every condition the team agreed is a prerequisite (critical-tier-only blocking, two-week advisory sprint, parallel execution, 24-hour rollback, baseline suppression), so voting on this text would bind us to a policy stricter and vaguer than what we actually endorsed."
+          },
+          {
+            "id": "b4",
+            "reason": "The motion still reads \"every repository\" even though we maintain a single monorepo, so per Theo's fix it must be rewritten to \"the monorepo\" before a vote, or enforcement scope is ambiguous."
+          },
+          {
+            "id": "b11",
+            "reason": "The motion still says \"every repository\" instead of \"the monorepo,\" and it does not encode the team's agreed advisory-first structure with severity-tiered blocking gated on Noah's secret canary and Sana's SQL canary passing—voting on the bare wording would re-open the two policy reversals I flagged."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "b12",
+        "topic": "Secret-detection and dependency-CVE rule availability in Lintwise's default install",
+        "experience_sought": "Vera ran Lintwise daily for six months on a prior backend-heavy team. On that install, were hardcoded-secret rules (API keys, tokens in config) and dependency-CVE lookup shipped in the default ruleset, or did the team add a separate rule-pack or plug-in? If add-on, what was the configuration effort? If the rules were absent entirely, say so."
+      },
+      {
+        "to": "a5",
+        "topic": "SQL-file first-class parsing and unparameterized-query detection",
+        "experience_sought": "Sana stated she read Lintwise documentation. In those docs, are .sql files listed as first-class parse targets with built-in rules for unparameterized WHERE clauses and null-guard drops, or does the parser only match SQL-like string patterns inside Python or JS source? Can you confirm whether noqa-style per-line suppressions are honoured on .sql files specifically?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "reminders": [
+      {
+        "step": "before-round-2",
+        "from": "Elena",
+        "quote": "I've seen three near-misses this quarter where a key almost shipped in a PR."
+      },
+      {
+        "step": "before-round-2",
+        "from": "Hana",
+        "quote": "Docs confirm container-cached parallel execution, so Mei's ninety-second cap is achievable."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Marcus",
+        "quote": "My baseline is 6-minute peak queue wait and 11-minute builds; adding one cached minute in parallel shouldn't extend wall-clock. But I haven't run Lintwise myself—I'm still working from Priya's four-minute default. So I'm for the gate conditional on one thing I own: a 20-PR burst load test during peak queue hours, measuring p95 queue depth and total CI wall-clock. If p95 queue wait stays under 8 minutes and builds under 12, the parallel config is validated and I'll sign off."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Tom",
+        "quote": "crucially, I did *not* tune the ruleset before measuring. That means 30 percent is an untuned floor, not a ceiling—tuned frontend rules should land well under that, but we won't know until the trial."
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 709248,
+        "paused": 0,
+        "meeting": 709248
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.47368421052631576,
+    "membersWhoChangedStanceInRound2": 4,
+    "cacheHitRatio": 0.5237585976645839,
+    "calls": 107,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 20,
+        "input": 25095,
+        "cached": 0,
+        "output": 36945,
+        "ms": 266075,
+        "costUsd": 0
+      },
+      "chair-notes": {
+        "calls": 1,
+        "input": 3946,
+        "cached": 0,
+        "output": 2081,
+        "ms": 30337,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 5856,
+        "cached": 2048,
+        "output": 2128,
+        "ms": 18525,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 5032,
+        "cached": 2048,
+        "output": 2540,
+        "ms": 23311,
+        "costUsd": 0
+      },
+      "chair-reminders": {
+        "calls": 2,
+        "input": 25610,
+        "cached": 2432,
+        "output": 4869,
+        "ms": 35731,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 20,
+        "input": 79503,
+        "cached": 53248,
+        "output": 20003,
+        "ms": 127342,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 40,
+        "input": 86226,
+        "cached": 6528,
+        "output": 28677,
+        "ms": 141148,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 5753,
+        "cached": 4096,
+        "output": 808,
+        "ms": 3595,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 20,
+        "input": 131393,
+        "cached": 122560,
+        "output": 13924,
+        "ms": 63128,
+        "costUsd": 0
+      }
+    }
+  }
+}

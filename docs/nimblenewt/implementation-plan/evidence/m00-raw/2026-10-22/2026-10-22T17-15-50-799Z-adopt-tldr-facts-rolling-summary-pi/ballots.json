@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "Requiring Lintwise now would bypass our required trial; I support a non-blocking monorepo trial to measure actionable findings and CI impact first."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "The motion still requires immediate adoption without the trial our merge policy requires or local measurements of build-time and queue impact."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "Its secret-detection rules support a non-blocking trial in our monorepo, not immediate mandatory adoption without local measurements and the required rollback path."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "My side-project JavaScript findings had about 30 percent noise under default rules, so I support a non-blocking monorepo trial before requiring Lintwise."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "We should first run a non-blocking trial in our monorepo to establish Python and SQL coverage, actionable findings, and CI impact before requiring Lintwise."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "I support a non-blocking trial in our monorepo to measure actionable findings, false positives, and CI impact before requiring Lintwise as a merge gate."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "The motion requires immediate blocking adoption without the trial and rollback path our merge policy requires."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial in our monorepo to assess clarity, fit with our code-style conventions, and CI impact before requiring Lintwise."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

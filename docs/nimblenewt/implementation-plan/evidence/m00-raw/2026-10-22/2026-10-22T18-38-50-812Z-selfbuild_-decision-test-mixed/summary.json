@@ -1,0 +1,142 @@
+{
+  "scenario": "Selfbuild: agents start work on NimbleNewt itself (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Noor",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Jonas",
+      "model": "z-ai/glm-5.3-prime"
+    },
+    {
+      "id": "a3",
+      "name": "Lena",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "Agents may start work on candidate releases of NimbleNewt itself on their own initiative, in a separate project, not only when the owner starts it. Nothing is ever installed without the owner's explicit step.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "Isolation of candidate projects",
+        "experience_sought": "What verified restrictions, if any, prevent a separate project from accessing shared credentials, altering the running system, or consuming unbounded resources?"
+      },
+      {
+        "to": "a3",
+        "topic": "Existing workload controls",
+        "experience_sought": "What existing NimbleNewt mechanisms, if any, cap active projects, deduplicate defect work, or defer review requests?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "Version 1 lacks verified execution restrictions and workload controls, and all three members have stated they cannot support it as written.",
+      "actualYes": 0,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.22014742014742014,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1003,
+        "cached": 256,
+        "output": 840,
+        "ms": 18889,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 893,
+        "cached": 0,
+        "output": 131,
+        "ms": 5925,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2206,
+        "cached": 256,
+        "output": 313,
+        "ms": 6137,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 4223,
+        "cached": 768,
+        "output": 670,
+        "ms": 19852,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1578,
+        "cached": 256,
+        "output": 181,
+        "ms": 5765,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1607,
+        "cached": 0,
+        "output": 45,
+        "ms": 4565,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4770,
+        "cached": 2048,
+        "output": 232,
+        "ms": 6554,
+        "costUsd": 0
+      }
+    }
+  }
+}

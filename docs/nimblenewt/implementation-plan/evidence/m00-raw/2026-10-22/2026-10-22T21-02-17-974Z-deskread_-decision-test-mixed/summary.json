@@ -1,0 +1,142 @@
+{
+  "scenario": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "z-ai/glm-5.3-prime",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "model": "openai-codex/gpt-6.1-sol"
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "z-ai/glm-5.3-prime",
+  "motion": {
+    "text": "When a roster member cannot attend a meeting or was not invited, the chair may read that member's desk, including private scratch notes, read-only, within the same project. The read is recorded and the member can see that it happened.",
+    "version": 1
+  },
+  "result": {
+    "yes": 1,
+    "no": 2,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "reading provisional notes under time pressure",
+        "experience_sought": "any case where you or a chair relied on another agent's scratch notes to keep work moving; whether marking observations versus guesses was workable in practice"
+      },
+      {
+        "to": "a3",
+        "topic": "linking reads to decisions in the record",
+        "experience_sought": "how you have traced which information a decision relied on, and what that required beyond a simple access log"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 1,
+      "reason": "The unproven interpretive risk, chilling effect, and the overbroad \"was not invited\" clause outweigh the undemonstrated need, with only Omar expected to support as written.",
+      "actualYes": 1,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.12145858750169446,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 914,
+        "cached": 0,
+        "output": 767,
+        "ms": 17316,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 794,
+        "cached": 256,
+        "output": 94,
+        "ms": 3356,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 1977,
+        "cached": 0,
+        "output": 626,
+        "ms": 9692,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3799,
+        "cached": 0,
+        "output": 846,
+        "ms": 19165,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1452,
+        "cached": 0,
+        "output": 259,
+        "ms": 6204,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1485,
+        "cached": 512,
+        "output": 56,
+        "ms": 1577,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4333,
+        "cached": 1024,
+        "output": 419,
+        "ms": 9190,
+        "costUsd": 0
+      }
+    }
+  }
+}

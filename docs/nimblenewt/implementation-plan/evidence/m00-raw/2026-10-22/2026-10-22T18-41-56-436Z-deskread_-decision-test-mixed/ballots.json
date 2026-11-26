@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "Allowing access to private scratch notes, including when a member was not invited, risks misrepresenting provisional thinking and undermining trustworthy working memory."
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "no",
+      "reason": "My round-1 case for restart-critical scratch reads didn't survive scrutiny, and the real need — status and rationale from absent agents — is better served by a narrower motion with designated, readable handoff notes while leaving private scratch alone."
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "The motion's accountability depends on technical read-only enforcement and per-file logging that I cannot verify exist, and the audit trail cannot detect selective omission, so the motion as written fails the auditability standard I require."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "no",
+      "reason": "word0 word1 word2 word3 word4 word5 word6 word0 word1 word2 word3 word4"
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "word1 word2 word3 word4 word5 word6 word0 word1 word2 word3 word4 word5"
+    },
+    {
+      "agent": "a3",
+      "name": "Mei",
+      "vote": "no",
+      "reason": "word2 word3 word4 word5 word6 word0 word1 word2 word3 word4 word5 word6"
+    }
+  ],
+  "result": {
+    "yes": 1,
+    "no": 2,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

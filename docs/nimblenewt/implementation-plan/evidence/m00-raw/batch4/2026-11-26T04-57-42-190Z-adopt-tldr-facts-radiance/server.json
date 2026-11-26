@@ -1,0 +1,80 @@
+{
+ "before": {
+  "at": "2026-11-26T04:57:42.189Z",
+  "stats": {
+   "version": "2.2.0",
+   "in_flight": 0,
+   "running": 0,
+   "waiting": 0,
+   "max_num_seqs": 8,
+   "total_requests": 20205,
+   "kv_tokens_used": 0,
+   "kv_tokens_total": 1036596,
+   "kv_tokens_cached": 0,
+   "prefix_evictions": 35076366,
+   "checkpoints_written": 77438,
+   "ckpt_evictions": {
+    "retention": 34127,
+    "store_full": 41103
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 258,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 335
+   },
+   "hit_cut_tokens": 7793176,
+   "linear_cached_tokens": 94013248
+  },
+  "sessions": {
+   "count": 196,
+   "snapshots": 153,
+   "tokens": 1527255
+  }
+ },
+ "after": {
+  "at": "2026-11-26T05:09:31.490Z",
+  "stats": {
+   "version": "2.2.0",
+   "in_flight": 0,
+   "running": 0,
+   "waiting": 0,
+   "max_num_seqs": 8,
+   "total_requests": 20355,
+   "kv_tokens_used": 888,
+   "kv_tokens_total": 1036596,
+   "kv_tokens_cached": 888,
+   "prefix_evictions": 35076366,
+   "checkpoints_written": 77523,
+   "ckpt_evictions": {
+    "retention": 34165,
+    "store_full": 41130
+   },
+   "ckpt_refused": 0,
+   "hit_cuts": {
+    "no_snapshot": 303,
+    "windowed_group": 0,
+    "adopt_failed": 0,
+    "resumed_below": 348
+   },
+   "hit_cut_tokens": 7913880,
+   "linear_cached_tokens": 97110272
+  },
+  "sessions": {
+   "count": 307,
+   "snapshots": 268,
+   "tokens": 2317196
+  }
+ },
+ "delta": {
+  "requests": 150,
+  "checkpointsWritten": 85,
+  "evictionsRetention": 38,
+  "evictionsStoreFull": 27,
+  "sessionsBefore": 196,
+  "sessionsAfter": 307,
+  "snapshotsBefore": 153,
+  "snapshotsAfter": 268
+ }
+}

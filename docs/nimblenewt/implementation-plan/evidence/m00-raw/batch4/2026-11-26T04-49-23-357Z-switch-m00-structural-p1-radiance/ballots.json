@@ -1,0 +1,15 @@
+{
+  "ballots": [],
+  "ballotHistory": [],
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Noor: Run the heavy-export benchmark Thursday (5 jobs tested so far; 8 heavy ETL jobs remain). Measure per-job and aggregate runtime, tail latency under I/O contention, and document any connection-pool or resource-isolation findings.",
+      "Axel: Run a two-night parallel canary of the six DB exports on Quill alongside the old scheduler. Record per-job minutes, lock-timeout events, memory-limit hits, and total export time vs. the 40-minute baseline. Report whether the 15-minute slack survives.",
+      "Axel / Noor: Obtain or test Quill's concurrent-pool and I/O-isolation semantics for multiple simultaneous DB-export jobs; report whether behavior is specified, tunable, or undefined.",
+      "Wen: Write and test a full rollback script (Quill → old scheduler) and validate it end-to-end by end of day Monday. Document the restore time in hours.",
+      "Wen: Monitor Noor's five validated jobs in production through one full week; report any timing drift, paging events, or manual interventions.",
+      "All: Compile a revised staged-cutover plan (5 jobs now → canary exports → remaining jobs next cycle) with explicit go/no-go gates tied to the data above, for the next meeting."
+    ]
+  }
+}

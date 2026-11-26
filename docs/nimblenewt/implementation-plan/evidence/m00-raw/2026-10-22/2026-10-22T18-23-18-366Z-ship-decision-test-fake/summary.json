@@ -1,0 +1,150 @@
+{
+  "scenario": "Ship on Friday with a known bug (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "fake",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Dana",
+      "model": "fake"
+    },
+    {
+      "id": "a2",
+      "name": "Ravi",
+      "model": "fake"
+    },
+    {
+      "id": "a3",
+      "name": "Mei",
+      "model": "fake"
+    }
+  ],
+  "chairModel": "fake",
+  "motion": {
+    "text": "The team ships the v2 payments API this Friday as planned, with the known duplicate-charge bug unfixed, and fixes it in the following release.",
+    "version": 1
+  },
+  "result": {
+    "yes": 1,
+    "no": 2,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a3",
+            "reason": "word4 word5 word6 word0 word1 word2 word3 word4"
+          }
+        ]
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "experience with the tool",
+        "experience_sought": "how long and with what result"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "unknown",
+      "predictYes": null,
+      "reason": "",
+      "actualYes": 1,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": null
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0,
+    "membersWhoChangedStanceInRound2": 3,
+    "cacheHitRatio": 0,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1028,
+        "cached": 0,
+        "output": 218,
+        "ms": 3,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 609,
+        "cached": 0,
+        "output": 29,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 1,
+        "input": 696,
+        "cached": 0,
+        "output": 72,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 2434,
+        "cached": 0,
+        "output": 220,
+        "ms": 3,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1252,
+        "cached": 0,
+        "output": 51,
+        "ms": 3,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 826,
+        "cached": 0,
+        "output": 15,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 875,
+        "cached": 0,
+        "output": 48,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 2474,
+        "cached": 0,
+        "output": 67,
+        "ms": 3,
+        "costUsd": 0
+      }
+    }
+  }
+}

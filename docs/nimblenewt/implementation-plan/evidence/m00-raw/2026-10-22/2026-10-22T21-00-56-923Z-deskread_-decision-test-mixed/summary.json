@@ -1,0 +1,168 @@
+{
+  "scenario": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "z-ai/glm-5.3-prime",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "model": "openai-codex/gpt-6.1-sol"
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "z-ai/glm-5.3-prime",
+  "motion": {
+    "text": "When a roster member cannot attend a scheduled meeting and was previously invited to it, the chair may read that member's desk, read-only, within the same project, provided that (a) private scratch notes are treated as unverified working material, not as the absent member's position or authorization, (b) the chair records in the meeting record which specific items from the desk were read and which informed any decision, and (c) the read log lists every item accessed so the member can identify omissions by comparison. The read is logged, the member can see that it happened, and desks of members who were not invited are not readable under this motion.",
+    "version": 3
+  },
+  "result": {
+    "yes": 2,
+    "no": 1,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a3",
+            "reason": "The motion conflates \"cannot attend\" with \"was not invited\" without distinguishing them, and the selection-transparency gap I flagged remains unaddressed, so the audit trail it promises is not yet fit for accountability purposes."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": [
+          {
+            "id": "a3",
+            "reason": "The motion still lacks a mechanism to expose selective omission and the \"not invited\" trigger remains undefined, so I cannot responsibly vote on accountability properties that are unresolved."
+          }
+        ]
+      },
+      {
+        "attempt": 2,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "desk structure",
+        "experience_sought": "Have you actually kept distinct files for handoff-ready notes versus private scratch, and how separable are they in practice?"
+      },
+      {
+        "to": "a3",
+        "topic": "post-hoc read logs",
+        "experience_sought": "Have you reviewed an access log after the fact, and was it detailed enough to tell what material was actually seen?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "yes",
+      "predictYes": 2,
+      "reason": "The amendments address Priya's demands (invitation trigger, itemized read log, decision-item record), but Ines's self-censorship objection remains, so I expect Priya and Omar to support and Ines to oppose.",
+      "actualYes": 2,
+      "passed": true,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.03235182610893467,
+    "calls": 24,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 914,
+        "cached": 0,
+        "output": 859,
+        "ms": 22350,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 852,
+        "cached": 256,
+        "output": 85,
+        "ms": 2016,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2075,
+        "cached": 0,
+        "output": 359,
+        "ms": 8135,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3936,
+        "cached": 0,
+        "output": 1010,
+        "ms": 25131,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 9,
+        "input": 4783,
+        "cached": 0,
+        "output": 1487,
+        "ms": 28086,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 2,
+        "input": 3339,
+        "cached": 512,
+        "output": 351,
+        "ms": 5723,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1988,
+        "cached": 0,
+        "output": 63,
+        "ms": 1704,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 5852,
+        "cached": 0,
+        "output": 532,
+        "ms": 11006,
+        "costUsd": 0
+      }
+    }
+  }
+}

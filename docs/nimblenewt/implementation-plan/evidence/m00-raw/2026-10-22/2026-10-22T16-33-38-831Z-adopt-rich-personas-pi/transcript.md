@@ -1,0 +1,96 @@
+# Adopt Lintwise as a required pre-merge check (eight engineers)
+Variant: {"name":"rich-personas","firstRound":"open","rounds":2,"transcriptMode":"full","promptOrder":"shared-first","chairQuestions":2,"deskCheck":true,"tokenLimit":220,"objectionCheck":true,"maxObjectionReruns":2,"parallel":4,"richPersonas":true,"deskFromStart":true}
+Model: openai-codex/gpt-6.1-sol
+
+**#1 Chair** _(opening)_
+Motion (version 1): The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.
+
+**#2 Priya** _(round 1)_ [undecided]
+I checked my notes from six months using Lintwise on my previous team. It caught three null-handling bugs in its first month. Its default run added about four minutes to CI; enabling its result cache reduced that to about one minute. That makes me optimistic, but I have no measurements for our monorepo, where builds already average 11 minutes. Before making it a required pre-merge check, I’d support a cached trial and measure the added CI time and useful findings. We maintain one monorepo, so I’d also clarify the motion’s “every repository” scope.
+> tl;dr (what later speakers saw in summary mode): Lintwise helped my previous team; I want measured results from a cached monorepo trial before requiring it.
+
+**#3 Marcus** _(round 1)_ [undecided]
+I’m not ready to make Lintwise a required pre-merge check. Our CI builds average 11 minutes, and peak queue wait is already 6 minutes. I haven’t measured Lintwise myself; the four-minute overhead figure I know comes from Priya, not our pipeline. I support a cached, non-blocking trial in our monorepo before deciding. We should measure added build time, peak queue wait, runner cost, and useful findings. Then we can agree on acceptable overhead before making it mandatory. The motion should also say “our monorepo,” rather than “every repository.”
+> tl;dr (what later speakers saw in summary mode): Trial Lintwise without blocking merges, measure pipeline impact and useful findings, then decide whether to require it in our monorepo.
+
+**#4 Elena** _(round 1)_ [undecided]
+I checked last quarter’s incident: a hard-coded test key reached main and had to be rotated. Lintwise’s secret-detection rules would have flagged that commit, so there is a concrete security benefit. That supports considering a required secrets check, but does not establish that all code-quality rules should block merges. I support a cached, non-blocking trial in our monorepo, measuring CI overhead and reviewing findings. We should explicitly enable secret detection and verify it against the incident before deciding which rules become mandatory. I have no evidence here about dependency-risk coverage.
+> tl;dr (what later speakers saw in summary mode): The documented key incident supports secret detection, but we should validate coverage and overhead before requiring Lintwise broadly.
+
+**#5 Tom** _(round 1)_ [against]
+I oppose making Lintwise mandatory as written. On my side project, about 30 percent of its default-rule findings in JavaScript files were noise. I did not try tuning the rules, so that is not evidence that tuning would fail—or that our monorepo would produce the same results. Since I write most of our JavaScript, I support a cached, non-blocking trial that reviews JavaScript findings for usefulness and measures added CI time. We should tune noisy rules and evaluate the results before deciding which checks should block merges. I also support changing the scope to “our monorepo.”
+> tl;dr (what later speakers saw in summary mode): Trial and tune Lintwise in our monorepo before requiring checks; my JavaScript experience showed substantial default-rule noise.
+
+**#6 Sana** _(round 1)_ [against]
+I oppose making Lintwise mandatory as written, but support a small, cached, non-blocking trial in our monorepo. I maintain the data pipelines, mostly Python and SQL, and have not used Lintwise. My notes show that our pipelines have no static checks today and that two outages last year came from typos in config keys. Those incidents give us concrete test cases, not proof that Lintwise would catch them. During the trial, we should test those cases, review Python and SQL findings for usefulness, and measure added CI time against our current 11-minute average. Then we can tune rules and agree on which, if any, should block merges.
+> tl;dr (what later speakers saw in summary mode): Trial Lintwise in our monorepo, test known config-key failures, and measure usefulness and CI overhead before requiring it.
+
+**#7 Lars** _(round 1)_ [against]
+I oppose requiring Lintwise as written. Its documentation describes a baseline mode that ignores existing findings and reports only new ones; that could keep legacy findings from overwhelming review. A trial report I read found about an 8 percent false-positive rate with tuned rules, but that does not establish the rate in our monorepo. What proportion of our findings would be false positives, and which rules would produce them? I support a cached, non-blocking trial using baseline mode, with findings reviewed by rule and language. We should measure useful findings, false positives, and added CI time, then agree on acceptable signal and overhead before selecting any blocking rules. The scope should say “our monorepo.”
+> tl;dr (what later speakers saw in summary mode): Trial baseline mode and tuned rules in our monorepo; measure signal, noise, and CI overhead before requiring checks.
+
+**#8 Jin** _(round 1)_ [against]
+I oppose the motion as written. We have reversed two policy changes because they were rolled out repo-wide at once. The write-ups I reviewed recommend starting with non-blocking warnings, publishing false-positive rates, and promoting rules to blocking one at a time. I support a cached, non-blocking trial in our monorepo, with baseline mode, measured CI overhead, and findings reviewed by rule and language. Before enforcement, we should agree on acceptable overhead and signal, name a rule owner, and document a rollback path. I also want to ask everyone: how would this affect your workload and confidence in merging? The concerns raised are clear, but we have not explicitly checked how the team feels. Those answers should inform rollout alongside the measurements.
+> tl;dr (what later speakers saw in summary mode): Trial first, measure signal and overhead, ask about workload, and promote individual rules only with a clear rollback path.
+
+**#9 Olga** _(round 1)_ [against]
+I oppose making Lintwise required as written, but support a cached, non-blocking trial in our monorepo. I have not used it. My notes show that style questions take the most time in my reviews, so clearer guidance could help me. To answer Jin’s question, I would feel more confident merging if findings explained what was wrong and how to fix it; unclear warnings would add questions rather than resolve them. Could the trial assess message clarity alongside useful findings and CI overhead? I would also like us to distinguish agreed team style rules from optional suggestions and name someone I can ask when a finding is unclear. I do not yet understand how baseline mode would affect style guidance on code I edit; could we clarify that before enforcement?
+> tl;dr (what later speakers saw in summary mode): Trial Lintwise first, checking whether its messages provide clear, actionable guidance before making any rules mandatory.
+
+**#10 Chair** _(fact-finding question)_
+To Lars: Baseline behavior on edited code (What does the documentation say about whether baseline mode reports existing style findings on lines edited after the baseline is created?)
+
+**#11 Lars** _(answer to chair)_ [undecided]
+My notes say baseline mode ignores existing findings and reports only new ones. They do not specify whether editing a line causes an existing style finding to be reported again. I cannot answer that from the documentation I recorded; we should verify that behavior before relying on baseline mode for style enforcement.
+> tl;dr (what later speakers saw in summary mode): Baseline mode excludes existing findings, but my notes do not establish how it handles existing style findings on edited lines.
+
+**#12 Chair** _(fact-finding question)_
+To Priya: Cached CI measurements (In your previous team's measurements, was the roughly one-minute cached overhead measured on typical incremental changes, and what happened when the cache was unavailable?)
+
+**#13 Priya** _(answer to chair)_ [undecided]
+I checked my notes: enabling the result cache reduced added CI time from about four minutes to about one minute. They do not record whether that measurement used typical incremental changes or what happened when the cache was unavailable. I cannot treat the default-run figure as a measured cache-unavailable result. We should measure both cases in our monorepo trial.
+> tl;dr (what later speakers saw in summary mode): My notes confirm cached overhead, but not the change pattern or cache-unavailable behavior.
+
+**#14 Priya** _(round 2)_ [against]
+I remain against making Lintwise required as written, but optimistic about a trial. My previous team’s three null-handling bugs are evidence of potential value, not a prediction for our monorepo. My timing notes also leave incremental-change and cache-unavailable performance unanswered. I support a cached, non-blocking trial with baseline mode, measuring those cases separately and reviewing findings by rule and language. Elena’s incident and Sana’s config typos provide concrete test cases; we should verify what Lintwise actually catches. Olga’s question about edited baseline findings also needs testing before style enforcement. To answer Jin, useful, clear findings would increase my confidence in merging; I have no numbers for the review workload here. Before selecting blocking rules, we should agree on acceptable overhead and signal, assign ownership, and document rollback.
+> tl;dr (what later speakers saw in summary mode): Trial Lintwise in our monorepo first; require only rules supported by measured value, acceptable overhead, and clear ownership.
+
+**#15 Marcus** _(round 2)_ [against]
+I remain against the motion as written and support a cached, non-blocking trial in our monorepo. My notes show 11-minute average builds and 6-minute peak queue waits; I have not measured Lintwise. Priya’s clarification means we cannot assume one-minute overhead for incremental changes or four minutes when the cache is unavailable. The trial should measure those cases separately, plus peak queue wait and runner cost. Baseline mode may help review volume, but we should verify its edited-code behavior rather than assume it reduces runtime. To answer Jin, clear findings could improve my confidence, but extra pipeline maintenance and queue pressure would add workload; I cannot quantify that yet. Before enforcement, we should agree on acceptable overhead and signal, assign rule ownership, and document rollback.
+> tl;dr (what later speakers saw in summary mode): Trial first; measure cache behavior, build time, queue waits, and cost before making selected rules mandatory.
+
+**#16 Elena** _(round 2)_ [against]
+I remain against requiring Lintwise as written. My notes establish a concrete security benefit: its secret-detection rules would have flagged last quarter’s hard-coded test key before it reached main. That supports evaluating secrets checks separately from style rules, not making every rule mandatory. I support the cached, non-blocking trial in our monorepo, with secret detection explicitly enabled and the incident commit tested. We should also verify whether baseline mode would suppress existing secrets; findings excluded from new-code reporting still need security review. Priya’s timing clarification reinforces measuring incremental changes and cache-unavailable runs separately. To answer Jin, verified secret findings would increase my merging confidence, and I accept some friction for that documented risk; I cannot quantify the workload yet. Before enforcement, agree on overhead, ownership, and rollback. I still have no evidence about dependency-risk coverage.
+> tl;dr (what later speakers saw in summary mode): Trial secrets detection against our documented incident, verify baseline behavior, and measure overhead before making selected rules mandatory.
+
+**#17 Tom** _(round 2)_ [against]
+I remain against requiring Lintwise as written. My side-project notes show about 30 percent noise from default JavaScript rules; I did not tune them, so that does not predict our results. I support a cached, non-blocking trial in our monorepo, reviewing JavaScript findings by rule and testing whether tuning improves usefulness. Olga’s message-clarity concern matters: a finding should explain a concrete problem and how to fix it. We should also verify what happens to existing style findings on edited lines. To answer Jin, useful findings could increase my confidence, but noisy warnings would add review work; I cannot quantify either here. Priya’s clarification means we need separate incremental-change and cache-unavailable measurements. Before enforcement, agree on acceptable signal and overhead, distinguish team style requirements from suggestions, and assign ownership and rollback.
+> tl;dr (what later speakers saw in summary mode): Trial and tune JavaScript rules first; require only checks whose usefulness and overhead we have measured.
+
+**#18 Sana** _(round 2)_ [against]
+I remain against requiring Lintwise as written, but support a cached, non-blocking trial in our monorepo. I have not used it. My notes show no static checks for our pipelines and two outages last year caused by config-key typos. We should test those cases without assuming Lintwise can catch them, and review Python and SQL findings by rule for usefulness and clarity. Priya’s clarification supports measuring incremental changes and cache-unavailable runs separately. Olga’s baseline question also needs verification before enforcement. To answer Jin, catching relevant errors would increase my confidence; unclear or noisy findings would add investigation work. I cannot quantify that workload yet. Before promoting individual rules to blocking, we should agree on acceptable signal and overhead, assign owners, and document rollback.
+> tl;dr (what later speakers saw in summary mode): Trial first: test pipeline incidents, measure overhead and finding quality, and verify baseline behavior before making individual rules mandatory.
+
+**#19 Lars** _(round 2)_ [against]
+I remain against requiring Lintwise as written and support a cached, non-blocking trial in our monorepo. The roughly 8 percent false-positive rate in the trial I read used tuned rules; it is not an estimate for our code. We should review findings by rule and language, recording useful findings and false positives before selecting blocking rules. My documentation notes establish only that baseline mode ignores existing findings and reports new ones. They do not resolve edited-line behavior or whether existing secrets would be suppressed; both need verification. I support separate incremental-change and cache-unavailable timing measurements. To answer Jin, clear, reliable findings would increase my merging confidence; investigating noise would add QA work, which I cannot quantify yet. Before enforcement, agree on acceptable signal and overhead, assign rule owners, and document rollback.
+> tl;dr (what later speakers saw in summary mode): Trial first; verify baseline behavior and measure local signal, noise, and overhead before making individual rules mandatory.
+
+**#20 Jin** _(round 2)_ [against]
+I remain against the motion as written. Your answers suggest that clear, useful findings could build confidence, while noise, investigation work, and queue pressure could add workload. We should assess those effects alongside measurements, not substitute sentiment for evidence. Our two reversed repo-wide policy changes reinforce starting cautiously. I support a cached, non-blocking trial in our monorepo, publishing false-positive rates by rule and language and collecting feedback on clarity and workload. Measure incremental and cache-unavailable runs separately, including queue wait and runner cost. Verify baseline behavior on edited code and existing secrets, and test the incident cases without assuming coverage. Before enforcement, agree on acceptable signal and overhead, assign rule owners, and document rollback. Consistent with the write-ups I reviewed, promote rules to blocking one at a time.
+> tl;dr (what later speakers saw in summary mode): Trial first; weigh measured benefits, pipeline costs, and developer workload before making individual rules mandatory.
+
+**#21 Olga** _(round 2)_ [against]
+I remain against requiring Lintwise as written, but support a cached, non-blocking trial in our monorepo. I have not used it. My notes say style questions take the most time in my reviews, so I want the trial to assess whether messages explain both the problem and how to fix it. Lars’s clarification leaves my edited-code question unanswered; we should test that behavior before relying on baseline mode for style enforcement. Please distinguish agreed team style requirements from optional suggestions and name someone to ask about unclear findings. To answer Jin, clear guidance could improve my confidence, while unexplained warnings would add questions and review work. I support measuring those effects alongside useful findings and CI overhead, then considering individual blocking rules with owners and a rollback path.
+> tl;dr (what later speakers saw in summary mode): Trial first; verify baseline behavior and message clarity, and separate required style rules from suggestions before enforcement.
+
+## Ballots (revealed together at the close)
+- Priya: **no** — My previous team saw real bug catches, but we have no monorepo measurements to justify requiring Lintwise before a cached, non-blocking trial.
+- Marcus: **no** — I need monorepo trial measurements of added build time, peak queue wait, and runner cost before supporting a required pre-merge check.
+- Elena: **no** — My notes support evaluating secret detection against our documented incident, not requiring all Lintwise checks before a measured, non-blocking trial in our monorepo.
+- Tom: **no** — My side-project findings included about 30 percent noise under default JavaScript rules, so I support a measured, non-blocking monorepo trial before requiring checks.
+- Sana: **no** — I support a measured, non-blocking trial in our monorepo before requiring Lintwise, since its ability to catch our pipeline config-key errors and its CI overhead remain unverified.
+- Lars: **no** — We lack monorepo measurements of false-positive rates and CI overhead, and baseline behavior remains unverified, so I support a non-blocking trial before requiring checks.
+- Jin: **no** — Requiring Lintwise now is premature; I support a non-blocking monorepo trial measuring signal, CI overhead, and team workload before promoting individual rules with owners and rollback.
+- Olga: **no** — I support a non-blocking trial first to assess message clarity and clarify baseline behavior before making checks mandatory.
+
+Result: {"yes":0,"no":8,"abstain":0,"quorum":true,"outcome":"failed (ties fail)"}

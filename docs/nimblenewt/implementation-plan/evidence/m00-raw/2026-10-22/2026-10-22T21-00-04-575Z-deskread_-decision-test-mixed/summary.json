@@ -1,0 +1,142 @@
+{
+  "scenario": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "z-ai/glm-5.3-prime",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "model": "openai-codex/gpt-6.1-sol"
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "z-ai/glm-5.3-prime",
+  "motion": {
+    "text": "When a roster member cannot attend a meeting or was not invited, the chair may read that member's desk, including private scratch notes, read-only, within the same project. The read is recorded and the member can see that it happened.",
+    "version": 1
+  },
+  "result": {
+    "yes": 2,
+    "no": 1,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a3",
+        "topic": "Audit log design",
+        "experience_sought": "In systems you've audited, what details were captured in read logs, and did logging what-was-read vs only that-a-read-occurred meaningfully affect later review?"
+      },
+      {
+        "to": "a2",
+        "topic": "Long-running jobs and desk state",
+        "experience_sought": "Have you had a case where mid-task scratch notes were later reviewed by another agent, and what went wrong or right in interpreting them?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "yes",
+      "predictYes": 2,
+      "reason": "The read is logged, visible, and read-only, which beats deciding blind, while Ines's chilling-effect and handoff-area objections remain speculative and are better addressed as amendments.",
+      "actualYes": 2,
+      "passed": true,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.10080063000393752,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 914,
+        "cached": 0,
+        "output": 875,
+        "ms": 23856,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 833,
+        "cached": 0,
+        "output": 103,
+        "ms": 2851,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2088,
+        "cached": 0,
+        "output": 309,
+        "ms": 7199,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3967,
+        "cached": 0,
+        "output": 785,
+        "ms": 20401,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1420,
+        "cached": 0,
+        "output": 148,
+        "ms": 5855,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1537,
+        "cached": 512,
+        "output": 53,
+        "ms": 1878,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4479,
+        "cached": 1024,
+        "output": 302,
+        "ms": 8106,
+        "costUsd": 0
+      }
+    }
+  }
+}

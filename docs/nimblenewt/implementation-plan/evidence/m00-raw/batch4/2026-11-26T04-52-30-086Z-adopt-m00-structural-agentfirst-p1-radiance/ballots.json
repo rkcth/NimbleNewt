@@ -1,0 +1,117 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "Parallel execution hides the ~1-minute cached runtime behind our 11-minute build, the two-sprint baseline calibration with FP-per-PR gating and security/secret-detection audits before any rule promotes to blocking matches the conditions I set in round two, and the rollback path plus override hatch protect against a noisy gate eroding trust."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The motion makes my runner-capacity check an explicit prerequisite before parallel placement goes live, keeps Lintwise in warn-only mode for two sprints so no PR is blocked before I've validated queue impact at peak, and auto-reverts any rule to advisory if FP-per-PR drifts past our threshold—every pipeline concern I raised is encoded."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The amended motion explicitly gates every promoted rule on passing the supply-chain dependency-tree audit and secret-detection verification results, which resolves both of my security preconditions that were outstanding in the prior wording."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The amended motion bakes in the warn-only calibration sprint I called for, uses baseline mode to neutralize the 30-percent-noise problem I saw on my side project, and gates promotion behind a per-PR FP threshold plus the security audit I volunteered to help verify—so the tool has to earn its blocking status rather than just getting bolted on."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The amended motion encodes exactly what I asked for—two-sprint advisory calibration measuring false positives specifically on my SQL/Python paths, parallel placement with Marcus's runner-capacity check as a prerequisite, baseline freeze to avoid legacy-debt noise, and a per-rule FP threshold before anything blocks merges, which means my transformations get tuned before they ever gate a pipeline."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion encodes my one-FP-per-PR threshold as a hard promotion criterion, guarantees automatic demotion back to advisory if a rule drifts, and requires per-rule explanation text—so the gate earns trust incrementally rather than eroding it, which is exactly the signal-to-noise discipline I need from a pre-merge check."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion encodes every merge-gate condition I stated—warn-only calibration with baseline freeze, FP-per-PR promotion threshold, written rollback to advisory rather than deletion, the two-person override hatch in the policy document itself, and Marcus's runner-capacity sign-off before parallel placement—turning what was a tribal-knowledge rollout risk into a documented, reversible policy."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The amended motion gives me the two-sprint advisory grace period I asked for, baseline mode so I'm not drowned in legacy violations, and the requirement that every promoted rule carries a one-line explanation plus a style-guide pointer—which is exactly the \"tutor, not blocker\" clarity I need as I learn our conventions."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "Parallel execution hides the ~1-minute cached runtime behind our 11-minute build, the two-sprint baseline calibration with FP-per-PR gating and security/secret-detection audits before any rule promotes to blocking matches the conditions I set in round two, and the rollback path plus override hatch protect against a noisy gate eroding trust.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The motion makes my runner-capacity check an explicit prerequisite before parallel placement goes live, keeps Lintwise in warn-only mode for two sprints so no PR is blocked before I've validated queue impact at peak, and auto-reverts any rule to advisory if FP-per-PR drifts past our threshold—every pipeline concern I raised is encoded.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The amended motion explicitly gates every promoted rule on passing the supply-chain dependency-tree audit and secret-detection verification results, which resolves both of my security preconditions that were outstanding in the prior wording.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The amended motion bakes in the warn-only calibration sprint I called for, uses baseline mode to neutralize the 30-percent-noise problem I saw on my side project, and gates promotion behind a per-PR FP threshold plus the security audit I volunteered to help verify—so the tool has to earn its blocking status rather than just getting bolted on.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The amended motion encodes exactly what I asked for—two-sprint advisory calibration measuring false positives specifically on my SQL/Python paths, parallel placement with Marcus's runner-capacity check as a prerequisite, baseline freeze to avoid legacy-debt noise, and a per-rule FP threshold before anything blocks merges, which means my transformations get tuned before they ever gate a pipeline.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion encodes my one-FP-per-PR threshold as a hard promotion criterion, guarantees automatic demotion back to advisory if a rule drifts, and requires per-rule explanation text—so the gate earns trust incrementally rather than eroding it, which is exactly the signal-to-noise discipline I need from a pre-merge check.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion encodes every merge-gate condition I stated—warn-only calibration with baseline freeze, FP-per-PR promotion threshold, written rollback to advisory rather than deletion, the two-person override hatch in the policy document itself, and Marcus's runner-capacity sign-off before parallel placement—turning what was a tribal-knowledge rollout risk into a documented, reversible policy.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The amended motion gives me the two-sprint advisory grace period I asked for, baseline mode so I'm not drowned in legacy violations, and the requirement that every promoted rule carries a one-line explanation plus a style-guide pointer—which is exactly the \"tutor, not blocker\" clarity I need as I learn our conventions.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

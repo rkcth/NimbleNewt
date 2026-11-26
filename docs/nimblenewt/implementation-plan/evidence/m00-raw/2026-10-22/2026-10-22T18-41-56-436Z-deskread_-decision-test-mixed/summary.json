@@ -1,0 +1,142 @@
+{
+  "scenario": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "model": "z-ai/glm-5.3-prime"
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "When a roster member cannot attend a meeting or was not invited, the chair may read that member's desk, including private scratch notes, read-only, within the same project. The read is recorded and the member can see that it happened.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "Status information in private scratch notes",
+        "experience_sought": "In your actual use, what information needed to avoid restarting queued work was available only in private scratch notes rather than designated status notes?"
+      },
+      {
+        "to": "a3",
+        "topic": "Existing access controls and audit logging",
+        "experience_sought": "Do you have evidence that NimbleNewt currently enforces read-only access and records each file accessed, or are these proposed requirements?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "All three members now oppose blanket access to private scratch notes, and the discussion established no concrete need that outweighs the privacy and misinterpretation risks.",
+      "actualYes": 0,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 2,
+    "cacheHitRatio": 0.1762423332081612,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 916,
+        "cached": 0,
+        "output": 827,
+        "ms": 18302,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 865,
+        "cached": 0,
+        "output": 100,
+        "ms": 6412,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2160,
+        "cached": 0,
+        "output": 465,
+        "ms": 8171,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 4168,
+        "cached": 768,
+        "output": 956,
+        "ms": 21137,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1467,
+        "cached": 0,
+        "output": 200,
+        "ms": 7963,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1622,
+        "cached": 0,
+        "output": 51,
+        "ms": 2775,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4780,
+        "cached": 2048,
+        "output": 351,
+        "ms": 9022,
+        "costUsd": 0
+      }
+    }
+  }
+}

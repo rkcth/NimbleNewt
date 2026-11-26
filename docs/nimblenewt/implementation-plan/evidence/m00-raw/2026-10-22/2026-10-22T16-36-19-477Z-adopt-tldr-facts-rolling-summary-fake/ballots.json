@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "word5 word6 word0 word1 word2 word3 word4 word5 word6 word0 word1 word2"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "word6 word0 word1 word2 word3 word4 word5 word6 word0 word1 word2 word3"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "word0 word1 word2 word3 word4 word5 word6 word0 word1 word2 word3 word4"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "word1 word2 word3 word4 word5 word6 word0 word1 word2 word3 word4 word5"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "word2 word3 word4 word5 word6 word0 word1 word2 word3 word4 word5 word6"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "word3 word4 word5 word6 word0 word1 word2 word3 word4 word5 word6 word0"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "word4 word5 word6 word0 word1 word2 word3 word4 word5 word6 word0 word1"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "word5 word6 word0 word1 word2 word3 word4 word5 word6 word0 word1 word2"
+    }
+  ],
+  "result": {
+    "yes": 4,
+    "no": 4,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}
