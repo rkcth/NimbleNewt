@@ -54,10 +54,12 @@ for (const backend of backends) {
         gate: (by, s) => qa.gate(by, s),
         newestChecked: async (by, t) => (await qa.list(by, t)).items.find((e) => e.source === "independent")?.submissionId,
         projects, assignments,
+        readDocument: async () => ({ files: [{ path: "index.html", text: "Sign in with a passkey." }], skipped: [] }),
       }, options);
       const ann = await agent("ann", ["author"]);
       const quinn = await agent("quinn", ["qa"]);
       const dora = await agent("dora", ["docs"]);
+      await docs.setCapability(owner, { commandId: cid("cap"), projectId: project, capabilityId: "passkey-sign-in", name: "passkey sign-in", maturity: "supported" });
       const pat = await agent("pat", ["author"]);
       const far = await agent("far", ["docs"], other);
       const code = async (task: string, tree: string): Promise<string> => {
@@ -69,10 +71,10 @@ for (const backend of backends) {
         await qa.record(quinn, { commandId: cid("qa"), submissionId: sub, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-19T09:30:00.000Z", checks: [{ name: "unit", result }] });
       };
       const document = derivedId("sbm", cid("doc"));
-      await plant("submission", document, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
+      await plant("submission", document, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactId: "art-aaaaaaaaaaaaaaaaaaaa", artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
 
       // Recording: a claim must name one of the document's implementing tasks; the owner must be an active agent; a keeper of documents records; others see nothing.
-      const promo = { projectId: project, title: "Landing page", location: "site/index.html", audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login }] };
+      const promo = { projectId: project, title: "Landing page", location: "site/index.html", audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login, capabilityId: "passkey-sign-in" }] };
       await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, claims: [{ text: "Instant search", taskId: search }] }), /unsupported claim/);
       await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, owner: "agent:nobody" }), /not an active agent/);
       await refuses("invalid_command", () => docs.record(owner, { commandId: cid("r"), ...promo, owner: far.id }), /may not read this project's tasks/);
@@ -94,7 +96,7 @@ for (const backend of backends) {
       await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), ...verify, documentSubmissionId: sub1 }), /kind document/);
       await refuses("forbidden", () => docs.verify(pat, { commandId: cid("v"), ...verify }));
       const foreignDoc = derivedId("sbm", cid("doc"));
-      await plant("submission", foreignDoc, { taskId: elsewhere, projectId: other, kind: "document", role: "docs", submittedBy: far.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
+      await plant("submission", foreignDoc, { taskId: elsewhere, projectId: other, kind: "document", role: "docs", submittedBy: far.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactId: "art-aaaaaaaaaaaaaaaaaaaa", artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
       await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), ...verify, documentSubmissionId: foreignDoc }), /not a submission of this project/);
       const searchCode = await code(search, treeA);
       await refuses("invalid_command", () => docs.verify(dora, { commandId: cid("v"), ...verify, evidence: [searchCode] }), /does not describe/);
@@ -181,7 +183,7 @@ for (const backend of backends) {
       const r1 = (await docs.get(owner, p1.id))!["revision"] as number;
       const kept = await docs.record(owner, { commandId: cid("r"), ...promo, obligationId: p1.id, expectedRevision: r1, applicableVersion: "2.0", owner: dora.id, title: "Landing page (new)" });
       assert.equal(kept.state, "verified");
-      const changed = await docs.record(owner, { commandId: cid("r"), ...promo, obligationId: p1.id, expectedRevision: kept.revision, applicableVersion: "2.0", claims: [{ text: "Sign in with a passkey or a code", taskId: login }] });
+      const changed = await docs.record(owner, { commandId: cid("r"), ...promo, obligationId: p1.id, expectedRevision: kept.revision, applicableVersion: "2.0", claims: [{ text: "Sign in with a passkey or a code", taskId: login, capabilityId: "passkey-sign-in" }] });
       assert.equal(changed.state, "unverified");
 
       // Two release checks at once (different command IDs): one update task per document, none twice. The guide's release update for 2.0 is still open, so 3.0 is only noted on it.
@@ -235,10 +237,12 @@ for (const backend of backends) {
         projects: { createTask: (c) => projects.createTask(c), transitionTask: async (c) => { if (failReady) { failReady = false; throw new Error("stopped between steps"); } return projects.transitionTask(c); } },
         // Assigning an update task fails once the same way: the task is left ready with no assignment.
         assignments: { assignTask: async (c) => { if (failAssign) { failAssign = false; throw new Error("stopped between steps"); } return assignments.assignTask(c); } },
+        readDocument: async () => ({ files: [{ path: "index.html", text: "Sign in with a passkey." }], skipped: [] }),
       }, moving);
       const ann = await agent("ann", ["author"]);
       const quinn = await agent("quinn", ["qa"]);
       const dora = await agent("dora", ["docs"]);
+      await docs.setCapability(owner, { commandId: cid("cap"), projectId: project, capabilityId: "passkey-sign-in", name: "passkey sign-in", maturity: "supported" });
       const code = async (tree: string): Promise<string> => {
         const id = derivedId("sbm", cid("code"));
         await plant("submission", id, { taskId: login, projectId: project, kind: "code", role: "author", submittedBy: ann.id, submittedAt: "2026-11-19T09:00:00.000Z", makesCommit: true, base: "c".repeat(40), tree, patchId: "d".repeat(40), evidence: [] });
@@ -247,14 +251,14 @@ for (const backend of backends) {
       };
       const docChange = async (): Promise<string> => {
         const id = derivedId("sbm", cid("doc"));
-        await plant("submission", id, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
+        await plant("submission", id, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-19T09:40:00.000Z", makesCommit: false, artifactId: "art-aaaaaaaaaaaaaaaaaaaa", artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
         return id;
       };
       const get = async (id: string) => (await docs.get(owner, id)) as unknown as { revision: number; state: string; title: string; location: string; reasons?: { tree?: string }[]; releaseVersion?: string; updates: { taskId: string; state: string }[] };
 
       // The title and the place are kept redacted, like the claims, and so is the update task's text made from them.
       const shaped = "token=abcdefghijklmnop0123456789";
-      const page = await docs.record(owner, { commandId: cid("r"), projectId: project, title: `Landing page ${shaped}`, location: `site/index.html?${shaped}`, audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login }] });
+      const page = await docs.record(owner, { commandId: cid("r"), projectId: project, title: `Landing page ${shaped}`, location: `site/index.html?${shaped}`, audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey", taskId: login, capabilityId: "passkey-sign-in" }] });
       const recorded = await get(page.id);
       assert.ok(!recorded.title.includes("abcdefghijklmnop0123456789") && !recorded.location.includes("abcdefghijklmnop0123456789"), "title and location are redacted");
       assert.match(recorded.title, /^Landing page /);
@@ -292,7 +296,7 @@ for (const backend of backends) {
       // Re-recording the flagged document with another claim makes it unverified but keeps what flagged it: the old code, the old version and the old document change still do not verify it.
       const flagged = await get(page.id);
       assert.deepEqual([flagged.state, flagged.releaseVersion, flagged.reasons?.map((r) => r.tree)], ["stale", "2.0", [treeB, undefined]]);
-      const replaced = await docs.record(dora, { commandId: cid("r"), obligationId: page.id, expectedRevision: flagged.revision, projectId: project, title: "Landing page", location: "site/index.html", audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey or a code", taskId: login }] });
+      const replaced = await docs.record(dora, { commandId: cid("r"), obligationId: page.id, expectedRevision: flagged.revision, projectId: project, title: "Landing page", location: "site/index.html", audience: "promotional", owner: dora.id, applicableVersion: "1.0", implementationRefs: [login], claims: [{ text: "Sign in with a passkey or a code", taskId: login, capabilityId: "passkey-sign-in" }] });
       assert.equal(replaced.state, "unverified");
       const kept = await get(page.id);
       assert.deepEqual([kept.releaseVersion, kept.reasons?.map((r) => r.tree)], ["2.0", [treeB, undefined]], "re-recording keeps the flags");

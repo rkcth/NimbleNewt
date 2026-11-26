@@ -43,6 +43,7 @@ import { isFinished as isDefectFinished, type DefectService } from "../submissio
 import { reasonText as qaReasonText, type QaEvidenceService } from "../submissions/qa-evidence.js";
 import type { QaReviewService } from "../submissions/qa-review-policy.js";
 import { docReasonText, docVerifyCode, type DocObligationService } from "../submissions/doc-obligations.js";
+import { claimFlagText } from "../submissions/doc-claims.js";
 import type { LandingQueueOps } from "../landing/queue-ops.js";
 import type { LandingPage } from "../workspace-ops/workspace-ops.js";
 import type { IntegrationPolicyService } from "../policy/integration-policy.js";
@@ -802,7 +803,7 @@ export interface StatusDeps {
   /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
   readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<LandingPage> };
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
-  readonly docs?: Pick<DocObligationService, "list">;
+  readonly docs?: Pick<DocObligationService, "list"> & Partial<Pick<DocObligationService, "capabilities">>;
   /** The newest document submissions of a project (card Q03b), read with `SubmissionService.documents`'s rule. Absent: the `docs` view does not list document changes that could verify a flagged document. */
   readonly docSubmissions?: Pick<SubmissionService, "documents">;
 }
@@ -2671,7 +2672,9 @@ export class StatusService {
     if (this.#deps.docs === undefined) return { observedAt: at, lines: [line("Documentation obligations are not kept on this controller.", cite("project", projectId))] };
     let list: Awaited<ReturnType<DocObligationService["list"]>>;
     try { list = await this.#deps.docs.list(by, projectId); } catch (error) { if (error instanceof DomainError && error.code === "not_found") return undefined; throw error; }
-    if (list.items.length === 0) return { observedAt: at, lines: [line("No documentation obligations are recorded for this project: no document is tied to the behaviour it describes yet.", cite("project", projectId))] };
+    // The capability register claims are checked against (card Q03), on the project's view: the owner's and directors' decisions, and the controller's own labels.
+    const register = forTask !== undefined || this.#deps.docs.capabilities === undefined ? [] : [await this.#capabilityLine(by, projectId)];
+    if (list.items.length === 0) return { observedAt: at, lines: [line("No documentation obligations are recorded for this project: no document is tied to the behaviour it describes yet.", cite("project", projectId)), ...register] };
     const order = { stale: 0, unverified: 1, verified: 2 } as const;
     // One task's view (card Q03): only the documents that describe it.
     const mine = forTask === undefined ? list.items : list.items.filter((i) => i.implementationRefs.includes(forTask.id));
@@ -2695,7 +2698,9 @@ export class StatusService {
         else if (g.verdict !== "passed") lapsed.set(d.id, `the tested code of this task it was verified against (${was.submissionId}, tree ${was.tree.slice(0, 12)}) no longer passes its QA gate (${g.reasons.length === 0 ? "no check judged" : g.reasons.join(", ").replace(/_/g, " ")})`);
       }
     }
-    const rank = (d: (typeof mine)[number]): number => (lapsed.has(d.id) ? 1.5 : order[d.state]);
+    // A document whose verification was refused for its claims comes first (card Q03): what it says is not supported.
+    // A verification clears the refusal, so one still on the record is newer than any verification: shown whatever the state (a verified document's newer text would not pass).
+    const rank = (d: (typeof mine)[number]): number => (d.claimCheck !== undefined ? -1 : lapsed.has(d.id) ? 1.5 : order[d.state]);
     const items = [...mine].sort((a, b) => rank(a) - rank(b));
     const lines: Line[] = [];
     const flagged = items.filter((i) => i.state !== "verified").length;
@@ -2703,7 +2708,8 @@ export class StatusService {
     // task its flag names, since a verification names tested code of every task the document describes). A flag that names only the document's other tasks is said, not left out of the count. A verified
     // document whose verification no longer holds for this task (above) is due as well.
     const due = flagged + lapsed.size;
-    if (forTask === undefined) lines.push(line(`${list.items.length} document(s) tracked: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
+    const refused = items.filter((i) => i.claimCheck !== undefined).length;
+    if (forTask === undefined) lines.push(line(`${list.items.length} document(s) tracked${refused === 0 ? "" : ` (${refused} refused for unsupported claims, shown first)`}: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${list.items.length - flagged} verified against tested code.`, cite("project", projectId)));
     else lines.push(line(`${items.length} document(s) describe ${shown(forTask.title)}: ${flagged} flagged (${items.filter((i) => i.state === "stale").length} stale, ${items.filter((i) => i.state === "unverified").length} unverified), ${items.length - flagged} verified against tested code${lapsed.size === 0 ? "" : ` (${lapsed.size} of them no longer hold for this task: verified against code that no longer passes its QA gate)`}. ${due === 0 ? `No documentation is due for this task (the docs gate still checks that the code landed is the tree each document was verified against${unread.size === 0 ? "" : `; whether the tested code ${unread.size} verified document(s) stand on still passes its QA gate could not be read here, and the docs gate checks that too`}).` : `Documentation is due for this task: ${due} document(s); the docs gate holds its landing until each is verified again.${unread.size === 0 ? "" : ` Whether the tested code ${unread.size} other verified document(s) stand on still passes its QA gate could not be read here; the docs gate checks that too.`}`}`, cite("task", forTask.id), cite("project", projectId)));
     // One read of the project's document changes per flag time (card Q03b review): a release flags many documents at the same moment, and each read may go through the whole index.
     const changesSince = new Map<string, Promise<Awaited<ReturnType<SubmissionService["documents"]>>>>();
@@ -2711,23 +2717,34 @@ export class StatusService {
     const end = Math.min(items.length, after + 30);
     if (after > 0) lines.push(line(after >= items.length ? `There are only ${items.length} document(s) here, so nothing comes after ${after}.` : `Showing documents ${after + 1} to ${end} of ${items.length}, in the same order (flagged ones first).`, cite("project", projectId)));
     for (const d of items.slice(after, end)) {
-      const head = `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
+      const kindWords = d.kind === "promotional_asset" ? `Promotional asset (${d.mediaType ?? "text"}, on ${quoted(d.channel ?? "", 60)})` : d.kind === "support_guidance" ? `Support guidance (on ${quoted(d.channel ?? "", 60)})` : `${d.audience[0]!.toUpperCase()}${d.audience.slice(1)} document`;
+      const head = `${kindWords} ${quoted(d.title, 120)} (${quoted(d.location, 120)}, ${d.id}), kept by ${shown(d.owner, 80)}, applies to version ${quoted(d.applicableVersion, 40)}, describes ${d.implementationRefs.join(", ")}`;
       const v = d.verification;
       const verified = v === undefined ? "" : ` Last verified ${v.verifiedAt} by ${shown(v.verifiedBy, 80)} for version ${quoted(v.version, 40)}: document change ${v.documentSubmissionId} (${v.artifactDigest.slice(0, 19)}) against ${v.evidence.map((e) => `tree ${e.tree.slice(0, 12)} of ${e.taskId} (${e.submissionId})`).join(", ")}.`;
       // For one task, say when none of the flags names it (a release flag concerns every task of the document): the document is still due for it, since the docs gate holds this task's landing too.
       const reasons = d.reasons ?? [];
-      const elsewhere = forTask === undefined || d.state === "verified" || reasons.length === 0 || reasons.some((r) => r.kind === "release_changed" || r.taskId === forTask.id) ? ""
+      const elsewhere = forTask === undefined || d.state === "verified" || reasons.length === 0 || reasons.some((r) => r.kind === "release_changed" || r.kind === "capability_changed" || r.taskId === forTask.id) ? ""
         : ` Flagged for other tasks it describes, not for this one; it still holds this task's landing until it is verified again (against tested code of every task it describes).`;
       const lapse = lapsed.get(d.id);
       const state = lapse !== undefined ? `Verified, but no longer for this task: ${lapse}; the docs gate holds this task's landing until it is verified again against code that passes (the qa view names it).` : d.state === "verified" ? "Verified." : d.state === "unverified" ? `FLAGGED: unverified (not checked against tested code since it was recorded)${(d.reasons ?? []).length === 0 ? "" : `; since then ${(d.reasons ?? []).map(docReasonText).join("; ")}`}.` : `FLAGGED: stale: ${(d.reasons ?? []).map(docReasonText).join("; ")}.`;
-      const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId})`).join("; ")}.`;
+      const claims = d.claims.length === 0 ? "" : ` Claims: ${d.claims.map((c) => `${quoted(c.text, 100)} (${c.taskId}${c.capabilityId === undefined ? ", no capability named" : `, ${c.capabilityId}`})`).join("; ")}.`;
+      const cc = d.claimCheck;
+      const refusal = cc === undefined ? "" : ` CLAIMS REFUSED at ${cc.at} (document change ${cc.documentSubmissionId}, ${cc.scanned ? "its text was read" : "its text was not read"}): ${cc.flags.slice(0, 3).map(claimFlagText).join("; ")}${cc.total > 3 ? `; and ${cc.total - 3} more` : ""}.${d.state === "verified" ? " The verification before it still stands." : ""} Fix the text or the claims, or the capability register, then verify again.`;
       const open: string[] = [];
       for (const u of d.updates.filter((x) => x.state === "open").slice(0, 5)) open.push(`${u.taskId} (${(await this.#runner.get("assignment", assignmentIdOf(u.taskId))) === undefined ? "not assigned" : "assigned"}; ${docReasonText(u.reason)})`);
       const toVerify = d.state === "verified" ? "" : await this.#docCandidates(by, projectId, d, changesSince);
-      lines.push(line(`${head}. ${state}${elsewhere}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
+      lines.push(line(`${head}. ${state}${refusal}${elsewhere}${verified}${claims}${open.length === 0 ? "" : ` Update tasks open: ${open.join("; ")}.`}${toVerify}`, cite("doc-obligation", d.id, d.revision), cite("project", projectId)));
     }
     if (items.length > end) lines.push(line(`${items.length - end} more document(s) are not shown here; ask again with after ${end} to see the next ${Math.min(30, items.length - end)}.`, cite("project", projectId)));
+    if (after === 0) lines.push(...register);
     return { observedAt: at, lines };
+  }
+
+  /** One line: the capability register (card Q03), at most 20 entries, each with its maturity, who set it (or that it is the controller's own label) and how many documents claim or named it. */
+  async #capabilityLine(by: Principal, projectId: string): Promise<Line> {
+    const r = await this.#deps.docs!.capabilities!(by, projectId);
+    const shownItems = r.items.slice(0, 20).map((e) => `${e.id} ${quoted(e.name, 60)}: ${e.maturity} (${e.source === "built-in" ? "the controller's own label" : `set by ${shown(e.setBy ?? "", 80)} at ${e.setAt ?? ""}`}; ${e.documents} document(s))`);
+    return line(`Capability register (every claim names one of these; a document naming an experimental one needs the label, an unsupported one is refused; the owner or a director changes them): ${shownItems.join("; ")}${r.items.length > 20 ? `; and ${r.items.length - 20} more` : ""}.`, cite("project", projectId));
   }
 
   /**
