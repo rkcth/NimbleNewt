@@ -114,6 +114,8 @@ for (const backend of backends) {
     const plain = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Dig" })).id;
     refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(GARDEN) }), /is not a repository bound to the project; bind that folder, written exactly as in the host's configuration, to the project with write access first/);
     refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: "not-a-digest" }), /does not name a task, a project and a folder/);
+    // A malformed project ID is refused with its reason, never thrown at the caller.
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: "proj-NOT-AN-ID", folderDigest: digest(GARDEN) }), /projectId/);
     const bound = await resources.bindResource(owner, { commandId: cid("b"), projectId: project, kind: "repository", label: "garden", locator: GARDEN, repositoryId: "garden", access: "write" });
     assert.deepEqual(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(GARDEN) }), { admitted: true, binding: { resourceId: bound.id, repositoryId: "garden", locatorEpoch: 1, label: "garden", pinned: false } });
     // The location is compared as written: a trailing slash is another folder.

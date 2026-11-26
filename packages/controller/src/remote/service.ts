@@ -22,7 +22,7 @@ import { redactText } from "../security/redact.js";
 import { cleanProcessRef } from "./process-ref.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type CarriedLanding, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
-import type { HostWorkspaceAdmission } from "./workspace-declaration.js";
+import { declaredFolders, type HostWorkspaceAdmission } from "./workspace-declaration.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
 import { ScriptOrders, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";
@@ -232,7 +232,16 @@ export interface PiTransferPort {
   get(hostId: string, transferId: unknown, name: unknown, offset: unknown): Promise<PiTransferChunk>;
 }
 
-interface WorkspaceAskState { readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: RemoteWorkspaceAnswer; readonly waiters: Set<() => void> }
+interface WorkspaceAskState {
+  readonly hostId: string; readonly wire: WorkspaceAsk; readonly at: number; abandoned: boolean; answer?: RemoteWorkspaceAnswer; readonly waiters: Set<() => void>;
+  /** Card P02 (remote hosts): the folder the host declared for the project when an integration or a landing was judged and asked; a host that reconnects with another declaration before it reads the request is refused it. */
+  readonly declared?: string;
+}
+
+/** Card P02 (remote hosts): the folders a host declares for a project, as one comparable text ("" for none). */
+function declaredOf(status: HostStatus | undefined, projectId: string): string {
+  return declaredFolders(status?.capabilities?.workspaces, projectId).sort().join(",");
+}
 
 /** The branch names a landing policy may carry: the same shape the owner's `workspace.landing.branch` accepts (up to 200 characters), so an owner's valid policy is never refused here as malformed (a host whose pin is another branch refuses it itself, by name). */
 const LANDING_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
@@ -659,12 +668,18 @@ export class RemoteWorkerService {
     const wire = checkAsk(call);
     // Card P02 (remote hosts): an integration or a landing writes the project's shared repository on that host, so the task's access scope is asked again now, on the folder the host declares (a binding unbound, moved or
     // narrowed since the attempt was placed, or a host whose folder changed, refuses it). A check that cannot be read refuses too. Nothing is sent either way. A repeat of a request already sent joins it as before.
-    if ((wire.operation === "integration" || wire.operation === "landing") && !this.#asks.has(wire.requestId)) {
+    // The declaration judged is kept with the request: a host that reconnects with another one (its configuration changed) before it reads the request is refused it then, with nothing sent (`workspaceRequests`).
+    let declared: string | undefined;
+    if ((wire.operation === "integration" || wire.operation === "landing") && this.#deps.workspaceAdmission !== undefined && !this.#asks.has(wire.requestId)) {
       let reasons: string[];
-      try { reasons = await this.#admissionReasons(host, wire); } catch (error) { this.#reportError(error); reasons = [`whether ${host} may write this task's repository could not be checked (${String((error as Error)?.message ?? error).slice(0, 160)})`]; }
+      try {
+        const status = await this.#deps.hosts.status(this.#deps.principal, host);
+        declared = declaredOf(status, wire.projectId);
+        reasons = await this.#admissionReasons(host, wire, status);
+      } catch (error) { this.#reportError(error); reasons = [`whether ${host} may write this task's repository could not be checked (${String((error as Error)?.message ?? error).slice(0, 160)})`]; }
       if (reasons.length > 0) return { ok: false, reason: `nothing was sent to ${host}, so nothing was written to the shared repository: ${reasons.join("; ")}`.slice(0, 600) };
     }
-    return this.#ask(host, wire, options);
+    return this.#ask(host, wire, options, declared);
   }
 
   /**
@@ -757,7 +772,7 @@ export class RemoteWorkerService {
     return [...await admit({ hostId, taskId: scope.taskId, projectId: scope.projectId, workspaces: caps.workspaces, ...(beforePin ? { beforePin: true } : {}) })];
   }
 
-  async #ask(host: string, wire: WorkspaceAsk, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
+  async #ask(host: string, wire: WorkspaceAsk, options: { readonly waitMs: number }, declared?: string): Promise<RemoteWorkspaceAnswer> {
     if (!Number.isSafeInteger(options.waitMs) || options.waitMs < 1 || options.waitMs > 3_600_000) invalid("waitMs", "must be a whole number of milliseconds from 1 to 3600000");
     const earlier = this.#asks.get(wire.requestId);
     let ask: WorkspaceAskState;
@@ -776,7 +791,7 @@ export class RemoteWorkerService {
       if (this.#asks.size >= 256) return { ok: false, reason: "too many workspace requests are open; nothing was sent" };
       const at = Date.now();
       // The host enforces the deadline: it does not start the request after the controller has stopped waiting and freed the agent.
-      ask = { hostId: host, wire: { ...wire, expiresAt: new Date(at + options.waitMs).toISOString() }, at, abandoned: false, waiters: new Set() };
+      ask = { hostId: host, wire: { ...wire, expiresAt: new Date(at + options.waitMs).toISOString() }, at, abandoned: false, waiters: new Set(), ...(declared === undefined ? {} : { declared }) };
       this.#asks.set(wire.requestId, ask);
       // The host's offers poll ends now, so it reads its requests without waiting out the hold.
       this.#endPoll(host);
@@ -798,7 +813,21 @@ export class RemoteWorkerService {
   /** The workspace requests waiting for this host, oldest first. The same request is listed until the host answers it (or it is withdrawn). */
   async workspaceRequests(host: Principal, sessionId: unknown): Promise<WorkspaceAsk[]> {
     await this.#session(host, sessionId);
-    return [...this.#asks.values()].filter((a) => a.hostId === host.id && a.answer === undefined && !a.abandoned).sort((x, y) => x.at - y.at).map((a) => a.wire);
+    const pending = [...this.#asks.values()].filter((a) => a.hostId === host.id && a.answer === undefined && !a.abandoned);
+    // Card P02 (remote hosts): an integration or a landing was judged on the folder the host declared then. A host that has since reconnected with another declaration (or none) is refused it here, before it reads it.
+    if (pending.some((a) => a.declared !== undefined)) {
+      let status: HostStatus | undefined;
+      let unread = false;
+      try { status = await this.#deps.hosts.status(this.#deps.principal, host.id); } catch (error) { this.#reportError(error); unread = true; }
+      for (const a of pending) {
+        if (a.declared === undefined) continue;
+        const current = unread ? undefined : declaredOf(status, a.wire.projectId);
+        if (current === a.declared) continue;
+        a.answer = { ok: false, reason: `nothing was sent to ${host.id}, so nothing was written to the shared repository: ${current === undefined ? "what it declares now could not be read" : `it reconnected declaring ${current === "" ? "no folder" : "another folder"} for project ${a.wire.projectId} than when the request was judged`}`.slice(0, 600) };
+        for (const wake of [...a.waiters]) wake();
+      }
+    }
+    return pending.filter((a) => a.answer === undefined).sort((x, y) => x.at - y.at).map((a) => a.wire);
   }
 
   /** The requests the controller withdrew from this host (it stopped waiting) and no answer came for; the host drops any it has queued and not started. Kept for an hour. */

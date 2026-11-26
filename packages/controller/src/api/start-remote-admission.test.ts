@@ -241,6 +241,64 @@ test("the placement is judged again after the pin: a binding narrowed between th
   assert.deepEqual(await r1.offers(), [], "nothing was offered");
 });
 
+test("an integration or a landing asked of a host that then reconnects with another folder (or none) before it reads the request is not listed for it and is refused; a reconnect with the same folder still gets it (card P02)", async (t) => {
+  const w = await world(t);
+  await w.s.resources.bindResource(w.rob, { commandId: "b-garden", projectId: w.project, kind: "repository", label: "garden", locator: GARDEN, repositoryId: "garden", access: "write" });
+  await w.s.resources.bindResource(w.rob, { commandId: "b-orchard", projectId: w.project, kind: "repository", label: "orchard", locator: ORCHARD, repositoryId: "orchard", access: "write" });
+  const r1 = await w.host("r1", [workspaceDeclaration(w.project, GARDEN)!]);
+  const { taskId } = await w.task("dig");
+  const remote = w.c.dispatch!.remote!;
+  const call = (operation: "integration" | "landing") => ({ requestId: rid(), operation, taskId, projectId: w.project, reason: "the owner asked", quietAttempts: [], ...(operation === "landing" ? { landing: { branch: "main" } } : {}) });
+  for (const [operation, again] of [["landing", [workspaceDeclaration(w.project, ORCHARD)!]], ["integration", []]] as const) {
+    // Judged and asked while the host declares garden; the host restarts with another configuration before it reads its requests.
+    const pending = remote.askWorkspace(w.rob, "host:r1", call(operation) as never, { waitMs: 5_000 });
+    await sleep(20);
+    await w.host("r1", again);
+    assert.deepEqual(await r1.workspaceRequests(), [], `the ${operation} is not listed for the reconnected host`);
+    const answer = await pending;
+    assert.equal(answer.ok, false);
+    assert.match((answer as { reason: string }).reason, new RegExp(`^nothing was sent to host:r1, so nothing was written to the shared repository: it reconnected declaring ${again.length === 0 ? "no folder" : "another folder"} for project proj-[a-z2-7]{20} than when the request was judged$`));
+    await w.host("r1", [workspaceDeclaration(w.project, GARDEN)!]);
+  }
+  // A reconnect with the same folder: the request is still listed and answered.
+  const same = remote.askWorkspace(w.rob, "host:r1", call("landing") as never, { waitMs: 5_000 });
+  await sleep(20);
+  await w.host("r1", [workspaceDeclaration(w.project, GARDEN)!]);
+  let listed: { requestId: string; operation: string }[] = [];
+  for (let i = 0; i < 100 && listed.length === 0; i++) { if (i > 0) await sleep(20); listed = await r1.workspaceRequests(); }
+  assert.deepEqual(listed.map((r) => r.operation), ["landing"]);
+  await r1.answerWorkspace(listed[0]!.requestId, { ok: true, summary: "landing done" });
+  assert.deepEqual(await same, { ok: true, summary: "landing done" });
+});
+
+test("the host's declaration and the controller's bound location are digested the same way for a folder with letters outside ASCII and mixed case, and a declaration for another project or a differently cased folder is not taken (card P02)", async (t) => {
+  const w = await world(t);
+  const FOLDER = "/srv/hosts/Gärten Ölbaum/日本";
+  await w.s.resources.bindResource(w.rob, { commandId: "b-garden", projectId: w.project, kind: "repository", label: "garden", locator: FOLDER, repositoryId: "garden", access: "write" });
+  const other = (await w.s.projects.createProject({ commandId: "p2", actor: w.rob.id, name: "Shed" })).id;
+  await w.host("r1", [workspaceDeclaration(other, FOLDER)!]);
+  const { taskId } = await w.task("dig");
+  assert.match(await w.reasonsOf(taskId, "host:r1"), /^host:r1 does not say which folder it uses for project /, "a declaration for another project is not one for this project");
+  await w.host("r1", [workspaceDeclaration(w.project, FOLDER.toLowerCase())!]);
+  assert.match(await w.reasonsOf(taskId, "host:r1"), /not a repository bound to the project/, "the folder is compared with its case as written");
+  await w.host("r1", [workspaceDeclaration(other, "/srv/x")!, workspaceDeclaration(w.project, FOLDER)!, workspaceDeclaration(w.project, FOLDER)!]);
+  const looked = await w.c.dispatch!.remote!.candidates(w.rob, w.q(taskId));
+  assert.ok(looked.eligible.includes("host:r1"), JSON.stringify(looked));
+});
+
+test("an admission that cannot be read when the host reads its offer holds the offer back: it is not delivered, and is once the admission can be read again (card P02)", async (t) => {
+  let failing = false;
+  const w = await world(t, { workspaceAdmission: async () => { if (failing) throw new Error("the records could not be read"); return []; } });
+  const r1 = await w.host("r1", [workspaceDeclaration(w.project, GARDEN)!]);
+  const { attemptId } = await w.task("dig");
+  assert.deepEqual((await w.c.dispatch!.dispatcher.tick()).started, [attemptId]);
+  failing = true;
+  assert.deepEqual(await r1.offers(), [], "held back, not delivered");
+  assert.equal((await w.c.dispatch!.remote!.placement(w.rob, attemptId))!.state, "offered", "nor withdrawn");
+  failing = false;
+  assert.deepEqual((await r1.offers()).map((o) => o.order.attemptId), [attemptId]);
+});
+
 test("an admission that cannot be read refuses an integration or a landing: nothing is sent (card P02)", async (t) => {
   const w = await world(t, { workspaceAdmission: async () => { throw new Error("the records could not be read"); } });
   const r1 = await w.host("r1", [workspaceDeclaration(w.project, GARDEN)!]);
