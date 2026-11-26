@@ -58,7 +58,7 @@ interface Script {
   /** `check` reports this after the launcher's own revoke, though the entry was removed; a later `revoke` command removes it. */
   lingering?: (path: string) => boolean;
   noAnswer?: boolean;
-  /** The window-object mode the launcher's run and info lines name (default: none for a run, `private` for info). */
+  /** The window-object mode the launcher's run and info lines name (default: none for a run, `private` for info; "" leaves the key out of both). */
   windowStation?: string;
   throws?: boolean;
   exitCode?: number;
@@ -135,7 +135,7 @@ class SimHost implements NativeHost {
       return undefined;
     };
     const gl = (g: { mode: string; path: string; soft: boolean }[], extra: (p: string) => Record<string, unknown>): unknown[] => g.map((x) => ({ path: x.path, mode: x.mode, soft: x.soft, ...extra(x.path), entriesLeft: this.entries.get(key(x.path)) ?? 0 }));
-    if (args[0] === "info") { const early = beginProfile(); if (early !== undefined) return early; return line({ command: "info", ok: true, containerSid: sid, profile: "created", windowStation: this.script.windowStation ?? "private", windowStationOk: true, ...(this.script.windowStation === "home-desktop" ? { privateStationError: "window objects: the private window station could not be made (error 5)" } : {}), ...deleteIt() }); }
+    if (args[0] === "info") { const early = beginProfile(); if (early !== undefined) return early; return line({ command: "info", ok: true, containerSid: sid, profile: "created", ...(this.script.windowStation === "" ? {} : { windowStation: this.script.windowStation ?? "private" }), windowStationOk: true, ...(this.script.windowStation === "home-desktop" ? { privateStationError: "window objects: the private window station could not be made (error 5)" } : {}), ...deleteIt() }); }
     if (args[0] === "check") return line({ command: "check", ok: true, clean: true, containerSid: sid, grants: gl(grants(args), () => ({ applied: false, revoked: false })) });
     if (args[0] === "revoke") { for (const g of grants(args)) this.entries.set(key(g.path), this.script.stubborn?.(g.path) ? 1 : 0); return line({ command: "revoke", ok: true, containerSid: sid, grants: gl(grants(args), () => ({ applied: true, revoked: true })) }); }
     if (args[0] === "delete-profile") {
@@ -175,7 +175,7 @@ class SimHost implements NativeHost {
     this.writeText(val("--stdout"), this.script.out ?? "");
     this.writeText(val("--stderr"), this.script.err ?? "");
     await this.script.onProgram?.(args, this, options?.signal);
-    return render({ ok: true, childStarted: true, childExitCode: this.script.exitCode ?? 0, timedOut: this.script.timedOut === true, ...(this.script.windowStation === undefined ? {} : { windowStation: this.script.windowStation }) });
+    return render({ ok: true, childStarted: true, childExitCode: this.script.exitCode ?? 0, timedOut: this.script.timedOut === true, ...(this.script.windowStation === undefined || this.script.windowStation === "" ? {} : { windowStation: this.script.windowStation }) });
   }
 }
 
@@ -781,6 +781,13 @@ describe("A03b native launcher: health is a real confined start", () => {
     assert.match(homeNote, /error 5/);
     assert.match(homeNote, /clipboard and the atom table .* stay shared .* accepted exposure/);
     assert.ok(!(homeHealth.notes ?? []).some((n) => /private window station and desktop made for it/.test(n)), "the named-station note is not claimed for the home desktop");
+    // a launcher that names no mode is not described as having the named private station (nothing is claimed that the line did not say)
+    const silent = new SimHost();
+    silent.script = { onProgram: probeBehaviour("none"), windowStation: "" };
+    const silentHealth = await healthy(silent).health();
+    assert.equal(silentHealth.healthy, true, silentHealth.reason);
+    assert.ok(!(silentHealth.notes ?? []).some((n) => /private window station and desktop made for it|private DESKTOP on the user's own/.test(n)), "no mode is claimed");
+    assert.ok((silentHealth.notes ?? []).some((n) => /did not name their mode/.test(n)));
     // a mode this backend does not know is unhealthy, never passed
     for (const bad of ["inherit", "winsta0", "Home-Desktop"]) {
       const odd = new SimHost();

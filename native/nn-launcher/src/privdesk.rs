@@ -194,14 +194,14 @@ pub(crate) struct PrivateDesktop { station: HANDLE, desktop: HANDLE, station_nam
 pub(crate) struct MakeError { pub(crate) mode: WindowMode, pub(crate) message: String, pub(crate) named_refusal: Option<String> }
 
 impl PrivateDesktop {
-    /// The window objects of one run, in the order of plan 12.5: the NAMED private window station when this launcher may name one (an administrator's elevated token); when a NON-elevated
-    /// launcher is refused with error 5 (the documented administrators-only rule), ONE private desktop on the user's own interactive station (the home desktop). Any other failure, and every
+    /// The window objects of one run, in the order of plan 12.5: the NAMED private window station when this launcher may name one (an administrator's elevated token); when a launcher KNOWN
+    /// to be not elevated (`elevation` Some(false): the token was read) is refused with error 5 (the documented administrators-only rule), ONE private desktop on the user's own interactive station (the home desktop). Any other failure, and every
     /// failure of the home desktop, is returned: the launcher never inherits a desktop, so nothing starts.
-    pub(crate) fn create(sid: PSID, elevated: bool) -> Result<PrivateDesktop, MakeError> {
+    pub(crate) fn create(sid: PSID, elevation: Option<bool>) -> Result<PrivateDesktop, MakeError> {
         let mut station_error = 0u32;
         match Self::create_named(sid, &mut station_error) {
             Ok(p) => Ok(p),
-            Err(message) if winobj::try_home_desktop(elevated, station_error) => match Self::create_home(sid) {
+            Err(message) if winobj::try_home_desktop(elevation, station_error) => match Self::create_home(sid) {
                 Ok(mut p) => { p.named_refusal = Some(message); Ok(p) }
                 Err(home) => Err(MakeError { mode: WindowMode::HomeDesktop, message: format!("{home} (after: {message})"), named_refusal: Some(message) }),
             },
@@ -223,7 +223,7 @@ impl PrivateDesktop {
         let Some(sid_b) = sid_bytes(sid) else { return Err(format!("window objects: refused: the SID is not well formed (error {ERR_NOT_PROFILE_SID})")) };
         let own = own_principals().map_err(|e| format!("window objects: the launcher's own account could not be read (error {e})"))?;
         let (station, flags) = own_station();
-        winobj::may_make_home_desktop(&station, flags).map_err(|e| format!("window objects: the home desktop {e}"))?;
+        winobj::may_make_home_desktop(&station, flags, session_id()).map_err(|e| format!("window objects: the home desktop {e}"))?;
         let mut sd = creation_sd(&own[0], &sid_b, DESKTOP_RIGHTS, winobj::DESKTOP_FULL, "home desktop")?;
         let name = winobj::home_desktop_name(random_seed());
         let lp = wide(&winobj::desktop_path(&station, &name));

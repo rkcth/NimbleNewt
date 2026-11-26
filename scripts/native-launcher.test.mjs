@@ -773,7 +773,7 @@ test("the home desktop: the hosted de-elevated cross-check reports the mode and 
 test("the home desktop: `info` tries the home desktop through the same function as a run, and no code path inherits a desktop", () => {
   const w = read("native", "nn-launcher", "src", "win.rs");
   const report = w.slice(w.indexOf("fn report_private_station"), w.indexOf("fn run("));
-  assert.ok(report.includes("privdesk::PrivateDesktop::create(sid, is_elevated())"), "info and check ask exactly what a run asks");
+  assert.ok(report.includes("privdesk::PrivateDesktop::create(sid, elevation())"), "info and check ask exactly what a run asks");
   const priv = read("native", "nn-launcher", "src", "privdesk.rs");
   assert.equal([...priv.matchAll(/CreateDesktopW\(/g)].length, 2, "the named desktop and the home desktop: the only two ways to a desktop");
   assert.ok(!/OpenInputDesktop|OpenDesktopW|GetThreadDesktop|SwitchDesktop/.test(priv));

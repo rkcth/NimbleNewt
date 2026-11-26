@@ -237,14 +237,19 @@ impl ProfileLife {
     }
 }
 
-fn is_elevated() -> bool {
+fn is_elevated() -> bool { elevation() == Some(true) }
+
+/// The process token's TokenElevation: Some(true) or Some(false) when it was read, None when the token could not be opened or queried. The choice of window objects needs to KNOW that the
+/// launcher is not elevated (an unreadable token never counts as "not elevated"); the JSON line's `elevated` is `is_elevated()` as before.
+fn elevation() -> Option<bool> {
     unsafe {
         let mut tok: HANDLE = null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return false; }
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return None; }
         let _g = Handle(tok);
         let mut e: TOKEN_ELEVATION = zeroed();
         let mut got = 0u32;
-        GetTokenInformation(tok, TokenElevation, &mut e as *mut _ as *mut c_void, size_of::<TOKEN_ELEVATION>() as u32, &mut got) != 0 && e.TokenIsElevated != 0
+        if GetTokenInformation(tok, TokenElevation, &mut e as *mut _ as *mut c_void, size_of::<TOKEN_ELEVATION>() as u32, &mut got) == 0 { return None; }
+        Some(e.TokenIsElevated != 0)
     }
 }
 
@@ -699,7 +704,7 @@ fn private_wanted(a: &Args) -> bool {
 /// non-elevated user's private desktop on WinSta0), `windowStationOk`, and `windowStationError` when not; when the home desktop was used because the named station was refused, also
 /// `privateStationError` (the named station's own message). Err: the message.
 fn report_private_station(j: &mut Json, sid: PSID) -> Result<(), String> {
-    match privdesk::PrivateDesktop::create(sid, is_elevated()) {
+    match privdesk::PrivateDesktop::create(sid, elevation()) {
         Ok(mut p) => {
             j.s("windowStation", p.mode().name());
             if let Some(r) = p.named_refusal() { j.s("privateStationError", r); }
@@ -746,7 +751,7 @@ fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {
     // The private window station and desktop come first: if they cannot be made nothing else was changed (no grant, no job), and the program does not start.
     let mut private: Option<privdesk::PrivateDesktop> = None;
     if private_wanted(a) {
-        match privdesk::PrivateDesktop::create(sid.0, is_elevated()) {
+        match privdesk::PrivateDesktop::create(sid.0, elevation()) {
             Ok(p) => {
                 j.s("windowStation", p.mode().name());
                 if let Some(r) = p.named_refusal() { j.s("privateStationError", r); }

@@ -39,16 +39,20 @@ pub(crate) const ERROR_STATION_REFUSED: u32 = 5;
 /// The interactive window station of a signed-in session, the only one the home desktop is made on.
 pub(crate) const INTERACTIVE_STATION: &str = "WinSta0";
 
-/// After the NAMED private window station failed with this error: does the launcher try the home desktop? Only for a NON-elevated launcher and only for the refusal (error 5) that Microsoft
-/// documents for a non-administrator. Any other error, and an elevated launcher that was refused, stay failures: the home desktop is not a general fallback, and nothing ever inherits a desktop.
-pub(crate) fn try_home_desktop(elevated: bool, station_error: u32) -> bool { !elevated && station_error == ERROR_STATION_REFUSED }
+/// After the NAMED private window station failed with this error: does the launcher try the home desktop? Only for a launcher KNOWN to be not elevated (`elevation` is the process token's
+/// TokenElevation: Some(false); None when it could not be read) and only for the refusal (error 5) that Microsoft documents for a non-administrator. Any other error, an elevated launcher that
+/// was refused, and a launcher whose elevation is unknown stay failures: the home desktop is not a general fallback, and nothing ever inherits a desktop.
+pub(crate) fn try_home_desktop(elevation: Option<bool>, station_error: u32) -> bool { elevation == Some(false) && station_error == ERROR_STATION_REFUSED }
 
-/// May the home desktop be made on this window station? Only the interactive WinSta0 with WSF_VISIBLE set (`flags` is USEROBJECTFLAGS.dwFlags, -1 when unreadable). A service's station
-/// (`Service-0x0-<logon id>$`), an unreadable name or an unreadable flag word fail closed: that case was never measured.
-pub(crate) fn may_make_home_desktop(station: &str, flags: i64) -> Result<(), String> {
+/// May the home desktop be made on this window station? Only the interactive WinSta0 with WSF_VISIBLE set (`flags` is USEROBJECTFLAGS.dwFlags, -1 when unreadable), in a signed-in user's
+/// session (`session` is the launcher's session id, -1 when unreadable; session 0 is the services' session, which has a WinSta0 of its own but no signed-in user). A service's station
+/// (`Service-0x0-<logon id>$`), session 0, an unreadable name, flag word or session fail closed: those cases were never measured, and the owner's supported configuration is a signed-in user.
+pub(crate) fn may_make_home_desktop(station: &str, flags: i64, session: i64) -> Result<(), String> {
     if !station.eq_ignore_ascii_case(INTERACTIVE_STATION) { return Err(format!("refused: the launcher's window station is {station}, not the interactive {INTERACTIVE_STATION}; the home desktop is made only there")); }
     if flags < 0 { return Err("refused: the flags of the launcher's window station could not be read, so it is not known to be the visible station".into()); }
     if flags & 1 == 0 { return Err("refused: the launcher's window station is not marked visible (WSF_VISIBLE clear), so this is not a signed-in session's station".into()); }
+    if session < 0 { return Err("refused: the launcher's session could not be read, so it is not known to be a signed-in user's session".into()); }
+    if session == 0 { return Err("refused: the launcher runs in session 0 (the services' session, no signed-in user); the home desktop is made only in a signed-in user's session".into()); }
     Ok(())
 }
 
@@ -258,23 +262,26 @@ mod tests {
 
     #[test]
     fn the_home_desktop_is_tried_only_for_a_non_elevated_launcher_refused_with_error_5() {
-        assert!(try_home_desktop(false, 5), "the owner's measured case");
-        assert!(!try_home_desktop(true, 5), "an elevated launcher that was refused is a failure, not a reason to change mode");
-        for other in [0u32, 1, 2, 6, 87, 1314, 0x2000_0006] { assert!(!try_home_desktop(false, other), "error {other} is not the documented refusal"); }
+        assert!(try_home_desktop(Some(false), 5), "the owner's measured case");
+        assert!(!try_home_desktop(Some(true), 5), "an elevated launcher that was refused is a failure, not a reason to change mode");
+        assert!(!try_home_desktop(None, 5), "a launcher whose elevation could not be read is not known to be non-elevated: no change of mode");
+        for other in [0u32, 1, 2, 6, 87, 1314, 0x2000_0006] { assert!(!try_home_desktop(Some(false), other), "error {other} is not the documented refusal"); }
         assert_eq!(ERROR_STATION_REFUSED, 5);
     }
 
     #[test]
     fn the_home_desktop_is_made_only_on_the_visible_interactive_station() {
-        assert_eq!(may_make_home_desktop("WinSta0", 1), Ok(()));
-        assert_eq!(may_make_home_desktop("winsta0", 1), Ok(()), "the name is not case sensitive");
-        assert_eq!(may_make_home_desktop("WinSta0", 0x3), Ok(()), "other flag bits do not matter");
-        for (station, flags) in [("Service-0x0-3e7$", 1), ("nn-ws-0000000000000000", 1), ("?", 1), ("", 1), ("WinSta1", 1), ("WinSta0x", 1)] {
-            assert!(may_make_home_desktop(station, flags).unwrap_err().contains("not the interactive"), "{station}");
+        assert_eq!(may_make_home_desktop("WinSta0", 1, 1), Ok(()));
+        assert_eq!(may_make_home_desktop("winsta0", 1, 1), Ok(()), "the name is not case sensitive");
+        assert_eq!(may_make_home_desktop("WinSta0", 0x3, 2), Ok(()), "other flag bits and another signed-in session do not matter");
+        for (station, flags) in [("Service-0x0-3e7$", 1), ("nn-ws-0000000000000000", 1), ("?", 1), ("", 1), ("WinSta1", 1), ("WinSta0x", 1), ("WinSta0\\Default", 1), ("WinSta0\0", 1)] {
+            assert!(may_make_home_desktop(station, flags, 1).unwrap_err().contains("not the interactive"), "{station}");
         }
-        assert!(may_make_home_desktop("WinSta0", -1).unwrap_err().contains("could not be read"));
-        assert!(may_make_home_desktop("WinSta0", 0).unwrap_err().contains("not marked visible"));
-        assert!(may_make_home_desktop("WinSta0", 2).unwrap_err().contains("not marked visible"));
+        assert!(may_make_home_desktop("WinSta0", -1, 1).unwrap_err().contains("could not be read"));
+        assert!(may_make_home_desktop("WinSta0", 0, 1).unwrap_err().contains("not marked visible"));
+        assert!(may_make_home_desktop("WinSta0", 2, 1).unwrap_err().contains("not marked visible"));
+        assert!(may_make_home_desktop("WinSta0", 1, 0).unwrap_err().contains("session 0"), "the services' session has a visible WinSta0 but no signed-in user");
+        assert!(may_make_home_desktop("WinSta0", 1, -1).unwrap_err().contains("session could not be read"));
     }
 
     #[test]

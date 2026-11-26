@@ -174,8 +174,8 @@ test("every run of the PRODUCT build is given a private window station and deskt
   const wincode = code(win);
   assert.match(wincode, /fn private_wanted\(a: &Args\) -> bool \{\n\s*#\[cfg\(feature = "experiment"\)\]\n\s*\{ a\.desktop == crate::args::DesktopMode::Private \}\n\s*#\[cfg\(not\(feature = "experiment"\)\)\]\n\s*\{ let _ = a; true \}/, "the product always wants it");
   const run = between(wincode, "fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {", "#[allow(clippy::too_many_arguments)]");
-  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0, is_elevated())") > 0, "created in run");
-  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0, is_elevated())") < run.indexOf("GrantSet { sid: sid.0"), "made before any grant");
+  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0, elevation())") > 0, "created in run");
+  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0, elevation())") < run.indexOf("GrantSet { sid: sid.0"), "made before any grant");
   assert.match(run, /Ok\(p\) => \{\s*j\.s\("windowStation", p\.mode\(\)\.name\(\)\);/, "the run's line names the mode that was made");
   assert.match(run, /crate::winobj::home_needs_ui_limits\(p\.mode\(\), a\.ui_limits\)\s*\{ return \(fail\(j, "grant", &e\), true\); \}\s*private = Some\(p\)/, "the home desktop is never used without the job's UI limits");
   assert.match(run, /Err\(e\) => \{ j\.s\("windowStation", e\.mode\.name\(\)\);[^\n]*return \(fail\(j, "grant", &e\.message\), true\) \}/, "the stage is the existing `grant` (STAGE_KIND maps it); the message starts with 'window objects:'; the mode attempted is named");
@@ -211,7 +211,7 @@ test("the private window station code never touches an object of the launcher's 
   assert.ok(between(priv, "impl CreationSd {", "fn creation_sd(").includes("SetSecurityDescriptorDacl(psd, 1, p, 0)"), "on the launcher's own new descriptor only");
   assert.match(priv, /SetSecurityDescriptorControl\(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED\)/, "nothing is inherited into it");
   const create = between(priv, "fn create_named(sid: PSID", "fn check(");
-  const chooser = between(priv, "pub(crate) fn create(sid: PSID, elevated: bool)", "pub(crate) fn mode(&self)");
+  const chooser = between(priv, "pub(crate) fn create(sid: PSID, elevation: Option<bool>)", "pub(crate) fn mode(&self)");
   const home = between(priv, "fn create_home(sid: PSID)", "fn create_named(sid: PSID");
   assert.ok(!/add_entry|write_dacl|WRITE_DAC/.test(create), "the product's create neither writes a DACL nor asks for WRITE_DAC");
   assert.match(create, /CreateWindowStationW\(wstation\.as_ptr\(\), winobj::STATION_CREATE_ONLY, STATION_RIGHTS, &sa\)/, "made with its final DACL and CWF_CREATE_ONLY (an existing station of that name is never opened)");
@@ -231,13 +231,22 @@ test("the private window station code never touches an object of the launcher's 
   assert.match(priv, /for class in \[TokenUser, TokenOwner\]/, "the user first: own[0] is the account the objects are made for");
   assert.equal(create.match(/\bcheck\(h[sd], &sid_b, (STATION|DESKTOP)_RIGHTS, /g)!.length, 2, "both named objects read back and checked");
   // The HOME DESKTOP (plan 12.5): chosen only for a non-elevated launcher refused with error 5; never an inherited desktop; created with its final list; nothing written; the process's own station is never closed or switched.
-  assert.match(chooser, /Err\(message\) if winobj::try_home_desktop\(elevated, station_error\) => match Self::create_home\(sid\)/, "the only road to the home desktop");
+  assert.match(chooser, /Err\(message\) if winobj::try_home_desktop\(elevation, station_error\) => match Self::create_home\(sid\)/, "the only road to the home desktop");
+  assert.match(pure, /pub\(crate\) fn try_home_desktop\(elevation: Option<bool>, station_error: u32\) -> bool \{ elevation == Some\(false\) && station_error == ERROR_STATION_REFUSED \}/, "only a launcher KNOWN to be not elevated");
+  // the elevation the choice uses is three-valued: an unreadable token is None (never "not elevated"); the JSON line's `elevated` keeps its old meaning
+  const elev = between(code(win), "fn elevation() -> Option<bool> {", "fn session_id()");
+  assert.match(elev, /OpenProcessToken\(GetCurrentProcess\(\), TOKEN_QUERY, &mut tok\) == 0 \{ return None; \}/);
+  assert.match(elev, /GetTokenInformation\(tok, TokenElevation, [^\n]*\) == 0 \{ return None; \}\s*Some\(e\.TokenIsElevated != 0\)/);
+  assert.match(code(win), /fn is_elevated\(\) -> bool \{ elevation\(\) == Some\(true\) \}/);
+  assert.ok(!/PrivateDesktop::create\([^)]*is_elevated\(\)\)/.test(code(win)), "the window objects never use the two-valued reading");
   assert.equal(chooser.match(/create_home\(/g)!.length, 1);
   assert.match(chooser, /Err\(message\) => Err\(MakeError \{ mode: WindowMode::Private, message, named_refusal: None \}\)/, "every other failure of the named station stays a failure");
   assert.match(chooser, /Err\(home\) => Err\(MakeError \{ mode: WindowMode::HomeDesktop/, "a failed home desktop is a failure: nothing starts");
   assert.ok(!/null\(\)\s*,\s*null\(\)\s*\)|inherit|lpDesktop/i.test(chooser + home), "no inherited-desktop fallback anywhere in the choice");
   assert.ok(!/add_entry|write_dacl|WRITE_DAC|SetSecurityInfo|SetProcessWindowStation|StationSwitch|CreateWindowStationW|CloseWindowStation/.test(home), "the home desktop writes no list, switches no station and closes none");
-  assert.ok(home.indexOf("winobj::may_make_home_desktop(&station, flags)") > 0 && home.indexOf("winobj::may_make_home_desktop(&station, flags)") < home.indexOf("CreateDesktopW("), "the station is checked before the desktop is made");
+  assert.ok(home.indexOf("winobj::may_make_home_desktop(&station, flags, session_id())") > 0 && home.indexOf("winobj::may_make_home_desktop(&station, flags, session_id())") < home.indexOf("CreateDesktopW("), "the station and the session are checked before the desktop is made");
+  assert.match(pure, /if session < 0 \{ return Err\(/, "an unreadable session fails closed");
+  assert.match(pure, /if session == 0 \{ return Err\(/, "session 0 (no signed-in user) fails closed");
   assert.match(home, /creation_sd\(&own\[0\], &sid_b, DESKTOP_RIGHTS, winobj::DESKTOP_FULL, "home desktop"\)\?/, "the same descriptor as the private desktop");
   assert.match(home, /CreateDesktopW\(wide\(&name\)\.as_ptr\(\), null\(\), null\(\), 0, DESKTOP_RIGHTS, &sa\)/);
   assert.match(home, /p\.check\(hd, &sid_b, DESKTOP_RIGHTS, "home desktop"\)\?/, "read back and checked with the same allow list");

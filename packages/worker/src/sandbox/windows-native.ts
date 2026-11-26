@@ -190,7 +190,8 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     // A mode this backend does not know is refused (fail closed), whatever else the line says: the launcher must name one of the two private modes, or (an older launcher) nothing at all.
     if (info.windowStation !== undefined && !isWindowStationMode(info.windowStation)) return no(`the launcher reported a window-object mode this backend does not know ("${info.windowStation}")`);
     if (info.windowStationOk === true && info.windowStation === "home-desktop") notes.push(`each run gets a private DESKTOP on the user's own window station (WinSta0), made with its final access list (the launcher made and closed one now; the named private window station was refused: ${info.privateStationError ?? "no reason given"}). The clipboard and the atom table of that station stay shared with the signed-in session (an accepted exposure, owner decision 2026-11-26); the desktop closes the window list, the foreground window, the cursor and the screen pixels`);
-    else if (info.windowStationOk === true) notes.push("each run gets a private window station and desktop made for it (the launcher made and closed one now)");
+    else if (info.windowStationOk === true && info.windowStation === "private") notes.push("each run gets a private window station and desktop made for it (the launcher made and closed one now)");
+    else if (info.windowStationOk === true) notes.push("the launcher made and closed its window objects now but did not name their mode (an older launcher): which of the two private modes a run gets is not known");
 
     // The real test: a node program is started inside the container and asked to do what it must not be able to.
     const nonce = randomUUID();
