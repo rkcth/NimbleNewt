@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ArtifactService, FileBlobStore } from "../../artifacts/index.js";
@@ -85,6 +85,14 @@ test("lag is measured from the primary: caught up reads zero, a standby that has
       assert.equal(facts.writable, false);
       assert.notEqual(facts.receivedLsn, facts.positionLsn, "received ahead of replayed");
       assert.deepEqual([...await markersOn(pair.standby.url())].sort(), [1, 2, 3], "the paused standby shows only what it replayed");
+      // a standby that has received more than it applied is not judged, and not promoted
+      const dir = tmp();
+      try {
+        const src = snapshotSource(storage);
+        try { await writeRecoveryManifest(src, join(dir, "m")); } finally { await src.close(); }
+        await assert.rejects(promoteDatabase({ manifestDirectory: join(dir, "m"), standby: { url: pair.standby.url(), schema: SCHEMA }, blobs: noBlobs, replayWaitMs: 500 }), (e: unknown) => e instanceof PromotionRefused && /received WAL it has not replayed/.test(e.message));
+        assert.equal((await probeNode(pair.standby.url())).inRecovery, true, "still a standby");
+      } finally { gone(dir); }
       await withClient(pair.standby.url("postgres"), async (c) => { await c.query("SELECT pg_wal_replay_resume()"); });
       await until("replay to catch up", async () => { const l = await measureLag(pair.primary.url(), STANDBY_NAME); return l !== undefined && l.unreplayedBytes === 0 ? l : undefined; });
       assert.equal((await markersOn(pair.standby.url())).size, 8);
@@ -118,7 +126,7 @@ test("asynchronous: writes acknowledged while the standby was behind are lost wi
       const result = await promoteDatabase({ manifestDirectory: join(dir, "manifest"), standby: { url: pair.standby.url(), schema: SCHEMA }, blobs: noBlobs, oldPrimaryUrl: pair.primary.url(), replayWaitMs: 10_000 });
       assert.equal(result.database, "promoted");
       assert.equal(result.controller, "not_promoted");
-      assert.match(result.notes.join(" "), /^$/, "the old primary's address was given and checked");
+      assert.match(result.notes.join(" "), /old primary did not answer.*partition/, "a stopped old primary is reported as not answering, not as proven gone");
 
       const loss = measureLoss(acked, await markersOn(pair.standby.url()));
       assert.deepEqual({ surviving: loss.surviving, lost: loss.lost, lostSeqs: loss.lostSeqs }, { surviving: 3, lost: 3, lostSeqs: [4, 5, 6] }, "asynchronous replication loses what the standby had not received");
@@ -228,7 +236,9 @@ test("a standby missing an artifact file, or workflow state the manifest lists, 
       // a file with the right name and the wrong bytes is no better
       const wrong = await FileBlobStore.open({ directory: join(dir, "wrong-blobs") });
       const digest = (await primaryBlobs.list())[0]!.digest;
-      await assert.rejects(promoteDatabase({ ...options, blobs: wrong, manifestDirectory: join(dir, "manifest-1") }), PromotionRefused);
+      mkdirSync(dirname(wrong.pathOf(digest)), { recursive: true });
+      writeFileSync(wrong.pathOf(digest), "x".repeat("alpha".length)); // the right name and size, the wrong bytes
+      await assert.rejects(promoteDatabase({ ...options, blobs: wrong, manifestDirectory: join(dir, "manifest-1") }), (e: unknown) => e instanceof PromotionRefused && e.problems.some((p) => p.kind === "blob_corrupt") && /does not match its name/.test(e.message));
       await stillStandby();
 
       // workflow state the standby never received: the manifest is newer than the standby

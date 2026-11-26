@@ -50,6 +50,19 @@ export interface ReplicaPair {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Nodes started by `pg_ctl` are daemons: nothing ties them to this process. A test that times out (node:test abandons it, so its `finally` never runs) or a process that exits early
+ * would leave them running until the next run's sweep, and the sweep does not run on Windows. So every node still running when this process exits is stopped here (immediate).
+ */
+const running = new Set<ReplicaNode>();
+let exitHook = false;
+function stopAtExit(node: ReplicaNode): void {
+  running.add(node);
+  if (exitHook) return;
+  exitHook = true;
+  process.once("exit", () => { for (const n of running) { try { n.stop("immediate"); } catch { /* best effort */ } } });
+}
+
 function makeNode(name: "primary" | "standby", directory: string, port: number): ReplicaNode {
   const { exe } = embeddedPostgresBinaries();
   const data = join(directory, "data");
@@ -71,8 +84,8 @@ function makeNode(name: "primary" | "standby", directory: string, port: number):
     name, port,
     url: (database = DATABASE) => `postgres://${USER}:${PASSWORD}@127.0.0.1:${port}/${database}`,
     isRunning: () => existsSync(join(data, "postmaster.pid")) && spawnSync(exe("pg_ctl"), ["status", "-D", data], { stdio: "ignore", timeout: 30_000 }).status === 0,
-    stop: (mode = "fast") => { ctl(["stop", "-D", data, "-m", mode, "-w", "-t", "60"], true); },
-    start: () => { ctl(["start", "-D", data, "-w", "-t", "60", "-l", logFile]); },
+    stop(mode = "fast") { ctl(["stop", "-D", data, "-m", mode, "-w", "-t", "60"], true); running.delete(this); },
+    start() { stopAtExit(this); ctl(["start", "-D", data, "-w", "-t", "60", "-l", logFile]); },
   };
 }
 

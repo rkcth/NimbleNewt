@@ -7,6 +7,10 @@ import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { createBackup, restoreBackup } from "../backup/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { PostgresStorage } from "../storage/index.js";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "../storage/index.js";
+import { promoteDatabaseWith } from "./promotion.js";
+import * as recoveryIndex from "./index.js";
 import {
   PromotionRefused, RecoveryManifestBad, StandbyConfigBad, compareToManifest, describeMode, measureLoss, parseStandbyConfig, promoteDatabase, readRecoveryManifest, reportRestoredStore,
   snapshotSource, writeRecoveryManifest, type RecoverySource,
@@ -203,7 +207,7 @@ const stateOf = (over: Partial<{ epoch: number; auditSeq: number; deliverySeq: n
 }) as never;
 const allBlobs = { verify: async () => "ok" as const };
 
-test("promotion is refused, with the standby untouched, for each of: no manifest, a writable node, a primary still writable, replay behind, a behind or missing record, a missing blob", async () => {
+test("promotion is refused, with the standby untouched, for each of: no manifest, a writable node, an old primary still answering, replay behind, a behind or missing record, a missing blob", async () => {
   const dir = tmp();
   try {
     const record = { kind: "task", id: "t1", revision: 2 };
@@ -211,33 +215,72 @@ test("promotion is refused, with the standby untouched, for each of: no manifest
     await manifestFor(join(dir, "ok"), [record]);
     await manifestFor(join(dir, "withblob"), [{ kind: "artifact", id: "x", revision: 1 }], artifact);
     let promoted = 0;
-    const steps = (over: Record<string, unknown> = {}) => ({ probe: async () => standbyFacts, state: stateOf({}, [record]), promote: async () => { promoted++; return { promoted: true as const, positionLsn: "0/6000000" }; }, ...over });
+    const steps = (over: Record<string, unknown> = {}) => ({ probe: async () => standbyFacts, state: stateOf({}, [record]), promote: async () => { promoted++; return { promoted: true as const, positionLsn: "0/6000000" }; }, ...over }) as Parameters<typeof promoteDatabaseWith>[1];
     const base = { standby: { url: "postgres://x/y", schema: "nimblenewt" }, blobs: allBlobs, replayWaitMs: 60 };
-    const refused = async (options: Parameters<typeof promoteDatabase>[0], pattern: RegExp): Promise<PromotionRefused> => {
+    const oldIs = (old: Record<string, unknown> | "down") => ({ probe: async (url: string) => { if (!url.includes("old")) return standbyFacts; if (old === "down") throw new Error("connect ECONNREFUSED"); return { ...standbyFacts, ...old }; } });
+    const refused = async (options: Parameters<typeof promoteDatabase>[0], s: Parameters<typeof promoteDatabaseWith>[1], pattern: RegExp): Promise<PromotionRefused> => {
       const before = promoted;
-      const e = await promoteDatabase(options).then(() => undefined, (error: unknown) => error);
+      const e = await promoteDatabaseWith(options, s).then(() => undefined, (error: unknown) => error);
       assert.ok(e instanceof PromotionRefused, String(e));
       assert.match(e.message, pattern);
       assert.equal(e.changed, false);
       assert.equal(promoted, before, "promote was not called");
       return e;
     };
-    await refused({ ...base, manifestDirectory: join(dir, "none"), steps: steps() }, /cannot be read/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), steps: steps({ probe: async () => ({ ...standbyFacts, inRecovery: false, writable: true }) }) }, /already a writable database/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), oldPrimaryUrl: "postgres://old/x", steps: steps({ writablePrimary: async () => ({ url: "postgres://old/x", found: [] }) }) }, /still answers as a writable database/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), oldPrimaryUrl: "postgres://old/x", steps: steps({ writablePrimary: async () => ({ found: [] }), probe: async (url: string) => (url.includes("old") ? { ...standbyFacts, inRecovery: false, writable: true, systemIdentifier: "9" } : standbyFacts) }) }, /not the primary this standby copies/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), steps: steps({ probe: async () => ({ ...standbyFacts, positionLsn: "0/4000000" }) }) }, /not replayed/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), steps: steps({ state: stateOf({}, [{ ...record, revision: 1 }]) }) }, /revision 1 here but the manifest has 2/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), steps: steps({ state: stateOf({}, []) }) }, /t1 is in the manifest but not on this node/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), steps: steps({ state: stateOf({ auditSeq: 7 }, [record]) }) }, /audit log stops at 7/);
-    await refused({ ...base, manifestDirectory: join(dir, "ok"), steps: steps({ state: stateOf({ epoch: 1 }, [record]) }) }, /epoch is 1/);
-    await refused({ ...base, manifestDirectory: join(dir, "withblob"), blobs: { verify: async () => "missing" as const }, steps: steps({ state: stateOf({}, [{ kind: "artifact", id: "x", revision: 1 }]) }) }, /artifact file aaaaaaaaaaaa\.\.\. is not on this node/);
+    const ok = { ...base, manifestDirectory: join(dir, "ok") };
+    await refused({ ...base, manifestDirectory: join(dir, "none") }, steps(), /cannot be read/);
+    await refused(ok, steps({ probe: async () => ({ ...standbyFacts, inRecovery: false, writable: true }) }), /already a writable database/);
+    await refused({ ...ok, oldPrimaryUrl: "postgres://old/x" }, steps(oldIs({ inRecovery: false, writable: true })), /still answers as a writable database/);
+    // read-only by default is not read-only: a session there can still write
+    await refused({ ...ok, oldPrimaryUrl: "postgres://old/x" }, steps(oldIs({ inRecovery: false, writable: false })), /not in recovery .*two primaries/);
+    await refused({ ...ok, oldPrimaryUrl: "postgres://old/x" }, steps(oldIs({ systemIdentifier: "9" })), /not the primary this standby copies/);
+    await refused(ok, steps({ probe: async () => ({ ...standbyFacts, positionLsn: "0/4000000" }) }), /not replayed/);
+    for (const wait of [Number.NaN, -1, 1.5, 700_000]) await refused({ ...ok, replayWaitMs: wait }, steps(), /replayWaitMs/);
+    let calls = 0;
+    await refused(ok, steps({ probe: async () => { calls++; if (calls > 1) throw new Error("gone"); return { ...standbyFacts, positionLsn: "0/4000000" }; } }), /stopped answering while it replayed/);
+    await refused(ok, steps({ state: stateOf({}, [{ ...record, revision: 1 }]) }), /revision 1 here but the manifest has 2/);
+    await refused(ok, steps({ state: stateOf({}, []) }), /t1 is in the manifest but not on this node/);
+    await refused(ok, steps({ state: stateOf({ auditSeq: 7 }, [record]) }), /audit log stops at 7/);
+    await refused(ok, steps({ state: stateOf({ deliverySeq: 2 }, [record]) }), /delivery counter is 2/);
+    await refused(ok, steps({ state: stateOf({ epoch: 1 }, [record]) }), /epoch is 1/);
+    await refused({ ...base, manifestDirectory: join(dir, "withblob"), blobs: { verify: async () => "missing" as const } }, steps({ state: stateOf({}, [{ kind: "artifact", id: "x", revision: 1 }]) }), /artifact file aaaaaaaaaaaa\.\.\. is not on this node/);
     // and the same inputs, whole, are promoted: the database only
-    const result = await promoteDatabase({ ...base, manifestDirectory: join(dir, "ok"), steps: steps() });
+    const result = await promoteDatabaseWith(ok, steps());
     assert.equal(promoted, 1);
     assert.equal(result.database, "promoted");
     assert.equal(result.controller, "not_promoted");
     assert.match(result.notes.join(" "), /old primary's address was not given/);
+    // an old primary that does not answer is not proof it is gone: the result says so
+    const down = await promoteDatabaseWith({ ...ok, oldPrimaryUrl: "postgres://old/x" }, steps(oldIs("down")));
+    assert.match(down.notes.join(" "), /did not answer.*partition/);
+    // the public entry point takes no steps: a caller cannot replace a check
+    assert.equal("promoteDatabaseWith" in recoveryIndex, false);
+    assert.equal(promoteDatabase.length, 1);
+  } finally { gone(dir); }
+});
+
+test("a manifest whose checksum matches but whose fields are not what this code writes is refused: a missing counter never skips its check", async () => {
+  const dir = tmp();
+  try {
+    await manifestFor(join(dir, "m"), [{ kind: "task", id: "t1", revision: 2 }]);
+    const path = join(dir, "m", "manifest.json");
+    const original = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const rewrite = (change: (m: Record<string, unknown>) => void): void => {
+      const m = structuredClone(original); delete m["sha256"]; change(m);
+      writeFileSync(path, JSON.stringify({ ...m, sha256: createHash("sha256").update(canonicalJson(m as never)).digest("hex") }));
+    };
+    rewrite(() => undefined);
+    readRecoveryManifest(join(dir, "m")); // re-hashed but unchanged: still good
+    for (const [change, why] of [
+      [(m: Record<string, unknown>) => { delete m["watermark"]; }, /watermark/],
+      [(m: Record<string, unknown>) => { m["watermark"] = { epoch: 2, auditSeq: "10", deliverySeq: 3 }; }, /watermark/],
+      [(m: Record<string, unknown>) => { delete (m["watermark"] as Record<string, unknown>)["deliverySeq"]; }, /watermark/],
+      [(m: Record<string, unknown>) => { (m["aggregates"] as Record<string, unknown>)["file"] = "../elsewhere.jsonl"; }, /entry for aggregates/],
+      [(m: Record<string, unknown>) => { (m["blobs"] as Record<string, unknown>)["rows"] = 1; }, /blobs\.jsonl has 0 entries/],
+    ] as const) {
+      rewrite(change);
+      assert.throws(() => readRecoveryManifest(join(dir, "m")), (e: unknown) => e instanceof RecoveryManifestBad && why.test(e.message));
+    }
   } finally { gone(dir); }
 });
 

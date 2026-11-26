@@ -49,7 +49,8 @@ function blobsOf(body: string | undefined): BlobRef[] {
 }
 
 /**
- * Writes the manifest for what `source` holds now, into `directory` (created; an existing manifest there is replaced only when the new one is whole). Records of kind `artifact` name
+ * Writes the manifest for what `source` holds now, into `directory` (created). The new files are written and flushed in a staging folder first, so a source that fails leaves the earlier
+ * manifest as it was. The swap removes the old `manifest.json` first and puts the new one in last: a crash during the swap leaves no manifest (refused), never a mix. Records of kind `artifact` name
  * the blobs; the reserved `tombstone` records are left out (a removed record is not state a recovery must find).
  */
 export async function writeRecoveryManifest(source: RecoverySource, directory: string, options: { readonly now?: () => Date } = {}): Promise<RecoveryManifest> {
@@ -80,9 +81,7 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
     const manifest: RecoveryManifest = { ...body, sha256: sha256(canonicalJson(body)) };
     // the manifest file is written last: a folder without it is not a manifest
     writeFlushed(join(staging, RECOVERY_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
-    for (const file of [RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE, RECOVERY_MANIFEST_FILE]) {
-      rmSync(join(directory, file), { force: true });
-    }
+    for (const file of [RECOVERY_MANIFEST_FILE, RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE]) rmSync(join(directory, file), { force: true });
     for (const file of [RECOVERY_AGGREGATES_FILE, RECOVERY_BLOBS_FILE, RECOVERY_MANIFEST_FILE]) renameSync(join(staging, file), join(directory, file));
     return manifest;
   } finally {
@@ -110,18 +109,36 @@ export function readRecoveryManifest(directory: string): ReadManifest {
   if (manifest?.format !== RECOVERY_FORMAT || manifest.product !== "nimblenewt") throw new RecoveryManifestBad("not a recovery manifest of a format this version reads");
   const { sha256: claimed, ...rest } = manifest;
   if (claimed !== sha256(canonicalJson(rest))) throw new RecoveryManifestBad("the recovery manifest's own checksum does not match: it was changed after it was written");
+  // The checksum says the text is as written, not that it was written by this code: every field a check relies on is read only when it has the right shape, so a missing counter can never
+  // make the comparison skip it.
+  const count = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+  const w = manifest.watermark as unknown as Record<string, unknown> | undefined;
+  if (typeof w !== "object" || w === null || !count(w["epoch"]) || !count(w["auditSeq"]) || !count(w["deliverySeq"])) throw new RecoveryManifestBad("the recovery manifest has no readable watermark (epoch and counters)");
+  for (const [entry, name] of [[manifest.aggregates, RECOVERY_AGGREGATES_FILE], [manifest.blobs, RECOVERY_BLOBS_FILE]] as const) {
+    const e = entry as unknown as Record<string, unknown> | undefined;
+    if (typeof e !== "object" || e === null || e["file"] !== name || !count(e["rows"]) || !count(e["bytes"]) || typeof e["sha256"] !== "string") throw new RecoveryManifestBad(`the recovery manifest's entry for ${name} is not readable`);
+  }
   const read = (entry: RecoveryFileEntry): string => {
     let text: string;
     try { text = readFileSync(join(directory, entry.file), "utf8"); } catch { throw new RecoveryManifestBad(`${entry.file} is missing`); }
     if (Buffer.byteLength(text) !== entry.bytes || sha256(text) !== entry.sha256) throw new RecoveryManifestBad(`${entry.file} does not match the manifest's size and checksum`);
     return text;
   };
-  const parse = <T>(text: string): T[] => text.split("\n").filter((l) => l !== "").map((l) => JSON.parse(l) as T);
-  const aggregatesText = read(manifest.aggregates);
-  const blobsText = read(manifest.blobs);
+  const parse = <T>(entry: RecoveryFileEntry, text: string, ok: (row: Record<string, unknown>) => boolean): T[] => {
+    const rows = text.split("\n").filter((l) => l !== "").map((l, i) => {
+      let row: unknown;
+      try { row = JSON.parse(l); } catch { throw new RecoveryManifestBad(`${entry.file} line ${i + 1} is not readable`); }
+      if (typeof row !== "object" || row === null || !ok(row as Record<string, unknown>)) throw new RecoveryManifestBad(`${entry.file} line ${i + 1} is not a readable entry`);
+      return row as T;
+    });
+    if (rows.length !== entry.rows) throw new RecoveryManifestBad(`${entry.file} has ${rows.length} entries, the manifest says ${entry.rows}`);
+    return rows;
+  };
+  const aggregates = parse<{ kind: string; id: string; revision: number }>(manifest.aggregates, read(manifest.aggregates), (r) => typeof r["kind"] === "string" && typeof r["id"] === "string" && count(r["revision"]));
+  const blobs = parse<BlobRef>(manifest.blobs, read(manifest.blobs), (r) => typeof r["digest"] === "string" && DIGEST.test(r["digest"]) && count(r["size"]));
   return {
     manifest,
-    aggregateRefs: () => parse<{ kind: string; id: string; revision: number }>(aggregatesText),
-    blobRefs: () => parse<BlobRef>(blobsText),
+    aggregateRefs: () => [...aggregates],
+    blobRefs: () => [...blobs],
   };
 }

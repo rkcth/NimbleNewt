@@ -171,6 +171,7 @@ export interface ControllerStateReader {
 export function readControllerState(url: string, schema: string, options: { readonly withBodies?: boolean; readonly pageSize?: number } = {}): ControllerStateReader {
   if (!SCHEMA_NAME.test(schema)) throw new StorageError("invalid_input", "schema: lower-case letters, digits and underscores", { path: "schema" });
   const pageSize = options.pageSize ?? 500;
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 10_000) throw new StorageError("invalid_input", "pageSize: a whole number from 1 to 10000", { path: "pageSize" });
   const q = `"${schema}"`;
   return {
     watermark: () => withShortConnection(url, { name: "reading the controller's watermark", ...STEP }, async (c: pg.Client) => {
