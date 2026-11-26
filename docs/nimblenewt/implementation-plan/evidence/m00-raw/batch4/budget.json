@@ -1,0 +1,8 @@
+{
+ "tokens": 0,
+ "usd": 0,
+ "runs": 0,
+ "capTokens": 1500000,
+ "capUsd": 0,
+ "note": "ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 4 spend: $0 cloud, a 1,500,000-token cap on Radiance, recorded per meeting. Written before the first batch-4 model call; the runner updates tokens, usd and runs after each meeting or checkpoint set."
+}

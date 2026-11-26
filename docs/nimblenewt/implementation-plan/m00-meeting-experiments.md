@@ -161,6 +161,10 @@ The "no" votes on the chair reading an absent member's desk (an owner-decided de
 - Prototype shortcuts that affect results: the chair is not on the roster (so only the casting-vote branch of the tie rule is exercised); the owner is a script; the correction while a vote is open ran only on the fake provider; restart survival, idle reminders and the interface warning are controller behaviour and not modelled; the leak check compares the first 50 characters of each held answer with every delivery.
 - Local-engine cache behaviour: the meeting-level comparison of prompt orders is in the third local batch below; the backend measurement itself (reuse steps, retention, memory) is G10's.
 
+## Fourth local batch: budget statement (set before any batch-4 model call, 2026-11-25)
+
+ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 4 spend: $0 cloud, a 1,500,000-token cap on Radiance, recorded per meeting. The budget file with the cap is `evidence/m00-raw/batch4/budget.json`, committed before the first run and kept inside the run evidence; the runner enforces it (`--budget ... --cap-tokens 1500000`). No cloud, ChatGPT or RunPod route is used. Radiance may be used as much as needed (owner, 2026-11-24), one request at a time.
+
 ## Local model batch (Radiance, 2026-11-15)
 
 Run on Rob's local server (Radiance, model `qwen3.8-flash-next-iq4r`, port 8002), one connection at a time, scenario `tool-adoption` (eight members). This is the first M00 data from the local model, so it does not compare with the cloud numbers above (different model, thinking on). Samples are tiny: three meetings per variant. Raw runs: `prototypes/meeting/runs/2026-11-15T23-*` (gitignored).
