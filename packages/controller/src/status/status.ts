@@ -55,7 +55,7 @@ import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
 import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService, ReleaseWindowService } from "../release/index.js";
 import { releaseDeadline } from "../release/index.js";
-import type { Aggregate, ControllerStorage } from "../storage/types.js";
+import type { Aggregate, ControllerStorage, JsonObject } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
@@ -221,7 +221,53 @@ export interface Changes {
 }
 
 export interface ToolUse { readonly id: string; readonly taskId: string; readonly server: string; readonly capability: string; readonly outcome: string; readonly uncertain: boolean; readonly at: string; readonly protocolRevision: string; readonly catalogRevision: number }
-export interface EffectUse { readonly id: string; readonly taskId: string; readonly kind: string; readonly target: string; readonly status: string; readonly at: string }
+export interface EffectUse {
+  readonly id: string; readonly taskId: string; readonly kind: string; readonly target: string; readonly status: string; readonly at: string;
+  /** A service operation (card P03b): what was asked of which resource, by whom, and what the service itself reported (version and time) or why it was not confirmed. */
+  readonly service?: ServiceOpView;
+}
+export interface ServiceOpView {
+  readonly resource: string; readonly action: string; readonly by: string;
+  /** The ledger's evidence says the resource was read back from the service and judged (absent for a person's settlement). */
+  readonly verified: boolean;
+  readonly systemVersion?: string; readonly observedAt?: string; readonly neighboursChecked?: number;
+  /** Why it was refused or not confirmed, in the service's or the controller's words (shown quoted). */
+  readonly reason?: string;
+}
+
+/**
+ * One service operation in plain words (card P03b). The words of the outcome are the controller's; what the service or the agent wrote (a refusal, a reason) is quoted and cleaned. `confirmed` is said only for an
+ * effect the ledger confirmed AND whose evidence says it was read back and verified; anything else is never called done.
+ */
+/** How many of a task's service operations its task view shows (card P03b); the tools view lists the rest. */
+export const SERVICE_OPS_IN_TASK_VIEW = 5;
+export function serviceOpLine(e: { readonly id: string; readonly status: string; readonly service: ServiceOpView }, byName: string): string {
+  const v = e.service;
+  const what = `${byName} asked for ${quoted(v.action, 40)} on ${quoted(v.resource, 130)}`;
+  if (e.status === "confirmed" && v.verified) return `Service operation ${e.id}: ${what}. Done and confirmed: the service was read back afterwards and showed the change (version ${quoted(v.systemVersion ?? "", 60)}, seen at ${v.observedAt === undefined ? "an unknown time" : quoted(v.observedAt, 40)})${v.neighboursChecked === undefined ? "" : `, and the ${v.neighboursChecked} resource${v.neighboursChecked === 1 ? "" : "s"} next to it ${v.neighboursChecked === 1 ? "was" : "were"} unchanged`}. A deliverable may name it as its outcome.`;
+  if (e.status === "confirmed") return `Service operation ${e.id}: ${what}. Settled by a person, not by reading the service back${v.reason === undefined ? "" : ` (${quoted(v.reason, 160)})`}, so it cannot be named as a verified outcome.`;
+  if (e.status === "failed") return `Service operation ${e.id}: ${what}. Not done: ${v.reason === undefined ? "it was refused" : quoted(v.reason, 200)}. Nothing was changed.`;
+  if (e.status === "uncertain") return `Service operation ${e.id}: ${what}. Not confirmed: ${v.reason === undefined ? "the result could not be checked" : quoted(v.reason, 200)}. It may or may not have changed the service; it is not tried again by itself, and a person has to check the service and settle it.`;
+  return `Service operation ${e.id}: ${what}. Not finished: the outcome is not known yet, and asking the service again is safe (nothing is applied twice).`;
+}
+
+/** What the ledger holds about a service operation, as the view shows it: the request from the intent, the facts from the evidence the service gave. */
+export function serviceOpOf(e: { readonly input?: JsonObject; readonly createdBy?: string }, evidence: JsonObject | undefined): ServiceOpView {
+  const input = e.input ?? {};
+  const action = (input["action"] as JsonObject | undefined)?.["type"];
+  const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const reason = str(evidence?.["problem"]) ?? str(evidence?.["reason"]) ?? str(evidence?.["error"]);
+  return {
+    resource: `${String(input["service"] ?? "?")}/${String(input["resource"] ?? "?")}`, action: typeof action === "string" ? action : "?", by: e.createdBy ?? "unknown",
+    // A person's settlement keeps the evidence they gave (with `resolvedBy`): whatever it says, it was not read back from the service by the controller.
+    verified: evidence?.["verified"] === true && evidence["resolvedBy"] === undefined,
+    ...(str(evidence?.["systemVersion"]) === undefined ? {} : { systemVersion: str(evidence?.["systemVersion"])! }),
+    ...(str(evidence?.["observedAt"]) === undefined ? {} : { observedAt: str(evidence?.["observedAt"])! }),
+    ...(typeof evidence?.["collateralChecked"] === "number" ? { neighboursChecked: evidence["collateralChecked"] } : {}),
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
 export interface ToolsUsed {
   readonly observedAt: string;
   readonly summary: readonly { readonly server: string; readonly capability: string; readonly calls: number; readonly ok: number; readonly errors: number; readonly uncertain: number }[];
@@ -278,7 +324,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   task: { keys: ["taskId|taskTitle"], about: "how one task is going and what blocks it" },
   overview: { keys: ["projectId", "agentId|agentName", "state", "execution", "limit"], about: "the tasks of a project or of one agent, by state" },
   changes: { keys: ["projectId", "since", "limit"], about: "what changed in a project since a time" },
-  tools: { keys: ["projectId", "taskId|taskTitle", "since", "limit"], about: "which tools were used" },
+  tools: { keys: ["projectId", "taskId|taskTitle", "since", "limit"], about: "which tools were used, and each service operation and what came of it" },
   delivered: { keys: ["projectId", "taskId|taskTitle", "since"], about: "what was delivered" },
   noticeboard: { keys: ["projectId"], about: "the project's noticeboard" },
   failed_events: { keys: ["projectId", "taskId|taskTitle", "limit"], about: "events whose handling failed" },
@@ -3851,6 +3897,15 @@ export class StatusService {
       for (const a of open) lines.push(line(`Warning: ${startSizeAlertText(a)}. Ask for the start_size status of the task for the figures and where the originals are kept.`, cite("ctx-start-size", a.id), cite("task", id)));
     }
 
+    // Card P03b: the task's service operations, newest first, each with what the service itself reported (or why it is not confirmed).
+    if (toolsOk) {
+      const ops = await this.#serviceOpsOf(id, SERVICE_OPS_IN_TASK_VIEW);
+      const names = new Map<string, string>();
+      for (const o of ops.items) lines.push(line(serviceOpLine(o, await this.#principalName(o.service.by, names)), cite("effect", o.id), cite("task", id)));
+      if (ops.more > 0) lines.push(line(`${ops.more} older service operation${ops.more === 1 ? " is" : "s are"} not shown here; the tools used on the task list them.`, cite("task", id)));
+      if (ops.partial) lines.push(line("The search for service operations stopped before every record was read, so some may be missing.", cite("task", id)));
+    }
+
     // Completion, from the task record alone, with the doubts that are still open.
     const doubts = await this.#doubts(id, all, toolsOk);
     const completion: TaskStatus["completion"] = body.state === "cancelled" ? "cancelled" : body.state === "done" ? (doubts.length > 0 ? "done_with_open_doubts" : "done") : "not_done";
@@ -4365,10 +4420,11 @@ export class StatusService {
         const page = await this.#runner.list("effect", { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
         for (const a of page) {
           after = a.id;
-          const e = a.body as unknown as { taskId?: string; kind: string; target: string };
+          const e = a.body as unknown as { taskId?: string; kind: string; target: string; input?: JsonObject; createdBy?: string; simulation?: string };
           if (e.taskId === undefined || !wanted.has(e.taskId) || (since !== undefined && a.createdAt <= since)) continue;
           const ledger = await this.#storage.getEffect(a.id);
-          effects.push({ id: a.id, taskId: e.taskId, kind: shown(e.kind, 60), target: shown(e.target, 120), status: ledger?.status ?? "unknown", at: a.createdAt });
+          const service = e.kind === "service-op" && e.simulation === undefined ? serviceOpOf(e, ledger?.evidence) : undefined;
+          effects.push({ id: a.id, taskId: e.taskId, kind: shown(e.kind, 60), target: shown(e.target, 120), status: ledger?.status ?? "unknown", at: a.createdAt, ...(service === undefined ? {} : { service }) });
         }
         if (page.length < this.#pageSize) break;
       }
@@ -4385,11 +4441,48 @@ export class StatusService {
     const summary = [...groups.values()].sort((x, y) => y.calls - x.calls || (x.server + x.capability < y.server + y.capability ? -1 : 1));
     const lines: Line[] = [];
     for (const g of summary) lines.push(line(`${g.server}, ${g.capability}: ${g.calls} call${g.calls === 1 ? "" : "s"} (${g.ok} ok, ${g.errors} failed${g.uncertain > 0 ? `, ${g.uncertain} with an unknown outcome` : ""}).`, ...calls.filter((c) => c.server === g.server && c.capability === g.capability).slice(0, 5).map((c) => cite(`mcp-call-${c.taskId}`, c.id))));
-    for (const e of effects.slice(0, limit)) lines.push(line(`Outside action ${e.kind} on ${e.target}: ${e.status}.`, cite("effect", e.id), cite("task", e.taskId)));
+    const names = new Map<string, string>();
+    for (const e of effects.slice(0, limit)) {
+      if (e.service !== undefined) lines.push(line(serviceOpLine({ id: e.id, status: e.status, service: e.service }, await this.#principalName(e.service.by, names)), cite("effect", e.id), cite("task", e.taskId)));
+      else lines.push(line(`Outside action ${e.kind} on ${e.target}: ${e.status}.`, cite("effect", e.id), cite("task", e.taskId)));
+    }
     if (calls.length === 0 && effects.length === 0) lines.push(line("No tool use is recorded for this scope, among what you may read.", cite(query.taskId === undefined ? "project" : "task", query.taskId ?? projectId)));
     else lines.push(line("A tool call is activity, not progress; what was delivered is a separate question.", cite(query.taskId === undefined ? "project" : "task", query.taskId ?? projectId)));
     if (partial) lines.push(line("The search stopped before every record was read, so some tool use may be missing.", cite("project", projectId)));
     return { observedAt: now, summary, calls: calls.slice(0, limit), effects: effects.slice(0, limit), total: calls.length + effects.length, partial, lines };
+  }
+
+  /** The service operations of one task (card P03b), newest first: at most `limit`, how many more there are, and whether the scan stopped early. Operations of a simulation scope are not service operations here. */
+  async #serviceOpsOf(taskId: string, limit: number): Promise<{ items: { id: string; status: string; at: string; service: ServiceOpView }[]; more: number; partial: boolean }> {
+    const found: { id: string; status: string; at: string; service: ServiceOpView }[] = [];
+    let after: string | undefined, partial = false;
+    for (let reads = 0; ; reads++) {
+      if (reads >= this.#pages) { partial = true; break; }
+      const page = await this.#runner.list("effect", { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
+      for (const a of page) {
+        after = a.id;
+        const e = a.body as unknown as { taskId?: string; kind: string; input?: JsonObject; createdBy?: string; simulation?: string };
+        if (e.taskId !== taskId || e.kind !== "service-op" || e.simulation !== undefined) continue;
+        const ledger = await this.#storage.getEffect(a.id);
+        found.push({ id: a.id, status: ledger?.status ?? "unknown", at: a.createdAt, service: serviceOpOf(e, ledger?.evidence) });
+      }
+      if (page.length < this.#pageSize) break;
+    }
+    found.sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : x.id < y.id ? -1 : 1));
+    return { items: found.slice(0, limit), more: Math.max(0, found.length - limit), partial };
+  }
+
+  /** A principal as the owner knows it: an agent by its name (quoted), the owner as "you", anything else by its ID. Looked up once per answer. */
+  async #principalName(principal: string, cache: Map<string, string>): Promise<string> {
+    const known = cache.get(principal);
+    if (known !== undefined) return known;
+    let name = principal.startsWith("owner") ? "you" : shown(principal, 80);
+    if (principal.startsWith("agent:")) {
+      const friendly = ((await this.#runner.get("agent", principal.slice("agent:".length)).catch(() => undefined))?.body as unknown as { friendlyName?: unknown } | undefined)?.friendlyName;
+      if (typeof friendly === "string") name = `the agent ${quoted(friendly, 80)}`;
+    }
+    cache.set(principal, name);
+    return name;
   }
 
   // ---- what was delivered -------------------------------------------------------------------------------------------------------

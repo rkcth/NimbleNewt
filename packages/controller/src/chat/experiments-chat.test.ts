@@ -7,7 +7,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { ExperimentService } from "../experiments/index.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import { CHAT_OPS } from "./commands.js";
-import { ModelInterpreter } from "./model-interpreter.js";
+import { ModelInterpreter, promptAbout } from "./model-interpreter.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 // Card B04: the owner asks what the experiments found, proposes one, pins its criteria, raises its budget and concludes it, all in free words; nothing needs a fixed phrase.
@@ -25,7 +25,7 @@ test("the interpreter prompt describes the experiments view, proposing, pinning,
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
   await m.interpret({ text: "how are the experiments", quoted: [], focus: {}, proposals: [] });
   const kind = STATUS_KINDS["experiments"]!;
-  assert.ok(system.includes(`experiments(${kind.keys.join(", ")}) - ${kind.about}`), "the view is listed from the one table");
+  assert.ok(system.includes(`experiments(${kind.keys.join(", ")}) - ${promptAbout(kind.about)}`), "the view is listed from the one table");
   for (const op of ["experiment.conclude(experimentId, expectedRevision, finding", "experiment.pin(experimentId, expectedRevision, criteria", "experiment.propose(projectId, title, proposal, affectedKey", "experiment.budget(experimentId, expectedRevision, maxRuns, maxCost, reason"]) assert.ok(system.includes(op), op);
   assert.match(system, /which experiments are running in Garden\?/);
   assert.match(system, /experiment\.pin with the criteria they gave, never invented digests or numbers/);
