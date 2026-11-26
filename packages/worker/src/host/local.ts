@@ -11,6 +11,7 @@ import { removeTree } from "../sandbox/script.js";
 import { SandboxError } from "../sandbox/errors.js";
 import type { HostSecurityEvent } from "../workspace/host.js";
 import { loaderChange, lookAtLoaderConfig, type LoaderPathState } from "./loader-watch.js";
+import { CHECKOUT_TOOL_LIMITS, runCheckoutCall, type CheckoutAnswer, type CheckoutCall } from "./checkout-tool.js";
 import { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type NetworkPort, type RelayRequest, type RelayResponse } from "./process.js";
 
 /**
@@ -367,8 +368,11 @@ interface Reserved {
   loaderSeen?: readonly LoaderPathState[];
   /** The look at it running now, if any: the next waits for it. */
   loaderLook?: Promise<void>;
-  /** Contract checks running in this sandbox now (card W05): ended with it. */
+  /** Contract checks running in this sandbox now (card W05), and checkout tool calls (card W09b): ended with it. */
   readonly checkRuns: Set<{ kill(): void }>;
+  /** Card W09b: the checkout tool calls this attempt made, and the one running now (they run one at a time). */
+  checkoutCalls: number;
+  checkoutQueue: Promise<void>;
 }
 
 /** What a sandbox still holds (card L02d), from its worker processes' run trees: see `HostSandboxSession.work`. */
@@ -410,6 +414,11 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
    * and scratch of its own, so the check cannot touch the agent's conversation. The run is ended at its time (or the owner's wall time, if smaller), each stream is cut at its cap, and nothing of it reaches the agent.
    */
   readonly checks: { run(attemptId: string, check: HostCheck): Promise<HostCheckResult> };
+  /**
+   * Runs one call of the agent's checkout tool (card W09b), in a sandbox of its own made from the attempt's as for a check (the checkout as /work, the same inputs, environment, no network and limits, with an empty home and scratch),
+   * one call of an attempt at a time and at most `CHECKOUT_TOOL_LIMITS.callsPerAttempt` per attempt. Throws when the attempt has no sandbox open here; `mayHaveActed` errors mark a changing call that did not end cleanly.
+   */
+  readonly checkout: { run(attemptId: string, call: CheckoutCall, signal: AbortSignal): Promise<CheckoutAnswer> };
 } {
   const reserved = new Map<string, Reserved>();
   const hostPaths = options.guestPaths === "host";
@@ -476,7 +485,7 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
       let normalized: ReturnType<typeof normalizeRecipe>;
       try { normalized = normalizeRecipe(recipe, planned.protectedPaths); } catch (error) { flagLaunch(order, error); throw error; }
       // The recipe's own limits, when it states some, are the sandbox's limits (narrower or wider than the host's default); otherwise the workspace's.
-      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0, checkRuns: new Set(), ...(network === undefined ? {} : { network }) };
+      const entry: Reserved = { order, workspace, recipe, limits: summary.limits ?? workspace.limits, closed: false, launched: [], foldedMs: 0, checkRuns: new Set(), checkoutCalls: 0, checkoutQueue: Promise.resolve(), ...(network === undefined ? {} : { network }) };
       reserved.set(order.attemptId, entry);
       await lookLoader(entry);
       return {
@@ -676,7 +685,33 @@ export function localWorkerParts<Call>(options: LocalHostOptions<Call>): {
     },
   };
 
-  return { sandbox, runtimes, checks, ownerPolicy: options.limits !== undefined && options.bestEffort !== undefined && options.onLaunch !== undefined };
+  const checkout = {
+    async run(attemptId: string, call: CheckoutCall, signal: AbortSignal): Promise<CheckoutAnswer> {
+      const entry = reserved.get(attemptId);
+      if (entry === undefined || entry.closed) throw new Error("the attempt has no sandbox open on this host");
+      if (hostPaths) throw new Error("the checkout tool needs a sandbox with a view of its own (bubblewrap); this host's sandbox shows the host's own paths");
+      if (++entry.checkoutCalls > CHECKOUT_TOOL_LIMITS.callsPerAttempt) throw new Error(`this attempt has made ${CHECKOUT_TOOL_LIMITS.callsPerAttempt} checkout calls, the most one attempt may make`);
+      const before = entry.checkoutQueue;
+      let release!: () => void;
+      entry.checkoutQueue = new Promise<void>((resolve) => { release = resolve; });
+      try {
+        await before;
+        if (entry.closed) throw new Error("the attempt's sandbox was closed");
+        let requested: ResourceLimits;
+        let bestEffort: boolean;
+        try {
+          requested = strictestLimits(strictestLimits(entry.limits, await options.limits?.(entry.order)), contractLimitsOf(entry.order)) ?? {};
+          bestEffort = options.bestEffort === undefined ? options.requireEnforced === false : (await options.bestEffort(entry.order)) === true;
+        } catch (error) { throw new Error(`the owner's limits could not be read: ${safeText(error, 200)}`); }
+        return await runCheckoutCall({
+          launcher: options.launcher, recipe: entry.recipe, limits: requested, bestEffort, node: `/opt/node/${options.app.node.executable}`, ...(options.checkBase === undefined ? {} : { base: options.checkBase }),
+          track: (run, started) => { if (!started) entry.checkRuns.delete(run); else { entry.checkRuns.add(run); if (entry.closed) run.kill(); } },
+        }, call, signal);
+      } finally { release(); }
+    },
+  };
+
+  return { sandbox, runtimes, checks, checkout, ownerPolicy: options.limits !== undefined && options.bestEffort !== undefined && options.onLaunch !== undefined };
 }
 
 /**

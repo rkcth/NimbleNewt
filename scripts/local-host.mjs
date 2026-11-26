@@ -212,6 +212,8 @@ export function localHostBuilder(setup) {
               progress: (scope) => workspaces.progress(scope),
               // The check of a done (card W05): the state of the checkout this port made, and the contract's checks run in the attempt's sandbox. Without it a done of a task whose contract names evidence or checks is never verified.
               verify: async (attemptId, scope, request) => { await refreshShared(); return verifyDone(attemptId, scope, request); },
+              // The agent's checkout tool (card W09b): each call in a sandbox of its own made from the attempt's, over its checkout only, with no network; the controller has judged and recorded it first.
+              checkout: (attemptId, request, signal) => parts.checkout.run(attemptId, request, signal),
               // A submit (card H12n): what it is checked against (the checkout's base, the landing branch's head, the files on each side) and its staging (tree and patch ID), from the same checkouts. Both ask the P02 admission
               // again (a repository no longer bound with write access to all of it refuses). Without them every `work.end { submit: true }` here is refused as unavailable.
               submitView: async (scope) => { await refreshShared(); return workspaces.submitView(scope); },

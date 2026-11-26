@@ -154,9 +154,9 @@ test("a verified finish needs a verified done, a supported report and passing ac
   assert.equal(o(att({ status: "failed", reportResult: null })), "error");
 });
 
-test("offered tools: only bridge tools are no file tools; Pi's own or the catalogue's file and command tools are", () => {
+test("offered tools: the other bridge tools are no file tools; Pi's own, the catalogue's and the bridge's checkout tool (card W09b) are", () => {
   assert.equal(offersFileTools(["nimblenewt__work-end", "nimblenewt__work-note", "nimblenewt__tool-invoke"]), false);
-  for (const t of ["read", "bash", "edit", "a_x__write-file", "shell"]) assert.equal(offersFileTools(["nimblenewt__work-end", t]), true, t);
+  for (const t of ["read", "bash", "edit", "a_x__write-file", "shell", "nimblenewt__work-checkout"]) assert.equal(offersFileTools(["nimblenewt__work-end", t]), true, t);
   assert.match(fileToolsLine([{ worker: { agentTools: ["nimblenewt__work-end"], fileTools: false } }]), /offered no tool that reads or changes files/);
   assert.equal(fileToolsLine([{ worker: { agentTools: ["bash"], fileTools: true } }]), null);
 });
@@ -338,9 +338,9 @@ test("end to end on the real worker (variant D): admission, a verified work.end,
     // The second agent: its own, non-streamed call on the same route, never the agent's conversation.
     assert.equal(run.bodies.second[0].model, "qwen-test");
     assert.ok(!allText(run.bodies.second[0]).includes("nimblenewt__"), "no tool call of the agent reaches the second agent");
-    // What the agent could call: only the bridge's tools, so a real coding task cannot be done on the worker today (the run records it).
-    assert.equal(r.worker.fileTools, false, JSON.stringify(r.worker.agentTools));
-    assert.ok(r.worker.agentTools.length > 0 && r.worker.agentTools.every((n) => n.startsWith("nimblenewt__")), JSON.stringify(r.worker.agentTools));
+    // What the agent could call: the bridge's tools, the checkout tool among them (card W09b), and nothing else; the record says so truthfully.
+    assert.equal(r.worker.fileTools, true, JSON.stringify(r.worker.agentTools));
+    assert.ok(r.worker.agentTools.includes("nimblenewt__work-checkout") && r.worker.agentTools.every((n) => n.startsWith("nimblenewt__")), JSON.stringify(r.worker.agentTools));
     assert.ok(existsSync(join(r.artifacts, "prompt.md")) && existsSync(join(r.artifacts, "hidden-tests.log")));
     // One size measured is not the gate: the release blocker is written with this run attached.
     const b = await releaseBlocker({ records: [r], resultsDir: run.resultsDir, batchId: r.batchId, benchCommit: r.benchCommit, route: r.route });
@@ -348,7 +348,7 @@ test("end to end on the real worker (variant D): admission, a verified work.end,
     const j = JSON.parse(readFileSync(b.json, "utf8"));
     assert.deepEqual(j.results.map((x) => [x.runId, x.outcome, x.questioning]), [[r.runId, "verified-finish", "supported"]]);
     assert.deepEqual(j.failures, ["M: not measured", "L: not measured"]);
-    assert.match(j.fileTools, /offered no tool that reads or changes files/);
+    assert.equal(j.fileTools, undefined, "the blocker no longer says the agent had no file tool");
   } finally { run.cleanup(); }
 });
 
@@ -393,6 +393,78 @@ test("a second agent whose replies cannot be read never lets a done through: the
     assert.match(r.worker.summary, /report_unsupported/);
     assert.ok(r.worker.requests.second >= 1);
     assert.equal(classifyWorkerRun({ attempt: { ...r.worker, state: r.worker.state }, hidden: r.hidden, changed: true }).outcome, r.outcome);
+  } finally { run.cleanup(); }
+});
+
+// ---- card W09b: the agent's own file and command tool, through the real worker --------------------------------------------------------------------------------
+
+/** Several tool calls in one reply (Pi runs them at once). */
+const callsReply = (calls) => stream(`${sse({ tool_calls: calls.map(([name, args], index) => ({ index, id: `call_${index}_${Math.random().toString(36).slice(2, 8)}`, type: "function", function: { name, arguments: JSON.stringify(args) } })) }, null)}${sse({}, "tool_calls", usage)}`);
+/** The answers of the tool calls the model is shown in this request (the newest last). */
+const toolAnswers = (body) => body.messages.filter((m) => m.role === "tool").map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+const CO = "nimblenewt__work-checkout";
+
+test("card W09b: the agent reads, writes, edits, builds and tests in its own checkout with the checkout tool, through the real worker and its sandbox, and reaches a verified finish; a path outside the checkout is refused", async (t) => {
+  const s = await sandboxUsable();
+  if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
+  const seen = [];
+  const steps = [
+    [CO, { action: "read", path: "src/a.mjs" }],
+    [CO, { action: "write", path: "src/b.mjs", text: "export const b = 1;\n" }],
+    [CO, { action: "edit", path: "src/b.mjs", old: "b = 1", text: "b = 2" }],
+    [CO, { action: "run", command: "node -e \"require('node:fs').accessSync('src/b.mjs')\" && node --input-type=module -e \"import { b } from './src/b.mjs'; if (b !== 2) process.exit(1); console.log('b is', b)\"" }],
+    [CO, { action: "read", path: "../../../data" }],
+    [CO, { action: "run", command: "node -e \"process.getBuiltinModule('net').connect(443,'192.0.2.1').on('error',e=>console.log('net',e.code)).on('connect',()=>console.log('net connected'))\"" }],
+    ["nimblenewt__work-end", { result: "done", report: "Read src/a.mjs, added src/b.mjs exporting b = 2, built and tested it in the checkout." }],
+  ];
+  const run = await runOne({
+    variant: "D",
+    agent: (i, body) => { if (i > 1) seen.push(toolAnswers(body).at(-1)); return i <= steps.length ? callReply(...steps[i - 1]) : textReply("Ended: src/b.mjs is added and tested."); },
+    second: () => judged(JSON.stringify({ verdict: "supported" })),
+  });
+  try {
+    const r = run.record;
+    t.diagnostic(`${r.outcome}: ${r.reason} ${JSON.stringify(r.worker)}`);
+    // What each call answered, as the model saw it.
+    assert.match(seen[0], /^\{"state":"confirmed".*"path":"src\/a\.mjs".*\}\nexport const a = 1;\n$/s, seen[0]);
+    assert.match(seen[1], /"state":"confirmed".*"created":true/, seen[1]);
+    assert.match(seen[2], /"state":"confirmed".*"line":1/, seen[2]);
+    assert.match(seen[3], /"exitCode":0[\s\S]*\nb is 2\n$/, seen[3]);
+    assert.match(seen[4], /"state":"failed".*not inside your checkout/, seen[4]);
+    assert.match(seen[5], /\nnet E[A-Z]+\n$/, seen[5]);
+    assert.doesNotMatch(seen[5], /net connected/);
+    // The work was the agent's own: nothing but its tool calls changed the checkout, and the controller verified the done and the second agent found the report supported.
+    assert.equal(r.outcome, "verified-finish", `${r.reason} ${JSON.stringify(r.worker)}`);
+    assert.deepEqual([r.worker.reportResult, r.worker.questioning, r.worker.verifications], ["done", "supported", ["passed"]]);
+    assert.equal(r.hidden.passed, true);
+    assert.equal(r.shipped.passed, true);
+    assert.equal(r.worker.fileTools, true);
+    // Every call was a recorded operation of the attempt; the refused path is a failed call.
+    assert.deepEqual(r.worker.checkoutCalls, { "read:confirmed": 1, "write:confirmed": 1, "edit:confirmed": 1, "run:confirmed": 2, "read:failed": 1 });
+  } finally { run.cleanup(); }
+});
+
+test("card W09b: a checkout command still running when the agent ends is stopped by the ending's settle through the real worker, not waited for, and is left uncertain (the call H12n counts as a killed write)", async (t) => {
+  const s = await sandboxUsable();
+  if (!s.usable) { if (required && process.platform === "linux") assert.fail(`NIMBLENEWT_REQUIRE_SANDBOX=1 but the sandbox is unusable: ${s.why}`); return t.skip("bubblewrap or a node install it can mount is unusable"); }
+  // The product host offers no submit yet (H12t: no submitView or stage), so a submit is refused there before any settle; the ending is a plain done. That an uncertain call that is not read-only turns a submit into
+  // release_failed is shown by start-work-end-settle (H12n), through the real dispatcher binding.
+  const run = await runOne({
+    variant: "D",
+    agent: (i) => {
+      if (i === 1) return callReply(CO, { action: "write", path: "src/b.mjs", text: "export const b = 2;\n" });
+      if (i === 2) return callsReply([[CO, { action: "run", command: "sleep 120" }], ["nimblenewt__work-end", { result: "done", report: "Added src/b.mjs exporting b = 2." }]]);
+      return textReply("Ended.");
+    },
+    second: () => judged(JSON.stringify({ verdict: "supported" })),
+  });
+  try {
+    const r = run.record;
+    t.diagnostic(`${r.outcome}: ${r.reason} ${JSON.stringify(r.worker)} ${r.wallMs} ms`);
+    assert.equal(r.worker.reportResult, "done");
+    assert.ok(r.wallMs < 100_000, `the command was stopped, not waited for (${r.wallMs} ms)`);
+    // The stopped command is uncertain and not read-only: what the ending's settle counts as a killed write.
+    assert.deepEqual(r.worker.checkoutCalls, { "write:confirmed": 1, "run:uncertain": 1 });
   } finally { run.cleanup(); }
 });
 

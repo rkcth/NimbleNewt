@@ -23,7 +23,11 @@ export const DEFAULT_TOOL_CLASSES: Readonly<Record<string, ActionClass>> = {
   "install-package": "install-executable", "install-tool": "install-executable", "register-skill": "install-executable", "install-mcp-server": "install-executable",
   "grant-access": "access-change", "add-user": "access-change", "set-permission": "access-change", "rotate-credential": "access-change", "open-network": "access-change",
   "update-database": "mutate", "delete-remote": "mutate", "call-api": "mutate",
+  // Card W09b: the agent's checkout tool, one name per action. A read only looks; a write, an edit and a command change the checkout (a command runs only in the attempt's own checkout sandbox, with no network, so it is an edit there).
+  "nimblenewt.checkout-read": "inspect", "nimblenewt.checkout-write": "workspace-edit", "nimblenewt.checkout-edit": "workspace-edit", "nimblenewt.checkout-run": "workspace-edit",
 };
+/** Card W09b: the checkout tool's names (`nimblenewt.checkout-<action>`). The right to work on the task (`attempt.work`) covers them on the task's own checkout; a restriction on one still refuses it, and the approval policy decides by class. */
+export const CHECKOUT_TOOLS: ReadonlySet<string> = new Set(["nimblenewt.checkout-read", "nimblenewt.checkout-write", "nimblenewt.checkout-edit", "nimblenewt.checkout-run"]);
 /** Tools that run a program: inside the agent's own checkout they only edit it; anywhere else they can change anything. */
 export const EXECUTION_TOOLS: ReadonlySet<string> = new Set(["run-script", "shell", "exec"]);
 

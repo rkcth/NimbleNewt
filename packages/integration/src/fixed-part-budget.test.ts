@@ -33,7 +33,7 @@ test("the figures the owner is told match the measured fixed part (within 5%)", 
   near(WORKER_FIXED_PART.systemPromptChars, r.systemPromptChars, "system text");
   near(WORKER_FIXED_PART.toolSchemaChars, r.toolSchemaChars, "bridge tool schemas");
   assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, Math.round(WORKER_FIXED_PART_TOKENS / 100) * 100);
-  assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, 7_200, `the words say about 7,200 tokens, pinned here on purpose; ${RAISE}`);
+  assert.equal(WORKER_FIXED_PART_ABOUT_TOKENS, 7_400, `the words say about 7,400 tokens, pinned here on purpose; ${RAISE}`);
 });
 
 test("a route nobody has measured counts at least the real fixed part", () => {
@@ -66,7 +66,7 @@ test("the smallest window that can start a task, and the warning for an accepted
   assert.equal(MIN_WORKABLE_CONTEXT_TOKENS, MIN_WORKABLE_WINDOW);
   assert.ok(MIN_STARTABLE_WINDOW > MIN_WORKABLE_CONTEXT_TOKENS);
   const w = smallWindowWarning(16_384);
-  assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 7,200 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
+  assert.ok(w !== undefined && w.includes("16,384 tokens") && w.includes("about 7,400 tokens") && w.includes(`at least ${MIN_STARTABLE_WINDOW.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} tokens`), w);
   assert.equal(smallWindowWarning(MIN_STARTABLE_WINDOW), undefined);
   assert.equal(smallWindowWarning(65_536), undefined);
 });

@@ -4,6 +4,7 @@ import { ACCEPTANCE_LIMIT, CatalogService, TOOLBOX_MANAGE, ToolboxProposalServic
 import { DeskService } from "../context/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
+import type { CheckoutToolReport, CheckoutToolRequest } from "../dispatch/ports.js";
 import { buildWorld, workGrants, type DispatchWorld, type WorkerScript } from "../dispatch/testing/world.js";
 import type { Grant } from "../security/index.js";
 import { DomainError } from "../domain/errors.js";
@@ -45,6 +46,8 @@ for (const backend of backends) {
     install(s: Session, name: string, version: string, extra?: Record<string, unknown>, source?: string): Promise<string>;
     /** The controller's own tools (card H12i); a test pushes one here and the service sees it at once. */
     builtins: BuiltinTool[];
+    /** Card W09b: what the attempt's host does with a checkout tool call (absent: the host cannot run it). */
+    checkoutHost: { run?: ((call: { readonly attemptId: string }, request: CheckoutToolRequest, signal: AbortSignal) => Promise<CheckoutToolReport>) | undefined };
     tick(): Promise<void>;
     /** What a revocation does to a call already running (T02b); the service reads it at the moment of revocation. */
     revocation: { mode: "finish" | "cancel" | "broken" };
@@ -64,15 +67,16 @@ for (const backend of backends) {
         const catalog = CatalogService.withEpoch(w.storage, w.epoch, desks, w.options);
         const runs: ScriptLaunch[] = [];
         const builtins: BuiltinTool[] = [];
+        const checkoutHost: Ctx["checkoutHost"] = {};
         let failure: unknown;
         const behave: Ctx["behave"] = { run: async () => ({ text: '{"ok":true}', cpuMs: 5 }) };
         const runner: ScriptRunner = { run: async (launch, signal) => { runs.push(launch); return behave.run(launch, signal); } };
         const hostFacts = { os: "linux" as const, arch: "x64" as const, interpreters: { node: "22.19.0" }, packages: {}, cpus: 8, memoryMb: 16_384 };
         const serviceOver = (dispatcher: DispatcherService, facts?: false): ToolExecutionService =>
-          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, builtins, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
+          new ToolExecutionService({ principal: w.dispatcherPrincipal, credentials: w.credentials, dispatch: dispatcher, assignments: w.assignments, catalog, hosts: w.hosts, admission: w.admission, runner, pauses: w.pauses, desks, builtins, revocationPolicy: () => { if (c.revocation.mode === "broken") throw new Error("setting unreadable"); return c.revocation.mode; }, checkout: async (call, request, signal) => { if (checkoutHost.run === undefined) throw new DomainError("unavailable", "the host cannot run the checkout tool"); return checkoutHost.run(call, request, signal); }, ...(facts === false ? {} : { facts: async () => hostFacts }), isLocalHost: () => true });
         const svc = serviceOver({ get: (...a: Parameters<DispatcherService["get"]>) => c.dispatcher.get(...a), toolOperation: (...a: Parameters<DispatcherService["toolOperation"]>) => c.dispatcher.toolOperation(...a) } as never);
         const c: Ctx = Object.assign(w, {
-          desks, catalog, svc, runs, behave, builtins, serviceOver, revocation: { mode: "finish" as "finish" | "cancel" | "broken" },
+          desks, catalog, svc, runs, behave, builtins, checkoutHost, serviceOver, revocation: { mode: "finish" as "finish" | "cancel" | "broken" },
           agentFor: async (nm: string, extra: Grant[] = []) => {
             const p = `agent:${nm}`;
             return w.agent(nm, [...workGrants(w.project), { action: "desk.write", project: w.project }, { action: "desk.read", project: w.project }, { action: "catalog.register", project: "*" }, { action: "catalog.read", project: "*" },
@@ -174,6 +178,180 @@ for (const backend of backends) {
     assert.match(String((wrong["result"] as JsonObject)["reason"]), /does not match its manifest/);
     assert.equal((failed["result"] as JsonObject)["reason"], "the page could not be fetched");
     void ben;
+  });
+
+  suite("card W09b: the checkout tool goes through the tool path: the right to work covers it, a restriction refuses it, reads are read-only operations and writes are not, a pause stops them, the arguments are checked, the host's words come back scrubbed", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("code it", ann);
+    const asked: CheckoutToolRequest[] = [];
+    const credential = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    c.checkoutHost.run = async (_call, request) => {
+      asked.push(request);
+      if (request.path === "../x") return { ok: false, reason: "\"../x\" is not inside your checkout" };
+      return { ok: true, body: request.action === "read" ? `token=${credential}\nline two\n` : "", facts: { path: request.path ?? null } };
+    };
+    let seen: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      seen["read"] = await s.send("work.checkout", { action: "read", path: "src/a.txt", text: "" }, "co-read");
+      seen["write"] = await s.send("work.checkout", { action: "write", path: "src/b.txt", text: "b" }, "co-write");
+      seen["escape"] = await s.send("work.checkout", { action: "read", path: "../x" }, "co-escape");
+      seen["unknownAction"] = await s.send("work.checkout", { action: "delete", path: "a" });
+      seen["unknownField"] = await s.send("work.checkout", { action: "read", path: "a", mode: "x" });
+      seen["noPath"] = await s.send("work.checkout", { action: "edit", old: "a", text: "b" });
+      await c.grants.restrict(c.owner, { commandId: uid("rst"), subject: ann.id, action: "tool.nimblenewt.checkout-run", project: c.project, reason: "no commands in this project" });
+      seen["restricted"] = await s.send("work.checkout", { action: "run", command: "ls" }, "co-run");
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      seen["pausedWrite"] = await s.send("work.checkout", { action: "edit", path: "src/b.txt", old: "b", text: "c" });
+      seen["pausedRead"] = await s.send("work.checkout", { action: "read", path: "src/b.txt" }, "co-read-2");
+    });
+    await c.tick();
+    const read = good(seen["read"]!);
+    assert.equal(read["state"], "confirmed", JSON.stringify(read));
+    assert.ok(!String(read["body"]).includes(credential) && String(read["body"]).includes("line two"), "a credential shape in a file is scrubbed before the agent sees it");
+    assert.equal(good(seen["write"]!)["state"], "confirmed");
+    const escape = good(seen["escape"]!);
+    assert.deepEqual([escape["state"], escape["reason"]], ["failed", "\"../x\" is not inside your checkout"]);
+    assert.equal(bad(seen["unknownAction"]!).code, "invalid_command");
+    assert.equal(bad(seen["unknownField"]!).code, "invalid_command");
+    assert.match(bad(seen["noPath"]!).message, /edit needs path/);
+    const restricted = good(seen["restricted"]!);
+    assert.equal(restricted["state"], "refused");
+    assert.match(String(restricted["reason"]), /no grant for tool\.nimblenewt\.checkout-run/);
+    assert.equal(bad(seen["pausedWrite"]!).code, "paused");
+    // The bridge refuses a paused task's writes itself; the tool path refuses every tool call of a paused task, reads too (a paused task runs nothing).
+    const pausedRead = good(seen["pausedRead"]!);
+    assert.equal(pausedRead["state"], "refused");
+    assert.match(String(pausedRead["reason"]), /paused/);
+    // Only the calls the tool path let through reached the host (the bad arguments, the restricted run and the paused edit did not), and the field the read does not use was left aside.
+    assert.deepEqual(asked.map((r) => r.action), ["read", "write", "read"]);
+    assert.deepEqual(asked[0], { action: "read", path: "src/a.txt" });
+    // Each call is a durable operation of the attempt under the tool's name; a read is read-only and a write is not.
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, c.worker.starts[0]!.attemptId))!;
+    const byCall = new Map(ops.map((o) => [o.callId, o]));
+    assert.deepEqual([byCall.get("co-read")!.tool.name, byCall.get("co-read")!.readOnly], ["nimblenewt.checkout-read", true]);
+    assert.deepEqual([byCall.get("co-write")!.tool.name, byCall.get("co-write")!.readOnly], ["nimblenewt.checkout-write", false]);
+    assert.ok(!JSON.stringify(ops).includes(credential), "the operation record keeps no credential either");
+  });
+
+  suite("card W09b: the owner's approval policy for the project governs the checkout tool by class: with workspace edits set to ask the owner, a write waits for the owner and a read runs", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("code it", ann);
+    c.checkoutHost.run = async () => ({ ok: true, body: "text", facts: {} });
+    await c.policy.set(c.owner, { scope: c.project, commandId: uid("pol"), overrides: { "workspace-edit.free": "owner" } } as never);
+    let seen: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      seen["write"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" });
+      seen["read"] = await s.send("work.checkout", { action: "read", path: "a.txt" });
+    });
+    await c.tick();
+    assert.equal(good(seen["write"]!)["state"], "awaiting-approval", JSON.stringify(seen["write"]));
+    assert.equal(good(seen["read"]!)["state"], "confirmed");
+  });
+
+  suite("card W09b second review: every changing action is a workspace edit (with workspace edits set to ask the owner, an edit and a command wait as a write does and none reaches the host; their operations are not read-only), and a tool of another kind that bears a checkout name gets no right from the right to work", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("code it", ann);
+    const asked: string[] = [];
+    c.checkoutHost.run = async (_call, request) => { asked.push(request.action); return { ok: true, body: "", facts: {} }; };
+    const seen: Record<string, BridgeResponse> = {};
+    let other: { state: string; reason?: string } | undefined;
+    let attemptId = "";
+    c.worker.script = c.session(async (s) => {
+      attemptId = s.attemptId;
+      // Before the policy changes: an edit and a command run, and are recorded as operations that change the checkout.
+      seen["edit"] = await s.send("work.checkout", { action: "edit", path: "a.txt", old: "a", text: "b" }, "sr-edit");
+      seen["run"] = await s.send("work.checkout", { action: "run", command: "true" }, "sr-run");
+      // A tool of another kind under a checkout name (an MCP server's, say): the right to work on the task does not cover it, its own grant is needed.
+      other = await s.gateway.call({ callId: "sr-mcp", tool: { name: "nimblenewt.checkout-read", version: "1.0.0", kind: "mcp", server: "mcs-aaaaaaaaaaaaaaaaaaaa" }, args: {}, target: { kind: "workspace", id: taskId } }, { kind: "local", run: async () => ({ text: "should not run" }) }) as { state: string; reason?: string };
+      await c.policy.set(c.owner, { scope: c.project, commandId: uid("pol"), overrides: { "workspace-edit.free": "owner" } } as never);
+      seen["editAsked"] = await s.send("work.checkout", { action: "edit", path: "a.txt", old: "b", text: "c" });
+      seen["runAsked"] = await s.send("work.checkout", { action: "run", command: "rm -rf src" });
+    });
+    await c.tick();
+    assert.equal(good(seen["edit"]!)["state"], "confirmed");
+    assert.equal(good(seen["run"]!)["state"], "confirmed");
+    assert.equal(good(seen["editAsked"]!)["state"], "awaiting-approval", JSON.stringify(seen["editAsked"]));
+    assert.equal(good(seen["runAsked"]!)["state"], "awaiting-approval", JSON.stringify(seen["runAsked"]));
+    assert.deepEqual(asked, ["edit", "run"], "the calls waiting for the owner never reached the host");
+    assert.equal(other?.state, "refused", JSON.stringify(other));
+    assert.match(String(other?.reason), /no grant for tool\.nimblenewt\.checkout-read/);
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
+    const byCall = new Map(ops.map((o) => [o.callId, o]));
+    assert.deepEqual([byCall.get("sr-edit")!.tool.name, byCall.get("sr-edit")!.readOnly], ["nimblenewt.checkout-edit", false]);
+    assert.deepEqual([byCall.get("sr-run")!.tool.name, byCall.get("sr-run")!.readOnly], ["nimblenewt.checkout-run", false]);
+  });
+
+  suite("card W09b: a checkout write stopped while it runs (the ending's settle) is left uncertain, so it counts as a killed write; a stopped read is cancelled; a host that cannot run the tool refuses it", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("code it", ann);
+    const entered: string[] = [];
+    let release: (() => void) | undefined;
+    c.checkoutHost.run = (_call, request, signal) => new Promise((resolve, reject) => {
+      entered.push(request.action);
+      if (request.action === "write" && request.path === "quick.txt") return resolve({ ok: true, body: "", facts: {} });
+      release = () => resolve({ ok: true, body: "", facts: {} });
+      signal.addEventListener("abort", () => reject(request.action === "read" ? new Error("the read was stopped") : Object.assign(new Error("stopped while it ran"), { mayHaveActed: true })), { once: true });
+    });
+    let attemptId = "";
+    const states: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      attemptId = s.attemptId;
+      const run = s.send("work.checkout", { action: "run", command: "sleep 60" }, "co-run");
+      const look = s.send("work.checkout", { action: "read", path: "a" }, "co-look");
+      const end = Date.now() + 5000;
+      while (entered.length < 2 && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+      await c.dispatcher.settle(c.dispatcherPrincipal, s.attemptId, { cancel: true });
+      states["run"] = await run; states["look"] = await look;
+      c.checkoutHost.run = undefined;
+      states["noHost"] = await s.send("work.checkout", { action: "read", path: "a" }, "co-nohost");
+    });
+    await c.tick();
+    void release;
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
+    const byCall = new Map(ops.map((o) => [o.callId, o]));
+    assert.deepEqual([byCall.get("co-run")!.state, byCall.get("co-run")!.readOnly], ["uncertain", false], "a killed command may have changed the checkout: settle reports it as a killed write (H12n: a submit becomes release_failed)");
+    assert.deepEqual([byCall.get("co-look")!.state, byCall.get("co-look")!.readOnly], ["cancelled", true]);
+    const noHost = good(states["noHost"]!);
+    assert.equal(noHost["state"], "failed");
+    assert.match(String(noHost["reason"]), /cannot run the checkout tool/);
+  });
+
+  suite("card W09b first review: a repeated call ID never runs a checkout write or command twice (answered as it was), the same ID with other arguments is refused, oversized or NUL arguments never reach the host, and a refusal's words are scrubbed", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("code it", ann);
+    const credential = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    const asked: string[] = [];
+    c.checkoutHost.run = async (_call, request) => {
+      asked.push(`${request.action}:${request.path ?? request.command ?? ""}`);
+      if (request.path === "refused.txt") return { ok: false, reason: `cannot write with ${credential}` };
+      return { ok: true, body: request.action === "run" ? "ran once\n" : "", facts: { exitCode: 0 } };
+    };
+    const seen: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      seen["write1"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "rep-write");
+      seen["write2"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "rep-write");
+      seen["run1"] = await s.send("work.checkout", { action: "run", command: "echo once >> log" }, "rep-run");
+      seen["run2"] = await s.send("work.checkout", { action: "run", command: "echo once >> log" }, "rep-run");
+      seen["other"] = await s.send("work.checkout", { action: "run", command: "echo twice >> log" }, "rep-run");
+      seen["nul"] = await s.send("work.checkout", { action: "write", path: "a\u0000b", text: "x" });
+      seen["longCommand"] = await s.send("work.checkout", { action: "run", command: "x".repeat(8001) });
+      seen["longPath"] = await s.send("work.checkout", { action: "read", path: "p".repeat(1001) });
+      seen["longText"] = await s.send("work.checkout", { action: "write", path: "big.txt", text: "t".repeat(60_001) });
+      seen["refused"] = await s.send("work.checkout", { action: "write", path: "refused.txt", text: "x" }, "rep-refused");
+      // A command is a write for the bridge's own pause gate (refused there, before the tool path, as an edit is).
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      seen["pausedRun"] = await s.send("work.checkout", { action: "run", command: "ls" }, "rep-paused");
+    });
+    await c.tick();
+    assert.equal(bad(seen["pausedRun"]!).code, "paused");
+    assert.deepEqual(asked, ["write:a.txt", "run:echo once >> log", "write:refused.txt"], "each call reached the host once; the bad ones never");
+    assert.equal(good(seen["write1"]!)["state"], "confirmed");
+    assert.equal(good(seen["write2"]!)["state"], "confirmed");
+    assert.equal(good(seen["run2"]!)["body"], "ran once\n", "a repeat is answered with the first answer");
+    assert.notEqual((seen["other"] as { ok: boolean }).ok === true && good(seen["other"]!)["state"], "confirmed", JSON.stringify(seen["other"]));
+    for (const k of ["nul", "longCommand", "longPath", "longText"]) assert.equal(bad(seen[k]!).code, "invalid_command", k);
+    const refused = JSON.stringify(seen["refused"]);
+    assert.ok(!refused.includes(credential) && /cannot write with/.test(refused), refused);
   });
 
   suite("model-supplied text never reaches a command line: it travels as data on standard input, and the argument vector is the manifest's entry point alone", async (c) => {

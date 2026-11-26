@@ -46,7 +46,7 @@ import { ToolPath, type Loaded } from "./tools.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
 import { boundContextUpdates } from "./context-updates.js";
-import { StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork } from "./ports.js";
+import { StartRefused, turnEndKindOf, type ContextUpdate, type HostProbe, type RecipeSummary, type ToolGateway, type WorkerTurnResult, type TurnUsage, type WorkOrder, type WorkerHandle, type WorkerHost, type HostLocalWork, type TurnEndKind, type WorkProgress, type DoneCheckReport, type DoneCheckRequest, type HostSubmitView, type HostStagedWork, type CheckoutToolReport, type CheckoutToolRequest } from "./ports.js";
 import { chooseHost, type HostVerdict } from "../hosts/candidates.js";
 import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
@@ -1115,6 +1115,18 @@ export class DispatcherService {
     const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
     if (host?.stage === undefined) throw new DomainError("unavailable", `the host this attempt runs on (${b.hostId ?? "none"}) cannot stage work for a submission`);
     return withinMs(host.stage(attemptId, { taskId: b.taskId, projectId: b.projectId }), this.#options.submitHostMs ?? SUBMIT_HOST_MS);
+  }
+
+  /**
+   * One call of the agent's checkout tool (card W09b), on the host the attempt runs on, for that attempt's checkout only. Staff only: the tool bridge asks it as the dispatcher, from inside the tool path's record of the call, for the
+   * attempt the call came through. Throws `unavailable` when the attempt's host cannot run it (a remote host today), `fenced` when the attempt is no longer running.
+   */
+  async checkoutTool(by: Principal, attemptId: string, request: CheckoutToolRequest, signal: AbortSignal): Promise<CheckoutToolReport> {
+    const b = (await this.#controlled(by, attemptId)).body;
+    if (b.state !== "running") throw new DomainError("fenced", `attempt ${attemptId} is not running; its checkout is not touched`);
+    const host = this.#deps.workers.find((w) => w.hostId === b.hostId);
+    if (host?.checkout === undefined) throw new DomainError("unavailable", `the host this attempt runs on (${b.hostId ?? "none"}) cannot run the checkout tool; it runs on this computer's worker host only`);
+    return host.checkout(attemptId, request, signal);
   }
 
   /**

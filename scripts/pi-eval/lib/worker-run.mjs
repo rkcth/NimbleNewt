@@ -64,10 +64,11 @@ export function buildCheck(task, timeoutSeconds = 1800) {
 
 /**
  * Whether the tools offered to the agent include one that reads or changes files or runs a command in its checkout: Pi's own (read, write, edit, bash) or a catalogue tool by the names the approval policy classifies
- * (packages/controller/src/policy/catalog.ts). On 2026-11-26 the worker offers only the nimblenewt bridge tools, so this is false and a coding task cannot be done there (see the W09 notes).
+ * (packages/controller/src/policy/catalog.ts), or the bridge's own checkout tool (card W09b, `nimblenewt__work-checkout`: read, write, edit and run in the checkout's sandbox). Before W09b the worker offered only the other bridge tools,
+ * so this was false and a coding task could not be done there (see the W09 notes).
  */
 export function offersFileTools(names) {
-  const FILE = /^(?:read|write|edit|bash|multi-?edit|read-file|write-file|edit-file|list-files|search-files|grep|run-script|shell|exec)$/i;
+  const FILE = /^(?:read|write|edit|bash|multi-?edit|read-file|write-file|edit-file|list-files|search-files|grep|run-script|shell|exec|work-checkout)$/i;
   return names.some((n) => FILE.test(String(n).replace(/^.*__/, "")));
 }
 
@@ -185,7 +186,7 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
     const summary = attemptSummary(ran.attempt);
     // Closed before grading: nothing of the agent runs while the acceptance tests do.
     await inst.close(); inst = undefined;
-    record.worker = { attemptId: ran.attemptId ?? null, ...(summary ?? {}), requests, agentTools, fileTools: offersFileTools(agentTools ?? []) };
+    record.worker = { attemptId: ran.attemptId ?? null, ...(summary ?? {}), requests, agentTools, fileTools: offersFileTools(agentTools ?? []), checkoutCalls: ran.checkoutCalls ?? null };
     record.nudges = summary?.nudges ?? 0;
     log(`attempt ended after ${(ran.wallMs / 60000).toFixed(1)} min: ${summary?.status ?? "none"} (${summary?.reportResult ?? "-"}, questioning ${summary?.questioning ?? "-"})`);
     const plan = existsSync(join(ran.checkout, "PLAN.md")) ? planProgress(readFileSync(join(ran.checkout, "PLAN.md"), "utf8")) : null;

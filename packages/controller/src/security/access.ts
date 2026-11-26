@@ -115,6 +115,9 @@ export function allows(principal: Principal, action: string, project: string | u
     && (g.expiresAt === undefined || g.expiresAt > now) && (g.resource === undefined || (options.resource !== undefined && sameResource(g.resource, options.resource))));
 }
 
+/** Whether a standing restriction of the principal forbids the action (card W09b: a right implied by another grant still yields to a restriction on the action itself). */
+export const restrictsAction = (principal: Principal, action: string, project: string | undefined, options: CheckOptions = {}): boolean => restricted(principal, action, project, options);
+
 /** Whether a grant names this exact action (not through `*` or a prefix) in the project: used where a broad grant must not be enough, such as reading another agent's private scratch. */
 export function allowsExactly(principal: Principal, action: string, project: string | undefined, options: CheckOptions = {}): boolean {
   if (principal.kind === "owner") return true;

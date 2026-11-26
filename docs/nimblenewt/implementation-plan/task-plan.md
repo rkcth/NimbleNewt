@@ -30,7 +30,7 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 | N00 / AII-250 | Owner-controlled implementation activation gate |
 | N01 / AII-251 | G01, G04, G07, G08 |
 | N02 / AII-252 | F01, F02, F03, F04a, F04b, F04c, F04d, F04, F04f, F04g, F04h, F04i, F04j, F04k, F04e, F04l, F04m, F04n, F09 |
-| N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b, W01, W01b, W02, W03, W04, W05, W06, W07, W08, W10, W12, W13, W09 |
+| N03 / AII-253 | G02, G03, G09, G10, G11, F05, F06, F07, F08, C06, C06b, W01, W01b, W02, W03, W04, W05, W06, W07, W08, W10, W12, W13, W09, W09b |
 | N04 / AII-254 | S01, S02, S03, S04, S05, S06, S07, S08, S09, S10, C03 |
 | N05 / AII-255 | L05, L05b, L05c, L05d, L01, L01b, L02, L02b, L02c, L02d, L02e, L03, L03b, L03c, L03d, L03e, L03f, L03g, L03h, L03i, L03j, L04, L04b, L04c, L04d, L04g, L06, L06b, H08, H08b |
 | N06 / AII-256 | G05, A01, A02, A03, A03b, A04, A05, A06, A07, A07b, A07c, A07d, A07e, A08, A08b, A08c, A09, A10, A10b, A07h, A07f, A07g |
@@ -871,9 +871,17 @@ Under the authorized planning sync, read current project/issue revisions, reconc
 ### W09 — Pass the completion gates on the real worker and on the Radiance route (the owner's local AI server) before release
 
 - **Parent:** N03 / AII-253.
-- **Blockers:** W01, W05, W06, W07, W08, W10.
+- **Blockers:** W01, W05, W06, W07, W08, W09b, W10.
 - **Deliverable:** The W01 bench is run through the real NimbleNewt worker and controller, not only the Pi command line (command-line results do not transfer automatically), on the Radiance route, which is the owner's local AI server and the only route that matters for this gate (Rob, 2026-11-10: Radiance is local; no cloud route is needed), with the model calls going through the controller's model relay (packages/pi-adapter/src/worker/relay-fetch.ts). This is a release gate.
 - **Acceptance and verification:** A real task is shown working end to end on the Radiance route through the controller's relay, from admission to a verified work.end and an accepted report; bench variants A to D are run on the real worker on that route (the Radiance server) and recorded with commit, route, model and results; the W01 gates hold for the shipped variant (verified finish at least 90, 85 and 70 percent for small, medium and large tasks, false done at most 5 percent, no silent non-finish); a gate that does not hold is a release blocker with its results attached.
+- **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
+
+### W09b — Give agents on the real worker file and command tools inside the sandbox, over the attempt's own checkout only
+
+- **Parent:** N03 / AII-253.
+- **Blockers:** W05, W06, H12n.
+- **Deliverable:** Raised 2026-11-26 from the W09 offline part and its first review (independently checked): a Pi agent on the real worker is given only the nimblenewt bridge tools (packages/pi-adapter/src/worker/process.ts composes the bridge and no personal tools; Pi Durable's own read, write, edit and bash tools are never installed; no catalogue tool reads or edits files; a script run has no mount of the checkout), so a real coding run through the worker cannot read, change, build or test its checkout, cannot reach a verified finish, and the W09 and W01 gates cannot hold. Security-sensitive product change: the agent gets one bridge tool (work.checkout, with the actions read, write, edit and run) whose every call goes through the controller's tool path (the right to work on the task, a restriction on the tool, the pause gates, the budget, the contract's ceiling, the approval policy by class: a read is inspect, the rest workspace-edit) as a durable operation, a changing call of a model's recorded turn also admitted on the effect ledger; the attempt's host runs it in a sandbox of its own made from the attempt's, as the done check does (the checkout as /work, no network, the attempt's and the owner's limits, an empty home and scratch, never the worker process or its credential).
+- **Acceptance and verification:** An agent on the real worker reads, writes and edits files of its own checkout and runs a bash command there, and a scripted run through the real worker in bubblewrap reads, edits, builds and tests and reaches a verified finish; every call is a recorded operation of the attempt through the tool path, read-only for a read and not for the others, refused by a restriction on the tool, by a pause and by the owner's approval policy for the project (in free-form chat), and answered with its output cut at a bound and scrubbed of credential shapes; a path or link that leads out of the checkout, .git, a write outside the checkout, the network, the controller's data folder, the agent's own home and other attempts are out of reach; a fork bomb or a command that runs too long is ended at its limit; a call that changes the checkout and is stopped while it runs is uncertain, so a submit then ends plainly with release_failed; the W09 bench reports worker.fileTools truthfully; the fixed part of the first call stays inside its budget and the window told; hosts other than this computer's refuse the tool in plain words.
 - **On interruption:** apply the continuation contract above; preserve this card's partial deliverable and remaining checks.
 
 ### A07h — Expire a standing grant only after it goes unused, and renew it each time a worker uses it

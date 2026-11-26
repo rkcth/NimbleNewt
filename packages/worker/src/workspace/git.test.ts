@@ -150,6 +150,85 @@ test("the neutral attribute file is made when the git directory has no info fold
   } finally { await w.done(); }
 });
 
+test("a repository the agent makes in a submodule entry's folder is never looked into by the host's git, so its own configuration (a clean filter) never runs on the host (card W09b review)", { skip }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-git-sub-"));
+  try {
+    // The submodule's own repository, with a file a clean filter would read: the base's gitlink names its commit, so the agent's copy below matches the entry (the state in which even an add looks inside).
+    const sub = join(dir, "subrepo");
+    sh(dir, "init", "-q", "-b", "main", sub);
+    await writeFile(join(sub, "f"), "data00001\n"); await writeFile(join(sub, ".gitattributes"), "* filter=nnx\n");
+    sh(sub, "add", "-A"); sh(sub, "commit", "-q", "-m", "sub");
+    const subCommit = sh(sub, "rev-parse", "HEAD");
+    const shared = join(dir, "shared");
+    sh(dir, "init", "-q", "-b", "main", shared);
+    await writeFile(join(shared, "README.md"), "hello\n");
+    sh(shared, "add", "-A"); sh(shared, "update-index", "--add", "--cacheinfo", `160000,${subCommit},sub`); sh(shared, "commit", "-q", "-m", "with a submodule entry");
+    const git = await GitBridge.create({ scratch: join(dir, "scratch") });
+    const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
+    await git.createCheckout({ shared, commit: await git.head(shared), gitDir, checkout });
+    // What a command in the agent's sandbox can do: a repository in the entry's (empty) folder, with a filter of its own, and a file changed at the same size so git must read it again.
+    await rm(join(checkout, "sub"), { recursive: true, force: true });
+    execFileSync("cp", ["-a", sub, join(checkout, "sub")]);
+    const marker = join(dir, "RAN-ON-HOST");
+    sh(join(checkout, "sub"), "config", "filter.nnx.clean", `sh -c 'touch ${marker}; cat'`);
+    const touch = async (n: number): Promise<void> => { await writeFile(join(checkout, "sub", "f"), `data${String(n).padStart(5, "0")}\n`); };
+    const calls: [string, () => Promise<unknown>][] = [
+      ["status", () => git.status({ gitDir, checkout })],
+      ["startState", () => git.startState({ gitDir, checkout })],
+      ["doneState", () => git.doneState({ gitDir, checkout, paths: [] })],
+      ["diffStat", () => git.diffStat({ gitDir, checkout })],
+      ["submitView", () => git.submitView({ shared, gitDir, checkout })],
+      ["startState again", () => git.startState({ gitDir, checkout })],
+    ];
+    let n = 2;
+    for (const [name, call] of calls) {
+      await touch(n++);
+      await call().catch(() => undefined);
+      assert.equal(existsSync(marker), false, `${name} ran the configuration of the agent's repository on the host`);
+    }
+    // The entry itself stays the base's: the bridge never carries a submodule change.
+    const state = await git.startState({ gitDir, checkout });
+    assert.equal(sh(dir, `--git-dir=${gitDir}`, "ls-tree", state.tree, "sub").split(/\s+/)[2], subCommit);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a submodule entry whose name holds pattern characters is left out of an add by its literal name, so a repository the agent makes there is never looked into (card W09b second review)", { skip }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-git-sub2-"));
+  try {
+    const sub = join(dir, "subrepo");
+    sh(dir, "init", "-q", "-b", "main", sub);
+    await writeFile(join(sub, "f"), "data00001\n"); await writeFile(join(sub, ".gitattributes"), "* filter=nnx\n");
+    sh(sub, "add", "-A"); sh(sub, "commit", "-q", "-m", "sub");
+    const subCommit = sh(sub, "rev-parse", "HEAD");
+    // As a pattern `m[o]d*` names `mod...`, not itself: only a literal exclusion leaves this entry's folder out.
+    const name = "lib/m[o]d*";
+    const shared = join(dir, "shared");
+    sh(dir, "init", "-q", "-b", "main", shared);
+    await writeFile(join(shared, "README.md"), "hello\n");
+    sh(shared, "add", "-A"); sh(shared, "update-index", "--add", "--cacheinfo", `160000,${subCommit},${name}`); sh(shared, "commit", "-q", "-m", "with a submodule entry");
+    const git = await GitBridge.create({ scratch: join(dir, "scratch") });
+    const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
+    await git.createCheckout({ shared, commit: await git.head(shared), gitDir, checkout });
+    await rm(join(checkout, name), { recursive: true, force: true });
+    execFileSync("cp", ["-a", sub, join(checkout, name)]);
+    const marker = join(dir, "RAN-ON-HOST");
+    sh(join(checkout, name), "config", "filter.nnx.clean", `sh -c 'touch ${marker}; cat'`);
+    let n = 2;
+    const calls: [string, () => Promise<unknown>][] = [["startState", () => git.startState({ gitDir, checkout })], ["doneState", () => git.doneState({ gitDir, checkout, paths: [] })], ["diffStat", () => git.diffStat({ gitDir, checkout })]];
+    for (const [label, call] of calls) {
+      await writeFile(join(checkout, name, "f"), `data${String(n++).padStart(5, "0")}\n`);
+      await call();
+      assert.equal(existsSync(marker), false, `${label} ran the configuration of the agent's repository on the host`);
+    }
+    // Taken as a pattern the entry's name would also leave out the agent's own `lib/mod-a.txt`, so its work would never be seen; by its literal name only the entry is left out.
+    await writeFile(join(checkout, "lib", "mod-a.txt"), "the agent's work\n");
+    assert.equal((await git.doneState({ gitDir, checkout, paths: ["lib/mod-a.txt"] })).changed, 1, "the agent's file beside the entry is part of its work");
+    const state = await git.startState({ gitDir, checkout });
+    assert.equal(sh(dir, `--git-dir=${gitDir}`, "--literal-pathspecs", "ls-tree", state.tree, name).split(/\s+/)[2], subCommit, "the entry stays the base's");
+    assert.ok(sh(dir, `--git-dir=${gitDir}`, "ls-tree", "-r", "--name-only", state.tree).split("\n").includes("lib/mod-a.txt"), "the agent's file is in the checkout's tree");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("the agent's changes reach the shared workspace only through expected-version writes: modified, new and deleted files", { skip }, async () => {
   const w = await world();
   try {
