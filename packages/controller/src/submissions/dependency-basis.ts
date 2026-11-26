@@ -8,12 +8,13 @@ import type { Change, JsonObject } from "../storage/types.js";
 /**
  * What QA evidence or an approval was judged against among the task's recorded dependencies (card C03), so a changed dependency takes it back (card Q02: "changed dependency invalidates affected test/review").
  *
- * When the evidence or approval is recorded, the task's dependency manifest is read and its entries (each with a fingerprint of what was observed: hash, ETag, members, search position) are kept once as a
+ * When the evidence or approval is recorded, the task's dependency manifest is read and its entries (each with a fingerprint of what was observed: hash, ETag, members, a search's scope and results, not when it was seen) are kept once as a
  * `dependency-snapshot` record, named by the task and the digest of its entries, so many records judged against the same manifest share one snapshot. The evidence or approval keeps only the snapshot's ID
  * (`NO_DEPENDENCIES` when the task had recorded none). Later it no longer holds when, for an entry of the snapshot:
  * - the entry was recorded again with a different observation (the agent saw it change: a file's new hash, a directory's other members, a search's other results), or it is gone from the manifest (fail closed);
  * - the controller judges it changed or deleted from its own state (`judgeFromState`: a shared record or decision edited or superseded, a tool version revoked or with another digest, the agent's active environment
- *   moved, a record that was absent now exists).
+ *   moved, a record that was absent now exists). A change the agent acknowledged by recording the entry again while it stood (`seen`: a superseded or deleted record, a revoked tool version cannot be recorded
+ *   back into an unchanged state) does not take back what was recorded after that acknowledgement, and new evidence and approvals are accepted again; a further change still takes them back.
  * A dependency recorded after it is the work of a later attempt and does not take it back (that work is submitted again and judged on its own). An observation-only kind with no new recording (a file nobody read
  * again) cannot be told to have changed and does not take it back; the worker's re-read is what records the change.
  */
@@ -32,9 +33,23 @@ const sha = (v: string): string => createHash("sha256").update(v).digest("hex");
 const manifestId = (taskId: string): string => derivedId("dpm", taskId);
 const msOf = (t: unknown): number => (typeof t === "string" ? Date.parse(t) : Number.NaN);
 
-/** A short fingerprint of what one entry observed (not when): the same observation recorded again has the same fingerprint. */
+/**
+ * A short fingerprint of what one entry observed (not when): the same observation recorded again has the same fingerprint. A search's position in the event stream (`cursor`) says when it was made, not what it
+ * found, so the same search recorded again later with the same results is the same observation; a weak ETag (`W/`) names the same version as the strong one (as `check` compares them). A change the agent
+ * acknowledged by recording the entry again (`seen`) is part of it, so evidence and approvals judged before the acknowledgement stay taken back.
+ */
 export function fingerprint(e: DependencyEntry): string {
-  return sha(JSON.stringify([e.kind, e.key, e.hash?.replace(/^sha256:/, "") ?? null, e.etag ?? null, e.members ?? null, e.cursor ?? null, e.scope ?? null, e.freshness ?? null, e.server ?? null, e.protocol ?? null])).slice(0, 16);
+  return sha(JSON.stringify([e.kind, e.key, e.hash?.replace(/^sha256:/, "") ?? null, e.etag?.replace(/^W\//, "") ?? null, e.members ?? null, e.scope ?? null, e.freshness ?? null, e.server ?? null, e.protocol ?? null, ...(e.seen === undefined ? [] : [e.seen])])).slice(0, 16);
+}
+
+/**
+ * The entry judged from the controller's own state (`judgeFromState`) when that is a change: changed or deleted, unless it is the very state the agent acknowledged by recording the entry again (`seen`). Undefined:
+ * no change, or not a kind the controller judges itself.
+ */
+async function changedFromState(get: (kind: string, id: string) => Promise<{ readonly body: unknown; readonly revision?: number } | undefined>, e: DependencyEntry): Promise<DependencyChange | undefined> {
+  const j = await judgeFromState(get, e);
+  if (j === undefined || (j[0] !== "changed" && j[0] !== "deleted") || (e.seen !== undefined && e.seen === j[2])) return undefined;
+  return { entryId: e.id, kind: e.kind, key: e.key, status: j[0], detail: j[1] };
 }
 
 /** The key as the owner may see it: one line, redacted, at most 80 characters. */
@@ -69,16 +84,15 @@ export async function dependencyChangesNow(runner: Pick<CommandRunner, "get">, t
   const out: DependencyChange[] = [];
   for (const e of manifest?.entries ?? []) {
     if (out.length >= limit) break;
-    const j = await judgeFromState((kind, id) => runner.get(kind, id), e);
-    if (j !== undefined && (j[0] === "changed" || j[0] === "deleted")) out.push({ entryId: e.id, kind: e.kind, key: e.key, status: j[0], detail: j[1] });
+    const c = await changedFromState((kind, id) => runner.get(kind, id), e);
+    if (c !== undefined) out.push(c);
   }
   return out;
 }
 
 /**
  * What changed among the dependencies the evidence or approval was judged against (empty: nothing). `snapshot` is what it kept; `undefined` for a record made before dependencies were kept, which is judged by its
- * time `at` instead: each entry the controller judges itself, observed before it (an entry observed at the same millisecond or later, or at a time that cannot be read, may be a later recording and is not judged),
- * is checked against the controller's state. A snapshot that cannot be read counts as a change (fail closed). At most `limit` changes are named.
+ * time `at` instead: each entry the controller judges itself and not observed strictly after it (fail closed: the same millisecond, or a time that cannot be read, is judged) is checked against the controller's state. A snapshot that cannot be read counts as a change (fail closed). At most `limit` changes are named.
  */
 export async function dependencyChanges(runner: Pick<CommandRunner, "get">, taskId: string, snapshot: string | undefined, at: string, limit = DEPENDENCY_CHANGES_NAMED): Promise<DependencyChange[]> {
   if (snapshot === NO_DEPENDENCIES) return [];
@@ -86,15 +100,14 @@ export async function dependencyChanges(runner: Pick<CommandRunner, "get">, task
   const manifest = (await runner.get("dependency-manifest", manifestId(taskId)))?.body as unknown as ManifestBody | undefined;
   const current = new Map((manifest?.entries ?? []).map((e) => [e.id, e] as const));
   const out: DependencyChange[] = [];
-  const judged = async (e: DependencyEntry): Promise<void> => {
-    const j = await judgeFromState(get, e);
-    if (j !== undefined && (j[0] === "changed" || j[0] === "deleted")) out.push({ entryId: e.id, kind: e.kind, key: e.key, status: j[0], detail: j[1] });
-  };
+  const judged = async (e: DependencyEntry): Promise<void> => { const c = await changedFromState(get, e); if (c !== undefined) out.push(c); };
   if (snapshot === undefined) {
     const atMs = msOf(at);
     for (const e of current.values()) {
       if (out.length >= limit) break;
-      if (!(msOf(e.observedAt) < atMs)) continue;
+      // Fail closed, as the decision links are: only an entry observed strictly after it is later work; the same millisecond, or a time that cannot be read on either side, is judged.
+      const observed = msOf(e.observedAt);
+      if (Number.isFinite(observed) && Number.isFinite(atMs) && observed > atMs) continue;
       await judged(e);
     }
     return out;

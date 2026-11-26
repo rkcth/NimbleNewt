@@ -116,7 +116,7 @@ for (const store of stores) {
       const asked = (await call(rev.token, "qa.review.requests", { projectId: project })).result;
       assert.deepEqual(asked.items.map((r: any) => [r.trigger, r.assignee, r.approval]), [["reapproval", rev.id, approve.result.id]]);
       const policyLines = ((await call(O, "status.ask", { request: { kind: "qa_policy", projectId: project } })).result.item.lines as { text: string }[]).map((l) => l.text);
-      assert.ok(policyLines.some((l) => l.includes(`its approval no longer counts, so it is reviewed again, assigned to ${rev.id}`)), policyLines.join("\n"));
+      assert.ok(policyLines.some((l) => new RegExp(`its approval no longer counts, so it is reviewed again \\(why: .*file dependency .*src/parser\\.ts.* was recorded again with a different observation.*\\), assigned to ${rev.id}`).test(l)), policyLines.join("\n"));
       assert.ok(policyLines.some((l) => l.includes("A rejection must name the requirement it found unmet (the default).")), policyLines.join("\n"));
       assert.equal((await call(O, "qa.review.sweep", {}, "sw2")).result.created, 0, "asked once");
       // Rev reviews again against what the work relies on now: the request is settled.

@@ -39,6 +39,12 @@ export interface DependencyEntry {
   readonly protocol?: string;
   /** A search of the task's own project that the controller makes again itself (card L04d): the principal that made it, set by the controller when it was recorded, never by the caller. */
   readonly reader?: string;
+  /**
+   * Card Q02 review: set by the controller, never by the caller, when the entry was recorded while the controller already judged what it names changed or deleted (`judgeFromState`: a record superseded or deleted,
+   * a tool version revoked, an environment with no active revision): the state that was read then. Recording it again is how the agent says it looked at the work against that change, so the QA evidence and
+   * approvals recorded after it are judged against it, not taken back by it; a further change (another state) still takes them back. `check` still reports the change itself.
+   */
+  readonly seen?: string;
 }
 
 /**
@@ -89,34 +95,38 @@ export const dependencyEntryId = (kind: string, key: string, projectId?: string)
  * (its digest, and whether it was revoked), an environment (the active revision's digest) and a negative lookup of a desk record or catalog entry. `undefined` for every other kind, which needs a worker's observation.
  * One rule, used by `check` and by the QA evidence and approvals that a changed dependency takes back (card Q02).
  */
-export async function judgeFromState(get: (kind: string, id: string) => Promise<{ readonly body: unknown } | undefined>, e: Pick<DependencyEntry, "kind" | "key" | "hash">): Promise<[DependencyStatus, string] | undefined> {
+export async function judgeFromState(get: (kind: string, id: string) => Promise<{ readonly body: unknown; readonly revision?: number } | undefined>, e: Pick<DependencyEntry, "kind" | "key" | "hash">): Promise<[DependencyStatus, string, string] | undefined> {
   const bare = (h: string | undefined): string => (h ?? "").replace(/^sha256:/, "");
+  // The third element names the state that was read (card Q02 review: `seen`), so a change recorded again by the agent is told from a later, further change. It is made of stored revisions only, never of
+  // content, so a reader of the manifest who may not read the record learns nothing about what it holds.
+  const at = (status: DependencyStatus, detail: string, ...state: unknown[]): [DependencyStatus, string, string] => [status, detail, sha(JSON.stringify([e.kind, ...state])).slice(0, 16)];
   switch (e.kind) {
     case "record": case "decision": {
       const found = await get("desk-record", e.key);
-      if (found === undefined) return ["deleted", "the record no longer exists"];
+      if (found === undefined) return at("deleted", "the record no longer exists", "absent");
       const record = found.body as { body: string; status: string };
-      return sha(record.body) === bare(e.hash) && record.status !== "superseded" ? ["unchanged", "the record is as it was seen"] : ["changed", record.status === "superseded" ? "the record was superseded" : "the record's content differs"];
+      const state = [found.revision ?? null];
+      return sha(record.body) === bare(e.hash) && record.status !== "superseded" ? at("unchanged", "the record is as it was seen", ...state) : at("changed", record.status === "superseded" ? "the record was superseded" : "the record's content differs", ...state);
     }
     case "tool-version": {
       const version = await get("catalog-version", e.key);
-      if (version === undefined) return ["deleted", "the version is not in the catalog"];
+      if (version === undefined) return at("deleted", "the version is not in the catalog", "absent");
       const body = version.body as { digest: string; name: string; version: string };
       const entry = (await get("catalog-entry", derivedId("cat", body.name)))?.body as { revoked?: readonly string[] } | undefined;
-      if (entry?.revoked?.includes(body.version) === true) return ["changed", "the version was revoked"];
-      return body.digest === bare(e.hash) ? ["unchanged", "the version is as it was seen"] : ["changed", "the version's digest differs"];
+      if (entry?.revoked?.includes(body.version) === true) return at("changed", "the version was revoked", version.revision ?? null, "revoked");
+      return body.digest === bare(e.hash) ? at("unchanged", "the version is as it was seen", version.revision ?? null) : at("changed", "the version's digest differs", version.revision ?? null);
     }
     case "environment": {
       const env = (await get("environment", derivedId("env", e.key)))?.body as { active?: number } | undefined;
-      if (env?.active === undefined) return ["deleted", "the agent has no active environment revision"];
+      if (env?.active === undefined) return at("deleted", "the agent has no active environment revision", "absent");
       const rev = (await get("environment-revision", derivedId("evr", `${e.key}|${env.active}`)))?.body as { digest?: string } | undefined;
-      if (rev?.digest === undefined) return ["unknown", `the active environment revision ${env.active} cannot be read`];
-      return bare(rev.digest) === bare(e.hash) ? ["unchanged", "the active environment revision is the one seen"] : ["changed", `the active environment moved to revision ${env.active}`];
+      if (rev?.digest === undefined) return at("unknown", `the active environment revision ${env.active} cannot be read`, env.active, "unreadable");
+      return bare(rev.digest) === bare(e.hash) ? at("unchanged", "the active environment revision is the one seen", env.active) : at("changed", `the active environment moved to revision ${env.active}`, env.active);
     }
     case "negative": {
       const i = e.key.indexOf(":");
       const [kind, id] = i > 0 ? [e.key.slice(0, i), e.key.slice(i + 1)] : ["", e.key];
-      if (kind === "desk-record" || kind === "catalog-entry") return (await get(kind, id)) === undefined ? ["unchanged", "there is still no such record"] : ["changed", "a record that was absent now exists"];
+      if (kind === "desk-record" || kind === "catalog-entry") return (await get(kind, id)) === undefined ? at("unchanged", "there is still no such record", "absent") : at("changed", "a record that was absent now exists", "present");
       return undefined;
     }
     default: return undefined;
@@ -182,6 +192,8 @@ export class DependencyService {
     // What the controller can judge itself is recorded only as it really is, and only by someone who may read it: a guessed hash is never stored.
     for (const [i, e] of fresh.entries()) if (!(await this.#verifyAtRecording(by, e, `dependencies[${i}]`))) (fresh[i] as { unverified?: boolean }).unverified = true;
     for (const [i, e] of fresh.entries()) if (e.kind === "search" && this.#judgesSearch(e, task.projectId)) fresh[i] = await this.#verifySearch(by, e, task.projectId, `dependencies[${i}]`);
+    // Card Q02 review: an entry recorded while what it names is already judged changed keeps that state as acknowledged (`seen`), so the change does not hold back the task's evidence and approvals forever.
+    for (const [i, e] of fresh.entries()) { const j = await judgeFromState((kind, id) => this.#runner.get(kind, id), e); if (j !== undefined && (j[0] === "changed" || j[0] === "deleted")) fresh[i] = { ...e, seen: j[2] }; }
     const ref: AggregateRef = { kind: "dependency-manifest", id: derivedId("dpm", taskId) };
     const r = await this.#runner.command("dependencies.record", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { taskId, entries: fresh.map((e) => e.id).join(",") },
@@ -407,7 +419,7 @@ export class DependencyService {
     const weak = (t: string): string => t.replace(/^W\//, "");
     const same = (hash?: string, etag?: string): boolean => (e.etag !== undefined && etag !== undefined ? weak(e.etag) === weak(etag) : e.hash !== undefined && hash !== undefined && e.hash.replace(/^sha256:/, "") === hash.replace(/^sha256:/, ""));
     const own = await judgeFromState((kind, id) => this.#runner.get(kind, id), e);
-    if (own !== undefined) return own;
+    if (own !== undefined) return [own[0], own[1]];
     switch (e.kind) {
       case "record": case "decision": case "tool-version": case "environment": return ["unknown", "it could not be judged"];
       case "negative": {

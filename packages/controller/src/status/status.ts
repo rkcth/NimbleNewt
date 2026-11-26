@@ -2996,7 +2996,7 @@ export class StatusService {
     else {
       lines.push(line(`${reqs.total} scheduled review(s) open${after > 0 ? `, from number ${after + 1}` : ""}.`, cite("project", projectId)));
       const why = { submission: "a new code submission", periodic: "the periodic review", incident: "an incident", gate: "independent review is required before it may land", reapproval: "its approval no longer counts, so it is reviewed again" } as const;
-      for (const r of reqs.items) lines.push(line(`Task ${r.taskId}, code ${r.submissionId} (tree ${r.tree.slice(0, 12)}): ${why[r.trigger]}, ${r.assignee === undefined ? "waiting for a reviewer that did not work on the task" : `assigned to ${shown(r.assignee, 80)}`}, since ${r.createdAt}.`, cite("task", r.taskId), cite("submission", r.submissionId)));
+      for (const r of reqs.items) lines.push(line(`Task ${r.taskId}, code ${r.submissionId} (tree ${r.tree.slice(0, 12)}): ${why[r.trigger]}${r.trigger === "reapproval" && r.reason !== undefined ? ` (why: ${quoted(r.reason, 200)})` : ""}, ${r.assignee === undefined ? "waiting for a reviewer that did not work on the task" : `assigned to ${shown(r.assignee, 80)}`}, since ${r.createdAt}.`, cite("task", r.taskId), cite("submission", r.submissionId)));
       if (reqs.next !== undefined) lines.push(line(`More reviews follow: ask again with after ${reqs.next}.`, cite("project", projectId)));
     }
     return { observedAt: at, lines };

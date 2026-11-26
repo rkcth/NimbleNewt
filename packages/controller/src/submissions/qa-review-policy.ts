@@ -45,7 +45,7 @@ export interface QaReviewPolicyBody {
   readonly updatedAt: string;
 }
 
-export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, projects: 500, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 100, incidentPageSize: 500, page: 20, sweepEveryMs: 60_000 } as const;
+export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, projects: 500, episodes: 20, looksPerRound: 200, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 100, incidentPageSize: 500, page: 20, sweepEveryMs: 60_000 } as const;
 
 const KIND = "qa-review-policy";
 const REQUEST = "qa-review-request";
@@ -111,6 +111,8 @@ export interface QaReviewPorts {
   readonly approvalOf?: (submissionId: string) => Promise<{ readonly approved: boolean; readonly reviewId?: string; readonly outdated?: { readonly reviewId: string; readonly approvedBy: string; readonly because: string } } | undefined>;
   /** Card Q02: looks at a task's QA evidence against its recorded dependencies (`QaEvidenceService.dependenciesChanged`), for the newest code of each unfinished task each round. Best effort; absent: not looked at here. */
   readonly dependenciesChanged?: (taskId: string) => Promise<unknown>;
+  /** How many tasks one round looks at for the two ports above (default `QA_REVIEW_LIMITS.looksPerRound`; tests set fewer). */
+  readonly looksPerRound?: number;
 }
 
 export interface QaReviewSweepResult { readonly projects: number; readonly created: number; readonly assigned: number; readonly settled: number; readonly superseded: number; readonly unassigned: number; readonly errors: number }
@@ -175,6 +177,8 @@ export class QaReviewService {
   readonly #ports: QaReviewPorts;
   /** When this controller's throttled round last ran (the dispatcher's call, every tick): at most once per `sweepEveryMs`. */
   #lastSweepAt: number | undefined;
+  /** Card Q02 review: where the next round's look at stale approvals and changed dependencies starts, among the tasks the round found (it moves on by `looksPerRound` each round, so every task is looked at in turn). */
+  #lookFrom = 0;
   private constructor(runner: CommandRunner, qa: Pick<QaEvidenceService, "newestCodeIn">, ports: QaReviewPorts) { this.#runner = runner; this.#qa = qa; this.#ports = ports; }
 
   static withEpoch(storage: ControllerStorage, epoch: number, qa: Pick<QaEvidenceService, "newestCodeIn">, ports: QaReviewPorts, options: RunnerOptions = {}): QaReviewService {
@@ -368,9 +372,17 @@ export class QaReviewService {
       scan = (await this.#qa.newestCodeIn(new Set(active.map((a) => a.policy.projectId)))).byProject;
       incidents = await this.#openIncidents(new Set(active.filter((a) => a.policy.triggers.onIncident).map((a) => a.policy.projectId)));
     } catch { total.errors += active.length; return total; }
+    // Card Q02 review: the look at stale approvals and changed dependencies reads each recorded dependency of each task, so one round looks at no more than `looksPerRound` tasks, the next ones after where the last
+    // round stopped (wrapping round), and the rounds go through all of them in turn. The gate, the landing and the views judge them when read, whatever the round reached.
+    const found = active.reduce((sum, a) => sum + (scan.get(a.policy.projectId)?.length ?? 0), 0);
+    const from = found === 0 ? 0 : this.#lookFrom % found;
+    const width = Math.min(this.#ports.looksPerRound ?? QA_REVIEW_LIMITS.looksPerRound, found);
+    let ordinal = 0;
+    const look = (): boolean => { const o = ordinal++; return ((o - from + found) % found) < width; };
+    this.#lookFrom = found === 0 ? 0 : (from + width) % found;
     for (const a of active) {
       try {
-        const r = await this.#project(a.policy, a, scan.get(a.policy.projectId) ?? [], incidents.get(a.policy.projectId) ?? []);
+        const r = await this.#project(a.policy, a, scan.get(a.policy.projectId) ?? [], incidents.get(a.policy.projectId) ?? [], look);
         total.created += r.created; total.assigned += r.assigned; total.settled += r.settled; total.superseded += r.superseded; total.unassigned += r.unassigned;
       } catch { total.errors++; }
     }
@@ -389,7 +401,7 @@ export class QaReviewService {
     return out;
   }
 
-  async #project(policy: QaReviewPolicyBody, index: { readonly open: readonly string[] }, tasks: NewestCode["tasks"], incidents: readonly { id: string; at: string }[]): Promise<{ created: number; assigned: number; settled: number; superseded: number; unassigned: number }> {
+  async #project(policy: QaReviewPolicyBody, index: { readonly open: readonly string[] }, tasks: NewestCode["tasks"], incidents: readonly { id: string; at: string }[], look: () => boolean = () => true): Promise<{ created: number; assigned: number; settled: number; superseded: number; unassigned: number }> {
     const out = { created: 0, assigned: 0, settled: 0, superseded: 0, unassigned: 0 };
     const projectId = policy.projectId;
     const t = policy.triggers;
@@ -449,11 +461,14 @@ export class QaReviewService {
     const wanted: { taskId: string; trigger: QaReviewRequestBody["trigger"]; cause: string; approval?: string; reason?: string; approvedBy?: string }[] = [];
     // Card Q02 ("invalidation schedules revalidation"): the newest code of each unfinished task whose approval stopped counting is asked to be reviewed again, once per such approval (the cause is its review ID), in
     // every project; and its QA evidence is looked at against the task's recorded dependencies (a re-check goes to whoever recorded evidence that no longer holds).
+    const asked = new Set([...open.values()].map((r) => r.submissionId));
     for (const x of scan.tasks) {
+      if (!look()) continue;
       const task = (await this.#runner.get("task", x.taskId))?.body as unknown as TaskBody | undefined;
       if (task === undefined || task.projectId !== projectId || task.state === "cancelled" || task.state === "done") continue;
       if (this.#ports.dependenciesChanged !== undefined) await this.#ports.dependenciesChanged(x.taskId).catch(() => undefined);
-      if (this.#ports.approvalOf === undefined) continue;
+      // Code that already has an open request is not asked for twice (below), so its approval is not read here.
+      if (this.#ports.approvalOf === undefined || asked.has(x.submissionId)) continue;
       const a = await this.#ports.approvalOf(x.submissionId).catch(() => undefined);
       if (a?.outdated !== undefined) wanted.push({ taskId: x.taskId, trigger: "reapproval", cause: `${a.outdated.reviewId}@${hex(a.outdated.because).slice(0, 12)}`, approval: a.outdated.reviewId, reason: redactText(a.outdated.because).slice(0, 300), approvedBy: a.outdated.approvedBy });
     }
@@ -493,8 +508,8 @@ export class QaReviewService {
       const info = newest.get(w.taskId)!;
       // A submission that already has an open review is not asked for twice, whichever trigger came second.
       if (owed.has(info.submissionId)) continue;
-      const id = `qrr-${hex(projectId, w.taskId, info.submissionId, w.trigger, w.cause)}`;
-      if ((await this.#runner.get(REQUEST, id)) !== undefined) continue;
+      const id = w.trigger === "reapproval" ? await this.#episode(projectId, w.taskId, info.submissionId, w.cause) : `qrr-${hex(projectId, w.taskId, info.submissionId, w.trigger, w.cause)}`;
+      if (id === undefined || (await this.#runner.get(REQUEST, id)) !== undefined) continue;
       if (w.trigger === "gate" && (await this.#independentEvidence({ projectId, taskId: w.taskId, submissionId: info.submissionId, createdAt: "" }, info)) !== undefined) continue;
       const assignee = await this.#pick(w.taskId, info, load, reviewers, w.approvedBy);
       const body: QaReviewRequestBody = { projectId, taskId: w.taskId, submissionId: info.submissionId, tree: info.tree, trigger: w.trigger, cause: w.cause, ...(w.approval === undefined ? {} : { approval: w.approval }), ...(w.reason === undefined ? {} : { reason: w.reason }), ...(w.approvedBy === undefined ? {} : { approvedBy: w.approvedBy }), ...(assignee === undefined ? {} : { assignee, assignedAt: now }), state: "open", createdAt: now };
@@ -525,6 +540,22 @@ export class QaReviewService {
     }
     for (const list of found.values()) list.sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : a.id < b.id ? -1 : 1));
     return found;
+  }
+
+  /**
+   * The request ID for this stale episode of an approval (card Q02 review): the first of the IDs made from the cause and an episode number that is not taken, read in order; an episode whose request was settled because
+   * the approval counted again (`settledBy` the approval itself, or `restored`) is over, so the approval that stops counting again for the same reason is asked again. Any other request already made (open, or
+   * settled by a newer review or as superseded) is this episode: `undefined`, nothing more is asked. Derived only from stored requests, so a repeated round or a second controller arrives at the same ID and makes it once.
+   * At most `QA_REVIEW_LIMITS.episodes` episodes per approval and reason are asked (an approval flapping without end is not asked without end).
+   */
+  async #episode(projectId: string, taskId: string, submissionId: string, cause: string): Promise<string | undefined> {
+    for (let k = 0; k < QA_REVIEW_LIMITS.episodes; k++) {
+      const id = `qrr-${hex(projectId, taskId, submissionId, "reapproval", k === 0 ? cause : `${cause}#${k}`)}`;
+      const b = (await this.#runner.get(REQUEST, id))?.body as unknown as QaReviewRequestBody | undefined;
+      if (b === undefined) return id;
+      if (!(b.state === "done" && (b.settledBy === "restored" || (b.approval !== undefined && b.settledBy === b.approval)))) return undefined;
+    }
+    return undefined;
   }
 
   /** Eligible reviewers for a task, least loaded first (`prefer`, the reviewer whose approval stopped counting, first when still eligible): never the submitters of its code, never the agent that holds it now. */
