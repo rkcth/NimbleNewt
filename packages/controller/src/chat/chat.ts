@@ -1595,7 +1595,21 @@ export class ChatService {
     if (intent.op === "doc.capability.set" && typeof args["capabilityId"] === "string" && typeof args["projectId"] === "string") {
       const reg = await this.#deps.api.handle(token, { v: API_VERSION, op: "doc.capability.list", args: { projectId: args["projectId"] } });
       if (!reg.ok) return refuse(reg.error.code, reg.error.message);
-      const e = ((reg.result["items"] ?? []) as { id: string; name: string; maturity: string; source: string; documents: number }[]).find((x) => x.id === args["capabilityId"]);
+      const items = (reg.result["items"] ?? []) as { id: string; name: string; names?: string[]; maturity: string; source: string; documents: number }[];
+      // Named loosely (card Q03, no magic phrases): the owner says "Claude caching" or "the offline mode", not an ID. An exact ID first, then one entry whose ID, name or scanned names match the words.
+      let e = items.find((x) => x.id === args["capabilityId"]);
+      if (e === undefined) {
+        const norm = (v: unknown): string => String(v).normalize("NFKC").toLowerCase().replace(/^(?:the|a|an)\s+/u, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+        const want = norm(args["capabilityId"]);
+        const exact = items.filter((x) => [x.id, x.name, ...(x.names ?? [])].some((n) => norm(n) === want));
+        const hits = exact.length > 0 || want.length < 3 ? exact : items.filter((x) => [x.id, x.name, ...(x.names ?? [])].some((n) => norm(n).includes(want)));
+        if (hits.length > 1) return { ok: false, kind: "ask", question: `More than one capability matches ${quotedText(String(args["capabilityId"]), 60)}. Which one?`, options: hits.slice(0, CHAT_LIMITS.options).map((x) => `${x.name} (${x.id}, ${x.maturity})`), field: "capabilityId", choices: hits.slice(0, CHAT_LIMITS.options).map((x) => x.id) };
+        if (hits.length === 1) { e = hits[0]!; args["capabilityId"] = e.id; }
+        else if (!/^[a-z][a-z0-9-]{1,59}$/.test(String(args["capabilityId"])) && want.length >= 2 && args["name"] !== undefined) {
+          // A new capability named in words (its name, in the owner's words, given too): its ID is made from them.
+          args["capabilityId"] = (/^[a-z]/.test(want) ? want : `c-${want}`).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+        }
+      }
       const rank = (m: unknown): number => (m === "supported" ? 2 : m === "experimental" ? 1 : m === "unsupported" ? 0 : -1);
       const to = args["maturity"];
       if (rank(to) < 0) return refuse("invalid_command", "A capability is rated supported, experimental or unsupported.");

@@ -8210,7 +8210,7 @@ Arguments:
 - `evidence`: the code submission IDs, one per described task
 - `applicableVersion` (optional): the version it now applies to
 
-Result: `{ id, revision, replayed, settled (update tasks settled), verified, scanned (text read), flags: [{ rule, capabilityId?, source, where, quote }] }`.
+Result: `{ id, revision, replayed, settled (update tasks settled), verified, scanned (text read), flags: [{ rule, capabilityId?, source, where, quote }] (at most 20), total (all flags) }`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -8259,7 +8259,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.capability.set`
 
-Rates one capability in the project's capability register (card Q03), which every documentation claim is checked against: `supported`, `experimental` (a document may name it only with an experimental label) or `unsupported` (a document may name it only to say it is not supported). The register starts with the controller's own labels (Claude and Strata prompt caching experimental, as the cache profiles state; an unattended Windows worker unsupported, by the owner's decision), and a project entry with the same ID replaces one. `names` are what the text scan looks for (the name is always one). A capability rated lower than when a document was verified flags that document `stale` with an update task for its keeper. The owner, or an agent holding the director role in the project (not the docs role). Repeating the same command ID sets it once and finishes the flagging.
+Rates one capability in the project's capability register (card Q03), which every documentation claim is checked against: `supported`, `experimental` (a document may name it only with an experimental label) or `unsupported` (a document may name it only to say it is not supported). The register starts with the controller's own labels (Claude and Strata prompt caching experimental, as the cache profiles state; an unattended Windows worker unsupported, by the owner's decision), and a project entry with the same ID replaces one (only the owner rates one of these higher than the controller's label; the controller's names stay scanned for). `names` are what the text scan looks for (the name is always one). A capability rated lower than when a document was verified flags that document `stale` with an update task for its keeper. The owner, or an agent holding the director role in the project (not the docs role). Repeating the same command ID sets it once and finishes the flagging.
 
 Arguments:
 

@@ -13,7 +13,7 @@ import type { NoActor, Principal, PrincipalBody } from "../security/principals.j
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
-import { CAPABILITY_ID, CAPABILITY_MATURITIES, CLAIM_LIMITS, checkDeclared, cleanText, effectiveRegister, maturityRank, scanText, type CapabilityEntry, type CapabilityMaturity, type CapabilityRegisterBody, type ClaimFlag } from "./doc-claims.js";
+import { CAPABILITY_ID, CAPABILITY_MATURITIES, CLAIM_LIMITS, builtInCapabilities, checkDeclared, cleanText, effectiveRegister, fileWhere, maturityRank, scanText, type CapabilityEntry, type CapabilityMaturity, type CapabilityRegisterBody, type ClaimFlag } from "./doc-claims.js";
 
 /** Who a document is for (card Q03): user and developer documentation, support guidance and promotional assets. A release change flags all four. */
 export const DOC_AUDIENCES = ["user", "developer", "support", "promotional"] as const;
@@ -134,7 +134,7 @@ export interface DocObligationPorts {
    * The text of a document change (card Q03): the files of the artifact a `document` submission names, read only when its manifest digest is the one the submission recorded and it belongs to the project; files
    * that are not text by name or not UTF-8 are listed as skipped. Absent (a controller with no artifact store): no text is read, and a promotional text asset cannot be verified.
    */
-  readonly readDocument?: (d: { readonly artifactId: string; readonly artifactDigest: string; readonly projectId: string }) => Promise<{ readonly files: readonly { readonly path: string; readonly text: string }[]; readonly skipped: readonly string[] }>;
+  readonly readDocument?: (d: { readonly artifactId: string; readonly artifactDigest: string; readonly projectId: string }) => Promise<{ readonly files: readonly { readonly path: string; readonly text: string }[]; readonly skipped: readonly string[]; readonly unread?: readonly { readonly path: string; readonly why: string }[] }>;
 }
 
 const DOB = /^dob-[a-z2-7]{20}$/;
@@ -339,7 +339,7 @@ export class DocObligationService {
    * Binds a document change to tested work. `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project; `evidence` names, for every implementing task, a code
    * submission of that task whose QA gate passes now. The owner or the document's own owner may verify. A release flag must be answered with its version.
    */
-  async verify(by: Principal, command: NoActor & { obligationId: string; expectedRevision: number; documentSubmissionId: string; evidence: readonly string[]; applicableVersion?: string }): Promise<{ id: string; revision: number; replayed: boolean; settled: readonly string[]; verified: boolean; flags: readonly ClaimFlag[]; scanned: boolean }> {
+  async verify(by: Principal, command: NoActor & { obligationId: string; expectedRevision: number; documentSubmissionId: string; evidence: readonly string[]; applicableVersion?: string }): Promise<{ id: string; revision: number; replayed: boolean; settled: readonly string[]; verified: boolean; flags: readonly ClaimFlag[]; total: number; scanned: boolean }> {
     only(command, ["commandId", "obligationId", "expectedRevision", "documentSubmissionId", "evidence", "applicableVersion"]);
     const commandId = checkCommandId(command.commandId);
     if (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1) bad("expectedRevision", "must be the obligation's revision");
@@ -352,6 +352,7 @@ export class DocObligationService {
     if (by.kind !== "owner" && by.id !== ob.owner) throw new DomainError("forbidden", `only the owner or the document's owner ${ob.owner} verifies it`);
     let settled: string[] = [];
     let flags: ClaimFlag[] = [];
+    let total = 0;
     let scanned = false;
     const scoped = scopedCommandId(by.id, commandId);
     const result = await this.#runner.command("doc.obligation.verify", { commandId: scoped, actor: by.id }, async () => ({
@@ -398,6 +399,7 @@ export class DocObligationService {
         // The claims (card Q03): every claim against the capability register, and the document's own text scanned for experimental or unsupported capabilities named without a label.
         const claimed = await this.#claimCheck(b, doc!);
         flags = claimed.flags;
+        total = flags.length;
         scanned = claimed.scanned;
         if (flags.length > 0) {
           // Refused for its claims, and kept so the owner sees why: the record notes the flags (its state is unchanged); nothing is settled. Fixing the text or the register and verifying again answers it.
@@ -433,8 +435,10 @@ export class DocObligationService {
       const detail = await this.#recordedDetail(scoped);
       flags = detail?.["verified"] === false && Array.isArray(detail["flags"]) ? (detail["flags"] as unknown as ClaimFlag[]) : [];
       scanned = detail?.["scanned"] === true;
+      total = typeof detail?.["total"] === "number" ? detail["total"] : flags.length;
     }
-    return { id: result.id, revision: result.revision, replayed: result.replayed, settled, verified: flags.length === 0, flags, scanned };
+    // At most 20 flags are returned, as the record keeps them; `total` counts all.
+    return { id: result.id, revision: result.revision, replayed: result.replayed, settled, verified: total === 0, flags: flags.slice(0, CLAIM_LIMITS.flags), total, scanned };
   }
 
   /**
@@ -456,7 +460,9 @@ export class DocObligationService {
       const read = await this.#ports.readDocument({ artifactId: doc.artifactId, artifactDigest: doc.artifactDigest, projectId: b.projectId });
       scanned = read.files.length > 0;
       files = read.files.length;
-      for (const f of read.files) add(scanText(f.text, register, `file ${cleanText(f.path, true).slice(0, 120)}`));
+      for (const f of read.files) add(scanText(f.text, register, fileWhere(f.path)));
+      // A file named as text that was not read (too many, too large, not UTF-8) is a flag: its claims would otherwise pass unchecked.
+      for (const u of read.unread ?? []) flags.push({ rule: "text_unread", source: "text", where: fileWhere(u.path), quote: u.why });
     }
     if (b.audience === "promotional" && (b.mediaType ?? "text") === "text" && !scanned) {
       bad("documentSubmissionId", doc.artifactId === undefined ? "a promotional text is verified only once its text is read: submit the document change naming its artifact (artifactId)"
@@ -517,6 +523,9 @@ export class DocObligationService {
         const reg = (found?.body as unknown as CapabilityRegisterBody | undefined) ?? { projectId, entries: [], changedAt: "" };
         const before = effectiveRegister(reg).find((e) => e.id === capabilityId);
         from = before?.maturity;
+        // The controller's own labels come from the code (a cache never measured, an owner decision): only the owner rates one higher, as a decision of their own. A director may rate one lower.
+        const builtIn = builtInCapabilities().find((e) => e.id === capabilityId);
+        if (builtIn !== undefined && by.kind !== "owner" && maturityRank(maturity) > maturityRank(builtIn.maturity)) throw new DomainError("forbidden", `${capabilityId} is ${builtIn.maturity} by the controller's own label: only the owner rates it higher`);
         const own = reg.entries.find((e) => e.id === capabilityId);
         if (own === undefined && reg.entries.length >= CLAIM_LIMITS.entries) throw new DomainError("unavailable", `a project's capability register holds at most ${CLAIM_LIMITS.entries} capabilities`);
         const finalName = name ?? before?.name ?? bad("name", "a new capability needs a name");

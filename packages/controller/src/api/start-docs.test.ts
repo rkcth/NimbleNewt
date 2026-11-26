@@ -177,7 +177,7 @@ test("documentation obligations through the running controller and the owner's c
     const claimsView = (await turn("m5b", qc, [{ kind: "status", request: { kind: "docs" }, evidence: qc, basis: "owner" }]))[0];
     const cl = (claimsView.lines as { text: string }[]).map((l) => l.text);
     assert.match(cl[0]!, /^1 document\(s\) tracked \(1 refused for unsupported claims, shown first\)/);
-    assert.match(cl[1]!, /Promotional document "Landing page".* CLAIMS REFUSED at .*its text was read\): file index\.html \(claude-prompt-caching\): the text names an experimental capability without an experimental label or a negation, in the same sentence: "Halve your bill with Claude caching!"\. The verification before it still stands\./);
+    assert.match(cl[1]!, /Promotional document "Landing page".* CLAIMS REFUSED at .*its text was read\): file "index\.html" \(claude-prompt-caching\): the text names an experimental capability without an experimental label or a negation, in the same sentence: "Halve your bill with Claude caching!"\. The verification before it still stands\./);
     assert.ok(!/[\u202A-\u202E]/.test(cl.join("\n")), "no direction mark reaches the owner");
     assert.match(cl[cl.length - 1]!, /^Capability register .*claude-prompt-caching "Claude prompt caching": experimental \(the controller's own label; 1 document\(s\)\); passkey-sign-in "passkey sign-in": supported \(set by owner:\S+ at [^;]+; 1 document\(s\)\)/);
     // The owner rates it by chat in free words: shown first, with what it changes and what follows for the documents.
@@ -255,6 +255,15 @@ test("documentation obligations through the running controller and the owner's c
     const byDora = await call(dora.token, "doc.obligation.retire", { obligationId: guideId, expectedRevision: both[1].revision }, "x2");
     assert.equal(byDora.ok, true, JSON.stringify(byDora));
     assert.deepEqual((await call(boot.token, "doc.obligation.list", { projectId: project })).result.items, []);
+    // First review: a task credential, even a director's, does not rate a capability (the operation refuses before the service is reached).
+    const scopedSet = { principal: { id: dora.id, kind: "agent", name: "Dora", grants: [], taskScope: { taskId: task, projectId: project } }, docObligations: { setCapability: async () => assert.fail("a task credential reached setCapability") } };
+    await assert.rejects(() => OPERATION_BY_NAME.get("doc.capability.set")!.run(scopedSet as never, { projectId: project, capabilityId: "claude-prompt-caching", maturity: "supported" }, "y0"), (e: any) => e.code === "forbidden" && /task credential/.test(e.message));
+    // First review: the capability named in words, not by its ID, is found in the register; words that fit more than one are asked about.
+    const byName = await turn("m5n", "Claude caching is measured now, treat it as supported", [{ kind: "command", op: "doc.capability.set", args: { capabilityId: "Claude caching", maturity: "supported" }, evidence: "Claude caching", basis: "owner" }]);
+    assert.equal(byName[0].status, "proposed", JSON.stringify(byName));
+    assert.ok((byName[0].preview as string[]).some((l) => /Rates "Claude prompt caching" \(claude-prompt-caching\) supported/.test(l)), JSON.stringify(byName[0].preview));
+    const vague = await turn("m5v", "the caching one is supported", [{ kind: "command", op: "doc.capability.set", args: { capabilityId: "caching", maturity: "supported" }, evidence: "the caching one is supported", basis: "owner" }]);
+    assert.deepEqual([vague[0].status, vague[0].options], ["asked", ["Claude prompt caching (claude-prompt-caching, supported)", "Strata caching (strata-caching, experimental)"]], JSON.stringify(vague));
   } finally {
     await c.close();
     rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

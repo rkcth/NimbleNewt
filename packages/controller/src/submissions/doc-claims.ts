@@ -58,8 +58,9 @@ export function builtInCapabilities(): CapabilityEntry[] {
 export function effectiveRegister(project: CapabilityRegisterBody | undefined): CapabilityEntry[] {
   const own = new Map((project?.entries ?? []).map((e) => [e.id, { ...e, source: "project" as const }]));
   const all = new Map<string, CapabilityEntry>();
-  for (const b of builtInCapabilities()) all.set(b.id, own.get(b.id) ?? b);
-  for (const [id, e] of own) all.set(id, e);
+  // A project entry replacing a built-in one keeps the built-in names too: a project cannot narrow what the scan looks for under the controller's own label.
+  for (const b of builtInCapabilities()) { const o = own.get(b.id); all.set(b.id, o === undefined ? b : { ...o, names: [...new Set([...o.names, ...b.names])] }); }
+  for (const [id, e] of own) if (!all.has(id)) all.set(id, e);
   return [...all.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
@@ -70,6 +71,7 @@ export const CLAIM_RULES = {
   experimental_claim_unlabelled: "a claim names an experimental capability without saying it is experimental",
   unsupported_mention: "the text names an unsupported capability without saying it is not supported, in the same sentence",
   experimental_mention_unlabelled: "the text names an experimental capability without an experimental label or a negation, in the same sentence",
+  text_unread: "a file named as text was not read (over 50 files, over 256 KiB, over 1 MiB in all, or not UTF-8), so what it says is unchecked: split it or save it as UTF-8",
 } as const;
 export type ClaimRule = keyof typeof CLAIM_RULES;
 
@@ -83,24 +85,47 @@ export interface ClaimFlag {
   readonly quote: string;
 }
 
-/** Labels that make a mention of an experimental capability acceptable. */
-const EXPERIMENTAL_LABEL = /(?<![\p{L}\p{N}])(experimental|not measured|unmeasured|untested|preview|beta)(?![\p{L}\p{N}])/iu;
-/** Plain negations: a sentence that says the capability is not there is not a claim of it. "no" alone is not one (too loose: "no setup needed: X does it"). */
+/** Labels that make a mention of an experimental capability acceptable anywhere in its sentence: words that say nothing else. */
+const EXPERIMENTAL_LABEL = /(?<![\p{L}\p{N}])(experimental|not measured|unmeasured|untested)(?![\p{L}\p{N}])/iu;
+/** Labels that count only near the name (within `NEAR` words): they are common words otherwise ("Preview your bill: X halves it"). */
+const NEAR_LABEL = /(?<![\p{L}\p{N}])(preview|beta)(?![\p{L}\p{N}])/iu;
+/**
+ * Plain negations, counted only near the name (within `NEAR` words before or after it): "Don't worry: X halves your bill" is not a denial of X. "no" alone is not one (too loose: "no setup needed: X
+ * does it"); "not just", "not only", "not merely" and "not simply" are not denials either.
+ */
 const NEGATION = /(?<![\p{L}\p{N}])(not|never|cannot|can't|can\u2019t|isn't|isn\u2019t|doesn't|doesn\u2019t|don't|don\u2019t|won't|won\u2019t|unsupported|unavailable)(?![\p{L}\p{N}])/iu;
+const NOT_A_DENIAL = /(?<![\p{L}\p{N}])not\s+(just|only|merely|simply)(?![\p{L}\p{N}])/giu;
+/** How many words on each side of a name a negation (or a weak label) may be. */
+export const NEAR = 8;
+
+const BLOCK_TAG = /<\/?(?:p|div|h[1-6]|li|ul|ol|dl|dt|dd|tr|td|th|table|thead|tbody|br|hr|section|article|header|footer|nav|aside|main|blockquote|pre|figure|figcaption|title|option)\b[^<>]{0,500}>/gi;
+const ENTITY = /&(#\d{1,7}|#x[0-9a-f]{1,6}|nbsp|amp|lt|gt|quot|apos|shy|zwj|zwnj|ensp|emsp|thinsp|rsquo|lsquo|ndash|mdash|hyphen);/gi;
+const NAMED: Readonly<Record<string, string>> = { nbsp: " ", amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", shy: "", zwj: "", zwnj: "", ensp: " ", emsp: " ", thinsp: " ", rsquo: "\u2019", lsquo: "\u2018", ndash: "-", mdash: "-", hyphen: "-" };
+const entity = (_m: string, e: string): string => {
+  const k = e.toLowerCase();
+  if (!k.startsWith("#")) return NAMED[k] ?? " ";
+  const n = k.startsWith("#x") ? Number.parseInt(k.slice(2), 16) : Number.parseInt(k.slice(1), 10);
+  return Number.isSafeInteger(n) && n > 0 && n <= 0x10ffff && (n < 0xd800 || n > 0xdfff) ? String.fromCodePoint(n) : " ";
+};
 
 /**
- * Text as the checks read it and the owner sees it quoted: NFKC (so look-alike forms of letters fold), zero-width characters and soft hyphens removed (so a name cannot be hidden by splitting it),
- * direction marks and overrides removed (so a quote cannot be shown reordered), other control characters made spaces, HTML tags and Markdown marks made spaces, spaces run together. Line breaks are kept
- * as `\n` (a sentence boundary) unless `oneLine`.
+ * Text as the checks read it and the owner sees it quoted: NFKC (so look-alike forms of letters fold); HTML block tags made line breaks and other tags spaces; HTML character references decoded (so
+ * `Strata&nbsp;caching` is the name); zero-width characters and soft hyphens removed (so a name cannot be hidden by splitting it); direction marks and overrides removed (so a quote cannot be shown
+ * reordered); other control characters made spaces; Markdown marks made spaces; spaces run together. A line break inside a paragraph (hard-wrapped text) is a space, as Markdown reads it; a blank line,
+ * or a line that starts a list item, heading, quote, table row or code fence, is a break (a sentence boundary) unless `oneLine`.
  */
 export function cleanText(raw: string, oneLine = false): string {
   let s = String(raw).normalize("NFKC");
+  s = s.replace(/\r\n?|[\u2028\u0085]/g, "\n").replace(/\u2029/g, "\n\n");
+  s = s.replace(BLOCK_TAG, "\n\n").replace(/<[^<>]{0,500}>/g, " ").replace(ENTITY, entity).normalize("NFKC");
   s = s.replace(/[\u200B-\u200D\u2060\uFEFF\u00AD\u180E]/g, "");
   s = s.replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "");
-  s = s.replace(/\r\n?|[\u2028\u2029\u0085]/g, "\n");
+  s = s.replace(/\r\n?|[\u2028\u0085]/g, "\n").replace(/\u2029/g, "\n\n");
   // eslint-disable-next-line no-control-regex
   s = s.replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g, " ");
-  s = s.replace(/<[^<>\n]{0,500}>/g, " ").replace(/[*_`~#>|[\]]/g, " ");
+  // A wrapped line goes on its paragraph: a break is kept before a blank line, a list item, a heading, a quote, a table row, a code fence or a setext underline.
+  s = s.replace(/([^\s])[ \t]*\n(?![ \t]*(?:\n|$|[-*+#>|=]|```|~~~|\d{1,9}[.)][ \t]))/g, "$1 ");
+  s = s.replace(/[*_`~#>|[\]]/g, " ");
   s = s.replace(/[ \t\f\v\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, " ");
   if (oneLine) s = s.replace(/\s*\n\s*/g, " ");
   return s.replace(/ *\n */g, "\n").trim();
@@ -117,17 +142,51 @@ const cut = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0,
 export const quoteOf = (s: string): string => cut(redactText(cleanText(s, true)), CLAIM_LIMITS.quote);
 
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/** A name as a pattern: case-insensitive, whole words, its words joined by any run of spaces or hyphens or by nothing (a name split by a removed zero-width character still matches). */
-const patternOf = (name: string): RegExp => new RegExp(`(?<![\\p{L}\\p{N}])${cleanText(name, true).split(/[\s-]+/).filter((w) => w !== "").map(escape).join("[\\s-]*")}(?![\\p{L}\\p{N}])`, "giu");
-/** "no" or "without" right before a name (at most two words between): "there is no unattended Windows service", "works without Claude caching". */
+/**
+ * A name as a pattern: case-insensitive, whole words, its words joined by any run of spaces or hyphens or by nothing (a name split by a removed zero-width character still matches); any word may take a
+ * possessive (`Claude's prompt caching`) and the last a plural (`Strata caches`, `Windows services`). Compiled once per name.
+ */
+const PATTERNS = new Map<string, string>();
+function patternSource(name: string): string {
+  let src = PATTERNS.get(name);
+  if (src === undefined) {
+    const words = cleanText(name, true).split(/[\s-]+/).filter((w) => w !== "").map(escape);
+    src = `(?<![\\p{L}\\p{N}])${words.map((w, i) => `${w}${i === words.length - 1 ? "(?:e?s)?" : ""}(?:['\u2019]s)?`).join("[\\s-]*")}(?![\\p{L}\\p{N}])`;
+    if (PATTERNS.size > 5000) PATTERNS.clear();
+    PATTERNS.set(name, src);
+  }
+  return src;
+}
+const patternOf = (name: string): RegExp => new RegExp(patternSource(name), "giu");
+/** "no" or "without" right before a name (at most two words between): "there is no unattended Windows service", "works without Claude caching". Tested on the 120 characters before the name only. */
 const DENIED_BEFORE = /(?<![\p{L}\p{N}])(no|without)(\s+[\p{L}\p{N}'-]+){0,2}\s*$/iu;
+const WINDOW_CHARS = 400;
+/** The `NEAR` words before `at` and after `end` in `s` (looked for within a bounded stretch, so a long sentence costs no more per name). */
+function near(s: string, at: number, end: number): string {
+  const before = s.slice(Math.max(0, at - WINDOW_CHARS), at).split(/\s+/).filter((w) => w !== "");
+  const after = s.slice(end, end + WINDOW_CHARS).split(/\s+/).filter((w) => w !== "");
+  // A word cut at the stretch's start is dropped: it may be the tail of a longer word.
+  if (at > WINDOW_CHARS) before.shift();
+  return `${before.slice(-NEAR).join(" ")} \u0000 ${after.slice(0, NEAR).join(" ")}`;
+}
 
-/** Whether `sentence`, with every name of the capability blanked out (a name such as "nobody signed in" must not count as its own negation), carries the label the maturity needs. */
+/**
+ * Whether `sentence` carries the label the maturity needs, for every place a name of the capability stands: "no" or "without" directly before it, or a negation (or, for an experimental one, "preview" or
+ * "beta") within `NEAR` words of it, or (experimental only) a plain experimental label anywhere in the sentence. Every name of the capability is blanked first (a name such as "nobody signed in" must
+ * not count as its own negation). A sentence naming the capability twice must label both places, unless the plain label covers the whole sentence.
+ */
 function labelled(sentence: string, entry: CapabilityEntry): boolean {
-  for (const n of entry.names) for (const m of sentence.matchAll(patternOf(n))) if (DENIED_BEFORE.test(sentence.slice(0, m.index))) return true;
-  let rest = sentence;
-  for (const n of entry.names) rest = rest.replace(patternOf(n), " ");
-  return entry.maturity === "unsupported" ? NEGATION.test(rest) : EXPERIMENTAL_LABEL.test(rest) || NEGATION.test(rest);
+  let blanked = sentence;
+  const spots: [number, number][] = [];
+  for (const n of entry.names) for (const m of sentence.matchAll(patternOf(n))) spots.push([m.index, m.index + m[0].length]);
+  for (const n of entry.names) blanked = blanked.replace(patternOf(n), (m) => " ".repeat(m.length));
+  if (entry.maturity === "experimental" && EXPERIMENTAL_LABEL.test(blanked)) return true;
+  return spots.every(([at, end]) => {
+    const from = Math.max(0, at - 120);
+    if (DENIED_BEFORE.test(`${from > 0 ? "x" : ""}${sentence.slice(from, at)}`)) return true;
+    const around = near(blanked, at, end).replace(NOT_A_DENIAL, " ");
+    return NEGATION.test(around) || (entry.maturity === "experimental" && NEAR_LABEL.test(around));
+  });
 }
 
 export interface DeclaredClaim { readonly text: string; readonly taskId: string; readonly capabilityId?: string }
@@ -144,7 +203,7 @@ export function checkDeclared(claims: readonly DeclaredClaim[], register: readon
     if (entry === undefined) { flags.push({ rule: "unknown_capability", capabilityId: c.capabilityId, source: "claim", where, quote }); return; }
     capabilities[entry.id] = entry.maturity;
     if (entry.maturity === "unsupported") flags.push({ rule: "unsupported_capability_claimed", capabilityId: entry.id, source: "claim", where, quote });
-    else if (entry.maturity === "experimental" && !EXPERIMENTAL_LABEL.test(cleanText(c.text, true))) flags.push({ rule: "experimental_claim_unlabelled", capabilityId: entry.id, source: "claim", where, quote });
+    else if (entry.maturity === "experimental" && !EXPERIMENTAL_LABEL.test(cleanText(c.text, true)) && !NEAR_LABEL.test(cleanText(c.text, true))) flags.push({ rule: "experimental_claim_unlabelled", capabilityId: entry.id, source: "claim", where, quote });
   });
   return { flags, capabilities };
 }
@@ -153,13 +212,14 @@ export function checkDeclared(claims: readonly DeclaredClaim[], register: readon
 export function scanText(raw: string, register: readonly CapabilityEntry[], where: string): { flags: ClaimFlag[]; capabilities: Record<string, CapabilityMaturity> } {
   const flags: ClaimFlag[] = [];
   const capabilities: Record<string, CapabilityMaturity> = {};
-  const watched = register.filter((e) => e.maturity !== "supported");
-  if (watched.length === 0) return { flags, capabilities };
+  if (register.length === 0) return { flags, capabilities };
+  // Supported capabilities are looked for too, but only to record that the text names them: a later lower rating then flags the document (card Q03), as it does one that claimed it.
+  const any = register.map((e) => new RegExp(e.names.map(patternSource).join("|"), "iu"));
   for (const sentence of sentencesOf(cleanText(raw))) {
-    for (const entry of watched) {
-      if (!entry.names.some((n) => patternOf(n).test(sentence))) continue;
+    for (const [i, entry] of register.entries()) {
+      if (!any[i]!.test(sentence)) continue;
       capabilities[entry.id] = entry.maturity;
-      if (labelled(sentence, entry)) continue;
+      if (entry.maturity === "supported" || labelled(sentence, entry)) continue;
       flags.push({ rule: entry.maturity === "unsupported" ? "unsupported_mention" : "experimental_mention_unlabelled", capabilityId: entry.id, source: "text", where, quote: quoteOf(sentence) });
     }
   }
@@ -168,6 +228,10 @@ export function scanText(raw: string, register: readonly CapabilityEntry[], wher
 
 /** Which files of a document artifact are read as text (by name). Others (images, archives) are listed as not read. */
 export const TEXT_FILE = /\.(md|markdown|mdx|txt|text|rst|adoc|asciidoc|html?|xhtml|csv|json|ya?ml|po)$/i;
+
+/** Where a flag stands for a file of the document: its path, cleaned to one line, redacted, cut and JSON-quoted (a path is the writer's text, like the sentence). */
+// eslint-disable-next-line no-control-regex
+export const fileWhere = (path: string): string => `file ${JSON.stringify(cut(redactText(String(path).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF\u061C\u00AD\u180E]/g, " ")), 120))}`;
 
 /** A flag in plain words, for the owner: the rule, the capability and the quoted sentence. */
 export function claimFlagText(f: ClaimFlag): string {
@@ -188,22 +252,28 @@ export interface DocumentArtifacts {
  * another project, or not the one the submission's digest names (the digest is `sha256:` and the artifact's manifest digest, as the tool bridge records it); a damaged file is the artifact service's
  * `integrity` error. Files are read in path order: those named as text, up to 50 files, 256 KiB each and 1 MiB in all, decoded as UTF-8 (a file that is not is skipped, never guessed at).
  */
-export function artifactDocumentReader(artifacts: DocumentArtifacts): (d: { readonly artifactId: string; readonly artifactDigest: string; readonly projectId: string }) => Promise<{ files: { path: string; text: string }[]; skipped: string[] }> {
+export function artifactDocumentReader(artifacts: DocumentArtifacts): (d: { readonly artifactId: string; readonly artifactDigest: string; readonly projectId: string }) => Promise<{ files: { path: string; text: string }[]; skipped: string[]; unread: { path: string; why: string }[] }> {
   const refuse = (why: string): never => { throw new DomainError("invalid_command", `documentSubmissionId: ${why}`, { field: "documentSubmissionId" }); };
   return async (d) => {
     const a = await artifacts.get(d.artifactId);
     if (a === undefined) return refuse(`its artifact ${d.artifactId} is not stored on this controller`);
-    if (a.projectId !== undefined && a.projectId !== d.projectId) return refuse("its artifact belongs to another project");
+    // An artifact that names no project is not read: whose text it is cannot be told (every publishing path names one).
+    if (a.projectId === undefined) return refuse("its artifact names no project, so it cannot be read for this one");
+    if (a.projectId !== d.projectId) return refuse("its artifact belongs to another project");
     if (d.artifactDigest !== `sha256:${a.manifestDigest}` && d.artifactDigest !== a.manifestDigest) return refuse("its artifact's files are not the ones the document change recorded (the digests differ)");
     const files: { path: string; text: string }[] = [];
     const skipped: string[] = [];
+    // Files named as text that were not read: the claim check flags each (a document cannot pass by being large or not UTF-8).
+    const unread: { path: string; why: string }[] = [];
     let total = 0;
     const decoder = new TextDecoder("utf-8", { fatal: true });
     for (const e of [...a.entries].sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))) {
-      if (!TEXT_FILE.test(e.path) || files.length >= CLAIM_LIMITS.files || e.size > CLAIM_LIMITS.fileBytes || total + e.size > CLAIM_LIMITS.totalBytes) { skipped.push(e.path); continue; }
+      if (!TEXT_FILE.test(e.path)) { skipped.push(e.path); continue; }
+      const why = files.length >= CLAIM_LIMITS.files ? `more than ${CLAIM_LIMITS.files} text files` : e.size > CLAIM_LIMITS.fileBytes ? `larger than ${CLAIM_LIMITS.fileBytes / 1024} KiB` : total + e.size > CLAIM_LIMITS.totalBytes ? `over ${CLAIM_LIMITS.totalBytes / 1024 / 1024} MiB of text in all` : undefined;
+      if (why !== undefined) { skipped.push(e.path); unread.push({ path: e.path, why }); continue; }
       const bytes = await artifacts.readFile(d.artifactId, e.path, { maxBytes: CLAIM_LIMITS.fileBytes });
-      try { files.push({ path: e.path, text: decoder.decode(bytes) }); total += e.size; } catch { skipped.push(e.path); }
+      try { files.push({ path: e.path, text: decoder.decode(bytes) }); total += e.size; } catch { skipped.push(e.path); unread.push({ path: e.path, why: "not UTF-8" }); }
     }
-    return { files, skipped };
+    return { files, skipped, unread };
   };
 }
