@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { deferredCommandState } from "../api/command-state.js";
 import { assignmentIdOf } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
+import type { SimulationService } from "../simulation/scopes.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
 import { versionIdOf } from "../catalog/catalog.js";
@@ -292,6 +293,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why; a corrected finding or severity says how many times it was edited and by whom last, and what the severity was), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author (and why one of the first ten would not land now); and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked on the controller's regular rounds and when a landing is asked for behind it, only while approved work waits behind it; approved work coming back stops the count); an approved first place that has held the branch for twenty-four hours while newer approved work waits behind it is shown with when the controller moves it to the back (nothing is removed)" },
+  simulations: { keys: ["taskId|taskTitle"], about: "owner only: scopes, runs, grants" },
   landing_checks: { keys: ["taskId|taskTitle", "projectId", "after"], about: "owner only: each required check's result at the newest landing attempts of a task or project (after: how many shown), the tree judged, what the last re-read changed" },
   landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off, no unfinished defects; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, or approved it before a decision of yours (also one for that task alone overriding a project-wide one) or the criteria changed so the approval no longer counts (what changed, when; a new review restores it), and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
@@ -425,6 +427,7 @@ export type StatusRequest =
   | { readonly kind: "docs"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "landing_checks"; readonly taskId?: string; readonly projectId?: string; readonly after?: number }
+  | { readonly kind: "simulations"; readonly taskId?: string }
   | { readonly kind: "landing_settings"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
@@ -801,6 +804,8 @@ export interface StatusDeps {
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
   readonly integration?: Pick<IntegrationPolicyService, "get">;
   /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
+  /** The owner's simulation scopes (card P07): the `simulations` view. Absent: the view says scopes are not kept here. */
+  readonly simulations?: Pick<SimulationService, "list">;
   readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<LandingPage> };
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list"> & Partial<Pick<DocObligationService, "capabilities">>;
@@ -1065,6 +1070,7 @@ export class StatusService {
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId", "after"]); return this.docLines(by, request.projectId, undefined, request.after); }
       case "landing_checks": { onlyKnown(request, ["kind", "taskId", "projectId", "after"]); return this.landingChecksLines(by, request); }
+      case "simulations": { onlyKnown(request, ["kind", "taskId"]); return this.simulationLines(by, request.taskId); }
       case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
@@ -2510,6 +2516,42 @@ export class StatusService {
    * nothing, as anyone but the owner is. Nothing the host ran is shown beyond each command's name, state, exit code and time-out: not its output. Texts the gate wrote are cut, credentials are removed and host paths are
    * replaced by a mark.
    */
+  /**
+   * The owner's simulation scopes in plain words (card P07): what each scope is (a stand-in where nothing real is written, sent or spent), what its newest runs did step by step (the R02
+   * fallback, a competing edit, a stop), the real access the owner granted after it (and that the scope itself grants nothing), and the replay reruns recorded in it. Read only, owner only.
+   */
+  async simulationLines(by: Principal, taskId?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner") return undefined;
+    const at = this.#runner.now();
+    let title: string | undefined;
+    if (taskId !== undefined) {
+      const task = await this.#runner.get("task", checkTaskId(taskId));
+      if (task === undefined) return undefined;
+      title = shown((task.body as unknown as TaskBody).title, 120);
+    }
+    if (by.taskScope !== undefined && taskId !== by.taskScope.taskId) return undefined;
+    const c = taskId === undefined ? cite("installation", "installation") : cite("task", taskId);
+    if (this.#deps.simulations === undefined) return { observedAt: at, lines: [line("Simulation scopes are not kept on this controller.", c)] };
+    const found = await this.#deps.simulations.list(by, { ...(taskId === undefined ? {} : { taskId }), limit: 5 });
+    if (found.scopes.length === 0) return { observedAt: at, lines: [line(`No simulation scope is on record${title === undefined ? "" : ` for task ${title}`}. A scope is a stand-in of a task's services where agents and tools can be tried before any real access is given; you can ask to open one.`, c)] };
+    const lines: Line[] = [line(`${found.scopes.length} simulation scope(s)${title === undefined ? "" : ` for task ${title}`}, newest first${found.truncated ? " (older ones are not shown)" : ""}. In a scope everything works on a stand-in: nothing real is written, sent or spent, every result is labelled simulated, and real access is only ever granted by you, separately.`, c)];
+    for (const s of found.scopes) {
+      const b = s.scope;
+      const sc = cite("simulation-scope", s.id);
+      lines.push(line(`Scope ${s.id} (task ${b.taskId}) is ${b.state}, opened ${b.openedAt}${b.purpose === undefined ? "" : ` for: ${shown(b.purpose, 200)}`}; it holds ${Object.keys(b.world.cells).length} stand-in resource(s), ${b.effects.length} single operation(s), ${(b.runs ?? []).length} workflow run(s) and ${(b.replays ?? []).length} replay rerun(s).`, sc));
+      for (const r of s.runs) {
+        const run = r.run;
+        const what = run.state !== "finished" ? "has not finished (sending the same run again goes on from where it stopped)" : run.outcome === "completed" ? "completed" : run.outcome === "stopped" ? "stopped before the end" : "completed with problems";
+        lines.push(line(`Run ${r.id} ${what}: ${run.results.length} of ${run.script.length} step(s) recorded, stand-in providers ${run.providers.join(" then ")}.`, cite("simulation-run", r.id)));
+        for (const x of run.results.slice(0, 30)) lines.push(line(`  Step ${x.index + 1}: ${shown(x.words, 400)}.`, cite("simulation-run", r.id)));
+      }
+      const grants = b.grants ?? [];
+      if (grants.length === 0) lines.push(line(`No real access was granted after this scope. After a run that completed, you can ask to grant an agent the access that run used; nothing in the scope grants it by itself.`, sc));
+      else for (const g of grants.slice(-10)) lines.push(line(`Real access you granted after run ${g.runId}: ${g.grantee} may ${g.action === "effect.perform" ? "change" : g.action} ${g.resource} for real (grant ${g.grantId}, ${g.at}).`, cite("grant-record", g.grantId)));
+    }
+    return { observedAt: at, lines };
+  }
+
   async landingChecksLines(by: Principal, request: { readonly taskId?: string; readonly projectId?: string; readonly after?: unknown }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const hasTask = request.taskId !== undefined, hasProject = request.projectId !== undefined;

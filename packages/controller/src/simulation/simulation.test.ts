@@ -74,7 +74,8 @@ for (const backend of backends) {
         assert.equal((await effects.run(intent.id, bridge)).status, "failed");
         assert.deepEqual(bridge.calls, []);
       }
-      // A scope effect that already started under its simulated stand-in (the answer was lost) and is then offered to a real bridge (as a recovery pass after a restart would): refused, never reconciled for real.
+      // A scope effect that already started under its simulated stand-in (the answer was lost) and is then offered to a real bridge (as a recovery pass after a restart would): refused, never reconciled for real,
+      // and left as it is (the stand-in may hold the change, so it is not recorded as "nothing was done"; the scope's own bridge finishes it: workflow.test.ts).
       let tries = 0;
       const flaky: EffectBridge = { idempotent: true, simulated: true, execute: async () => { tries += 1; throw new Error("lost"); } };
       const started = await effects.intend({ commandId: cid("st"), actor: owner.id, kind: "service-op", target: "simulation:x", input: { y: 1 }, taskId: task, simulation: scope });
@@ -82,9 +83,12 @@ for (const backend of backends) {
       assert.ok(tries >= 1);
       assert.equal((await effects.get(started.id))?.started, true);
       const recovery = realBridge();
-      const settled = await effects.run(started.id, recovery);
-      assert.equal(settled.status, "failed");
+      await refuses("forbidden", () => effects.run(started.id, recovery));
+      assert.equal((await effects.get(started.id))?.status, "intended", "left for the scope to finish");
       assert.deepEqual(recovery.calls, [], "the recovery never asked or touched the real target");
+      const finished = await effects.run(started.id, { idempotent: true, simulated: true, execute: async () => ({ ok: true }), reconcile: async () => ({ state: "applied", evidence: { ok: true } }) });
+      assert.equal(finished.status, "confirmed");
+      assert.equal(finished.evidence?.["simulated"], true);
       // The other direction: a real effect cannot be done or settled by a stand-in.
       const real = await effects.intend({ commandId: cid("real"), actor: owner.id, kind: "git-push", target: "repo:main", input: { c: "abc" } });
       let standInCalls = 0;

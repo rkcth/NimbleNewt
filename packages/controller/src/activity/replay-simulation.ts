@@ -9,10 +9,13 @@ import type { AggregateRef, ControllerStorage, JsonObject } from "../storage/typ
 import type { ActivityService } from "./activity.js";
 
 /**
- * A rerun of a replay (card U09b, standing in for card P07's simulation scope, which is not built). A replay itself never reruns anything (`ReplayService` holds no port that could, and `rerunRefused` says so);
- * a rerun is this separate owner-only command, and it runs only inside its own isolated scope: the scope holds no tool, no model, no message port and no effect ledger. It re-walks the steps the record has, from a
- * step on, and writes one `replay-simulation` record of what it would do again and with what outcome, every line labelled simulated. It can inject one provider failure at a step to see what would not be reached.
- * Nothing is run, sent, spent or changed; the owner grants real access separately and nothing here can use it. What it is NOT: a workflow run against simulated tools and events (P07 proper).
+ * A rerun of a replay (card U09b). A replay itself never reruns anything (`ReplayService` holds no port that could, and `rerunRefused` says so); a rerun is this separate owner-only command, and it runs only
+ * inside an isolated scope: the walk itself holds no tool, no model, no message port and no effect ledger. It re-walks the steps the record has, from a step on, and writes one `replay-simulation` record of what
+ * it would do again and with what outcome, every line labelled simulated. It can inject one provider failure at a step to see what would not be reached. Nothing is run, sent, spent or changed; the owner grants
+ * real access separately and nothing here can use it.
+ * Card P07: with `scopes` composed (the running controller always composes it), the rerun is recorded in a simulation scope record (`simulation-scope`): the one the owner names, or the task's own replay scope,
+ * opened the first time and the same one for every later rerun of that task. The record names it (`scope.scopeId`) and the scope lists the rerun. A workflow run against simulated tools, events and providers
+ * is `simulation.run` in a scope; a replay rerun stays a walk through what was recorded.
  */
 export const SIMULATION_LABEL = "Simulated. Nothing was run, sent, spent or changed, and no real access was used; this is a walk through the recorded steps, not a new run.";
 export const SIMULATION_LIMITS = { steps: 200, pageRead: 100 } as const;
@@ -23,10 +26,16 @@ const WOULD: Readonly<Record<string, string>> = {
   ownership: "hand the task over again", lifecycle: "stop or suspend again", "meeting-decision": "apply the meeting decision again", branch: "open or change the side line again", submission: "submit again",
   compression: "compress the history again", instruction: "be given the instruction again", "source-retrieved": "be given the source again", "model-selected": "select the model route again", "harness-selected": "select the harness again",
 };
+/** The simulation scopes a rerun is recorded in (card P07; `SimulationService.replayScope` and `noteReplay`). */
+export interface ReplayScopes {
+  replayScope(by: Principal, taskId: string, scopeId?: string): Promise<string>;
+  noteReplay(scopeId: string, simulationId: string): Promise<void>;
+}
 export interface SimulatedStep { readonly seq: number; readonly kind: string; readonly summary: string; readonly would: string; readonly recordedOutcome: string; readonly simulatedOutcome: "as-recorded" | "failed-injected" | "not-reached"; readonly simulated: true }
 export interface SimulationBody {
   readonly taskId: string; readonly projectId: string; readonly by: string; readonly at: string; readonly from: number; readonly failAt?: number;
-  readonly scope: { readonly kind: "simulation"; readonly isolated: true; readonly tools: 0; readonly providers: 0; readonly effects: 0 };
+  /** `scopeId`: the simulation scope record the rerun is recorded in (card P07); absent only for a rerun recorded before scopes were composed. */
+  readonly scope: { readonly kind: "simulation"; readonly isolated: true; readonly tools: 0; readonly providers: 0; readonly effects: 0; readonly scopeId?: string };
   readonly label: string; readonly steps: readonly SimulatedStep[]; readonly truncated: boolean;
 }
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -34,12 +43,13 @@ const invalid = (field: string, message: string): never => { throw new DomainErr
 export class ReplaySimulationService {
   readonly #runner: CommandRunner;
   readonly #activity: Pick<ActivityService, "steps">;
-  private constructor(runner: CommandRunner, activity: Pick<ActivityService, "steps">) { this.#runner = runner; this.#activity = activity; }
-  static withEpoch(storage: ControllerStorage, epoch: number, activity: Pick<ActivityService, "steps">, options: RunnerOptions = {}): ReplaySimulationService { return new ReplaySimulationService(new CommandRunner(storage, epoch, options), activity); }
+  readonly #scopes: ReplayScopes | undefined;
+  private constructor(runner: CommandRunner, activity: Pick<ActivityService, "steps">, scopes: ReplayScopes | undefined) { this.#runner = runner; this.#activity = activity; this.#scopes = scopes; }
+  static withEpoch(storage: ControllerStorage, epoch: number, activity: Pick<ActivityService, "steps">, options: RunnerOptions = {}, scopes?: ReplayScopes): ReplaySimulationService { return new ReplaySimulationService(new CommandRunner(storage, epoch, options), activity, scopes); }
 
   /** Owner only. Walks the task's recorded steps from `from` (default the first) in an isolated scope and records what it would do again. `failAt` makes that step fail as a provider failure would, so the steps after it are not reached. */
-  async simulate(by: Principal, command: NoActor & { taskId: string; from?: number; failAt?: number }): Promise<{ id: string; replayed: boolean; simulation: SimulationBody }> {
-    onlyKnown(command, ["commandId", "taskId", "from", "failAt"]);
+  async simulate(by: Principal, command: NoActor & { taskId: string; from?: number; failAt?: number; scopeId?: string }): Promise<{ id: string; replayed: boolean; simulation: SimulationBody }> {
+    onlyKnown(command, ["commandId", "taskId", "from", "failAt", "scopeId"]);
     if (by.kind !== "owner") throw new DomainError("forbidden", "only the owner may run a simulation");
     const taskId = checkTaskId(command.taskId);
     const task = (await this.#runner.get("task", taskId))?.body as unknown as { projectId: string } | undefined;
@@ -47,6 +57,12 @@ export class ReplaySimulationService {
     const whole = (v: unknown, f: string): number | undefined => (v === undefined ? undefined : typeof v === "number" && Number.isSafeInteger(v) && v >= 1 ? v : invalid(f, "must be a step number from 1"));
     const from = whole(command.from, "from") ?? 1; const failAt = whole(command.failAt, "failAt");
     if (failAt !== undefined && failAt < from) invalid("failAt", "must be a step at or after from");
+    if (command.scopeId !== undefined && typeof command.scopeId !== "string") invalid("scopeId", "must be a simulation scope ID");
+    if (command.scopeId !== undefined && this.#scopes === undefined) invalid("scopeId", "simulation scopes are not available here");
+    const id = derivedId("sim", scopedCommandId(by.id, command.commandId));
+    // A repeat of a rerun already recorded answers it as it was (its scope included), before any scope is looked up again.
+    const earlier = (await this.#runner.get(KIND, id))?.body as unknown as SimulationBody | undefined;
+    const scopeId = earlier !== undefined ? earlier.scope.scopeId : this.#scopes === undefined ? undefined : await this.#scopes.replayScope(by, taskId, command.scopeId);
     const steps: SimulatedStep[] = []; let truncated = false; let failed = false;
     for (let after = from - 1; ; ) {
       const page = await this.#activity.steps(by, taskId, { after, limit: SIMULATION_LIMITS.pageRead });
@@ -66,14 +82,14 @@ export class ReplaySimulationService {
     }
     if (failAt !== undefined && !failed) invalid("failAt", "is not a step of this task in the walked range");
     const at = this.#runner.now();
-    const body: SimulationBody = { taskId, projectId: task.projectId, by: by.id, at, from, ...(failAt === undefined ? {} : { failAt }), scope: { kind: "simulation", isolated: true, tools: 0, providers: 0, effects: 0 }, label: SIMULATION_LABEL, steps, truncated };
-    const id = derivedId("sim", scopedCommandId(by.id, command.commandId));
+    const body: SimulationBody = { taskId, projectId: task.projectId, by: by.id, at, from, ...(failAt === undefined ? {} : { failAt }), scope: { kind: "simulation", isolated: true, tools: 0, providers: 0, effects: 0, ...(scopeId === undefined ? {} : { scopeId }) }, label: SIMULATION_LABEL, steps, truncated };
     const ref: AggregateRef = { kind: KIND, id };
     const r = await this.#runner.command("activity.replay.simulate", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
-      payload: { taskId, from, ...(failAt === undefined ? {} : { failAt }) },
+      payload: { taskId, from, ...(failAt === undefined ? {} : { failAt }), ...(command.scopeId === undefined ? {} : { scopeId: command.scopeId }) },
       build: async () => ({ ref, creates: true, changes: [{ type: "create" as const, ref, body: JSON.parse(JSON.stringify(body)) as JsonObject }], detail: { taskId, steps: steps.length } }),
     }));
     const stored = (await this.#runner.get(KIND, r.id))!.body as unknown as SimulationBody;
+    if (stored.scope.scopeId !== undefined && this.#scopes !== undefined) await this.#scopes.noteReplay(stored.scope.scopeId, r.id);
     return { id: r.id, replayed: r.replayed, simulation: stored };
   }
 
