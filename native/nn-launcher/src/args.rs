@@ -31,14 +31,23 @@ impl Mode {
 /// uses `private` (a window station and desktop made for the run, the same code as `--desktop private` here). Every value is refused by the product build.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub(crate) enum DesktopMode { #[default] Inherit, Empty, Winsta0, GrantRead, GrantFull, GrantStation, GrantDesktop, NewDesktop, NewStation, Private }
+pub(crate) enum DesktopMode { #[default] Inherit, Empty, Winsta0, GrantRead, GrantFull, GrantStation, GrantDesktop, NewDesktop, NewStation, Private, HomeDesktop, HomeStationRead, HomeStationFull }
 
 impl DesktopMode {
-    pub(crate) const ALL: [(&'static str, DesktopMode); 10] = [("inherit", DesktopMode::Inherit), ("empty", DesktopMode::Empty), ("winsta0", DesktopMode::Winsta0), ("grant-read", DesktopMode::GrantRead), ("grant-full", DesktopMode::GrantFull),
-        ("grant-station", DesktopMode::GrantStation), ("grant-desktop", DesktopMode::GrantDesktop), ("new-desktop", DesktopMode::NewDesktop), ("new-station", DesktopMode::NewStation), ("private", DesktopMode::Private)];
+    pub(crate) const ALL: [(&'static str, DesktopMode); 13] = [("inherit", DesktopMode::Inherit), ("empty", DesktopMode::Empty), ("winsta0", DesktopMode::Winsta0), ("grant-read", DesktopMode::GrantRead), ("grant-full", DesktopMode::GrantFull),
+        ("grant-station", DesktopMode::GrantStation), ("grant-desktop", DesktopMode::GrantDesktop), ("new-desktop", DesktopMode::NewDesktop), ("new-station", DesktopMode::NewStation), ("private", DesktopMode::Private),
+        ("home-desktop", DesktopMode::HomeDesktop), ("home-desktop-station-read", DesktopMode::HomeStationRead), ("home-desktop-station-full", DesktopMode::HomeStationFull)];
     pub(crate) fn parse(s: &str) -> Option<DesktopMode> { Self::ALL.iter().find(|(n, _)| *n == s).map(|(_, m)| *m) }
     #[cfg_attr(not(feature = "experiment"), allow(dead_code))]
     pub(crate) fn name(self) -> &'static str { Self::ALL.iter().find(|(_, m)| *m == self).map(|(n, _)| *n).unwrap_or("inherit") }
+}
+
+/// The "home" modes (the common one-account PC, not elevated; EXPERIMENT only): `home-desktop` makes ONE desktop on the launcher's CURRENT window station (WinSta0 in a signed-in session) with its final
+/// access list (the launcher's own account, SYSTEM, the container) and writes nothing to the station; the two `home-desktop-station-*` modes add ONE temporary entry for the container on that station
+/// (read level, or the full level the private station measured) and remove it again. Never read by the product build.
+impl DesktopMode {
+    #[cfg_attr(not(feature = "experiment"), allow(dead_code))]
+    pub(crate) fn is_home(self) -> bool { matches!(self, DesktopMode::HomeDesktop | DesktopMode::HomeStationRead | DesktopMode::HomeStationFull) }
 }
 
 /// Round 5 (EXPERIMENT only): the process creation flag that decides how a console is given to the child. `no-window` (CREATE_NO_WINDOW) is the product's behaviour.
@@ -83,6 +92,8 @@ pub(crate) struct Args {
     pub(crate) capabilities: Vec<String>, // names or SID strings, in the order given (repeatable --capability)
     pub(crate) desktop: DesktopMode, // round 5, experiment only
     pub(crate) creation: Creation,   // round 5, experiment only
+    pub(crate) steps: Vec<String>, // home-probe: only these steps (repeatable, or a comma list); experiment only
+    pub(crate) force_station_entry: bool, // home-probe: also run the modes that write a temporary entry on the window station, even when the desktop alone worked; experiment only
     pub(crate) dump: Vec<String>, // paths whose DACL is printed as SDDL after the grants are applied and again after the child ended (repeatable --dump)
     pub(crate) sid: Option<String>, // check, revoke, delete-profile: the SID the backend expects for --name (a cross-check, never a selection: the SID is always derived from the name)
     pub(crate) profile_record: Option<String>, // run, info, delete-profile with a per-run profile name: the record file of the profile in the supervisor's control folder (see profile.rs)
@@ -100,6 +111,9 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--sid" => { let v = value("--sid")?; if !profile::is_app_sid_text(&v) { return Err("--sid is not an AppContainer SID (S-1-15-2 and seven more parts)".into()); } a.sid = Some(v); }
             "--profile-record" => { let v = value("--profile-record")?; if v.is_empty() { return Err("--profile-record is empty".into()); } a.profile_record = Some(v); }
             "--win32k-off" | "--no-kill-on-close" | "--keep-profile" | "--stdout-pipe" | "--stderr-pipe" | "--stdout-nul-rw" | "--stderr-nul-rw" | "--dump" | "--desktop" | "--creation" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
+            "--steps" | "--force-station-entry" if !EXPERIMENT => return Err(format!("{flag} is an experiment option and is not in this build")),
+            "--steps" => { for part in value("--steps")?.split(',') { let p = part.trim(); if p.is_empty() { return Err("--steps has an empty name".into()); } a.steps.push(p.to_string()); } }
+            "--force-station-entry" => a.force_station_entry = true,
             "--exe" => a.exe = Some(value("--exe")?),
             "--cmdline" => a.cmdline = Some(value("--cmdline")?),
             "--cwd" => a.cwd = Some(value("--cwd")?),
@@ -133,7 +147,7 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
             "--stdout-nul-rw" => a.stdout_nul = true,
             "--stderr-nul-rw" => a.stderr_nul = true,
             "--dump" => a.dump.push(value("--dump")?),
-            "--desktop" => a.desktop = DesktopMode::parse(&value("--desktop")?).ok_or("--desktop: inherit, empty, winsta0, grant-read, grant-full, grant-station, grant-desktop, new-desktop, new-station or private")?,
+            "--desktop" => a.desktop = DesktopMode::parse(&value("--desktop")?).ok_or("--desktop: inherit, empty, winsta0, grant-read, grant-full, grant-station, grant-desktop, new-desktop, new-station, private, home-desktop, home-desktop-station-read or home-desktop-station-full")?,
             "--creation" => a.creation = Creation::parse(&value("--creation")?).ok_or("--creation: no-window, detached, none or new-console")?,
             "--capability" => {
                 let c = value("--capability")?;
@@ -185,6 +199,8 @@ mod tests {
     const EXPERIMENT_FLAGS: [&str; 8] = ["--win32k-off", "--no-kill-on-close", "--keep-profile", "--stdout-pipe", "--stderr-pipe", "--stdout-nul-rw", "--stderr-nul-rw", "--dump"];
     /// Round 5 options that take a value: each is refused by the product build, whatever the value.
     const ROUND5_OPTIONS: [(&str, &str); 2] = [("--desktop", "grant-full"), ("--creation", "detached")];
+    /// The home-case options (one account, not elevated): refused by the product build too, with and without a value.
+    const HOME_OPTIONS: [(&str, Option<&str>); 5] = [("--steps", Some("desktop-cmd")), ("--force-station-entry", None), ("--desktop", Some("home-desktop")), ("--desktop", Some("home-desktop-station-read")), ("--desktop", Some("home-desktop-station-full"))];
 
     #[test]
     fn the_backends_own_argument_list_is_accepted_by_every_build() {
@@ -242,7 +258,7 @@ mod tests {
             let e = parse(&["run", "--stdin", stdin]).err().unwrap_or_else(|| panic!("--stdin {stdin} was accepted"));
             assert!(e.contains("only file:PATH"), "{stdin}: {e}");
         }
-        for command in ["grant", "dump", "open-test", "context", "desktop-revoke", "Run", "RUN", "help", ""] {
+        for command in ["grant", "dump", "open-test", "context", "desktop-revoke", "home-probe", "home-revoke", "ui-test", "deelevate", "Run", "RUN", "help", ""] {
             let e = parse(&[command]).err().unwrap_or_else(|| panic!("command {command:?} was accepted"));
             assert!(e.contains("not in this build"), "{command}: {e}");
         }
@@ -368,5 +384,41 @@ mod tests {
         for bad in ["Inherit", "GRANT-FULL", "grant", "", "winsta0\\default", "new_station"] { assert!(parse(&["run", "--desktop", bad]).is_err(), "--desktop {bad:?}"); }
         for bad in ["No-Window", "detach", "", "CREATE_NO_WINDOW"] { assert!(parse(&["run", "--creation", bad]).is_err(), "--creation {bad:?}"); }
         assert!(parse(&["run", "--desktop"]).unwrap_err().ends_with("needs a value"));
+    }
+
+    #[cfg(not(feature = "experiment"))]
+    #[test]
+    fn the_product_build_refuses_the_home_case_options_and_commands() {
+        for (flag, value) in HOME_OPTIONS {
+            let mut v = product_run();
+            v.push(flag);
+            if let Some(x) = value { v.push(x); }
+            assert!(parse(&v).unwrap_err().contains("not in this build"), "{flag} {value:?}");
+        }
+        for command in ["home-probe", "home-revoke", "ui-test", "deelevate"] {
+            for extra in [vec![], vec!["--name", NAME], vec!["--steps", "context"]] {
+                let mut v = vec![command];
+                v.extend(extra);
+                assert!(parse(&v).unwrap_err().contains("not in this build"), "{command}");
+            }
+        }
+    }
+
+    #[cfg(feature = "experiment")]
+    #[test]
+    fn the_home_case_options_take_exactly_their_values() {
+        let a = parse(&["home-probe", "--steps", "context,desktop-cmd", "--steps", "inherit", "--force-station-entry", "--aap-policy", "optout"]).expect("home-probe");
+        assert_eq!(a.steps, ["context", "desktop-cmd", "inherit"]);
+        assert!(a.force_station_entry);
+        assert_eq!(a.aap, Some(AAP_OPT_OUT));
+        for (name, mode) in [("home-desktop", DesktopMode::HomeDesktop), ("home-desktop-station-read", DesktopMode::HomeStationRead), ("home-desktop-station-full", DesktopMode::HomeStationFull)] {
+            let a = parse(&["run", "--desktop", name]).unwrap();
+            assert_eq!((a.desktop, a.desktop.is_home(), a.desktop.name()), (mode, true, name));
+        }
+        for other in DesktopMode::ALL.iter().filter(|(n, _)| !n.starts_with("home-")) { assert!(!other.1.is_home(), "{}", other.0); }
+        for bad in ["", "context,", ",context", "a,,b"] { assert!(parse(&["home-probe", "--steps", bad]).is_err(), "--steps {bad:?}"); }
+        assert!(parse(&["home-probe", "--steps"]).unwrap_err().ends_with("needs a value"));
+        assert!(!parse(&["home-probe"]).unwrap().force_station_entry && parse(&["home-probe"]).unwrap().steps.is_empty());
+        for command in ["home-probe", "home-revoke", "ui-test"] { assert!(parse(&[command]).is_ok(), "{command}"); }
     }
 }

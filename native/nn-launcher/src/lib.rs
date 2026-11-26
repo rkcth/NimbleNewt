@@ -12,6 +12,9 @@ mod winobj;
 // Round 5 (experiment build and tests only): the pure rules for the window-object entries; not in the product binary.
 #[cfg(any(test, feature = "experiment"))]
 mod deskrules;
+// The pure rules of the one-account ("home") measurement: steps, the access-list summary, the write rules (experiment build and tests only; not in the product binary).
+#[cfg(any(test, feature = "experiment"))]
+mod homerules;
 #[cfg(windows)]
 mod win;
 

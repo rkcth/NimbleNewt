@@ -207,6 +207,44 @@ jobs:
           elif [ "$rc" -eq 1 ]; then echo "::warning::reproducibility result: DIFFERENT - see nn-launcher.repro.json and the why lines above; this is a report, not a gate"
           else echo "::warning::the comparison itself failed (exit $rc); see the output above"; fi
           exit 0
+      # Card A03b, the home case (2026-11-25; README "The home case"): the owner's own PC has ONE account that runs as an administrator under UAC, not elevated, and there the product launcher cannot make its
+      # named private window station (error 5) and fails closed. These runs measure the alternatives on the user's OWN window station (`home-probe`: a private desktop on WinSta0 with and without a temporary
+      # entry for the container, and the desktop inherited) from three processes: (1) as this elevated runner, (2) as a DE-ELEVATED child of it (`deelevate`: Administrators deny-only, privileges removed,
+      # medium integrity: what access checks see in a UAC-filtered token, built with CreateRestrictedToken; the UAC linked token itself is not used, so the result is for that token, not for every UAC state),
+      # (3) the same de-elevated with the plain AppContainer. Cross-check: the PRODUCT launcher's `info` run de-elevated should reproduce the owner's measurement (the named window station refused,
+      # error 5): if it does not, the de-elevation does not behave like the owner's token and (2) and (3) say nothing about it. A REPORT, not a gate (`continue-on-error`, `|| true`): a finding may be a
+      # failure. Nothing is changed outside the run except one temporary entry for a throw-away container on WinSta0 when the desktop alone fails, removed in the same step.
+      - name: "Home case: one account, not elevated (elevated and de-elevated runs of the same steps; a report, not a gate)"
+        shell: bash
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          set +e
+          exp="$PWD/experiments/windows-appcontainer/launcher/target/release/nn-appc-launcher.exe"
+          prod="$PWD/native/nn-launcher/target/release/nn-launcher.exe"
+          out="$RUNNER_TEMP/appc-out/home"; mkdir -p "$out"
+          if [ ! -f "$exp" ]; then echo "::warning::the experiment launcher was not built; no home-case run"; exit 0; fi
+          run_home() { # label, extra launcher arguments before home-probe, home-probe arguments
+            label="$1"; shift; pre="$1"; shift
+            # shellcheck disable=SC2086
+            "$exp" $pre home-probe --timeout-ms 20000 "$@" > "$out/home-$label.jsonl" 2> "$out/home-$label.log"
+            echo "home-probe $label exited $?"
+            node experiments/windows-appcontainer/home.mjs summarize "$out/home-$label.jsonl" --label "$label" | tee "$out/home-$label.md" >> "$GITHUB_STEP_SUMMARY"
+            node scripts/redact-log.mjs < "$out/home-$label.log" | tail -40
+          }
+          run_home elevated-lpac "" --aap-policy optout
+          run_home deelevated-lpac deelevate --aap-policy optout
+          run_home deelevated-plain deelevate --aap-policy none
+          # the cross-check: the product launcher's info, de-elevated
+          if [ -f "$prod" ]; then
+            hex16="$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")"; home_name="NimbleNewtRun-$hex16"
+            mkdir -p "$RUNNER_TEMP/home-records"
+            "$exp" deelevate --exe "$(cygpath -w "$prod")" info --name "$home_name" --profile-record "$(cygpath -w "$RUNNER_TEMP/home-records/$home_name.sid")" > "$out/product-info-deelevated.txt" 2>&1
+            node scripts/redact-log.mjs < "$out/product-info-deelevated.txt"
+            { echo "### Cross-check: the product launcher's info, de-elevated"; echo; echo '```'; grep -o '"windowStationOk":[a-z]*\|"windowStationError":"[^"]*"\|"elevated":[a-z]*\|"profileGone":[a-z]*' "$out/product-info-deelevated.txt" | sort -u; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
       # Card A03b slice 3: the administrator installer script is parsed by PowerShell and run with -WhatIf and Verify. Neither changes the machine: the checks below fail the step if an account or a folder appeared.
       # The owner's first real run (Windows PowerShell 5.1, elevated, `-File`, a relative -LauncherPath, the default account name) failed in the hash step. This step now runs EXACTLY that command (the product
       # nn-launcher.exe built above, its sha256, `powershell.exe -ExecutionPolicy Bypass -File ... -Action Install -LauncherPath .\nn-launcher.exe -ExpectedSha256 <hash> -AllowUnsigned -WhatIf`) under Windows

@@ -38,7 +38,7 @@ pub(crate) struct Plan { pub(crate) station: Option<u32>, pub(crate) desktop: Op
 
 pub(crate) fn plan(mode: DesktopMode) -> Plan {
     match mode {
-        DesktopMode::Inherit | DesktopMode::Empty | DesktopMode::Winsta0 | DesktopMode::Private => Plan { station: None, desktop: None, create: Create::No },
+        DesktopMode::Inherit | DesktopMode::Empty | DesktopMode::Winsta0 | DesktopMode::Private | DesktopMode::HomeDesktop | DesktopMode::HomeStationRead | DesktopMode::HomeStationFull => Plan { station: None, desktop: None, create: Create::No },
         DesktopMode::GrantRead => Plan { station: Some(STATION_READ), desktop: Some(DESKTOP_READ), create: Create::No },
         DesktopMode::GrantFull => Plan { station: Some(STATION_FULL), desktop: Some(DESKTOP_FULL), create: Create::No },
         DesktopMode::GrantStation => Plan { station: Some(STATION_FULL), desktop: None, create: Create::No },
@@ -51,7 +51,7 @@ pub(crate) fn plan(mode: DesktopMode) -> Plan {
 fn log(msg: &str) { eprintln!("nn-desktop: {msg}"); }
 
 /// The name of a window station or desktop handle (UOI_NAME), or "?".
-fn object_name(h: HANDLE) -> String {
+pub(crate) fn object_name(h: HANDLE) -> String {
     unsafe {
         let mut buf = [0u16; 512];
         let mut needed = 0u32;
@@ -62,7 +62,7 @@ fn object_name(h: HANDLE) -> String {
 }
 
 /// The USEROBJECTFLAGS.dwFlags of a window station: bit 0 is WSF_VISIBLE, which only the interactive window station has. -1 when it cannot be read.
-fn station_flags(h: HANDLE) -> i64 {
+pub(crate) fn station_flags(h: HANDLE) -> i64 {
     unsafe {
         let mut buf = [0u32; 3]; // USEROBJECTFLAGS: fInherit (BOOL), fReserved (BOOL), dwFlags (DWORD)
         let mut needed = 0u32;
@@ -74,7 +74,7 @@ pub(crate) fn current_station_name() -> String { object_name(unsafe { GetProcess
 pub(crate) fn current_desktop_name() -> String { object_name(unsafe { GetThreadDesktop(GetCurrentThreadId()) } as HANDLE) }
 
 /// The DACL of a window object as SDDL text ("error N" when it cannot be read). `h` needs READ_CONTROL.
-fn object_sddl(h: HANDLE) -> String {
+pub(crate) fn object_sddl(h: HANDLE) -> String {
     unsafe {
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
         let rc = GetSecurityInfo(h, SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION, null_mut(), null_mut(), null_mut(), null_mut(), &mut sd);
@@ -93,7 +93,7 @@ fn object_sddl(h: HANDLE) -> String {
 }
 
 /// How many explicit entries for the SID the object's DACL holds (Err: the Win32 error).
-fn object_entries(h: HANDLE, sid: PSID) -> Result<u32, u32> {
+pub(crate) fn object_entries(h: HANDLE, sid: PSID) -> Result<u32, u32> {
     unsafe {
         let mut acl: *mut ACL = null_mut();
         let mut sd: PSECURITY_DESCRIPTOR = null_mut();
@@ -106,7 +106,7 @@ fn object_entries(h: HANDLE, sid: PSID) -> Result<u32, u32> {
 }
 
 /// Removes every explicit entry that names the SID and keeps every other entry in its order (deskrules::without_explicit_entries); with none there, nothing is written.
-fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
+pub(crate) fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
     let sid_b = sid_bytes(sid).ok_or(ERR_NOT_PROFILE_SID)?;
     let Some(old) = acl_copy(h)? else { return Ok(()) }; // a NULL DACL holds no entry
     let (new, removed) = deskrules::without_explicit_entries(old.bytes(), &sid_b).ok_or(ERR_BAD_ACL)?;
@@ -121,13 +121,13 @@ struct Touched { what: &'static str, name: String, mask: u32, applied: bool, err
     original: Option<AclCopy>, matches: Option<bool>, reordered: bool }
 
 /// Everything round 5 does to window objects for one run. Dropping it undoes the entries and closes what it opened or made.
-pub(crate) struct Desk { sid: PSID, items: Vec<Touched>, pub(crate) lp_desktop: Option<Vec<u16>>, pub(crate) lp_text: String, pub(crate) failed: Option<String> }
+pub(crate) struct Desk { sid: PSID, items: Vec<Touched>, pub(crate) lp_desktop: Option<Vec<u16>>, pub(crate) lp_text: String, pub(crate) failed: Option<String>, close_errors: Vec<(String, u32)> }
 
-fn open_station(name: &str, access: u32) -> HANDLE { unsafe { OpenWindowStationW(wide(name).as_ptr(), 0, access) as HANDLE } }
-fn open_desktop(name: &str, access: u32) -> HANDLE { unsafe { OpenDesktopW(wide(name).as_ptr(), 0, 0, access) as HANDLE } }
+pub(crate) fn open_station(name: &str, access: u32) -> HANDLE { unsafe { OpenWindowStationW(wide(name).as_ptr(), 0, access) as HANDLE } }
+pub(crate) fn open_desktop(name: &str, access: u32) -> HANDLE { unsafe { OpenDesktopW(wide(name).as_ptr(), 0, 0, access) as HANDLE } }
 
 impl Desk {
-    pub(crate) fn new(sid: PSID) -> Desk { Desk { sid, items: Vec::new(), lp_desktop: None, lp_text: "(null)".into(), failed: None } }
+    pub(crate) fn new(sid: PSID) -> Desk { Desk { sid, items: Vec::new(), lp_desktop: None, lp_text: "(null)".into(), failed: None, close_errors: Vec::new() } }
 
     fn grant(&mut self, what: &'static str, is_station: bool, name: String, mask: u32) {
         let h = if is_station { open_station(&name, READ_CONTROL_BIT | WRITE_DAC_BIT) } else { open_desktop(&name, READ_CONTROL_BIT | WRITE_DAC_BIT) };
@@ -161,6 +161,7 @@ impl Desk {
             DesktopMode::Winsta0 => { self.lp_desktop = Some(wide("WinSta0\\Default")); self.lp_text = "WinSta0\\Default".into(); }
             _ => {}
         }
+        if mode.is_home() { self.prepare_home(mode, &station); return; }
         if p.station.is_none() && p.desktop.is_none() && p.create == Create::No { return; }
         // Only the SID of one AppContainer profile ever gets an entry (never a group, an account, a capability).
         if !crate::winobj::is_profile_sid(&sid_string(self.sid)) {
@@ -234,6 +235,42 @@ impl Desk {
         }
     }
 
+    /// The home modes (one account, not elevated; see homerules.rs): ONE desktop made on the launcher's CURRENT window station with its final access list (the launcher's own account, SYSTEM and the
+    /// container, nothing written afterwards), and, for the two `home-desktop-station-*` modes, ONE temporary allow entry for the container on that station first (removed again in `finish`, read back,
+    /// compared with the copy taken before). The entry is written only to the interactive station WinSta0 (deskrules::may_write_interactive_station); a station of a service is never touched here.
+    fn prepare_home(&mut self, mode: DesktopMode, station: &str) {
+        if let Err(e) = crate::homerules::may_make_home_desktop(station) { self.failed = Some(format!("window objects: {e}")); return; }
+        let Some(sid_b) = sid_bytes(self.sid) else { self.failed = Some(format!("window objects: refused: the SID is not well formed (error {ERR_NOT_PROFILE_SID})")); return };
+        if let Some(mask) = crate::homerules::home_station_mask(mode) {
+            let flags = station_flags(unsafe { GetProcessWindowStation() } as HANDLE);
+            if let Err(e) = crate::homerules::may_write_interactive_station(station, flags) { log(&format!("no grant: {e}")); self.failed = Some(format!("window objects: {e}")); return; }
+            self.grant("window station", true, station.to_string(), mask);
+            if self.failed.is_some() { return; }
+        }
+        let own = match super::privdesk::own_principals() { Ok(o) => o, Err(e) => { self.failed = Some(format!("window objects: the launcher's own account could not be read (error {e})")); return; } };
+        let mut sd = match super::privdesk::creation_sd(&own[0], &sid_b, crate::winobj::DESKTOP_RIGHTS, crate::winobj::DESKTOP_FULL, "desktop") { Ok(s) => s, Err(e) => { self.failed = Some(e); return; } };
+        let name = format!("nn-home-{:x}-{:x}", unsafe { GetCurrentProcessId() }, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64 & 0xFFFF_FFFF).unwrap_or(0));
+        log(&format!("before create home desktop {name} in {station}"));
+        let sa = sd.attributes();
+        let h = unsafe { SetLastError(0); CreateDesktopW(wide(&name).as_ptr(), null(), null(), 0, crate::winobj::DESKTOP_RIGHTS, &sa) } as HANDLE;
+        let created_error = unsafe { GetLastError() };
+        let mut t = Touched { what: "home desktop", name: name.clone(), mask: crate::winobj::DESKTOP_RIGHTS, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
+        if h.is_null() { t.error = Some(created_error); }
+        else if created_error == ERROR_ALREADY_EXISTS { t.error = Some(ERROR_ALREADY_EXISTS); }
+        else {
+            // The access list is read back and checked exactly like the private desktop's: one flag-free entry for the container, otherwise only SYSTEM, Administrators, OWNER RIGHTS and the launcher's own account.
+            match acl_copy(h) {
+                Err(e) => t.error = Some(e),
+                Ok(None) => t.error = Some(ERR_NULL_DACL),
+                Ok(Some(c)) => match crate::winobj::private_acl_ok(c.bytes(), &sid_b, crate::winobj::DESKTOP_RIGHTS, &own) { Ok(()) => t.applied = true, Err(why) => { log(&format!("home desktop access list not acceptable: {why}")); t.error = Some(ERR_BAD_ACL); } },
+            }
+        }
+        log(&format!("after create home desktop {name}: applied {} error {:?}", t.applied, t.error));
+        if t.applied { self.lp_desktop = Some(wide(&format!("{station}\\{name}"))); self.lp_text = format!("{station}\\{name}"); }
+        else { self.failed = Some(format!("window objects: the home desktop {name} could not be made or its access list is not acceptable (error {})", t.error.unwrap_or(0))); }
+        self.items.push(t);
+    }
+
     /// Removes the entries from the objects that were changed (the made ones are only closed), reads each DACL back, closes every handle. Safe to call twice.
     pub(crate) fn finish(&mut self) {
         for t in self.items.iter_mut() {
@@ -254,7 +291,8 @@ impl Desk {
                 log(&format!("after revoke {} {}: revoked {} entries left {} same as before {:?} order differs {}", t.what, t.name, t.revoked, t.left, t.matches, t.reordered));
             }
             if t.owned {
-                unsafe { if t.is_station { CloseWindowStation(t.handle as HWINSTA); } else { CloseDesktop(t.handle as HDESK); } }
+                let closed = unsafe { if t.is_station { CloseWindowStation(t.handle as HWINSTA) } else { CloseDesktop(t.handle as HDESK) } };
+                if closed == 0 { self.close_errors.push((format!("{} {}", t.what, t.name), unsafe { GetLastError() })); }
                 t.owned = false;
             }
         }
@@ -278,6 +316,7 @@ impl Desk {
             i.render()
         }).collect();
         o.raw("objects", format!("[{}]", items.join(",")));
+        o.raw("closeErrors", format!("[{}]", self.close_errors.iter().map(|(what, e)| { let mut c = Json::new(); c.s("object", what); c.n("error", *e as i64); c.render() }).collect::<Vec<_>>().join(",")));
         o.b("allReverted", self.all_reverted());
         o.render()
     }
@@ -287,7 +326,7 @@ impl Drop for Desk { fn drop(&mut self) { self.finish(); } }
 
 // ---------------------------------------------------------------------------------------------------------------- the `context` and `desktop-revoke` commands
 
-fn integrity_rid() -> i64 {
+pub(crate) fn integrity_rid() -> i64 {
     unsafe {
         let mut tok: HANDLE = null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return -1; }
@@ -304,7 +343,7 @@ fn integrity_rid() -> i64 {
     }
 }
 
-fn os_version() -> (i64, i64, i64) {
+pub(crate) fn os_version() -> (i64, i64, i64) {
     unsafe {
         let mut v: OSVERSIONINFOW = zeroed();
         v.dwOSVersionInfoSize = size_of::<OSVERSIONINFOW>() as u32;

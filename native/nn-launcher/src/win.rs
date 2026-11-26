@@ -50,6 +50,10 @@ mod privdesk;
 #[cfg(feature = "experiment")]
 #[path = "desk.rs"]
 mod desk;
+// The one-account ("home") measurement: `home-probe`, `ui-test`, `home-revoke`, `deelevate` (experiment build only; the pure rules are in homerules.rs).
+#[cfg(feature = "experiment")]
+#[path = "home.rs"]
+mod home;
 
 fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
@@ -1055,6 +1059,15 @@ pub fn main() {
         println!("{}", open_test());
         std::process::exit(0);
     }
+    #[cfg(feature = "experiment")]
+    if raw.get(1).map(String::as_str) == Some("ui-test") {
+        println!("{}", home::ui_test());
+        std::process::exit(0);
+    }
+    #[cfg(feature = "experiment")]
+    if raw.get(1).map(String::as_str) == Some("deelevate") {
+        std::process::exit(home::deelevate(&raw[2..]));
+    }
     let mut j = Json::new();
     j.s("tool", TOOL);
     j.n("version", 1);
@@ -1062,6 +1075,8 @@ pub fn main() {
         Ok(a) => a,
         Err(e) => { let o = fail(j, "arguments", &e); println!("{}", o.j.render()); std::process::exit(o.code); }
     };
+    #[cfg(feature = "experiment")]
+    if a.command == "home-probe" { std::process::exit(home::home_probe(&a)); }
     j.s("command", &a.command);
     j.b("elevated", is_elevated());
     j.n("sessionId", session_id());
@@ -1101,6 +1116,15 @@ pub fn main() {
             desk::context(&mut j);
             j.b("ok", true);
             Outcome { j, code: 0 }
+        }
+        #[cfg(feature = "experiment")]
+        "home-revoke" => {
+            // Removes the container's explicit entries from WinSta0 (after a killed `--desktop home-desktop-station-*` run); the SID is derived from the name, no profile is made.
+            let mut j = j;
+            match desk::derived_sid(&a.name) {
+                Err(e) => fail(j, "container", &e),
+                Ok(sid) => { let ok = home::home_revoke(&mut j, sid.0); j.b("ok", ok); Outcome { j, code: if ok { 0 } else { EXIT_LAUNCHER_FAILED } } }
+            }
         }
         #[cfg(feature = "experiment")]
         "desktop-revoke" => {

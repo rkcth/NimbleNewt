@@ -100,7 +100,7 @@ fn random_seed() -> u64 {
 
 /// The launcher's own token user and token owner (binary SIDs, the user FIRST): the account the objects are made for, and the only accounts the read-back check accepts besides the fixed ones.
 /// The PROCESS token (the launcher never impersonates; the objects get the process token's owner).
-fn own_principals() -> Result<Vec<Vec<u8>>, u32> {
+pub(crate) fn own_principals() -> Result<Vec<Vec<u8>>, u32> {
     unsafe {
         let mut tok: HANDLE = null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return Err(GetLastError()); }
@@ -123,7 +123,7 @@ fn own_principals() -> Result<Vec<Vec<u8>>, u32> {
 fn trouble(what: &str, code: u32) -> String { format!("window objects: the private {what} (error {code})") }
 
 /// A security descriptor (absolute form) holding one DACL, kept alive with the ACL it points to for the creating call. The DACL is marked protected, so nothing is inherited into it.
-struct CreationSd { _acl: Vec<usize>, sd: Box<SECURITY_DESCRIPTOR> }
+pub(crate) struct CreationSd { _acl: Vec<usize>, sd: Box<SECURITY_DESCRIPTOR> }
 impl CreationSd {
     fn new(acl: &[u8]) -> Result<CreationSd, u32> {
         unsafe {
@@ -139,13 +139,13 @@ impl CreationSd {
         }
     }
     /// SECURITY_ATTRIBUTES for the creating call (the handle is not inheritable). Valid while `self` lives.
-    fn attributes(&mut self) -> SECURITY_ATTRIBUTES {
+    pub(crate) fn attributes(&mut self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: &mut *self.sd as *mut SECURITY_DESCRIPTOR as *mut c_void, bInheritHandle: 0 }
     }
 }
 
 /// The creation descriptor of one private object (Err: a typed "window objects:" message).
-fn creation_sd(user: &[u8], container: &[u8], mask: u32, full: u32, what: &str) -> Result<CreationSd, String> {
+pub(crate) fn creation_sd(user: &[u8], container: &[u8], mask: u32, full: u32, what: &str) -> Result<CreationSd, String> {
     let acl = winobj::private_dacl(user, container, mask, full).ok_or_else(|| format!("window objects: refused: no access list could be built for the private {what} (error {ERR_BAD_ACL})"))?;
     CreationSd::new(&acl).map_err(|e| trouble(&format!("{what}'s security descriptor could not be built"), e))
 }

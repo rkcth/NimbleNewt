@@ -14,6 +14,7 @@ import {
   REBUILT_LABEL, chooseProbeReport, createFixtures, extractProbeReport, judgeCell, judgeProbe, makeTarball, matrixCells, parseLauncherLine, pickOutboundHost, quoteWindowsArg, removeTree, renderMarkdown,
   scrubText, selectCells, tally, validateReport, witnessProblem,
 } from "../experiments/windows-appcontainer/lib.mjs";
+import { OPTIONS as HOME_OPTIONS, childReport, groupVerdict, judgeHome, parseHomeLines, renderHomeMarkdown } from "../experiments/windows-appcontainer/home.mjs";
 import { discoverTools, parseCli, runExperiment } from "../experiments/windows-appcontainer/run-experiment.mjs";
 import {
   LADDER_STEPS, LPAC_COM, MAX_TIMEOUTS_PER_VARIANT, STEP_TIMEOUT_MS, WELL_KNOWN_CAPABILITY_SIDS, buildStepArgs, firewallCommands, judgeFirewall, judgeStep, ladderEnv, ladderPlan, ladderVariants,
@@ -2627,7 +2628,7 @@ test("the launcher source (round 5): the window objects are touched only in the 
   assert.match(win, /"context" => \{/);
   // a set-up that failed stops the run before anything starts
   assert.match(win, /if let Some\(e\) = &desk\.failed \{ return Err\(\("grant", e\.clone\(\)\)\);/);
-  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 7, "every set-up failure message starts with the marker the harness looks for");
+  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 12, "every set-up failure message starts with the marker the harness looks for (7 of round 5, 5 of the home modes)");
   // before and after lines on standard error for each step of the set-up
   for (const phrase of ["before grant", "after grant", "before create desktop", "after create desktop", "before create window station", "after create window station", "before revoke", "after revoke"]) assert.ok(desk.includes(phrase), phrase);
   // no registry, no service, no persistent setting
@@ -2646,7 +2647,8 @@ test("the launcher crate (round 5): the extra windows-sys modules come only with
   assert.ok(feature, "experiment feature");
   const extra = [...feature[1].matchAll(/"windows-sys\/([A-Za-z0-9_]+)"/g)].map((m) => m[1]).sort();
   // (Win32_Graphics_Gdi and Win32_System_StationsAndDesktops became the product's own with the private window station fix)
-  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_System_SystemInformation"]);
+  // (the home-case round added the child-side window, clipboard, hook, atom and keyboard-state calls, still experiment only)
+  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"]);
   const deps = /^windows-sys = \{ version = "0\.59", features = \[([^\]]*)\]/m.exec(toml)[1];
   const listed = [...deps.matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1]);
   assert.deepEqual(listed, ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Threading"]);
@@ -2944,4 +2946,147 @@ test("A03b real Install/Verify/Uninstall step: hosted only, after the staging, n
   assert.deepEqual([...step.matchAll(/Remove-LocalUser[^\n]*/g)].map((m) => m[0].replace(/[\s}]+$/, "")), ["Remove-LocalUser -Name $name"], "the user is removed only by its exact generated name");
   assert.ok(!/installer_real|nn-real-|nnprobe/.test(own), "never in the own-runner job");
   assert.ok(wf.includes("permissions:\n  contents: read\n"), "permissions unchanged");
+});
+
+// ------------------------------------------------------------------------------------------------ the home case (one account, not elevated)
+
+const homeLine = (o) => JSON.stringify({ tool: "nn-appc-launcher", probe: "home", ...o });
+const uiReport = { tool: "nn-appc-launcher", probe: "ui-test", user32Loaded: true, windowStation: "WinSta0", desktop: "nn-home-1-2", windowsSeen: 0, windowsSeenVisible: 0, openClipboardOk: false, lowLevelKeyboardHookInstalled: false, globalAtomAdded: false, screenPixelReadable: false, ok: true };
+const runLine = (step, group, works, extra = {}) => homeLine({ step, group, program: step.split("-").slice(1).join("-"), ok: true, works, childExitCode: works ? 0 : -1073741502, childStdout: step.endsWith("ui-test") ? JSON.stringify(uiReport) : "", ...extra });
+const fixture = (verdicts) => [
+  homeLine({ step: "context", ok: true, elevated: false, elevationType: "limited", adminGroup: "deny-only", integrity: "medium", sessionId: 1, osBuild: 26200, windowStation: "WinSta0", interactiveStation: true, desktop: "Default" }),
+  homeLine({ step: "station-access", ok: true, station: { name: "WinSta0", openWithWriteDac: false, openWithCreateDesktop: true, owner: "S-1-5-18", allApplicationPackagesAllow: ["0x20002"] } }),
+  homeLine({ step: "profile", ok: true, profileDeleted: true, profileGone: true }),
+  ...Object.entries(verdicts).flatMap(([group, works]) => works === null ? [homeLine({ step: `${group}-ui-test`, group, skipped: true, reason: "skipped: x", ok: true })] : [runLine(`${group}-ui-test`, group, works), runLine(`${group}-node`, group, works), runLine(`${group}-cmd`, group, true)]),
+  homeLine({ step: "summary", ok: true, stationEntryLeftBehind: false }),
+].join("\nstray line\n");
+
+test("home.mjs: the strongest working option is chosen in the documented order, and a skipped or missing group is not a pass", () => {
+  assert.deepEqual(HOME_OPTIONS.map((o) => o.group), ["desktop", "station-read", "station-full", "inherit"]);
+  const lines = parseHomeLines(fixture({ inherit: true, desktop: true, "station-read": null }));
+  assert.equal(lines.length, 11, "3 single steps, 3 + 3 lines for the two groups, 1 skipped line, the summary; the stray text is ignored");
+  const j = judgeHome(lines);
+  assert.deepEqual(j.verdicts, { desktop: "works", "station-read": "skipped", "station-full": "not-run", inherit: "works" });
+  assert.equal(j.strongestWorking, "desktop");
+  assert.equal(judgeHome(parseHomeLines(fixture({ inherit: true, desktop: false }))).strongestWorking, "inherit");
+  assert.equal(judgeHome(parseHomeLines(fixture({ inherit: false, desktop: false }))).strongestWorking, null);
+  assert.equal(judgeHome(parseHomeLines(fixture({ desktop: false, "station-read": true }))).strongestWorking, "station-read");
+  // cmd alone does not decide: a group whose cmd works and whose user32 program fails FAILS
+  assert.equal(groupVerdict(parseHomeLines(fixture({ desktop: false })), "desktop"), "fails");
+  assert.equal(groupVerdict([], "desktop"), "not-run");
+});
+
+test("home.mjs: the report states the facts, the options and the limits of one run, and shows what the confined program saw", () => {
+  const md = renderHomeMarkdown(parseHomeLines(fixture({ inherit: true, desktop: true })), "lpac");
+  assert.match(md, /### Home case: lpac/);
+  assert.match(md, /Administrators group deny-only, integrity medium/);
+  assert.match(md, /CANNOT open it with WRITE_DAC \(an open only; nothing was written\)/);
+  assert.match(md, /ALL APPLICATION PACKAGES holds allow entries on the station: 0x20002/);
+  assert.match(md, /\| a private desktop on the user's own window station, no entry written to the station \| no \| works \|/);
+  assert.match(md, /Strongest option that worked here: \*\*desktop\*\*\. This is one machine, one build and one run; it is not a general finding\./);
+  assert.match(md, /What the confined `ui-test` program saw/);
+  assert.match(renderHomeMarkdown([], ""), /No probe line was found/);
+  assert.match(renderHomeMarkdown(parseHomeLines(fixture({ desktop: false, inherit: false }))), /No option worked here: the launcher would fail closed/);
+  const left = renderHomeMarkdown(parseHomeLines(fixture({ desktop: true }).replace('"stationEntryLeftBehind":false', '"stationEntryLeftBehind":true')));
+  assert.match(left, /An entry for a throw-away container was left on the window station/);
+  assert.equal(childReport({ childStdout: "not json" }), null);
+  assert.equal(childReport({ childStdout: JSON.stringify({ probe: "other" }) }), null);
+});
+
+test("home.mjs: the command line summarizes a file and refuses anything else", () => {
+  const dir = tmp();
+  writeFileSync(join(dir, "h.jsonl"), fixture({ desktop: true, inherit: true }));
+  const ok = spawnSync(process.execPath, [join(exp, "home.mjs"), "summarize", join(dir, "h.jsonl"), "--label", "x"], { encoding: "utf8" });
+  assert.equal(ok.status, 0);
+  assert.match(ok.stdout, /### Home case: x/);
+  assert.equal(spawnSync(process.execPath, [join(exp, "home.mjs"), "nope"], { encoding: "utf8" }).status, 2);
+});
+
+test("the home case (source): experiment only, one temporary station entry and only to the interactive station, no input sent, no window made, every call documented", () => {
+  const read = (f) => readFileSync(join(root, "native", "nn-launcher", "src", f), "utf8");
+  const win = read("win.rs"), home = read("home.rs"), rules = read("homerules.rs"), desk = read("desk.rs"), lib = read("lib.rs"), args = read("args.rs"), priv = read("privdesk.rs");
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  // not in the product: the module is gated, the rules module is gated, the commands are refused by the product's command list
+  assert.match(win, /#\[cfg\(feature = "experiment"\)\]\n#\[path = "home\.rs"\]\nmod home;/);
+  assert.match(lib, /#\[cfg\(any\(test, feature = "experiment"\)\)\]\nmod homerules;/);
+  assert.ok(args.includes('"--steps" | "--force-station-entry" if !EXPERIMENT => return Err('));
+  for (const c of ["ui-test", "deelevate"]) assert.match(win, new RegExp(`Some\\("${c}"\\)`));
+  assert.match(win, /"home-revoke" => \{/);
+  assert.match(win, /if a\.command == "home-probe" \{ std::process::exit\(home::home_probe\(&a\)\); \}/);
+  // the only write to a shared object is the entry on the station, guarded by the interactive-station rule, removed by Drop and read back
+  assert.match(desk, /crate::homerules::may_write_interactive_station\(station, flags\)/);
+  assert.match(desk, /if let Some\(mask\) = crate::homerules::home_station_mask\(mode\)/);
+  assert.match(desk, /impl Drop for Desk \{ fn drop\(&mut self\) \{ self\.finish\(\); \} \}/);
+  assert.match(home, /desk::remove_entries\(h, sid\)/);
+  assert.match(rules, /name == "WinSta0"|eq_ignore_ascii_case\("winsta0"\)/);
+  assert.ok(rules.includes("flags & 1 == 0"), "the visible flag is required");
+  assert.ok(home.includes("ATTEMPT {id}: a temporary entry") && home.includes("home-revoke --name {name}"), "the name and the clean-up command are printed before the entry is written");
+  // the desktop is created with its final access list (no write afterwards) and read back with the product's own allow-list check
+  assert.match(desk, /creation_sd\(&own\[0\], &sid_b, crate::winobj::DESKTOP_RIGHTS, crate::winobj::DESKTOP_FULL, "desktop"\)/);
+  assert.match(desk, /crate::winobj::private_acl_ok\(c\.bytes\(\), &sid_b, crate::winobj::DESKTOP_RIGHTS, &own\)/);
+  // nothing is sent, nothing is shown, nothing persistent is touched
+  for (const banned of ["SendInput", "SendMessage", "PostMessage", "keybd_event", "mouse_event", "CreateWindow", "MessageBox", "GetClipboardData", "SetClipboardData", "EmptyClipboard", "GetWindowText", "SwitchDesktop", "SetThreadDesktop", "ChangeDisplaySettings", "SystemParametersInfo", "ExitWindows", "RegSetValue", "RegCreateKey", "CreateService", "LogonUser", "NetUserAdd", "NetUserSetInfo", "password"]) {
+    assert.ok(!new RegExp(banned, "i").test(home.replace(/^\s*\/\/.*$/gm, "")), `${banned} in home.rs`);
+  }
+  // the product build gains no behaviour: the four items of privdesk.rs that became pub(crate), nothing else
+  const diffTokens = [...priv.matchAll(/pub\(crate\) (fn own_principals|struct CreationSd|fn attributes|fn creation_sd)/g)].length;
+  assert.equal(diffTokens, 4);
+  // every Win32 call of this round is documented in the README
+  for (const c of ["CreateRestrictedToken", "SetTokenInformation", "CreateProcessAsUserW", "EnumWindows", "IsWindowVisible", "GetForegroundWindow", "GetCursorPos", "OpenClipboard", "CloseClipboard", "GetClipboardSequenceNumber", "GetDC", "GetPixel", "ReleaseDC", "GetAsyncKeyState", "SetWindowsHookExW", "UnhookWindowsHookEx", "CallNextHookEx", "GetModuleHandleW", "GlobalAddAtomW", "GlobalDeleteAtom", "CreateDesktopW"]) {
+    assert.ok(home.includes(c) || desk.includes(c), `${c} not used`);
+    assert.ok(readme.includes(c), `${c} missing in the README`);
+  }
+  // one process-creation call per family, as before: the product's CreateProcessW is the only one in win.rs; the de-elevated child is the only CreateProcessAsUserW
+  assert.equal(win.match(/CreateProcessW\(/g).length, 1);
+  assert.equal(home.match(/CreateProcessAsUserW\(/g).length, 1);
+  // the restricted token: privileges removed, groups deny-only, integrity medium, no restricting SIDs, no password
+  assert.ok(home.includes("CreateRestrictedToken(tok.0, DISABLE_MAX_PRIVILEGE, disable.len() as u32,") && home.includes("MEDIUM_INTEGRITY_RID") && home.includes("hr::is_admin_like"));
+});
+
+test("the home case (documents): the measurement is recorded as measured, the constraints are written down, the card is not flipped, and the commands are exact", () => {
+  const plan = readFileSync(join(root, "docs", "nimblenewt", "windows-isolation-plan.md"), "utf8");
+  const s = plan.slice(plan.indexOf("### 12.5 The common home case"), plan.indexOf("## 13. What we would tell users"));
+  assert.ok(s.length > 5000);
+  for (const fact of ["Windows 11 Pro build 26200", "PowerShell 5.1", "`elevated:false`", "`sessionId:1`", "`windowStationOk:false`", "error 5", "`profileDeleted:true`", "`profileGone:true`", "`profileDeleteHr:0`", "Access is denied"]) assert.ok(s.includes(fact), fact);
+  assert.ok(s.includes("**What is NOT measured.**") && s.includes("The standard-account question"));
+  assert.ok(/NO route may set, store or pass a password/.test(s) && s.includes("nobody does that on windows"));
+  assert.ok(s.includes("The A03b card is NOT flipped") && s.includes("fail closed") || s.includes("Fail closed stays"));
+  assert.ok(s.includes("**Recommended default for the non-elevated user: option 1"));
+  assert.ok(s.includes("Never fall back silently to option 3"));
+  for (const part of ["private DESKTOP", "WINSTA_CREATEDESKTOP", "JOB_OBJECT_UILIMIT_READCLIPBOARD", "Documented versus measured", "What must be measured", "ALL APPLICATION PACKAGES"]) assert.ok(s.includes(part), part);
+  // the one-account fact and the password veto are in the design constraints of section 2 too
+  assert.match(plan, /\*\*Design constraints \(the owner's, 2026-11-25; details in 12\.5\)\.\*\* The normal Windows PC has ONE account/);
+  // no password route is built or proposed anywhere in this slice's text or code
+  const exp = join(root, "experiments", "windows-appcontainer");
+  const readme = readFileSync(join(exp, "README.md"), "utf8").split("## The home case")[1];
+  assert.ok(readme.includes(".\\nn-appc-launcher.exe home-probe --steps context,station-access,profile | Out-File -Encoding utf8 home-readonly.jsonl"));
+  assert.ok(readme.includes(".\\nn-appc-launcher.exe home-probe --aap-policy optout --timeout-ms 20000 | Out-File -Encoding utf8 home-lpac.jsonl"));
+  assert.ok(readme.includes(".\\nn-appc-launcher.exe home-probe --aap-policy none   --timeout-ms 20000 | Out-File -Encoding utf8 home-plain.jsonl"));
+  assert.ok(readme.includes(".\\nn-appc-launcher.exe home-revoke --name NimbleNewtRun-<16 hex from the ATTEMPT line>"));
+  assert.ok(readme.includes('NOT "Run as administrator"') || readme.includes('a NORMAL PowerShell, not "Run as administrator"'));
+  assert.ok(!/(set|store|pass) a password|temporary password|Set-LocalUser|net user/i.test(readme.replace(/It does not write a password anywhere and creates no account\./, "")));
+  const notes = readFileSync(join(root, "docs", "nimblenewt", "implementation-plan", "implementation-notes.md"), "utf8");
+  const n = notes.slice(notes.indexOf("### A03b: the common home case, one account and not elevated"));
+  assert.ok(n.includes("card NOT flipped") && n.includes("`profileGone:true`") && n.includes("NOT done / unknown until Windows runs it") && n.includes("ASSUMPTION:"));
+  const nl = readFileSync(join(root, "native", "nn-launcher", "README.md"), "utf8");
+  assert.ok(nl.includes("## The common home case: one account, not elevated") && nl.includes("This product build contains none of that code and refuses those commands."));
+  const contributing = readFileSync(join(root, "CONTRIBUTING.md"), "utf8");
+  for (const f of ["native/nn-launcher/src/home.rs", "native/nn-launcher/src/homerules.rs"]) assert.ok(contributing.includes(f), f);
+  const planText = JSON.parse(readFileSync(join(root, "docs", "nimblenewt", "implementation-plan", "task-plan.json"), "utf8"));
+  const card = (planText.cards ?? planText.tasks ?? []).find?.((c) => c.id === "A03b");
+  if (card) assert.notEqual(card.status, "done", "A03b is not flipped by this slice");
+});
+
+test("the home case (workflow): a report step in the hosted job, never in the own-runner job, with the cross-check and no gate", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  const from = hosted.indexOf('- name: "Home case: one account, not elevated');
+  assert.ok(from > hosted.indexOf("id: build_product") && from < hosted.indexOf("id: installer_whatif"), "after the product build (it needs the product launcher), before the installer steps");
+  const step = hosted.slice(from, hosted.indexOf("\n      # Card A03b", from + 10) > 0 ? hosted.indexOf("\n      # ", from + 10) : undefined);
+  assert.match(step, /shell: bash\n\s+if: always\(\)\n\s+continue-on-error: true\n\s+timeout-minutes: 20\n/);
+  for (const piece of ["home-probe --timeout-ms 20000", "run_home elevated-lpac", "run_home deelevated-lpac deelevate --aap-policy optout", "run_home deelevated-plain deelevate --aap-policy none", 'deelevate --exe "$(cygpath -w "$prod")" info --name "$home_name"', "home.mjs summarize", "scripts/redact-log.mjs"]) assert.ok(step.includes(piece), piece);
+  assert.ok(!/uses:|permissions:|secrets\./.test(step));
+  assert.ok(!own.includes("home-probe") && !own.includes("deelevate"), "the owner's runner is never given the de-elevation helper");
+  assert.equal(hosted.split("run_home elevated-lpac").length, 2, "one home-case step");
 });
