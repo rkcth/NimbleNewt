@@ -41,6 +41,10 @@ async function world(backend: (typeof backends)[number]) {
     const found = await runner.get(kind, id);
     await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
   };
+  const drop = async (kind: string, id: string): Promise<void> => {
+    const found = (await runner.get(kind, id))!;
+    await runner.command("test.drop", { commandId: cid("drop"), actor: owner.id }, async () => ({ payload: { kind, id }, build: async () => ({ ref: { kind, id }, creates: false, changes: [{ type: "delete" as const, ref: { kind, id }, expectedRevision: found.revision }], detail: {} }) }));
+  };
   const raw = async (kind: string, id: string): Promise<any> => (await w.storage.getAggregate({ kind, id }))?.body;
   const roles = new Map<string, string[]>();
   const agent = async (nm: string, held: string[], grants: { action: string; project: string }[] = [{ action: "task.read", project }]): Promise<Principal> => {
@@ -66,7 +70,7 @@ async function world(backend: (typeof backends)[number]) {
   const code = await svc.record(ann, { commandId: cid("s"), taskId: task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
   const review = (verdict: string) => svc.record(rev, { commandId: cid("rv"), taskId: task, kind: "review", role: "reviewer", subject: code.id, verdict } as never);
   const evidence = () => qa.record(qaAgent, { commandId: cid("qe"), submissionId: code.id, criteriaRevision: 1, environment: "linux", observedAt: "2026-11-26T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] });
-  return { w, projects, owner, project, task, plant, raw, desk, deskBody, wrk, rev, svc, qa, deps, code, review, evidence, deskReads: () => deskReads };
+  return { w, projects, roles, owner, project, task, plant, drop, raw, desk, deskBody, wrk, rev, svc, qa, deps, code, review, evidence, deskReads: () => deskReads };
 }
 
 for (const backend of backends) {
@@ -144,6 +148,95 @@ for (const backend of backends) {
       const before = x.deskReads();
       assert.equal((await qa.gate(owner, code.id)).verdict, "passed");
       assert.equal(x.deskReads() - before, 1, "the record is read once for five evidence records");
+    } finally { await x.w.close(); }
+  });
+
+  test(`${backend.name}: a deleted record takes approvals back and refuses new ones until it is recorded again; an entry gone from the manifest takes back (fail closed) (card Q02 second review)`, async () => {
+    const x = await world(backend);
+    try {
+      const { owner, task, desk, deps, svc, code } = x;
+      await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v1") }] });
+      await x.review("approve");
+      await x.drop("desk-record", desk);
+      assert.match((await svc.approvalOf(code.id))?.outdated?.because ?? "", /record dependency \(entry dpm-[a-z2-7]+\) is gone \(the record no longer exists\)/);
+      await assert.rejects(() => x.review("approve"), /an approval waits/);
+      await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v1") }] });
+      assert.equal(typeof (await deps.get(owner, task))!.entries[0]!.seen, "string", "acknowledged");
+      const a2 = await x.review("approve");
+      assert.deepEqual([(await svc.approvalOf(code.id))?.approved, (await svc.approvalOf(code.id))?.reviewId], [true, a2.id]);
+      // The manifest loses the entry the approval was judged against (only a damaged store does that): it no longer counts.
+      const m = await x.raw("dependency-manifest", derivedId("dpm", task));
+      await x.plant("dependency-manifest", derivedId("dpm", task), { ...m, entries: [] });
+      assert.match((await svc.approvalOf(code.id))?.outdated?.because ?? "", /an entry is no longer in its manifest/);
+    } finally { await x.w.close(); }
+  });
+
+  test(`${backend.name}: a dependency recorded while an approval is being written makes the write read the manifest again; the approval never keeps the older manifest (card Q02 second review)`, async () => {
+    const x = await world(backend);
+    try {
+      const { owner, task, desk, deps, code } = x;
+      await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v1") }] });
+      let reads = 0; let fired = false;
+      // The second manifest read of the approval's write (the one its basis is made from) is answered with what was there, and the dependency is recorded right after.
+      const racing = new Proxy(x.w.storage, { get(t, p) { const v = Reflect.get(t, p) as unknown; if (p === "getAggregate") return async (ref: { kind: string }, ...rest: unknown[]) => { const got = await (v as (...a: unknown[]) => Promise<unknown>).call(t, ref, ...rest); if (ref.kind === "dependency-manifest" && !fired && ++reads === 2) { fired = true; await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "file", key: "src/b.ts", hash: sha("b") }] }); } return got; }; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v; } }) as ControllerStorage;
+      const svc2 = SubmissionService.withEpoch(racing, x.projects.epoch, async (id) => x.roles.get(id) ?? [], options);
+      let outcome: unknown;
+      try { outcome = await svc2.record(x.rev, { commandId: cid("rv"), taskId: task, kind: "review", role: "reviewer", subject: code.id, verdict: "approve" } as never); } catch (e) { outcome = e; }
+      assert.ok(fired);
+      if (!(outcome instanceof Error)) {
+        const verdicts = await x.raw("submission-verdicts", code.id);
+        const snapshot = verdicts.reviews[verdicts.reviews.length - 1].basis.dependencies;
+        assert.ok(Object.keys((await x.raw("dependency-snapshot", snapshot)).entries).includes(derivedId("dpm", "file||src/b.ts")), "the approval was judged against the manifest as it is");
+      }
+    } finally { await x.w.close(); }
+  });
+
+  test(`${backend.name}: an approval made before dependencies were kept, at a time that cannot be read, is judged against every entry (fail closed) (card Q02 second review)`, async () => {
+    const x = await world(backend);
+    try {
+      const { owner, task, desk, deps, svc, code } = x;
+      await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v1") }] });
+      clock = "2026-11-26T10:10:00.000Z";
+      await x.review("approve");
+      const verdicts = await x.raw("submission-verdicts", code.id);
+      const last = verdicts.reviews[verdicts.reviews.length - 1];
+      await x.plant("submission-verdicts", code.id, { reviews: [...verdicts.reviews.slice(0, -1), { ...last, at: "not a time", basis: { criteriaRevision: last.basis.criteriaRevision, decisions: last.basis.decisions } }] });
+      // Recorded again after the approval (so observed after it, could the time be read), now judged changed: the approval is taken back.
+      clock = "2026-11-26T10:20:00.000Z";
+      await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v1") }] });
+      assert.equal((await svc.approvalOf(code.id))?.approved, true, JSON.stringify(await svc.approvalOf(code.id)));
+      await x.plant("desk-record", desk, x.deskBody("spec v2"));
+      assert.equal((await svc.approvalOf(code.id))?.approved, false, "a time that cannot be read is judged");
+    } finally { await x.w.close(); clock = "2026-11-26T10:00:00.000Z"; }
+  });
+
+  test(`${backend.name}: a directory recorded again with its names in another order is no change; with another name it is (card Q02 second review)`, async () => {
+    const x = await world(backend);
+    try {
+      const { owner, task, deps, svc, code } = x;
+      const dir = (members: string[]) => deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "directory", key: "src", members }] });
+      await dir(["a.ts", "b.ts"]);
+      await x.review("approve");
+      await dir(["b.ts", "a.ts"]);
+      assert.equal((await svc.approvalOf(code.id))?.approved, true);
+      await dir(["a.ts", "b.ts", "c.ts"]);
+      assert.match((await svc.approvalOf(code.id))?.outdated?.because ?? "", /directory dependency "src" was recorded again with a different observation/);
+    } finally { await x.w.close(); }
+  });
+
+  test(`${backend.name}: after a dependency look invalidated some evidence, recording another dependency again is looked at too (card Q02 second review)`, async () => {
+    const x = await world(backend);
+    try {
+      const { owner, task, deps } = x;
+      const file = (key: string, h: string) => deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "file", key, hash: h }] });
+      await file("a.ts", sha("a1"));
+      const e1 = await x.evidence();
+      await file("b.ts", sha("b1"));
+      const e2 = await x.evidence();
+      await file("b.ts", sha("b2"));
+      assert.deepEqual([(await x.raw("qa-evidence", e1.id)).state, (await x.raw("qa-evidence", e2.id)).state], ["current", "invalidated"]);
+      await file("a.ts", sha("a2"));
+      assert.equal((await x.raw("qa-evidence", e1.id)).state, "invalidated");
     } finally { await x.w.close(); }
   });
 }
