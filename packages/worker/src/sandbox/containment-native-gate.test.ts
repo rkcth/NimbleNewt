@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 import { REQUIRED_CASE_IDS, assessRelease, isLinkRightInconclusive, parseReport, type CaseResult, type ContainmentReport, type NativeWindowsEvidence } from "./containment.js";
-import { attachNativeWindowsEvidence, grantsReadBackOf, nativeWindowsEvidence, type NativeEvidenceInput } from "./containment-windows-native-evidence.js";
+import { redactReport } from "./containment-windows-evidence.js";
+import { PACKAGED_CONTROLLER_EXISTS, attachNativeWindowsEvidence, collectNativeEvidence, grantsReadBackOf, nativeWindowsEvidence, type NativeEvidenceInput } from "./containment-windows-native-evidence.js";
 
 // Card A03b: the Windows release gate on AppContainer-era evidence (owner decision 2026-11-26: keep the AppContainer launcher, no Windows Sandbox).
 // The fixtures below are the owner's real-PC run (own-hardware run 45881452017, commit 276883c4, Windows 10.0.26200 x64, home-desktop mode), copied byte for byte from its redacted results zip:
@@ -37,14 +42,16 @@ const cleanRun = (n: number): string => JSON.stringify({ runId: `r${n}`, mode: "
 
 const robReport = (): ContainmentReport => { const p = parseReport(ROB_REPORT_TEXT); assert.ok("report" in p, JSON.stringify(p)); return p.report; };
 /**
- * The real files plus the measurements that run did NOT make (it recorded no account kind, no run records, no leftover count as data, no working-directory or supervisor-ACL check). They are
- * supplied here to show the gate's rule for a run of the same shape that does record them; the real run alone is refused (test below).
+ * What the new scripts hand the assembler for a run like the owner's (run-g05.ps1 -> containment-evidence.mjs run --native-info ... --account-kind ... --symlink-right no; the collector reads the
+ * launcher, its record, this run's records and the leftover profiles): the real info line, record and launcher hash, plus the facts that run did NOT record as data then (account kind, run records,
+ * leftover count as a number, the link right). The account kind is not known for the owner's PC: "administrator-filtered" stands in (either kind passes). No working-directory check is run (no
+ * packaged controller exists, card K03), so the block says packaged:false and the gate accepts it as "not yet measurable".
  */
 const fullInput = (over: Partial<NativeEvidenceInput> = {}): NativeEvidenceInput => ({
   infoRaw: ROB_INFO, recordRaw: ROB_RECORD, launcherSha256: ROB_LAUNCHER_SHA,
-  runRecordsRaw: [cleanRun(1), cleanRun(2)], leftoverProfiles: 0, accountKind: "standard", symlinkRight: false,
-  workdirRaw: JSON.stringify({ schema: "nimblenewt.g05-workdir/1", packaged: true, passed: true }), supervisorAcl: "strict", ...over,
+  runRecordsRaw: [cleanRun(1), cleanRun(2)], leftoverProfiles: 0, accountKind: "administrator-filtered", symlinkRight: false, ...over,
 });
+const PACKAGED_OK = JSON.stringify({ schema: "nimblenewt.g05-workdir/1", packaged: true, passed: true });
 function withEvidence(report: ContainmentReport, input: NativeEvidenceInput = fullInput()): ContainmentReport {
   const made = attachNativeWindowsEvidence(report, input);
   assert.ok("report" in made, JSON.stringify(made));
@@ -67,19 +74,37 @@ const withCase = (r: ContainmentReport, id: string, change: (c: CaseResult) => C
 const hosted = (): ContainmentReport => withEvidence({ ...robReport(), cases: robReport().cases.map((c) => ({ ...c, verdict: "pass", detail: "held; the same attempt got through without the sandbox" })) }, fullInput({ symlinkRight: true }));
 
 describe("A03b Windows release gate: what passes", () => {
-  test("the owner's real report (8 pass, the 2 file-link cases inconclusive for want of the link right) passes once the block is complete, and the 2 are listed as accepted, not passed", () => {
+  test("the owner's real report (8 pass, the 2 file-link cases inconclusive for want of the link right) as the new scripts produce it passes, with three items accepted, not passed", () => {
     const g = gate(withEvidence(robReport()));
     assert.deepEqual(g.blockers, []);
     assert.equal(g.ok, true);
     assert.equal(g.platforms["win32"], true);
-    assert.equal(g.accepted.length, 2);
-    assert.ok(g.accepted.every((a) => /inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege/.test(a)), g.accepted.join(" | "));
-    assert.ok(g.accepted.some((a) => /deny-symlink-read/.test(a)) && g.accepted.some((a) => /deny-symlink-write/.test(a)));
+    assert.deepEqual(g.accepted, [
+      "win32: case deny-symlink-read inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so the file link was not planted and the case (its junction attempts included) was not judged",
+      "win32: case deny-symlink-write inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so the file link was not planted and the case (its junction attempts included) was not judged",
+      "win32: the packaged controller working-directory check: not a pass: not yet measurable until K03 (no packaged controller exists)",
+    ]);
+    // run-g05.ps1 always runs with --redact: the redacted report written to results\ reads back and passes the same way.
+    const redacted = parseReport(JSON.stringify(redactReport(withEvidence(robReport()), { users: ["robert"] })));
+    assert.ok("report" in redacted && redacted.report.nativeWindows !== undefined);
+    assert.deepEqual(gate(redacted.report).accepted, g.accepted);
+    // A standard account passes the same way.
+    assert.equal(gate(withEvidence(robReport(), fullInput({ accountKind: "standard" }))).ok, true);
   });
-  test("the hosted de-elevated rehearsal shape (10/10) passes with nothing accepted", () => {
+  test("the hosted de-elevated rehearsal shape (10/10) passes with only the K03 item accepted; with a passing packaged check nothing is accepted", () => {
     const g = gate(hosted());
     assert.deepEqual(g.blockers, []);
-    assert.deepEqual(g.accepted, []);
+    assert.deepEqual(g.accepted, ["win32: the packaged controller working-directory check: not a pass: not yet measurable until K03 (no packaged controller exists)"]);
+    const full = gate(withEvidence(hosted(), fullInput({ symlinkRight: true, workdirRaw: PACKAGED_OK })));
+    assert.deepEqual([full.ok, full.accepted], [true, []]);
+  });
+  test("the working-directory check: packaged:false (no packaged controller) is accepted whatever passed says; packaged and failed is refused; not recorded is refused", () => {
+    assert.equal(PACKAGED_CONTROLLER_EXISTS, false, "card K03 is not built; when it lands, this flips and an unmeasured check is refused");
+    for (const passed of [true, false]) assert.equal(gate(withEvidence(robReport(), fullInput({ workdirRaw: JSON.stringify({ schema: "nimblenewt.g05-workdir/1", packaged: false, passed }) }))).ok, true);
+    refused(withEvidence(robReport(), fullInput({ workdirRaw: JSON.stringify({ schema: "nimblenewt.g05-workdir/1", packaged: true, passed: false }) })), /packaged controller working-directory check failed/);
+    // Once a packaged controller exists, no check output means no measurement: refused.
+    refused(withEvidence(robReport(), fullInput({ packagedControllerExists: true })), /working-directory check is not recorded/);
+    assert.equal(gate(withEvidence(robReport(), fullInput({ packagedControllerExists: true, workdirRaw: PACKAGED_OK }))).ok, true);
   });
   test("the assembler reads the real info line and release record as they are", () => {
     const made = nativeWindowsEvidence(fullInput());
@@ -89,7 +114,8 @@ describe("A03b Windows release gate: what passes", () => {
     assert.deepEqual([e.elevated, e.sessionId, e.windowStation, e.windowStationOk], [false, 1, "home-desktop", true]);
     assert.deepEqual(e.profiles, { created: true, deleted: true, gone: true, leftover: 0 });
     assert.equal(e.grantsReadBack, "clean");
-    assert.deepEqual(made.notProven, ["a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)"]);
+    assert.equal(e.packagedControllerWorkingDirectory?.packaged, false);
+    assert.deepEqual(made.notProven, ["the working-directory check on a packaged controller (none exists yet: card K03)", "a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)"]);
   });
 });
 
@@ -106,10 +132,10 @@ describe("A03b Windows release gate: the owner's real run as it is", () => {
     assert.ok("report" in made);
     const b = gate(made.report).blockers.map((x) => x.replace(/^win32: /, ""));
     const want = [/^case deny-symlink-read: inconclusive .*recorded that the account lacks/, /^case deny-symlink-write: inconclusive .*recorded that the account lacks/, /kind of account .* is not recorded/,
-      /NimbleNewtRun-\* container profiles left after the run were not counted/, /read-back after each run is not recorded/, /not run on the packaged controller/, /supervisor-ACL check was not-run/];
+      /NimbleNewtRun-\* container profiles left after the run were not counted/, /read-back after each run is not recorded/];
     assert.equal(b.length, want.length, b.join("\n"));
     for (const w of want) assert.ok(b.some((x) => w.test(x)), `${w}: ${b.join(" | ")}`);
-    assert.equal(made.notProven.length, 7, made.notProven.join(" | "));
+    assert.equal(made.notProven.length, 6, made.notProven.join(" | "));
   });
 });
 
@@ -141,11 +167,11 @@ describe("A03b Windows release gate: every refusal (fail closed)", () => {
     refused(withNative(good(), (n) => ({ ...n, grantsReadBack: "left" })), /still present after a run/);
     refused(withNative(good(), (n) => ({ ...n, grantsReadBack: "not-measured" })), /read-back after each run is not recorded/);
   });
-  test("kept from the Windows Sandbox era: the packaged working-directory check and the strict supervisor-ACL check", () => {
-    refused(withNative(good(), (n) => ({ ...n, packagedControllerWorkingDirectory: { packaged: false, passed: true } })), /not run on the packaged controller/);
+  test("kept from the Windows Sandbox era: the packaged working-directory check (measured and failed, or not recorded, refuses); the strict supervisor-ACL check is dropped", () => {
     refused(withNative(good(), (n) => ({ ...n, packagedControllerWorkingDirectory: { packaged: true, passed: false } })), /working-directory check failed/);
-    refused(withNative(good(), (n) => ({ ...n, supervisorAclCheck: "report-only" })), /supervisor-ACL check was report-only/);
-    refused(withNative(good(), (n) => ({ ...n, supervisorAclCheck: "not-run" })), /supervisor-ACL check was not-run/);
+    refused(withNative(good(), (n) => ({ ...n, packagedControllerWorkingDirectory: null })), /working-directory check is not recorded/);
+    assert.ok(!gate(good()).blockers.some((b) => /supervisor-ACL/.test(b)));
+    assert.ok(!("supervisorAclCheck" in good().nativeWindows!), "the native block has no supervisor-ACL field");
   });
   test("cases: every one missing, failing or not_run blocks; a duplicate blocks", () => {
     for (const id of REQUIRED_CASE_IDS) {
@@ -212,8 +238,9 @@ describe("A03b native Windows evidence: read as data", () => {
     bad((n) => { delete (n["profiles"] as Record<string, unknown>)["gone"]; });
     bad((n) => { n["grantsReadBack"] = "unreadable"; });
     bad((n) => { n["symlinkRight"] = "no"; });
-    bad((n) => { delete n["supervisorAclCheck"]; });
     bad((n) => { delete n["packagedControllerWorkingDirectory"]; });
+    bad((n) => { n["packagedControllerWorkingDirectory"] = { packaged: "no", passed: true }; });
+    bad((n) => { n["packagedControllerWorkingDirectory"] = true; });
   });
   test("the assembler refuses what it cannot read, and only fills a native Windows report", () => {
     const err = (input: Partial<NativeEvidenceInput>, pattern: RegExp): void => { const m = nativeWindowsEvidence(fullInput(input)); assert.ok("error" in m && pattern.test(m.error), JSON.stringify(m)); };
@@ -242,5 +269,56 @@ describe("A03b native Windows evidence: read as data", () => {
     assert.equal(grantsReadBackOf(["{"]).state, "not-measured");
     const m = nativeWindowsEvidence(fullInput({ runRecordsRaw: [cleanRun(1).replace('"readBack":"clean"', '"readBack":"left"')] }));
     assert.ok("evidence" in m && m.evidence.grantsReadBack === "left");
+  });
+});
+
+describe("A03b native Windows evidence: what the evidence run collects from disk", () => {
+  /** A stand-in of the bundle, its control folder and %LOCALAPPDATA%\\Packages (POSIX paths: the collector takes the join to use). */
+  function layout(t: { after: (fn: () => void) => void }) {
+    const root = mkdtempSync(join(tmpdir(), "nn-a03b-native-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const bin = join(root, "bin"), control = join(root, "control"), packages = join(root, "Packages");
+    for (const d of [bin, join(control, "records"), join(control, "raw"), packages]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(bin, "nn-launcher.exe"), "launcher bytes");
+    writeFileSync(join(bin, "nn-launcher.record.json"), ROB_RECORD);
+    writeFileSync(join(control, "raw", "info.stdout.txt"), ROB_INFO);
+    const src = { infoFile: join(control, "raw", "info.stdout.txt"), launcher: join(bin, "nn-launcher.exe"), controlDir: control, packagesDir: packages, since: new Date("2026-11-26T19:10:00Z") };
+    return { root, bin, control, packages, src };
+  }
+  test("the launcher's own hash, its record, only this run's records and the leftover profiles are read; the two facts pass through", (t) => {
+    const l = layout(t);
+    writeFileSync(join(l.control, "records", "old.json"), cleanRun(9).replace("2026-11-26T19:10:50.000Z", "2026-11-25T10:00:00.000Z").replace('"readBack":"clean"', '"readBack":"left"'));
+    writeFileSync(join(l.control, "records", "r1.json"), cleanRun(1));
+    writeFileSync(join(l.packages, "microsoft.windows.photos_8wekyb3d8bbwe"), "");
+    const input = collectNativeEvidence({ ...l.src, accountKind: "standard", symlinkRight: false }, join);
+    assert.ok(!("error" in input), JSON.stringify(input));
+    assert.equal(input.launcherSha256, createHash("sha256").update("launcher bytes").digest("hex"));
+    assert.deepEqual([input.runRecordsRaw?.length, input.leftoverProfiles, input.accountKind, input.symlinkRight], [1, 0, "standard", false], "the older run's record (left) is not this run's");
+    // The bytes on disk are not the released launcher: the gate refuses the hash.
+    refused(withEvidence(robReport(), input), /does not match its release record/);
+    // With the released launcher's hash the same collection passes.
+    assert.equal(gate(withEvidence(robReport(), { ...input, launcherSha256: ROB_LAUNCHER_SHA })).ok, true);
+  });
+  test("a leftover profile is counted (case-insensitive moniker); an unreadable records folder or packages folder becomes not measured; no info, record or launcher is no block", (t) => {
+    const l = layout(t);
+    writeFileSync(join(l.control, "records", "r1.json"), cleanRun(1));
+    mkdirSync(join(l.packages, "nimblenewtrun-00000000000000ab"));
+    const counted = collectNativeEvidence(l.src, join);
+    assert.ok(!("error" in counted) && counted.leftoverProfiles === 1);
+    const noDirs = collectNativeEvidence({ ...l.src, controlDir: join(l.root, "absent"), packagesDir: join(l.root, "absent") }, join);
+    assert.ok(!("error" in noDirs) && noDirs.runRecordsRaw === undefined && noDirs.leftoverProfiles === undefined);
+    const made = attachNativeWindowsEvidence(robReport(), noDirs);
+    assert.ok("report" in made && made.report.nativeWindows.grantsReadBack === "not-measured" && made.report.nativeWindows.profiles.leftover === null);
+    // An empty records folder: no run of this evidence run recorded, not measured.
+    rmSync(join(l.control, "records", "r1.json"));
+    const empty = collectNativeEvidence(l.src, join);
+    assert.ok(!("error" in empty) && empty.runRecordsRaw?.length === 0);
+    for (const [change, why] of [[{ infoFile: join(l.root, "none") }, /info output/], [{ launcher: join(l.root, "none", "nn-launcher.exe") }, /release record/]] as const) {
+      const r = collectNativeEvidence({ ...l.src, ...change }, join);
+      assert.ok("error" in r && why.test(r.error), JSON.stringify(r));
+    }
+    rmSync(join(l.bin, "nn-launcher.exe"));
+    const noExe = collectNativeEvidence(l.src, join);
+    assert.ok("error" in noExe && /launcher file/.test(noExe.error));
   });
 });

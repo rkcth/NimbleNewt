@@ -34,7 +34,7 @@ function containment(p) {
     r.backend = "windows-native";
     r.nativeWindows = {
       launcher: { recordCommit: COMMIT, recordSha256: "e".repeat(64), fileSha256: "e".repeat(64) }, elevated: false, accountKind: "standard", sessionId: 1, windowStation: "home-desktop", windowStationOk: true,
-      profiles: { created: true, deleted: true, gone: true, leftover: 0 }, grantsReadBack: "clean", symlinkRight: false, packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict",
+      profiles: { created: true, deleted: true, gone: true, leftover: 0 }, grantsReadBack: "clean", symlinkRight: false, packagedControllerWorkingDirectory: { packaged: true, passed: true },
     };
   }
   return r;
@@ -230,7 +230,7 @@ test("containment evidence is judged by the G05 gate: a report for another commi
   blocked(judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "fail"; })), /containment linux: case /);
   blocked(judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "inconclusive"; })), /containment linux: case .*inconclusive/);
   blocked(judgeAltered(edit("linux", (r) => { r.cases = []; })), /containment linux: case .* is missing/);
-  blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.supervisorAclCheck = "report-only"; })), /containment win32: .*strict/);
+  blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.packagedControllerWorkingDirectory = { packaged: true, passed: false }; })), /containment win32: the packaged controller working-directory check failed/);
   blocked(judgeAltered(edit("win32", (r) => { delete r.nativeWindows; })), /containment win32: the native Windows host evidence is missing/);
   blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.elevated = true; })), /containment win32: the Windows run was elevated/);
   blocked(judgeAltered(edit("darwin", (r) => { r.weakerThanLinux = false; })), /containment darwin: .*weaker/);

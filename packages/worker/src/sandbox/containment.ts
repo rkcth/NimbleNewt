@@ -21,8 +21,8 @@ import { GUEST_PATHS, guestPathFor } from "./windows-plan.js";
  * 2. A release gate (`assessRelease`) that reads the reports of the platforms and says what still blocks a release: a missing platform, a failed or missing case, evidence about another commit,
  *    and the evidence only a real Windows PC can give. Since the owner's decision of 2026-11-26 (keep the AppContainer launcher, no Windows Sandbox) that is the native launcher's evidence
  *    (`NativeWindowsEvidence`): the launcher is the released one for this commit, the run was not elevated, in the signed-in user's interactive session with its window objects made, every
- *    per-run profile gone and every grant read back clean, plus the packaged controller working directory and the strict supervisor-ACL check. The Windows Sandbox era block (`windows`: the
- *    unattended service identity after logout and reboot, the mapped-output ACL controls) no longer satisfies it. A run refused cleanly after the owner signs out is NOT yet required (open item, A03b).
+ *    per-run profile gone and every grant read back clean, plus the packaged controller working directory (accepted, not passed, while no packaged controller exists: card K03). The Windows
+ *    Sandbox era block (`windows`: the unattended service identity after logout and reboot, the mapped-output ACL controls, the strict supervisor-ACL check) no longer satisfies it. A run refused cleanly after the owner signs out is NOT yet required (open item, A03b).
  */
 
 export const CONTAINMENT_SCHEMA = "nimblenewt.containment/1";
@@ -89,9 +89,12 @@ export interface NativeWindowsEvidence {
   readonly grantsReadBack: "clean" | "left" | "not-measured";
   /** Whether the account held SeCreateSymbolicLinkPrivilege (`null`: not recorded). Only `false` lets a file-link case be inconclusive for want of it. */
   readonly symlinkRight: boolean | null;
-  /** As in the Windows Sandbox era: the packaged controller's working directory check and the strict supervisor-ACL check (the native backend's control folder is never granted to the container). */
-  readonly packagedControllerWorkingDirectory: { readonly packaged: boolean; readonly passed: boolean };
-  readonly supervisorAclCheck: "strict" | "report-only" | "not-run";
+  /**
+   * The controller working-directory check (scripts/g05-workdir-check.mjs). `packaged: false` says no packaged controller exists to check (card K03 not built): the gate lists it as accepted, not
+   * passed. `null`: not recorded, refused. The Windows Sandbox era's strict supervisor-ACL check has no native counterpart and is not part of this block (its native equivalents are the grant
+   * read-back, the profile lifecycle and the elevation check above).
+   */
+  readonly packagedControllerWorkingDirectory: { readonly packaged: boolean; readonly passed: boolean } | null;
 }
 
 export interface ContainmentReport {
@@ -594,8 +597,7 @@ export function isNativeWindowsEvidence(n: unknown): n is NativeWindowsEvidence 
     && isObject(p) && bool(p["created"]) && bool(p["deleted"]) && bool(p["gone"]) && (p["leftover"] === null || (Number.isSafeInteger(p["leftover"]) && (p["leftover"] as number) >= 0))
     && (n["grantsReadBack"] === "clean" || n["grantsReadBack"] === "left" || n["grantsReadBack"] === "not-measured")
     && (n["symlinkRight"] === null || bool(n["symlinkRight"]))
-    && isObject(wd) && bool(wd["packaged"]) && bool(wd["passed"])
-    && (n["supervisorAclCheck"] === "strict" || n["supervisorAclCheck"] === "report-only" || n["supervisorAclCheck"] === "not-run");
+    && (wd === null || (isObject(wd) && bool(wd["packaged"]) && bool(wd["passed"])));
 }
 
 /** The two cases that plant FILE symbolic links (besides directory junctions), and the file links they plant (containment-windows-cases.ts). */
@@ -652,7 +654,7 @@ export interface GateResult {
   readonly blockers: readonly string[];
   /** Per required platform: whether its report satisfied every check. */
   readonly platforms: Readonly<Record<string, boolean>>;
-  /** What was accepted although it is not a pass (card A03b: a file-link case inconclusive for want of the symbolic-link right), so a release log shows it. Never a blocker. */
+  /** What was accepted although it is not a pass (card A03b: a file-link case inconclusive for want of the symbolic-link right; the packaged working-directory check while K03 is not built), so a release log shows it. Never a blocker. */
   readonly accepted: readonly string[];
 }
 
@@ -660,7 +662,7 @@ export interface GateResult {
  * The native Windows block's requirements (card A03b, owner decision 2026-11-26), each a separate problem. `commit` is the report's own commit, already compared with the release commit by the caller.
  * Not required in this slice: a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step is still open).
  */
-function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string): string[] {
+function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepted: string[]): string[] {
   const problems: string[] = [];
   if (n.launcher.recordCommit !== commit) problems.push(`the launcher's release record is for commit ${n.launcher.recordCommit.slice(0, 12)}, not the evidence's ${commit.slice(0, 12)}`);
   if (n.launcher.fileSha256 !== n.launcher.recordSha256) problems.push("the launcher that ran does not match its release record (SHA-256)");
@@ -675,9 +677,11 @@ function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string): string
   else if (n.profiles.leftover !== 0) problems.push(`${n.profiles.leftover} ${RUN_PROFILE_PREFIX}* container profile(s) were left after the run`);
   if (n.grantsReadBack === "not-measured") problems.push("the grants' read-back after each run is not recorded");
   else if (n.grantsReadBack !== "clean") problems.push("a grant for the container was still present after a run (read-back not clean)");
-  if (!n.packagedControllerWorkingDirectory.packaged) problems.push("the controller working-directory check was not run on the packaged controller");
-  else if (!n.packagedControllerWorkingDirectory.passed) problems.push("the packaged controller working-directory check failed");
-  if (n.supervisorAclCheck !== "strict") problems.push(`the supervisor-ACL check was ${n.supervisorAclCheck}; the strict check is required before release`);
+  // Coordinator decision 2026-11-26: while no packaged controller exists (card K03), a check that says so is accepted, not passed. FOLLOW-UP: when K03 lands this must become required.
+  const wd = n.packagedControllerWorkingDirectory;
+  if (wd === null) problems.push("the controller working-directory check is not recorded");
+  else if (!wd.packaged) accepted.push("win32: the packaged controller working-directory check: not a pass: not yet measurable until K03 (no packaged controller exists)");
+  else if (!wd.passed) problems.push("the packaged controller working-directory check failed");
   return problems;
 }
 
@@ -737,7 +741,7 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
         if (r.windows !== undefined) problems.push("the report carries the Windows Sandbox era evidence block (windows), which is not AppContainer evidence and is no longer accepted");
         const n = r.nativeWindows;
         if (n === undefined) problems.push("the native Windows host evidence is missing (launcher release record, elevation, account, session, window station, profiles, grant read-back)");
-        else problems.push(...nativeWindowsProblems(n, r.implementationCommit));
+        else problems.push(...nativeWindowsProblems(n, r.implementationCommit, accepted));
       } else {
         if (r.windows !== undefined) problems.push("Windows evidence in a non-Windows report");
         if (r.nativeWindows !== undefined) problems.push("native Windows evidence in a non-Windows report");

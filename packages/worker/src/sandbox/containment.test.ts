@@ -133,7 +133,7 @@ const goodWindows = (): WindowsEvidence => ({
 const goodNative = (): NativeWindowsEvidence => ({
   launcher: { recordCommit: COMMIT, recordSha256: "e".repeat(64), fileSha256: "e".repeat(64) }, elevated: false, accountKind: "standard", sessionId: 1, windowStation: "home-desktop", windowStationOk: true,
   profiles: { created: true, deleted: true, gone: true, leftover: 0 }, grantsReadBack: "clean", symlinkRight: false,
-  packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict",
+  packagedControllerWorkingDirectory: { packaged: true, passed: true },
 });
 function report(platform: PlatformName, extra: Partial<Record<keyof ContainmentReport, unknown>> = {}): ContainmentReport {
   const base: ContainmentReport = {

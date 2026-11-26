@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
+import { win32 } from "node:path";
 import type { ContainmentReport, NativeWindowsEvidence } from "./containment.js";
 import { isNativeWindowsEvidence } from "./containment.js";
 import { parseWorkdirCheck } from "./containment-windows-evidence.js";
@@ -6,19 +9,28 @@ import { parseWorkdirCheck } from "./containment-windows-evidence.js";
  * Card A03b: the `nativeWindows` block of a containment report, from what the run on a real Windows PC itself wrote (owner decision 2026-11-26: the AppContainer launcher, no Windows Sandbox).
  * Read as data, never typed in by hand:
  *   - the launcher's `info` JSON line (`nn-launcher info`, as run-g05.ps1 runs it): elevated, sessionId, the window-object mode and windowStationOk, the throw-away profile created, deleted and gone;
- *   - the launcher's release record (`nn-launcher.record.json`, schema nimblenewt.native-launcher-record/1) and the SHA-256 of the launcher file that ran;
- *   - the backend's run records (`<control>\records\*.json`, windows-native-job.ts) for the grant read-back of every run;
- *   - the count of `NimbleNewtRun-*` profiles left afterwards, the account kind, whether the account holds SeCreateSymbolicLinkPrivilege, the working-directory check output and the supervisor-ACL
- *     check, each only when the caller measured it.
- * Anything not given is `not-measured` / `null` / `not-run`, which the release gate refuses, and is named in `notProven`.
+ *   - the launcher's release record (`nn-launcher.record.json` next to the launcher, schema nimblenewt.native-launcher-record/1) and the SHA-256 of the launcher file the backend ran;
+ *   - the backend's run records (`<control>\records\*.json`, windows-native-job.ts) of this evidence run, for the grant read-back of every run;
+ *   - the count of `NimbleNewtRun-*` profiles left under `%LOCALAPPDATA%\Packages` after the run;
+ *   - the account kind and whether the account holds SeCreateSymbolicLinkPrivilege, as run-g05.ps1 found them (`containment-evidence.mjs run --account-kind ... --symlink-right ...`);
+ *   - the working-directory check output when one was run; otherwise, while no packaged controller exists (card K03), the fact that there is none (`packaged: false`).
+ * Anything not given is `not-measured` / `null`, which the release gate refuses, and is named in `notProven`.
  */
 
 export const LAUNCHER_RECORD_SCHEMA = "nimblenewt.native-launcher-record/1";
+/**
+ * Whether a packaged controller release exists to run the working-directory check on (card K03, the release pipeline). While false, a run without the check records `packaged: false` (the gate
+ * accepts it as "not yet measurable"). FOLLOW-UP: set to true when K03 lands; then a run without the check output records nothing and the gate refuses it.
+ */
+export const PACKAGED_CONTROLLER_EXISTS = false;
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_RUN_RECORDS = 1000;
+const MAX_LAUNCHER_BYTES = 64 * 1024 * 1024;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
+/** A per-run profile's folder under %LOCALAPPDATA%\Packages (Windows keeps the moniker in lower case). */
+const RUN_PROFILE_FOLDER = /^nimblenewtrun-[0-9a-f]{16}$/i;
 
 export interface NativeEvidenceInput {
   /** The launcher's `info` output (its last `nn-appc-launcher` JSON line is read). */
@@ -30,8 +42,10 @@ export interface NativeEvidenceInput {
   readonly leftoverProfiles?: number;
   readonly accountKind?: "standard" | "administrator-filtered";
   readonly symlinkRight?: boolean;
+  /** The working-directory check's output (scripts/g05-workdir-check.mjs), when it was run. */
   readonly workdirRaw?: string;
-  readonly supervisorAcl?: "strict" | "report-only";
+  /** Tests only: whether a packaged controller exists (default `PACKAGED_CONTROLLER_EXISTS`). */
+  readonly packagedControllerExists?: boolean;
 }
 
 function lastInfoLine(text: string): Record<string, unknown> | undefined {
@@ -76,7 +90,7 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     return { error: `the launcher's release record is not a ${LAUNCHER_RECORD_SCHEMA} with sourceCommit and sha256` };
   }
   if (!SHA256.test(input.launcherSha256)) return { error: "the launcher file's SHA-256 must be 64 lower-case hex digits" };
-  let workingDirectory = { packaged: false, passed: false };
+  let workingDirectory: { packaged: boolean; passed: boolean } | null = (input.packagedControllerExists ?? PACKAGED_CONTROLLER_EXISTS) ? null : { packaged: false, passed: false };
   if (input.workdirRaw !== undefined) {
     const wd = parseWorkdirCheck(input.workdirRaw);
     if ("error" in wd) return { error: wd.error };
@@ -95,7 +109,6 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     grantsReadBack: grants.state,
     symlinkRight: input.symlinkRight ?? null,
     packagedControllerWorkingDirectory: workingDirectory,
-    supervisorAclCheck: input.supervisorAcl ?? "not-run",
   };
   if (!isNativeWindowsEvidence(evidence)) return { error: "the native Windows evidence would not read back as evidence" };
   const notProven = [
@@ -103,8 +116,7 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     ...(leftover === null ? ["the count of NimbleNewtRun-* profiles left after the run"] : []),
     ...(grants.state === "not-measured" ? [`the grant read-back after each run (${grants.why ?? "not given"})`] : []),
     ...(evidence.symlinkRight === null ? ["whether the account holds SeCreateSymbolicLinkPrivilege"] : []),
-    ...(workingDirectory.packaged ? [] : ["the working-directory check on a packaged controller"]),
-    ...(evidence.supervisorAclCheck === "strict" ? [] : ["the strict supervisor-ACL check"]),
+    ...(workingDirectory === null ? ["the controller working-directory check"] : workingDirectory.packaged ? [] : ["the working-directory check on a packaged controller (none exists yet: card K03)"]),
     "a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)",
   ];
   return { evidence, notProven };
@@ -117,4 +129,70 @@ export function attachNativeWindowsEvidence<R extends Pick<ContainmentReport, "p
   const made = nativeWindowsEvidence(input);
   if ("error" in made) return made;
   return { report: { ...report, nativeWindows: made.evidence }, notProven: made.notProven };
+}
+
+export interface NativeEvidenceSources {
+  /** The `info` output file run-g05.ps1 wrote (its raw copy). */
+  readonly infoFile: string;
+  /** The launcher the backend ran (NIMBLENEWT_WIN_LAUNCHER); its release record is `nn-launcher.record.json` in the same folder. */
+  readonly launcher: string;
+  /** The backend's control folder (NIMBLENEWT_WIN_CONTROL_DIR); its run records are under `records`. */
+  readonly controlDir: string;
+  /** `%LOCALAPPDATA%\Packages`, where the per-run profiles live. */
+  readonly packagesDir: string;
+  /** When the evidence run started: only run records from then on are this run's. */
+  readonly since: Date;
+  readonly accountKind?: "standard" | "administrator-filtered";
+  readonly symlinkRight?: boolean;
+  readonly workdirRaw?: string;
+}
+
+/** The folder of a path written with \ or / (a Windows path on Windows; a POSIX one in the tests). */
+function folderOf(p: string): string {
+  const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  return i <= 0 ? "." : p.slice(0, i);
+}
+
+/**
+ * Reads the files `nativeWindowsEvidence` needs. `join` is win32.join on Windows (the tests pass POSIX paths and join). What cannot be read is left out (and so becomes not measured), except the
+ * info line, the release record and the launcher, without which there is no block (`error`). Never throws.
+ */
+export function collectNativeEvidence(src: NativeEvidenceSources, join: (...parts: string[]) => string = win32.join): NativeEvidenceInput | { error: string } {
+  const read = (p: string): string | undefined => { try { const b = readFileSync(p); return b.length > MAX_INPUT_BYTES ? undefined : b.toString("utf8"); } catch { return undefined; } };
+  const infoRaw = read(src.infoFile);
+  if (infoRaw === undefined) return { error: "the launcher's info output could not be read" };
+  const recordRaw = read(join(folderOf(src.launcher), "nn-launcher.record.json"));
+  if (recordRaw === undefined) return { error: "the launcher's release record (nn-launcher.record.json next to the launcher) could not be read" };
+  let launcherSha256: string;
+  try {
+    const b = readFileSync(src.launcher);
+    if (b.length > MAX_LAUNCHER_BYTES) return { error: "the launcher file is too large" };
+    launcherSha256 = createHash("sha256").update(b).digest("hex");
+  } catch { return { error: "the launcher file could not be read" }; }
+  let runRecordsRaw: string[] | undefined;
+  try {
+    const dir = join(src.controlDir, "records");
+    const names = readdirSync(dir).filter((n) => /^[A-Za-z0-9._-]{1,100}\.json$/.test(n)).sort();
+    runRecordsRaw = [];
+    for (const name of names.slice(-MAX_RUN_RECORDS)) {
+      const raw = read(join(dir, name));
+      if (raw === undefined) { runRecordsRaw = undefined; break; }
+      let startedAt: unknown;
+      try { startedAt = (JSON.parse(raw) as { startedAt?: unknown }).startedAt; } catch { startedAt = undefined; }
+      // Only a record shown to be older than this run is left out; one whose time cannot be read is kept, and grantsReadBackOf judges it.
+      const t = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN;
+      if (Number.isFinite(t) && t < src.since.getTime()) continue;
+      runRecordsRaw.push(raw);
+    }
+  } catch { runRecordsRaw = undefined; }
+  let leftoverProfiles: number | undefined;
+  try { leftoverProfiles = readdirSync(src.packagesDir).filter((n) => RUN_PROFILE_FOLDER.test(n)).length; } catch { leftoverProfiles = undefined; }
+  return {
+    infoRaw, recordRaw, launcherSha256,
+    ...(runRecordsRaw === undefined ? {} : { runRecordsRaw }),
+    ...(leftoverProfiles === undefined ? {} : { leftoverProfiles }),
+    ...(src.accountKind === undefined ? {} : { accountKind: src.accountKind }),
+    ...(src.symlinkRight === undefined ? {} : { symlinkRight: src.symlinkRight }),
+    ...(src.workdirRaw === undefined ? {} : { workdirRaw: src.workdirRaw }),
+  };
 }

@@ -12,6 +12,8 @@
 #   - refuses to run elevated (a member of Administrators with an elevated token): the question is what a NORMAL signed-in account can confine;
 #   - checks every file of this folder against SHA256SUMS (a missing, extra or changed file stops it before anything runs);
 #   - says whether this account may create symbolic links (whoami /priv); without that right the cases that plant a FILE symbolic link may be inconclusive, which is fine;
+#   - says whether this is a standard account or an administrator account in a normal (filtered) window (whoami /groups: the Administrators group S-1-5-32-544 is in a filtered token, deny-only);
+#     both answers go into the report (containment-evidence.mjs --account-kind, --symlink-right), with the launcher's info, for the release gate;
 #   - runs bin\nn-launcher.exe info once (a throw-away per-run container profile, made and deleted again);
 #   - runs the ten cases with the bundle's own node.exe and scripts (no network: scripts\offline-guard.mjs is loaded first);
 #   - keeps the raw output only under control\raw\ in this folder, and puts copies with names, paths, SIDs and addresses replaced into results\;
@@ -137,14 +139,37 @@ if ($check.Count -gt 0) {
 }
 Write-Host 'bundle check: every file matches SHA256SUMS, nothing extra'
 
-# ---------------------------------------------------------------------------------------------- 3. symbolic links
-$privText = ''
-try { $privText = (& "$env:SystemRoot\System32\whoami.exe" /priv) | Out-String } catch { $privText = '' }
-if ($privText -match 'SeCreateSymbolicLinkPrivilege') {
+# ---------------------------------------------------------------------------------------------- 3. symbolic links and the kind of account
+# whoami's privilege names and SIDs are the same in every display language. A whoami that fails gives $null: the report then says "not recorded" and the release gate refuses it.
+function Get-WhoamiText([string[]] $whoamiArgs) {
+  $t = $null
+  try { $t = (& "$env:SystemRoot\System32\whoami.exe" @whoamiArgs) | Out-String; if ($LASTEXITCODE -ne 0) { $t = $null } } catch { $t = $null }
+  if ($null -ne $t -and $t.Trim() -eq '') { $t = $null }
+  return $t
+}
+$linkRight = $null
+$privText = Get-WhoamiText @('/priv')
+if ($null -eq $privText) {
+  Write-Host 'symbolic links: whoami /priv could not be read; the report will say the link right was not recorded.'
+} elseif ($privText -match 'SeCreateSymbolicLinkPrivilege') {
+  $linkRight = 'yes'
   Write-Host 'symbolic links: this account holds the right to create them (SeCreateSymbolicLinkPrivilege).'
 } else {
+  $linkRight = 'no'
   Write-Host 'symbolic links: this account does not hold SeCreateSymbolicLinkPrivilege (normal for a non-administrator; Developer Mode also allows links).'
   Write-Host '  The cases that plant a FILE symbolic link may be reported inconclusive. That is expected and fine.'
+}
+# Not elevated is already shown above (the Administrators role check). The Administrators group SID in the token then means an administrator account in a filtered (normal) window.
+$accountKind = $null
+$groupsText = Get-WhoamiText @('/groups', '/fo', 'csv', '/nh')
+if ($null -eq $groupsText) {
+  Write-Host 'account: whoami /groups could not be read; the report will say the account kind was not recorded.'
+} elseif ($groupsText -match '"S-1-5-32-544"') {
+  $accountKind = 'administrator-filtered'
+  Write-Host 'account: an administrator account in a normal (not elevated) window.'
+} else {
+  $accountKind = 'standard'
+  Write-Host 'account: a standard account.'
 }
 
 # ---------------------------------------------------------------------------------------------- 4. folders and settings
@@ -290,7 +315,11 @@ $evidenceCode = $null
 if ($infoOk) {
   try {
     Write-Host 'the ten cases: running (a few minutes; output is kept, not shown) ...'
-    $evidenceCode = Invoke-Captured $node @('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact') (Join-Path $raw 'evidence.stdout.txt') (Join-Path $raw 'evidence.stderr.txt') $null 25
+    # The report's nativeWindows block (card A03b): the launcher's info output (raw; only its fields are read), the account kind and the link right found above.
+    $evidenceArgs = @('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact', '--native-info', (Join-Path $raw 'info.stdout.txt'))
+    if ($null -ne $accountKind) { $evidenceArgs += @('--account-kind', $accountKind) }
+    if ($null -ne $linkRight) { $evidenceArgs += @('--symlink-right', $linkRight) }
+    $evidenceCode = Invoke-Captured $node $evidenceArgs (Join-Path $raw 'evidence.stdout.txt') (Join-Path $raw 'evidence.stderr.txt') $null 25
     Write-Host "  the evidence run ended with exit $evidenceCode (0: every case held; 1: a case did not hold or there was no capacity; anything else: it failed)"
     if ($evidenceCode -ne 0 -and $evidenceCode -ne 1) { Add-Problem "the evidence run failed (exit $evidenceCode)" }
   } catch { Add-Problem "the evidence run could not be run: $($_.Exception.Message)" }
