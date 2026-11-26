@@ -223,7 +223,10 @@ const disk: Record<DiskFeature, boolean> = (() => {
     const found: Record<DiskFeature, boolean> = { "case": holds(["a", "A"]), "normalisation": holds(["\u00e9", "e\u0301"]), "trailing-dot": holds(["x."]), "windows-chars": holds(["a\"b", "a\nb"]), "device-names": holds(["CON.ts"]) };
     for (const k of Object.keys(found) as DiskFeature[]) if (lacks.has(k)) found[k] = false;
     return found;
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    // Best effort: this runs as the file loads, so a folder Windows still holds open (a virus scan of the files just made) must not fail every test in the file; retried, then left for the system to clear.
+    try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* a probe folder left behind is harmless */ }
+  }
 })();
 
 test("the disk probe: a disk that holds everything is seen so (Linux), and the override names only features the probe knows (card H12n, staging test fix)", () => {
