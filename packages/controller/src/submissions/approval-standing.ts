@@ -11,6 +11,8 @@ export interface ApprovalBasis { readonly criteriaRevision: number; readonly dec
 
 /** How many stored contract versions are read, newest first, to find the one in force when an approval without a basis was recorded; past that the approval is not counted (it cannot be told what it was judged on). */
 export const APPROVAL_CONTRACT_WALK = 20;
+/** A stored time as milliseconds; `NaN` when it is not a readable time (every comparison with `NaN` is false, so the callers fail closed). */
+const msOf = (t: unknown): number => (typeof t === "string" ? Date.parse(t) : Number.NaN);
 const work = (c: Record<string, unknown> | undefined): Record<string, unknown> => ({ acceptanceCriteria: [], ...(c ?? {}) });
 /**
  * The contract fields whose change takes an approval back: the criteria text a reviewer judged the work against. The checks and the required evidence are left out: the landing gate runs the contract's checks itself
@@ -48,10 +50,13 @@ export async function approvalOutdated(runner: Pick<CommandRunner, "get">, taskI
     }
     return undefined;
   };
+  // An approval with no basis is judged by time, compared as instants (not as text: a time written without milliseconds sorts after the same second with them). Fail closed: a link or a contract version stored at the
+  // very same millisecond as the approval, or a time that cannot be read, counts as made after it (the order cannot be told, so the approval is not counted on it).
+  const approvedMs = msOf(review.at);
   for (const l of reliance?.links ?? []) {
     const why = await gone(l.decisionId, await decision(l.decisionId), l);
     if (why !== undefined) return why;
-    const judged = review.basis !== undefined ? review.basis.decisions.includes(basisKey(l.decisionId, l.version)) : !(l.linkedAt > review.at);
+    const judged = review.basis !== undefined ? review.basis.decisions.includes(basisKey(l.decisionId, l.version)) : msOf(l.linkedAt) < approvedMs;
     if (!judged) return `the task has relied on owner decision ${l.decisionId} since ${l.linkedAt}, which this approval was not judged against`;
   }
   for (const c of review.cited?.decisions ?? []) {
@@ -73,9 +78,11 @@ export async function approvalOutdated(runner: Pick<CommandRunner, "get">, taskI
     for (let n = nowVersion, read = 0; ; n--, read++) {
       if (n <= 0) { then = 0; break; }
       if (read >= APPROVAL_CONTRACT_WALK) return `the task contract has changed more than ${APPROVAL_CONTRACT_WALK} times, so the criteria this approval was judged against cannot be told`;
+      if (Number.isNaN(approvedMs)) return "the time of this approval cannot be read, so the criteria it was judged against cannot be told";
       const v = await version(n);
-      if (v === undefined || typeof v.changedAt !== "string") return `the task contract's version ${n} cannot be read, so the criteria this approval was judged against cannot be told`;
-      if (!(v.changedAt > review.at)) { then = n; break; }
+      const changed = msOf(v?.changedAt);
+      if (v === undefined || Number.isNaN(changed)) return `the task contract's version ${n} cannot be read, so the criteria this approval was judged against cannot be told`;
+      if (changed < approvedMs) { then = n; break; }
     }
   }
   if (then === nowVersion) return undefined;

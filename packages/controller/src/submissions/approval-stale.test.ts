@@ -1,5 +1,5 @@
 // Card Q02 (stale approvals): an approval stops counting when a decision the task relies on is superseded or disputed after it, when the task comes to rely on a decision it was not judged against, when a decision it
-// cites changes, or when the task contract's work fields change. Read where approvals are read (`approvalOf`), so the landing gate's `review` check, the landing queue and the review waiting view all see it, with the
+// cites changes, or when the task contract's criteria text (expected result, acceptance criteria) changes. Read where approvals are read (`approvalOf`), so the landing gate's `review` check, the landing queue and the review waiting view all see it, with the
 // reason in plain words. A new review against the current decisions and criteria restores it; a dispute settled by keeping the decision restores it; a priority-only contract change leaves it. Approvals recorded
 // before the basis was kept are judged by their time. The carry-over by unchanged patch ID still works for unchanged decisions and stops with the same rule. Runs on all four storage backends.
 import assert from "node:assert/strict";
@@ -71,7 +71,8 @@ for (const backend of backends) {
       const host: LandingCheckHost = { landingChecks: async (call) => ({ checkout: true, change: { base: BASE, head: "9".repeat(40), tree: T1, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH }) }) as LandingCheckHostReport };
       const gate = new LandingGate({ requiredChecks: async () => ["review"], tests: async () => undefined, approvalOf: (id) => svc.approvalOf(id), now: () => NOW });
       const reviewCheck = async () => (await gate.evaluate({ taskId: task, projectId: project, submissionId: code.id, host })).results[0]!;
-      const ops = new LandingQueueOps(LandingQueueService.withEpoch(world.storage, projects.epoch, options), { approvalOf: (id) => svc.approvalOf(id), landingBranch: async () => "main", projectOfTask: async () => project });
+      let failRead = false;
+      const ops = new LandingQueueOps(LandingQueueService.withEpoch(world.storage, projects.epoch, options), { approvalOf: async (id) => { if (failRead) throw new Error("storage unavailable"); return svc.approvalOf(id); }, landingBranch: async () => "main", projectOfTask: async () => project });
       const queued = async () => (await ops.list(owner, { projectId: project })).items[0];
       const waitingState = async () => (await svc.waiting(owner, project)).items.find((i) => i.taskId === task)?.state;
 
@@ -82,6 +83,15 @@ for (const backend of backends) {
       assert.deepEqual((await raw("submission", first.id)).judgedAgainst, { criteriaRevision: 1, decisions: [`${dA}@1`] });
       assert.equal((await reviewCheck()).result, "pass");
       assert.equal((await ops.add(owner, { commandId: cid("q"), submissionId: code.id })).position, 1);
+      assert.equal((await queued())?.held, undefined);
+      // The queue also says when an entry's approval cannot be read, or is for another base or tree than the one queued (card Q02 review): neither reads as landing.
+      failRead = true;
+      assert.equal((await queued())?.held, "its approval could not be read");
+      failRead = false;
+      const submitted = await raw("submission", code.id);
+      await plant("submission", code.id, { ...submitted, tree: T2 });
+      assert.equal((await queued())?.held, "its approval is for another base or tree than the one queued");
+      await plant("submission", code.id, submitted);
       assert.equal((await queued())?.held, undefined);
       assert.equal(await waitingState(), "needs_signoff", "approved: it waits for a director sign-off, not for a review");
 
@@ -222,6 +232,44 @@ for (const backend of backends) {
       assert.equal(await approved(), true);
       await linked("2026-11-26T10:00:00.001Z");
       assert.equal(await because(), `the task has relied on owner decision ${dA} since 2026-11-26T10:00:00.001Z, which this approval was not judged against`);
+      // Times are compared as instants and fail closed (card Q02 review): a link at the approval's very millisecond counts as made after it (the order cannot be told), and a time written without milliseconds is
+      // not misread by its text ("10:00:00Z" sorts after "10:00:00.500Z" as text, though it is the earlier instant).
+      await linked("2026-11-26T10:00:00.000Z");
+      assert.equal(await because(), `the task has relied on owner decision ${dA} since 2026-11-26T10:00:00.000Z, which this approval was not judged against`, "a link at the same millisecond");
+      const old = (at: string) => plant("submission-verdicts", code.id, { reviews: [{ id: derivedId("sbm", "old"), verdict: "approve", by: "agent:rev", at }] });
+      await old("2026-11-26T10:00:00Z");
+      await linked("2026-11-26T10:00:00.500Z");
+      assert.equal(await because(), `the task has relied on owner decision ${dA} since 2026-11-26T10:00:00.500Z, which this approval was not judged against`, "half a second after an approval written without milliseconds");
+      await linked("2026-11-26T09:59:59Z");
+      assert.equal(await approved(), true, "a link a second before it, written without milliseconds");
+      await linked("yesterday");
+      assert.match((await because()) ?? "", /since yesterday, which this approval was not judged against/, "a link time that cannot be read does not count as before the approval");
+      await old("not a time");
+      await linked("2026-11-26T09:59:59Z");
+      assert.match((await because()) ?? "", /which this approval was not judged against/, "an approval time that cannot be read: no link counts as judged");
+      // The contract walk the same way: a version stored at the approval's very millisecond was not in force when it was given.
+      await plant("decision-reliance", relianceIdOf(task), { taskId: task, projectId: project, links: [], revalidations: 0, followUps: [] });
+      await old("2026-11-26T10:00:00.000Z");
+      await version(1, "2026-11-26T10:00:00.000Z");
+      await plant("task-contract", task, { ...body, version: 1 });
+      assert.equal(await because(), "the task contract's acceptanceCriteria changed since version 0 (now version 1, stored at 2026-11-26T10:00:00.000Z)");
+      await version(1, "2026-11-26T09:59:59Z");
+      assert.equal(await approved(), true, "a version stored a second before it, written without milliseconds");
+      await old("not a time");
+      assert.equal(await because(), "the time of this approval cannot be read, so the criteria it was judged against cannot be told");
+      await plant("task-contract", task, { ...body, version: 0 });
+      assert.equal(await approved(), true, "no contract and no decisions: nothing to compare, as before");
+      // An approval with a basis (card Q02 review): judged with no contract (version 0), then a contract made with no criteria (only a priority) leaves it; a basis version above the current one (damaged or
+      // partly restored data) does not count, even where a record of that version exists.
+      const withBasis = (criteriaRevision: number) => plant("submission-verdicts", code.id, { reviews: [{ id: derivedId("sbm", "new"), verdict: "approve", by: "agent:rev", at: "2026-11-26T10:00:00.000Z", basis: { criteriaRevision, decisions: [] } }] });
+      await withBasis(0);
+      const empty = { ...body, acceptanceCriteria: [], priority: 9 };
+      await plant("task-contract-version", `${task}.1`, { ...empty, version: 1, changedAt: "2026-11-26T11:00:00.000Z" });
+      await plant("task-contract", task, { ...empty, version: 1 });
+      assert.equal(await approved(), true, "a contract made after it with no criteria: nothing it was judged against changed");
+      await withBasis(2);
+      await plant("task-contract-version", `${task}.2`, { ...empty, version: 2, changedAt: "2026-11-26T11:30:00.000Z" });
+      assert.equal(await because(), "the task contract's version 2, which this approval was judged against, cannot be read (it is now at version 1)");
     } finally { await world.close(); }
   });
 }
