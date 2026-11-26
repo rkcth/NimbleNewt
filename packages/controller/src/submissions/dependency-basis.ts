@@ -24,6 +24,12 @@ export const NO_DEPENDENCIES = "none";
 /** At most this many changes are named (each is one line for the owner). */
 export const DEPENDENCY_CHANGES_NAMED = 5;
 
+/**
+ * Second review (cost): what one pass over a task's evidence has already judged, so many evidence records judged against the same entries read each entry's state once, and each snapshot once. Made fresh for one pass
+ * (one read of the gate, one check of the task), never kept.
+ */
+export type DependencyMemo = Map<string, Promise<unknown>>;
+
 interface SnapshotBody { readonly taskId: string; readonly digest: string; readonly entries: Readonly<Record<string, string>> }
 
 /** One recorded dependency that changed since the evidence or approval was judged, in words the owner can read. */
@@ -47,10 +53,19 @@ export function fingerprint(e: DependencyEntry): string {
  * no change, or not a kind the controller judges itself.
  */
 async function changedFromState(get: (kind: string, id: string) => Promise<{ readonly body: unknown; readonly revision?: number } | undefined>, e: DependencyEntry): Promise<DependencyChange | undefined> {
+  // Second review: an entry its recorder could not read (`unverified`) holds only its word, not an observation of the record; judging it would tell that recorder, through a refusal or a reason, whether its guess
+  // matches a record it may not read. It is judged as an observation-only entry: only recording it again with another observation changes it.
+  if (e.unverified === true) return undefined;
   const j = await judgeFromState(get, e);
   if (j === undefined || (j[0] !== "changed" && j[0] !== "deleted") || (e.seen !== undefined && e.seen === j[2])) return undefined;
   return { entryId: e.id, kind: e.kind, key: e.key, status: j[0], detail: j[1] };
 }
+
+/**
+ * The kinds whose key names a shared record or catalog version (or a lookup of one) that a reader of the reason may not be allowed to read (second review): the reason goes to the assigned reviewer, the recorder of
+ * evidence and the views, so it names the manifest entry instead (`resume.dependencies.check` gives each entry's ID and key to those who may read it).
+ */
+const PRIVATE_KEYS: ReadonlySet<string> = new Set(["record", "decision", "tool-version", "negative"]);
 
 /** The key as the owner may see it: one line, redacted, at most 80 characters. */
 const shown = (key: string): string => { const one = redactText(key.replace(/[\u0000-\u001f\u007f]/g, " ")); return one.length > 80 ? `${one.slice(0, 79)}…` : one; };
@@ -58,7 +73,7 @@ const shown = (key: string): string => { const one = redactText(key.replace(/[\u
 /** One change in plain words. */
 export function dependencyChangeText(c: DependencyChange): string {
   if (c.kind === "manifest") return `the task's recorded dependencies ${c.status === "missing" && c.entryId.startsWith("dps-") ? "this was judged against cannot be read" : `changed: an entry ${c.detail}`}`;
-  return `the task's recorded ${c.kind} dependency "${shown(c.key)}" ${c.status === "re-recorded" ? c.detail : `${c.status === "deleted" ? "is gone" : "changed"} (${c.detail})`}`;
+  return `the task's recorded ${c.kind} dependency ${PRIVATE_KEYS.has(c.kind) ? `(entry ${c.entryId})` : `"${shown(c.key)}"`} ${c.status === "re-recorded" ? c.detail : `${c.status === "deleted" ? "is gone" : "changed"} (${c.detail})`}`;
 }
 
 /**
@@ -94,13 +109,14 @@ export async function dependencyChangesNow(runner: Pick<CommandRunner, "get">, t
  * What changed among the dependencies the evidence or approval was judged against (empty: nothing). `snapshot` is what it kept; `undefined` for a record made before dependencies were kept, which is judged by its
  * time `at` instead: each entry the controller judges itself and not observed strictly after it (fail closed: the same millisecond, or a time that cannot be read, is judged) is checked against the controller's state. A snapshot that cannot be read counts as a change (fail closed). At most `limit` changes are named.
  */
-export async function dependencyChanges(runner: Pick<CommandRunner, "get">, taskId: string, snapshot: string | undefined, at: string, limit = DEPENDENCY_CHANGES_NAMED): Promise<DependencyChange[]> {
+export async function dependencyChanges(runner: Pick<CommandRunner, "get">, taskId: string, snapshot: string | undefined, at: string, limit = DEPENDENCY_CHANGES_NAMED, memo?: DependencyMemo): Promise<DependencyChange[]> {
   if (snapshot === NO_DEPENDENCIES) return [];
   const get = (kind: string, id: string) => runner.get(kind, id);
-  const manifest = (await runner.get("dependency-manifest", manifestId(taskId)))?.body as unknown as ManifestBody | undefined;
+  const once = <T>(key: string, make: () => Promise<T>): Promise<T> => { if (memo === undefined) return make(); let p = memo.get(key) as Promise<T> | undefined; if (p === undefined) { p = make(); memo.set(key, p); } return p; };
+  const manifest = (await once(`m:${taskId}`, () => runner.get("dependency-manifest", manifestId(taskId))))?.body as unknown as ManifestBody | undefined;
   const current = new Map((manifest?.entries ?? []).map((e) => [e.id, e] as const));
   const out: DependencyChange[] = [];
-  const judged = async (e: DependencyEntry): Promise<void> => { const c = await changedFromState(get, e); if (c !== undefined) out.push(c); };
+  const judged = async (e: DependencyEntry): Promise<void> => { const c = await once(`e:${taskId}:${JSON.stringify([e.id, e.kind, e.key, e.hash ?? null, e.seen ?? null, e.unverified ?? null])}`, () => changedFromState(get, e)); if (c !== undefined) out.push(c); };
   if (snapshot === undefined) {
     const atMs = msOf(at);
     for (const e of current.values()) {
@@ -112,7 +128,7 @@ export async function dependencyChanges(runner: Pick<CommandRunner, "get">, task
     }
     return out;
   }
-  const kept = (await runner.get(DEPENDENCY_SNAPSHOT, snapshot))?.body as unknown as SnapshotBody | undefined;
+  const kept = (await once(`s:${snapshot}`, () => runner.get(DEPENDENCY_SNAPSHOT, snapshot)))?.body as unknown as SnapshotBody | undefined;
   if (kept === undefined || kept.taskId !== taskId || typeof kept.entries !== "object" || kept.entries === null) return [{ entryId: snapshot, kind: "manifest", key: snapshot, status: "missing", detail: "cannot be read" }];
   for (const [id, fp] of Object.entries(kept.entries)) {
     if (out.length >= limit) break;

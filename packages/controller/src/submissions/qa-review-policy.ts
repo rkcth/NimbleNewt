@@ -45,6 +45,12 @@ export interface QaReviewPolicyBody {
   readonly updatedAt: string;
 }
 
+/**
+ * Second review: the times in why an approval stopped counting (a dependency "recorded again … at T") are left out of the cause, so the same change recorded again at another time is the same reason and its
+ * episodes stay bounded (`QA_REVIEW_LIMITS.episodes`), rather than a new cause, and a new request, each time an observation is recorded back and forth.
+ */
+const TIMES = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g;
+
 export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, projects: 500, episodes: 20, looksPerRound: 200, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 100, incidentPageSize: 500, page: 20, sweepEveryMs: 60_000 } as const;
 
 const KIND = "qa-review-policy";
@@ -470,7 +476,7 @@ export class QaReviewService {
       // Code that already has an open request is not asked for twice (below), so its approval is not read here.
       if (this.#ports.approvalOf === undefined || asked.has(x.submissionId)) continue;
       const a = await this.#ports.approvalOf(x.submissionId).catch(() => undefined);
-      if (a?.outdated !== undefined) wanted.push({ taskId: x.taskId, trigger: "reapproval", cause: `${a.outdated.reviewId}@${hex(a.outdated.because).slice(0, 12)}`, approval: a.outdated.reviewId, reason: redactText(a.outdated.because).slice(0, 300), approvedBy: a.outdated.approvedBy });
+      if (a?.outdated !== undefined) wanted.push({ taskId: x.taskId, trigger: "reapproval", cause: `${a.outdated.reviewId}@${hex(a.outdated.because.replace(TIMES, "")).slice(0, 12)}`, approval: a.outdated.reviewId, reason: redactText(a.outdated.because).slice(0, 300), approvedBy: a.outdated.approvedBy });
     }
     if (!t.onSubmission && t.periodicMinutes === null && !t.onIncident && !policy.gatesCompletion && wanted.length === 0) return out;
     const eligible: typeof scan.tasks[number][] = [];

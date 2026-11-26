@@ -12,7 +12,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { CONTRACT_WORK_FIELDS } from "./acceptance.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
 import { overriddenFor } from "./review-citation.js";
-import { dependencyChanges, dependencyChangesNow, dependencyChangeText, readDependencyBasis, type DependencyChange } from "./dependency-basis.js";
+import { dependencyChanges, dependencyChangesNow, dependencyChangeText, readDependencyBasis, type DependencyChange, type DependencyMemo } from "./dependency-basis.js";
 
 /** The four results a QA check can have (card Q02). They are kept apart: only `passed` passes; `failed`, `blocked` (could not be run: an environment or a dependency was missing) and `not-run` each fail the gate and are counted separately. */
 export const QA_RESULTS = ["passed", "failed", "blocked", "not-run"] as const;
@@ -274,7 +274,7 @@ export class QaEvidenceService {
   }
 
   /** What changed since the record was made: its criteria (only the fields that say what the work must be) and its decisions. Empty: it still holds. */
-  async #staleness(e: QaEvidenceBody, now: { version: number; body: Record<string, unknown> | undefined }, reliance: RelianceBody | undefined, reads?: QaGateRead[]): Promise<QaStaleReason[]> {
+  async #staleness(e: QaEvidenceBody, now: { version: number; body: Record<string, unknown> | undefined }, reliance: RelianceBody | undefined, reads?: QaGateRead[], memo?: DependencyMemo): Promise<QaStaleReason[]> {
     const reasons: QaStaleReason[] = [];
     if (e.criteriaRevision !== now.version) {
       const then = e.criteriaRevision === 0 ? {} : ((await this.#runner.get("task-contract-version", `${e.taskId}.${e.criteriaRevision}`))?.body as unknown as Record<string, unknown> | undefined);
@@ -302,7 +302,7 @@ export class QaEvidenceService {
       reasons.push(l.state === "current" ? { kind: "decision_not_cited", decisionId: l.decisionId } : { kind: "decision_superseded", decisionId: l.decisionId, state: "superseded" });
     }
     // Card Q02: a dependency the task recorded changed since (seen recorded again with another observation, or judged changed from the controller's own state).
-    for (const change of await dependencyChanges(this.#runner, e.taskId, e.dependencySnapshot, e.recordedAt)) reasons.push({ kind: "dependency_changed", change });
+    for (const change of await dependencyChanges(this.#runner, e.taskId, e.dependencySnapshot, e.recordedAt, undefined, memo)) reasons.push({ kind: "dependency_changed", change });
     return reasons;
   }
 
@@ -397,10 +397,11 @@ export class QaEvidenceService {
         // record named (those still required, when the contract names checks), so a narrower re-check does not pass on fewer checks than were looked at before.
         const required = this.#required(contract.body);
         const covered = new Set(checks.map((c) => c.name));
+        const memo: DependencyMemo = new Map();
         for (const other of index.body.ids) {
           const e = (await this.#runner.get("qa-evidence", other))?.body as unknown as QaEvidenceBody | undefined;
           if (e === undefined || e.state !== "current" || e.submissionId !== command.submissionId || e.source !== source || (source === "self" && e.recordedBy !== by.id)) continue;
-          if ((await this.#staleness(e, contract, reliance)).length === 0) for (const c of e.checks) covered.add(c.name);
+          if ((await this.#staleness(e, contract, reliance, undefined, memo)).length === 0) for (const c of e.checks) covered.add(c.name);
         }
         const settled: string[] = [];
         const open: QaOpenRecheck[] = [];
@@ -536,11 +537,12 @@ export class QaEvidenceService {
       const contract = await this.#contract(taskId);
       const reliance = await this.#reliance(taskId);
       const out: { id: string; revision: number; body: QaEvidenceBody; reasons: QaStaleReason[] }[] = [];
+      const memo: DependencyMemo = new Map();
       for (const id of index.body.ids) {
         const found = await this.#runner.get("qa-evidence", id);
         const e = found?.body as unknown as QaEvidenceBody | undefined;
         if (found === undefined || e === undefined || e.state !== "current") continue;
-        const reasons = await this.#staleness(e, contract, reliance);
+        const reasons = await this.#staleness(e, contract, reliance, undefined, memo);
         if (reasons.length > 0) out.push({ id, revision: found.revision, body: e, reasons });
       }
       return out;
@@ -777,11 +779,12 @@ export class QaEvidenceService {
     const contract = await this.#contract(taskId);
     const reliance = await this.#reliance(taskId);
     const items: (QaEvidenceBody & { id: string; revision: number; staleNow: readonly QaStaleReason[] })[] = [];
+    const memo: DependencyMemo = new Map();
     for (const id of [...index.body.ids].reverse()) {
       const found = await this.#runner.get("qa-evidence", id);
       const e = found?.body as unknown as QaEvidenceBody | undefined;
       if (found === undefined || e === undefined) continue;
-      items.push({ ...e, id, revision: found.revision, staleNow: e.state === "current" ? await this.#staleness(e, contract, reliance) : [] });
+      items.push({ ...e, id, revision: found.revision, staleNow: e.state === "current" ? await this.#staleness(e, contract, reliance, undefined, memo) : [] });
     }
     const rechecks: (QaRecheckBody & { id: string })[] = [];
     for (const r of index.body.rechecks) {
@@ -923,6 +926,7 @@ export class QaEvidenceService {
     const { sub, taskId, task } = await this.#submission(by, submissionIdValue);
     const submissionId = submissionIdValue;
     const reads: QaGateRead[] = [];
+    const memo: DependencyMemo = new Map();
     // The project's review policy (card Q02): the checks it adds to the contract's and how many independent original sources each check needs. Not bound in `reads` (a policy change counts from the next read).
     const policy = await this.#ports.policy?.(task.projectId, taskId);
     const contract = await this.#contract(taskId);
@@ -944,7 +948,7 @@ export class QaEvidenceService {
       reads.push({ kind: "qa-evidence", id, revision: found.revision });
       const own = e.submissionId === submissionId;
       if (e.state !== "current") { if (own) stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }
-      const reasons = await this.#staleness(e, contract, reliance, reads);
+      const reasons = await this.#staleness(e, contract, reliance, reads, memo);
       if (reasons.length > 0) { if (own) stale.push({ id, reasons }); } else { usable.push({ ...e, id }); if (!own) carriedUsed.add(e.submissionId); }
     }
     const pending: string[] = [];

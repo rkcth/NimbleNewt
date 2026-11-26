@@ -193,7 +193,8 @@ export class DependencyService {
     for (const [i, e] of fresh.entries()) if (!(await this.#verifyAtRecording(by, e, `dependencies[${i}]`))) (fresh[i] as { unverified?: boolean }).unverified = true;
     for (const [i, e] of fresh.entries()) if (e.kind === "search" && this.#judgesSearch(e, task.projectId)) fresh[i] = await this.#verifySearch(by, e, task.projectId, `dependencies[${i}]`);
     // Card Q02 review: an entry recorded while what it names is already judged changed keeps that state as acknowledged (`seen`), so the change does not hold back the task's evidence and approvals forever.
-    for (const [i, e] of fresh.entries()) { const j = await judgeFromState((kind, id) => this.#runner.get(kind, id), e); if (j !== undefined && (j[0] === "changed" || j[0] === "deleted")) fresh[i] = { ...e, seen: j[2] }; }
+    // Only for an entry the recorder could read (second review): an unverified hash is only its word, and whether it matches the record, or whether a looked-up record exists, is not for this reader to learn.
+    for (const [i, e] of fresh.entries()) { if (e.unverified === true) continue; const j = await judgeFromState((kind, id) => this.#runner.get(kind, id), e); if (j !== undefined && (j[0] === "changed" || j[0] === "deleted")) fresh[i] = { ...e, seen: j[2] }; }
     const ref: AggregateRef = { kind: "dependency-manifest", id: derivedId("dpm", taskId) };
     const r = await this.#runner.command("dependencies.record", { commandId: scopedCommandId(by.id, command.commandId), actor: by.id }, async () => ({
       payload: { taskId, entries: fresh.map((e) => e.id).join(",") },

@@ -122,12 +122,12 @@ for (const backend of backends) {
       await plant("desk-record", desk, deskBody("spec v2"));
       const stale = await qa.gate(owner, sub);
       assert.ok(stale.stale.some((s) => s.id === e2.id && s.reasons.some((r) => r.kind === "dependency_changed" && r.change.status === "changed")), JSON.stringify(stale.stale));
-      assert.equal(reasonText(stale.stale.find((s) => s.id === e2.id)!.reasons[0]!), `the task's recorded record dependency "${desk}" changed (the record's content differs)`);
+      assert.equal(reasonText(stale.stale.find((s) => s.id === e2.id)!.reasons[0]!), `the task's recorded record dependency (entry ${derivedId("dpm", `record||${desk}`)}) changed (the record's content differs)`);
       const looked = await qa.dependenciesChanged(task);
       assert.deepEqual(looked.invalidated, [e2.id]);
       assert.deepEqual((await qa.dependenciesChanged(task)).invalidated, [], "once");
       // New evidence is refused while the recorded dependency is seen changed, with what to do; once the agent records it again, evidence is accepted.
-      await assert.rejects(() => evidence(), isDomain("stale_revision", new RegExp(`record dependency "${desk}" changed \\(the record's content differs\\): the work is looked at again against it \\(the task's agent records it again\\) before it is checked`)));
+      await assert.rejects(() => evidence(), isDomain("stale_revision", new RegExp(`record dependency \\(entry ${derivedId("dpm", `record||${desk}`)}\\) changed \\(the record's content differs\\): the work is looked at again against it \\(the task's agent records it again\\) before it is checked`)));
       await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v2") }] });
       const e3 = await evidence();
       assert.equal((await raw("qa-evidence", e3.id)).state, "current");
@@ -185,7 +185,7 @@ for (const backend of backends) {
       assert.equal((await svc.approvalOf(code.id))?.approved, true);
       // The shared record is edited: the approval stops counting; a new approval is refused while it is seen changed (a request for changes is recorded); once recorded again, an approval stands.
       await plant("desk-record", desk, deskBody("spec v2"));
-      assert.match((await svc.approvalOf(code.id))!.outdated!.because, new RegExp(`record dependency "${desk}" changed \\(the record's content differs\\)`));
+      assert.match((await svc.approvalOf(code.id))!.outdated!.because, new RegExp(`record dependency \\(entry ${derivedId("dpm", `record||${desk}`)}\\) changed \\(the record's content differs\\)`));
       await assert.rejects(() => review("approve"), isDomain("invalid_command", /an approval waits until the task's agent has looked at the work against it again \(and records it again\); a request for changes or a rejection can be recorded now/));
       await review("changes");
       await deps.record(owner, { commandId: cid("d"), taskId: task, dependencies: [{ kind: "record", key: desk, hash: sha("spec v2") }] });

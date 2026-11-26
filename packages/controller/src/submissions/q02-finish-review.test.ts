@@ -77,7 +77,7 @@ for (const backend of backends) {
       assert.equal((await svc.approvalOf(code.id))?.approved, true);
       // The record is superseded (its content is unchanged): the approval and the evidence are taken back, and new ones are refused, saying what to do.
       await plant("desk-record", desk, deskBody("spec v1", "superseded"));
-      assert.deepEqual([(await svc.approvalOf(code.id))?.outdated?.reviewId, (await svc.approvalOf(code.id))?.outdated?.because], [a1.id, `the task's recorded record dependency "${desk}" changed (the record was superseded)`]);
+      assert.deepEqual([(await svc.approvalOf(code.id))?.outdated?.reviewId, (await svc.approvalOf(code.id))?.outdated?.because], [a1.id, `the task's recorded record dependency (entry ${derivedId("dpm", `record||${desk}`)}) changed (the record was superseded)`]);
       await assert.rejects(() => x.review("approve"), isDomain("invalid_command", /the record was superseded\): an approval waits until the task's agent has looked at the work against it again \(and records it again\)/));
       await assert.rejects(() => x.evidence(), isDomain("stale_revision", /the record was superseded\): the work is looked at again against it \(the task's agent records it again\)/));
       // The acknowledgement is the controller's own field: a caller cannot set it.
