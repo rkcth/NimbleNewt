@@ -283,6 +283,40 @@ for (const backend of backends) {
     assert.match(String(noHost["reason"]), /cannot run the checkout tool/);
   });
 
+  suite("card W09b first review: a repeated call ID never runs a checkout write or command twice (answered as it was), the same ID with other arguments is refused, oversized or NUL arguments never reach the host, and a refusal's words are scrubbed", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("code it", ann);
+    const credential = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    const asked: string[] = [];
+    c.checkoutHost.run = async (_call, request) => {
+      asked.push(`${request.action}:${request.path ?? request.command ?? ""}`);
+      if (request.path === "refused.txt") return { ok: false, reason: `cannot write with ${credential}` };
+      return { ok: true, body: request.action === "run" ? "ran once\n" : "", facts: { exitCode: 0 } };
+    };
+    const seen: Record<string, BridgeResponse> = {};
+    c.worker.script = c.session(async (s) => {
+      seen["write1"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "rep-write");
+      seen["write2"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "rep-write");
+      seen["run1"] = await s.send("work.checkout", { action: "run", command: "echo once >> log" }, "rep-run");
+      seen["run2"] = await s.send("work.checkout", { action: "run", command: "echo once >> log" }, "rep-run");
+      seen["other"] = await s.send("work.checkout", { action: "run", command: "echo twice >> log" }, "rep-run");
+      seen["nul"] = await s.send("work.checkout", { action: "write", path: "a\u0000b", text: "x" });
+      seen["longCommand"] = await s.send("work.checkout", { action: "run", command: "x".repeat(8001) });
+      seen["longPath"] = await s.send("work.checkout", { action: "read", path: "p".repeat(1001) });
+      seen["longText"] = await s.send("work.checkout", { action: "write", path: "big.txt", text: "t".repeat(60_001) });
+      seen["refused"] = await s.send("work.checkout", { action: "write", path: "refused.txt", text: "x" }, "rep-refused");
+    });
+    await c.tick();
+    assert.deepEqual(asked, ["write:a.txt", "run:echo once >> log", "write:refused.txt"], "each call reached the host once; the bad ones never");
+    assert.equal(good(seen["write1"]!)["state"], "confirmed");
+    assert.equal(good(seen["write2"]!)["state"], "confirmed");
+    assert.equal(good(seen["run2"]!)["body"], "ran once\n", "a repeat is answered with the first answer");
+    assert.notEqual((seen["other"] as { ok: boolean }).ok === true && good(seen["other"]!)["state"], "confirmed", JSON.stringify(seen["other"]));
+    for (const k of ["nul", "longCommand", "longPath", "longText"]) assert.equal(bad(seen[k]!).code, "invalid_command", k);
+    const refused = JSON.stringify(seen["refused"]);
+    assert.ok(!refused.includes(credential) && /cannot write with/.test(refused), refused);
+  });
+
   suite("model-supplied text never reaches a command line: it travels as data on standard input, and the argument vector is the manifest's entry point alone", async (c) => {
     const ann = await c.agentFor("ann");
     await c.task("t", ann);
