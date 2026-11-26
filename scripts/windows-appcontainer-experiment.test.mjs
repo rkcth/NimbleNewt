@@ -3165,16 +3165,18 @@ test("the home case (second review): Ctrl+C and the window closing remove the st
   const handler = desk.slice(desk.indexOf("unsafe extern \"system\" fn console_ctrl("), desk.indexOf("fn remove_pending_now("));
   assert.ok(handler.includes("std::panic::catch_unwind(") && handler.includes("HOME_STOP.store(true") && handler.includes("remove_pending_now()") && /\n    1\n\}/.test(handler), "the handler stops, removes, never unwinds, answers TRUE");
   const rp = desk.slice(desk.indexOf("fn remove_pending_now("), desk.indexOf("// ---", desk.indexOf("fn remove_pending_now(")));
-  assert.ok(rp.indexOf("let mut pending = pending_lock();") < rp.indexOf("remove_entries(h, sid.psid())") && rp.includes("crate::homerules::may_write_interactive_station(&name, flags)") && rp.includes("object_entries(h, sid.psid())"), "the handler's removal: locked, only WinSta0, read back");
+  assert.ok(rp.indexOf("let mut pending = pending_lock();") >= 0 && rp.indexOf("let mut pending = pending_lock();") < rp.indexOf("remove_entries(h, sid.psid())") && rp.includes("crate::homerules::may_write_interactive_station(&name, flags)") && rp.includes("object_entries(h, sid.psid())"), "the handler's removal: locked, only WinSta0, read back");
   const fin = desk.slice(desk.indexOf("pub(crate) fn finish("), desk.indexOf("pub(crate) fn all_reverted("));
-  assert.ok(fin.indexOf("let mut pending = pending_lock();") < fin.indexOf("remove_entries(t.handle, self.sid)"), "the normal removal takes the same lock");
+  const finLock = fin.indexOf("let mut pending = pending_lock();");
+  assert.ok(finLock > 0 && finLock < fin.indexOf("remove_entries(t.handle, self.sid)"), "the normal removal takes the same lock");
   // home-probe: the handler is installed at the start, a stopped run runs no further step (checked before the ATTEMPT line), deelevate's parent waits for its child
   const hp = home.slice(home.indexOf("pub(crate) fn home_probe("), home.indexOf("// ---", home.indexOf("pub(crate) fn home_probe(")));
-  assert.ok(hp.indexOf("desk::install_console_handler();") < hp.indexOf("for step in &steps"));
-  assert.ok(hp.indexOf("if desk::home_stopped() {") < hp.indexOf('log(&format!("ATTEMPT step {}"'), "stopped before the next step's ATTEMPT");
+  const hpInst = hp.indexOf("desk::install_console_handler();"), hpStop = hp.indexOf("if desk::home_stopped() {");
+  assert.ok(hpInst > 0 && hpInst < hp.indexOf("for step in &steps"));
+  assert.ok(hpStop > hp.indexOf("for step in &steps") && hpStop < hp.indexOf('log(&format!("ATTEMPT step {}"'), "stopped before the next step's ATTEMPT");
   assert.match(hp, /s\.b\("stopped", desk::home_stopped\(\)\);/);
   const de = home.slice(home.indexOf("pub(crate) fn deelevate("));
-  assert.ok(de.indexOf("desk::install_console_handler();") < de.indexOf("CreateProcessAsUserW("));
+  assert.ok(de.indexOf("desk::install_console_handler();") > 0 && de.indexOf("desk::install_console_handler();") < de.indexOf("CreateProcessAsUserW("));
   // no output call that panics on a closed pipe or console
   assert.ok(!/println!|eprintln!/.test(code(home)), "home.rs writes through emit/log only");
   assert.ok(!/eprintln!/.test(code(desk)), "desk.rs logs without eprintln!");
