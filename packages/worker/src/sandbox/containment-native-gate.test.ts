@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { REQUIRED_CASE_IDS, assessRelease, isLinkRightInconclusive, parseReport, type CaseResult, type ContainmentReport, type NativeWindowsEvidence } from "./containment.js";
 import { redactReport } from "./containment-windows-evidence.js";
@@ -80,9 +81,9 @@ describe("A03b Windows release gate: what passes", () => {
     assert.equal(g.ok, true);
     assert.equal(g.platforms["win32"], true);
     assert.deepEqual(g.accepted, [
-      "win32: case deny-symlink-read inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so the file link was not planted and the case (its junction attempts included) was not judged",
-      "win32: case deny-symlink-write inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so the file link was not planted and the case (its junction attempts included) was not judged",
-      "win32: the packaged controller working-directory check: not a pass: not yet measurable until K03 (no packaged controller exists)",
+      "win32: case deny-symlink-read inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so its file link was not planted and that attempt was not judged (the case's junction attempts were refused)",
+      "win32: case deny-symlink-write inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so its file link was not planted and that attempt was not judged (the case's junction attempts were refused)",
+      "win32: the packaged controller working-directory check: not a pass: not yet measurable (no packaged controller release exists yet)",
     ]);
     // run-g05.ps1 always runs with --redact: the redacted report written to results\ reads back and passes the same way.
     const redacted = parseReport(JSON.stringify(redactReport(withEvidence(robReport()), { users: ["robert"] })));
@@ -91,20 +92,31 @@ describe("A03b Windows release gate: what passes", () => {
     // A standard account passes the same way.
     assert.equal(gate(withEvidence(robReport(), fullInput({ accountKind: "standard" }))).ok, true);
   });
-  test("the hosted de-elevated rehearsal shape (10/10) passes with only the K03 item accepted; with a passing packaged check nothing is accepted", () => {
+  test("the hosted de-elevated rehearsal shape (10/10) passes with only the working-directory item accepted; with a passing packaged check nothing is accepted", () => {
     const g = gate(hosted());
     assert.deepEqual(g.blockers, []);
-    assert.deepEqual(g.accepted, ["win32: the packaged controller working-directory check: not a pass: not yet measurable until K03 (no packaged controller exists)"]);
+    assert.deepEqual(g.accepted, ["win32: the packaged controller working-directory check: not a pass: not yet measurable (no packaged controller release exists yet)"]);
     const full = gate(withEvidence(hosted(), fullInput({ symlinkRight: true, workdirRaw: PACKAGED_OK })));
     assert.deepEqual([full.ok, full.accepted], [true, []]);
   });
   test("the working-directory check: packaged:false (no packaged controller) is accepted whatever passed says; packaged and failed is refused; not recorded is refused", () => {
-    assert.equal(PACKAGED_CONTROLLER_EXISTS, false, "card K03 is not built; when it lands, this flips and an unmeasured check is refused");
+    assert.equal(PACKAGED_CONTROLLER_EXISTS, false, "no packaged controller release is built yet; when one is, this flips and packaged:false is refused");
     for (const passed of [true, false]) assert.equal(gate(withEvidence(robReport(), fullInput({ workdirRaw: JSON.stringify({ schema: "nimblenewt.g05-workdir/1", packaged: false, passed }) }))).ok, true);
     refused(withEvidence(robReport(), fullInput({ workdirRaw: JSON.stringify({ schema: "nimblenewt.g05-workdir/1", packaged: true, passed: false }) })), /packaged controller working-directory check failed/);
     // Once a packaged controller exists, no check output means no measurement: refused.
     refused(withEvidence(robReport(), fullInput({ packagedControllerExists: true })), /working-directory check is not recorded/);
     assert.equal(gate(withEvidence(robReport(), fullInput({ packagedControllerExists: true, workdirRaw: PACKAGED_OK }))).ok, true);
+    // And the gate itself: once a packaged controller exists, a report that says packaged:false (made by an older bundle, or written by hand) is refused, not accepted.
+    const unpackaged = withEvidence(robReport());
+    const g = assessRelease([unpackaged], { commit: ROB_COMMIT, now: NOW, platforms: ["win32"], packagedControllerExists: true });
+    assert.equal(g.ok, false);
+    assert.ok(g.blockers.some((b) => /was not run on the packaged controller/.test(b)), g.blockers.join(" | "));
+  });
+  test("the packaged-controller exception cannot outlive the release decision: card D03 (release readiness) is not flipped while PACKAGED_CONTROLLER_EXISTS is false", () => {
+    const plan = JSON.parse(readFileSync(fileURLToPath(new URL("../../../../docs/nimblenewt/implementation-plan/task-plan.json", import.meta.url)), "utf8")) as { tasks: { id: string; status: string }[] };
+    const d03 = plan.tasks.find((t) => t.id === "D03");
+    assert.ok(d03 !== undefined, "card D03 is in task-plan.json");
+    if (!PACKAGED_CONTROLLER_EXISTS) assert.equal(d03.status, "planned", "build the packaged controller, run g05-workdir-check.mjs on it in the owner run, and set PACKAGED_CONTROLLER_EXISTS to true before D03");
   });
   test("the assembler reads the real info line and release record as they are", () => {
     const made = nativeWindowsEvidence(fullInput());
@@ -115,7 +127,7 @@ describe("A03b Windows release gate: what passes", () => {
     assert.deepEqual(e.profiles, { created: true, deleted: true, gone: true, leftover: 0 });
     assert.equal(e.grantsReadBack, "clean");
     assert.equal(e.packagedControllerWorkingDirectory?.packaged, false);
-    assert.deepEqual(made.notProven, ["the working-directory check on a packaged controller (none exists yet: card K03)", "a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)"]);
+    assert.deepEqual(made.notProven, ["the working-directory check on a packaged controller (none exists yet)", "a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)"]);
   });
 });
 
@@ -180,6 +192,11 @@ describe("A03b Windows release gate: every refusal (fail closed)", () => {
       refused(withCase(good(), id, (c) => ({ ...c, verdict: "not_run", detail: "no capacity" })), new RegExp(`case ${id}: not_run`));
     }
     refused({ ...good(), cases: [...good().cases, good().cases[0]!] }, /appears twice/);
+    // A case the gate does not know blocks (a report holds the required cases only), whatever its verdict.
+    for (const verdict of ["pass", "fail"] as const) refused({ ...good(), cases: [...good().cases, { id: "deny-something-else", category: "control", verdict, detail: "held" }] }, /deny-something-else is not one of the required cases/);
+    // A spoofed id (case or space changed) is not the required case: the real one is missing.
+    refused(withCase(good(), "deny-write-system", (c) => ({ ...c, id: "Deny-write-system" })), /case deny-write-system is missing/);
+    refused(withCase(good(), "deny-write-system", (c) => ({ ...c, id: "deny-write-system " })), /case deny-write-system is missing/);
   });
   test("inconclusive: only the two file-link cases, only for a FILE link not planted, only when the run recorded the account lacks the right", () => {
     // The right held (or not recorded): a file link not planted is not excused.
@@ -188,6 +205,11 @@ describe("A03b Windows release gate: every refusal (fail closed)", () => {
     // A junction (no privilege needed) not planted is never excused.
     refused(withCase(good(), "deny-symlink-read", (c) => ({ ...c, detail: c.detail.replace("link-abs-file", "link-abs-dir") })), /case deny-symlink-read: inconclusive/);
     refused(withCase(good(), "deny-symlink-write", (c) => ({ ...c, detail: c.detail.replace("link-write", "link-dir") })), /case deny-symlink-write: inconclusive/);
+    // A file link of the OTHER case is not this case's link (each case's own links only).
+    refused(withCase(good(), "deny-symlink-write", (c) => ({ ...c, detail: c.detail.replace("link-write", "link-abs-file") })), /case deny-symlink-write: inconclusive/);
+    refused(withCase(good(), "deny-symlink-read", (c) => ({ ...c, detail: c.detail.replace("link-abs-file", "link-write") })), /case deny-symlink-read: inconclusive/);
+    // The second file link of the read case is accepted the same way.
+    assert.equal(gate(withCase(good(), "deny-symlink-read", (c) => ({ ...c, detail: c.detail.replace("link-abs-file", "link-rel-key") }))).ok, true);
     // Any other inconclusive reason in the same cases blocks.
     refused(withCase(good(), "deny-symlink-read", (c) => ({ ...c, detail: "the attempt timed out" })), /case deny-symlink-read: inconclusive \(the attempt timed out\)/);
     refused(withCase(good(), "deny-symlink-write", (c) => ({ ...c, detail: `${c.detail} ` })), /case deny-symlink-write: inconclusive/);
@@ -241,6 +263,11 @@ describe("A03b native Windows evidence: read as data", () => {
     bad((n) => { delete n["packagedControllerWorkingDirectory"]; });
     bad((n) => { n["packagedControllerWorkingDirectory"] = { packaged: "no", passed: true }; });
     bad((n) => { n["packagedControllerWorkingDirectory"] = true; });
+    // No field the gate does not read, at any level.
+    bad((n) => { n["supervisorAclCheck"] = "strict"; });
+    bad((n) => { (n["launcher"] as Record<string, unknown>)["trusted"] = true; });
+    bad((n) => { (n["profiles"] as Record<string, unknown>)["extra"] = 0; });
+    bad((n) => { n["packagedControllerWorkingDirectory"] = { packaged: false, passed: false, note: "x" }; });
   });
   test("the assembler refuses what it cannot read, and only fills a native Windows report", () => {
     const err = (input: Partial<NativeEvidenceInput>, pattern: RegExp): void => { const m = nativeWindowsEvidence(fullInput(input)); assert.ok("error" in m && pattern.test(m.error), JSON.stringify(m)); };
@@ -313,6 +340,13 @@ describe("A03b native Windows evidence: what the evidence run collects from disk
     rmSync(join(l.control, "records", "r1.json"));
     const empty = collectNativeEvidence(l.src, join);
     assert.ok(!("error" in empty) && empty.runRecordsRaw?.length === 0);
+    // More records than the bound: not measured (names are random run ids, so no subset by name may stand for this run's records). A "left" record among them is never dropped by a slice.
+    for (let i = 0; i < 1001; i++) writeFileSync(join(l.control, "records", `r${String(i).padStart(4, "0")}.json`), i === 0 ? cleanRun(i).replace('"readBack":"clean"', '"readBack":"left"') : cleanRun(i));
+    const many = collectNativeEvidence(l.src, join);
+    assert.ok(!("error" in many) && many.runRecordsRaw === undefined, "over the bound: not measured");
+    rmSync(join(l.control, "records", "r1000.json"));
+    const bound = collectNativeEvidence(l.src, join);
+    assert.ok(!("error" in bound) && bound.runRecordsRaw?.length === 1000 && grantsReadBackOf(bound.runRecordsRaw).state === "left", "at the bound every record is read, the first by name included");
     for (const [change, why] of [[{ infoFile: join(l.root, "none") }, /info output/], [{ launcher: join(l.root, "none", "nn-launcher.exe") }, /release record/]] as const) {
       const r = collectNativeEvidence({ ...l.src, ...change }, join);
       assert.ok("error" in r && why.test(r.error), JSON.stringify(r));
@@ -320,5 +354,90 @@ describe("A03b native Windows evidence: what the evidence run collects from disk
     rmSync(join(l.bin, "nn-launcher.exe"));
     const noExe = collectNativeEvidence(l.src, join);
     assert.ok("error" in noExe && /launcher file/.test(noExe.error));
+  });
+});
+
+describe("A03b Windows release gate: every single-field change of the owner's real-shape report (table-driven)", () => {
+  type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
+  const base = (): Json => JSON.parse(JSON.stringify(withEvidence(robReport()))) as Json;
+  /** Every path to a value of the report (arrays by index). */
+  const paths = (v: Json, at: (string | number)[] = []): (string | number)[][] => {
+    if (Array.isArray(v)) return v.flatMap((x, i) => [[...at, i], ...paths(x, [...at, i])]);
+    if (v !== null && typeof v === "object") return Object.entries(v).flatMap(([k, x]) => [[...at, k], ...paths(x, [...at, k])]);
+    return [];
+  };
+  const getAt = (v: Json, p: readonly (string | number)[]): Json => p.reduce<Json>((o, k) => (o as Record<string, Json>)[k as string]!, v);
+  /** The report with the value at `p` replaced (`undefined`: removed). */
+  const setAt = (p: readonly (string | number)[], value: Json | undefined): Json => {
+    const copy = base();
+    const parent = getAt(copy, p.slice(0, -1));
+    const k = p[p.length - 1]!;
+    if (value === undefined) { if (Array.isArray(parent)) parent.splice(k as number, 1); else delete (parent as Record<string, Json>)[k as string]; }
+    else (parent as Record<string, Json>)[k as string] = value;
+    return copy;
+  };
+  const mutations = (v: Json): { name: string; value: Json | undefined }[] => {
+    const out: { name: string; value: Json | undefined }[] = [
+      { name: "removed", value: undefined }, { name: "null", value: null }, { name: "'false'", value: "false" }, { name: "'true'", value: "true" }, { name: "'0'", value: "0" }, { name: "''", value: "" },
+      { name: "true", value: true }, { name: "false", value: false }, { name: "0", value: 0 }, { name: "-1", value: -1 }, { name: "1.5", value: 1.5 }, { name: "2^53", value: 2 ** 53 }, { name: "[]", value: [] }, { name: "{}", value: {} },
+      { name: "array of it", value: [v] }, { name: "__proto__ object", value: JSON.parse('{"__proto__":{"ok":true}}') as Json },
+    ];
+    if (typeof v === "string") {
+      out.push({ name: "upper", value: v.toUpperCase() }, { name: "lower", value: v.toLowerCase() }, { name: "trailing space", value: `${v} ` }, { name: "leading space", value: ` ${v}` },
+        { name: "shortened", value: v.slice(0, -1) }, { name: "first 12", value: v.slice(0, 12) }, { name: "NUL added", value: `${v}\u0000` }, { name: "very long", value: v.repeat(200) });
+    }
+    if (typeof v === "number") out.push({ name: "+1", value: v + 1 }, { name: "negated", value: -v - 1 }, { name: "as text", value: String(v) });
+    if (typeof v === "boolean") out.push({ name: "flipped", value: !v }, { name: "as text", value: String(v) });
+    if (v !== null && typeof v === "object" && !Array.isArray(v)) out.push({ name: "extra key", value: { ...v, unexpected: true } });
+    return out;
+  };
+  /**
+   * The fields the gate deliberately does not judge (any well-formed value passes): the platform's machine words, a case's category, a passing case's detail, the trusted-host authority text, the
+   * report time within its window, the session number other than 0, the account kind between its two measured values, and whether a check that could not be run (packaged:false) "passed".
+   */
+  const free = (p: readonly (string | number)[], before: Json, after: Json | undefined): boolean => {
+    const key = p.join(".");
+    if (JSON.stringify(before) === JSON.stringify(after)) return true;
+    if (key === "arch" || key === "osVersion" || key === "trustedHost.authority") return typeof after === "string" && after.trim().length > 0;
+    if (key === "generatedAt") return true;
+    if (/^cases\.\d+\.category$/.test(key)) return true;
+    if (/^cases\.\d+\.detail$/.test(key)) return getAt(base(), [...p.slice(0, -1), "verdict"]) === "pass";
+    if (key === "nativeWindows.sessionId") return typeof after === "number" && after !== 0;
+    if (key === "nativeWindows.accountKind") return after === "standard" || after === "administrator-filtered";
+    if (key === "nativeWindows.packagedControllerWorkingDirectory.passed") return typeof after === "boolean";
+    return false;
+  };
+  test("the unchanged report passes (two link cases and the working-directory check accepted)", () => {
+    const p = parseReport(JSON.stringify(base()));
+    assert.ok("report" in p);
+    const g = gate(p.report);
+    assert.deepEqual([g.ok, g.accepted.length], [true, 3]);
+  });
+  test("every removal or change of one field is refused (by parseReport or by the gate) unless the gate deliberately does not judge that field", () => {
+    let tried = 0, refusedCount = 0;
+    const slipped: string[] = [];
+    for (const p of paths(base())) {
+      const before = getAt(base(), p);
+      for (const m of mutations(before)) {
+        tried++;
+        const copy = setAt(p, m.value);
+        const parsed = parseReport(JSON.stringify(copy));
+        const passed = "report" in parsed && gate(parsed.report).ok;
+        if (!passed) { refusedCount++; continue; }
+        if (!free(p, before, m.value)) slipped.push(`${p.join(".")} ${m.name}`);
+      }
+    }
+    assert.deepEqual(slipped, [], `passed the gate although they should not: ${slipped.join(" | ")}`);
+    assert.ok(tried > 1500 && refusedCount > tried * 0.8, `${refusedCount} of ${tried} refused`);
+  });
+  test("whole-report forms: array, a second report, cases reordered, the report repeated in one file, a huge report", () => {
+    assert.ok("error" in parseReport(JSON.stringify([base()])));
+    assert.ok("error" in parseReport(`${JSON.stringify(base())}${JSON.stringify(base())}`));
+    assert.ok("error" in parseReport(JSON.stringify({ ...(base() as Record<string, Json>), padding: "x".repeat(10) })));
+    const big = parseReport(JSON.stringify({ ...(base() as Record<string, Json>), osVersion: "x".repeat(5_000_000) }));
+    assert.ok("error" in big);
+    const r = withEvidence(robReport());
+    assert.equal(gate({ ...r, cases: [...r.cases].reverse() }).ok, true, "order does not matter");
+    assert.equal(assessRelease([r, r], { commit: ROB_COMMIT, now: NOW, platforms: ["win32"] }).ok, false, "two reports for one platform");
   });
 });

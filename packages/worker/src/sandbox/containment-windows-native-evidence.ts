@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { win32 } from "node:path";
 import type { ContainmentReport, NativeWindowsEvidence } from "./containment.js";
-import { isNativeWindowsEvidence } from "./containment.js";
+import { PACKAGED_CONTROLLER_EXISTS, isNativeWindowsEvidence } from "./containment.js";
 import { parseWorkdirCheck } from "./containment-windows-evidence.js";
 
 /*
@@ -13,16 +13,13 @@ import { parseWorkdirCheck } from "./containment-windows-evidence.js";
  *   - the backend's run records (`<control>\records\*.json`, windows-native-job.ts) of this evidence run, for the grant read-back of every run;
  *   - the count of `NimbleNewtRun-*` profiles left under `%LOCALAPPDATA%\Packages` after the run;
  *   - the account kind and whether the account holds SeCreateSymbolicLinkPrivilege, as run-g05.ps1 found them (`containment-evidence.mjs run --account-kind ... --symlink-right ...`);
- *   - the working-directory check output when one was run; otherwise, while no packaged controller exists (card K03), the fact that there is none (`packaged: false`).
+ *   - the working-directory check output when one was run; otherwise, while no packaged controller exists (PACKAGED_CONTROLLER_EXISTS), the fact that there is none (`packaged: false`).
  * Anything not given is `not-measured` / `null`, which the release gate refuses, and is named in `notProven`.
  */
 
 export const LAUNCHER_RECORD_SCHEMA = "nimblenewt.native-launcher-record/1";
-/**
- * Whether a packaged controller release exists to run the working-directory check on (card K03, the release pipeline). While false, a run without the check records `packaged: false` (the gate
- * accepts it as "not yet measurable"). FOLLOW-UP: set to true when K03 lands; then a run without the check output records nothing and the gate refuses it.
- */
-export const PACKAGED_CONTROLLER_EXISTS = false;
+/** Defined with the gate (containment.ts), which refuses `packaged: false` once it is true; while false, a run without the check records `packaged: false`, accepted as "not yet measurable". */
+export { PACKAGED_CONTROLLER_EXISTS };
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_RUN_RECORDS = 1000;
 const MAX_LAUNCHER_BYTES = 64 * 1024 * 1024;
@@ -116,7 +113,7 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     ...(leftover === null ? ["the count of NimbleNewtRun-* profiles left after the run"] : []),
     ...(grants.state === "not-measured" ? [`the grant read-back after each run (${grants.why ?? "not given"})`] : []),
     ...(evidence.symlinkRight === null ? ["whether the account holds SeCreateSymbolicLinkPrivilege"] : []),
-    ...(workingDirectory === null ? ["the controller working-directory check"] : workingDirectory.packaged ? [] : ["the working-directory check on a packaged controller (none exists yet: card K03)"]),
+    ...(workingDirectory === null ? ["the controller working-directory check"] : workingDirectory.packaged ? [] : ["the working-directory check on a packaged controller (none exists yet)"]),
     "a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)",
   ];
   return { evidence, notProven };
@@ -172,9 +169,10 @@ export function collectNativeEvidence(src: NativeEvidenceSources, join: (...part
   let runRecordsRaw: string[] | undefined;
   try {
     const dir = join(src.controlDir, "records");
+    // Every record is looked at (names are random run ids, so no slice by name may stand for "the newest"); more than the bound is not measured.
     const names = readdirSync(dir).filter((n) => /^[A-Za-z0-9._-]{1,100}\.json$/.test(n)).sort();
     runRecordsRaw = [];
-    for (const name of names.slice(-MAX_RUN_RECORDS)) {
+    for (const name of names.length > MAX_RUN_RECORDS ? [] : names) {
       const raw = read(join(dir, name));
       if (raw === undefined) { runRecordsRaw = undefined; break; }
       let startedAt: unknown;
@@ -184,6 +182,7 @@ export function collectNativeEvidence(src: NativeEvidenceSources, join: (...part
       if (Number.isFinite(t) && t < src.since.getTime()) continue;
       runRecordsRaw.push(raw);
     }
+    if (names.length > MAX_RUN_RECORDS) runRecordsRaw = undefined;
   } catch { runRecordsRaw = undefined; }
   let leftoverProfiles: number | undefined;
   try { leftoverProfiles = readdirSync(src.packagesDir).filter((n) => RUN_PROFILE_FOLDER.test(n)).length; } catch { leftoverProfiles = undefined; }

@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:net";
 import { arch as osArch, release as osRelease, tmpdir } from "node:os";
 import { basename, dirname, join, relative, win32 } from "node:path";
 import type { SandboxBackend } from "./backend.js";
-import { runWindowsNodeCases } from "./containment-windows-cases.js";
+import { FILE_LINKS_BY_CASE, runWindowsNodeCases } from "./containment-windows-cases.js";
 import { windowsEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher } from "./launcher.js";
 import { GUEST, type SandboxRecipe } from "./recipe.js";
@@ -21,7 +21,7 @@ import { GUEST_PATHS, guestPathFor } from "./windows-plan.js";
  * 2. A release gate (`assessRelease`) that reads the reports of the platforms and says what still blocks a release: a missing platform, a failed or missing case, evidence about another commit,
  *    and the evidence only a real Windows PC can give. Since the owner's decision of 2026-11-26 (keep the AppContainer launcher, no Windows Sandbox) that is the native launcher's evidence
  *    (`NativeWindowsEvidence`): the launcher is the released one for this commit, the run was not elevated, in the signed-in user's interactive session with its window objects made, every
- *    per-run profile gone and every grant read back clean, plus the packaged controller working directory (accepted, not passed, while no packaged controller exists: card K03). The Windows
+ *    per-run profile gone and every grant read back clean, plus the packaged controller working directory (accepted, not passed, while no packaged controller exists). The Windows
  *    Sandbox era block (`windows`: the unattended service identity after logout and reboot, the mapped-output ACL controls, the strict supervisor-ACL check) no longer satisfies it. A run refused cleanly after the owner signs out is NOT yet required (open item, A03b).
  */
 
@@ -90,7 +90,7 @@ export interface NativeWindowsEvidence {
   /** Whether the account held SeCreateSymbolicLinkPrivilege (`null`: not recorded). Only `false` lets a file-link case be inconclusive for want of it. */
   readonly symlinkRight: boolean | null;
   /**
-   * The controller working-directory check (scripts/g05-workdir-check.mjs). `packaged: false` says no packaged controller exists to check (card K03 not built): the gate lists it as accepted, not
+   * The controller working-directory check (scripts/g05-workdir-check.mjs). `packaged: false` says no packaged controller exists to check: while PACKAGED_CONTROLLER_EXISTS is false the gate lists it as accepted, not
    * passed. `null`: not recorded, refused. The Windows Sandbox era's strict supervisor-ACL check has no native counterpart and is not part of this block (its native equivalents are the grant
    * read-back, the profile lifecycle and the elevation check above).
    */
@@ -585,10 +585,17 @@ const bool = (v: unknown): v is boolean => typeof v === "boolean";
 const phases = (v: unknown): boolean => isObject(v) && PHASES.every((k) => bool(v[k]));
 
 const SHA256 = /^[0-9a-f]{64}$/;
-/** The shape of the native Windows block, every field required (a missing field is malformed, not "not measured": the producer writes `not-measured` or `null` itself). */
+/** Exactly these keys (an extra key is not evidence the gate reads, so a block carrying one is malformed rather than silently half-read). */
+const exactKeys = (o: Record<string, unknown>, keys: readonly string[]): boolean => { const k = Object.keys(o); return k.length === keys.length && keys.every((x) => Object.hasOwn(o, x)); };
+const REPORT_KEYS: readonly string[] = ["schema", "generatedAt", "implementationCommit", "dirty", "platform", "arch", "osVersion", "macosVersion", "backend", "backendVersion", "capacityAvailable",
+  "capacityReason", "weakerThanLinux", "cases", "trustedHost", "windows", "nativeWindows"];
+const NATIVE_KEYS = ["launcher", "elevated", "accountKind", "sessionId", "windowStation", "windowStationOk", "profiles", "grantsReadBack", "symlinkRight", "packagedControllerWorkingDirectory"] as const;
+/** The shape of the native Windows block, every field required (a missing field is malformed, not "not measured": the producer writes `not-measured` or `null` itself). No other field. */
 export function isNativeWindowsEvidence(n: unknown): n is NativeWindowsEvidence {
-  if (!isObject(n)) return false;
+  if (!isObject(n) || !exactKeys(n, NATIVE_KEYS)) return false;
   const l = n["launcher"], p = n["profiles"], wd = n["packagedControllerWorkingDirectory"];
+  if (!isObject(l) || !exactKeys(l, ["recordCommit", "recordSha256", "fileSha256"]) || !isObject(p) || !exactKeys(p, ["created", "deleted", "gone", "leftover"])) return false;
+  if (wd !== null && (!isObject(wd) || !exactKeys(wd, ["packaged", "passed"]))) return false;
   return isObject(l) && typeof l["recordCommit"] === "string" && COMMIT.test(l["recordCommit"]) && typeof l["recordSha256"] === "string" && SHA256.test(l["recordSha256"])
     && typeof l["fileSha256"] === "string" && SHA256.test(l["fileSha256"])
     && bool(n["elevated"]) && (n["accountKind"] === "standard" || n["accountKind"] === "administrator-filtered" || n["accountKind"] === "not-measured")
@@ -600,14 +607,21 @@ export function isNativeWindowsEvidence(n: unknown): n is NativeWindowsEvidence 
     && (wd === null || (isObject(wd) && bool(wd["packaged"]) && bool(wd["passed"])));
 }
 
-/** The two cases that plant FILE symbolic links (besides directory junctions), and the file links they plant (containment-windows-cases.ts). */
-const FILE_LINK_CASES = new Set(["deny-symlink-read", "deny-symlink-write"]);
 /**
- * The one inconclusive a native Windows report may carry: the host could not plant a FILE symbolic link (an account without SeCreateSymbolicLinkPrivilege), so the unconfined pairing was skipped and the
- * case could not be judged. Exactly the suite's own wording, naming a file link (a junction needs no privilege, so a junction not planted is never excused).
+ * The one inconclusive a native Windows report may carry: the host could not plant a FILE symbolic link (an account without SeCreateSymbolicLinkPrivilege), so that attempt could not be judged. Exactly
+ * the suite's own wording, naming one of the file links THIS case plants (FILE_LINKS_BY_CASE; a junction needs no privilege, so a junction not planted is never excused). The suite uses this wording
+ * only when every other attempt of the case was planted, was not let through and was refused (containment-windows-cases.ts judgeAroundUnplanted).
  */
-const LINK_RIGHT_INCONCLUSIVE = /^without the sandbox the same attempt did not get through \((link-abs-file|link-rel-key|link-write): skipped not-planted\), so a refusal would prove nothing$/;
-export const isLinkRightInconclusive = (c: CaseResult): boolean => FILE_LINK_CASES.has(c.id) && c.verdict === "inconclusive" && LINK_RIGHT_INCONCLUSIVE.test(c.detail);
+export const isLinkRightInconclusive = (c: CaseResult): boolean => {
+  const links = Object.hasOwn(FILE_LINKS_BY_CASE, c.id) ? FILE_LINKS_BY_CASE[c.id]! : [];
+  return c.verdict === "inconclusive" && links.some((l) => c.detail === `without the sandbox the same attempt did not get through (${l}: skipped not-planted), so a refusal would prove nothing`);
+};
+/**
+ * Whether a packaged controller release exists to run the working-directory check on. While false, the gate accepts `packaged: false` as "not a pass, not yet measurable"; once true, it refuses it.
+ * No card in task-plan.json builds a packaged controller release yet (an earlier note named K03, which is migration recovery and already implemented); the release-readiness card D03 cannot be
+ * flipped while this is false (containment-native-gate.test.ts checks it), so the exception cannot outlive the release decision unnoticed.
+ */
+export const PACKAGED_CONTROLLER_EXISTS = false;
 
 /** Checks the shape of one report read from a file. Returns the report or the reason it is not one. Nothing in a report is trusted before this. */
 export function parseReport(raw: string): { report: ContainmentReport } | { error: string } {
@@ -615,19 +629,22 @@ export function parseReport(raw: string): { report: ContainmentReport } | { erro
   let v: unknown;
   try { v = JSON.parse(raw); } catch { return { error: "the report is not JSON" }; }
   if (!isObject(v) || v["schema"] !== CONTAINMENT_SCHEMA) return { error: "not a containment report (schema)" };
+  // No field the gate does not read (a report is what produceReport writes; an extra field would be read by nobody and could only mislead a reader of the file).
+  const extra = Object.keys(v).find((k) => !REPORT_KEYS.includes(k));
+  if (extra !== undefined) return { error: `a field the report does not have: ${JSON.stringify(extra.slice(0, 40))}` };
   if (!str(v["generatedAt"], 40) || !ISO_TIME.test(v["generatedAt"]) || !Number.isFinite(Date.parse(v["generatedAt"]))) return { error: "generatedAt: an ISO time" };
   if (typeof v["implementationCommit"] !== "string" || !COMMIT.test(v["implementationCommit"])) return { error: "implementationCommit: 40 hex digits" };
   if (!bool(v["dirty"])) return { error: "dirty: true or false" };
   if (v["platform"] !== "linux" && v["platform"] !== "darwin" && v["platform"] !== "win32") return { error: "platform: linux, darwin or win32" };
-  if (!str(v["arch"], 40) || !str(v["osVersion"], 100) || !str(v["backend"], 100)) return { error: "arch, osVersion and backend: short text" };
+  if (!str(v["arch"], 40) || !str(v["osVersion"], 100) || !str(v["backend"], 100) || v["arch"].trim() === "" || v["osVersion"].trim() === "" || v["backend"].trim() === "") return { error: "arch, osVersion and backend: short text, not empty" };
   for (const k of ["macosVersion", "backendVersion", "capacityReason"]) if (v[k] !== undefined && !str(v[k])) return { error: `${k}: short text` };
   if (!bool(v["capacityAvailable"]) || !bool(v["weakerThanLinux"])) return { error: "capacityAvailable and weakerThanLinux: true or false" };
   if (!Array.isArray(v["cases"]) || v["cases"].length > MAX_CASES) return { error: `cases: a list of at most ${MAX_CASES}` };
   for (const c of v["cases"] as unknown[]) {
-    if (!isObject(c) || !str(c["id"], 100) || !str(c["detail"], 400) || !VERDICTS.includes(c["verdict"] as Verdict) || !str(c["category"], 40)) return { error: "a case needs id, category, verdict and detail" };
+    if (!isObject(c) || !exactKeys(c, ["id", "category", "verdict", "detail"]) || !str(c["id"], 100) || !str(c["detail"], 400) || !VERDICTS.includes(c["verdict"] as Verdict) || !str(c["category"], 40)) return { error: "a case needs id, category, verdict and detail" };
   }
   const t = v["trustedHost"];
-  if (t !== undefined && !(isObject(t) && t["mode"] === "trusted-host" && str(t["authority"]) && bool(t["reachesHostFiles"]) && bool(t["refusedWithoutAuthority"]))) return { error: "trustedHost: mode, authority, reachesHostFiles, refusedWithoutAuthority" };
+  if (t !== undefined && !(isObject(t) && exactKeys(t, ["mode", "authority", "reachesHostFiles", "refusedWithoutAuthority"]) && t["mode"] === "trusted-host" && str(t["authority"]) && t["authority"].trim() !== "" && bool(t["reachesHostFiles"]) && bool(t["refusedWithoutAuthority"]))) return { error: "trustedHost: mode, authority, reachesHostFiles, refusedWithoutAuthority" };
   const w = v["windows"];
   if (w !== undefined) {
     const id = isObject(w) ? w["serviceIdentity"] : undefined;
@@ -647,6 +664,8 @@ export interface GateOptions {
   readonly commit: string;
   readonly now?: Date;
   readonly platforms?: readonly PlatformName[];
+  /** Tests only: whether a packaged controller exists (default `PACKAGED_CONTROLLER_EXISTS`). */
+  readonly packagedControllerExists?: boolean;
 }
 
 export interface GateResult {
@@ -654,7 +673,7 @@ export interface GateResult {
   readonly blockers: readonly string[];
   /** Per required platform: whether its report satisfied every check. */
   readonly platforms: Readonly<Record<string, boolean>>;
-  /** What was accepted although it is not a pass (card A03b: a file-link case inconclusive for want of the symbolic-link right; the packaged working-directory check while K03 is not built), so a release log shows it. Never a blocker. */
+  /** What was accepted although it is not a pass (card A03b: a file-link case inconclusive for want of the symbolic-link right; the packaged working-directory check while no packaged controller exists), so a release log shows it. Never a blocker. */
   readonly accepted: readonly string[];
 }
 
@@ -662,7 +681,7 @@ export interface GateResult {
  * The native Windows block's requirements (card A03b, owner decision 2026-11-26), each a separate problem. `commit` is the report's own commit, already compared with the release commit by the caller.
  * Not required in this slice: a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step is still open).
  */
-function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepted: string[]): string[] {
+function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepted: string[], packagedExists: boolean): string[] {
   const problems: string[] = [];
   if (n.launcher.recordCommit !== commit) problems.push(`the launcher's release record is for commit ${n.launcher.recordCommit.slice(0, 12)}, not the evidence's ${commit.slice(0, 12)}`);
   if (n.launcher.fileSha256 !== n.launcher.recordSha256) problems.push("the launcher that ran does not match its release record (SHA-256)");
@@ -677,10 +696,11 @@ function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string, accepte
   else if (n.profiles.leftover !== 0) problems.push(`${n.profiles.leftover} ${RUN_PROFILE_PREFIX}* container profile(s) were left after the run`);
   if (n.grantsReadBack === "not-measured") problems.push("the grants' read-back after each run is not recorded");
   else if (n.grantsReadBack !== "clean") problems.push("a grant for the container was still present after a run (read-back not clean)");
-  // Coordinator decision 2026-11-26: while no packaged controller exists (card K03), a check that says so is accepted, not passed. FOLLOW-UP: when K03 lands this must become required.
+  // Coordinator decision 2026-11-26: while no packaged controller exists, a check that says so is accepted, not passed. Once one exists (PACKAGED_CONTROLLER_EXISTS), a report saying none is refused.
   const wd = n.packagedControllerWorkingDirectory;
   if (wd === null) problems.push("the controller working-directory check is not recorded");
-  else if (!wd.packaged) accepted.push("win32: the packaged controller working-directory check: not a pass: not yet measurable until K03 (no packaged controller exists)");
+  else if (!wd.packaged && packagedExists) problems.push("the controller working-directory check was not run on the packaged controller");
+  else if (!wd.packaged) accepted.push("win32: the packaged controller working-directory check: not a pass: not yet measurable (no packaged controller release exists yet)");
   else if (!wd.passed) problems.push("the packaged controller working-directory check failed");
   return problems;
 }
@@ -712,6 +732,7 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
       const seen = new Set<string>();
       for (const c of r.cases) {
         if (seen.has(c.id)) problems.push(`case ${c.id} appears twice`);
+        else if (!REQUIRED_CASE_IDS.includes(c.id)) problems.push(`case ${c.id} is not one of the required cases (a report holds those only)`);
         seen.add(c.id);
       }
       for (const id of REQUIRED_CASE_IDS) {
@@ -720,7 +741,7 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
         else if (c.verdict === "pass") continue;
         else if (platform === "win32" && isLinkRightInconclusive(c)) {
           // Card A03b (owner decision 2026-11-26): acceptable only when the run recorded that the account lacks the symbolic-link right. Recorded as accepted, never as a pass.
-          if (r.nativeWindows?.symlinkRight === false) accepted.push(`${platform}: case ${id} inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so the file link was not planted and the case (its junction attempts included) was not judged`);
+          if (r.nativeWindows?.symlinkRight === false) accepted.push(`${platform}: case ${id} inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so its file link was not planted and that attempt was not judged (the case's junction attempts were refused)`);
           else problems.push(`case ${id}: inconclusive (${c.detail}); a file link not planted is accepted only when the run recorded that the account lacks SeCreateSymbolicLinkPrivilege`);
         } else problems.push(`case ${id}: ${c.verdict}${c.detail === "" ? "" : ` (${c.detail})`}`);
       }
@@ -741,7 +762,7 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
         if (r.windows !== undefined) problems.push("the report carries the Windows Sandbox era evidence block (windows), which is not AppContainer evidence and is no longer accepted");
         const n = r.nativeWindows;
         if (n === undefined) problems.push("the native Windows host evidence is missing (launcher release record, elevation, account, session, window station, profiles, grant read-back)");
-        else problems.push(...nativeWindowsProblems(n, r.implementationCommit, accepted));
+        else problems.push(...nativeWindowsProblems(n, r.implementationCommit, accepted, options.packagedControllerExists ?? PACKAGED_CONTROLLER_EXISTS));
       } else {
         if (r.windows !== undefined) problems.push("Windows evidence in a non-Windows report");
         if (r.nativeWindows !== undefined) problems.push("native Windows evidence in a non-Windows report");

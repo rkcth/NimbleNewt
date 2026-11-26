@@ -19789,7 +19789,7 @@ The owner's real-PC run (own-hardware run 45881452017, commit 276883c4, Windows 
 
 Accepted, not passed (listed in `GateResult.accepted` and printed by `gate` as "accepted (not a pass)"):
 - A file-link case `inconclusive` with exactly the suite's "skipped not-planted" wording for a FILE link (`link-abs-file`, `link-rel-key`, `link-write`, never a junction), when the block records `symlinkRight:false`.
-- The working-directory check with `packaged:false`: "not a pass: not yet measurable until K03".
+- The working-directory check with `packaged:false`: "not a pass: not yet measurable" (no packaged controller release exists yet).
 
 Refused:
 - A packaged controller whose check failed, or a check that is not recorded (`null`).
@@ -19807,7 +19807,7 @@ Dropped: the service session, `afterLogout`/`afterReboot`, `mappedOutputAcl`, `f
 
 - ASSUMPTION: a file-link case that is inconclusive for want of the link right is acceptable (lead's instruction; this differs from the first review's point 4). It is shown as accepted, never as a pass. In such a case the verdict stops at the first link not planted, so that case's junction attempts are not judged either.
 - ASSUMPTION (coordinator decision, 2026-11-26): the strict supervisor-ACL check belonged to the Windows Sandbox backend and has no native counterpart, so it is dropped. Its native equivalents are already required: grant read-back clean on every run record, 0 leftover profiles, the profile created and gone, and a token that is not elevated.
-- ASSUMPTION (coordinator decision, 2026-11-26): while no packaged controller exists (`PACKAGED_CONTROLLER_EXISTS = false`, card K03), a run without the check records `packaged:false`, and the gate accepts it as "not a pass: not yet measurable until K03". A measured failure, or no record, is refused. FOLLOW-UP: when K03 lands, set `PACKAGED_CONTROLLER_EXISTS` to true and make the gate require `packaged:true, passed:true` instead of accepting `packaged:false`. Wire `g05-workdir-check.mjs` into the owner run at the same time.
+- ASSUMPTION (coordinator decision, 2026-11-26): while no packaged controller exists (`PACKAGED_CONTROLLER_EXISTS = false`), a run without the check records `packaged:false`, and the gate accepts it as "not a pass: not yet measurable". A measured failure, or no record, is refused. (Corrected by the first review below: this said "card K03", but K03 is migration recovery and is already implemented; no card in task-plan.json builds a packaged controller release. The constant now lives with the gate, which refuses `packaged:false` once it is true, and a test keeps D03 from being flipped while it is false.) FOLLOW-UP: when a packaged controller release is built, set `PACKAGED_CONTROLLER_EXISTS` to true and wire `g05-workdir-check.mjs` into the owner run against it.
 - ASSUMPTION: "interactive signed-in session" is checked as `sessionId != 0` plus the window objects made (`windowStationOk`).
 - ASSUMPTION: the per-run profiles are covered by `info`'s own lifecycle and the leftover count after the whole run. A run whose profile is not shown gone fails in `windows-native-job.ts`, and its profile would remain as a leftover.
 - ASSUMPTION: run records are this run's when their `startedAt` is not before the evidence run's start. A record whose time cannot be read is kept and judged. The mutex in `run-g05.ps1` keeps a second run out.
@@ -19816,3 +19816,71 @@ Dropped: the service session, `afterLogout`/`afterReboot`, `mappedOutputAcl`, `f
 - Not run: `run-g05.ps1` has still never run (no PowerShell here). The new lines were read for 5.1: `+=` on an array, splatting `@whoamiArgs` to a native command, `$LASTEXITCODE` after `&`, ASCII only.
 
 Also in this slice: the controller's Windows label (`environment/sandbox.ts`) states what is true now. AppContainer and Job Object, weaker than Linux, measured on one real Windows 11 PC as its signed-in user, 8 of 10 cases held, the 2 symbolic-link cases not exercised. Sign-out and restart behaviour is not measured, and service mode is not supported. `produceReport` no longer calls the Windows Sandbox session probe on Windows, and `containment-evidence.mjs run` no longer prints the "Windows Sandbox owner" line. The Windows Sandbox code itself is not deleted (separate cleanup slice). The A03b status in the task plan is unchanged.
+
+### A03b gate: first review and fixes (2026-11-26, Claude agent, Opus 5.5; branch `card-a03b-gate` on 38c12456; not pushed; no workflow run; nothing run on Windows or PowerShell)
+
+Read from the viewpoint of a report that should not pass: a wrong, old or hand-made file, or one shaped by a process on the owner's PC. Findings and fixes:
+
+1. **High: a junction leak could be reported as the accepted "file link not planted" wording.** `judgeWindowsCase` returned inconclusive as soon as any unconfined attempt did not get through, before it looked at the host's witness or at a confined attempt that got through. On an account without the link right, `deny-symlink-read` and `deny-symlink-write` therefore stopped at the unplanted FILE link. Their directory junctions (planted, no right needed) were never judged, and a write or read through a junction in the sandbox would have been reported with exactly the wording the gate now accepts. The first not-through attempt was also the one named, so a broken junction probe behind an unplanted file link was named as the file link. Fixed in `containment-windows-cases.ts`:
+   - `FILE_LINKS_BY_CASE` lists each case's own file links.
+   - A problem other than an unplanted file link is named first.
+   - When only unplanted file links did not get through, `judgeAroundUnplanted` judges the rest of the case. A witness or a leak fails it. A missing junction effect unconfined, a confined run that did not make the same attempts, or a junction attempt not `denied` is inconclusive with another wording.
+   - The accepted wording is used only when every planted attempt was refused. `freeProof` names the junction write before the file link's.
+   - The gate accepts each case's own file links only (`link-write` is no longer accepted for the read case, nor the read links for the write case). Its accepted text now says the junction attempts were refused.
+   - The owner's run 45881452017 was judged by the old code. The gate's commit check keeps that report, or any report from older code, out of a release.
+2. **Medium: the packaged-controller exception did not depend on `PACKAGED_CONTROLLER_EXISTS` at the gate, and it named the wrong card.** The constant only steered the producer: once it was true, a report written by an older bundle, or by hand, that said `packaged:false` was still accepted. The constant now lives in `containment.ts`, where the gate refuses `packaged:false` once it is true. The note "until K03" was wrong (K03 is migration recovery, `implemented`), so that follow-up could never fire. New test: while the constant is false, card D03 (release readiness) must stay `planned`.
+   - ASSUMPTION: D03 is the right tripwire, because no card in task-plan.json builds a packaged controller and D03 is the release decision. Moving the tripwire to whichever card later builds the package is a one-line test change.
+3. **Low: fields nobody reads were allowed.** `parseReport` now refuses:
+   - a top-level field a report does not have;
+   - a case with a field other than id, category, verdict and detail;
+   - a trusted-host block with another field;
+   - any extra field anywhere in `nativeWindows`;
+   - an empty `arch`, `osVersion`, `backend` or trusted-host `authority`.
+
+   The gate refuses a case id outside the ten required ones (a "pass" or "fail" case the gate never read). The suites emit exactly the ten.
+4. **Low: run records were bounded by a slice by name.** Run ids are random UUIDs, so "the last 1000 by name" was not "this run's". All records are now read, and more than 1000 means not measured.
+5. **Low: label wording.** "the 2 symbolic-link cases were not exercised" became "could not be judged because that account may not create file links". The cases ran, and their junction attempts were made but not judged.
+
+Checked and found sound:
+- Every rule fails closed on missing, null, wrong-type, string-for-boolean, string-for-number, negative, fractional and oversized values. A `__proto__` key read by JSON.parse is an own key and is refused as extra.
+- Commits and hashes are exact lower-case hex, compared exactly. A duplicate case is refused.
+- `symlinkRight` enters only from `--symlink-right`, which run-g05.ps1 passes from `whoami /priv`. A privilege that is present but Disabled counts as `yes`, so the exception is refused: the right exists, and refusal is the safe side.
+- `whoami` missing, denied or giving a non-zero exit gives no flag, so not recorded, so refused. The Administrators SID is matched as a whole quoted CSV field.
+- `info.stdout.txt` is written by `WriteAllText` with `UTF8Encoding($false)` (no BOM), and JS `trim()` would remove a BOM anyway. The last `nn-appc-launcher` line is read.
+- The profile folder pattern matches the moniker format (`NimbleNewtRun-` + 16 hex, lower-cased by Windows).
+- Every guard from the two owner-bundle reviews is still in run-g05.ps1 (only the account section and the evidence-run arguments changed).
+
+New tests:
+- `containment-native-gate.test.ts`, "every single-field change": a table-driven fuzz over the owner's real-shape report. About 1,860 single changes: removal, null, `'false'`, `'0'`, `''`, booleans, 0, -1, 1.5, 2^53, `[]`, `{}`, wrapped in an array, a `__proto__` object, case and space changes, shortened, NUL, very long, +1, negated, as text, flipped, and an extra key at every object. Each must be refused unless the gate deliberately does not judge that field (machine words, category, a passing case's detail, authority text, time, non-zero session, either account kind, `passed` under `packaged:false`). On its first run it found the empty `arch`/`osVersion`/`authority`.
+- The same file also tests whole-report forms, unknown and spoofed case ids, cross-case link names, extra keys, the gate-side packaged refusal, the D03 tripwire, and over 1000 records.
+- `containment-windows-cases.test.ts` tests the junction judged around an unplanted file link (leak, witness, broken probe, not refused, left out) and the freeProof order.
+
+Deliberate breakages of my own (20, each in the compiled `dist` file, seen to fail its test, restored byte-identical by sha256):
+1. The junction witness ignored.
+2. The junction leak ignored.
+3. The first not-through attempt named.
+4. Junction attempts not required to be refused.
+5. freeProof naming the file link first.
+6. A missing junction effect ignored.
+7. Either case's file links accepted for both.
+8. The gate ignoring `packagedExists`.
+9. An unknown case id ignored.
+10. An extra top-level field.
+11. An extra case field.
+12. An extra launcher field.
+13. An empty OS version.
+14. Session 0 refused only when negative.
+15. The record's commit not compared.
+16. Accepted items returned while refused.
+17. A null link right taken as lacking.
+18. Over 1000 records read as 1000.
+19. The profile pattern at 8 hex.
+20. An empty authority.
+
+Residual risks:
+- A report is a file. A process running as the owner on that PC can write any report, info line or record, and nothing in a file can prove otherwise. The gate stops wrong, old and inconsistent reports, not a forger with the owner's rights. Signing the evidence on the PC would not change that.
+- Developer Mode lets an account plant links without the privilege. Then whoami says `no` while links can be planted. A file link that failed to plant for another reason (a file system without links, say) would then be accepted as the link-right case. The planting error code is not recorded.
+- `writeRecord` (windows-native-job.ts, not changed here) prunes `records` to 200 by name. Records are named by random id, so once a bundle's control folder holds 200 records, a fresh record can be deleted at random, including a `left` one. That needs about 70 reruns in one extracted folder. A fix (prune by `startedAt`) belongs to the backend.
+- Run records are taken as this run's by `startedAt >= since` on the PC's clock. A clock change mid-run can drop or add records. The mutex in run-g05.ps1 keeps a second run out.
+- The gate does not check that the number of run records matches the number of confined launches.
+- run-g05.ps1 has still never run. The new lines were read for Windows PowerShell 5.1.
