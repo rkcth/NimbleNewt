@@ -253,3 +253,15 @@ test("the prompt tells the model how to ask for the rest of a long documentation
   assert.match(system, /Both documentation views show 30 documents a page, in the same order each time; after \(a whole number\) is how many were already shown\. You do not see earlier answers, so take it from the owner's words/);
   assert.match(system, /\("show me the next documents", "what other documents are there\?"\) or the second page is after 30, the third page after 60 \(30 for each page before it\); a number the owner gives is used as said \("the documents after 60" is after 60, "from document 61" is after 60\)/);
 });
+
+test("the model is told that Claude cache support is experimental and unmeasured, so an owner asking about caching gets that and no claim of verified behaviour (G10 owner decision 2026-11-26)", async () => {
+  const seen: string[] = [];
+  const m = new ModelInterpreter({ complete: async (_route, r) => { seen.push(r.system); return good; } }, () => ["a/primary"]);
+  await m.interpret(input);
+  assert.match(seen[0]!, /Claude cache support is experimental and has not been measured against the real service/);
+  assert.match(seen[0]!, /Strata's is experimental too and was never run here/);
+  assert.match(seen[0]!, /llama\.cpp, vLLM, Radiance and OpenAI \(its usage fields, through Hermes\) were measured/);
+  assert.match(seen[0]!, /a project requiring isolation gets no cache settings on Claude/);
+  assert.match(CHAT_OPS["routing.provider.add"]!.verb, /claude \(experimental: its cache support has not been measured against the real service\)/);
+  assert.match(CHAT_OPS["routing.provider.add"]!.verb, /strata \(experimental: its cache support was never run here\)/);
+});

@@ -457,4 +457,17 @@ mod tests {
         assert!(parse(&["home-revoke", "--name", NAME]).unwrap_err().contains("needs --profile-record"));
         assert!(parse(&["home-revoke", "--name", NAME, "--profile-record", "C:\\c\\p.sid"]).is_ok());
     }
+
+    #[test]
+    fn the_window_object_mode_is_never_an_option_the_caller_can_pick() {
+        // The mode (private or home-desktop) is chosen by the launcher from what the account may do (winobj::try_home_desktop); no option names it, in either build.
+        for flag in ["--window-station", "--window-mode", "--home-desktop", "--inherit-desktop", "--allow-inherited-desktop"] {
+            assert!(parse(&["run", flag, "home-desktop"]).is_err(), "{flag}");
+            assert!(parse(&["info", flag]).is_err(), "{flag}");
+        }
+        #[cfg(not(feature = "experiment"))]
+        for value in ["home-desktop", "inherit", "private", "winsta0"] {
+            assert!(parse(&["run", "--desktop", value]).unwrap_err().contains("not in this build"), "{value}");
+        }
+    }
 }

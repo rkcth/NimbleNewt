@@ -2,7 +2,7 @@
 // cells) and the hand-started workflow's new steps. Nothing here runs the launcher or the installer; what they DO on Windows is judged by the hosted run and, later, the owner's own machine.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -729,4 +729,59 @@ test("A03b real run: the pin catches at least ten deliberate breakages, and the 
   }
   assert.ok(caught >= 10);
   assert.equal(sha(), before, "the workflow file on disk was not touched");
+});
+
+// ---------------------------------------------------------------------------------------------------------------- the home desktop in the product (plan 12.5.1)
+
+test("the home desktop: the product's own documents record what it closes, what stays shared, the limit's measured effect, and the owner's clipboard decision", () => {
+  const plan = read("docs", "nimblenewt", "windows-isolation-plan.md");
+  const s = plan.slice(plan.indexOf("#### 12.5.1 The home desktop in the product"), plan.indexOf("## 13. What we would tell users"));
+  assert.ok(s.length > 4000, "the section exists");
+  for (const fact of ["495 windows (28 visible)", "0 with them", "`EnumWindows`", "foreground window", "cursor position", "one screen pixel", "clipboard open", "clipboard sequence number", "global atom add", "keyboard hook", "on its own desktop only",
+    "0x20327", "0xf00ff", "The job's clipboard limit, stated plainly", "did NOT block the open in this one run", "unmeasured", "GetClipboardData", "nn-hd-<64 random bits>", "NO fallback to the inherited desktop",
+    "windowStation", "privateStationError", "try_home_desktop", "may_make_home_desktop", "Still not measured on the product itself"]) assert.ok(s.includes(fact), fact);
+  // second review: the figures say where they come from (the owner's pasted output, not stored), the mask is decoded, and what stops SwitchDesktop on the visible station is named as documented only
+  for (const fact of ["pasted into the working session on 2026-11-26", "is NOT stored in this repository", "0x201FF", "`DESKTOP_SWITCHDESKTOP`", "`JOB_OBJECT_UILIMIT_DESKTOP`", "documented, NOT measured",
+    "no WRITE_DAC, WRITE_OWNER or DELETE", "`jobProcessesAtEnd`", "If the specified desktop already exists, the function succeeds and returns a handle to the existing desktop", "deny-only",
+    "that `JOB_OBJECT_UILIMIT_DESKTOP` stops `SwitchDesktop` on WinSta0"]) assert.ok(s.includes(fact), fact);
+  const launcherReadme = read("native", "nn-launcher", "README.md");
+  for (const fact of ["that output is not stored in this repository", "0x201FF", "`JOB_OBJECT_UILIMIT_DESKTOP` (documented, not measured)", "`jobProcessesAtEnd`", "the UI limit stops `SwitchDesktop` there"]) assert.ok(launcherReadme.includes(fact), fact);
+  // the owner's decision is recorded as a decision (with the date), not as an open item
+  assert.ok(s.includes('Owner decision (2026-11-26: "The clipboard is fine")') && s.includes("ACCEPTED exposure"));
+  assert.ok(!/open item for the owner|owner must decide|\bOPEN:|for the owner to decide/i.test(s), "no open clipboard question is left for the owner");
+  assert.ok(plan.includes("**Correction (2026-11-26).**"), "the earlier claim that the limits close the clipboard is corrected where it was made");
+  assert.ok(s.includes('Owner decision (2026-11-26: "Let\'s require someone to be logged in")') && s.includes("Windows work STOPS when nobody is signed in") && s.includes("TO BE VERIFIED on Windows, not proven"));
+  assert.ok(!/(requires?|needs?) an unattended Session-0 service/i.test(s), "no unattended service identity is described as a requirement");
+  const readme = read("native", "nn-launcher", "README.md");
+  const w = readme.slice(readme.indexOf("## Window objects: the private station, or the home desktop"), readme.indexOf("## What is not in it"));
+  for (const fact of ["never by an option", "NEVER inherits the user's desktop", "NOTHING is written to WinSta0's access list", "CLIPBOARD", "ATOM table", "did not block the clipboard open", "accepted exposure", "2026-11-26", "The clipboard is fine", "495", "Let's require someone to be logged in", "Windows work stops when nobody is signed in", "not a requirement"]) assert.ok(w.includes(fact), fact);
+  const notes = read("docs", "nimblenewt", "implementation-plan", "implementation-notes.md");
+  const n = notes.slice(notes.indexOf("### A03b: the home desktop in the product launcher"));
+  for (const fact of ["card NOT flipped", "ASSUMPTION:", "NOT done / only Windows can show", "Owner decision (2026-11-26", "ACCEPTED exposure", "did not block the open", "Let's require someone to be logged in", "TO BE VERIFIED on Windows, not proven"]) assert.ok(n.includes(fact), fact);
+  const contributing = read("CONTRIBUTING.md");
+  assert.ok(contributing.includes("private home desktop on WinSta0") && contributing.includes("which mode is used and the home desktop's station rule"));
+  // no native file exists without a CONTRIBUTING entry
+  for (const f of readdirSync(join(root, "native", "nn-launcher", "src"))) assert.ok(contributing.includes(`native/nn-launcher/src/${f}`), f);
+});
+
+test("the home desktop: the hosted de-elevated cross-check reports the mode and is a report, not a gate; the elevated steps still demand the named station", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const from = wf.indexOf("# the cross-check: the product launcher's info, de-elevated");
+  assert.ok(from > 0);
+  const block = wf.slice(from, wf.indexOf("          exit 0", from));
+  for (const piece of ['"windowStation":"[^"]*"', '"privateStationError":"[^"]*"', `grep -q '"elevated":false'`, `grep -q '"windowStation":"home-desktop"'`, `grep -q '"windowStationOk":true'`, "::notice::de-elevated product info: windowStation home-desktop, windowStationOk true", "::warning::de-elevated product info did not report"]) assert.ok(block.includes(piece), piece);
+  assert.ok(!/\bexit [1-9]|set -e|\|\| false/.test(block), "a report: nothing in the block can fail the step");
+  assert.ok(wf.slice(from).includes("          exit 0"), "the step still ends with exit 0");
+  // the two elevated steps keep demanding `private` (the named path is unchanged)
+  assert.equal(wf.split(`grep -q '"windowStation":"private"'`).length - 1, 2);
+});
+
+test("the home desktop: `info` tries the home desktop through the same function as a run, and no code path inherits a desktop", () => {
+  const w = read("native", "nn-launcher", "src", "win.rs");
+  const report = w.slice(w.indexOf("fn report_private_station"), w.indexOf("fn run("));
+  assert.ok(report.includes("privdesk::PrivateDesktop::create(sid, elevation())"), "info and check ask exactly what a run asks");
+  const priv = read("native", "nn-launcher", "src", "privdesk.rs");
+  assert.equal([...priv.matchAll(/CreateDesktopW\(/g)].length, 2, "the named desktop and the home desktop: the only two ways to a desktop");
+  assert.ok(!/OpenInputDesktop|OpenDesktopW|GetThreadDesktop|SwitchDesktop/.test(priv));
+  assert.ok(w.includes("home_needs_ui_limits(p.mode(), a.ui_limits)"));
 });

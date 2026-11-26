@@ -237,14 +237,19 @@ impl ProfileLife {
     }
 }
 
-fn is_elevated() -> bool {
+fn is_elevated() -> bool { elevation() == Some(true) }
+
+/// The process token's TokenElevation: Some(true) or Some(false) when it was read, None when the token could not be opened or queried. The choice of window objects needs to KNOW that the
+/// launcher is not elevated (an unreadable token never counts as "not elevated"); the JSON line's `elevated` is `is_elevated()` as before.
+fn elevation() -> Option<bool> {
     unsafe {
         let mut tok: HANDLE = null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return false; }
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 { return None; }
         let _g = Handle(tok);
         let mut e: TOKEN_ELEVATION = zeroed();
         let mut got = 0u32;
-        GetTokenInformation(tok, TokenElevation, &mut e as *mut _ as *mut c_void, size_of::<TOKEN_ELEVATION>() as u32, &mut got) != 0 && e.TokenIsElevated != 0
+        if GetTokenInformation(tok, TokenElevation, &mut e as *mut _ as *mut c_void, size_of::<TOKEN_ELEVATION>() as u32, &mut got) == 0 { return None; }
+        Some(e.TokenIsElevated != 0)
     }
 }
 
@@ -599,7 +604,7 @@ fn make_job(a: &Args) -> Result<Handle, String> {
             return Err(format!("SetInformationJobObject(limits) failed: {}", GetLastError()));
         }
         if a.ui_limits {
-            let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: 0x0000_00FF /* JOB_OBJECT_UILIMIT_ALL */ };
+            let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: crate::winobj::JOB_UI_LIMITS };
             if SetInformationJobObject(job.0, JobObjectBasicUIRestrictions, &ui as *const _ as *const c_void, size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32) == 0 {
                 return Err(format!("SetInformationJobObject(ui) failed: {}", GetLastError()));
             }
@@ -695,15 +700,23 @@ fn private_wanted(a: &Args) -> bool {
     { let _ = a; true }
 }
 
-/// `info` and `check`: can this account make (and close) a private window station for the container? Writes `windowStationOk`, and `windowStationError` when not. Err: the message.
+/// `info` and `check`: can this account make (and close) the window objects for the container? Writes `windowStation` (the mode: `private` for a named station of its own, `home-desktop` for the
+/// non-elevated user's private desktop on WinSta0), `windowStationOk`, and `windowStationError` when not; when the home desktop was used because the named station was refused, also
+/// `privateStationError` (the named station's own message). Err: the message.
 fn report_private_station(j: &mut Json, sid: PSID) -> Result<(), String> {
-    match privdesk::PrivateDesktop::create(sid) {
+    match privdesk::PrivateDesktop::create(sid, elevation()) {
         Ok(mut p) => {
+            j.s("windowStation", p.mode().name());
+            if let Some(r) = p.named_refusal() { j.s("privateStationError", r); }
             if p.close() { j.b("windowStationOk", true); return Ok(()); }
             let e = format!("window objects: the private window station or desktop could not be closed (error {})", p.close_error().unwrap_or(0));
             j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e)
         }
-        Err(e) => { j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e) }
+        Err(e) => {
+            j.s("windowStation", e.mode.name());
+            if let Some(r) = &e.named_refusal { j.s("privateStationError", r); }
+            j.b("windowStationOk", false); j.s("windowStationError", &e.message); Err(e.message)
+        }
     }
 }
 
@@ -738,7 +751,16 @@ fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {
     // The private window station and desktop come first: if they cannot be made nothing else was changed (no grant, no job), and the program does not start.
     let mut private: Option<privdesk::PrivateDesktop> = None;
     if private_wanted(a) {
-        match privdesk::PrivateDesktop::create(sid.0) { Ok(p) => private = Some(p), Err(e) => return (fail(j, "grant", &e), true) }
+        match privdesk::PrivateDesktop::create(sid.0, elevation()) {
+            Ok(p) => {
+                j.s("windowStation", p.mode().name());
+                if let Some(r) = p.named_refusal() { j.s("privateStationError", r); }
+                // The home desktop shares the user's window station: the job's UI limits are not optional there (the backend always passes them).
+                if let Err(e) = crate::winobj::home_needs_ui_limits(p.mode(), a.ui_limits) { return (fail(j, "grant", &e), true); }
+                private = Some(p)
+            }
+            Err(e) => { j.s("windowStation", e.mode.name()); if let Some(r) = &e.named_refusal { j.s("privateStationError", r); } return (fail(j, "grant", &e.message), true) }
+        }
     }
     let mut grants = GrantSet { sid: sid.0, items: Vec::new() };
     #[cfg(feature = "experiment")]
@@ -873,6 +895,10 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         let mut code = 0u32;
         GetExitCodeProcess(process.0, &mut code);
         if leftover != 0 { TerminateJobObject(job.0, 1); } // the program ended but left processes behind: end them too
+        // TerminateJobObject returns before the processes are gone. Wait (at most 5 s) for the job to be empty, so the window objects closed after this are not still held by a process of the run;
+        // what was left is reported, not hidden (0: empty, -1: unreadable, more: still ending when the wait ran out; the desktop then lives until they are gone).
+        let at_end = if leftover == 0 { 0 } else { crate::winobj::wait_job_empty(|| active_processes(job.0), 100, || std::thread::sleep(std::time::Duration::from_millis(50))) };
+        j.n("jobProcessesAtEnd", at_end);
         for d in drains.drain(..) { let _ = d.join(); } // every write end is closed by now (the job is ended), so the copies finish
         if !a.dump.is_empty() { j.raw("daclsAfter", dump_json(&a.dump)); }
         j.s("stdin", &a.stdin);
@@ -960,9 +986,8 @@ fn describe(a: &Args, mut j: Json) -> Json {
     j.b("uiLimits", a.ui_limits);
     j.n("timeoutMs", a.timeout_ms as i64);
     j.s("profileName", &a.name);
-    // The window station of the child: always a private one in the product (see privdesk.rs); the experiment build names its mode.
-    #[cfg(not(feature = "experiment"))]
-    j.s("windowStation", "private");
+    // The window station of the child: in the product it is `private` or `home-desktop` (see privdesk.rs); the line says which one only once the objects were made (or refused), so an early failure
+    // claims neither. The experiment build names its own mode here.
     #[cfg(feature = "experiment")]
     j.s("windowStation", a.desktop.name());
     #[cfg(feature = "experiment")]

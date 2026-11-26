@@ -484,6 +484,8 @@ for (const backend of backends) {
     assert.deepEqual(u.cache, { cachedTokens: 950, computedTokens: 20, writtenTokens: 10, calls: 2 });
     assert.deepEqual(u.cacheByBackend, { claude: { cachedTokens: 900, computedTokens: 10, writtenTokens: 5, calls: 1 }, radiance: { cachedTokens: 50, computedTokens: 10, writtenTokens: 5, calls: 1 } });
     assert.deepEqual(u.totals, { costMicros: 21, computeMs: 0 }, "tokens never mix into money");
+    assert.deepEqual(Object.keys(u.cacheNotes ?? {}), ["claude"], "only the experimental backend carries a note");
+    assert.match(u.cacheNotes!["claude"]!, /Claude cache support is experimental and has not been measured against the real service/);
     // The same command with different cache figures is a conflict, and bad figures are refused.
     const r3 = await c.reserve(c.root, 5);
     const sc3 = cid("s");
@@ -493,5 +495,11 @@ for (const backend of backends) {
     for (const bad of [{ ...hit(1), cachedTokens: -1 }, { ...hit(1), route: "no slash" }, { ...hit(1), backend: "Bad Name" }, { ...hit(1), extra: 1 }, "x"]) {
       await refuses("invalid_command", () => c.svc.settle(c.host, { commandId: cid("s"), reservationId: r4.id, costMicros: 1, cache: bad as never }));
     }
+    // Strata (read from source, never run) gets its own note; measured backends never do.
+    await c.svc.charge(c.host, { commandId: cid("c"), activity: "meeting", taskId: c.root, costMicros: 1, cache: hit(3, "strata", "local/strata-m") });
+    await c.svc.charge(c.host, { commandId: cid("c"), activity: "meeting", taskId: c.root, costMicros: 1, cache: hit(3, "vllm", "local/vllm-m") });
+    const u2 = await c.svc.usage(c.owner, { taskId: c.root });
+    assert.deepEqual(Object.keys(u2.cacheNotes ?? {}).sort(), ["claude", "strata"]);
+    assert.match(u2.cacheNotes!["strata"]!, /Strata cache support is experimental and has not been measured/);
   });
 }

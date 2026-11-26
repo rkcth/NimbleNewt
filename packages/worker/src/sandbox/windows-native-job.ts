@@ -1,8 +1,8 @@
 import type { ProcessResult } from "./windows-host.js";
 import { ChannelRelay, type ChannelFs, type ChannelJob, type ChannelPorts, type ChannelStats } from "./windows-native-channel.js";
 import {
-  EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, RUN_PROFILE_PREFIX, failureKindOf, grantArgs, isRunProfileName, parseLauncherLine, softRefusals,
-  type LauncherLine, type NativeFailure, type NativeGrant, type NativeSettings, type RunFiles, type RunProfile,
+  EXIT_BUSY, EXIT_FAILED, FAILURE_PREFIX, RUN_PROFILE_PREFIX, failureKindOf, grantArgs, isRunProfileName, isWindowStationMode, parseLauncherLine, softRefusals,
+  type LauncherLine, type NativeFailure, type WindowStationMode, type NativeGrant, type NativeSettings, type RunFiles, type RunProfile,
 } from "./windows-native-plan.js";
 import { overlapsWin } from "./windows-plan.js";
 
@@ -76,6 +76,8 @@ export interface RunRecord {
   readonly readBack: "clean" | "left" | "unreadable";
   /** This run's own container profile and what became of it: the name, the SID the launcher recorded, whether it was deleted and whether it was found gone afterwards. */
   readonly profile?: { readonly name: string; readonly sid?: string; readonly deleted: boolean; readonly gone: boolean };
+  /** The window objects this run's container used (`private`: a window station of its own; `home-desktop`: a private desktop on the user's own WinSta0, plan 12.5). Absent when the launcher did not say (an older one). */
+  readonly windowStation?: WindowStationMode;
   /** A streamed run: how much went through the channel (counts only, never content), and anything the relay noted. */
   readonly channel?: ChannelStats & { readonly note?: string };
 }
@@ -419,6 +421,7 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
         else if (!line.ok && line.childStarted !== true) failure = { kind: failureKindOf(line.stage), message: `${line.stage ?? "launcher"}: ${line.error ?? "failed"}` };
         else if (!line.ok) failure = { kind: failureKindOf(line.stage), message: `${line.stage ?? "launcher"}: ${line.error ?? "failed"} (the program had started)` };
         else if (line.childStarted !== true) failure = { kind: "launcher", message: "the launcher reported success but not that the program started" };
+        else if (line.windowStation !== undefined && !isWindowStationMode(line.windowStation)) failure = { kind: "launcher", message: `the launcher reported a window-object mode this backend does not know ("${line.windowStation}")` };
       }
     }
   } finally {
@@ -458,6 +461,7 @@ export async function runNativeJob(host: NativeHost, job: NativeJob, stdin: stri
         exitCode: line?.childExitCode ?? null, timedOut: line?.timedOut === true, ...(failure === undefined ? {} : { failure }),
         grants: (line?.grants ?? []).map((g) => ({ path: g.path, mode: g.mode, soft: g.soft, applied: g.applied, revoked: g.revoked, errorCode: g.errorCode ?? null })),
         softRefused: line === undefined ? [] : softRefusals(line), entriesLeft: back.left, readBack: back.state,
+        ...(isWindowStationMode(line?.windowStation) ? { windowStation: line!.windowStation as WindowStationMode } : {}),
         ...(!profileRecorded ? {} : { profile: { name: job.profile.name, ...(sid === undefined ? {} : { sid }), deleted: profileGone, gone: profileGone } }),
         ...(relayEnd === undefined ? {} : { channel: { ...relayEnd.stats, ...(relayEnd.note === undefined ? {} : { note: relayEnd.note }) } }),
       };

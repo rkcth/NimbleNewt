@@ -8,7 +8,7 @@ export { SandboxLauncher, type Capacity, type LaunchRecord, type LaunchRequest, 
 export { listQuarantined, quarantine, readQuarantined, type QuarantineHooks, type QuarantineRecord } from "./quarantine.js";
 export { DEFAULT_HEADROOM, LIMIT_BOUNDS, checkHeadroom, checkLimits, detectLimitCapabilities, limitedPlan, type Headroom, type LimitCapabilities, type LimitEnforcement, type LimitName, type LimitedPlan, type ResourceLimits } from "./limits.js";
 export { windowsNativeBackend, windowsDefaultBackend, unavailableNative, PROBE_SCRIPT, type WindowsNativeOptions } from "./windows-native.js";
-export { NATIVE_BACKEND_NAME, NATIVE_MODE, NODE_PRESERVE_OPTIONS, LPAC_CAPABILITIES, REFUSED_ROUTE, FAILURE_PREFIX, checkNativeRecipe, grantsFor, launcherArgs, nativeEnv, programPath, quoteWindowsArg, commandLine, parseLauncherLine, type NativeFailure, type NativeGrant, type NativeSettings, type ContainerKind } from "./windows-native-plan.js";
+export { NATIVE_BACKEND_NAME, NATIVE_MODE, NODE_PRESERVE_OPTIONS, LPAC_CAPABILITIES, REFUSED_ROUTE, FAILURE_PREFIX, checkNativeRecipe, grantsFor, launcherArgs, nativeEnv, programPath, quoteWindowsArg, commandLine, parseLauncherLine, WINDOW_STATION_MODES, isWindowStationMode, type WindowStationMode, type NativeFailure, type NativeGrant, type NativeSettings, type ContainerKind } from "./windows-native-plan.js";
 export { runNativeJob, sweepLeftovers, sweepLeftoversLocked, revokeAndReadBack, readRecord, type NativeHost, type NativeJob, type RunRecord } from "./windows-native-job.js";
 export { nativeRealHost } from "./windows-native-real.js";
 /** Superseded (2026-11-25): Windows Sandbox is not the Windows plan; the native launcher above is. Kept only for the tests and diagnostics that still exercise it. */

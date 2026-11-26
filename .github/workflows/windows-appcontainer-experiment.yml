@@ -244,7 +244,16 @@ jobs:
             "$exp" deelevate --exe "$(cygpath -w "$prod")" info --name "$home_name" --profile-record "$(cygpath -w "$rec_dir/$home_name.sid")" > "$out/product-info-deelevated.txt" 2>&1
             rm -rf "$rec_dir"
             node scripts/redact-log.mjs < "$out/product-info-deelevated.txt"
-            { echo "### Cross-check: the product launcher's info, de-elevated"; echo; echo '```'; grep -o '"windowStationOk":[a-z]*\|"windowStationError":"[^"]*"\|"elevated":[a-z]*\|"profileGone":[a-z]*' "$out/product-info-deelevated.txt" | sort -u; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "### Cross-check: the product launcher's info, de-elevated"; echo; echo '```'; grep -o '"windowStation":"[^"]*"\|"windowStationOk":[a-z]*\|"windowStationError":"[^"]*"\|"privateStationError":"[^"]*"\|"elevated":[a-z]*\|"profileGone":[a-z]*' "$out/product-info-deelevated.txt" | sort -u; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            # A REPORT, not a gate (the step ends with exit 0): a de-elevated product `info` is expected to say windowStation home-desktop with windowStationOk true (the named station is refused with error 5, then the
+            # private desktop on WinSta0 is made and closed; plan 12.5). Anything else is printed as a warning for the reader and fails nothing.
+            if grep -q '"elevated":false' "$out/product-info-deelevated.txt" && grep -q '"windowStation":"home-desktop"' "$out/product-info-deelevated.txt" && grep -q '"windowStationOk":true' "$out/product-info-deelevated.txt"; then
+              echo "::notice::de-elevated product info: windowStation home-desktop, windowStationOk true"
+              echo "De-elevated product info: home-desktop mode works (windowStationOk true)." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::de-elevated product info did not report windowStation home-desktop with windowStationOk true (see the cross-check above)"
+              echo "De-elevated product info: NOT the expected home-desktop success (see the lines above)." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           exit 0
       # Card A03b slice 3: the administrator installer script is parsed by PowerShell and run with -WhatIf and Verify. Neither changes the machine: the checks below fail the step if an account or a folder appeared.

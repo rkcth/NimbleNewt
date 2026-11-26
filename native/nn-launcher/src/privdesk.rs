@@ -1,8 +1,11 @@
-// The private window station and desktop of every run (card A03b, Session 0 fix; both builds, Windows only). The pure rules (names, masks, the DACL check) are in winobj.rs.
+// The window objects of every run (card A03b, Session 0 fix; both builds, Windows only): the private window station and desktop below, or, for a NON-elevated launcher that is refused the named station with error 5,
+// ONE private desktop on the user's own interactive WinSta0 (the home desktop, `create_home`; plan 12.5.1). Never the inherited desktop. The pure rules (names, masks, the DACL check) are in winobj.rs.
 //
 // What it does, for ONE run: make a window station with a name of its own, give the container's SID one explicit allow entry on it, make a desktop in it and give the container one entry there
-// too, hand `station\desktop` to CreateProcessW as lpDesktop, and close the desktop and then the station when the run is over (the job's kill-on-close has ended the child by then; an object
-// with no handle left is destroyed). A window station of the launcher's own session is never opened, never changed and never named: not WinSta0 (the interactive station), not the service's
+// too, hand `station\desktop` to CreateProcessW as lpDesktop, and close the desktop and then the station when the run is over. By then the job has been told to end every process (TerminateJobObject
+// on a timeout or leftovers; kill-on-close when the job handle went at the end of run_inner) and the launcher waited, bounded, for the job to be empty (`jobProcessesAtEnd`). Closing is closing
+// the LAUNCHER's handle: CloseDesktop fails only when a thread of the calling process uses the desktop (Microsoft), never because another process still does; the object itself is destroyed
+// when its last handle and last user are gone, so a process still ending keeps it alive that long and `closed:true` does not claim more than the handle. A window station of the launcher's own session is never opened, never changed and never named: not WinSta0 (the interactive station), not the service's
 // `Service-0x0-<logon id>$`, and no DACL of the launcher's own objects is written.
 //
 // Both objects are CREATED with their final DACL (winobj::private_dacl in the SECURITY_ATTRIBUTES of the creating call): the launcher's own token user and SYSTEM with every specific right of the
@@ -15,7 +18,7 @@
 // CreateDesktopW makes a desktop in the CALLING PROCESS's window station, so the launcher switches its own process window station to the new one for that single call and back at once
 // (SetProcessWindowStation). The switch back is checked, and a guard restores the original station on every other path out (an early return or a panic) too.
 use super::*;
-use crate::winobj::{self, DESKTOP_RIGHTS, STATION_RIGHTS};
+use crate::winobj::{self, WindowMode, DESKTOP_RIGHTS, STATION_RIGHTS};
 use windows_sys::Win32::System::StationsAndDesktops::*;
 
 #[cfg(feature = "experiment")] // the product never writes a DACL: its objects are created with their final one
@@ -122,6 +125,21 @@ pub(crate) fn own_principals() -> Result<Vec<Vec<u8>>, u32> {
 
 fn trouble(what: &str, code: u32) -> String { format!("window objects: the private {what} (error {code})") }
 
+/// The launcher's own process window station: its name (UOI_NAME, "?" when unreadable) and USEROBJECTFLAGS.dwFlags (-1 when unreadable; bit 0 is WSF_VISIBLE). The handle is the process's own and is not closed.
+fn own_station() -> (String, i64) {
+    unsafe {
+        let h = GetProcessWindowStation() as HANDLE;
+        if h.is_null() { return ("?".into(), -1); }
+        let mut buf = [0u16; 256];
+        let mut needed = 0u32;
+        let name = if GetUserObjectInformationW(h, UOI_NAME, buf.as_mut_ptr() as *mut c_void, (buf.len() * 2) as u32, &mut needed) == 0 { "?".to_string() }
+            else { String::from_utf16_lossy(&buf[..buf.iter().position(|c| *c == 0).unwrap_or(buf.len())]) };
+        let mut f = [0u32; 3]; // USEROBJECTFLAGS: fInherit, fReserved, dwFlags
+        let flags = if GetUserObjectInformationW(h, UOI_FLAGS, f.as_mut_ptr() as *mut c_void, 12, &mut needed) == 0 { -1 } else { f[2] as i64 };
+        (name, flags)
+    }
+}
+
 /// A security descriptor (absolute form) holding one DACL, kept alive with the ACL it points to for the creating call. The DACL is marked protected, so nothing is inherited into it.
 pub(crate) struct CreationSd { _acl: Vec<usize>, sd: Box<SECURITY_DESCRIPTOR> }
 impl CreationSd {
@@ -171,11 +189,67 @@ impl StationSwitch {
 impl Drop for StationSwitch { fn drop(&mut self) { self.restore(); } }
 
 /// One run's private window station and desktop. Dropping it closes both (the desktop first).
-pub(crate) struct PrivateDesktop { station: HANDLE, desktop: HANDLE, station_name: String, desktop_name: String, lp: Vec<u16>, own: Vec<Vec<u8>>, closed: bool, close_error: Option<u32> }
+pub(crate) struct PrivateDesktop { station: HANDLE, desktop: HANDLE, station_name: String, desktop_name: String, lp: Vec<u16>, own: Vec<Vec<u8>>, closed: bool, close_error: Option<u32>, mode: WindowMode, named_refusal: Option<String> }
+
+/// Why no window objects were made: the mode that was last attempted, the typed message ("window objects: ...") and, when the home desktop was tried after the named station was refused, the
+/// named station's own message (so the report says both).
+pub(crate) struct MakeError { pub(crate) mode: WindowMode, pub(crate) message: String, pub(crate) named_refusal: Option<String> }
 
 impl PrivateDesktop {
-    /// Makes the objects for the container with this SID. Err: a message that starts with "window objects:" (nothing is left open).
-    pub(crate) fn create(sid: PSID) -> Result<PrivateDesktop, String> {
+    /// The window objects of one run, in the order of plan 12.5: the NAMED private window station when this launcher may name one (an administrator's elevated token); when a launcher KNOWN
+    /// to be not elevated (`elevation` Some(false): the token was read) is refused with error 5 (the documented administrators-only rule), ONE private desktop on the user's own interactive station (the home desktop). Any other failure, and every
+    /// failure of the home desktop, is returned: the launcher never inherits a desktop, so nothing starts.
+    pub(crate) fn create(sid: PSID, elevation: Option<bool>) -> Result<PrivateDesktop, MakeError> {
+        let mut station_error = 0u32;
+        match Self::create_named(sid, &mut station_error) {
+            Ok(p) => Ok(p),
+            Err(message) if winobj::try_home_desktop(elevation, station_error) => match Self::create_home(sid) {
+                Ok(mut p) => { p.named_refusal = Some(message); Ok(p) }
+                Err(home) => Err(MakeError { mode: WindowMode::HomeDesktop, message: format!("{home} (after: {message})"), named_refusal: Some(message) }),
+            },
+            Err(message) => Err(MakeError { mode: WindowMode::Private, message, named_refusal: None }),
+        }
+    }
+
+    /// The mode these objects are (`private` or `home-desktop`).
+    pub(crate) fn mode(&self) -> WindowMode { self.mode }
+    /// The named station's own error text when this run is a home desktop (the named station was refused first), else None.
+    pub(crate) fn named_refusal(&self) -> Option<&str> { self.named_refusal.as_deref() }
+
+    /// The home desktop (plan 12.5): ONE desktop on the launcher's own CURRENT window station, which must be the visible interactive WinSta0 (winobj::may_make_home_desktop), CREATED with its final
+    /// protected access list (the launcher's own account, SYSTEM and the container: the same descriptor and the same read-back as the private desktop) and NOT written afterwards. Nothing is
+    /// written to the station's access list (the measured run needed no entry) and the station handle is the process's own, never closed here. `lpDesktop` is `WinSta0\<name>`.
+    fn create_home(sid: PSID) -> Result<PrivateDesktop, String> {
+        let text = sid_string(sid);
+        if !winobj::is_profile_sid(&text) { return Err(format!("window objects: refused: the SID is not one AppContainer profile's (error {ERR_NOT_PROFILE_SID})")); }
+        let Some(sid_b) = sid_bytes(sid) else { return Err(format!("window objects: refused: the SID is not well formed (error {ERR_NOT_PROFILE_SID})")) };
+        let own = own_principals().map_err(|e| format!("window objects: the launcher's own account could not be read (error {e})"))?;
+        let (station, flags) = own_station();
+        winobj::may_make_home_desktop(&station, flags, session_id()).map_err(|e| format!("window objects: the home desktop {e}"))?;
+        let mut sd = creation_sd(&own[0], &sid_b, DESKTOP_RIGHTS, winobj::DESKTOP_FULL, "home desktop")?;
+        let name = winobj::home_desktop_name(random_seed());
+        let lp = wide(&winobj::desktop_path(&station, &name));
+        let mut p = PrivateDesktop { station: null_mut(), desktop: null_mut(), station_name: station, desktop_name: name.clone(), lp, own, closed: false, close_error: None, mode: WindowMode::HomeDesktop, named_refusal: None };
+        unsafe {
+            let sa = sd.attributes();
+            SetLastError(0);
+            let hd = CreateDesktopW(wide(&name).as_ptr(), null(), null(), 0, DESKTOP_RIGHTS, &sa) as HANDLE;
+            let e = GetLastError();
+            if hd.is_null() { return Err(trouble("home desktop could not be made", e)); }
+            p.desktop = hd; // closed by Drop on every path out
+            // CreateDesktopW OPENS a desktop that already has this name (documented) and does not document the error code for it: an open is caught here by ERROR_ALREADY_EXISTS where Windows sets
+            // it, and in any case by the read-back below (only a list naming THIS run's new container exactly once, with the launcher's account and SYSTEM, passes; the descriptor given above is
+            // ignored for an existing desktop). The CreateDesktop page also says it "assigns it to the calling thread": if that were so, CloseDesktop would fail for this handle, which `close`
+            // reports (`closeError`) and `info` turns into windowStationOk:false: only a run on Windows shows which.
+            if e == ERROR_ALREADY_EXISTS { return Err(trouble("home desktop name is already taken", ERR_NAME_TAKEN)); }
+            p.check(hd, &sid_b, DESKTOP_RIGHTS, "home desktop")?;
+        }
+        Ok(p)
+    }
+
+    /// Makes the named station and its desktop for the container with this SID. Err: a message that starts with "window objects:" (nothing is left open); `station_error` is the error of
+    /// CreateWindowStationW when that call was the one that failed (else left 0).
+    fn create_named(sid: PSID, station_error: &mut u32) -> Result<PrivateDesktop, String> {
         let text = sid_string(sid);
         if !winobj::is_profile_sid(&text) { return Err(format!("window objects: refused: the SID is not one AppContainer profile's (error {ERR_NOT_PROFILE_SID})")); }
         let Some(sid_b) = sid_bytes(sid) else { return Err(format!("window objects: refused: the SID is not well formed (error {ERR_NOT_PROFILE_SID})")) };
@@ -185,7 +259,7 @@ impl PrivateDesktop {
         let (station_name, desktop_name) = winobj::private_names(random_seed());
         let lp = wide(&winobj::desktop_path(&station_name, &desktop_name));
         let (wstation, wdesktop) = (wide(&station_name), wide(&desktop_name));
-        let mut p = PrivateDesktop { station: null_mut(), desktop: null_mut(), station_name, desktop_name, lp, own, closed: false, close_error: None };
+        let mut p = PrivateDesktop { station: null_mut(), desktop: null_mut(), station_name, desktop_name, lp, own, closed: false, close_error: None, mode: WindowMode::Private, named_refusal: None };
         unsafe {
             // The station. A name that already exists is never adopted (its DACL is not ours).
             // CWF_CREATE_ONLY: an existing station of that name makes the call fail instead of opening it (the error code alone is not documented for that case).
@@ -195,6 +269,7 @@ impl PrivateDesktop {
             let hs = CreateWindowStationW(wstation.as_ptr(), winobj::STATION_CREATE_ONLY, STATION_RIGHTS, &sa) as HANDLE;
             let e = GetLastError();
             if hs.is_null() {
+                *station_error = e;
                 // Microsoft: "Only members of the Administrators group are allowed to specify a name" (CreateWindowStation). A NULL name is not used: it names the station after the caller's
                 // logon session, which is the station a service already has.
                 let hint = if e == ERROR_ACCESS_DENIED { " (Microsoft documents that only members of Administrators may name a window station)" } else { "" };
@@ -252,9 +327,10 @@ impl PrivateDesktop {
     /// The part of the launcher's JSON line that names the objects (their names are not secret: the DACL is what protects them).
     pub(crate) fn json(&self) -> String {
         let mut o = Json::new();
-        o.s("mode", "private");
+        o.s("mode", self.mode.name());
         o.s("station", &self.station_name);
         o.s("desktop", &self.desktop_name);
+        if let Some(r) = &self.named_refusal { o.s("privateStationError", r); }
         o.b("closed", self.closed && self.close_error.is_none());
         if let Some(e) = self.close_error { o.n("closeError", e as i64); }
         o.render()
