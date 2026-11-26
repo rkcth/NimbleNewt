@@ -283,7 +283,9 @@ export class QaEvidenceService {
       const record = await this.#runner.get("decision", d.id);
       if (record !== undefined) reads?.push({ kind: "decision", id: d.id, revision: record.revision });
       const found = record?.body as unknown as OwnerDecisionBody | undefined;
-      if (found === undefined || found.state !== "active" || found.version !== d.version) reasons.push({ kind: "decision_superseded", decisionId: d.id, state: found?.state ?? "missing" });
+      // A link the task's own override marked: the decision is in force for other tasks, but this evidence was made against guidance that no longer applies to this task.
+      const unlinked = found?.state === "active" && (reliance?.links ?? []).some((l) => l.decisionId === d.id && l.state !== "current");
+      if (found === undefined || found.state !== "active" || found.version !== d.version || unlinked) reasons.push({ kind: "decision_superseded", decisionId: d.id, state: unlinked ? "no longer in force for this task (a task-level decision of the owner overrides it)" : found?.state ?? "missing" });
     }
     for (const l of reliance?.links ?? []) {
       if (e.decisions.some((d) => d.id === l.decisionId)) continue;

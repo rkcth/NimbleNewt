@@ -6761,7 +6761,7 @@ Arguments:
 - `stance` (optional): how the words were read
 - `sourceTurnId` (optional): set by the owner's chat to the turn the words came from; the words must be in that turn, and a direct caller leaves it out
 
-Result: `{ recorded, ... }`: the decision, or why none was made.
+Result: `{ recorded, ... }`: the decision, or why none was made. `overridden: { taskId, decisionIds }` when a task-level decision overrides project-wide ones for that task only: that task's links to them are marked superseded (its approvals stop counting and its next action waits until it is revalidated onto this decision), other tasks keep them.
 
 Completion: finished when accepted (`completed: true`).
 

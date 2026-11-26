@@ -701,6 +701,13 @@ const NOT_CARRIED_OUT: Readonly<Record<string, string>> = {
   expired: "it waited for you past the time you set (meeting.decision.holdExpiryDays) and was treated as declined",
 };
 
+/** What a task-level decision that overrides a project-wide one did, in plain words (card C08): only that task's linked work stops counting. */
+const overrideWords = (o: unknown): string[] => {
+  const v = o as { taskId?: unknown; decisionIds?: unknown } | undefined;
+  if (typeof v?.taskId !== "string" || !Array.isArray(v.decisionIds) || v.decisionIds.length === 0) return [];
+  return [`It overrides the project-wide decision ${v.decisionIds.map(String).join(", ")} for task ${v.taskId} only; other tasks keep it. That task's work linked to the project-wide decision no longer counts: its earlier approvals stop counting and its next action waits until the work is revalidated onto this decision and reviewed again.`];
+};
+
 /** The owner decision recorded for the meeting decision and never linked to it, in plain words (card M02h). */
 const orphanLines = (out: Readonly<Record<string, unknown>>): string[] => {
   const list = Array.isArray(out["orphanedDecisions"]) ? (out["orphanedDecisions"] as { id?: unknown; topic?: unknown; state?: unknown }[]) : [];
@@ -1773,7 +1780,7 @@ export const OPERATIONS: readonly Operation[] = [
     run: async (c, a) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "limit", "after"]); return page(await difficultyOf(c).decisions(c.principal, str(a, "taskId"), { limit: limitOf(a), ...(optStr(a, "after") === undefined ? {} : { afterId: optStr(a, "after")! }) })); } },
   { name: "routing.decision", kind: "query", summary: "One routing decision of a task.", args: { taskId: "the task", decisionId: "the decision" }, result: "`{ item }`.",
     run: async (c, a) => { ownTask(c, str(a, "taskId")); only(a, ["taskId", "decisionId"]); return found("decision", await difficultyOf(c).decision(c.principal, str(a, "taskId"), str(a, "decisionId"))); } },
-  { name: "decision.record", kind: "command", summary: "The owner records a decision, correction or gate in their own words (direct channel; a chat decision is recorded from the chat turn). A correction supersedes only the conflicting decisions in its scope and takes effect at once; dependent work is marked and blocked until revalidated. Anything but `stance: decided` records nothing.", args: { projectId: "the project", "taskId?": "narrow to one task", category: "the kind of decision", topic: "what it is about", statement: "the decided choice", wording: "the owner's own words", "gate?": "for a gate, which", basedOn: "the version of this topic you saw (0 for none)", "session?": "a label for the session or device", "stance?": "how the words were read", "sourceTurnId?": "set by the owner's chat to the turn the words came from; the words must be in that turn, and a direct caller leaves it out" }, result: "`{ recorded, ... }`: the decision, or why none was made.", completion: { kind: "completed" },
+  { name: "decision.record", kind: "command", summary: "The owner records a decision, correction or gate in their own words (direct channel; a chat decision is recorded from the chat turn). A correction supersedes only the conflicting decisions in its scope and takes effect at once; dependent work is marked and blocked until revalidated. Anything but `stance: decided` records nothing.", args: { projectId: "the project", "taskId?": "narrow to one task", category: "the kind of decision", topic: "what it is about", statement: "the decided choice", wording: "the owner's own words", "gate?": "for a gate, which", basedOn: "the version of this topic you saw (0 for none)", "session?": "a label for the session or device", "stance?": "how the words were read", "sourceTurnId?": "set by the owner's chat to the turn the words came from; the words must be in that turn, and a direct caller leaves it out" }, result: "`{ recorded, ... }`: the decision, or why none was made. `overridden: { taskId, decisionIds }` when a task-level decision overrides project-wide ones for that task only: that task's links to them are marked superseded (its approvals stop counting and its next action waits until it is revalidated onto this decision), other tasks keep them.", completion: { kind: "completed" },
     run: async (c, a, id) => {
       only(a, ["projectId", "taskId", "category", "topic", "statement", "wording", "gate", "basedOn", "session", "stance", "sourceTurnId"]);
       const { sourceTurnId, ...rest } = a;
@@ -1783,7 +1790,7 @@ export const OPERATIONS: readonly Operation[] = [
       // Said back to the owner as the record answers: what was recorded, or that nothing was and why.
       const where = rest["gate"] === undefined ? `"${String(rest["topic"] ?? "the gate")}"` : `"${String(rest["topic"] ?? "the gate")}" (gate: ${String(rest["gate"]).slice(0, 40)})`;
       const shown = result["recorded"] === true && result["disputeId"] !== undefined ? [`Recorded decision version ${String(result["version"])} on ${where}, but it conflicts with a decision made after the version it was based on: nothing on ${where} is in force until you choose (decision.resolve-dispute ${String(result["disputeId"])}).`]
-        : result["recorded"] === true ? [`Recorded decision version ${String(result["version"])} on ${where}: ${String(rest["statement"])}${result["propagation"] === "pending" ? " (the tasks affected are still being told)" : ""}`] : [`Nothing was recorded: ${String(result["reason"] ?? "the words are not a decision")}`];
+        : result["recorded"] === true ? [`Recorded decision version ${String(result["version"])} on ${where}: ${String(rest["statement"])}${result["propagation"] === "pending" ? " (the tasks affected are still being told)" : ""}`, ...overrideWords(result["overridden"])] : [`Nothing was recorded: ${String(result["reason"] ?? "the words are not a decision")}`];
       return asJson({ ...result, shown } as never);
     } },
   { name: "decision.resolve-dispute", kind: "command", summary: "The owner settles a dispute between conflicting instructions on one decision; arrival order and agents never do.", args: { disputeId: "the dispute", chosen: "the decision chosen" }, result: "`{ ... }`: what was done.", completion: { kind: "completed" },

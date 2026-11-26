@@ -2489,11 +2489,25 @@ export class ChatService {
       const locked = defItem?.["forbidMainAutomatic"] === true;
       fillNotes.push(`What this means: ${who} finished work goes to main on its own once ${named !== undefined ? `its checks (${named})` : fromRecord !== undefined ? `its checks (${fromRecord})` : "the checks it requires"} pass — no person approves each one, so anything that only passed on the integration branch is on main. Confirming this proposal is what turns it on.${locked ? " The installation currently forbids landing on main automatically, so it is refused while that lock stands." : ""}`);
     }
+    // A decision for one task on a topic the whole project has decided overrides the project-wide one for that task only (card C08): the proposal says what that does to the task's linked work and its approvals.
+    if (intent.op === "decision.record" && typeof args["taskId"] === "string" && args["category"] !== "gate" && typeof args["projectId"] === "string" && typeof args["topic"] === "string") fillNotes.push(...(await this.#overrideNote(token, args["projectId"], args["taskId"], args["topic"])));
     steps.push({ op: intent.op, args, commandId: "" });
     const raisesSpend = intent.op === "difficulty.set" ? await this.#raisesSpend(token, args) : false;
     const reasonBase = proposalReason(intent.op, args, intent.draft === true, { profile, quoted, raisesSpend, said: ownerSaysMove(intent.op, args, words, ["taskId", "prerequisiteId", "projectId", "agentId"].flatMap((k) => (typeof args[k] === "string" && labels[args[k] as string] !== undefined ? [labels[args[k] as string] as string] : [])).concat(intent.op === "resource.bind" && typeof args["label"] === "string" ? [args["label"]] : []).concat(extraTargets)) });
     const reason = reasonBase ?? showFirst ?? (fromRecord ? "the location comes from an earlier binding, not from your words, so it is shown first" : undefined);
     return { ok: true, steps, pins, labels, ...(projectId === undefined ? {} : { projectId }), ...(reason === undefined ? {} : { reason }), ...(notes.length + fillNotes.length === 0 ? {} : { notes: [...fillNotes, ...notes] }), args, op: intent.op };
+  }
+
+  /** What recording a task-level decision does when the project has an active decision on the topic, in plain words for the proposal: nothing when it has none. */
+  async #overrideNote(token: string, projectId: string, taskId: string, topic: string): Promise<string[]> {
+    const history = ((await this.#get(token, "decision.history", { projectId, topic, taskId })) as unknown as Record<string, unknown>[] | undefined) ?? [];
+    const wide = history.filter((e) => e["taskId"] === undefined && e["state"] === "active");
+    if (wide.length === 0) return [];
+    const ids = wide.map((e) => String(e["id"]));
+    const reliance = (await this.#get(token, "decision.reliance", { taskId })) as { links?: { decisionId?: unknown; state?: unknown; subject?: { kind?: unknown } }[] } | undefined;
+    const linked = (reliance?.links ?? []).filter((l) => l.state === "current" && ids.includes(String(l.decisionId)));
+    const what = [...new Set(linked.map((l) => String(l.subject?.kind ?? "work")))].join(", ");
+    return [`What this means: it overrides the project-wide decision ${ids.join(", ")} (${quotedText(String(wide[0]!["statement"] ?? ""), 120)}) for this task only; other tasks keep it. ${linked.length === 0 ? "None of this task's work is linked to the project-wide decision, so nothing of it stops counting." : `This task's ${what} linked to it (${linked.length} link${linked.length === 1 ? "" : "s"}) stop${linked.length === 1 ? "s" : ""} counting: its earlier approvals no longer count and its next action waits until the work is revalidated onto this decision and reviewed again.`}`];
   }
 
   /**

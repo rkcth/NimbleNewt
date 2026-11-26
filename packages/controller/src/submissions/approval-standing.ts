@@ -43,6 +43,8 @@ export async function approvalOutdated(runner: Pick<CommandRunner, "get">, taskI
       const since = d.disputeId === undefined ? undefined : ((await runner.get("decision-dispute", d.disputeId))?.body as unknown as DisputeBody | undefined)?.openedAt;
       return `owner decision ${id} has been disputed${since === undefined ? "" : ` since ${since}`} (two owner instructions conflict) and waits for the owner to settle it`;
     }
+    // A task-level override: the decision is still in force for the other tasks, not for this one (the link says why).
+    if (d.state === "active" && link !== undefined && link.state !== "current" && link.because !== undefined) return `owner decision ${id} no longer applies to this task: ${link.because}`;
     if (d.state !== "active" || (link !== undefined && link.state !== "current")) {
       const by = d.supersededBy ?? link?.supersededBy;
       const at = d.supersededAt ?? link?.markedAt;
