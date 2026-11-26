@@ -36,7 +36,7 @@ async function world(backend: (typeof backends)[number]) {
   const effects = EffectService.withEpoch(w.storage, projects.epoch, undefined, { ...options, holder: "simulation" });
   const grants = GrantService.withEpoch(w.storage, projects.epoch, options);
   const sims = SimulationService.withEpoch(w.storage, projects.epoch, { effects, grants }, options);
-  return { w, projects, owner, project, task, effects, grants, sims };
+  return { w, projects, principals, owner, project, task, effects, grants, sims };
 }
 
 test("a run script's field values are bounded like a scope's states", async () => {
@@ -145,6 +145,56 @@ for (const backend of backends) {
       assert.deepEqual(r.run.results[0]!.attempts!.map((a) => a.effectId), [attempt], "one model attempt, the one that started before the crash");
       assert.equal((await w.storage.getEffect(attempt))!.status, "confirmed");
       assert.equal((await fresh.observe(owner, { scopeId, service: "billing", resource: "db" })).state["size"], 30);
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: only the owner reads runs and lists scopes; a list for a task holds that task's scopes only; a replay rerun cannot be put in another task's scope (review, card P07)`, async () => {
+    const { w, projects, principals, owner, project, task, sims } = await world(backend);
+    try {
+      const other = (await projects.createTask({ commandId: cid("t2"), actor: owner.id, projectId: project, title: "two" })).id;
+      const mine = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: LAYOUT })).id;
+      const theirs = (await sims.open(owner, { commandId: cid("o"), taskId: other, layout: LAYOUT })).id;
+      const run = await sims.run(owner, { commandId: cid("run"), scopeId: mine, steps: [{ agent: "ann", service: "billing", resource: "db", fields: { size: 12 } }] });
+      const ann = await principals.authenticate((await principals.issueCredential(owner, "agent:ann")).token);
+      await refuses("not_found", () => sims.getRun(ann, run.id));
+      await refuses("not_found", () => sims.list(ann, {}));
+      await refuses("forbidden", () => sims.grant(ann, { commandId: cid("g"), scopeId: mine, grantee: "agent:ann", basis: "self" }));
+      await refuses("forbidden", () => sims.replayScope(ann, task));
+      assert.equal((await sims.getRun(owner, run.id)).run.taskId, task);
+      const listed = await sims.list(owner, { taskId: task, limit: 20 });
+      assert.deepEqual(listed.scopes.map((x) => x.id), [mine]);
+      assert.ok((await sims.list(owner, { limit: 20 })).scopes.some((x) => x.id === theirs));
+      await refuses("invalid_command", () => sims.replayScope(owner, task, theirs), /another task/);
+      assert.equal(await sims.replayScope(owner, task, mine), mine);
+    } finally { await w.close(); }
+  });
+
+  test(`${backend.name}: a run cut short by a crash in a scope closed since goes no further: the rest is recorded not reached and nothing more changes (review, card P07)`, async () => {
+    const { w, projects, owner, task, sims } = await world(backend);
+    try {
+      const scopeId = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: LAYOUT })).id;
+      const commandId = cid("crash");
+      const runId = derivedId("smr", scopedCommandId(owner.id, commandId));
+      const attempt = derivedId("eff", `simrun:${runId}:s0:a1`);
+      const dying = new Proxy(w.storage, {
+        get(target, name, receiver) {
+          const value = Reflect.get(target, name, receiver) as unknown;
+          if (typeof value !== "function") return value;
+          if (name === "applyOperation") return async (input: Parameters<ControllerStorage["applyOperation"]>[0]) => { if (input.settleEffects.some((s) => s.effectId === attempt)) throw Object.assign(new Error("died"), { kind: "unavailable", name: "StorageError" }); return target.applyOperation(input); };
+          return value.bind(target);
+        },
+      });
+      const doomed = SimulationService.withEpoch(w.storage, projects.epoch, { effects: EffectService.withEpoch(dying, projects.epoch, undefined, { ...options, holder: "dies" }) }, options);
+      const steps = [{ agent: "ann", service: "billing", resource: "db", fields: { size: 30 } }, { agent: "ann", service: "shop", resource: "cart", fields: { replicas: 9 } }];
+      await assert.rejects(doomed.run(owner, { commandId, scopeId, steps }));
+      await sims.close(owner, { commandId: cid("c"), scopeId });
+      const r = await sims.run(owner, { commandId, scopeId, steps });
+      assert.equal(r.run.state, "finished");
+      assert.equal(r.run.outcome, "stopped");
+      assert.deepEqual(r.run.results.map((x) => x.outcome), ["not-reached", "not-reached"]);
+      assert.match(r.run.results[1]!.words, /scope was closed/);
+      assert.equal((await sims.observe(owner, { scopeId, service: "billing", resource: "db" })).state["size"], 10);
+      assert.equal((await sims.observe(owner, { scopeId, service: "shop", resource: "cart" })).state["replicas"], 1);
     } finally { await w.close(); }
   });
 }

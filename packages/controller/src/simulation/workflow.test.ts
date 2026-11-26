@@ -256,6 +256,10 @@ for (const backend of backends) {
       const settled = (await effects.get(toolId))!;
       assert.equal(settled.status, "confirmed");
       assert.equal(settled.evidence?.["simulated"], true);
+      // Review: it is settled by the scope's stand-in of the services, read back and verified, not by an answer that never looked at it.
+      assert.equal(settled.evidence?.["verified"], true, JSON.stringify(settled.evidence));
+      assert.equal(settled.evidence?.["target"], "billing/cache");
+      assert.equal(settled.evidence?.["systemVersion"], (await sims.observe(owner, { scopeId, service: "billing", resource: "cache" })).systemVersion);
       assert.equal((await sims.observe(owner, { scopeId, service: "billing", resource: "cache" })).state["restarts"], 1, "not done twice");
       // The repeated command goes on from the step it had not recorded: the third agent runs, the first two are not done again.
       const done = await sims2.run(owner, { commandId, scopeId, steps });
