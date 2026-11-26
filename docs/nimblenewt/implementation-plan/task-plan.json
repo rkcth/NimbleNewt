@@ -9336,12 +9336,26 @@
       ],
       "deliverable": "Versioned output records and review state",
       "acceptance_and_verification": "Tool completion alone cannot accept task; missing/changed artifact invalidates review; rejected version history retained; draft, submitted, under-review, accepted, rejected and superseded are distinct versioned events; the deliverable records type, responsible agent, audience and access scope; an operational outcome can be a deliverable with verifiable reference, system version and observation time; source and exported artifacts can be grouped under one version; submission is checked against the task contract revision in force (S10); amended 2026-10-28: submission kinds by role are Q01b; Dependency re-expressed 2026-11-27 (ASSUMPTION under the nothing-waits-on-Rob rule): P02 is no longer a blocker of Q01, because no clause here needs a coding workspace or an integration (a code deliverable links a Q01b code submission, whatever made it); the end-to-end clause that work made in a P02 workspace is accepted here moved to P02, which now depends on Q01; P03 stays a blocker, because the operational-outcome clause (verifiable reference, system version and observation time) is proven through P03's check against confirmed, verified effects of the same task",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "dbea598c",
+          "9fe78123",
+          "0be4a564",
+          "9dcffe16"
+        ],
+        "ci_runs": [
+          "45762730007"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Versioned deliverables of a task with type (code, document, report, design, operational-outcome), responsible agent, audience and access scope; each version moves draft, submitted, under-review, accepted, rejected or superseded, every move its own immutable numbered event (and an invalidated event for a voided review). Only deliverable.accept by the owner, a director of the project or the reviewer that started the review accepts, never the responsible agent, the creator, the submitter or a linked submission's submitter; finishing the task accepts nothing. Submit, start-review and accept verify every artifact against its bytes: damage at accept or deliverable.check voids the review back to submitted; a missing blob or record counts as damage; without an artifact checker nothing that names artifacts is submitted or decided. Rejected versions keep state, decider and redacted reason when a new version supersedes the others. Source and exported artifacts are grouped under one version. Submission must name the task contract version in force (S10), stored on the version. An operational outcome must name a confirmed, verified service-op effect of the same task with the target's system version and observation time (P03). A code deliverable must link the responsible agent's own code submission; a document submission must match one of the version's artifacts. Where no other agent could review, or for an external audience, the owner decides. Limits: the task's own done is not gated on acceptance (it would need a setting); the reviewAssignments port has no source yet, so a reviewer decides through an explicit review.decide grant for the project; an accepted version is not re-checked against a later contract change; verification hashes up to 20 artifacts per call with no byte cap; one confirmed effect may back several deliverables. Follow-ups, not clauses here: submission kinds by role are Q01b; work made in a P02 workspace reaching Q01 as a code deliverable is now P02's clause (2026-11-27); real-hardware QA is Y03."
+      }
     },
     {
       "id": "Q02",
