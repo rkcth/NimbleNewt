@@ -19178,3 +19178,38 @@ Reviewed `card-w09-embedder` at `fd417209` (embedder, bench, command, the two ho
 **Verified** (`8cb13ad1` plus this section; `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, one run at a time through the slot, short TMPDIR). `npm ci --ignore-scripts`, `tsc --build --force`, `api:docs:write` (no change), `check:deps`, `licenses:check`, `roadmap:check` pass. Node 22.23.0 and 24.21.0 the same: `scripts/*.test.mjs` 513 (512 pass, 1 skipped); the 8 local-host integration tests 15 of 15; `chat/prompt-room` 11 of 11; `scripts/pi-eval/*.test.mjs` 183 of 183 from a clean checkout of `8cb13ad1` under `/srv/code/worktrees-pi` (removed afterwards). From `/srv/ai` 27 fail, all stub-agent runner and isolation tests (the bench's sandbox hides `/srv/ai`); they pass from the clean copy, so they hide no regression.
 
 **Left open.** The bridge filter's refusal-only check has no test (it needs the product host; it is bench-only code). An abort after the request was sent frees the slot when the fetch is aborted, before the server may have stopped generating, so Radiance can briefly overlap one cancelled reply with the next request. The real runs, the agents' file and command tools, the second agent's 1,500-token reply limit and the build check's memory remain as the W09 notes say.
+
+## H12n on the product launcher's host: a submit is answered there (Claude agent, Sonnet 5.5, 2026-11-26)
+
+Plain words first. The H12n and H12t flip audits found that on the launcher's own worker host (`scripts/local-host.mjs`, the product composition) every `work.end { submit: true }` failed closed as unavailable: the host built `LocalWorker` and `LocalWorkspaces` but gave the worker no `submitView` or `stage`, which only the W03 test rig gave. So in the product, work could reach review only through the owner's release and landing. Now the product host answers both from the same checkouts its workspace port made, so an agent's submit opens a code submission. No card is flipped.
+
+- **Built.**
+  - `scripts/local-host.mjs` gives `LocalWorker` `submitView` and `stage` (`LocalWorkspaces.submitView` / `stageWork`, after the same `refreshShared` as `verify`), as the W03 rig does. The rules are unchanged: request-time overlap refusal (`SubmitRefused` with the head and the files), the re-check after the settle, the staged-base check, the third read after the staging, a killed write call ending `release_failed`, the replay lookup.
+  - `LocalWorkspaces.submitView` and `stageWork` (worker `workspace/local-host.ts`) now ask the P02 `admit` hook again, on the shared folder the checkout came from, when `admit` is given (the product host gives it; the W03 rig and the H12n host test do not, and they are unchanged). If the binding is unbound, moved, narrowed to read or to some paths, or the check fails, both refuse with `unavailable` ("the work cannot be submitted: <reason>"), and nothing is read or staged. The agent sees the existing "the checkout's base is not known, so a submit cannot be checked" refusal, and the reason goes to the dispatcher's `onError`. This is the same re-ask that integration and landing already make. The admission rule itself (`workspaceAdmission`) is unchanged.
+- **Tests.**
+  - `packages/integration/src/h12n-launcher-submit.test.ts` (new; real bubblewrap; through `launch()` with the product builder and a scripted offline model behind an injected fetch; skipped without bubblewrap unless `NIMBLENEWT_REQUIRE_SANDBOX=1`). Four attempts of one project:
+    - (1) A stale base with no shared file opens one `code` / `author` submission carrying the checkout's base, the task index's `write-tree` and git's stable patch ID. Only the agent's file is staged. A later change to the checkout does not change the record. The attempt succeeds.
+    - (2) A landing branch that changed the agent's file: the agent is told `submit refused: the landing branch moved to <head> and changed 1 of your files (src/a.ts)`, nothing is recorded, and its plain end is taken.
+    - (3) A `write-file` call begun on the host's gateway and never reported is cut `uncertain` at the settle. The ending is `ended` / `release_failed` with the runtime-hold blocker, nothing is staged and nothing is submitted.
+    - (4) The owner narrows the binding to read while the agent works: the dispatcher's `stageWork` is refused with the P02 reason, the submit is refused as unavailable, and nothing is staged or recorded.
+  - `packages/worker/src/workspace/p02-workspace.test.ts` (+1): the view and the staging ask the admission with the task, project and shared folder. A refusal, a failing check, or an answer without a reason refuses both with `unavailable`, and the index is untouched. Admitted again, both answer. A host without `admit` stages as before.
+- **Breakages** (each alone, on built files or the script; both tests run; restored and checked by sha256): 12 of 12 caught.
+  - The product host without `submitView` and `stage`, without `stage` only, and without `submitView` only.
+  - The admission re-check never refusing, dropped from the view only, dropped from the staging only, asked with the wrong project, and refusing with another code.
+  - The landing side's files always empty.
+  - The request-time overlap refusal removed.
+  - The tree recorded as the base.
+  - The settle binding never reporting a write.
+- **Not done (said plainly).**
+  - The remote host (`scripts/remote-host.mjs`) is unchanged. The worker protocol has no submit view or staging, so a submit from a remote host is still refused as unavailable.
+  - The `submitted` outcome is the ending's own. The attempt's dispatch outcome is `succeeded`, as before.
+  - P08's re-check of tree and patch ID at landing time is still not built.
+- ASSUMPTION: `PLAN.md` stays in the staged tree. This is the open W05/H12o decision, recorded in the H12n host slice's reviews and in the H12o product slice; this change does not touch it.
+- ASSUMPTION: the admission re-check sits in `LocalWorkspaces`, next to the integration/landing re-check, rather than in the script. It covers every host that gives `admit`, and it changes nothing for hosts that do not. It is reversible: one call in each of the two methods.
+- ASSUMPTION: no owner control and no prompt text was added. The submit is the agent's `work.end`, and the owner already reads submissions and blockers through the chat views.
+- **Runs** (Linux, `NIMBLENEWT_REQUIRE_SANDBOX=1`, offline guard, through `/tmp/nn-slot.sh`, short TMPDIR; the same on Node 22.23.0 and Node 24.21.0):
+  - worker: 860 passed, 2 skipped, of 862
+  - integration (h12t, h12n x2, h12o, t02d x2, p02b x3, u14b x2, g09c, a09b, u14e, h12m): 26 of 26
+  - api `start-work-end*`: 17 of 17
+  - `scripts/*.test.mjs`: 512 passed, 1 skipped, of 513
+  - `npm ci --ignore-scripts`, `tsc --build --force`, `check:deps`, `licenses:check` and `roadmap:check` all passed; `api:docs:write` made no change.

@@ -119,6 +119,39 @@ test("an integration or a landing asks the admission again on the shared folder 
   } finally { await w.done(); }
 });
 
+test("a submit's view and its staging ask the admission again on the checkout's shared folder: a binding unbound or narrowed since the workspace opened refuses both, nothing read or staged; admitted again, both answer (card H12n, product launcher)", { skip }, async () => {
+  let answer: WorkspaceAdmissionAnswer | Error = { admitted: true, binding: BINDING };
+  const asked: { taskId: string; projectId: string; shared: string }[] = [];
+  const w = await world({ admit: async (c) => { asked.push(c); if (answer instanceof Error) throw answer; return answer; } });
+  try {
+    assert.equal(await w.ws.submitView(scope), undefined, "no checkout: nothing to say, nothing asked");
+    await assert.rejects(w.ws.stageWork(scope), /holds no checkout/);
+    assert.equal(asked.length, 0);
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    asked.length = 0;
+    const g = gitOf(made);
+    const indexBefore = g("ls-files", "-s");
+    for (const refusal of [{ admitted: false, reason: "the project has read access only to repository \"garden\", and an agent's workspace is written in; give the project write access to it first" } as const, new Error("the store is down"), { admitted: false } as never]) {
+      answer = refusal;
+      await assert.rejects(w.ws.submitView(scope), (e: Error & { code?: string }) => e.code === "unavailable" && /^the work cannot be submitted: /.test(e.message), "the view is refused");
+      await assert.rejects(w.ws.stageWork(scope), (e: Error & { code?: string }) => e.code === "unavailable" && /^the work cannot be submitted: /.test(e.message), "the staging is refused");
+    }
+    answer = { admitted: false, reason: "the project has read access only to repository \"garden\"" };
+    await assert.rejects(w.ws.stageWork(scope), /read access only to repository "garden"/, "the reason is said");
+    assert.equal(g("ls-files", "-s"), indexBefore, "nothing was staged into the checkout's index");
+    assert.deepEqual(asked.map((a) => [a.taskId, a.projectId, a.shared]), Array.from({ length: 7 }, () => ["tsk-one", "prj-one", w.shared]), "asked with the task, its project and the shared folder the checkout came from");
+    answer = { admitted: true, binding: BINDING };
+    const base = sh(w.shared, "rev-parse", "HEAD");
+    assert.deepEqual(await w.ws.submitView(scope), { base, head: base, mine: ["src/a.ts"], landed: [] });
+    const staged = await w.ws.stageWork(scope);
+    assert.deepEqual([staged.base, staged.files], [base, ["src/a.ts"]]);
+    // A host without an admission check stages as before (the W03 rig, the H12n host test).
+    const open = new LocalWorkspaces({ root: w.root, git: w.git, shared: () => w.shared, busy: () => [] });
+    assert.deepEqual((await open.stageWork(scope)).tree, staged.tree);
+  } finally { await w.done(); }
+});
+
 test("a start record's file name means one attempt on every filesystem: an ID with a capital letter, a colon or an end dot is kept under a digest of it, and is read back by its ID (card P02 review)", { skip }, async () => {
   const w = await world();
   try {

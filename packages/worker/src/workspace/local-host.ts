@@ -167,6 +167,7 @@ export class LocalWorkspaces {
   async submitView(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] } | undefined> {
     const where = this.locate(call);
     if (where === undefined) return undefined;
+    await this.#submitAdmitted(call, where.shared);
     const tip = await this.host.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: where.shared }, "the submit could not be checked");
     if ("refuse" in tip) throw new WorkspaceError("unavailable", tip.refuse);
     return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout, head: tip.head });
@@ -179,6 +180,7 @@ export class LocalWorkspaces {
   async stageWork(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; tree: string; patchId: string; files: string[] }> {
     const where = this.locate(call);
     if (where === undefined) throw new WorkspaceError("unavailable", "this host holds no checkout for the task, so its work cannot be staged");
+    await this.#submitAdmitted(call, where.shared);
     const staged = await this.#options.git.stage({ gitDir: where.gitDir, checkout: where.checkout });
     const patchId = await this.#options.git.patchId({ gitDir: where.gitDir, base: staged.base });
     if (patchId === undefined || staged.files.length === 0) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
@@ -260,6 +262,16 @@ export class LocalWorkspaces {
       }
       return made;
     } finally { if (this.#making.get(key) === tail) this.#making.delete(key); }
+  }
+
+  /**
+   * A submit's view and its staging (card H12n, product launcher follow-up): with `admit` given, the task's repository must still be bound to its project with write access to all of it (card P02), asked again on the shared
+   * folder the checkout came from. A binding unbound, moved or narrowed since the workspace opened refuses (`unavailable`); nothing is read or staged. Without `admit` (a host that asks no admission) nothing changes.
+   */
+  async #submitAdmitted(call: { readonly taskId: string; readonly projectId: string }, shared: string): Promise<void> {
+    if (this.#options.admit === undefined) return;
+    const answer = await this.#admission({ taskId: call.taskId, projectId: call.projectId, shared });
+    if ("refused" in answer) throw new WorkspaceError("unavailable", `the work cannot be submitted: ${answer.refused}`.slice(0, 500));
   }
 
   /** The `admit` hook's answer as a binding or a plain refusal (a throw, or an answer that is not an admission, is a refusal). */
