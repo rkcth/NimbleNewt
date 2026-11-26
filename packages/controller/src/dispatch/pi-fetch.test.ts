@@ -140,6 +140,18 @@ test("a refused cache setting is repeated without cache settings and Pi gets the
   assert.equal(await b.takeUsage(), undefined);
 });
 
+test("isolation required: a refused isolation setting reaches Pi as the adapter's plain-words error, and nothing is sent without it (the retry of a project that does not require isolation is the test above)", async () => {
+  const refusing: Transport = { send: async (r) => (r.path.includes("erase") ? { status: 200, body: {} } : "cache_prompt" in r.body ? { status: 400, body: { error: { message: "unknown field cache_prompt" } } } : { status: 200, body: { timings: { cache_n: 0, prompt_n: 10 } } }) };
+  const seen: HttpRequest[] = [];
+  const a = await make(2, { isolationRequired: (p) => p === A }).forAttempt({ projectId: A, route: "llama/local" });
+  const response = await post(a.policy.fetch!(simulatedFetch(refusing, seen)), chat(1));
+  assert.equal(response.status, 400);
+  const text = await drain(response);
+  assert.match(JSON.parse(text).error.message, /server refused the setting that keeps this project's cache apart from other projects \(cache_prompt=false\).*not sent again without it/);
+  assert.deepEqual(seen.filter((r) => r.path === "/v1/chat/completions").map((r) => r.body["cache_prompt"]), [false], "one call, with cache_prompt false");
+  assert.equal(await a.takeUsage(), undefined);
+});
+
 test("an aborted call frees the slot's turn; requests that are not a JSON POST pass to the real fetch untouched", async () => {
   const a = await make(1).forAttempt({ projectId: A, route: "llama/local" });
   const server = new LlamaSim(1); const seen: HttpRequest[] = [];

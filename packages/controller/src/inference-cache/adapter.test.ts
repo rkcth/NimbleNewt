@@ -154,6 +154,71 @@ test("a refused cache setting repeats the same messages without any cache settin
 });
 const profileFact = () => profileFor({ kind: "claude", model: "claude-opus-5-5" });
 
+test("isolation required: a refused isolation setting is returned as an error in plain words and the call is never sent without it; a project that does not require isolation is still retried plain", async () => {
+  const chats = (seen: readonly HttpRequest[]) => seen.filter((r) => r.path.startsWith("/v1/"));
+  const recording = (answer: (r: HttpRequest) => HttpResponse) => { const seen: HttpRequest[] = []; return { seen, send: async (r: HttpRequest) => { seen.push(r); return answer(r); } }; };
+  const declined = (res: CallResult, kept: readonly string[]) => {
+    assert.equal(res.status, 400);
+    assert.equal(res.fallback, undefined, "no plain retry");
+    assert.deepEqual(res.isolationRefused?.kept, kept);
+    assert.equal(res.isolationRefused?.refusedStatus, 400);
+    assert.match(res.isolationRefused?.message ?? "", /server refused the setting that keeps this project's cache apart.*not sent again without it.*not requiring isolation, or use another route/);
+    assert.equal((res.body as { error: { message: string } }).error.message, res.isolationRefused!.message, "the caller's error is the plain-words text");
+    assert.ok(res.skipped.includes(res.isolationRefused!.message), "and it is in the record of what was left out");
+    assert.equal(res.outcome, "unknown");
+  };
+
+  // vLLM that refuses cache_salt: the project that requires isolation gets the error, and the server never receives a body without the salt
+  const vllmProfile = profileFor({ kind: "vllm", model: "m" });
+  const old = recording((r) => ("cache_salt" in r.body ? refuse(400, "Unrecognized request argument: cache_salt") : ok({ usage: { prompt_tokens: 10, prompt_tokens_details: { cached_tokens: 0 } } })));
+  const iso = await new CacheAdapter(vllmProfile, old).call(convo("a", 1), ctx({ isolationRequired: true }));
+  declined(iso, ["cache_salt"]);
+  assert.match(iso.isolationRefused!.reason, /Unrecognized request argument: cache_salt/, "the server's own text is kept beside it");
+  assert.deepEqual(old.seen.map((r) => typeof r.body["cache_salt"]), ["string"], "one call, and it carried the salt");
+  // a FastAPI-style 422 that names the field is the same refusal
+  const strict = recording(() => ({ status: 422, body: { detail: [{ loc: ["body", "cache_salt"], type: "extra_forbidden" }] } }));
+  const iso422 = await new CacheAdapter(vllmProfile, strict).call(convo("a", 1), ctx({ isolationRequired: true }));
+  assert.deepEqual([iso422.status, iso422.isolationRefused?.refusedStatus, iso422.fallback, strict.seen.length], [422, 422, undefined, 1]);
+  // an error that is not about the cache comes back as it is, for an isolated project too
+  const tooLong = recording(() => refuse(400, "maximum context length is 8192 tokens"));
+  const plainError = await new CacheAdapter(vllmProfile, tooLong).call(convo("a", 1), ctx({ isolationRequired: true }));
+  assert.deepEqual([plainError.status, plainError.isolationRefused, plainError.fallback, tooLong.seen.length], [400, undefined, undefined, 1]);
+  assert.match((plainError.body as { error: { message: string } }).error.message, /maximum context length/);
+  // a project that does not require isolation keeps today's retry
+  const open = await new CacheAdapter(vllmProfile, new VllmSim({ oldVersion: true })).call(convo("a", 1), ctx());
+  assert.deepEqual([open.status, open.fallback?.removed, open.isolationRefused], [200, ["cache_salt"], undefined]);
+  const openFalse = await new CacheAdapter(vllmProfile, new VllmSim({ oldVersion: true })).call(convo("a", 1), ctx({ isolationRequired: false }));
+  assert.deepEqual([openFalse.status, openFalse.fallback?.removed], [200, ["cache_salt"]], "false is the same as not set");
+
+  // llama.cpp without slots: the isolated project's cache_prompt false is refused; a plain retry would leave cache_prompt out, which the server reads as reuse on
+  const noPrompt = (r: HttpRequest) => ("cache_prompt" in r.body ? refuse(400, "unknown field cache_prompt") : ok({ timings: { cache_n: 0, prompt_n: 10 } }));
+  const bare = recording(noPrompt);
+  declined(await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m" }), bare).call(convo("a", 1), ctx({ isolationRequired: true })), ["cache_prompt=false"]);
+  assert.deepEqual(bare.seen.map((r) => r.body["cache_prompt"]), [false], "never sent without cache_prompt false");
+  const bareOpen = recording(noPrompt);
+  const retried = await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m" }), bareOpen).call(convo("a", 1), ctx());
+  assert.deepEqual([retried.status, retried.fallback?.removed, bareOpen.seen.length], [200, ["cache_prompt"], 2]);
+
+  // llama.cpp with slots: the same, whatever slot the dispatcher picked
+  const slotted = recording((r) => (r.path.includes("erase") ? ok({}) : noPrompt(r)));
+  declined(await new CacheAdapter(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, hostPromptCacheOff: true } }), slotted).call(convo("a", 1), ctx({ slot: 0, isolationRequired: true })), ["cache_prompt=false"]);
+  assert.deepEqual(chats(slotted.seen).map((r) => [r.body["cache_prompt"], r.body["id_slot"]]), [[false, undefined]]);
+
+  // Strata: strata_checkpoint false is refused; the isolated project is not sent without it, another project still is
+  const noCheckpoint = (r: HttpRequest) => ("strata_checkpoint" in r.body || "strata_prefix" in r.body ? refuse(400, "unknown field strata_checkpoint") : ok({ timings: { cache_n: 0, prompt_n: 10 } }));
+  const strata = recording(noCheckpoint);
+  declined(await new CacheAdapter(profileFor({ kind: "strata", model: "m", options: { pinPrefix: true } }), strata).call(convo("doc", 3), ctx({ isolationRequired: true })), ["strata_checkpoint=false"]);
+  assert.deepEqual(strata.seen.map((r) => r.body["strata_checkpoint"]), [false]);
+  const strataOpen = recording(noCheckpoint);
+  const pinned = await new CacheAdapter(profileFor({ kind: "strata", model: "m", options: { pinPrefix: true } }), strataOpen).call(convo("doc", 3), ctx({ pinMessages: 1, pinAuthorized: true }));
+  assert.deepEqual([pinned.status, pinned.fallback !== undefined, pinned.isolationRefused, strataOpen.seen.length], [200, true, undefined, 2]);
+
+  // Claude: an isolated project is sent no cache setting at all, so a 400 naming cache_control is not a refusal of ours and comes back as it is
+  const claude = recording(() => refuse(400, "cache_control is not allowed here"));
+  const c = await new CacheAdapter(profileFact(), claude).call({ model: "claude-opus-5-5", system: doc("s", 800), messages: [{ role: "user", content: "q" }] }, ctx({ isolationRequired: true }));
+  assert.deepEqual([c.status, c.isolationRefused, c.fallback, c.applied, claude.seen.length], [400, undefined, undefined, [], 1]);
+});
+
 test("a cache reset or engine pause is never called through an adapter, whatever the path says", async () => {
   const sim = new LlamaSim(1);
   for (const [kind, path] of [["radiance", "/reset_prefix_cache"], ["vllm", "/reset_prefix_cache"], ["vllm", "/pause"], ["vllm", "/pause/now"]] as const) {

@@ -142,7 +142,17 @@ export interface CallResult {
   readonly isolation?: IsolationMode;
   /** Present when the endpoint refused a cache setting and the call was repeated with none: the same messages went again, so no context was lost. */
   readonly fallback?: { readonly reason: string; readonly refusedStatus: number; readonly removed: readonly string[] };
+  /**
+   * Present when the endpoint refused a cache setting and the project requires isolation: the call was **not** sent again without it, because a request without the setting that keeps this project apart
+   * (vLLM's `cache_salt`, llama.cpp's `cache_prompt: false`, Strata's `strata_checkpoint: false`) could reuse another project's prefix or leave this one's shared. `message` is the plain-words error (also the body's
+   * `error.message`); `reason` is the server's own text; `kept` the settings the refused request carried.
+   */
+  readonly isolationRefused?: { readonly message: string; readonly reason: string; readonly refusedStatus: number; readonly kept: readonly string[] };
 }
+
+/** The plain-words error of a refused isolation setting (see `CallResult.isolationRefused`). */
+export const isolationRefusedMessage = (settings: readonly string[]): string =>
+  `The server refused the setting that keeps this project's cache apart from other projects (${settings.join(", ")}). This project requires isolation, so the call was not sent again without it. The owner can mark the project as not requiring isolation, or use another route (a server that accepts the setting, or one of the project's own).`;
 
 /** The part of a resolved marker a slot operation needs. */
 export interface SlotMarker { readonly kind: string; readonly handle?: string }
@@ -177,7 +187,8 @@ export function ledgerCache(hit: CacheHit, backend: string, route: string): { re
 /**
  * One endpoint's cache adapter: prepares a request with the profile's settings, sends it, reads the hit, and **falls back without losing context**. If the endpoint refuses a cache setting (an
  * unknown field, a refused marker or lifetime), the same request is sent again with every cache setting removed; the messages are in every request, so nothing the model needs depends on server state,
- * and an evicted or incompatible cache costs time only. Calls to paths the profile forbids (cache resets, engine pause) are refused here, whatever the caller asks.
+ * and an evicted or incompatible cache costs time only. A project that requires isolation is the exception: its refused call is returned as an error in plain words (`isolationRefused`) and never sent
+ * without the setting that keeps it apart. Calls to paths the profile forbids (cache resets, engine pause) are refused here, whatever the caller asks.
  */
 export class CacheAdapter {
   readonly #profile: CacheProfile;
@@ -257,9 +268,17 @@ export class CacheAdapter {
     let fallback: CallResult["fallback"];
     let used = first;
     let placed = true;
+    let isolationRefused: CallResult["isolationRefused"];
     const refusal = sent.status >= 400 && first.applied.length > 0 ? failureMessage(sent.body, 2000) : undefined;
-    // When the refusal names cache_prompt on a slotted server there is no safe way to say "do not reuse", so the error is returned instead of a retry that would reuse by similarity.
-    if (refusal !== undefined && this.#profile.refusedCacheSetting({ status: sent.status, message: refusal }) && !(this.#profile.slotted && /\bcache_prompt\b/.test(refusal.toLowerCase()))) {
+    const refusedSetting = refusal !== undefined && this.#profile.refusedCacheSetting({ status: sent.status, message: refusal });
+    if (refusedSetting && context.isolationRequired === true) {
+      // A project that requires isolation is never sent the plain retry: without the refused setting the request is not kept apart from other projects (on vLLM the salt is the isolation itself). The refusal is
+      // returned in plain words, and nothing else is sent.
+      const message = isolationRefusedMessage(first.applied);
+      isolationRefused = { message, reason: failureMessage(sent.body) || "the endpoint refused a cache setting", refusedStatus: sent.status, kept: first.applied };
+      sent = { status: sent.status, body: { error: { message, type: "isolation_setting_refused", server: isolationRefused.reason } } };
+    } else if (refusedSetting && !(this.#profile.slotted && /\bcache_prompt\b/.test(refusal.toLowerCase()))) {
+      // When the refusal names cache_prompt on a slotted server there is no safe way to say "do not reuse", so the error is returned instead of a retry that would reuse by similarity.
       const plain = this.#profile.prepare(request, { ...context, plain: true });
       // The plain retry names no slot, so the server places it wherever it likes: no slot's holder is known any more. Forgotten before it is sent, so a retry that fails or is cut off leaves nothing known either.
       if (this.#profile.slotted) { this.#state.forget(); placed = false; isolation = "cache-prompt-off-no-slot"; }
@@ -270,7 +289,7 @@ export class CacheAdapter {
     if (slotted && slot !== undefined && placed && sent.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, context.scopeKey);
     const hit = sent.status < 400 ? this.#profile.read(sent.body) : this.#profile.read(undefined);
     const outcome = sent.status < 400 ? judge(hit, used.expects, expectedCachedTokens) : "unknown";
-    return { status: sent.status, body: sent.body, hit, outcome, applied: used.applied, skipped: isolation === "cache-prompt-off-host-cache-not-attested" && used === first ? [...used.skipped, "cache_prompt off (host cache not attested off): the server may keep a prompt cache a slot erase does not clear; run it with --cache-ram 0 and set hostPromptCacheOff to reuse after an erase"] : used.skipped, ...(isolation === undefined ? {} : { isolation }), ...(slotCleared ? { slotCleared } : {}), ...(fallback === undefined ? {} : { fallback }) };
+    return { status: sent.status, body: sent.body, hit, outcome, applied: used.applied, skipped: isolation === "cache-prompt-off-host-cache-not-attested" && used === first ? [...used.skipped, "cache_prompt off (host cache not attested off): the server may keep a prompt cache a slot erase does not clear; run it with --cache-ram 0 and set hostPromptCacheOff to reuse after an erase"] : isolationRefused !== undefined ? [...used.skipped, isolationRefused.message] : used.skipped, ...(isolation === undefined ? {} : { isolation }), ...(slotCleared ? { slotCleared } : {}), ...(fallback === undefined ? {} : { fallback }), ...(isolationRefused === undefined ? {} : { isolationRefused }) };
   }
 
   /**

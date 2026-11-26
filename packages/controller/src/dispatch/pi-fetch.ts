@@ -177,7 +177,10 @@ export function piFetch(options: PiFetchOptions): (inner: FetchFunction) => Fetc
     const finished = run().finally(() => callerSignal?.removeEventListener("abort", onAbort)).then(
       (call) => {
         // The last answer of the call, when no stream was given to Pi (an error status, or a plain JSON body).
-        if (last !== undefined) give(new Response(last.text, { status: last.status, statusText: last.statusText, headers: last.headers }));
+        // A refused isolation setting (the call was not sent again without it) is answered with the adapter's error in plain words, not the server's own text.
+        const declined = call.result?.isolationRefused !== undefined ? call.result : undefined;
+        if (declined !== undefined) give(new Response(JSON.stringify(declined.body), { status: declined.status, headers: { "content-type": "application/json" } }));
+        else if (last !== undefined) give(new Response(last.text, { status: last.status, statusText: last.statusText, headers: last.headers }));
         try { options.onCall(call); } catch (error) { safely(options.onError, error); }
       },
       (error: unknown) => { if (settled) { if (callerSignal?.aborted !== true) safely(options.onError, error); } else { settled = true; early!.reject(error); } },

@@ -18,7 +18,7 @@ const LLAMA_QUALIFIED = {
 const VLLM_QUALIFIED = {
   prefixReuse: { capability: "prefix-reuse", evidence: `${VLLM_RUN}: a new head 0 of 6,470 cached, a second conversation 6,400 of 6,470 and a third 6,464 of 6,470 (whole 64-token blocks); after idle gaps of 0 to 120 s 6,400 each time` },
   fork: { capability: "fork", evidence: `${VLLM_RUN}: other conversations on a read head reused it (6,400 of 6,470 and 6,464 of 6,470), every request at 1, 2, 4 and 8 at once reused it, and a new head sent to n at once was computed once (reuse in n-1 of n)` },
-  isolation: { capability: "isolation", evidence: `${VLLM_RUN}: the same head under the same cache_salt 6,400 of 6,472 cached; under another salt 0, with no salt 0 (one request at a time). Holds only for calls that carry the salt: a server that refuses cache_salt gets the adapter's plain retry without it, which is not isolated` },
+  isolation: { capability: "isolation", evidence: `${VLLM_RUN}: the same head under the same cache_salt 6,400 of 6,472 cached; under another salt 0, with no salt 0 (one request at a time). Holds only for calls that carry the salt: a server that refuses cache_salt gets the adapter's plain retry without it (not isolated) only for a project that does not require isolation; one that does gets the refusal as an error and nothing is sent without the salt` },
 } as const satisfies Record<string, Qualification>;
 const RADIANCE_QUALIFIED = {
   prefixReuse: { capability: "prefix-reuse", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0, qwen3.8-flash-next-iq4r, 2026-11-16): a new head 0 of 13,471 cached, the same request again 12,288 of 13,471, 13,474 and 13,471 in three repeats; run 2 (2.2.0, 2026-11-25): 6,144 of about 6,673 on every repeat at 1, 2, 4 and 8 streams" },
