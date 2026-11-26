@@ -50,6 +50,7 @@ async function world(backend: (typeof backends)[number]) {
   return { w, projects, owner, task, ann, effects, grants, sims };
 }
 
+const derivedTask = (task: string): string => (task.endsWith("a") ? `${task.slice(0, -1)}b` : `${task.slice(0, -1)}a`);
 const grantCount = async (storage: ControllerStorage): Promise<number> => (await storage.listAggregates("grant-record", { limit: 200 })).length;
 
 for (const backend of backends) {
@@ -119,6 +120,36 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+test("a competing edit must have an agent step after it, also when only provider failures follow it (second review, card P07)", async () => {
+  const { checkScript } = await import("./workflow.js");
+  const edit = { event: "competing-edit", service: "billing", resource: "db", fields: { size: 99 } };
+  const agent = { agent: "ann", service: "billing", resource: "db", fields: { size: 20 } };
+  for (const steps of [[agent, edit], [agent, edit, { event: "provider-failure" }]]) assert.throws(() => checkScript({ steps }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /an agent step must follow it/.test(e.message), JSON.stringify(steps));
+  assert.doesNotThrow(() => checkScript({ steps: [edit, { event: "provider-failure" }, agent] }));
+});
+
+test("the grant step's grants are in the scope's project only; a run's record lists every effect its steps made; an owner credential confined to another task grants nothing (second review, card P07)", async () => {
+  const { w, owner, task, ann, effects, sims } = await world(backends[0]!);
+  try {
+    const projectId = ((await w.storage.getAggregate({ kind: "task", id: task }))!.body as { projectId: string }).projectId;
+    const scopeId = (await sims.open(owner, { commandId: cid("o"), taskId: task, layout: LAYOUT })).id;
+    const r = await sims.run(owner, { commandId: cid("run"), scopeId, steps: [{ event: "provider-failure", route: "sim-primary/model" }, { agent: "ann", service: "billing", resource: "db", fields: { size: 20 } }, { agent: "bea", service: "billing", resource: "api", fields: { mode: "off" } }] });
+    assert.equal(r.run.outcome, "completed");
+    const made = r.run.results.flatMap((x) => [...(x.attempts ?? []).map((a) => a.effectId), ...(x.tool === undefined ? [] : [x.tool.effectId])]);
+    assert.equal(made.length, 5, "ann: two model attempts (an outage, then the fallback) and a tool call; bea: one attempt and a tool call");
+    for (const id of made) { assert.ok(r.run.effects.includes(id), `the run's record lists ${id}`); assert.equal((await effects.get(id))?.simulation, scopeId); }
+    // An owner credential confined to another task reaches neither this scope's grant step nor its grants.
+    const elsewhere = { ...owner, taskScope: { taskId: derivedTask(task), projectId } } as typeof owner;
+    await refuses("forbidden", () => sims.grant(elsewhere, { commandId: cid("g"), scopeId, grantee: ann, basis: "from another task" }));
+    assert.equal(await grantCount(w.storage), 0);
+    const g = await sims.grant(owner, { commandId: cid("g"), scopeId, grantee: ann, basis: "the simulation went well" });
+    assert.deepEqual(g.grants.map((x) => x.project), [projectId, projectId]);
+    const stored = (await w.storage.listAggregates("grant-record", { limit: 200 })).map((a) => a.body as { project: string; resource?: { kind: string; id: string } });
+    assert.deepEqual(stored.map((b) => b.project), [projectId, projectId], "never every project");
+    assert.deepEqual(stored.map((b) => b.resource).sort((a, b) => (a!.id < b!.id ? -1 : 1)), [{ kind: "service", id: "billing/api" }, { kind: "service", id: "billing/db" }]);
+  } finally { await w.close(); }
+});
 
 test("the list of scopes takes a whole number from 1 to 20 (second review, card P07)", async () => {
   const { w, owner, sims } = await world(backends[0]!);
