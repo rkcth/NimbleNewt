@@ -488,7 +488,8 @@ test("the launcher calls use only commands and flags the launcher's own parser a
 
 test("the JSON fields and stages the verdict reads are the ones the launcher writes", () => {
   for (const key of ["windowStationOk", "windowStationError", "containerSid", "profileDeleted", "profileGone", "elevated", "sessionId"]) assert.ok(winRs.includes(`"${key}"`) || read("native", "nn-launcher", "src", "profile.rs").includes(key) || read("native", "nn-launcher", "src", "desk.rs").includes(key), key);
-  assert.ok(winRs.includes('j.s("windowStation", "private")'));
+  assert.ok(winRs.includes('j.s("windowStation", p.mode().name())') && winRs.includes('j.s("windowStation", e.mode.name())'), "the line names the mode that was made (private or home-desktop)");
+  assert.ok(winRs.includes('"privateStationError"'), "the named station's refusal is reported when the home desktop was used");
   assert.ok(winRs.includes('fail(j, "container"') && winRs.includes('fail(j, "grant", &e)'), "the stages the verdict maps");
   assert.ok(read("native", "nn-launcher", "src", "desk.rs").includes("window objects:") || winRs.includes("window objects:"), "the message prefix the verdict matches");
   assert.ok(winRs.includes('"info" => {') && winRs.includes('"check" => {'));
