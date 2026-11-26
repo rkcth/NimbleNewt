@@ -9395,12 +9395,34 @@
       ],
       "deliverable": "Isolated simulation scope where a workflow runs against simulated tools, events and providers before real write access is granted (README 612, 245)",
       "acceptance_and_verification": "A workflow runs end to end against simulated tools and events including provider failure and competing edits; no real write, send or spend is possible in the scope (asserted against the effect ledger); results are labelled simulated; the owner grants real access separately; replay reruns use the same isolated scope",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "4822d766",
+          "4d55b48b",
+          "50ab343e",
+          "4615ce73",
+          "ae9cadeb",
+          "1081b8ff",
+          "74ffddc8",
+          "39738a50",
+          "2a020d13",
+          "4fca342e",
+          "141f59c9",
+          "2e0dfb03"
+        ],
+        "ci_runs": [
+          "45846069820"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A simulation scope (simulation.open/operate/observe/close/get/list) holds a stand-in of the services; the effect ledger refuses any real write, send or spend for an effect marked with a scope (the real bridge is never called) and a stand-in cannot settle a real effect; every result and settled effect is labelled simulated. simulation.run runs an owner's script of up to 30 steps: named stand-in agents read a resource, ask a stand-in model and make one tool call on the stand-in; provider failures (outage, rate-limit, credit, auth) are decided by the real R02 FallbackService on its own in-memory store, so nothing reaches the task's spend, retry budget or route health; a competing edit by another writer is caught by compare and set, read again and redone on other fields, or left as a conflict on the same fields. Runs are idempotent by command ID, resume after a crash step by step, and the start-up reconciler finishes a started scope effect only through the scope's own bridge. Real access is a separate owner step (simulation.grant, shown first in chat): effect.perform narrowed to each service resource a cleanly completed run changed, in the scope's project. activity.replay.simulate reruns are recorded in the task's own replay scope, the same one every time (or a named open scope of the task). The owner reads scopes and runs in the simulations status view. Limits: the agents in a run are scripted stand-ins, so no real worker attempt, host or model client is dispatched into a scope; the stand-in providers give a fixed reply and simulate only the four failure kinds (no slow or partial answers, cutover or drain, and the R04 route gate is not composed); steps run one after the other, so two agents racing in parallel are not simulated; a replay rerun walks the recorded steps and does not replay them against the stand-ins; no copy of a real service's state into a scope; a scope effect recorded and never started is finished when the same command is sent again, not by the reconciler; a second completed run can grant the same resource again; the composed test covers SQLite and PostgreSQL, the other two backends through the domain tests."
+      }
     },
     {
       "id": "Q01",
