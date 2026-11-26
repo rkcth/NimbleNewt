@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { safeText } from "@nimblenewt/contracts";
@@ -19,8 +20,12 @@ export type CheckoutAnswer =
   | { readonly ok: true; readonly body: string; readonly facts: { readonly [key: string]: string | number | boolean | null } }
   | { readonly ok: false; readonly reason: string };
 
-/** The bounds of one call: its time (also cut by the owner's wall time), what each stream may write, what is handed back (the start and the end of a longer text), the processes a command may have at once, and the calls one attempt may make. */
-export const CHECKOUT_TOOL_LIMITS = { timeoutMs: 600_000, streamBytes: 4 * 1024 * 1024, bodyChars: 16_000, headChars: 4_000, processes: 512, callsPerAttempt: 5_000, fileBytes: 4 * 1024 * 1024 } as const;
+/**
+ * The bounds of one call: its time (also cut by the owner's wall time), what each stream may write, what is handed back (the start and the end of a longer text), the processes a command may have at once, and the calls one attempt may make.
+ * `diskReserveBytes` (first review): this host cannot cap what a sandbox writes in all (a file's size at most), and the checkout lies beside the controller's data, so a call is not started, and one running is stopped, when the
+ * checkout's file system or the call's own has less than this free (looked at every `diskCheckMs`).
+ */
+export const CHECKOUT_TOOL_LIMITS = { timeoutMs: 600_000, streamBytes: 4 * 1024 * 1024, bodyChars: 16_000, headChars: 4_000, processes: 512, callsPerAttempt: 5_000, fileBytes: 4 * 1024 * 1024, diskReserveBytes: 2 * 1024 * 1024 * 1024, diskCheckMs: 1000 } as const;
 
 /**
  * The program that reads, writes or edits one file inside the sandbox, given the request on standard input and answering one JSON line. Run by the sandbox's own Node.js (`node -e`); it is this fixed text, never the model's.
@@ -141,6 +146,16 @@ export interface CheckoutRunContext {
   readonly base?: string;
   /** Told the run once it started (so the sandbox's close can end it), and when it ended. */
   readonly track: (run: { kill(): void }, started: boolean) => void;
+  /** Tests only: the free space under which a call is not started or is stopped (default `CHECKOUT_TOOL_LIMITS.diskReserveBytes`). */
+  readonly diskReserveBytes?: number;
+}
+
+/** Whether one of the folders lies on a file system with less than `reserve` bytes free (a folder that cannot be looked at counts as full: the call is not made blind). */
+async function diskLow(folders: readonly string[], reserve: number): Promise<boolean> {
+  for (const folder of folders) {
+    try { const s = await statfs(folder); if (s.bavail * s.bsize < reserve) return true; } catch { return true; }
+  }
+  return false;
 }
 
 /** One call, in a sandbox of its own. Answers the call's result, or throws: `mayHaveActed` for a call that changes the checkout and did not end cleanly, a plain error for one that could not start or only read. */
@@ -159,6 +174,8 @@ export async function runCheckoutCall(ctx: CheckoutRunContext, call: CheckoutCal
   try {
     const home = join(directory, "home"), scratch = join(directory, "scratch");
     mkdirSync(home); mkdirSync(scratch);
+    const reserve = ctx.diskReserveBytes ?? CHECKOUT_TOOL_LIMITS.diskReserveBytes, watched = [ctx.recipe.workdir, directory];
+    if (await diskLow(watched, reserve)) return { ok: false, reason: `the disk your checkout is on has less than ${Math.round(reserve / 1048576)} MB free; nothing was run (remove large files you made with run, such as build output)` };
     let run;
     try {
       run = await ctx.launcher.launch({ recipe: { ...ctx.recipe, home, scratch }, command, timeoutMs, maxOutputBytes: CHECKOUT_TOOL_LIMITS.streamBytes, ...(isRun ? {} : { stdin: JSON.stringify(call) }), limits, requireEnforced: !ctx.bestEffort });
@@ -167,15 +184,18 @@ export async function runCheckoutCall(ctx: CheckoutRunContext, call: CheckoutCal
     const stop = (): void => run.kill();
     signal.addEventListener("abort", stop, { once: true });
     if (signal.aborted) run.kill();
+    // The disk is looked at while the call runs; a call that brings it under the reserve is stopped (its end is then known, as at its time limit).
+    let diskFull = false, looking = false;
+    const watch = setInterval(() => { if (looking) return; looking = true; void diskLow(watched, reserve).then((low) => { if (low && !diskFull) { diskFull = true; run.kill(); } }).finally(() => { looking = false; }); }, CHECKOUT_TOOL_LIMITS.diskCheckMs);
     let result;
-    try { result = await run.result; } finally { signal.removeEventListener("abort", stop); ctx.track(run, false); }
+    try { result = await run.result; } finally { clearInterval(watch); signal.removeEventListener("abort", stop); ctx.track(run, false); }
     if (signal.aborted) { if (changes) throw mayHaveActed(`the ${call.action} was stopped while it ran; it may have changed the checkout`); throw new Error("the read was stopped"); }
     const started = !(result.exitCode === null && result.signal === null && !result.timedOut && !result.killed);
     if (!started) throw new Error(`the call could not be started: ${safeText(result.stderr.replace(/^could not start: /, ""), 300).trim()}`);
     if (isRun) {
       const streams = `${result.stdout}${result.stderr === "" ? "" : `${result.stdout === "" || result.stdout.endsWith("\n") ? "" : "\n"}[stderr]\n${result.stderr}`}`;
-      const shown = cutMiddle(streams);
-      return { ok: true, body: shown.text, facts: { exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, ms: result.durationMs, truncated: shown.truncated || result.truncated === true, ...(result.releaseProblem === undefined ? {} : { cleanup: safeText(result.releaseProblem, 200) }) } };
+      const shown = cutMiddle(diskFull ? `${streams}\n[stopped: the disk your checkout is on fell under ${Math.round(reserve / 1048576)} MB free; remove what the command wrote]` : streams);
+      return { ok: true, body: shown.text, facts: { exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, ...(diskFull ? { diskFull: true } : {}), ms: result.durationMs, truncated: shown.truncated || result.truncated === true, ...(result.releaseProblem === undefined ? {} : { cleanup: safeText(result.releaseProblem, 200) }) } };
     }
     let answer: CheckoutAnswer | undefined;
     if (result.exitCode === 0 && !result.timedOut && !result.killed) { try { answer = JSON.parse(result.stdout) as CheckoutAnswer; } catch { answer = undefined; } }

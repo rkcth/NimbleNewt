@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -199,6 +200,23 @@ describe("the checkout tool in a sandbox of its own (card W09b)", () => {
     refused(await call({ action: "edit", path: "bin.dat", old: "A", text: "Z" }), /not UTF-8 text/);
     assert.deepEqual(readFileSync(join(checkout, "bin.dat")), bytes);
     assert.equal(factsOf(await call({ action: "read", path: "src/a.txt" })).notText, undefined);
+  });
+
+  ifUsable("a call is not started when the checkout's disk is under the reserve, and a command that brings it under the reserve is stopped and says so", async () => {
+    refused(await call({ action: "run", command: "echo never > /work/never.txt" }, { diskReserveBytes: Number.MAX_SAFE_INTEGER }), /has less than .* MB free; nothing was run/);
+    assert.equal(existsSync(join(checkout, "never.txt")), false);
+    const free = (s: { bavail: number; bsize: number }): number => s.bavail * s.bsize;
+    const before = free(await statfs(checkout));
+    const t0 = Date.now();
+    // 64 MiB under what is free now: the command writes 4 MiB at a time, slowly, up to 400 MiB.
+    const a = await call({ action: "run", command: "for i in $(seq 1 100); do head -c 4194304 /dev/zero >> /work/fill.bin; sleep 0.05; done; echo all-written" }, { diskReserveBytes: before - 64 * 1048576, limits: { memoryMb: 512, wallTimeMs: 60_000 } });
+    try {
+      assert.equal(factsOf(a).diskFull, true, JSON.stringify(a).slice(0, 300));
+      assert.match(okBody(a), /stopped: the disk your checkout is on fell under/);
+      assert.doesNotMatch(okBody(a), /all-written/);
+      assert.ok(statSync(join(checkout, "fill.bin")).size < 400 * 1048576);
+      assert.ok(Date.now() - t0 < 30_000);
+    } finally { rmSync(join(checkout, "fill.bin"), { force: true }); }
   });
 
   ifUsable("a process a command leaves running in the background ends with the call and never acts after it", async () => {
