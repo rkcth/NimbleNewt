@@ -2648,7 +2648,7 @@ test("the launcher crate (round 5): the extra windows-sys modules come only with
   const extra = [...feature[1].matchAll(/"windows-sys\/([A-Za-z0-9_]+)"/g)].map((m) => m[1]).sort();
   // (Win32_Graphics_Gdi and Win32_System_StationsAndDesktops became the product's own with the private window station fix)
   // (the home-case round added the child-side window, clipboard, hook, atom and keyboard-state calls, still experiment only)
-  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"]);
+  assert.deepEqual(extra, ["Wdk_System_SystemServices", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"]);
   const deps = /^windows-sys = \{ version = "0\.59", features = \[([^\]]*)\]/m.exec(toml)[1];
   const listed = [...deps.matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1]);
   assert.deepEqual(listed, ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops", "Win32_System_Threading"]);
@@ -2808,7 +2808,7 @@ test("round 5 review: desk.rs refuses the interactive station, a SID that is not
   const finish = desk.slice(desk.indexOf("pub(crate) fn finish"), desk.indexOf("pub(crate) fn all_reverted"));
   assert.ok(!/SetSecurityInfo|write_dacl|add_entry/.test(finish), "the copy taken before the grant is never written back");
   assert.match(finish, /t\.matches = Some\(cmp == AclCompare::Same\);/);
-  assert.match(desk, /t\.created \|\| t\.original\.is_none\(\) \|\| \(t\.revoked && t\.left == 0 && t\.matches == Some\(true\)\)/);
+  assert.match(desk, /t\.created \|\| t\.original\.is_none\(\) \|\| \(t\.revoked && t\.left == 0 && t\.matches == Some\(true\) && t\.sddl_same == Some\(true\)\)/);
   // the station switch for a made desktop is undone at once and checked; a failure stops the run
   const create = prepare.slice(prepare.indexOf("Create::Station =>"));
   assert.ok(create.indexOf("SetProcessWindowStation(hs as HWINSTA)") < create.indexOf("SetProcessWindowStation(original)") && create.indexOf("SetProcessWindowStation(original)") < create.indexOf("add_entry(hd"));
@@ -3144,10 +3144,87 @@ test("the home case (review fixes): the documents state what a killed launcher l
   assert.ok(s.includes("how many such desktops fit is NOT known") && s.includes("dynamic in later systems"));
   assert.ok(s.includes("together with that run's per-run profile"));
   const readme = readFileSync(join(root, "experiments", "windows-appcontainer", "README.md"), "utf8").split("## The home case")[1];
-  assert.ok(!readme.includes("a container that no longer exists") && readme.includes("It ALSO leaves that step's per-run profile"));
+  assert.ok(!readme.includes("a container that no longer exists") && readme.includes("during ANY run step leaves that step's per-run profile"));
   assert.ok(!readme.includes("no key reaches it") && readme.includes("LowLevelHooksTimeout"));
-  assert.ok(!readme.includes("a few minutes at most") && readme.includes("at most about 10 minutes each"));
+  assert.ok(!readme.includes("a few minutes at most") && readme.includes("at most about 12 minutes each"));
   assert.ok(readme.includes("never the folder `--cwd` names"));
   const home = readFileSync(join(root, "native", "nn-launcher", "src", "home.rs"), "utf8");
   assert.ok(!home.includes("it names a profile that no longer exists") && !home.includes("no key is ever delivered"));
 });
+
+test("the home case (second review): Ctrl+C and the window closing remove the station entry, output never panics, nothing outside the work folder is granted, the whole list is compared", () => {
+  const read = (f) => readFileSync(join(root, "native", "nn-launcher", "src", f), "utf8");
+  const home = read("home.rs"), desk = read("desk.rs"), rules = read("homerules.rs");
+  const code = (t) => t.replace(/^\s*\/\/.*$/gm, "");
+  // a console control handler, installed once, BEFORE the station entry is written, and the write happens under the same lock the handler takes, refused once stopped
+  assert.match(desk, /SetConsoleCtrlHandler\(Some\(console_ctrl\), 1\)/);
+  const ph = desk.slice(desk.indexOf("fn prepare_home("), desk.indexOf("pub(crate) fn finish("));
+  const inst = ph.indexOf("install_console_handler();"), lock = ph.indexOf("let mut pending = pending_lock();"), stop = ph.indexOf("if home_stopped()"), reg = ph.indexOf("*pending = Some(SidBuf::new(&sid_b));"), grant = ph.indexOf('self.grant("window station"');
+  assert.ok(inst > 0 && inst < lock && lock < stop && stop < reg && reg < grant, "handler, lock, stop check, registration, then the write");
+  assert.ok(ph.indexOf("CreateDesktopW(") > grant, "the desktop after the entry, as before");
+  const handler = desk.slice(desk.indexOf("unsafe extern \"system\" fn console_ctrl("), desk.indexOf("fn remove_pending_now("));
+  assert.ok(handler.includes("std::panic::catch_unwind(") && handler.includes("HOME_STOP.store(true") && handler.includes("remove_pending_now()") && /\n    1\n\}/.test(handler), "the handler stops, removes, never unwinds, answers TRUE");
+  const rp = desk.slice(desk.indexOf("fn remove_pending_now("), desk.indexOf("// ---", desk.indexOf("fn remove_pending_now(")));
+  assert.ok(rp.indexOf("let mut pending = pending_lock();") < rp.indexOf("remove_entries(h, sid.psid())") && rp.includes("crate::homerules::may_write_interactive_station(&name, flags)") && rp.includes("object_entries(h, sid.psid())"), "the handler's removal: locked, only WinSta0, read back");
+  const fin = desk.slice(desk.indexOf("pub(crate) fn finish("), desk.indexOf("pub(crate) fn all_reverted("));
+  assert.ok(fin.indexOf("let mut pending = pending_lock();") < fin.indexOf("remove_entries(t.handle, self.sid)"), "the normal removal takes the same lock");
+  // home-probe: the handler is installed at the start, a stopped run runs no further step (checked before the ATTEMPT line), deelevate's parent waits for its child
+  const hp = home.slice(home.indexOf("pub(crate) fn home_probe("), home.indexOf("// ---", home.indexOf("pub(crate) fn home_probe(")));
+  assert.ok(hp.indexOf("desk::install_console_handler();") < hp.indexOf("for step in &steps"));
+  assert.ok(hp.indexOf("if desk::home_stopped() {") < hp.indexOf('log(&format!("ATTEMPT step {}"'), "stopped before the next step's ATTEMPT");
+  assert.match(hp, /s\.b\("stopped", desk::home_stopped\(\)\);/);
+  const de = home.slice(home.indexOf("pub(crate) fn deelevate("));
+  assert.ok(de.indexOf("desk::install_console_handler();") < de.indexOf("CreateProcessAsUserW("));
+  // no output call that panics on a closed pipe or console
+  assert.ok(!/println!|eprintln!/.test(code(home)), "home.rs writes through emit/log only");
+  assert.ok(!/eprintln!/.test(code(desk)), "desk.rs logs without eprintln!");
+  assert.match(desk, /fn log\(msg: &str\) \{ use std::io::Write; let _ = writeln!\(std::io::stderr\(\)/);
+  // the only file-system grant is the work folder; node is a copy inside it
+  const sr = home.slice(home.indexOf("fn step_run("), home.indexOf("fn hr_writes_station("));
+  assert.equal([...sr.matchAll(/GrantSpec \{/g)].length, 1);
+  assert.match(sr, /a\.grants = vec!\[GrantSpec \{ mode: Mode::Modify, path: ws\.to_string\(\), soft: false \}\];/);
+  assert.ok(!/Mode::Rx|soft: true|soft_rx/.test(code(home)), "no grant on node's install folder");
+  assert.match(hp, /let to = format!\("\{ws\}\\\\node\.exe"\); std::fs::copy\(std::fs::canonicalize\(&p\)/);
+  assert.ok(sr.includes('let differs = !left && line.contains('), "a list that differs is told apart from an entry left");
+  // every run step prints its profile clean-up; station steps both commands
+  assert.ok(sr.includes("hr::profile_cleanup_command(&name, &sid, &record)") && sr.includes("hr::cleanup_commands(&name, &sid, &record)"));
+  assert.ok(sr.indexOf("profile_cleanup_command") < sr.indexOf("let mut o = run(&a, j);"));
+  assert.ok(rules.includes('".\\\\nn-appc-launcher.exe delete-profile --name {name} --sid {sid} --profile-record {}"'));
+  // the read-back: the entries AND the SDDL text with the descriptor's flags; an entry left is told apart from a list changed by someone else
+  assert.match(desk, /t\.sddl_before = Some\(text\);/);
+  assert.ok(desk.indexOf("t.sddl_before = Some(text);") < desk.indexOf("match add_entry(h, self.sid, mask)"), "the text is taken before the write");
+  assert.match(desk, /t\.revoked && t\.left == 0 && t\.matches == Some\(true\) && t\.sddl_same == Some\(true\)/);
+  assert.match(desk, /pub\(crate\) fn entry_left\(&self\) -> bool \{ self\.items\.iter\(\)\.any\(\|t\| !t\.created && t\.original\.is_some\(\) && t\.left != 0\) \}/);
+  assert.ok(sr.includes('line.contains("\\"entryLeft\\":true")') && sr.includes('line.contains("\\"allReverted\\":false")'));
+  assert.match(hp, /s\.b\("ok", !entry_left && !list_differs\);/);
+  // the console module is an experiment feature only
+  const cargo = readFileSync(join(root, "native", "nn-launcher", "Cargo.toml"), "utf8");
+  const feat = cargo.slice(cargo.indexOf("experiment = ["), cargo.indexOf("]", cargo.indexOf("experiment = [")));
+  const deps = cargo.slice(cargo.indexOf("[dependencies]"));
+  assert.ok(feat.includes('"windows-sys/Win32_System_Console"') && !deps.includes("Win32_System_Console"));
+});
+
+test("the home case (second review): home.mjs reads PowerShell's UTF-8 file with its byte-order mark and reports a stopped run, a changed list and a missing summary", () => {
+  const lines = parseHomeLines("\uFEFF" + homeLine({ step: "context", ok: true }) + "\r\n" + homeLine({ step: "desktop-ui-test", group: "desktop", skipped: true, reason: "stopped: Ctrl+C or the window closing", ok: true }) + "\r\n");
+  assert.equal(lines.length, 2, "the first line keeps its byte-order mark in the file");
+  const j = judgeHome(lines);
+  assert.equal(j.stopped, true);
+  assert.equal(j.summaryFound, false);
+  const md = renderHomeMarkdown(lines, "x");
+  assert.match(md, /The run was stopped/);
+  assert.match(md, /No summary line/);
+  const changed = renderHomeMarkdown([{ probe: "home", step: "summary", stationEntryLeftBehind: false, stationListDiffers: true }], "y");
+  assert.match(changed, /did not read back exactly/);
+  assert.doesNotMatch(changed, /left on the window station/);
+  assert.equal(judgeHome([{ probe: "home", step: "summary", stationListDiffers: false }]).listDiffers, false);
+});
+
+test("the home case (second review): the documents say what Ctrl+C, closing the window and Task Manager leave, ask for UTF-8 output, and drop the node grant", () => {
+  const readme = readFileSync(join(root, "experiments", "windows-appcontainer", "README.md"), "utf8").split("## The home case")[1];
+  assert.ok(readme.includes("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8"));
+  assert.ok(readme.includes("a console control handler is installed before the first write") && readme.includes("ENDED FROM OUTSIDE (Task Manager"));
+  assert.ok(!readme.includes("Do not press Ctrl+C") && !readme.includes("soft read grant on node's folder") && readme.includes("`node.exe` is COPIED into the work folder"));
+  assert.ok(readme.includes("Run ONE probe at a time"));
+  assert.ok(readme.includes("`descriptorTextSame`") && readme.includes("`stationListDiffers`"));
+});
+

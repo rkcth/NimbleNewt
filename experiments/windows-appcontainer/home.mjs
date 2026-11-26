@@ -62,8 +62,10 @@ export function judgeHome(lines) {
   const summary = lines.find((l) => l.step === "summary");
   const entryLeft = summary?.stationEntryLeftBehind === true;
   const keptFolder = typeof summary?.workFolderKept === "string" ? summary.workFolderKept : null;
+  const listDiffers = summary?.stationListDiffers === true;
+  const stopped = summary?.stopped === true || lines.some((l) => l.skipped === true && /^stopped:/.test(String(l.reason)));
   const closeErrors = lines.flatMap((l) => (l.desktop && Array.isArray(l.desktop.closeErrors) ? l.desktop.closeErrors : []));
-  return { facts, verdicts, strongestWorking: best ? best.group : null, entryLeft, keptFolder, closeErrors: closeErrors.length, steps: lines.length };
+  return { facts, verdicts, strongestWorking: best ? best.group : null, entryLeft, keptFolder, listDiffers, stopped, summaryFound: Boolean(summary), closeErrors: closeErrors.length, steps: lines.length };
 }
 
 const cell = (v) => (v === undefined ? "?" : String(v));
@@ -85,6 +87,9 @@ export function renderHomeMarkdown(lines, label = "") {
     ? `Strongest option that worked here: **${j.strongestWorking}**. This is one machine, one build and one run; it is not a general finding.`
     : "No option worked here: the launcher would fail closed (no confined run).");
   if (j.entryLeft) md.push("", `**An entry for a throw-away container was left on the window station**: run the \`home-revoke\` command printed on that step's ATTEMPT line (it needs the profile's record, in the \`rec\` folder of ${j.keptFolder ? `\`${j.keptFolder}\`` : "the work folder"}). The ATTEMPT line also prints \`delete-profile\` for the profile, needed only if the launcher was killed.`);
+  if (j.listDiffers) md.push("", "**WinSta0's access list did not read back exactly as it was copied before the entry** (the container's entry is gone, but another entry or the descriptor's flags differ: another program may have changed the list meanwhile). Nothing was written back; send this file.");
+  if (j.stopped) md.push("", "The run was stopped (Ctrl+C or the window closing): the steps after that point did not run.");
+  if (!j.summaryFound) md.push("", "No summary line: the run did not reach its end (stopped, or ended from outside). If an ATTEMPT line was printed for a step that did not finish, run its clean-up command(s).");
   if (j.closeErrors) md.push("", `${j.closeErrors} desktop or station handle(s) could not be closed (see the lines' desktop.closeErrors).`);
   md.push("", "| step | works | exit | note |", "| --- | --- | --- | --- |");
   for (const l of lines) {

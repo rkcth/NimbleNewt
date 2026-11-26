@@ -143,6 +143,11 @@ pub(crate) fn cleanup_commands(name: &str, sid: &str, record: &str) -> String {
     format!(".\\nn-appc-launcher.exe home-revoke --name {name} --profile-record {r} ; .\\nn-appc-launcher.exe delete-profile --name {name} --sid {sid} --profile-record {r}", r = quote_arg(record))
 }
 
+/// The clean-up command printed before every other run step: the per-run profile is deleted only at the end of the step, so a launcher ended from outside during it leaves the profile (and its record).
+pub(crate) fn profile_cleanup_command(name: &str, sid: &str, record: &str) -> String {
+    format!(".\\nn-appc-launcher.exe delete-profile --name {name} --sid {sid} --profile-record {}", quote_arg(record))
+}
+
 /// May `home-revoke` remove entries for this name's SID from WinSta0? Only with the proof `delete-profile` needs (profile::may_delete): a per-run name, and a record file this launcher wrote that
 /// names this profile and the SID the name derives to now. `derived` is the string form of the derived SID. The error says which part failed; nothing is written then.
 pub(crate) fn may_revoke(name: &str, record_text: Option<&str>, derived: &str) -> Result<(), String> {
@@ -425,6 +430,11 @@ mod tests {
         assert_eq!(work_folder_name(0x1_2345_6789), "nn-home-23456789");
         assert_eq!(work_folder_name(0), "nn-home-00000000");
         assert!(is_admin_like("S-1-5-114"), "the local-admin group is deny-only in a UAC-filtered token");
+        // every other run step: the profile's own clean-up, with the same proof
+        let p = profile_cleanup_command("NimbleNewtRun-0123456789abcdef", "S-1-15-2-1-2-3-4-5-6-7", "C:\\T\\nn-home-1\\rec\\NimbleNewtRun-0123456789abcdef.sid");
+        assert_eq!(p, ".\\nn-appc-launcher.exe delete-profile --name NimbleNewtRun-0123456789abcdef --sid S-1-15-2-1-2-3-4-5-6-7 --profile-record C:\\T\\nn-home-1\\rec\\NimbleNewtRun-0123456789abcdef.sid");
+        assert!(c.ends_with(&p[p.find("delete-profile").unwrap()..].replace("C:\\T\\nn-home-1\\rec\\NimbleNewtRun-0123456789abcdef.sid", "\"C:\\Users\\A B\\AppData\\Local\\Temp\\nn-home-1\\rec\\NimbleNewtRun-0123456789abcdef.sid\"")), "the same text as the station steps' second command");
+        assert!(profile_cleanup_command("NimbleNewtRun-0123456789abcdef", "S-1-15-2-1-2-3-4-5-6-7", "C:\\A B\\r.sid").ends_with("--profile-record \"C:\\A B\\r.sid\""));
     }
 
     #[test]

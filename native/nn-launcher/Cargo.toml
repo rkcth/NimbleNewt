@@ -17,10 +17,10 @@ path = "src/main.rs"
 [features]
 # The measuring options of experiments/windows-appcontainer (deny-write and deny-strong grants, pipes, the NUL device, dump, grant, delete-profile, open-test, hang
 # diagnosis; round 5: the window station and desktop modes of the child, the creation flag, the `context` and `desktop-revoke` commands, which also switch on the extra windows-sys modules they call;
-# the one-account ("home") measurement round adds the window, clipboard, hook, atom and keyboard-state calls of the child-side `ui-test`;
+# the one-account ("home") measurement round adds the window, clipboard, hook, atom and keyboard-state calls of the child-side `ui-test`, and the console control handler (SetConsoleCtrlHandler) that removes its WinSta0 entry at Ctrl+C or when the window closes;
 # the product's private window station needs Win32_System_StationsAndDesktops and Win32_Graphics_Gdi (CreateDesktopW takes a DEVMODEW), so the product's own feature list below has them).
 # NEVER on in a release build: the product is built with no features.
-experiment = ["windows-sys/Win32_System_SystemInformation", "windows-sys/Wdk_System_SystemServices", "windows-sys/Win32_System_DataExchange", "windows-sys/Win32_System_LibraryLoader", "windows-sys/Win32_UI_Input_KeyboardAndMouse", "windows-sys/Win32_UI_WindowsAndMessaging"]
+experiment = ["windows-sys/Win32_System_SystemInformation", "windows-sys/Wdk_System_SystemServices", "windows-sys/Win32_System_DataExchange", "windows-sys/Win32_System_LibraryLoader", "windows-sys/Win32_UI_Input_KeyboardAndMouse", "windows-sys/Win32_UI_WindowsAndMessaging", "windows-sys/Win32_System_Console"]
 
 [dependencies]
 windows-sys = { version = "0.59", features = [

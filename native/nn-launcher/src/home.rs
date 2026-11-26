@@ -14,9 +14,11 @@
 //
 // What is written, and how it is undone: the desktop made for a step is created with its final access list (the launcher's own account, SYSTEM, the container) and closed at the end of the step.
 // The ONLY write to a shared object is ONE temporary allow entry for ONE throw-away container SID on WinSta0 (the two `home-desktop-station-*` modes, only when asked for or when the desktop alone
-// failed): taken out again in the same step (a Drop guard covers a panic), read back and compared with the copy taken before. A launcher KILLED between the write and the removal leaves that entry
-// until sign-out, and also leaves that run's per-run profile and its record (the profile is deleted only at the end of a run); the ATTEMPT line prints both clean-up commands
-// (`home-revoke` and `delete-profile`, each with the record as its proof, as delete-profile requires).
+// failed): taken out again in the same step (a Drop guard covers a panic), read back and compared with the copy taken before (the entries byte for byte and the SDDL text with the descriptor's
+// flags). Ctrl+C, Ctrl+Break and closing the window run a console control handler (desk.rs) that removes the entry at once; Ctrl+C then lets the current step finish and clean up and runs no further
+// step. A launcher ENDED FROM OUTSIDE (Task Manager) between the write and the removal leaves that entry until sign-out; a launcher ended in any run step (from outside, or by closing the window)
+// leaves that step's per-run profile and its record (the profile is deleted only at the end of a run). Every run step's ATTEMPT line prints the clean-up commands (`delete-profile`, and
+// `home-revoke` for a station step, each with the record as its proof, as delete-profile requires). Nothing outside the new work folder gets a file-system entry: node.exe is copied into it.
 use super::*;
 use crate::homerules::{self as hr, Group, Kind, Prog, Verdict};
 
@@ -31,7 +33,10 @@ use super::desk;
 use super::privdesk::acl_copy;
 
 fn get<'a>(j: &'a Json, k: &str) -> Option<&'a str> { j.0.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str()) }
-fn log(msg: &str) { eprintln!("nn-home: {msg}"); }
+/// Standard error (the ATTEMPT lines) and standard output (the JSON lines) ignore a failed write: eprintln!/println! would panic, and in PowerShell a pipeline stopped with Ctrl+C closes the
+/// pipe this program writes to while it still finishes (and cleans up) its current step.
+fn log(msg: &str) { use std::io::Write; let _ = writeln!(std::io::stderr(), "nn-home: {msg}"); }
+fn emit(line: &str) { use std::io::Write; let mut o = std::io::stdout().lock(); let _ = writeln!(o, "{line}"); let _ = o.flush(); }
 
 /// 64 random bits (the OS-seeded hasher of std, the process number and the clock): names of the throw-away profiles and the work folder.
 fn random_seed() -> u64 {
@@ -209,23 +214,23 @@ fn step_profile(j: &mut Json, rec: &str) {
 
 // ---------------------------------------------------------------------------------------------------------------- programs in the container
 
-struct Resolved { exe: String, cmdline: String, soft_rx: Option<String> }
+struct Resolved { exe: String, cmdline: String }
 
 fn find_on_path(file: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(file)).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
 }
 
-fn resolve(prog: Prog, ws: &str, sys: &str, ui_exe: &str) -> Result<Resolved, String> {
+/// The program of a step. node is the COPY in the work folder (see home_probe): no folder outside the work folder is given an entry.
+fn resolve(prog: Prog, sys: &str, ui_exe: &str, node: &Result<String, String>) -> Result<Resolved, String> {
     match prog {
-        Prog::Cmd => { let exe = format!("{sys}\\System32\\cmd.exe"); Ok(Resolved { cmdline: format!("{} /c echo nn-home-ok", hr::quote_arg(&exe)), exe, soft_rx: None }) }
-        Prog::Hostname => { let exe = format!("{sys}\\System32\\hostname.exe"); Ok(Resolved { cmdline: hr::quote_arg(&exe), exe, soft_rx: None }) }
+        Prog::Cmd => { let exe = format!("{sys}\\System32\\cmd.exe"); Ok(Resolved { cmdline: format!("{} /c echo nn-home-ok", hr::quote_arg(&exe)), exe }) }
+        Prog::Hostname => { let exe = format!("{sys}\\System32\\hostname.exe"); Ok(Resolved { cmdline: hr::quote_arg(&exe), exe }) }
         Prog::Node => {
-            let exe = find_on_path("node.exe").ok_or("node.exe was not found on PATH")?;
-            let dir = std::path::Path::new(&exe).parent().map(|p| p.to_string_lossy().into_owned());
-            Ok(Resolved { cmdline: format!("{} -e \"process.stdout.write('nn-home-node-ok')\"", hr::quote_arg(&exe)), exe, soft_rx: dir })
+            let exe = node.clone()?;
+            Ok(Resolved { cmdline: format!("{} -e \"process.stdout.write('nn-home-node-ok')\"", hr::quote_arg(&exe)), exe })
         }
-        Prog::UiTest => { let _ = ws; Ok(Resolved { cmdline: format!("{} ui-test", hr::quote_arg(ui_exe)), exe: ui_exe.to_string(), soft_rx: None }) }
+        Prog::UiTest => Ok(Resolved { cmdline: format!("{} ui-test", hr::quote_arg(ui_exe)), exe: ui_exe.to_string() }),
     }
 }
 
@@ -235,14 +240,15 @@ fn read_head(path: &str, max: usize) -> String {
 
 /// One run step: a throw-away per-run profile (the product's own name form and record), the work folder as the only grant, the product's LPAC arguments, one program.
 #[allow(clippy::too_many_arguments)]
-fn step_run(base: &Args, id: &str, group: Group, prog: Prog, limits: bool, ws: &str, dir: &str, rec: &str, ui_exe: &str) -> (String, bool) {
+/// Returns the line, whether an entry of this step may still be on the window station, and whether a station list differs from its copy for another reason.
+fn step_run(base: &Args, id: &str, group: Group, prog: Prog, limits: bool, ws: &str, dir: &str, rec: &str, ui_exe: &str, node: &Result<String, String>) -> (String, bool, bool) {
     let mut j = base_line(id, group.name());
     j.s("program", prog.name());
     j.b("limits", limits);
     let sys = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    let r = match resolve(prog, ws, &sys, ui_exe) {
+    let r = match resolve(prog, &sys, ui_exe, node) {
         Ok(r) => r,
-        Err(why) => { j.b("skipped", true); j.s("reason", &why); j.b("ok", true); return (j.render(), false); }
+        Err(why) => { j.b("skipped", true); j.s("reason", &why); j.b("ok", true); return (j.render(), false, false); }
     };
     let name = run_name();
     let mut a = Args { command: "run".into(), name: name.clone(), kill_on_close: true, stdin: "nul".into(), ..Default::default() };
@@ -253,10 +259,9 @@ fn step_run(base: &Args, id: &str, group: Group, prog: Prog, limits: bool, ws: &
     a.stdout = Some(out.clone());
     a.stderr = Some(err.clone());
     a.profile_record = Some(format!("{rec}\\{name}.sid"));
-    a.env = vec![("SystemRoot".into(), sys.clone()), ("windir".into(), sys.clone()), ("TEMP".into(), ws.to_string()), ("TMP".into(), ws.to_string()),
-        ("PATH".into(), format!("{sys}\\System32;{sys}{}", r.soft_rx.as_deref().map(|d| format!(";{d}")).unwrap_or_default()))];
+    a.env = vec![("SystemRoot".into(), sys.clone()), ("windir".into(), sys.clone()), ("TEMP".into(), ws.to_string()), ("TMP".into(), ws.to_string()), ("PATH".into(), format!("{sys}\\System32;{sys}"))];
+    // The ONLY grant: the work folder (a new folder of this run, removed at the end). No folder of the user's (node's own install folder included) is given an entry.
     a.grants = vec![GrantSpec { mode: Mode::Modify, path: ws.to_string(), soft: false }];
-    if let Some(d) = &r.soft_rx { a.grants.push(GrantSpec { mode: Mode::Rx, path: d.clone(), soft: true }); }
     // The product's LPAC form when the caller chose `--aap-policy optout`; the plain AppContainer when it chose `none` (or gave nothing).
     a.aap = base.aap;
     a.capabilities = if base.aap == Some(AAP_OPT_OUT) && base.capabilities.is_empty() { vec!["registryRead".into(), "lpacCom".into()] } else { base.capabilities.clone() };
@@ -269,47 +274,69 @@ fn step_run(base: &Args, id: &str, group: Group, prog: Prog, limits: bool, ws: &
     j.b("elevated", is_elevated());
     j.n("sessionId", session_id());
     let j = describe(&a, j);
+    // Printed before anything is made: the profile of this step is deleted only at its end, so a program ended from outside (Task Manager) in ANY run step leaves it.
+    let sid = derived_sid(&name).map(|s| sid_string(s.0)).unwrap_or_default();
+    let record = format!("{rec}\\{name}.sid");
     if group.mode().is_home() && hr_writes_station(group) {
-        let sid = derived_sid(&name).map(|s| sid_string(s.0)).unwrap_or_default();
-        let record = format!("{rec}\\{name}.sid");
-        log(&format!("ATTEMPT {id}: a temporary entry for the container {sid} (profile {name}) is written to WinSta0 and removed in this step; if this program is killed, run: {}", hr::cleanup_commands(&name, &sid, &record)));
+        log(&format!("ATTEMPT {id}: a temporary entry for the container {sid} (profile {name}) is written to WinSta0 and removed in this step; if this program is ended from outside, run: {}", hr::cleanup_commands(&name, &sid, &record)));
+    } else {
+        log(&format!("ATTEMPT {id}: profile {name}; if this program is ended from outside, run: {}", hr::profile_cleanup_command(&name, &sid, &record)));
     }
     let mut o = run(&a, j);
     let works = get(&o.j, "ok") == Some("true") && get(&o.j, "childExitCode") == Some("0") && get(&o.j, "timedOut") == Some("false");
     o.j.b("works", works);
     o.j.s("childStdout", &read_head(&out, 1500));
     o.j.s("childStderr", &read_head(&err, 400));
-    let left = o.j.render().contains("\"allReverted\":false");
-    (o.j.render(), left)
+    let line = o.j.render();
+    let left = line.contains("\"entryLeft\":true");
+    let differs = !left && line.contains("\"allReverted\":false");
+    (line, left, differs)
 }
 
 fn hr_writes_station(g: Group) -> bool { matches!(g, Group::StationRead | Group::StationFull) }
 
 /// `home-probe`: runs the steps (all, or `--steps`), one JSON line each, then a summary line. Returns the process exit code (0 when the probe itself ran; the lines hold the findings).
 pub(crate) fn home_probe(a: &Args) -> i32 {
-    let steps = match hr::select_steps(hr::all_steps(), &a.steps) { Ok(s) => s, Err(e) => { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &e); println!("{}", j.render()); return 125; } };
+    let steps = match hr::select_steps(hr::all_steps(), &a.steps) { Ok(s) => s, Err(e) => { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &e); emit(&j.render()); return 125; } };
+    // Ctrl+C / Ctrl+Break / the window closing: the current step finishes (or the process is ended by Windows after the handler removed the station entry); no further step runs.
+    desk::install_console_handler();
     // The work folder is ALWAYS a new folder of its own (create-new) inside --cwd or the temp folder, never the folder --cwd names: it is removed whole at the end.
     let base = a.cwd.as_deref().map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
     let root = base.join(hr::work_folder_name(random_seed()));
-    if let Err(e) = std::fs::create_dir(&root) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made (it must be new): {e}")); println!("{}", j.render()); return 125; }
+    if let Err(e) = std::fs::create_dir(&root) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made (it must be new): {e}")); emit(&j.render()); return 125; }
     // `rec` (the launcher's profile records) is outside the work folder the container is granted, as the product keeps them out of its reach.
     let (ws, dir, rec) = (root.join("ws"), root.join("steps"), root.join("rec"));
     for d in [&ws, &dir, &rec] {
-        if let Err(e) = std::fs::create_dir(d) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made: {e}")); println!("{}", j.render()); return 125; }
+        if let Err(e) = std::fs::create_dir(d) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made: {e}")); emit(&j.render()); return 125; }
     }
     let (ws, dir, rec) = (ws.to_string_lossy().into_owned(), dir.to_string_lossy().into_owned(), rec.to_string_lossy().into_owned());
     // The program that loads user32 inside the container is this same executable, copied into the work folder (the folder carries the container's only grant, so it can start there).
     let ui_exe = format!("{ws}\\nn-ui.exe");
     let copied = std::env::current_exe().and_then(|me| std::fs::copy(me, &ui_exe)).is_ok();
+    // node.exe (when on PATH and a node step is chosen) is COPIED into the work folder too, so the container needs no entry on node's own install folder (a folder of the user's, outside the
+    // work folder: an entry there would be propagated to every file below it and stay if the program were ended from outside). node.exe runs alone for `-e`.
+    let node: Result<String, String> = if steps.iter().any(|s| matches!(s.kind, Kind::Run { prog: Prog::Node, .. })) {
+        match find_on_path("node.exe") {
+            None => Err("node.exe was not found on PATH".into()),
+            // through a link (nvm-style folders are links) to the file itself; a shim that starts node from its own folder will not run from the copy, and its step says so (works: false)
+            Some(p) => { let to = format!("{ws}\\node.exe"); std::fs::copy(std::fs::canonicalize(&p).unwrap_or_else(|_| p.into()), &to).map(|_| to).map_err(|e| format!("node.exe could not be copied into the work folder: {e}")) }
+        }
+    } else { Err("no node step chosen".into()) };
     let mut verdicts: Vec<(Group, Verdict)> = Vec::new();
     let mut seen: Vec<(Group, bool, bool)> = Vec::new(); // group, a deciding step ran, all deciding steps worked
     let mut entry_left = false;
+    let mut list_differs = false;
     let mut ran = 0;
     for step in &steps {
+        if desk::home_stopped() {
+            let mut j = base_line(&step.id, step.group.name()); j.b("skipped", true); j.s("reason", "stopped: Ctrl+C or the window closing"); j.b("ok", true);
+            emit(&j.render());
+            continue;
+        }
         log(&format!("ATTEMPT step {}", step.id));
         if let Err(why) = hr::station_decision(step.group, !a.steps.is_empty(), a.force_station_entry, &verdicts) {
             let mut j = base_line(&step.id, step.group.name()); j.b("skipped", true); j.s("reason", &why); j.b("ok", true);
-            println!("{}", j.render());
+            emit(&j.render());
             continue;
         }
         ran += 1;
@@ -321,8 +348,9 @@ pub(crate) fn home_probe(a: &Args) -> i32 {
                 if prog == Prog::UiTest && !copied {
                     let mut j = base_line(&step.id, step.group.name()); j.b("skipped", true); j.s("reason", "this executable could not be copied into the work folder"); j.b("ok", true); j.render()
                 } else {
-                    let (line, left) = step_run(a, &step.id, step.group, prog, limits, &ws, &dir, &rec, &ui_exe);
+                    let (line, left, differs) = step_run(a, &step.id, step.group, prog, limits, &ws, &dir, &rec, &ui_exe, &node);
                     entry_left |= left;
+                    list_differs |= differs;
                     if hr::decides_verdict(step) && !line.contains("\"skipped\":true") {
                         let worked = line.contains("\"works\":true");
                         match seen.iter_mut().find(|(g, _, _)| *g == step.group) { Some(s) => { s.1 = true; s.2 &= worked; } None => seen.push((step.group, true, worked)) }
@@ -334,16 +362,19 @@ pub(crate) fn home_probe(a: &Args) -> i32 {
                 }
             }
         };
-        println!("{line}");
+        emit(&line);
     }
     let mut s = base_line("summary", "");
     for g in hr::GROUPS { s.s(&format!("group_{}", g.name().replace('-', "_")), verdicts.iter().find(|(x, _)| *x == g).map(|(_, v)| v.name()).unwrap_or("not-run")); }
     s.n("stepsRun", ran);
     s.b("stationEntryLeftBehind", entry_left);
+    // An access list that differs from its copy for another reason (another program changed it meanwhile, or the descriptor's flags changed): reported, never written back.
+    s.b("stationListDiffers", list_differs);
+    s.b("stopped", desk::home_stopped());
     // With an entry left behind the folder is KEPT: its `rec` folder holds the record home-revoke needs as proof (the summary names it).
     if entry_left { s.b("workFolderRemoved", false); s.s("workFolderKept", &root.to_string_lossy()); } else { s.b("workFolderRemoved", std::fs::remove_dir_all(&root).is_ok()); }
-    s.b("ok", !entry_left);
-    println!("{}", s.render());
+    s.b("ok", !entry_left && !list_differs);
+    emit(&s.render());
     0
 }
 
@@ -438,8 +469,10 @@ pub(crate) fn deelevate(rest: &[String]) -> i32 {
     let mut j = Json::new();
     j.s("tool", TOOL);
     j.s("command", "deelevate");
-    let fail = |mut j: Json, stage: &str, e: u32| -> i32 { j.b("ok", false); j.s("stage", stage); j.n("error", e as i64); println!("{}", j.render()); 125 };
+    let fail = |mut j: Json, stage: &str, e: u32| -> i32 { j.b("ok", false); j.s("stage", stage); j.n("error", e as i64); emit(&j.render()); 125 };
     let (program, rest) = match hr::split_deelevate_args(rest) { Ok(v) => v, Err(_) => return fail(j, "arguments", 0) };
+    // The child shares this console and gets Ctrl+C itself; this process keeps waiting for it (and its clean-up) instead of ending first.
+    desk::install_console_handler();
     unsafe {
         // TOKEN_ADJUST_DEFAULT is needed by SetTokenInformation(TokenIntegrityLevel) below: CreateRestrictedToken's new handle "has the same access rights as ExistingTokenHandle" (Microsoft).
         let Some(tok) = open_own_token(TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT) else { return fail(j, "open-token", GetLastError()) };
@@ -477,7 +510,7 @@ pub(crate) fn deelevate(rest: &[String]) -> i32 {
         GetExitCodeProcess(process.0, &mut code);
         j.n("childExitCode", code as i32 as i64);
         j.b("ok", true);
-        println!("{}", j.render());
+        emit(&j.render());
         code as i32
     }
 }

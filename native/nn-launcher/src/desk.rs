@@ -18,6 +18,7 @@ use super::*;
 use crate::args::DesktopMode;
 use crate::deskrules::{self, AclCompare};
 use windows_sys::Win32::System::StationsAndDesktops::*;
+use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
 
@@ -48,7 +49,68 @@ pub(crate) fn plan(mode: DesktopMode) -> Plan {
     }
 }
 
-fn log(msg: &str) { eprintln!("nn-desktop: {msg}"); }
+/// A progress line on standard error. A failed write is ignored (eprintln! would panic, and this is called between a write to a window object's list and its removal, and from Drop).
+fn log(msg: &str) { use std::io::Write; let _ = writeln!(std::io::stderr(), "nn-desktop: {msg}"); }
+
+// ---------------------------------------------------------------------------------------------------------------- Ctrl+C and the window closing (the home modes)
+//
+// Without a handler Ctrl+C, Ctrl+Break and closing the console end the process at once (ExitProcess: no destructor runs), so an entry written to WinSta0 would stay until sign-out. The handler
+// (installed before the first write) marks the run stopped and removes the registered container's entries from the station at once, under the same lock as the write and the normal removal.
+// For Ctrl+C and Ctrl+Break it returns TRUE: the process goes on, finishes the current step (its own clean-up included: the desktop closed, the profile deleted) and runs no further step. For the
+// window closing, sign-out and shutdown Windows ends the process when the handler returns (Microsoft: SetConsoleCtrlHandler, HandlerRoutine); the entry is gone by then, the per-run profile and
+// the work folder may be left (the ATTEMPT line printed their clean-up commands). Ending the process from Task Manager (TerminateProcess) runs no handler: then `home-revoke` is the clean-up.
+
+/// A SID's bytes in a u32-aligned buffer (EqualSid and GetLengthSid read it through a PSID).
+pub(crate) struct SidBuf(Vec<u32>);
+impl SidBuf {
+    fn new(b: &[u8]) -> SidBuf { let mut v = vec![0u32; b.len().div_ceil(4)]; unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), v.as_mut_ptr() as *mut u8, b.len()); } SidBuf(v) }
+    fn psid(&self) -> PSID { self.0.as_ptr() as PSID }
+    fn is(&self, other: PSID) -> bool { unsafe { EqualSid(self.psid(), other) != 0 } }
+}
+// SAFETY of Send: the buffer is plain bytes owned by the Mutex below.
+unsafe impl Send for SidBuf {}
+
+static HOME_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The container whose entry may be on the station right now (set before the write, cleared after a removal read back as 0).
+static HOME_PENDING: std::sync::Mutex<Option<SidBuf>> = std::sync::Mutex::new(None);
+static HANDLER: std::sync::Once = std::sync::Once::new();
+
+fn pending_lock() -> std::sync::MutexGuard<'static, Option<SidBuf>> { HOME_PENDING.lock().unwrap_or_else(|e| e.into_inner()) }
+
+/// Was Ctrl+C pressed or the window closed? `home-probe` runs no further step then.
+pub(crate) fn home_stopped() -> bool { HOME_STOP.load(std::sync::atomic::Ordering::SeqCst) }
+
+/// Installs the handler once per process (also used by `deelevate`, whose parent then waits for its child's clean-up instead of ending at Ctrl+C).
+pub(crate) fn install_console_handler() {
+    HANDLER.call_once(|| unsafe { if SetConsoleCtrlHandler(Some(console_ctrl), 1) == 0 { log(&format!("the Ctrl+C handler could not be installed (error {})", GetLastError())); } });
+}
+
+unsafe extern "system" fn console_ctrl(kind: u32) -> BOOL {
+    // A panic must not cross this boundary (it would abort): everything is caught, and the answer is TRUE either way.
+    let _ = std::panic::catch_unwind(|| {
+        HOME_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+        let what = match kind { 0 => "Ctrl+C", 1 => "Ctrl+Break", 2 => "the window closing", 5 => "sign-out", 6 => "shutdown", _ => "a console event" };
+        let removed = remove_pending_now();
+        log(&format!("{what}: stopping after the current step; {removed}"));
+    });
+    1
+}
+
+/// The handler's removal: the registered container's explicit entries off the process's window station (only the interactive WinSta0, the only station the home modes write), read back.
+fn remove_pending_now() -> String {
+    let mut pending = pending_lock();
+    let Some(sid) = pending.as_ref() else { return "no entry of this run is on the window station".into() };
+    let name = current_station_name();
+    let flags = station_flags(unsafe { GetProcessWindowStation() } as HANDLE);
+    if let Err(e) = crate::homerules::may_write_interactive_station(&name, flags) { return format!("the entry was not removed: {e}"); }
+    let h = open_station(&name, READ_CONTROL_BIT | WRITE_DAC_BIT);
+    if h.is_null() { return format!("the entry could not be removed (open error {}): run the home-revoke command of the ATTEMPT line", unsafe { GetLastError() }); }
+    let r = remove_entries(h, sid.psid());
+    let left = object_entries(h, sid.psid()).map(|n| n as i64).unwrap_or(-1);
+    unsafe { CloseWindowStation(h as HWINSTA); }
+    if r.is_ok() && left == 0 { *pending = None; "the container's entry on WinSta0 was removed (read back: none left)".into() }
+    else { format!("the entry could not be removed ({r:?}, entries left {left}): run the home-revoke command of the ATTEMPT line") }
+}
 
 /// The name of a window station or desktop handle (UOI_NAME), or "?".
 pub(crate) fn object_name(h: HANDLE) -> String {
@@ -116,9 +178,11 @@ pub(crate) fn remove_entries(h: HANDLE, sid: PSID) -> Result<(), u32> {
 }
 
 /// One object the launcher changed or made, and what became of it. `original`: the DACL before the grant (objects the launcher did not make); `matches`: whether the DACL after the revoke
-/// has the same entries as `original` (None: not compared); `reordered`: the same entries came back in another order (reported; nothing is written back).
+/// has the same entries as `original` (None: not compared); `reordered`: the same entries came back in another order (reported; nothing is written back). `sddl_before` / `sddl_same`: the whole
+/// DACL part of the descriptor as SDDL text (the control flags such as P and AI included, so a change of the descriptor's flags is seen too) before the grant, and whether the text after the revoke
+/// is identical (never printed: it names the user's logon session).
 struct Touched { what: &'static str, name: String, mask: u32, applied: bool, error: Option<u32>, revoked: bool, left: i64, handle: HANDLE, owned: bool, is_station: bool, created: bool,
-    original: Option<AclCopy>, matches: Option<bool>, reordered: bool }
+    original: Option<AclCopy>, matches: Option<bool>, reordered: bool, sddl_before: Option<String>, sddl_same: Option<bool> }
 
 /// Everything round 5 does to window objects for one run. Dropping it undoes the entries and closes what it opened or made.
 pub(crate) struct Desk { sid: PSID, items: Vec<Touched>, pub(crate) lp_desktop: Option<Vec<u16>>, pub(crate) lp_text: String, pub(crate) failed: Option<String>, close_errors: Vec<(String, u32)> }
@@ -132,7 +196,7 @@ impl Desk {
     fn grant(&mut self, what: &'static str, is_station: bool, name: String, mask: u32) {
         let h = if is_station { open_station(&name, READ_CONTROL_BIT | WRITE_DAC_BIT) } else { open_desktop(&name, READ_CONTROL_BIT | WRITE_DAC_BIT) };
         let open_error = unsafe { GetLastError() };
-        let mut t = Touched { what, name: name.clone(), mask, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station, created: false, original: None, matches: None, reordered: false };
+        let mut t = Touched { what, name: name.clone(), mask, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station, created: false, original: None, matches: None, reordered: false, sddl_before: None, sddl_same: None };
         log(&format!("before grant {what} {name} mask 0x{mask:x}"));
         if h.is_null() { t.error = Some(open_error); }
         else {
@@ -141,8 +205,14 @@ impl Desk {
                 Err(e) => t.error = Some(e),
                 Ok(None) => t.error = Some(ERR_NULL_DACL),
                 Ok(Some(c)) => {
-                    t.original = Some(c);
-                    match add_entry(h, self.sid, mask) { Ok(()) => t.applied = true, Err(e) => t.error = Some(e) }
+                    // The SDDL text too (the descriptor's DACL flags included); an unreadable one means no write either.
+                    let text = object_sddl(h);
+                    if !text.starts_with("D:") { t.error = Some(ERR_BAD_ACL); }
+                    else {
+                        t.original = Some(c);
+                        t.sddl_before = Some(text);
+                        match add_entry(h, self.sid, mask) { Ok(()) => t.applied = true, Err(e) => t.error = Some(e) }
+                    }
                 }
             }
         }
@@ -188,7 +258,7 @@ impl Desk {
                 let name = format!("nn-appc-d{pid}");
                 log(&format!("before create desktop {name} in {station}"));
                 let h = unsafe { CreateDesktopW(wide(&name).as_ptr(), null(), null(), 0, 0x01FF | READ_CONTROL_BIT | WRITE_DAC_BIT, null()) } as HANDLE;
-                let mut t = Touched { what: "new desktop", name: name.clone(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
+                let mut t = Touched { what: "new desktop", name: name.clone(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false, sddl_before: None, sddl_same: None };
                 if h.is_null() { t.error = Some(unsafe { GetLastError() }); }
                 else { match add_entry(h, self.sid, DESKTOP_FULL) { Ok(()) => t.applied = true, Err(e) => t.error = Some(e) } }
                 log(&format!("after create desktop {name}: applied {} error {:?}", t.applied, t.error));
@@ -201,7 +271,7 @@ impl Desk {
                 let dname = "nn-appc-d";
                 log(&format!("before create window station {sname}"));
                 let hs = unsafe { CreateWindowStationW(wide(&sname).as_ptr(), 0, 0x37F | READ_CONTROL_BIT | WRITE_DAC_BIT, null()) } as HANDLE;
-                let mut ts = Touched { what: "new window station", name: sname.clone(), mask: STATION_FULL, applied: false, error: None, revoked: false, left: -1, handle: hs, owned: true, is_station: true, created: true, original: None, matches: None, reordered: false };
+                let mut ts = Touched { what: "new window station", name: sname.clone(), mask: STATION_FULL, applied: false, error: None, revoked: false, left: -1, handle: hs, owned: true, is_station: true, created: true, original: None, matches: None, reordered: false, sddl_before: None, sddl_same: None };
                 if hs.is_null() { ts.error = Some(unsafe { GetLastError() }); }
                 else { match add_entry(hs, self.sid, STATION_FULL) { Ok(()) => ts.applied = true, Err(e) => ts.error = Some(e) } }
                 log(&format!("after create window station {sname}: applied {} error {:?}", ts.applied, ts.error));
@@ -223,7 +293,7 @@ impl Desk {
                         log(&format!("could not switch back to the window station {station} (error {})", unsafe { GetLastError() }));
                         if self.failed.is_none() { self.failed = Some(format!("window objects: the launcher could not switch back to its window station {station} (error {ERR_STATION_SWITCH_BACK})")); }
                     }
-                    let mut td = Touched { what: "new desktop", name: dname.to_string(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: hd, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
+                    let mut td = Touched { what: "new desktop", name: dname.to_string(), mask: DESKTOP_FULL, applied: false, error: None, revoked: false, left: -1, handle: hd, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false, sddl_before: None, sddl_same: None };
                     if hd.is_null() { td.error = Some(if switched { create_error } else { create_error.max(1) }); }
                     else { match add_entry(hd, self.sid, DESKTOP_FULL) { Ok(()) => td.applied = true, Err(e) => td.error = Some(e) } }
                     log(&format!("after create desktop {dname}: applied {} error {:?}", td.applied, td.error));
@@ -246,7 +316,17 @@ impl Desk {
         if let Some(mask) = crate::homerules::home_station_mask(mode) {
             let flags = station_flags(unsafe { GetProcessWindowStation() } as HANDLE);
             if let Err(e) = crate::homerules::may_write_interactive_station(station, flags) { log(&format!("no grant: {e}")); self.failed = Some(format!("window objects: {e}")); return; }
-            self.grant("window station", true, station.to_string(), mask);
+            // The console control handler (Ctrl+C, Ctrl+Break, the window closing, sign-out) removes the entry at once; it is installed and the SID registered BEFORE the write, under the
+            // same lock as the write, so the handler either runs before (and the write is refused) or after it (and removes it).
+            install_console_handler();
+            {
+                let mut pending = pending_lock();
+                if home_stopped() { self.failed = Some("window objects: stopped (Ctrl+C or the window closing) before the entry was written; nothing was written".into()); return; }
+                *pending = Some(SidBuf::new(&sid_b));
+                self.grant("window station", true, station.to_string(), mask);
+                // Nothing was copied, so nothing was written: no entry of this run can be there.
+                if self.items.last().is_some_and(|t| t.original.is_none()) { *pending = None; }
+            }
             if self.failed.is_some() { return; }
         }
         let own = match super::privdesk::own_principals() { Ok(o) => o, Err(e) => { self.failed = Some(format!("window objects: the launcher's own account could not be read (error {e})")); return; } };
@@ -256,7 +336,7 @@ impl Desk {
         let sa = sd.attributes();
         let h = unsafe { SetLastError(0); CreateDesktopW(wide(&name).as_ptr(), null(), null(), 0, crate::winobj::DESKTOP_RIGHTS, &sa) } as HANDLE;
         let created_error = unsafe { GetLastError() };
-        let mut t = Touched { what: "home desktop", name: name.clone(), mask: crate::winobj::DESKTOP_RIGHTS, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false };
+        let mut t = Touched { what: "home desktop", name: name.clone(), mask: crate::winobj::DESKTOP_RIGHTS, applied: false, error: None, revoked: false, left: -1, handle: h, owned: true, is_station: false, created: true, original: None, matches: None, reordered: false, sddl_before: None, sddl_same: None };
         if h.is_null() { t.error = Some(created_error); }
         else if created_error == ERROR_ALREADY_EXISTS { t.error = Some(ERROR_ALREADY_EXISTS); }
         else {
@@ -280,8 +360,13 @@ impl Desk {
             // Every object whose DACL was copied before the grant is cleaned, applied or not (a removal with nothing to remove writes nothing).
             if t.original.is_some() && !t.created && !t.revoked {
                 log(&format!("before revoke {} {}", t.what, t.name));
+                // The same lock as the console control handler's removal: the two never write the list at the same moment.
+                let mut pending = pending_lock();
                 match remove_entries(t.handle, self.sid) { Ok(()) => t.revoked = true, Err(e) => t.error = Some(e) }
                 t.left = object_entries(t.handle, self.sid).map(|n| n as i64).unwrap_or(-1);
+                if t.left == 0 && pending.as_ref().is_some_and(|p| p.is(self.sid)) { *pending = None; }
+                drop(pending);
+                if let Some(before) = &t.sddl_before { t.sddl_same = Some(object_sddl(t.handle) == *before); }
                 if let Some(orig) = &t.original {
                     // Compared and reported only: the copy taken before the grant is NEVER written back (it could be stale; the insert and the removal keep every other entry as it was,
                     // so a difference means something else changed the DACL meanwhile, and that change is left alone).
@@ -290,7 +375,7 @@ impl Desk {
                     t.reordered = cmp == AclCompare::Reordered;
                     t.matches = Some(cmp == AclCompare::Same);
                 }
-                log(&format!("after revoke {} {}: revoked {} entries left {} same as before {:?} order differs {}", t.what, t.name, t.revoked, t.left, t.matches, t.reordered));
+                log(&format!("after revoke {} {}: revoked {} entries left {} same as before {:?} order differs {} descriptor text the same {:?}", t.what, t.name, t.revoked, t.left, t.matches, t.reordered, t.sddl_same));
             }
             if t.owned {
                 let closed = unsafe { if t.is_station { CloseWindowStation(t.handle as HWINSTA) } else { CloseDesktop(t.handle as HDESK) } };
@@ -301,7 +386,11 @@ impl Desk {
     }
 
     /// Every object the launcher did not make is back as it was: no entry left and the same entries as before the grant (objects never copied were never written).
-    pub(crate) fn all_reverted(&self) -> bool { self.items.iter().all(|t| t.created || t.original.is_none() || (t.revoked && t.left == 0 && t.matches == Some(true))) }
+    pub(crate) fn all_reverted(&self) -> bool { self.items.iter().all(|t| t.created || t.original.is_none() || (t.revoked && t.left == 0 && t.matches == Some(true) && t.sddl_same == Some(true))) }
+
+    /// Is an entry for the container still (or possibly) on an object the launcher did not make? (-1: the list could not be read back, counted as left.) Separate from `all_reverted`: a list that
+    /// another program changed meanwhile is not an entry of this run left behind.
+    pub(crate) fn entry_left(&self) -> bool { self.items.iter().any(|t| !t.created && t.original.is_some() && t.left != 0) }
 
     pub(crate) fn json(&self, mode: DesktopMode) -> String {
         let mut o = Json::new();
@@ -315,11 +404,13 @@ impl Desk {
             i.n("error", t.error.map(|e| e as i64).unwrap_or(0)); i.b("revoked", t.revoked); i.n("entriesLeft", t.left);
             match t.matches { Some(m) => i.b("matchesOriginal", m), None => i.raw("matchesOriginal", "null".into()) }
             i.b("orderDiffers", t.reordered);
+            match t.sddl_same { Some(m) => i.b("descriptorTextSame", m), None => i.raw("descriptorTextSame", "null".into()) }
             i.render()
         }).collect();
         o.raw("objects", format!("[{}]", items.join(",")));
         o.raw("closeErrors", format!("[{}]", self.close_errors.iter().map(|(what, e)| { let mut c = Json::new(); c.s("object", what); c.n("error", *e as i64); c.render() }).collect::<Vec<_>>().join(",")));
         o.b("allReverted", self.all_reverted());
+        o.b("entryLeft", self.entry_left());
         o.render()
     }
 }
