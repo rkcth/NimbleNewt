@@ -129,7 +129,7 @@ export interface EditResult { readonly editId: string; readonly status: EditStat
 const MODE_WORDS: Readonly<Record<string, string>> = { allow: "runs without asking", "agent-review": "goes to an agent review", owner: "asks you" };
 const TIER_WORDS: Readonly<Record<Tier, string>> = { free: "development and testing", guarded: "staging", live: "customer-live" };
 const CLASS_WORDS: Readonly<Record<ActionClass, string>> = {
-  "inspect": "Reading", "workspace-edit": "Editing files in a workspace", "mutate": "Changing outside systems", "external-send": "Sending messages out", "publish": "Publishing", "spend": "Spending",
+  "inspect": "Reading", "workspace-edit": "Editing files and running commands in a workspace", "mutate": "Changing outside systems", "external-send": "Sending messages out", "publish": "Publishing", "spend": "Spending",
   "install-executable": "Installing programs", "access-change": "Changing access", "commit": "Commits", "push": "Pushes", "merge": "Merges", "deploy": "Deployments",
 };
 /** What stays the owner's decision whatever a table or a standing grant says (card A07). */
@@ -164,9 +164,9 @@ const MUSING = /\b(maybe|perhaps|should we|should i|i wonder|what if|let me thin
 const CURLY = /[\u2018\u2019\u02bc\u201b]/g;
 const moveOf = (c: PolicyEditChange): string => (c.type === "gate" ? (c.on ? "gate" : "none") : c.type === "revoke" || c.type === "lock" || c.type === "reserve" || c.type === "profile" || c.type === "environment" ? c.type : c.type === "cell" ? `cell:${c.mode}` : "none");
 const ENV_WORDS: Readonly<Record<string, RegExp>> = { development: /\b(dev|development)\b/i, testing: /\b(test|testing)\b/i, staging: /\bstag(e|ing)\b/i, "customer-live": /\b(prod|production|live|customer-live)\b/i };
-/** The words by which an owner names an action class. */
+/** The words by which an owner names an action class. Card W09b second review: a command in an agent's checkout is a workspace edit (`nimblenewt.checkout-run`), so "commands" names that class too; "run" alone does not (it is in too many sentences). */
 const CLASS_SYNONYMS: Readonly<Record<string, RegExp>> = {
-  "inspect": /\b(read|reading|inspect)/i, "workspace-edit": /\b(edit|editing|write|writing|files?|workspace)\b/i, "mutate": /\b(mutat|change|changing|update|delete|call)/i, "external-send": /\b(send|sending|e-?mail|mail|message)/i,
+  "inspect": /\b(read|reading|inspect)/i, "workspace-edit": /\b(edit|editing|write|writing|files?|workspace|commands?|shell|bash)\b/i, "mutate": /\b(mutat|change|changing|update|delete|call)/i, "external-send": /\b(send|sending|e-?mail|mail|message)/i,
   "publish": /\bpublish/i, "spend": /\b(spend|spending|purchase|pay|buy)/i, "install-executable": /\binstall/i, "access-change": /\b(access|permission)/i, "commit": /\bcommit/i, "push": /\bpush/i, "merge": /\bmerge/i, "deploy": /\bdeploy/i,
 };
 const esc = (x: string): string => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

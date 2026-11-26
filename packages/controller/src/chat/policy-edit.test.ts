@@ -74,6 +74,11 @@ test("the owner's order needs the verb of that move, no negation, no musing, and
   assert.equal(ownerOrders("lock commits in development", "Lock commits in development. Pushes are fine as they are.", "lock", [/commit/i]), true);
   assert.deepEqual(["product", "developer", "device", "tested", "the live site", "in dev", "production", "staging", "a stage"].map((w) => targetsOf({ type: "environment", environment: "customer-live" })[0]!.test(w) ? 1 : 0), [0, 0, 0, 0, 1, 0, 1, 0, 0]);
   assert.deepEqual(["developer", "device", "in dev", "development"].map((w) => targetsOf({ type: "environment", environment: "development" })[0]!.test(w) ? 1 : 0), [0, 0, 1, 1]);
+  // Card W09b second review: an agent's commands in its checkout are workspace edits, so the owner names that class by them as well as by files.
+  const edits = targetsOf({ type: "cell", class: "workspace-edit", environment: "free", mode: "owner" } as never);
+  assert.equal(ownerOrders("ask me before agents run commands", "Ask me before agents run commands in their checkouts.", "cell:owner", edits), true);
+  assert.equal(ownerOrders("ask me before agents edit files", "Ask me before agents edit files.", "cell:owner", edits), true);
+  assert.equal(ownerOrders("ask me before agents run deployments", "Ask me before agents run deployments.", "cell:owner", edits), false, "run alone does not name the class");
 });
 
 test("a grant's length: stated wins, an until date is exact, nothing stated gives the 30-day fallback, and more than a year is refused", () => {
