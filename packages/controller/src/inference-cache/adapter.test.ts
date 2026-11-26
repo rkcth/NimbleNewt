@@ -162,7 +162,7 @@ test("isolation required: a refused isolation setting is returned as an error in
     assert.equal(res.fallback, undefined, "no plain retry");
     assert.deepEqual(res.isolationRefused?.kept, kept);
     assert.equal(res.isolationRefused?.refusedStatus, 400);
-    assert.match(res.isolationRefused?.message ?? "", /server refused the setting that keeps this project's cache apart.*not sent again without it.*not requiring isolation, or use another route/);
+    assert.match(res.isolationRefused?.message ?? "", /server refused the setting that keeps this project's cache apart.*not sent again without it\. To run it, use another route .*turn off its isolation requirement where the controller is configured\.$/);
     assert.equal((res.body as { error: { message: string } }).error.message, res.isolationRefused!.message, "the caller's error is the plain-words text");
     assert.ok(res.skipped.includes(res.isolationRefused!.message), "and it is in the record of what was left out");
     assert.equal(res.outcome, "unknown");
@@ -174,6 +174,13 @@ test("isolation required: a refused isolation setting is returned as an error in
   const iso = await new CacheAdapter(vllmProfile, old).call(convo("a", 1), ctx({ isolationRequired: true }));
   declined(iso, ["cache_salt"]);
   assert.match(iso.isolationRefused!.reason, /Unrecognized request argument: cache_salt/, "the server's own text is kept beside it");
+  assert.equal((iso.body as { error: { server: string } }).error.server, iso.isolationRefused!.reason, "and answered beside the plain words");
+  // The server's own text is one plain line of at most 300 characters: control, line-separator and direction characters become spaces
+  const odd = recording(() => refuse(400, `cache_salt\u0000 not\r\nallowed\u202e here\u2028 ${"long ".repeat(200)}`));
+  const oddRes = await new CacheAdapter(vllmProfile, odd).call(convo("a", 1), ctx({ isolationRequired: true }));
+  assert.ok(oddRes.isolationRefused!.reason.startsWith("cache_salt not allowed here long long"), oddRes.isolationRefused!.reason.slice(0, 60));
+  assert.doesNotMatch(oddRes.isolationRefused!.reason, /[\u0000-\u001f\u2028\u202e]/);
+  assert.equal(oddRes.isolationRefused!.reason.length, 300);
   assert.deepEqual(old.seen.map((r) => typeof r.body["cache_salt"]), ["string"], "one call, and it carried the salt");
   // a FastAPI-style 422 that names the field is the same refusal
   const strict = recording(() => ({ status: 422, body: { detail: [{ loc: ["body", "cache_salt"], type: "extra_forbidden" }] } }));

@@ -23,7 +23,7 @@ export interface CachePolicyDeps {
   readonly principal: Principal;
   /** `recordOutcome` is given by the composer so that a missed pin marks the marker lost; without it the outcomes are not recorded. */
   readonly markers?: Pick<MarkerService, "resolve"> & Partial<Pick<MarkerService, "recordOutcome">>;
-  /** Whether a project requires that its prompts share no cache with other projects. */
+  /** Whether a project requires that its prompts share no cache with other projects. Given, any answer other than `false` (undefined or null included) counts as required; absent, no project requires it (C06 lead decision (1)). */
   readonly isolationRequired?: (projectId: string) => boolean | Promise<boolean>;
   /** Told when the bookkeeping around a model call fails after Pi already has its answer (a stream that broke after it had begun, the usage hook). Default: logged, redacted. */
   readonly onError?: (error: unknown) => void;
@@ -84,7 +84,7 @@ export class CachePolicies {
     const report = d.onError ?? ((error: unknown): void => { console.error(`pin marker bookkeeping for ${attempt.route} failed: ${redactText(error instanceof Error ? error.message : String(error)).slice(0, 300)}`); });
     const context: CacheContext = {
       scopeKey, shareKey, ...(slot === undefined ? {} : { slot }), ...(options.retention === undefined ? {} : { retention: options.retention }),
-      ...(options.pinMessages === undefined ? {} : { pinMessages: options.pinMessages }), pinAuthorized, ...(await d.isolationRequired?.(attempt.projectId) === true ? { isolationRequired: true } : {}),
+      ...(options.pinMessages === undefined ? {} : { pinMessages: options.pinMessages }), pinAuthorized, ...(d.isolationRequired !== undefined && (await d.isolationRequired(attempt.projectId)) !== false ? { isolationRequired: true } : {}),
     };
     // A slotted server goes through the adapter only with the endpoint's shared state; any other configured endpoint is observed, so its hit figures reach accounting too. A route with no endpoint, or a generic profile, is left to Pi.
     const routed = state !== undefined;

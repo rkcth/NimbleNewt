@@ -152,7 +152,7 @@ export interface CallResult {
 
 /** The plain-words error of a refused isolation setting (see `CallResult.isolationRefused`). */
 export const isolationRefusedMessage = (settings: readonly string[]): string =>
-  `The server refused the setting that keeps this project's cache apart from other projects (${settings.join(", ")}). This project requires isolation, so the call was not sent again without it. The owner can mark the project as not requiring isolation, or use another route (a server that accepts the setting, or one of the project's own).`;
+  `The server refused the setting that keeps this project's cache apart from other projects (${settings.join(", ")}). This project requires isolation, so the call was not sent again without it. To run it, use another route (a server that accepts the setting, or one of the project's own), or, if the project does not need to be kept apart, turn off its isolation requirement where the controller is configured.`;
 
 /** The part of a resolved marker a slot operation needs. */
 export interface SlotMarker { readonly kind: string; readonly handle?: string }
@@ -164,7 +164,8 @@ const failureMessage = (body: unknown, max = 300): string => {
   const e = o?.["error"];
   const m = typeof e === "string" ? e : e !== null && typeof e === "object" ? (e as Record<string, unknown>)["message"] : o?.["message"];
   const detail = o?.["detail"] === undefined ? "" : typeof o["detail"] === "string" ? o["detail"] : JSON.stringify(o["detail"]);
-  return redactText(`${typeof m === "string" ? m : ""} ${detail}`.trim()).slice(0, max);
+  // The server's own text is quoted into records and answers: control, line-separator and direction-changing characters are made spaces, so it reads as one plain line.
+  return redactText(`${typeof m === "string" ? m : ""} ${detail}`.replace(/[\s\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, " ").trim()).slice(0, max);
 };
 
 /**
@@ -289,7 +290,7 @@ export class CacheAdapter {
     if (slotted && slot !== undefined && placed && sent.status < 400 && this.#state.epoch === epoch) this.#state.holder.set(slot, context.scopeKey);
     const hit = sent.status < 400 ? this.#profile.read(sent.body) : this.#profile.read(undefined);
     const outcome = sent.status < 400 ? judge(hit, used.expects, expectedCachedTokens) : "unknown";
-    return { status: sent.status, body: sent.body, hit, outcome, applied: used.applied, skipped: isolation === "cache-prompt-off-host-cache-not-attested" && used === first ? [...used.skipped, "cache_prompt off (host cache not attested off): the server may keep a prompt cache a slot erase does not clear; run it with --cache-ram 0 and set hostPromptCacheOff to reuse after an erase"] : isolationRefused !== undefined ? [...used.skipped, isolationRefused.message] : used.skipped, ...(isolation === undefined ? {} : { isolation }), ...(slotCleared ? { slotCleared } : {}), ...(fallback === undefined ? {} : { fallback }), ...(isolationRefused === undefined ? {} : { isolationRefused }) };
+    return { status: sent.status, body: sent.body, hit, outcome, applied: used.applied, skipped: [...used.skipped, ...(isolation === "cache-prompt-off-host-cache-not-attested" && used === first ? ["cache_prompt off (host cache not attested off): the server may keep a prompt cache a slot erase does not clear; run it with --cache-ram 0 and set hostPromptCacheOff to reuse after an erase"] : []), ...(isolationRefused === undefined ? [] : [isolationRefused.message])], ...(isolation === undefined ? {} : { isolation }), ...(slotCleared ? { slotCleared } : {}), ...(fallback === undefined ? {} : { fallback }), ...(isolationRefused === undefined ? {} : { isolationRefused }) };
   }
 
   /**

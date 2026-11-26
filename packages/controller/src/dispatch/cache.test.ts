@@ -92,6 +92,20 @@ test("a project that requires isolation gets no cache key on a backend that cann
   assert.notEqual((await policies.forAttempt({ projectId: A, route: "vllm/big" })).policy.key, undefined, "vLLM's salt isolates, so its cache stays on");
 });
 
+test("a given isolation hook fails closed: only an answer of false lets a project share; undefined or null counts as required, and a hook that fails fails the attempt", async () => {
+  const answers = new Map<string, unknown>([[A, undefined], [B, false], [C, null]]);
+  const policies = make({ isolationRequired: (p) => answers.get(p) as boolean });
+  assert.equal((await policies.forAttempt({ projectId: A, route: "openai/gpt" })).policy.key, undefined, "undefined is required");
+  assert.notEqual((await policies.forAttempt({ projectId: B, route: "openai/gpt" })).policy.key, undefined, "false shares");
+  assert.equal((await policies.forAttempt({ projectId: C, route: "openai/gpt" })).policy.key, undefined, "null is required");
+  const asyncHook = make({ isolationRequired: async (p) => p === B ? false : (undefined as unknown as boolean) });
+  assert.equal((await asyncHook.forAttempt({ projectId: A, route: "openai/gpt" })).policy.key, undefined, "a promised undefined is required");
+  assert.notEqual((await asyncHook.forAttempt({ projectId: B, route: "openai/gpt" })).policy.key, undefined);
+  await assert.rejects(make({ isolationRequired: () => { throw new Error("projects store unavailable"); } }).forAttempt({ projectId: A, route: "openai/gpt" }), /projects store unavailable/);
+  // Without a hook no project requires isolation (C06 lead decision (1)).
+  assert.notEqual((await make().forAttempt({ projectId: A, route: "openai/gpt" })).policy.key, undefined);
+});
+
 test("one server is one endpoint state whatever path its URL carries, so its slot holders and turns are shared", () => {
   const endpoints = new CacheEndpoints();
   assert.equal(endpoints.state("http://127.0.0.1:8080"), endpoints.state("http://127.0.0.1:8080/v1"));
