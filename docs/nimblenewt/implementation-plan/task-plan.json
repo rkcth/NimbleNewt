@@ -10806,12 +10806,32 @@
       ],
       "deliverable": "Worker three-way re-apply of the agent's work onto the current landing-branch head (conflict markers plus a list), exposed as the agent's work.refresh tool with no quiesce and recorded in the workspace record",
       "acceptance_and_verification": "Changed and new files survive; conflicts are listed and never resolved automatically; refresh rounds are counted on the submission; tested on a branch that moved in overlapping and in unrelated files",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "c21c4741",
+          "eebe3115",
+          "d61eb7f3",
+          "25446501",
+          "1f7267bb",
+          "1df72eb8",
+          "d0c33d53",
+          "1307e8cc",
+          "7401f9d7",
+          "4f98cae9"
+        ],
+        "ci_runs": [
+          "45803960092"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A running agent calls work.refresh (API, tool bridge and Pi tool) and the worker re-applies its work three ways onto the head of the owner's landing branch with no quiesce: changed and new files survive, non-overlapping edits merge, overlapping edits and delete-versus-change are listed with markers and never resolved; the request is recorded in the workspace record with the lists; a refresh that moved the base is a round, counted by the controller and carried as refreshRound on the code submission (the per-project cap and the reservation after it are P10). Limits: no real model or sandboxed agent called the tool (offline); a crash between the host's refresh and the controller's record undercounts one round; a host crash mid-write can leave one merged file short; a same-size rewrite within one timestamp tick on coarse-time filesystems is not detected; delete-versus-change keeps the agent's side; a host built before the follow-up refreshes onto its checked-out head (the controller then records the refresh as failed); a new checkout and the owner's quiesced refresh still start from the shared tree's checked-out head; the submit's refusal when the view is unavailable is the generic text. Follow-ups, not clauses here."
+      }
     },
     {
       "id": "H12o",
@@ -10824,12 +10844,49 @@
       ],
       "deliverable": "Commit of the approved tree tied to the submission; recovery recognises a commit that was already made",
       "acceptance_and_verification": "A restart or a retry between commit and record makes one commit; a changed tree or base needs a new approval; the commit is made through the workspace service's release operation, behind the quiesce, on the host that holds the checkout (moved from H12m on 2026-11-08)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "d6721f83",
+          "f7bed48b",
+          "697fe96d",
+          "ccbbb095",
+          "1bef1c83",
+          "256e9398",
+          "23298166",
+          "964d228e",
+          "d1d08ff2",
+          "ed78d0e7",
+          "9edd34ff",
+          "c7cc3111",
+          "22728b9c",
+          "a033f20e",
+          "2ae72209",
+          "8959b591",
+          "464669e7",
+          "fd13cef2",
+          "91c8d1fe",
+          "b27d03a0",
+          "1849c334",
+          "711bdb0d",
+          "d6a876d3",
+          "cfe7d324",
+          "5f4a0cc8",
+          "3ac4c99a",
+          "76b4e27f"
+        ],
+        "ci_runs": [
+          "45803960092"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A release that names an approved code submission commits exactly its approved tree on its approved base in the task's own checkout, on the host that holds it, through the workspace service's release operation behind the quiesce (the approval is read again inside it); the commit carries the NimbleNewt-Submission trailer and is listed in the host's release ledger before the head moves by compare-and-swap; the controller writes one submission-commit record with the release's outcome, a repeat is answered from it, and a lost answer or a restart between commit and record is recovered by the host finding the commit, so one commit is made; a changed tree or a moved base is refused and needs a new submission and approval. A reviewer's approval releases automatically as a review-gate permit commit; the submissions view says whether it was committed and why not. Limits: a remote host refuses a release of a submission (no protocol field; no submission can be opened from a remote host yet either, H12n); the approved tree still carries the agent's PLAN.md (not a clause here; a product decision about what an approved commit contains); the older commitOnce/CommitPort path is not wired (the card's release-operation route replaced it); a task with a live attempt, or a reviewer approving from its own attempt, is released only by a later approval or the owner; a Q01 acceptance is not read as an approval. Follow-ups, not clauses here."
+      }
     },
     {
       "id": "P09",
