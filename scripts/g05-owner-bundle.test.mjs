@@ -226,7 +226,7 @@ test("run-g05.ps1 writes the zip with ZipFile to the Desktop (Downloads when the
   assert.ok(code.includes('Write-Host "$hold/$total cases hold, $inconclusive inconclusive"'));
   assert.ok(code.includes("(Get-Field $_ 'verdict') -eq 'pass'") && code.includes("(Get-Field $_ 'verdict') -eq 'inconclusive'"));
   const clean = code.slice(at("function Show-Cleanup {"), code.indexOf("\n}\n", at("function Show-Cleanup {")));
-  assert.ok(clean.includes("& '$launcherQ' delete-profile --name $pname --sid $psid --profile-record '$($rec -replace \"'\", \"''\")'") && clean.includes("$launcherQ = $launcher -replace \"'\", \"''\"") && clean.includes("Get-ChildItem $env:LOCALAPPDATA\\Packages -Filter NimbleNewtRun-*"), "the printed command is pasteable for a path with an apostrophe");
+  assert.ok(clean.includes("& $launcherQ delete-profile --name $pname --sid $psid --profile-record $(ConvertTo-Quoted $rec)") && clean.includes("$launcherQ = ConvertTo-Quoted $launcher") && clean.includes("Get-ChildItem $env:LOCALAPPDATA\\Packages -Filter NimbleNewtRun-*"), "the printed command is pasteable for a path with an apostrophe");
   // a confined write that got through to a system folder is checked for afterwards and named, with its clean-up
   assert.ok(code.includes("$script:systemLeft = @(@((Join-Path $env:SystemRoot 'g05-x'), (Join-Path $env:SystemRoot 'System32\\g05-x'), 'C:\\g05-x', 'C:\\Program Files\\g05-x') | Where-Object { Test-Path -LiteralPath $_ })"));
   assert.ok(/if \(\$script:systemLeft\.Count -gt 0\) \{ Add-Problem/.test(code) && clean.includes("foreach ($x in $script:systemLeft)"));
@@ -260,4 +260,125 @@ test("run-g05.ps1 changes nothing on the machine: no Defender, policy, registry,
   assert.ok(started.length >= 3 && started.every((s) => s === "$launcher" || s === "$node"), started.join());
   assert.equal([...code.matchAll(/^\s*& /gm)].length + [...code.matchAll(/\(& /g)].length, 1, "one call operator: whoami");
   assert.ok(code.includes("$launcher = Join-Path $b 'bin\\nn-launcher.exe'") && code.includes("$node = Join-Path $b 'node\\node.exe'"));
+});
+
+// ------------------------------------------------------------------------------------------------ second review: the personal-data check against what the redaction really leaves
+
+/** The personal-data check of run-g05.ps1 (section 8) as JavaScript, line for line: the helper lines it ports are pinned in the script below, and the fixed patterns and the placeholder
+ *  pattern are read from the script itself. `env` is the Windows environment of the run; `files` maps a name inside results\ to its text. Returns "<file> contains <kind>" findings. */
+const PS_HELPERS = [
+  "function Add-WordPattern([string] $label, [string] $word) { if ($word -and $word.Length -ge 2) { Add-Pattern $label ('(?<![A-Za-z0-9])' + [regex]::Escape($word) + '(?![A-Za-z0-9])') } }",
+  "Add-WordPattern 'your account name (USERNAME)' $env:USERNAME",
+  "Add-WordPattern 'the computer name (COMPUTERNAME)' $env:COMPUTERNAME",
+  "if ($env:USERDOMAIN -ne $env:COMPUTERNAME) { Add-WordPattern 'the account domain name (USERDOMAIN)' $env:USERDOMAIN }",
+  "if ($leaf -ne $env:USERNAME) { Add-WordPattern 'the name of your home folder' $leaf }",
+  "$text = $placeholders.Replace([System.IO.File]::ReadAllText($f), ' ')",
+  "$rel = $placeholders.Replace($f.Substring($b.Length + 1), ' ')",
+  "foreach ($p in $patterns) { if ($p[1].IsMatch($text) -or $p[1].IsMatch($rel)) { $found.Add(\"$rel contains $($p[0])\") } }",
+];
+const esc = (s) => s.replace(/[\\*+?|{[()^$.#\s]/g, (c) => (c === " " ? "\\ " : `\\${c}`));
+function psFindings(env, files) {
+  const pats = [];
+  const add = (label, re) => pats.push([label, new RegExp(re, "i")]);
+  const word = (label, w) => { if (w && w.length >= 2) add(label, `(?<![A-Za-z0-9])${esc(w)}(?![A-Za-z0-9])`); };
+  const path = (p) => p.split(/[\\/]+/).filter((x) => x !== "").map(esc).join("[\\\\/]+");
+  const same = (a, b) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
+  word("your account name (USERNAME)", env.USERNAME);
+  word("the computer name (COMPUTERNAME)", env.COMPUTERNAME);
+  if (!same(env.USERDOMAIN, env.COMPUTERNAME)) word("the account domain name (USERDOMAIN)", env.USERDOMAIN);
+  const dns = env.DNSNAME ?? env.COMPUTERNAME;
+  if (!same(dns, env.COMPUTERNAME)) word("the network host name", dns);
+  for (const [label, v] of [["your home folder (USERPROFILE)", env.USERPROFILE], ["your local AppData folder (LOCALAPPDATA)", env.LOCALAPPDATA], ["your TEMP folder", env.TEMP]]) if (v) add(label, path(v));
+  if (env.USERPROFILE) { const leaf = env.USERPROFILE.replace(/\\+$/, "").split("\\").pop(); if (!same(leaf, env.USERNAME)) word("the name of your home folder", leaf); }
+  for (const m of code.matchAll(/^Add-Pattern '([^']+)' '([^']+)'$/gm)) add(m[1], m[2]);
+  const ph = new RegExp(/Regex\('(<\(\?:user[^']*)'/.exec(code)[1], "g");
+  const found = [];
+  for (const [name, raw] of Object.entries(files)) {
+    const text = raw.replace(ph, " "), rel = `results\\${name}`.replace(ph, " ");
+    for (const [label, re] of pats) if (re.test(text) || re.test(rel)) found.push(`${rel} contains ${label}`);
+  }
+  return found;
+}
+const redactLog = (env, text) => {
+  const r = spawnSync(process.execPath, [join(root, "scripts", "redact-log.mjs")], { input: text, encoding: "utf8", env: { PATH: process.env.PATH, ...env } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!r.stdout.includes("could not be loaded"), "the built redaction is used");
+  return r.stdout;
+};
+/** Windows output as the launcher's info, the evidence run and node print it, for the account in `who`. */
+const windowsOutput = (who) => [
+  `{"ok":true,"elevated":false,"account":"${who.host}\\\\${who.user.replace(/ /g, " ")}","accountSid":"S-1-5-21-1004336348-1177238915-682003330-1001","logon":"S-1-5-5-0-412337","container":"S-1-15-2-1430448594-2639229838-973813799-439329657-1197984847-4069167804-1277922394","windowStation":"private","windowStationOk":true,"profileDeleted":true,"profileGone":true,"control":"${who.home.replace(/\\/g, "\\\\")}\\\\Downloads\\\\windows-g05-owner-bundle\\\\control"}`,
+  `case deny-read-outside: confined read of ${who.temp}\\nn-g05-a1b2c3\\outside\\secret.txt refused (Access is denied.); unconfined read of it worked`,
+  `    at file:///${who.home.replace(/\\/g, "/")}/Downloads/windows-g05-owner-bundle/packages/worker/dist/sandbox/containment.js:412:9`,
+  `profile folder ${who.local}\\Packages\\nimblenewtrun-0123456789abcdef removed; grants read back clean on ${who.home}\\Downloads\\windows-g05-owner-bundle\\node`,
+  `loopback 127.0.0.1:50123 listening; this PC's address 192.168.1.20 and fe80::1c2b:3d4e:5f60:7a8b%12 were not tried`,
+  `Azure AD account S-1-12-1-3523716318-1145236127-2519836318-2263283920 seen in the token's groups`,
+  `Windows 10.0.26200.1, node v22.19.0, launcher 0.1.0; robust handling of a slow start`,
+].join("\n") + "\n";
+
+test("second review: on realistic Windows output for 'robert' (plain and spaced home folder, an 8.3 TEMP), the redaction leaves nothing the zip check refuses; unredacted, every kind is found", () => {
+  for (const line of PS_HELPERS) assert.ok(code.includes(line), `the port follows run-g05.ps1: ${line}`);
+  const accounts = [
+    { env: { USERNAME: "robert", COMPUTERNAME: "DESKTOP-7Q2M4RB", USERDOMAIN: "DESKTOP-7Q2M4RB", USERPROFILE: "C:\\Users\\robert", LOCALAPPDATA: "C:\\Users\\robert\\AppData\\Local", TEMP: "C:\\Users\\robert\\AppData\\Local\\Temp" }, user: "robert" },
+    { env: { USERNAME: "Robert Smith", COMPUTERNAME: "ROBS-PC", USERDOMAIN: "ROBS-PC", USERPROFILE: "C:\\Users\\Robert Smith", LOCALAPPDATA: "C:\\Users\\Robert Smith\\AppData\\Local", TEMP: "C:\\Users\\ROBERT~1\\AppData\\Local\\Temp" }, user: "Robert Smith" },
+    // a Microsoft account: the home folder's name is not the account name
+    { env: { USERNAME: "rober", COMPUTERNAME: "DESKTOP-K1", USERDOMAIN: "DESKTOP-K1", USERPROFILE: "C:\\Users\\rober_000", LOCALAPPDATA: "C:\\Users\\rober_000\\AppData\\Local", TEMP: "C:\\Users\\rober_000\\AppData\\Local\\Temp" }, user: "rober" },
+  ];
+  for (const a of accounts) {
+    const raw = windowsOutput({ user: a.user, host: a.env.COMPUTERNAME, home: a.env.USERPROFILE, temp: a.env.TEMP, local: a.env.LOCALAPPDATA });
+    const before = psFindings(a.env, { "evidence.stdout.txt": raw });
+    for (const kind of ["your account name (USERNAME)", "the computer name (COMPUTERNAME)", "your home folder (USERPROFILE)", "your TEMP folder", "a ...\\Users\\ path", "an account SID (S-1-5-21-...)", "an Azure AD account SID (S-1-12-1-...)", "a logon session SID (S-1-5-5-...)", "an IPv4 address", "an IPv6 address"]) {
+      assert.ok(before.some((f) => f.endsWith(`contains ${kind}`)), `${a.user}: unredacted, ${kind} is found (${before.join("; ")})`);
+    }
+    const clean = redactLog(a.env, raw);
+    assert.ok(clean.includes("S-1-15-2-1430448594") && clean.includes("127.0.0.1:50123") && clean.includes("10.0.26200.1") && clean.includes("robust"), `${a.user}: what is not personal stays readable: ${clean}`);
+    assert.deepEqual(psFindings(a.env, { "evidence.stdout.txt": clean, "info.stdout.txt": clean }), [], `${a.user}: the redacted text makes a zip: ${clean}`);
+  }
+});
+
+test("second review: an account named like a common word is matched as a whole word ('rob' is not in 'robust'), and one named like a placeholder ('User', 'Home') does not refuse every zip", () => {
+  const env = (user, host) => ({ USERNAME: user, COMPUTERNAME: host, USERDOMAIN: host, USERPROFILE: `C:\\Users\\${user}`, LOCALAPPDATA: `C:\\Users\\${user}\\AppData\\Local`, TEMP: `C:\\Users\\${user}\\AppData\\Local\\Temp` });
+  assert.deepEqual(psFindings(env("rob", "PC1"), { "a.txt": "robust, Robotics, problem, prob" }), []);
+  assert.equal(psFindings(env("rob", "PC1"), { "a.txt": "signed in as Rob." }).length, 1, "the name itself is still found");
+  assert.equal(psFindings(env("a", "PC1"), { "a.txt": "a b c" }).length, 0, "a one-letter name is not looked for alone (its paths still are)");
+  const placeholders = "signed in: <host>\\<user>; folder <home>\\Downloads; S-1-5-21-<domain>-<account>, S-1-5-5-<session>, <ip>, <email>, <withheld: possible personal data>";
+  for (const [user, host] of [["User", "PC1"], ["home", "PC1"], ["robert", "HOST"], ["Account", "DOMAIN"]]) {
+    assert.deepEqual(psFindings(env(user, host), { "a.txt": placeholders }), [], `${user}@${host}: the redaction's placeholders are not the name`);
+    assert.ok(psFindings(env(user, host), { "a.txt": `x ${user} y` }).length > 0, `${user}: the bare name is still found`);
+  }
+  // taking a placeholder out never joins two pieces into the name
+  assert.ok(psFindings(env("robert", "PC1"), { "a.txt": "robe<user>rt" }).length === 0 && code.includes("$placeholders.Replace([System.IO.File]::ReadAllText($f), ' ')"));
+  assert.ok(code.includes("[System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant"), "case folding is not the PC's culture's (Turkish i)");
+});
+
+test("second review: one run at a time (a named mutex taken before anything is written), refused under OneDrive, other NimbleNewt settings cleared, every program run with a time limit", () => {
+  const lock = at("New-Object System.Threading.Mutex($false, $lockName)");
+  const refuse = code.indexOf("exit 2", at("if (-not $locked) {"));
+  assert.ok(at("$principal.IsInRole(") < lock && refuse < at("$check = Test-Bundle") && refuse < at("New-Item -ItemType Directory"), "the lock follows the elevation check and comes before the bundle check and any write");
+  assert.ok(code.includes("$locked = $script:runLock.WaitOne(0)") && code.includes("catch [System.Threading.AbandonedMutexException] { $locked = $true }"), "an earlier run that died leaves the lock free");
+  assert.match(code, /if \(-not \$locked\) \{\n\s+Write-Host 'REFUSED: another run[^\n]*\n\s+exit 2\n\}/);
+  const od = at("foreach ($od in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial))");
+  assert.ok(od < at("$check = Test-Bundle") && /StartsWith\(\$od\.TrimEnd\('\\'\) \+ '\\', \[System\.StringComparison\]::OrdinalIgnoreCase\)\) \{\n\s+Write-Host 'REFUSED: this folder is inside OneDrive[^\n]*\n\s+exit 2/.test(code));
+  const fsAt = at("$fsKind = (New-Object System.IO.DriveInfo($b)).DriveFormat");
+  assert.ok(fsAt < at("$check = Test-Bundle") && /if \(\$fsKind -and \$fsKind -ne 'NTFS' -and \$fsKind -ne 'ReFS'\) \{\n\s+Write-Host "REFUSED: this folder is on a \$fsKind drive[^\n]*\n\s+exit 2/.test(code), "a drive without access lists is refused before anything runs");
+  assert.ok(code.includes("if ($v -like 'NIMBLENEWT_*' -and $v -ne 'NIMBLENEWT_WIN_LAUNCHER' -and $v -ne 'NIMBLENEWT_WIN_CONTROL_DIR') { [System.Environment]::SetEnvironmentVariable($v, $null, 'Process') }"));
+  assert.ok(at("if ($v -like 'NIMBLENEWT_*'") < at("Invoke-Captured $launcher"));
+  const inv = code.slice(at("function Invoke-Captured"), at("function Get-Field"));
+  assert.ok(inv.includes("[int] $minutes)") && inv.includes("if (-not $p.WaitForExit($minutes * 60000)) {") && inv.includes("$p.Kill()") && /throw "it was still running after \$minutes minutes/.test(inv));
+  const calls = [...code.matchAll(/^.*Invoke-Captured \$(launcher|node) .*$/gm)].map((m) => m[0]);
+  assert.equal(calls.length, 3);
+  for (const c of calls) assert.match(c, / \$(null|src) (\d+)\)?( \}| *)$/, `a time limit: ${c}`);
+});
+
+test("second review: printed clean-up commands quote every quote PowerShell ends a string at, and name only exact record files; the zip's last place is control\\ (the next bundle check would refuse it at the root)", () => {
+  assert.ok(code.includes("function ConvertTo-Quoted([string] $t) { return \"'\" + ($t -replace \"['\\u2018\\u2019\\u201A\\u201B]\", '$0$0') + \"'\" }"));
+  // .NET reads the class as JavaScript does: the typographic quotes are doubled too
+  const quoted = (t) => `'${t.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
+  assert.equal(quoted("C:\\Rob\u2019s files\\x'; calc; '"), "'C:\\Rob\u2019\u2019s files\\x''; calc; '''");
+  const clean = code.slice(at("function Show-Cleanup {"), code.indexOf("\n}\n", at("function Show-Cleanup {")));
+  assert.ok(clean.includes("if ([System.IO.Path]::GetFileName($rec) -cnotmatch '^NimbleNewtRun-[0-9a-f]{16}\\.sid$') { continue }") && !/-replace "'", "''"/.test(clean), "no hand-made quoting left");
+  assert.ok(clean.includes("Remove-Item -LiteralPath $(ConvertTo-Quoted $x)"));
+  assert.ok(code.includes("if (-not [System.IO.Directory]::Exists($dest)) { $dest = $control }") && !code.includes("$dest = $b"));
+  // a path part that is empty ("a//b") is refused by the line check itself (a lone empty string is false in PowerShell, so the count is taken)
+  assert.ok(code.includes("@($rel.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0"));
 });

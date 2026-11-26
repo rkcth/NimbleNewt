@@ -250,4 +250,17 @@ test("own-hardware (card A03b): the G05 owner bundle runs only when its input is
   // no secrets, no elevation, nothing installed, no Windows Sandbox in the owner bundle jobs
   for (const j of [build, run]) assert.ok(!/secrets\.|permissions:|RunAs|Install-NimbleNewtLauncher|New-LocalUser|Set-MpPreference|Set-ExecutionPolicy|wsb|deelevate/.test(j.replace(/^\s*#.*$/gm, "")));
   for (const m of (build + run).matchAll(/uses: ([^\s]+)/g)) assert.match(m[1], /@[0-9a-f]{40}$/, m[1]);
+  // second review: no dependency install script runs in the build of what runs on the owner's PC; an empty path part is refused by the line check; the zip's last place is the control folder
+  assert.ok(build.includes("      - run: npm ci --ignore-scripts\n") && !/- run: npm ci\n/.test(build));
+  assert.ok(code.includes("@($rel.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0"));
+  assert.ok(code.includes("foreach ($d in @([System.Environment]::GetFolderPath('Desktop'), (Join-Path $env:USERPROFILE 'Downloads'), (Join-Path $b 'control')))"));
+  // no expression is pasted into a script: values reach the shell only through env (EXPECT_SUMS, checked against 64 hex digits first)
+  for (const j of [build, run]) for (const block of j.split(/\n {6}- /).filter((b) => /\n {8}run: \|/.test(b) || /^run: /.test(b))) assert.ok(!/\$\{\{/.test(block.slice(block.indexOf("run:"))), `no \${{ }} in a run script: ${block.slice(0, 60)}`);
+});
+
+test("windows-appcontainer-experiment (card A03b): the G05 owner bundle steps paste no expression into a script", () => {
+  const text = read("windows-appcontainer-experiment.yml");
+  const from = text.indexOf("- name: \"G05 owner bundle: parse run-g05.ps1"), to = text.indexOf("exit 0\n", text.indexOf("id: owner_rehearsal"));
+  assert.ok(from > 0 && to > from);
+  for (const block of text.slice(from, to).split(/\n {6}- /)) if (block.includes("run: |")) assert.ok(!/\$\{\{/.test(block.slice(block.indexOf("run: |"))), block.slice(0, 60));
 });

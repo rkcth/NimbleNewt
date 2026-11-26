@@ -1,7 +1,8 @@
 # run-g05.ps1 - card G05 / A03b: the ten containment cases on this Windows PC, run from the owner bundle that CI built (artifact windows-g05-owner-bundle).
 #
 # How to run it (Windows PowerShell 5.1 or PowerShell 7, as your normal account, NOT "Run as administrator"):
-#   1. Download the artifact windows-g05-owner-bundle from the workflow run and extract it to a folder of its own (for example in Downloads).
+#   1. Download the artifact windows-g05-owner-bundle from the workflow run and extract it to a folder of its own in Downloads (NOT on a OneDrive-synced Desktop or Documents folder:
+#      the script refuses a folder under OneDrive, whose files can be cloud placeholders and whose raw output would be synced).
 #   2. Open a normal PowerShell window in that folder and run:
 #        powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1
 #      (-ExecutionPolicy Bypass applies to this one PowerShell process only; nothing is changed on the machine.)
@@ -43,9 +44,38 @@ if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administ
 }
 Write-Host 'not elevated: good'
 
+# One run at a time on this PC (a manual run and the own runner's job both run as this account): a second run would see the first one's live container profiles as leftovers and
+# remove its zip. The lock is a named mutex, released by Windows when this process ends, however it ends.
+$script:runLock = $null
+foreach ($lockName in @('Global\NimbleNewt-G05-owner-run', 'Local\NimbleNewt-G05-owner-run')) {
+  try { $script:runLock = New-Object System.Threading.Mutex($false, $lockName); break } catch { $script:runLock = $null }
+}
+$locked = $false
+if ($null -ne $script:runLock) {
+  try { $locked = $script:runLock.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $locked = $true }
+}
+if (-not $locked) {
+  Write-Host 'REFUSED: another run of run-g05.ps1 (a window of yours, or the own runner''s job) is still running on this PC. Wait for it to finish, then run this again. Nothing was run.'
+  exit 2
+}
+
 # ---------------------------------------------------------------------------------------------- 2. the folder itself
 if ([string]::IsNullOrEmpty($b) -or $b -match '^[A-Za-z]:\\?$' -or $b -match '~\d' -or $b.StartsWith('\\')) {
   Write-Host 'REFUSED: run the script from its own extracted folder on a local drive, by its full (not shortened) name. Nothing was run.'
+  exit 2
+}
+# Not under OneDrive: there files can be cloud placeholders (reparse points, which the check below refuses as links) and the raw, unredacted output in control\raw would be synced.
+foreach ($od in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)) {
+  if ($od -and ($b + '\').StartsWith($od.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Host 'REFUSED: this folder is inside OneDrive (a Desktop or Documents folder synced by OneDrive is). Extract the artifact again into a folder in Downloads and run it from there. Nothing was run.'
+    exit 2
+  }
+}
+# On a drive with access lists (NTFS or ReFS): the container's access is given and taken away by access lists, which a FAT32 or exFAT drive (a USB stick, an SD card) does not have.
+$fsKind = ''
+try { $fsKind = (New-Object System.IO.DriveInfo($b)).DriveFormat } catch { $fsKind = '' }
+if ($fsKind -and $fsKind -ne 'NTFS' -and $fsKind -ne 'ReFS') {
+  Write-Host "REFUSED: this folder is on a $fsKind drive, which has no access lists. Extract the artifact again into a folder in Downloads and run it from there. Nothing was run."
   exit 2
 }
 
@@ -69,7 +99,7 @@ function Test-Bundle {
     if ($line.Length -eq 0) { continue }
     if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9._@/-]+)$') { $bad.Add("SHA256SUMS line $n is not '<sha256>  <path>'"); continue }
     $hash = $Matches[1]; $rel = $Matches[2]
-    if ($rel.StartsWith('/') -or $rel.EndsWith('/') -or ($rel.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }) -or $rel -match '^(control|results)/' -or $rel -eq 'SHA256SUMS') { $bad.Add("SHA256SUMS line $n names a path that is not allowed"); continue }
+    if ($rel.StartsWith('/') -or $rel.EndsWith('/') -or @($rel.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0 -or $rel -match '^(control|results)/' -or $rel -eq 'SHA256SUMS') { $bad.Add("SHA256SUMS line $n names a path that is not allowed"); continue }
     $key = $rel.ToLowerInvariant()
     if ($listed.ContainsKey($key)) { $bad.Add("SHA256SUMS names $rel twice"); continue }
     $listed[$key] = $true
@@ -102,7 +132,7 @@ function Test-Bundle {
 $check = Test-Bundle
 if ($check.Count -gt 0) {
   $check | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" }
-  Write-Host "REFUSED: $($check.Count) problem(s) with the bundle's files against SHA256SUMS. Download and extract the artifact again into an EMPTY folder. Nothing was run."
+  Write-Host "REFUSED: $($check.Count) problem(s) with the bundle's files against SHA256SUMS. Download and extract the artifact again into an EMPTY folder (if a file is missing again, your antivirus may have removed it: its history says). Nothing was run."
   exit 2
 }
 Write-Host 'bundle check: every file matches SHA256SUMS, nothing extra'
@@ -147,6 +177,10 @@ $env:NIMBLENEWT_WIN_LAUNCHER = "$b\bin\nn-launcher.exe"
 $env:NIMBLENEWT_WIN_CONTROL_DIR = "$b\control"
 # The bundle's node must load only the bundle's code: options a user environment may carry for node are not passed on.
 foreach ($v in @('NODE_OPTIONS', 'NODE_PATH', 'NODE_PRESERVE_SYMLINKS', 'NODE_REPL_EXTERNAL_MODULE')) { [System.Environment]::SetEnvironmentVariable($v, $null, 'Process') }
+# Nor any other NimbleNewt setting this account's environment may carry (NIMBLENEWT_WIN_CONTAINER, NIMBLENEWT_WIN_MAX_RUNS, the retired Windows Sandbox ones ...): the run is the bundle's defaults.
+foreach ($v in @([System.Environment]::GetEnvironmentVariables('Process').Keys)) {
+  if ($v -like 'NIMBLENEWT_*' -and $v -ne 'NIMBLENEWT_WIN_LAUNCHER' -and $v -ne 'NIMBLENEWT_WIN_CONTROL_DIR') { [System.Environment]::SetEnvironmentVariable($v, $null, 'Process') }
+}
 $utf8 = New-Object System.Text.UTF8Encoding $false
 
 function ConvertTo-WinArg([string] $a) {
@@ -157,7 +191,8 @@ function ConvertTo-WinArg([string] $a) {
 }
 
 # Runs a program with its standard output and error captured to two files (never to this console: they may hold personal names), optionally with a file as its standard input.
-function Invoke-Captured([string] $exe, [string[]] $argv, [string] $outFile, [string] $errFile, [string] $inFile) {
+# A program still running after $minutes is stopped and this throws (the caller counts it as a problem and the clean-up text is printed; the backend's own timeouts normally end a case first).
+function Invoke-Captured([string] $exe, [string[]] $argv, [string] $outFile, [string] $errFile, [string] $inFile, [int] $minutes) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $exe
   $psi.Arguments = (($argv | ForEach-Object { ConvertTo-WinArg $_ }) -join ' ')
@@ -176,6 +211,13 @@ function Invoke-Captured([string] $exe, [string[]] $argv, [string] $outFile, [st
     $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
     $p.StandardInput.Close()
   }
+  if (-not $p.WaitForExit($minutes * 60000)) {
+    try { $p.Kill() } catch { }
+    [void]$p.WaitForExit(30000)
+    if ($o.Wait(30000)) { [System.IO.File]::WriteAllText($outFile, $o.Result, $utf8) }
+    if ($e.Wait(30000)) { [System.IO.File]::WriteAllText($errFile, $e.Result, $utf8) }
+    throw "it was still running after $minutes minutes and was stopped"
+  }
   $p.WaitForExit()
   [System.IO.File]::WriteAllText($outFile, $o.Result, $utf8)
   [System.IO.File]::WriteAllText($errFile, $e.Result, $utf8)
@@ -189,34 +231,39 @@ function Get-Field($obj, [string] $name) {
   return $p.Value
 }
 
+# Text put between single quotes in a command printed for pasting: PowerShell ends a single-quoted string at ' and also at the typographic quotes U+2018 to U+201B, so each is doubled.
+function ConvertTo-Quoted([string] $t) { return "'" + ($t -replace "['\u2018\u2019\u201A\u201B]", '$0$0') + "'" }
+
 # The cleanup a failed run may need: the per-run container profiles whose record is in this folder and whose profile folder still exists, deleted by the launcher with the record's proof.
 function Show-Cleanup {
   Write-Host ''
   Write-Host 'CLEAN-UP. The backend sweeps its own leftovers (grants and profiles recorded under control\profiles) the next time this script runs: running it again is the first step.'
   Write-Host 'A per-run profile that is still there can be deleted by the launcher, with the proof its record file holds (name and SID on its second line):'
   $packages = Join-Path $env:LOCALAPPDATA 'Packages'
-  $launcherQ = $launcher -replace "'", "''"
+  $launcherQ = ConvertTo-Quoted $launcher
   $shown = 0
   foreach ($dir in @($infoDir, (Join-Path $control 'profiles'))) {
     if (-not [System.IO.Directory]::Exists($dir)) { continue }
     foreach ($rec in [System.IO.Directory]::GetFiles($dir, 'NimbleNewtRun-*.sid')) {
+      # only a record the backend or this script names (the wildcard also takes longer extensions and any text in the middle)
+      if ([System.IO.Path]::GetFileName($rec) -cnotmatch '^NimbleNewtRun-[0-9a-f]{16}\.sid$') { continue }
       $lines = @([System.IO.File]::ReadAllLines($rec))
       if ($lines.Count -lt 2 -or $lines[1] -cnotmatch '^(NimbleNewtRun-[0-9a-f]{16}) (S-1-15-2-[0-9-]+)$') { continue }
       $pname = $Matches[1]; $psid = $Matches[2]
       if (-not (Test-Path -LiteralPath (Join-Path $packages $pname.ToLowerInvariant()))) { continue }
-      Write-Host "  & '$launcherQ' delete-profile --name $pname --sid $psid --profile-record '$($rec -replace "'", "''")'"
+      Write-Host "  & $launcherQ delete-profile --name $pname --sid $psid --profile-record $(ConvertTo-Quoted $rec)"
       $shown++
     }
   }
   if ($shown -eq 0) {
-    Write-Host "  & '$launcherQ' delete-profile --name NimbleNewtRun-<16 hex> --sid <the SID on the second line of its .sid record> --profile-record <that .sid file under control\info or control\profiles>"
+    Write-Host "  & $launcherQ delete-profile --name NimbleNewtRun-<16 hex> --sid <the SID on the second line of its .sid record> --profile-record <that .sid file under control\info or control\profiles>"
     Write-Host '  (no record here names a profile that still exists)'
   }
   Write-Host 'Leftover-profile check (should list nothing):'
   Write-Host '  Get-ChildItem $env:LOCALAPPDATA\Packages -Filter NimbleNewtRun-*'
   if ($script:systemLeft.Count -gt 0) {
     Write-Host 'A confined write got through: these files were left in system folders (the case fails). Delete each, from an administrator PowerShell if a normal one is refused:'
-    foreach ($x in $script:systemLeft) { Write-Host "  Remove-Item -LiteralPath '$($x -replace "'", "''")'" }
+    foreach ($x in $script:systemLeft) { Write-Host "  Remove-Item -LiteralPath $(ConvertTo-Quoted $x)" }
   }
 }
 
@@ -229,7 +276,7 @@ $infoRecord = Join-Path $infoDir "$infoName.sid"
 $infoOk = $false
 try {
   Write-Host 'launcher info: making and deleting one throw-away container profile ...'
-  $code = Invoke-Captured $launcher @('info', '--name', $infoName, '--profile-record', $infoRecord) (Join-Path $raw 'info.stdout.txt') (Join-Path $raw 'info.stderr.txt') $null
+  $code = Invoke-Captured $launcher @('info', '--name', $infoName, '--profile-record', $infoRecord) (Join-Path $raw 'info.stdout.txt') (Join-Path $raw 'info.stderr.txt') $null 10
   $infoJson = $null
   foreach ($l in [System.IO.File]::ReadAllLines((Join-Path $raw 'info.stdout.txt'))) { if ($l.StartsWith('{')) { try { $infoJson = $l | ConvertFrom-Json } catch { $infoJson = $null } } }
   $facts = @('ok', 'elevated', 'windowStation', 'windowStationOk', 'profileDeleted', 'profileGone') | ForEach-Object { "$_=$(Get-Field $infoJson $_)" }
@@ -243,26 +290,27 @@ $evidenceCode = $null
 if ($infoOk) {
   try {
     Write-Host 'the ten cases: running (a few minutes; output is kept, not shown) ...'
-    $evidenceCode = Invoke-Captured $node @('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact') (Join-Path $raw 'evidence.stdout.txt') (Join-Path $raw 'evidence.stderr.txt') $null
+    $evidenceCode = Invoke-Captured $node @('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact') (Join-Path $raw 'evidence.stdout.txt') (Join-Path $raw 'evidence.stderr.txt') $null 25
     Write-Host "  the evidence run ended with exit $evidenceCode (0: every case held; 1: a case did not hold or there was no capacity; anything else: it failed)"
     if ($evidenceCode -ne 0 -and $evidenceCode -ne 1) { Add-Problem "the evidence run failed (exit $evidenceCode)" }
-  } catch { Add-Problem "the evidence run could not be started: $($_.Exception.Message)" }
+  } catch { Add-Problem "the evidence run could not be run: $($_.Exception.Message)" }
 }
 
 # ---------------------------------------------------------------------------------------------- 7. redacted copies of the raw output
 foreach ($name in @('info.stdout.txt', 'info.stderr.txt', 'evidence.stdout.txt', 'evidence.stderr.txt')) {
   $src = Join-Path $raw $name
   if (-not [System.IO.File]::Exists($src)) { continue }
-  try { [void](Invoke-Captured $node @('scripts\redact-log.mjs') (Join-Path $results $name) (Join-Path $raw "redact-$name") $src) }
+  try { [void](Invoke-Captured $node @('scripts\redact-log.mjs') (Join-Path $results $name) (Join-Path $raw "redact-$name") $src 5) }
   catch { Add-Problem "the redacted copy of $name could not be made" }
 }
 
 # ---------------------------------------------------------------------------------------------- 8. nothing personal may leave in the zip
-# The zip's place: the Desktop Explorer shows (a OneDrive-moved Desktop too), else Downloads, else this folder. An older zip of this name (an earlier run's) is removed first, so a refused run never
+# The zip's place: the Desktop Explorer shows (a OneDrive-moved Desktop too), else Downloads, else control\ in this folder (not the folder itself: the next run's bundle check would
+# refuse it there as an extra file). An older zip of this name (an earlier run's) is removed first, so a refused run never
 # leaves an older zip that looks like this run's.
 $dest = [System.Environment]::GetFolderPath('Desktop')
 if ([string]::IsNullOrEmpty($dest) -or -not [System.IO.Directory]::Exists($dest)) { $dest = Join-Path $env:USERPROFILE 'Downloads' }
-if (-not [System.IO.Directory]::Exists($dest)) { $dest = $b }
+if (-not [System.IO.Directory]::Exists($dest)) { $dest = $control }
 $zip = Join-Path $dest 'nn-g05-results.zip'
 $zipBlocked = $false
 try { if ([System.IO.File]::Exists($zip)) { [System.IO.File]::Delete($zip); Write-Host 'removed the nn-g05-results.zip of an earlier run' } }
@@ -271,7 +319,7 @@ catch { $zipBlocked = $true; Add-Problem 'the nn-g05-results.zip of an earlier r
 # The redaction (scripts\redact-log.mjs and --redact) leaves placeholders such as <user>, <home>, <ip>, S-1-5-21-<domain>-<account>; what is looked for here is the text it should have replaced.
 # Per-run container SIDs (S-1-15-2-...) are made from the random per-run profile name, not from this PC or account, and the redaction keeps them on purpose: they are not looked for.
 $patterns = New-Object System.Collections.Generic.List[object]
-function Add-Pattern([string] $label, [string] $regex) { $patterns.Add(@($label, (New-Object System.Text.RegularExpressions.Regex($regex, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)))) }
+function Add-Pattern([string] $label, [string] $regex) { $patterns.Add(@($label, (New-Object System.Text.RegularExpressions.Regex($regex, ([System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::CultureInvariant))))) }
 function Add-WordPattern([string] $label, [string] $word) { if ($word -and $word.Length -ge 2) { Add-Pattern $label ('(?<![A-Za-z0-9])' + [regex]::Escape($word) + '(?![A-Za-z0-9])') } }
 # A path matched with any run of \ or / between its parts, so C:\Users\x, C:/Users/x and the JSON form C:\\Users\\x are all found.
 function ConvertTo-PathPattern([string] $p) { return ((@($p -split '[\\/]+') | Where-Object { $_ -ne '' } | ForEach-Object { [regex]::Escape($_) }) -join '[\\/]+') }
@@ -295,10 +343,13 @@ Add-Pattern 'a logon session SID (S-1-5-5-...)' 'S-1-5-5-\d'
 Add-Pattern 'an IPv4 address' '\b(?!127\.|0\.)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b'
 Add-Pattern 'an IPv6 address' '(?<![0-9A-F:.])[0-9A-F]{1,4}(?:(?::[0-9A-F]{1,4}){7}|(?::[0-9A-F]{1,4}){0,5}::(?:[0-9A-F]{1,4}:){0,5}[0-9A-F]{1,4})(?![0-9A-F:])'
 Add-Pattern 'a MAC address' '(?<![0-9A-F])[0-9A-F]{2}([-:])[0-9A-F]{2}(?:\1[0-9A-F]{2}){4}(?![0-9A-F])'
+# The redaction's own placeholders are taken out first (each becomes a blank, so no two pieces join into a word), as its last gate (scrub) does: an account or computer named
+# like one of them ("User", "Home", "Host") would otherwise match every placeholder and no zip could ever be made.
+$placeholders = New-Object System.Text.RegularExpressions.Regex('<(?:user|host|home|sid|ip|email|domain|account|session|vm|other|withheld: possible personal data)>', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
 $found = New-Object System.Collections.Generic.List[string]
 foreach ($f in [System.IO.Directory]::GetFiles($results, '*', [System.IO.SearchOption]::AllDirectories)) {
-  $text = [System.IO.File]::ReadAllText($f)
-  $rel = $f.Substring($b.Length + 1)
+  $text = $placeholders.Replace([System.IO.File]::ReadAllText($f), ' ')
+  $rel = $placeholders.Replace($f.Substring($b.Length + 1), ' ')
   # the file's name inside the zip is checked as well as its text
   foreach ($p in $patterns) { if ($p[1].IsMatch($text) -or $p[1].IsMatch($rel)) { $found.Add("$rel contains $($p[0])") } }
 }
