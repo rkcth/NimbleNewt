@@ -4,6 +4,7 @@ import type { ControllerStorage, JsonObject } from "../storage/types.js";
 import {
   AssignmentService, DomainError, EffectRejected, EffectService, type DomainErrorCode, type EffectBridge, type EffectRequest, type Fence, type Owner,
 } from "./index.js";
+import { mergeChanges } from "./changes.js";
 import { ProjectService } from "./service.js";
 import { backends, stopServer, type World } from "./testing/backends.js";
 
@@ -144,6 +145,20 @@ for (const backend of backends) {
       assert.deepEqual([view.status, view.started, "claim" in view, view.key, view.inputDigest.length], ["confirmed", true, false, made.id, 64]);
     });
   }
+
+  suite("a start guard whose reads straddled another commit (a gate created between them, so it plans a create and a check of one record) is read again before the claim, not answered stale; one that never settles is unavailable", async ({ effects }) => {
+    const outside = new Outside();
+    const gate = { kind: "pause-gate", id: "pgt-straddled" };
+    let reads = 0;
+    const straddled = async () => (++reads === 1 ? mergeChanges([{ type: "create", ref: gate, body: {} }], [{ type: "check", ref: gate, expectedRevision: 1 }]) : []);
+    const made = await effects.intend(intent("e"));
+    const done = await effects.run(made.id, keyed(outside), { beforeStart: straddled });
+    assert.deepEqual([done.status, reads, outside.applications], ["confirmed", 2, [made.id]], "judged again, then done once");
+    const never = await effects.intend(intent("e"));
+    let tries = 0;
+    await refuses("unavailable", () => effects.run(never.id, keyed(outside), { beforeStart: async () => { tries++; throw new DomainError("stale_revision", "always straddled"); } }));
+    assert.deepEqual([tries, outside.applications.length, (await effects.get(never.id))?.status], [5, 1, "intended"], "bounded, and nothing was done");
+  });
 
   suite("a target that refuses the effect makes it failed, and it is not tried again", async ({ effects }) => {
     const outside = new Outside();

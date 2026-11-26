@@ -244,7 +244,13 @@ export class EffectService {
       if (fenceLost && !body.started) return this.#settle(effectId, aggregate, "failed", { reason: "superseded before it started", fence: body.fence as unknown as JsonObject });
       // A caller's own gate on starting (card L05: a pause or an interruption blocks effects that have not started). It may refuse by throwing; the checks it returns commit with the claim, so
       // a change it saw cannot slip in between. It is not consulted for an effect that already started: that one is only ever reconciled.
-      if (!body.started && options.beforeStart !== undefined) guardChanges = mergeChanges(guardChanges, await options.beforeStart());
+      // A guard whose reads straddled another commit (its checks cannot all hold: `mergeChanges` says `stale_revision`) is read again, as a claim that lost a race is; nothing was claimed or done yet.
+      if (!body.started && options.beforeStart !== undefined) {
+        try { guardChanges = mergeChanges(guardChanges, await options.beforeStart()); } catch (error) {
+          if (isDomainError(error, "stale_revision")) continue;
+          throw error;
+        }
+      }
 
       // Claim (revision-guarded, with the fence as a guard so the claim is atomic with ownership).
       try {

@@ -25,4 +25,6 @@ test("mergeChanges refuses a check beside a create of the same record as stale (
   assert.throws(() => mergeChanges([check(gate, 1)], [create]), stale, "in either order");
   // A create of one record beside checks of others is unchanged.
   assert.deepEqual(mergeChanges([create], [check(a, 1)]), [create, check(a, 1)]);
+  const other = check({ kind: "pause-gate", id: "pgt-2" }, 1);
+  assert.deepEqual(mergeChanges([create], [other]), [create, other], "another gate of the same kind is another record");
 });
