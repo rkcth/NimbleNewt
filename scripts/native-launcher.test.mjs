@@ -740,6 +740,12 @@ test("the home desktop: the product's own documents record what it closes, what 
   for (const fact of ["495 windows (28 visible)", "0 with them", "`EnumWindows`", "foreground window", "cursor position", "one screen pixel", "clipboard open", "clipboard sequence number", "global atom add", "keyboard hook", "on its own desktop only",
     "0x20327", "0xf00ff", "The job's clipboard limit, stated plainly", "did NOT block the open in this one run", "unmeasured", "GetClipboardData", "nn-hd-<64 random bits>", "NO fallback to the inherited desktop",
     "windowStation", "privateStationError", "try_home_desktop", "may_make_home_desktop", "Still not measured on the product itself"]) assert.ok(s.includes(fact), fact);
+  // second review: the figures say where they come from (the owner's pasted output, not stored), the mask is decoded, and what stops SwitchDesktop on the visible station is named as documented only
+  for (const fact of ["pasted into the working session on 2026-11-26", "is NOT stored in this repository", "0x201FF", "`DESKTOP_SWITCHDESKTOP`", "`JOB_OBJECT_UILIMIT_DESKTOP`", "documented, NOT measured",
+    "no WRITE_DAC, WRITE_OWNER or DELETE", "`jobProcessesAtEnd`", "If the specified desktop already exists, the function succeeds and returns a handle to the existing desktop", "deny-only",
+    "that `JOB_OBJECT_UILIMIT_DESKTOP` stops `SwitchDesktop` on WinSta0"]) assert.ok(s.includes(fact), fact);
+  const launcherReadme = read("native", "nn-launcher", "README.md");
+  for (const fact of ["that output is not stored in this repository", "0x201FF", "`JOB_OBJECT_UILIMIT_DESKTOP` (documented, not measured)", "`jobProcessesAtEnd`", "the UI limit stops `SwitchDesktop` there"]) assert.ok(launcherReadme.includes(fact), fact);
   // the owner's decision is recorded as a decision (with the date), not as an open item
   assert.ok(s.includes('Owner decision (2026-11-26: "The clipboard is fine")') && s.includes("ACCEPTED exposure"));
   assert.ok(!/open item for the owner|owner must decide|\bOPEN:|for the owner to decide/i.test(s), "no open clipboard question is left for the owner");

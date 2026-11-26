@@ -604,7 +604,7 @@ fn make_job(a: &Args) -> Result<Handle, String> {
             return Err(format!("SetInformationJobObject(limits) failed: {}", GetLastError()));
         }
         if a.ui_limits {
-            let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: 0x0000_00FF /* JOB_OBJECT_UILIMIT_ALL */ };
+            let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: crate::winobj::JOB_UI_LIMITS };
             if SetInformationJobObject(job.0, JobObjectBasicUIRestrictions, &ui as *const _ as *const c_void, size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32) == 0 {
                 return Err(format!("SetInformationJobObject(ui) failed: {}", GetLastError()));
             }
@@ -895,6 +895,10 @@ fn run_inner(a: &Args, j: &mut Json, sid: &Sid, grants: &mut GrantSet, exe: &str
         let mut code = 0u32;
         GetExitCodeProcess(process.0, &mut code);
         if leftover != 0 { TerminateJobObject(job.0, 1); } // the program ended but left processes behind: end them too
+        // TerminateJobObject returns before the processes are gone. Wait (at most 5 s) for the job to be empty, so the window objects closed after this are not still held by a process of the run;
+        // what was left is reported, not hidden (0: empty, -1: unreadable, more: still ending when the wait ran out; the desktop then lives until they are gone).
+        let at_end = if leftover == 0 { 0 } else { crate::winobj::wait_job_empty(|| active_processes(job.0), 100, || std::thread::sleep(std::time::Duration::from_millis(50))) };
+        j.n("jobProcessesAtEnd", at_end);
         for d in drains.drain(..) { let _ = d.join(); } // every write end is closed by now (the job is ended), so the copies finish
         if !a.dump.is_empty() { j.raw("daclsAfter", dump_json(&a.dump)); }
         j.s("stdin", &a.stdin);

@@ -184,6 +184,8 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     const info = probe.line;
     // A launcher that cannot make the private window station each run needs says so itself (stage "grant", message "window objects: ..."): a service on a host that refuses it would otherwise fail
     // the confinement probe below with an exit code only.
+    // The non-elevated user's case names its own mode: the home desktop was tried after the named station was refused, and both reasons are given (not "a private window station" alone).
+    if (info !== undefined && !info.ok && info.windowStationOk === false && info.windowStation === "home-desktop") return no(`the launcher could not make the home desktop (a private desktop on the user's own window station WinSta0) for the container (${info.windowStationError ?? info.error ?? "no reason given"}; the named private window station before it: ${info.privateStationError ?? "no reason given"})`);
     if (info !== undefined && !info.ok && info.windowStationOk === false) return no(`the launcher could not make a private window station and desktop for the container (${info.windowStationError ?? info.error ?? "no reason given"})`);
     if (info === undefined || !info.ok) return no(`the launcher could not make the container profile (${info?.error ?? "no answer"})`);
     if (probe.problem !== undefined) return no(`the probe's container profile could not be deleted: ${probe.problem}`);
