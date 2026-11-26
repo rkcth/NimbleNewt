@@ -151,27 +151,85 @@ test("the qualifications rest on the committed rows: each figure a qualification
   const evidenceOf = (p: CacheProfile, capability: string): string => { const q = (p.qualifications ?? []).find((x) => x.capability === capability); assert.ok(q !== undefined, `${p.kind} ${capability}`); return q.evidence; };
   // The figure as a whole number: "0 of 6,471" must not be found inside "6,470 of 6,471".
   const quotes = (text: string, h: { cached: number; prompt: number }, label: string): void => assert.ok(new RegExp(`(?<![\\d,])${n(h.cached)} of ${n(h.prompt)}(?![\\d,]\\d)`).test(text), `${label}: "${n(h.cached)} of ${n(h.prompt)}" in ${text}`);
+  // The figure in the clause it belongs to: from the lead words up to the next ";" (or, instead, the given stop words), so two figures swapped between "same slot" and "another slot" are caught.
+  const clause = (text: string, lead: string, stop?: string): string => {
+    const i = text.indexOf(lead); assert.ok(i >= 0, `"${lead}" in ${text}`);
+    const rest = text.slice(i + lead.length); const ends = [rest.indexOf(stop ?? ";")].filter((x) => x >= 0);
+    return ends.length === 0 ? rest : rest.slice(0, Math.min(...ends));
+  };
   const full = llama({ slots: 4, slotSave: true, hostPromptCacheOff: true });
   // llama.cpp
-  quotes(evidenceOf(full, "prefix-reuse"), read("llamacpp", r1, "shared", "second-conversation"), "llama prefix reuse");
-  quotes(evidenceOf(full, "prefix-reuse"), read("llamacpp", r1, "shared", "cold"), "llama cold");
+  quotes(clause(evidenceOf(full, "prefix-reuse"), "a second and a third conversation"), read("llamacpp", r1, "shared", "second-conversation"), "llama prefix reuse");
+  quotes(clause(evidenceOf(full, "prefix-reuse"), "a new head computed in full"), read("llamacpp", r1, "shared", "cold"), "llama cold");
+  // concurrent reuse is stated as not qualified, with the counts of the rows
+  const warmReused = (r: Run, level: number): number => Array.from({ length: level }, (_, i) => read("llamacpp", r, "concurrency", `n${level}-warm-${i + 1}`)).filter((h) => h.cached / h.prompt > 0.5).length;
+  const counts = [2, 4, 8].map((l) => warmReused(r1, l));
+  assert.deepEqual([2, 4, 8].map((l) => warmReused(r2, l)), counts, "both runs");
+  assert.ok(evidenceOf(full, "prefix-reuse").includes(`with 2, 4 and 8 sent at once only ${counts[0]}, ${counts[1]} and ${counts[2]} of the warm requests reused`), `concurrent counts ${counts.join(", ")}`);
   for (const [r, label] of [[r1, "run 1"], [r2, "run 2"]] as const) {
-    const off = read("llamacpp", r, "extras", "cache-prompt-off"); assert.equal(off.cached, 0, label); quotes(evidenceOf(full, "reuse-off"), off, `reuse off ${label}`);
-    const again = read("llamacpp", r, "extras", "slot0-again"); assert.ok(again.cached / again.prompt > 0.99, label); quotes(evidenceOf(full, "slot-affinity"), again, `same slot ${label}`);
-    const other = read("llamacpp", r, "extras", "slot1-same-head"); assert.ok(other.cached < 10, label); quotes(evidenceOf(full, "slot-affinity"), other, `other slot ${label}`);
+    const off = read("llamacpp", r, "extras", "cache-prompt-off"); assert.equal(off.cached, 0, label); quotes(clause(evidenceOf(full, "reuse-off"), "cache_prompt false computed everything", ")"), off, `reuse off ${label}`);
+    const again = read("llamacpp", r, "extras", "slot0-again"); assert.ok(again.cached / again.prompt > 0.99, label); quotes(clause(evidenceOf(full, "slot-affinity"), "id_slot 0 again reused"), again, `same slot ${label}`);
+    const other = read("llamacpp", r, "extras", "slot1-same-head"); assert.ok(other.cached < 10, label); quotes(clause(evidenceOf(full, "slot-affinity"), "named into slot 1 reused"), other, `other slot ${label}`);
   }
   const erased = read("llamacpp", r2, "extras", "slot0-after-erase"); const restored = read("llamacpp", r2, "extras", "slot0-after-restore");
   assert.deepEqual([erased.cached, restored.cached / restored.prompt > 0.99], [0, true]);
-  quotes(evidenceOf(full, "slot-save-restore"), erased, "erase"); quotes(evidenceOf(full, "slot-save-restore"), restored, "restore");
+  quotes(clause(evidenceOf(full, "slot-save-restore"), "after the erase", "after the restore"), erased, "erase"); quotes(clause(evidenceOf(full, "slot-save-restore"), "after the restore into the same slot"), restored, "restore");
   // run 1 (host cache on): the erase left the head, so the restore proves nothing and the capability is not qualified there
   assert.ok(read("llamacpp", r1, "extras", "slot0-after-erase").cached > 6000);
   assert.equal(isQualified(llama({ slots: 4, slotSave: true }), "slot-save-restore"), false);
   // vLLM
   const vp = vllm();
-  quotes(evidenceOf(vp, "prefix-reuse"), read("vllm", v, "shared", "second-conversation"), "vllm second");
+  quotes(clause(evidenceOf(vp, "prefix-reuse"), "a second conversation", " and a third"), read("vllm", v, "shared", "second-conversation"), "vllm second");
   quotes(evidenceOf(vp, "fork"), read("vllm", v, "shared", "third-conversation"), "vllm third");
-  const same = read("vllm", v, "extras", "salt-a-again"); quotes(evidenceOf(vp, "isolation"), same, "same salt");
+  const same = read("vllm", v, "extras", "salt-a-again"); quotes(clause(evidenceOf(vp, "isolation"), "under the same cache_salt"), same, "same salt");
+  const [otherSalt, noSalt] = [read("vllm", v, "extras", "salt-b-same-head").cached, read("vllm", v, "extras", "no-salt-same-head").cached];
+  assert.ok(evidenceOf(vp, "isolation").includes(`under another salt ${n(otherSalt)}, with no salt ${n(noSalt)}`), "the other-salt and no-salt figures are the rows'");
+  assert.match(evidenceOf(vp, "isolation"), /only for calls that carry the salt/, "the condition the measurement covers is stated");
   assert.deepEqual([read("vllm", v, "extras", "salt-b-same-head").cached, read("vllm", v, "extras", "no-salt-same-head").cached], [0, 0], "another salt and no salt reused nothing");
   for (const level of [1, 2, 4, 8]) for (let i = 1; i <= level; i++) assert.ok(read("vllm", v, "concurrency", `n${level}-warm-${i}`).cached >= 6400, `vllm n${level}-warm-${i}`);
   for (const gap of [0, 15, 30, 60, 120]) assert.equal(read("vllm", v, "idle", `after-${gap}s`).cached, 6400, `vllm after ${gap} s`);
+});
+
+test("the Radiance qualifications quote the committed Radiance rows: each repeat's and fork's figures, the fork's server prompt times against the cold ones, and run 2's reuse at every stream count", () => {
+  interface RStep { readonly repeat?: number; readonly step: string; readonly promptTokens: number; readonly cachedTokens: number; readonly serverPromptMs: number; readonly correct: boolean }
+  const r1 = JSON.parse(readFileSync(join(EVIDENCE, "g10-radiance-run1.json"), "utf8")) as { partA: { steps: RStep[] } };
+  const r2 = JSON.parse(readFileSync(join(EVIDENCE, "g10-radiance-run2.json"), "utf8")) as { concurrency: { levels: { repeat: RStep[] }[] } };
+  const p = profileFor({ kind: "radiance", model: "m" });
+  const ev = (c: string): string => (p.qualifications ?? []).find((q) => q.capability === c)!.evidence;
+  const n = (x: number): string => x.toLocaleString("en-US");
+  const of = (name: string): RStep[] => r1.partA.steps.filter((s) => s.step === name);
+  const [cold, repeat, fork] = [of("cold"), of("repeat"), of("fork")];
+  assert.deepEqual([cold.length, repeat.length, fork.length], [3, 3, 3]);
+  assert.ok(cold.every((s) => s.cachedTokens === 0) && ev("prefix-reuse").includes(`a new head 0 of ${n(cold[0]!.promptTokens)} cached`));
+  const cached = new Set(repeat.map((s) => s.cachedTokens)); assert.equal(cached.size, 1);
+  assert.ok(ev("prefix-reuse").includes(`again ${n(repeat[0]!.cachedTokens)} of ${repeat.slice(0, -1).map((s) => n(s.promptTokens)).join(", ")} and ${n(repeat.at(-1)!.promptTokens)} in three repeats`), ev("prefix-reuse"));
+  assert.ok(ev("fork").includes(`${n(fork[0]!.cachedTokens)} of ${n(fork[0]!.promptTokens)} cached, answered right in ${fork.filter((s) => s.correct).length} of 3`), ev("fork"));
+  const range = (xs: number[]): string => `${(Math.min(...xs) / 1000).toFixed(1)} to ${(Math.max(...xs) / 1000).toFixed(1)} s`;
+  assert.ok(ev("fork").includes(`server prompt time ${range(fork.map((s) => s.serverPromptMs))} against ${range(cold.map((s) => s.serverPromptMs))} cold`), ev("fork"));
+  const repeats2 = r2.concurrency.levels.flatMap((l) => l.repeat);
+  assert.equal(repeats2.length, 15);
+  assert.ok(repeats2.every((s) => s.cachedTokens === 6144) && ev("prefix-reuse").includes("6,144 of about 6,673 on every repeat at 1, 2, 4 and 8 streams"));
+  assert.ok(repeats2.every((s) => Math.abs(s.promptTokens - 6673) <= 3), "about 6,673");
+});
+
+test("the capability matrix in g10-evidence.md marks qualified exactly what the profiles qualify, and says not measured for Claude, Strata and an OpenAI-compatible service", () => {
+  const doc = readFileSync(join(EVIDENCE, "..", "g10-evidence.md"), "utf8");
+  const section = doc.slice(doc.indexOf("## Capability matrix"), doc.indexOf("## Stated limits of the narrowed card"));
+  const rowOf = (name: string): string[] => { const line = section.split("\n").find((l) => l.startsWith(`| ${name} `)); assert.ok(line !== undefined, name); return line.split("|").slice(1, -1).map((c) => c.trim()); };
+  const header = section.split("\n").find((l) => l.startsWith("| Backend"))!.split("|").slice(1, -1).map((c) => c.trim());
+  const col = (h: string): number => { const i = header.findIndex((x) => x.startsWith(h)); assert.ok(i >= 0, h); return i; };
+  const q = (cell: string): boolean => cell.includes("**qualified");
+  const radiance = rowOf("Radiance"), vllmRow = rowOf("vLLM"), llamaRow = rowOf("llama.cpp");
+  assert.deepEqual([q(radiance[col("Prefix reuse")]!), q(radiance[col("Fork")]!), q(radiance[col("Isolation")]!)], [true, true, false]);
+  assert.deepEqual([q(vllmRow[col("Prefix reuse")]!), q(vllmRow[col("Fork")]!), q(vllmRow[col("Isolation")]!), q(vllmRow[col("Pin")]!)], [true, true, true, false]);
+  assert.deepEqual([q(llamaRow[col("Prefix reuse")]!), q(llamaRow[col("Fork")]!), q(llamaRow[col("Pin")]!), q(llamaRow[col("Slot save")]!), q(llamaRow[col("Other qualified")]!)], [true, false, false, true, true]);
+  assert.match(llamaRow[col("Isolation")]!, /^none; `cache_prompt: false` \*\*qualified\*\* as reuse off/, "llama.cpp keeps no projects apart; only reuse off is qualified");
+  assert.match(llamaRow[col("Prefix reuse")]!, /one request at a time.*concurrent reuse not qualified/);
+  assert.match(llamaRow[col("Slot save")]!, /only with `--cache-ram 0` attested/);
+  assert.match(vllmRow[col("Isolation")]!, /only for calls that carry the salt/);
+  for (const name of ["Claude", "Strata", "OpenAI-compatible service", "OpenAI (through Hermes)"]) {
+    const row = rowOf(name); assert.equal(row.some(q), false, `${name}: nothing qualified`);
+  }
+  for (const name of ["Claude", "Strata"]) assert.match(rowOf(name)[col("Status")]!, /experimental, not measured/);
+  assert.match(rowOf("OpenAI-compatible service")[col("Status")]!, /^not measured$/);
 });

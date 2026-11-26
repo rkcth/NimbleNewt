@@ -10,19 +10,19 @@ const EMPTY_HIT = (source: string, caveat?: string): CacheHit => ({ known: false
 const LLAMA_RUNS = "g10-llamacpp-run1.json and run2.json (llama.cpp server-cuda sha256:2855fd7d, Qwen3-8B Q8_0, -np 4, 2026-11-25)";
 const VLLM_RUN = "g10-vllm-run1.json (vLLM v0.34.0, Qwen/Qwen3-8B, --enable-prompt-tokens-details, 2026-11-25)";
 const LLAMA_QUALIFIED = {
-  prefixReuse: { capability: "prefix-reuse", evidence: `${LLAMA_RUNS}: a new head computed in full (0 of 6,472 cached), the same head in a second and a third conversation 6,454 of 6,472; the same slot again 6,452 of 6,470 and 6,453 of 6,471; after idle gaps of 0 to 120 s (run 1) 6,451 to 6,455` },
+  prefixReuse: { capability: "prefix-reuse", evidence: `${LLAMA_RUNS}: a new head computed in full (0 of 6,472 cached), the same head in a second and a third conversation 6,454 of 6,472; the same slot again 6,452 of 6,470 and 6,453 of 6,471; after idle gaps of 0 to 120 s (run 1) 6,451 to 6,455. One request at a time: with 2, 4 and 8 sent at once only 1, 1 and 5 of the warm requests reused the head (both runs), so concurrent reuse is not qualified` },
   reuseOff: { capability: "reuse-off", evidence: `${LLAMA_RUNS}: cache_prompt false computed everything with the host prompt cache on and off (0 of 6,470; 0 of 6,471)` },
   slotAffinity: { capability: "slot-affinity", evidence: `${LLAMA_RUNS}: id_slot 0 again reused 6,452 of 6,470 and 6,453 of 6,471; the same head named into slot 1 reused 4 of 6,470 and 0 of 6,471` },
-  slotSaveRestore: { capability: "slot-save-restore", evidence: "g10-llamacpp-run2.json (with --cache-ram 0 and --slot-save-path): save, erase and restore answered 200; after the erase 0 of 6,471 cached, after the restore 6,470 of 6,471. With the default host cache (run 1) the erase did not remove the head, so the restore showed nothing: not qualified without hostPromptCacheOff" },
+  slotSaveRestore: { capability: "slot-save-restore", evidence: "g10-llamacpp-run2.json (with --cache-ram 0 and --slot-save-path): save, erase and restore of slot 0 answered 200; after the erase 0 of 6,471 cached, after the restore into the same slot 6,470 of 6,471 (restore into another slot not measured). With the default host cache (run 1) the erase did not remove the head, so the restore showed nothing: not qualified without hostPromptCacheOff" },
 } as const satisfies Record<string, Qualification>;
 const VLLM_QUALIFIED = {
   prefixReuse: { capability: "prefix-reuse", evidence: `${VLLM_RUN}: a new head 0 of 6,470 cached, a second conversation 6,400 of 6,470 and a third 6,464 of 6,470 (whole 64-token blocks); after idle gaps of 0 to 120 s 6,400 each time` },
   fork: { capability: "fork", evidence: `${VLLM_RUN}: other conversations on a read head reused it (6,400 of 6,470 and 6,464 of 6,470), every request at 1, 2, 4 and 8 at once reused it, and a new head sent to n at once was computed once (reuse in n-1 of n)` },
-  isolation: { capability: "isolation", evidence: `${VLLM_RUN}: the same head under the same cache_salt 6,400 of 6,472 cached; under another salt 0, with no salt 0` },
+  isolation: { capability: "isolation", evidence: `${VLLM_RUN}: the same head under the same cache_salt 6,400 of 6,472 cached; under another salt 0, with no salt 0 (one request at a time). Holds only for calls that carry the salt: a server that refuses cache_salt gets the adapter's plain retry without it, which is not isolated` },
 } as const satisfies Record<string, Qualification>;
 const RADIANCE_QUALIFIED = {
-  prefixReuse: { capability: "prefix-reuse", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0, qwen3.8-flash-next-iq4r, 2026-11-16): a new head 0 of 13,471 cached, the same request again 12,288 of 13,471 in three repeats; run 2 (2.2.0, 2026-11-25): 6,144 of about 6,673 on every repeat at 1, 2, 4 and 8 streams" },
-  fork: { capability: "fork", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0): a second conversation on the same head 12,288 of 13,471 cached, answered right in 3 of 3, prompt 0.4 to 1.3 s against 2.8 to 12.3 s cold" },
+  prefixReuse: { capability: "prefix-reuse", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0, qwen3.8-flash-next-iq4r, 2026-11-16): a new head 0 of 13,471 cached, the same request again 12,288 of 13,471, 13,474 and 13,471 in three repeats; run 2 (2.2.0, 2026-11-25): 6,144 of about 6,673 on every repeat at 1, 2, 4 and 8 streams" },
+  fork: { capability: "fork", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0): a second conversation on the same head 12,288 of 13,471 cached, answered right in 3 of 3, server prompt time 0.4 to 1.2 s against 2.8 to 12.3 s cold" },
 } as const satisfies Record<string, Qualification>;
 
 // ---- reading responses: defensive, because a response is data from a server we do not control ----------------------------------------------------------------------------------------

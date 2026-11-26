@@ -288,6 +288,9 @@ test("negotiation says what is granted, what is not, and what happens instead", 
   assert.deepEqual([...attested.unqualified].sort(), ["fork", "pin"]);
   const salted = negotiate(profileFor({ kind: "vllm", model: "m" }), ["prefix-reuse", "fork", "isolation", "retention-control", "pin"]);
   assert.deepEqual([Object.keys(salted.granted).sort(), [...salted.unqualified]], [["fork", "isolation", "prefix-reuse", "retention-control"], ["retention-control"]]);
+  // The salt partition is qualified by its entry, not by the capability being present: the same vLLM profile without its qualifications grants isolation as unqualified.
+  const unproven = negotiate({ ...profileFor({ kind: "vllm", model: "m" }), qualifications: [] }, ["prefix-reuse", "isolation"]);
+  assert.deepEqual([Object.keys(unproven.granted).sort(), [...unproven.unqualified].sort()], [["isolation", "prefix-reuse"], ["isolation", "prefix-reuse"]]);
   const hosted = negotiate(profileFor({ kind: "openai", model: "m" }), ["prefix-reuse", "fork"]);
   assert.deepEqual([...hosted.unqualified].sort(), ["fork", "prefix-reuse"], "OpenAI: nothing qualified");
   const generic = negotiate(profileFor({ model: "m" }), ["prefix-reuse", "pin", "retention-control"]);
