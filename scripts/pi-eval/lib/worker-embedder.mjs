@@ -191,7 +191,20 @@ export async function runW09Task(inst, t) {
   }
   if (!timedOut) await c.dispatch.dispatcher.idle().catch(() => undefined);
   if (attemptId !== undefined) attempt = await c.dispatch.dispatcher.get(c.dispatch.principal, attemptId);
-  return { projectId, taskId, agentId, attemptId, attempt, timedOut, wallMs: Date.now() - startedAt, ...taskCheckout(inst, projectId, taskId) };
+  // Card W09b: the attempt's checkout tool calls, counted by action and how each ended (`run:uncertain`), from the controller's operation records: no arguments, no output.
+  let checkoutCalls = null;
+  if (attemptId !== undefined) {
+    try {
+      checkoutCalls = {};
+      for (const o of (await c.dispatch.dispatcher.operations(c.dispatch.principal, attemptId)) ?? []) {
+        const name = String(o.tool?.name ?? "");
+        if (!name.startsWith("nimblenewt.checkout-")) continue;
+        const key = `${name.slice("nimblenewt.checkout-".length)}:${o.state}`;
+        checkoutCalls[key] = (checkoutCalls[key] ?? 0) + 1;
+      }
+    } catch { checkoutCalls = null; }
+  }
+  return { projectId, taskId, agentId, attemptId, attempt, timedOut, wallMs: Date.now() - startedAt, checkoutCalls, ...taskCheckout(inst, projectId, taskId) };
 }
 
 /** The parts of the attempt record a bench run keeps (bounded: no conversation, no notes' full text). */

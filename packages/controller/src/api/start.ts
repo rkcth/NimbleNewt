@@ -1935,6 +1935,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // Card T02d: a revocation taken by another process pauses as the owner who revoked (read from the store, active principals only).
         // Card T02d close-out: each running call is also on the durable record, so another controller process on this store lists it and the owner's revoke question and choice reach it.
         runRecords: RunningCallStore.withEpoch(storage, epoch),
+        // Card W09b: the agent's checkout tool runs on the host that holds the attempt (only this computer's worker host can), asked by the dispatcher from inside the tool path's record of the call.
+        checkout: (call, request, signal) => dispatch!.dispatcher.checkoutTool(dispatch!.principal, call.attemptId, request, signal),
         // Card Q01b (bridge): a document change names an artifact of the attempt's task; the digest is the one recorded at publication, taken only while the files still match it. Without an artifact directory there is none.
         // The files are read (`intact`) only when the bridge asks, after it has found the artifact to be of the attempt's own task: another task's artifact is never read for an agent.
         ...(checked === undefined ? {} : { artifactOf: async (id: string) => { const a = await checked.get(id); return a === undefined ? undefined : { ...(a.taskId === undefined ? {} : { taskId: a.taskId }), manifestDigest: a.manifestDigest, intact: async () => (await checked.verify(id)).ok }; } }),

@@ -5,9 +5,9 @@ import { derivedId } from "../domain/ids.js";
 import { onlyKnown, type View } from "../domain/model.js";
 import { CommandRunner, view } from "../domain/runner.js";
 import { McpService } from "../mcp/mcp.js";
-import { ActionCatalog } from "../policy/catalog.js";
+import { ActionCatalog, CHECKOUT_TOOLS } from "../policy/catalog.js";
 import { selectRoute } from "../routing/index.js";
-import { allows, toolAction } from "../security/access.js";
+import { allows, restrictsAction, toolAction } from "../security/access.js";
 import { redactText } from "../security/redact.js";
 import type { Principal } from "../security/principals.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
@@ -216,7 +216,10 @@ export class ToolPath {
     }
     // The agent's grants as they are now (the credential's snapshot is taken again for each call), and the contract's permission list.
     const fresh = await this.#deps.credentials.principalOf(this.#deps.principal, d.attemptId, { limit: false });
-    if (!allows(fresh, toolAction(c.tool.name), d.projectId, { resource: { kind: "task", id: d.taskId }, now: this.#runner.now() })) return { kind: "refused", reason: `${d.agentId} holds no grant for ${toolAction(c.tool.name)} on this task now`, denied: true };
+    const at = { resource: { kind: "task", id: d.taskId }, now: this.#runner.now() };
+    // Card W09b: the controller's checkout tool works only on the attempt's own checkout, so the right to work on the task covers it; a restriction on the tool itself still refuses it.
+    const implied = c.tool.kind === "builtin" && CHECKOUT_TOOLS.has(c.tool.name) && allows(fresh, "attempt.work", d.projectId, at) && !restrictsAction(fresh, toolAction(c.tool.name), d.projectId, at);
+    if (!implied && !allows(fresh, toolAction(c.tool.name), d.projectId, at)) return { kind: "refused", reason: `${d.agentId} holds no grant for ${toolAction(c.tool.name)} on this task now`, denied: true };
     const permissions = await this.#permissions(d.taskId);
     // Inside the contract's ceiling the approved contract covers the call; beyond it the policy still decides, and what it would have allowed or sent to a reviewer goes to the owner instead (asked again).
     const beyond = permissions.length > 0 && !permissions.some((p) => p === "*" || p === "tool.*" || p === toolAction(c.tool.name) || p === `class.${cls}`);
@@ -492,7 +495,9 @@ export class ToolPath {
     } catch (error) {
       if (isDomainError(error, "stale_epoch")) throw error;
       const message = error instanceof Error ? error.message : "the call failed";
-      return this.#finalize(ready.d, ready.opId, signal.aborted ? "cancelled" : "failed", { error: message, ...(signal.aborted ? {} : { fromExecutor: true as const }) });
+      // Card W09b: an executor that says it may already have acted (a command or a write that was running in the checkout when it was stopped) leaves a call that is not read-only uncertain, never cancelled: the tree cannot be trusted.
+      const acted = !ready.readOnly && (error as { mayHaveActed?: unknown } | null)?.mayHaveActed === true;
+      return this.#finalize(ready.d, ready.opId, acted ? "uncertain" : signal.aborted ? "cancelled" : "failed", { error: message, ...(signal.aborted || acted ? {} : { fromExecutor: true as const }) });
     }
   }
 

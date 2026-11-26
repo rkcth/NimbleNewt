@@ -178,6 +178,24 @@ export interface DoneCheckRequest {
   readonly maxOutputBytes: number;
 }
 
+/**
+ * One call of the agent's checkout tool (card W09b), as the controller hands it to the host that holds the attempt: read, write or edit one file of the checkout (a path relative to it), or run one bash command in it. The host runs it in a
+ * sandbox of its own made from the attempt's (the checkout as /work, no network, the attempt's and the owner's limits, an empty home and scratch), never in the worker process, and keeps every path inside the checkout.
+ */
+export interface CheckoutToolRequest {
+  readonly action: "read" | "write" | "edit" | "run";
+  readonly path?: string;
+  /** write: the whole new text; edit: the text that replaces `old`. */
+  readonly text?: string;
+  /** edit: text that occurs exactly once in the file. */
+  readonly old?: string;
+  readonly command?: string;
+}
+/** What the call came to: `body` is the file's text or the command's output (cut to the host's bound, the cut said in `truncated`), the rest plain facts (line count, exit code, time). A refusal (a path outside the checkout, no such file) is `ok: false`. */
+export type CheckoutToolReport =
+  | { readonly ok: true; readonly body: string; readonly facts: { readonly [key: string]: string | number | boolean | null } }
+  | { readonly ok: false; readonly reason: string };
+
 /** One check as the host ran it. `not-run`: the host could not run it (no sandbox, a launch refused); `reason` says why. `output` is the tail of what it wrote (both streams), as the host cut it. */
 export interface DoneCheckRun {
   readonly name: string;
@@ -274,6 +292,8 @@ export interface WorkerHost {
    * that cannot leaves it out, and a done of a task with a contract is then not taken as verified. One that fails throws.
    */
   verify?(attemptId: string, scope: { readonly taskId: string; readonly projectId: string }, request: DoneCheckRequest): Promise<DoneCheckReport>;
+  /** Runs one call of the agent's checkout tool (card W09b) in a sandbox of its own over the attempt's checkout; `signal` stops it. A host that cannot leaves it out, and the tool is refused for its attempts. One that fails throws. */
+  checkout?(attemptId: string, request: CheckoutToolRequest, signal: AbortSignal): Promise<CheckoutToolReport>;
   /**
    * What an agent's `work.end { submit: true }` is checked against (card H12n): the commit the task's checkout is based on, the landing branch's head now, the files the agent changed against the base and the files the landing
    * branch changed since. `undefined`: this host holds no checkout for the task. A host that cannot say leaves it out, and a submit from it is refused as unavailable.

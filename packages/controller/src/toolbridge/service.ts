@@ -7,7 +7,7 @@ import { checkHost, runAction, toolboxName, versionIdOf, type CatalogService, ty
 import type { DeskService } from "../context/index.js";
 import type { DispatcherService } from "../dispatch/dispatcher.js";
 import { TERMINAL, type ToolIdentity } from "../dispatch/model.js";
-import type { ToolGateway, ToolResult } from "../dispatch/ports.js";
+import type { CheckoutToolReport, CheckoutToolRequest, ToolGateway, ToolResult } from "../dispatch/ports.js";
 import type { AdmissionService } from "../admission/index.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
@@ -41,7 +41,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose", "toolbox.pins", "toolbox.optin", "toolbox.proposal", "toolbox.revoke"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "work.checkout", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose", "toolbox.pins", "toolbox.optin", "toolbox.proposal", "toolbox.revoke"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -50,6 +50,9 @@ export type BridgeResponse =
   | { readonly ok: true; readonly result: JsonObject }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
+/** Card W09b: the checkout tool's version (one per behaviour change) and the bounds of its arguments: a path, the text of a write or edit (the whole request is bound by `BRIDGE_LIMITS.args` too), a command. */
+export const CHECKOUT_TOOL_VERSION = "1.0.0";
+export const CHECKOUT_LIMITS = { path: 1000, text: 60_000, command: 8000 } as const;
 export const BRIDGE_LIMITS = { args: 64 * 1024, output: 64 * 1024, instructions: 16 * 1024, page: 100, defaultPage: 50, query: 100, access: 50, runningListed: 50 } as const;
 
 /** Runs an approved script (the sandbox of H12b/A03 implements it). It is handed argv and stdin as data: nothing here builds, and nothing there may build, a shell command line. */
@@ -181,6 +184,11 @@ export interface ToolExecutionDeps {
   readonly jobRuns?: Pick<LocalJobRuns, "room" | "start" | "ended"> & Partial<Pick<LocalJobRuns, "runningFor">>;
   /** Tools the controller itself runs (card H12i: the web tool). They appear in `tool.discover` and `tool.describe` and run through `tool.invoke`; they cannot be started as jobs. */
   readonly builtins?: readonly BuiltinTool[];
+  /**
+   * Card W09b: runs one call of the agent's checkout tool on the host that holds the attempt (the dispatcher's `checkoutTool`, which finds the host). Called only from inside the dispatcher's tool path, after the call was judged and
+   * recorded. Absent: `work.checkout` answers that the tool is not available here.
+   */
+  readonly checkout?: (call: { readonly attemptId: string }, request: CheckoutToolRequest, signal: AbortSignal) => Promise<CheckoutToolReport>;
 }
 
 /**
@@ -217,14 +225,16 @@ const ADMITTED: ReadonlySet<BridgeOperation> = new Set([...WRITES].filter((op) =
 const PROPOSAL_READS: ReadonlySet<unknown> = new Set(["list", "get"]);
 export const PROPOSAL_ACTIONS = ["propose", "promote", "revise", "rebase", "withdraw", "list", "get", "decide"] as const;
 /** Whether a request writes (what a pause refuses), by its operation and, for the one operation with several actions, its action. */
-const writes = (op: string, args: unknown): boolean => WRITES.has(op as BridgeOperation) || (op === "toolbox.proposal" && !PROPOSAL_READS.has((args as { action?: unknown } | undefined)?.action));
+const writes = (op: string, args: unknown): boolean => WRITES.has(op as BridgeOperation) || (op === "toolbox.proposal" && !PROPOSAL_READS.has((args as { action?: unknown } | undefined)?.action))
+  // Card W09b: a checkout read only looks; a write, an edit, a command (and an action that is not known, which the operation refuses) is a write.
+  || (op === "work.checkout" && (args as { action?: unknown } | undefined)?.action !== "read");
 /** The activity step of a `toolbox.proposal` write (card T08). */
 const proposalStep = (agent: string, action: unknown, id: (key: string) => string, result: JsonObject): string =>
   action === "promote" ? `${agent} offered its tool ${typeof result["from"] === "object" && result["from"] !== null ? String((result["from"] as { name?: unknown }).name ?? "unknown").slice(0, 120) : "unknown"} as shared tool ${id("name")}, proposal ${id("proposalId")}, through the bridge (a suggestion: it changes nothing until a maintainer decides).`
   : action === "decide" ? `${agent} decided toolbox proposal ${id("proposalId")} through the bridge: ${id("state")}${typeof result["released"] === "object" && result["released"] !== null ? `, released as ${String((result["released"] as { version?: unknown }).version ?? "?").slice(0, 40)}` : ""} (an acceptance authorises nothing beyond that release).`
   : `${agent} ${action === "revise" ? "revised" : action === "rebase" ? "rebased" : action === "withdraw" ? "withdrew" : "changed"} toolbox proposal ${id("proposalId")} through the bridge.`;
 /** Whether a recorded call of this request is admitted as an effect (card L05d). */
-const admitted = (op: string, args: unknown): boolean => ADMITTED.has(op as BridgeOperation) || (op === "toolbox.proposal" && writes(op, args));
+const admitted = (op: string, args: unknown): boolean => ADMITTED.has(op as BridgeOperation) || ((op === "toolbox.proposal" || op === "work.checkout") && writes(op, args));
 /** How long a call waits for its generation to be completed, in steps of this many ms. */
 /**
  * The command ID of the operation a bridge call runs: `{prefix}:{attempt}:{call}`. A command ID is at most 120 characters and a call ID may be 120, so a long call ID would be refused as an invalid command; such a call is keyed by a digest of
@@ -246,7 +256,7 @@ const BUSY_WAIT_TOTAL_MS = 30_000;
  * for a review (`awaiting-approval`) or still running (`in-progress`) is asked again with the same call ID to go on (review of card L05d). Their effect bridge is idempotent, and an answer that is not final leaves the effect pending,
  * so the next ask runs the operation again (which answers its current state) instead of being answered with the first, unfinished answer from the ledger.
  */
-const ASKED_AGAIN: ReadonlySet<BridgeOperation> = new Set(["tool.invoke", "job.start"]);
+const ASKED_AGAIN: ReadonlySet<BridgeOperation> = new Set(["tool.invoke", "job.start", "work.checkout"]);
 const NOT_FINAL: ReadonlySet<unknown> = new Set(["awaiting-approval", "in-progress"]);
 class NotFinal extends Error { constructor() { super("the operation is not finished; ask again with the same call ID"); } }
 /** The most of an admitted write's result kept in the effect ledger for a repeat of the call; a larger one is answered without it. */
@@ -548,6 +558,7 @@ export class ToolExecutionService {
               case "work.end": return await this.#workEnd(token, context, args);
               case "work.refresh": return await this.#workRefresh(token, context, args);
               case "work.note": case "work.answer": return await this.#workWrite(token, context, request.op as "work.note" | "work.answer", args);
+              case "work.checkout": return await this.#checkout(context, gateway, args);
               case "maintenance.request": return await this.#maintenanceRequest(token, context, args);
               case "maintenance.status": return await this.#maintenanceStatus(token, context, args);
               case "turn.continue": return this.#turnContinue(context, args);
@@ -1136,6 +1147,51 @@ export class ToolExecutionService {
   }
 
   /** The names the agent may see with their latest live versions. Names and versions only: a description is fetched with `tool.describe`, on demand. */
+  /**
+   * The agent's checkout tool (card W09b): read, write or edit one file of the attempt's own checkout, or run one bash command in it. Each call is a tool call of the dispatcher's tool path under the name
+   * `nimblenewt.checkout-<action>` (the agent's right to work on the task, a restriction on the tool, the pause gates, the budget, the contract's ceiling and the approval policy by class: a read is `inspect`, the rest `workspace-edit`),
+   * recorded as a durable operation whose read-only flag is the class's; a write that is a model's recorded call is also admitted as an effect of its generation (`#admitted`). The host runs it in a sandbox of its own over the
+   * checkout, with no network. A call stopped while it changes the checkout (the ending's settle) is left uncertain, so a submit turns into a plain end with `release_failed` (card H12n). What it hands back is cut by the host
+   * and scrubbed of credential shapes here, before it is kept or shown.
+   */
+  async #checkout(c: Context, gateway: BoundGateway, args: JsonObject): Promise<BridgeResponse> {
+    const action = args["action"];
+    if (action !== "read" && action !== "write" && action !== "edit" && action !== "run") return invalid("action", "must be read, write, edit or run");
+    const fields = action === "read" ? ["path"] : action === "write" ? ["path", "text"] : action === "edit" ? ["path", "old", "text"] : ["command"];
+    // The tool lists every action's fields, so a model may fill in one that this action does not use: it is left aside. A name that is not a field of the tool is refused.
+    onlyKnown(args, ["action", "path", "text", "old", "command"]);
+    const request: Record<string, string> = { action };
+    for (const k of fields) {
+      const v = args[k];
+      const max = k === "path" ? CHECKOUT_LIMITS.path : k === "command" ? CHECKOUT_LIMITS.command : CHECKOUT_LIMITS.text;
+      const empty = k === "text";
+      if (typeof v !== "string" || (!empty && v.length === 0) || v.length > max || v.includes("\0")) return invalid(k, `${action} needs ${k}: text of ${empty ? 0 : 1} to ${max} characters without a NUL`);
+      request[k] = v;
+    }
+    const checkout = this.#deps.checkout;
+    if (checkout === undefined) throw new DomainError("unavailable", "this controller cannot run the checkout tool");
+    const changes = action !== "read";
+    const result = await gateway.call(
+      { callId: c.callId, tool: { name: `nimblenewt.checkout-${action}`, version: CHECKOUT_TOOL_VERSION, kind: "builtin" }, args: request, target: { kind: "workspace", id: c.taskId } },
+      { kind: "local", run: async (signal) => {
+        let report: CheckoutToolReport;
+        // The host says when a call that changes the checkout was already running in its sandbox and did not end cleanly (stopped, killed, no answer): it may have changed files, and the tool path keeps it uncertain.
+        try { report = await checkout({ attemptId: c.attemptId }, request as unknown as CheckoutToolRequest, signal); } catch (error) {
+          if (changes && (error as { mayHaveActed?: unknown } | null)?.mayHaveActed === true) throw Object.assign(new Error(`the checkout ${action} did not end cleanly; it may have changed the checkout (${redactText(String((error as Error).message ?? error)).slice(0, 200)})`), { mayHaveActed: true });
+          throw error;
+        }
+        // A refusal (a path outside the checkout, no such file, `old` not found once) was made before anything changed: the call failed, with the host's words.
+        if (!report.ok) throw new DomainError("invalid_command", redactText(report.reason).slice(0, 500));
+        return { text: JSON.stringify({ ...report.facts, body: redactText(report.body) }) };
+      } },
+    );
+    if (result.state !== "confirmed") return ok({ ...(result as unknown as JsonObject) });
+    let shown: JsonObject;
+    // Asked again after it ended, a read is answered from the operation's kept summary, which may be cut: said so.
+    try { shown = JSON.parse(result.text) as JsonObject; } catch { shown = { note: "this call already ran; only the start of its answer was kept", body: result.text }; }
+    return ok({ state: "confirmed", operationId: result.operationId, ...shown });
+  }
+
   async #discover(c: Context, args: JsonObject): Promise<BridgeResponse> {
     onlyKnown(args, ["query", "limit", "after"]);
     const query = args["query"] === undefined ? undefined : typeof args["query"] === "string" && args["query"].length <= BRIDGE_LIMITS.query ? args["query"].toLowerCase() : invalid("query", `must be text of at most ${BRIDGE_LIMITS.query} characters`);

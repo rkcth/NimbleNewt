@@ -29,7 +29,7 @@ function fakeController(catalogue: { name: string; kind: string; version: string
 test("the bridge declares a fixed set of stable tools in the reserved namespace, with wire names, shared by every agent, each presented again after a crash (G04 follow-up: the controller answers it from its records)", () => {
   const bridge = createBridge(fakeController().transport);
   assert.deepEqual(bridge.tools.map((t) => t.name), BRIDGE_TOOL_NAMES.slice());
-  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "submission-record", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-optin", "toolbox-pins", "toolbox-proposal", "toolbox-revoke", "toolbox-source", "work-answer", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
+  assert.deepEqual(BRIDGE_TOOL_NAMES, ["artifact-publish", "deliverable-draft", "deliverable-submit", "dependency-record", "desk-read", "desk-write", "job-cancel", "job-output", "job-start", "job-status", "maintenance-request", "maintenance-status", "message-send", "service-observe", "service-operate", "submission-record", "task-get", "task-recall", "task-transition", "task-update", "tool-discover", "tool-describe", "tool-invoke", "tool-register", "toolbox-copies", "toolbox-copy", "toolbox-notices", "toolbox-optin", "toolbox-pins", "toolbox-proposal", "toolbox-revoke", "toolbox-source", "work-answer", "work-checkout", "work-end", "work-note", "work-refresh"].map((n) => `nimblenewt__${n}`));
   assert.equal(bridgeToolName("tool.invoke"), "nimblenewt__tool-invoke");
   for (const tool of bridge.tools) {
     assert.equal(tool.shared, true);
@@ -310,4 +310,15 @@ test("the toolbox tools (card T08) are always there, name no task, project or ag
   for (const p of ["everyone", "agentId"]) assert.ok(!Object.keys((optin.parameters as unknown as { properties: Record<string, unknown> }).properties).includes(p), `toolbox.optin takes no ${p}`);
   const oldOptin = old.tools.find((t) => t.name === bridgeToolName("toolbox.optin"))!;
   assert.match(String(await oldOptin.execute({ name: "lint" }, { callId: "c3" } as never)), /^refused \(unknown_tool\): toolbox\.optin is not available on this controller/);
+});
+
+test("card W09b: the checkout tool shows a file's text or a command's output with its line breaks after the call's facts; any other answer is shown as JSON; an older controller is said to have no such tool", async () => {
+  const tool = (b: ReturnType<typeof createBridge>) => b.tools.find((t) => t.name === "nimblenewt__work-checkout")!;
+  const sent: BridgeRequest[] = [];
+  const now = createBridge({ send: async (r) => { sent.push(r); return r.args?.["action"] === "read" ? { ok: true, result: { state: "confirmed", operationId: "top-1", path: "a.txt", body: "one\ntwo\n" } } : { ok: true, result: { state: "refused", reason: "paused" } }; } });
+  assert.equal(await tool(now).execute({ action: "read", path: "a.txt" }, { callId: "call_1" } as never), '{"state":"confirmed","operationId":"top-1","path":"a.txt"}\none\ntwo\n');
+  assert.equal(await tool(now).execute({ action: "run", command: "ls" }, { callId: "call_2" } as never), '{"state":"refused","reason":"paused"}');
+  assert.deepEqual(sent.map((r) => [r.op, r.args]), [["work.checkout", { action: "read", path: "a.txt" }], ["work.checkout", { action: "run", command: "ls" }]]);
+  const old = createBridge({ send: async (r) => ({ ok: false, code: "invalid_command", message: `op: ${r.op} is not an operation of the bridge` }) });
+  assert.match(String(await tool(old).execute({ action: "read", path: "a" }, { callId: "call_3" } as never)), /^refused \(unknown_tool\): work\.checkout is not available on this controller; nothing was read, changed or run/);
 });

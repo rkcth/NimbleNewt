@@ -1,5 +1,6 @@
 export { PROCESS_LIMITS, ProcessNotEnded, WorkerProcess, type NetworkPipe, type NetworkPort, type ProcessHandlers, type RelayRequest, type RelayResponse } from "./process.js";
 export { appFromRepository, localWorkerParts, doneVerifier, orderAnchor, withOrderAnchor, CHECK_OUTPUT_CHARS, type HostCheck, type HostCheckResult, storedTokensOf, strictestLimits, stricterThanOwner, ownerPolicyOptions, type OwnerPolicyServices, type LaunchEnforcement, type HostFirstCall, type HostHeldProcess, type HostLease, type AttemptWorkspace, type CacheFigures, type HostOrder, type HostRuntime, type HostSandboxSession, type HostTurnResult, type LocalHostOptions, type WorkerApp } from "./local.js";
+export { CHECKOUT_HELPER, CHECKOUT_TOOL_LIMITS, cutMiddle, mayHaveActed, runCheckoutCall, type CheckoutAnswer, type CheckoutCall, type CheckoutRunContext } from "./checkout-tool.js";
 export { LeaseLost, LeaseWatchdog, killContained, systemClock, type LossReason, type WatchdogClock, type WatchdogOptions } from "./watchdog.js";
 export { CONVERSATION_STORES_MAX, LocalConversationStores, validConversationKey, type ConversationStoresOptions } from "./conversation-stores.js";
 export { lookAtLoaderConfig, loaderChange, LOADER_LOOK_LIMITS, type LoaderChange, type LoaderPathState, type LoaderPathType } from "./loader-watch.js";

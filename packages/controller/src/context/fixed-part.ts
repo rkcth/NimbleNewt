@@ -32,10 +32,13 @@ import { admitFirstCall, type FirstCall } from "./dispatch.js";
  * Card Q01b's bridge slice added `submission.record` (577 characters) within the budget by shortening other descriptions: 2,537 + 19,210 characters, still about 7,200 tokens (21,747, 7,249 tokens, is the most that rounds to it: no room is left at that figure).
  * Card Q02's sixth slice added three review parameters to `submission.record` (`criteriaRevision`, `decisions`, `unmet`; 118 characters, without descriptions): measured 2,537 + 19,328. The recorded figure stays 19,210
  *    (within the 5% the budget test allows, still told as about 7,200 tokens); only 72 characters are left under the budget, so the next addition does steps 1 and 2 or shortens other descriptions.
+ * Card W09b added the checkout tool (`work.checkout`, one tool with an action, 455 characters) and made room by shortening the descriptions of tool.invoke, tool.describe, job.start, toolbox.copy and toolbox.pins and its own: measured
+ *    2,537 + 19,589 (22,126). The budget moved 200 characters from the system text (2,800 to 2,600, 63 over its measured figure) to the tool schemas (19,400 to 19,600, 11 left), so the floor stays 22,200 and the window told stays 36,864.
+ *    The recorded figure stays 19,210 (within the 5% the budget test allows, still told as about 7,200 tokens; 7,376 measured); the next addition does steps 1 to 3.
  */
 export const WORKER_FIXED_PART = { systemPromptChars: 2_537, toolSchemaChars: 19_210 } as const;
 /** The most the real fixed part may grow to before the budget test fails: a little room over the measured figures, no more. It is also the floor counted for a route nobody has measured (`ROUTE_FLOOR_DEFAULTS`). */
-export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 2_800, toolSchemaChars: 19_400 } as const;
+export const WORKER_FIXED_PART_BUDGET = { systemPromptChars: 2_600, toolSchemaChars: 19_600 } as const;
 export const WORKER_FIXED_PART_CHARS = WORKER_FIXED_PART.systemPromptChars + WORKER_FIXED_PART.toolSchemaChars;
 /** The measured fixed part in tokens at the budgets' estimate (three characters to a token), and the figure the owner is told, rounded to hundreds ("about N tokens"; the budget test pins it). */
 export const WORKER_FIXED_PART_TOKENS = Math.ceil(WORKER_FIXED_PART_CHARS / BUDGET_DEFAULTS.charsPerToken);
