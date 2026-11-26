@@ -2534,15 +2534,16 @@ export class StatusService {
       const b = s.scope;
       const sc = cite("simulation-scope", s.id);
       lines.push(line(`Scope ${s.id} (task ${b.taskId}) is ${b.state}, opened ${b.openedAt}${b.purpose === undefined ? "" : ` for: ${shown(b.purpose, 200)}`}; it holds ${Object.keys(b.world.cells).length} stand-in resource(s), ${b.effects.length} single operation(s), ${(b.runs ?? []).length} workflow run(s) and ${(b.replays ?? []).length} replay rerun(s).`, sc));
-      for (const r of s.runs) {
-        const run = r.run;
-        const what = run.state !== "finished" ? "has not finished (sending the same run again goes on from where it stopped)" : run.outcome === "completed" ? "completed" : run.outcome === "stopped" ? "stopped before the end" : "completed with problems";
-        lines.push(line(`Run ${r.id} ${what}: ${run.results.length} of ${run.script.length} step(s) recorded, stand-in providers ${run.providers.join(" then ")}.`, cite("simulation-run", r.id)));
-        for (const x of run.results.slice(0, 30)) lines.push(line(`  Step ${x.index + 1}: ${shown(x.words, 400)}.`, cite("simulation-run", r.id)));
-      }
+      // Second review: the chat shows a view's first lines only, so the real access granted comes before the runs, and the newest run comes first with its steps (older runs one line each).
       const grants = b.grants ?? [];
       if (grants.length === 0) lines.push(line(`No real access was granted after this scope. After a run that completed, you can ask to grant an agent the access that run used; nothing in the scope grants it by itself.`, sc));
-      else for (const g of grants.slice(-10)) lines.push(line(`Real access you granted after run ${g.runId}: ${g.grantee} may ${g.action === "effect.perform" ? "change" : g.action} ${g.resource} for real (grant ${g.grantId}, ${g.at}).`, cite("grant-record", g.grantId)));
+      else for (const g of grants.slice(-10).reverse()) lines.push(line(`Real access you granted after run ${g.runId}: ${g.grantee} may ${g.action === "effect.perform" ? "change" : g.action} ${g.resource} for real (grant ${g.grantId}, ${g.at}).`, cite("grant-record", g.grantId)));
+      for (const [k, r] of [...s.runs].reverse().entries()) {
+        const run = r.run;
+        const what = run.state !== "finished" ? "has not finished (sending the same run again goes on from where it stopped)" : run.outcome === "completed" ? "completed" : run.outcome === "stopped" ? "stopped before the end" : "completed with problems";
+        lines.push(line(`${k === 0 ? "Newest run" : "Earlier run"} ${r.id} ${what}: ${run.results.length} of ${run.script.length} step(s) recorded, stand-in providers ${run.providers.join(" then ")}.`, cite("simulation-run", r.id)));
+        if (k === 0) for (const x of run.results.slice(0, 30)) lines.push(line(`  Step ${x.index + 1}: ${shown(x.words, 400)}.`, cite("simulation-run", r.id)));
+      }
     }
     return { observedAt: at, lines };
   }

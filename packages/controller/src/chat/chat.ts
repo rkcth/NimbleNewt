@@ -1464,7 +1464,7 @@ export class ChatService {
         const got = await this.#deps.api.handle(token, { v: API_VERSION, op: "simulation.run.get", args: { runId } });
         if (!got.ok) return refuse(got.error.code, got.error.message);
         const run = got.result["run"] as { state?: string; outcome?: string; results?: { kind?: string; outcome?: string; target?: string; agent?: string }[] };
-        if (run.state !== "finished" || run.outcome !== "completed") return refuse("invalid_transition", `the newest run of that scope ${run.state !== "finished" ? "has not finished" : `ended ${String(run.outcome)}`}, so nothing would be granted; run the simulation again first`);
+        if (run.state !== "finished" || run.outcome !== "completed" || !(run.results ?? []).every((r) => r.outcome === "armed" || r.outcome === "done" || r.outcome === "retried")) return refuse("invalid_transition", `the newest run of that scope ${run.state !== "finished" ? "has not finished" : `ended ${String(run.outcome)}`}, so nothing would be granted; run the simulation again first`);
         const used = (run.results ?? []).filter((r) => r.kind === "agent" && (r.outcome === "done" || r.outcome === "retried") && typeof r.target === "string");
         const resources = [...new Set(used.map((r) => r.target!))];
         args["runId"] = runId;

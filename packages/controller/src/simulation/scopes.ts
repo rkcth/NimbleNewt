@@ -495,9 +495,15 @@ export class SimulationService {
         for (let i = index; i < body.script.length; i++) await this.#record(runId, { index: i, kind: body.script[i]!.kind, outcome: "not-reached", words: "not reached: the simulation scope was closed", simulated: true }, body.armed, [], i === body.script.length - 1 ? "stopped" : undefined);
         return;
       }
+      // Second review: a run a step stopped goes no further, also when the process stopped before the later steps were recorded `not reached` (a resend would otherwise run them and the run
+      // could end `completed`).
+      if (body.results.some((x) => x.outcome === "stopped")) {
+        for (let i = index; i < body.script.length; i++) await this.#record(runId, { index: i, kind: body.script[i]!.kind, outcome: "not-reached", words: "not reached: the run stopped earlier", simulated: true }, body.armed, [], i === body.script.length - 1 ? "stopped" : undefined);
+        return;
+      }
       const step = body.script[index]!;
       const last = index === body.script.length - 1;
-      const outcomeSoFar = (extra: RunStepResult): RunOutcome => ([...body.results, extra].some((x) => x.outcome === "conflict" || x.outcome === "failed") ? "completed-with-problems" : "completed");
+      const outcomeSoFar = (extra: RunStepResult): RunOutcome => { const all = [...body.results, extra]; return all.some((x) => x.outcome === "stopped" || x.outcome === "not-reached") ? "stopped" : all.some((x) => x.outcome === "conflict" || x.outcome === "failed") ? "completed-with-problems" : "completed"; };
       if (step.kind === "provider-failure") {
         const result: RunStepResult = { index, kind: step.kind, outcome: "armed", target: step.route, words: `the next ${step.times === 1 ? "call" : `${step.times} calls`} to the stand-in provider ${step.route} fail${step.times === 1 ? "s" : ""} with ${step.failure} (injected)`, simulated: true };
         await this.#record(runId, result, [...body.armed, { route: step.route, failure: step.failure, left: step.times }], [], last ? outcomeSoFar(result) : undefined);
@@ -538,8 +544,11 @@ export class SimulationService {
     // 1. The agent reads the resource (kept with its tool call, so a rerun after a crash uses what it read then).
     const toolId = derivedId("eff", `${key}:tool`);
     const toolKnown = await this.#ports.effects.get(toolId);
-    const saw = typeof toolKnown?.input["expect"] === "string" ? toolKnown.input["expect"] as string : (await SimulatedServices.fromSnapshot((await this.#scope(body.scopeId)).body.world, () => this.#runner.now()).observe(ref))?.systemVersion;
+    let saw = typeof toolKnown?.input["expect"] === "string" ? toolKnown.input["expect"] as string : (await SimulatedServices.fromSnapshot((await this.#scope(body.scopeId)).body.world, () => this.#runner.now()).observe(ref))?.systemVersion;
     if (saw === undefined) return { result: { index, kind: "agent", agent: step.agent, target, outcome: "failed", words: `${target} is not in the scope`, simulated: true }, armed, effects };
+    // Second review: what the agent read is also kept with each of its model calls. A crash after the competing edit and before the tool call was recorded would otherwise make the rerun read
+    // the resource again, after the other writer's change: the edit would go unseen and the agent would write over it, and the run could end `completed` (which the grant step relies on).
+    const sawRecorded = toolKnown !== undefined;
     // 2. It asks a model: the real R02 fallback over the stand-in routes decides each attempt; each attempt is an effect of the scope answered by the stand-in provider.
     const attempts: { route: string; effectId: string; outcome: "answered" | "failed"; failure?: string }[] = [];
     let at = await router.begin(key);
@@ -551,11 +560,12 @@ export class SimulationService {
       const intentId = `${key}:a${at.attempt}`;
       const effectId = derivedId("eff", intentId);
       const known = await this.#ports.effects.get(effectId);
+      if (!sawRecorded && typeof known?.input["saw"] === "string") saw = known.input["saw"] as string;
       const route = at.route;
       const slot = armed.find((a) => a.route === route && a.left > 0);
       const failure = known !== undefined ? (typeof known.input["failure"] === "string" ? known.input["failure"] as ProviderFailure : undefined) : slot?.failure;
       if (failure !== undefined && slot !== undefined) slot.left -= 1;
-      if (known === undefined) await this.#ports.effects.intend({ commandId: intentId, actor: `simulation:${step.agent}`, kind: "model-call", target: `simulation:${body.scopeId}/provider:${at.route}`, input: { agent: step.agent, route: at.route, step: index, attempt: at.attempt, costMicros: 0, ...(failure === undefined ? {} : { failure }) }, taskId: body.taskId, simulation: body.scopeId });
+      if (known === undefined) await this.#ports.effects.intend({ commandId: intentId, actor: `simulation:${step.agent}`, kind: "model-call", target: `simulation:${body.scopeId}/provider:${at.route}`, input: { agent: step.agent, route: at.route, step: index, attempt: at.attempt, costMicros: 0, saw, ...(failure === undefined ? {} : { failure }) }, taskId: body.taskId, simulation: body.scopeId });
       effects.push(effectId);
       const out = await this.#ports.effects.run(effectId, providerBridge());
       if (out.status === "confirmed") { attempts.push({ route: at.route, effectId, outcome: "answered" }); await router.succeeded(key, at.callId, at.attempt); break; }
@@ -638,7 +648,9 @@ export class SimulationService {
     const runId = command.runId ?? runs.at(-1);
     if (runId === undefined) throw new DomainError("invalid_transition", "this simulation scope has no run yet; real access is granted after a simulation (simulation.run) has completed");
     const run = (await this.#run(runId)).body;
-    if (run.state !== "finished" || run.outcome !== "completed") throw new DomainError("invalid_transition", `the run ${runId} ${run.state !== "finished" ? "has not finished" : `ended ${run.outcome}`}, so it does not show the work can be done; nothing was granted (run the simulation again, or grant with grant.create)`);
+    // Second review: every step is checked as recorded too, not only the run's outcome: a run whose steps did not all finish cleanly shows nothing a grant could rest on.
+    const clean = run.results.length === run.script.length && run.results.every((x) => x.outcome === "armed" || x.outcome === "done" || x.outcome === "retried");
+    if (run.state !== "finished" || run.outcome !== "completed" || !clean) throw new DomainError("invalid_transition", `the run ${runId} ${run.state !== "finished" ? "has not finished" : run.outcome !== "completed" ? `ended ${run.outcome}` : "has a step that did not finish cleanly"}, so it does not show the work can be done; nothing was granted (run the simulation again, or grant with grant.create)`);
     const resources = [...new Set(run.results.filter((r) => r.kind === "agent" && (r.outcome === "done" || r.outcome === "retried") && r.target !== undefined).map((r) => r.target!))];
     if (resources.length === 0) throw new DomainError("invalid_transition", "the run changed no service resource, so there is no access to grant");
     const grants: { id: string; action: string; project: string; resource: string; replayed: boolean }[] = [];
@@ -668,7 +680,8 @@ export class SimulationService {
     if (by.kind !== "owner") throw new DomainError("not_found", "no such simulation scope");
     const taskId = query.taskId === undefined ? undefined : checkTaskId(query.taskId);
     if (by.taskScope !== undefined && taskId !== by.taskScope.taskId) throw new DomainError("forbidden", "a credential confined to a task may read the simulation scopes of that task only");
-    const limit = Math.min(Math.max(query.limit ?? 5, 1), 20);
+    if (query.limit !== undefined && !(typeof query.limit === "number" && Number.isSafeInteger(query.limit) && query.limit >= 1 && query.limit <= 20)) invalid("limit", "must be a whole number from 1 to 20");
+    const limit = query.limit ?? 5;
     const all: { id: string; scope: SimulationScopeBody }[] = [];
     let scanned = 0;
     for (let after: string | undefined; ;) {
