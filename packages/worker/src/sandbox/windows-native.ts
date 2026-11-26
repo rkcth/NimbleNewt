@@ -11,7 +11,7 @@ import { jobFile, jobsDir, probeProfile, runNativeJob, runProfileFor, sweepLefto
 import { nativeRealHost } from "./windows-native-real.js";
 import {
   DEFAULT_JOB_LIMITS, DEFAULT_MAX_CONCURRENT_RUNS, EXIT_BUSY, LPAC_CAPABILITIES, MAX_CONCURRENT_RUNS_LIMIT, MAX_RUN_MS, NATIVE_BACKEND_NAME, NATIVE_MODE, REFUSED_ROUTE,
-  checkNativeRecipe, checkProgramFolder, grantsFor, launcherArgs, nativeEnv, newRunProfileName, programPath,
+  checkNativeRecipe, checkProgramFolder, grantsFor, isWindowStationMode, launcherArgs, nativeEnv, newRunProfileName, programPath,
   type ContainerKind, type NativeSettings,
 } from "./windows-native-plan.js";
 import { checkWindowsHostPath, overlapsWin } from "./windows-plan.js";
@@ -187,7 +187,10 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     if (info !== undefined && !info.ok && info.windowStationOk === false) return no(`the launcher could not make a private window station and desktop for the container (${info.windowStationError ?? info.error ?? "no reason given"})`);
     if (info === undefined || !info.ok) return no(`the launcher could not make the container profile (${info?.error ?? "no answer"})`);
     if (probe.problem !== undefined) return no(`the probe's container profile could not be deleted: ${probe.problem}`);
-    if (info.windowStationOk === true) notes.push("each run gets a private window station and desktop made for it (the launcher made and closed one now)");
+    // A mode this backend does not know is refused (fail closed), whatever else the line says: the launcher must name one of the two private modes, or (an older launcher) nothing at all.
+    if (info.windowStation !== undefined && !isWindowStationMode(info.windowStation)) return no(`the launcher reported a window-object mode this backend does not know ("${info.windowStation}")`);
+    if (info.windowStationOk === true && info.windowStation === "home-desktop") notes.push(`each run gets a private DESKTOP on the user's own window station (WinSta0), made with its final access list (the launcher made and closed one now; the named private window station was refused: ${info.privateStationError ?? "no reason given"}). The clipboard and the atom table of that station stay shared with the signed-in session (an accepted exposure, owner decision 2026-11-26); the desktop closes the window list, the foreground window, the cursor and the screen pixels`);
+    else if (info.windowStationOk === true) notes.push("each run gets a private window station and desktop made for it (the launcher made and closed one now)");
 
     // The real test: a node program is started inside the container and asked to do what it must not be able to.
     const nonce = randomUUID();

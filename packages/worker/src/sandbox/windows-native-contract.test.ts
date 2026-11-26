@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { LPAC_CAPABILITIES, RUN_PROFILE_PREFIX, isRunProfileName, parseLauncherLine } from "./windows-native-plan.js";
+import { LPAC_CAPABILITIES, RUN_PROFILE_PREFIX, WINDOW_STATION_MODES, isRunProfileName, isWindowStationMode, parseLauncherLine } from "./windows-native-plan.js";
 
 // Card A03b slice 3: the contract between the TypeScript side (windows-native-plan.ts, windows-native-job.ts) and the Rust launcher crate (native/nn-launcher). The crate cannot run here
 // (Windows only), so these tests read its source and the compiled TypeScript and pin the NAMES that cross the boundary: the `tool` identifier, the JSON field names the parser reads, the
@@ -120,7 +120,7 @@ test("the product build is the default: the feature is off, the binary is named 
   assert.match(cargo, /^\[\[bin\]\]\nname = "nn-launcher"/m);
   // The feature only switches on these extra windows-sys modules that the experiment build's code calls (round 5): no dependency (`dep:`, another crate's feature), no other module, no default.
   // Any change to this list is a change to this test. (The window station and Gdi modules are the product's own since the private window station fix: see the next test.)
-  assert.match(cargo, /^experiment = \["windows-sys\/Win32_System_SystemInformation", "windows-sys\/Wdk_System_SystemServices"\]$/m);
+  assert.match(cargo, /^experiment = \["windows-sys\/Win32_System_SystemInformation", "windows-sys\/Wdk_System_SystemServices", "windows-sys\/Win32_System_DataExchange", "windows-sys\/Win32_System_LibraryLoader", "windows-sys\/Win32_UI_Input_KeyboardAndMouse", "windows-sys\/Win32_UI_WindowsAndMessaging", "windows-sys\/Win32_System_Console"\]$/m);
   assert.equal(cargo.match(/^experiment\s*=/gm)?.length, 1, "one definition of the feature");
   // The product's dependency table is exactly windows-sys: the feature cannot reach an optional dependency because there is none.
   const deps = /^\[dependencies\]\n([^[]*)/m.exec(cargo)?.[1] ?? "";
@@ -174,9 +174,11 @@ test("every run of the PRODUCT build is given a private window station and deskt
   const wincode = code(win);
   assert.match(wincode, /fn private_wanted\(a: &Args\) -> bool \{\n\s*#\[cfg\(feature = "experiment"\)\]\n\s*\{ a\.desktop == crate::args::DesktopMode::Private \}\n\s*#\[cfg\(not\(feature = "experiment"\)\)\]\n\s*\{ let _ = a; true \}/, "the product always wants it");
   const run = between(wincode, "fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {", "#[allow(clippy::too_many_arguments)]");
-  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0)") > 0, "created in run");
-  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0)") < run.indexOf("GrantSet { sid: sid.0"), "made before any grant");
-  assert.match(run, /Err\(e\) => return \(fail\(j, "grant", &e\), true\)/, "the stage is the existing `grant` (STAGE_KIND maps it); the message starts with 'window objects:'");
+  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0, is_elevated())") > 0, "created in run");
+  assert.ok(run.indexOf("privdesk::PrivateDesktop::create(sid.0, is_elevated())") < run.indexOf("GrantSet { sid: sid.0"), "made before any grant");
+  assert.match(run, /Ok\(p\) => \{\s*j\.s\("windowStation", p\.mode\(\)\.name\(\)\);/, "the run's line names the mode that was made");
+  assert.match(run, /crate::winobj::home_needs_ui_limits\(p\.mode\(\), a\.ui_limits\)\s*\{ return \(fail\(j, "grant", &e\), true\); \}\s*private = Some\(p\)/, "the home desktop is never used without the job's UI limits");
+  assert.match(run, /Err\(e\) => \{ j\.s\("windowStation", e\.mode\.name\(\)\);[^\n]*return \(fail\(j, "grant", &e\.message\), true\) \}/, "the stage is the existing `grant` (STAGE_KIND maps it); the message starts with 'window objects:'; the mode attempted is named");
   assert.ok(priv.match(/format!\("window objects:/g)!.length >= 3 && /fn trouble\(what: &str, code: u32\) -> String \{ format!\("window objects: /.test(priv), "every message starts with 'window objects:'");
   const inner = between(wincode, "fn run_inner(", "for spec in &a.grants {");
   assert.match(inner, /if private_wanted\(a\) && private_desktop\.is_none\(\) \{ return Err\(\("grant", "window objects: /, "no private desktop, no start");
@@ -190,11 +192,13 @@ test("the private window station code never touches an object of the launcher's 
   const priv = code(crate("src/privdesk.rs"));
   const pure = code(crate("src/winobj.rs").split("#[cfg(test)]")[0]!);
   for (const text of [priv, pure]) {
-    assert.ok(!/winsta0/i.test(text), "never the interactive station");
+    if (text === priv) assert.ok(!/winsta0/i.test(text), "privdesk.rs never names the interactive station: the one name is winobj's INTERACTIVE_STATION");
     assert.ok(!/OpenWindowStationW|OpenDesktopW|GetThreadDesktop|SetThreadDesktop|SwitchDesktop|SetEntriesInAclW|SetKernelObjectSecurity|SetUserObjectSecurity/.test(text), "no open by name, no entry builder that rebuilds the list");
   }
   // The product writes NO DACL: both objects are CREATED with their final one (winobj::private_dacl in the SECURITY_ATTRIBUTES of the creating call). The DACL writers of the experiment
   // (write_dacl, add_entry) are compiled into the experiment build only, and the one SetSecurityDescriptorDacl is on the launcher's own new descriptor, inside CreationSd::new.
+  assert.equal(pure.match(/winsta0/gi)!.length, 1, "winobj names WinSta0 once: the constant the home desktop's station check and lpDesktop use");
+  assert.match(pure, /pub\(crate\) const INTERACTIVE_STATION: &str = "WinSta0";/);
   const raw = crate("src/privdesk.rs");
   for (const f of ["pub(crate) fn write_dacl(", "pub(crate) fn add_entry(", "pub(crate) const WRITE_DAC_BIT"]) {
     const at = raw.indexOf(f);
@@ -206,7 +210,9 @@ test("the private window station code never touches an object of the launcher's 
   assert.equal(priv.match(/SetSecurityDescriptorDacl\(/g)!.length, 1);
   assert.ok(between(priv, "impl CreationSd {", "fn creation_sd(").includes("SetSecurityDescriptorDacl(psd, 1, p, 0)"), "on the launcher's own new descriptor only");
   assert.match(priv, /SetSecurityDescriptorControl\(psd, SE_DACL_PROTECTED, SE_DACL_PROTECTED\)/, "nothing is inherited into it");
-  const create = between(priv, "pub(crate) fn create(sid: PSID)", "fn check(");
+  const create = between(priv, "fn create_named(sid: PSID", "fn check(");
+  const chooser = between(priv, "pub(crate) fn create(sid: PSID, elevated: bool)", "pub(crate) fn mode(&self)");
+  const home = between(priv, "fn create_home(sid: PSID)", "fn create_named(sid: PSID");
   assert.ok(!/add_entry|write_dacl|WRITE_DAC/.test(create), "the product's create neither writes a DACL nor asks for WRITE_DAC");
   assert.match(create, /CreateWindowStationW\(wstation\.as_ptr\(\), winobj::STATION_CREATE_ONLY, STATION_RIGHTS, &sa\)/, "made with its final DACL and CWF_CREATE_ONLY (an existing station of that name is never opened)");
   assert.match(pure, /pub\(crate\) const STATION_CREATE_ONLY: u32 = 0x0000_0001;/, "CWF_CREATE_ONLY is 1 (winuser.h)");
@@ -223,7 +229,20 @@ test("the private window station code never touches an object of the launcher's 
   assert.match(pure, /DESKTOP_FULL: u32 = 0x000F_01FF;/);
   assert.match(priv, /winobj::private_acl_ok\(c\.bytes\(\), sid_b, mask, &self\.own\)/, "the read-back is checked against the launcher's own token user and owner");
   assert.match(priv, /for class in \[TokenUser, TokenOwner\]/, "the user first: own[0] is the account the objects are made for");
-  assert.equal(priv.match(/\bcheck\(h[sd], &sid_b, (STATION|DESKTOP)_RIGHTS, /g)!.length, 2, "both objects read back and checked");
+  assert.equal(create.match(/\bcheck\(h[sd], &sid_b, (STATION|DESKTOP)_RIGHTS, /g)!.length, 2, "both named objects read back and checked");
+  // The HOME DESKTOP (plan 12.5): chosen only for a non-elevated launcher refused with error 5; never an inherited desktop; created with its final list; nothing written; the process's own station is never closed or switched.
+  assert.match(chooser, /Err\(message\) if winobj::try_home_desktop\(elevated, station_error\) => match Self::create_home\(sid\)/, "the only road to the home desktop");
+  assert.equal(chooser.match(/create_home\(/g)!.length, 1);
+  assert.match(chooser, /Err\(message\) => Err\(MakeError \{ mode: WindowMode::Private, message, named_refusal: None \}\)/, "every other failure of the named station stays a failure");
+  assert.match(chooser, /Err\(home\) => Err\(MakeError \{ mode: WindowMode::HomeDesktop/, "a failed home desktop is a failure: nothing starts");
+  assert.ok(!/null\(\)\s*,\s*null\(\)\s*\)|inherit|lpDesktop/i.test(chooser + home), "no inherited-desktop fallback anywhere in the choice");
+  assert.ok(!/add_entry|write_dacl|WRITE_DAC|SetSecurityInfo|SetProcessWindowStation|StationSwitch|CreateWindowStationW|CloseWindowStation/.test(home), "the home desktop writes no list, switches no station and closes none");
+  assert.ok(home.indexOf("winobj::may_make_home_desktop(&station, flags)") > 0 && home.indexOf("winobj::may_make_home_desktop(&station, flags)") < home.indexOf("CreateDesktopW("), "the station is checked before the desktop is made");
+  assert.match(home, /creation_sd\(&own\[0\], &sid_b, DESKTOP_RIGHTS, winobj::DESKTOP_FULL, "home desktop"\)\?/, "the same descriptor as the private desktop");
+  assert.match(home, /CreateDesktopW\(wide\(&name\)\.as_ptr\(\), null\(\), null\(\), 0, DESKTOP_RIGHTS, &sa\)/);
+  assert.match(home, /p\.check\(hd, &sid_b, DESKTOP_RIGHTS, "home desktop"\)\?/, "read back and checked with the same allow list");
+  assert.match(home, /station: null_mut\(\)/, "no station handle is held, so none is closed");
+  assert.match(home, /ERROR_ALREADY_EXISTS/, "an existing desktop name is refused, never adopted");
   assert.ok(create.indexOf("let own = own_principals()") > 0 && create.indexOf("let own = own_principals()") < create.indexOf("CreateWindowStationW("), "the own principals are read before anything is made");
   // the check is an allow list: anything that is not the container, a fixed trusted principal or the launcher's own is refused (no logon-session wildcard)
   assert.match(pure, /const ALWAYS_TRUSTED: \[&str; 3\] = \["S-1-5-18", "S-1-5-32-544", "S-1-3-4"\];/);
@@ -232,7 +251,7 @@ test("the private window station code never touches an object of the launcher's 
   assert.match(pure, /return Err\(format!\("\{text\} holds an allow entry \(only the container/);
   assert.match(priv, /impl Drop for StationSwitch \{ fn drop\(&mut self\) \{ self\.restore\(\); \} \}/);
   assert.match(priv, /if !restored \{ return Err\(trouble\("launcher could not switch back/);
-  assert.ok(priv.indexOf("let restored = back.restore();") < priv.indexOf("p.check(hd, &sid_b"), "back on its own station before anything else is done");
+  assert.ok(create.indexOf("let restored = back.restore();") < create.indexOf("p.check(hd, &sid_b"), "back on its own station before anything else is done");
   // objects are closed desktop first, then the station
   assert.ok(priv.indexOf("CloseDesktop(self.desktop") < priv.indexOf("CloseWindowStation(self.station"));
   // only an AppContainer profile's SID is ever given an entry
@@ -250,7 +269,16 @@ test("`info` and `check` report whether a private window station can be made (in
   const report = between(w, "fn report_private_station", "fn run(");
   assert.match(report, /if p\.close\(\) \{ j\.b\("windowStationOk", true\); return Ok\(\(\)\); \}/, "ok only when the objects were also closed");
   for (const k of ["windowStationOk", "windowStationError"]) assert.ok(report.includes(`"${k}"`), k);
-  assert.ok(/j\.s\("windowStation", "private"\)/.test(w), "the product names the mode");
+  assert.ok(/j\.s\("windowStation", p\.mode\(\)\.name\(\)\)/.test(report) && /j\.s\("windowStation", e\.mode\.name\(\)\)/.test(report), "the product names the mode, on success and on failure");
+  assert.ok(/j\.s\("privateStationError", r\)/.test(report), "and the named station's refusal when the home desktop was used");
+  assert.ok(!/j\.s\("windowStation", "private"\)/.test(w), "no fixed word: the mode is the one that was made");
+  const home = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true, windowStation: "home-desktop", windowStationOk: true, privateStationError: "window objects: the private window station could not be made (error 5)" }));
+  assert.deepEqual([home?.windowStation, home?.windowStationOk, home?.privateStationError], ["home-desktop", true, "window objects: the private window station could not be made (error 5)"]);
+  assert.deepEqual([...WINDOW_STATION_MODES], ["private", "home-desktop"]);
+  for (const m of WINDOW_STATION_MODES) assert.ok(isWindowStationMode(m), m);
+  for (const m of ["inherit", "winsta0", "Private", "", "home-desktop ", 1, null, undefined]) assert.ok(!isWindowStationMode(m), String(m));
+  assert.ok(/WINDOW_STATION_MODES = \["private", "home-desktop"\]/.test(here("windows-native-plan.js")), "the list is the two modes the crate's WindowMode names");
+  assert.ok(/WindowMode::Private => "private", WindowMode::HomeDesktop => "home-desktop"/.test(crate("src/winobj.rs")), "the crate's names are the ones the backend reads");
   const ok = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: true, windowStation: "private", windowStationOk: true }));
   assert.deepEqual([ok?.windowStation, ok?.windowStationOk, ok?.windowStationError], ["private", true, undefined]);
   const bad = parseLauncherLine(JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "grant", windowStation: "private", windowStationOk: false, windowStationError: "window objects: x (error 5)" }));

@@ -695,15 +695,23 @@ fn private_wanted(a: &Args) -> bool {
     { let _ = a; true }
 }
 
-/// `info` and `check`: can this account make (and close) a private window station for the container? Writes `windowStationOk`, and `windowStationError` when not. Err: the message.
+/// `info` and `check`: can this account make (and close) the window objects for the container? Writes `windowStation` (the mode: `private` for a named station of its own, `home-desktop` for the
+/// non-elevated user's private desktop on WinSta0), `windowStationOk`, and `windowStationError` when not; when the home desktop was used because the named station was refused, also
+/// `privateStationError` (the named station's own message). Err: the message.
 fn report_private_station(j: &mut Json, sid: PSID) -> Result<(), String> {
-    match privdesk::PrivateDesktop::create(sid) {
+    match privdesk::PrivateDesktop::create(sid, is_elevated()) {
         Ok(mut p) => {
+            j.s("windowStation", p.mode().name());
+            if let Some(r) = p.named_refusal() { j.s("privateStationError", r); }
             if p.close() { j.b("windowStationOk", true); return Ok(()); }
             let e = format!("window objects: the private window station or desktop could not be closed (error {})", p.close_error().unwrap_or(0));
             j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e)
         }
-        Err(e) => { j.b("windowStationOk", false); j.s("windowStationError", &e); Err(e) }
+        Err(e) => {
+            j.s("windowStation", e.mode.name());
+            if let Some(r) = &e.named_refusal { j.s("privateStationError", r); }
+            j.b("windowStationOk", false); j.s("windowStationError", &e.message); Err(e.message)
+        }
     }
 }
 
@@ -738,7 +746,16 @@ fn run_core(a: &Args, j: Json, sid: &Sid) -> (Outcome, bool) {
     // The private window station and desktop come first: if they cannot be made nothing else was changed (no grant, no job), and the program does not start.
     let mut private: Option<privdesk::PrivateDesktop> = None;
     if private_wanted(a) {
-        match privdesk::PrivateDesktop::create(sid.0) { Ok(p) => private = Some(p), Err(e) => return (fail(j, "grant", &e), true) }
+        match privdesk::PrivateDesktop::create(sid.0, is_elevated()) {
+            Ok(p) => {
+                j.s("windowStation", p.mode().name());
+                if let Some(r) = p.named_refusal() { j.s("privateStationError", r); }
+                // The home desktop shares the user's window station: the job's UI limits are not optional there (the backend always passes them).
+                if let Err(e) = crate::winobj::home_needs_ui_limits(p.mode(), a.ui_limits) { return (fail(j, "grant", &e), true); }
+                private = Some(p)
+            }
+            Err(e) => { j.s("windowStation", e.mode.name()); if let Some(r) = &e.named_refusal { j.s("privateStationError", r); } return (fail(j, "grant", &e.message), true) }
+        }
     }
     let mut grants = GrantSet { sid: sid.0, items: Vec::new() };
     #[cfg(feature = "experiment")]
@@ -960,9 +977,8 @@ fn describe(a: &Args, mut j: Json) -> Json {
     j.b("uiLimits", a.ui_limits);
     j.n("timeoutMs", a.timeout_ms as i64);
     j.s("profileName", &a.name);
-    // The window station of the child: always a private one in the product (see privdesk.rs); the experiment build names its mode.
-    #[cfg(not(feature = "experiment"))]
-    j.s("windowStation", "private");
+    // The window station of the child: in the product it is `private` or `home-desktop` (see privdesk.rs); the line says which one only once the objects were made (or refused), so an early failure
+    // claims neither. The experiment build names its own mode here.
     #[cfg(feature = "experiment")]
     j.s("windowStation", a.desktop.name());
     #[cfg(feature = "experiment")]
