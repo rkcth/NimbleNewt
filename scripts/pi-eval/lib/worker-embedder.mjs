@@ -62,8 +62,18 @@ export function radianceOnlyFetch({ baseUrl, fetch: inner = globalThis.fetch, on
     let release;
     const mine = new Promise((ok) => { release = ok; });
     const before = chain;
+    // The next request waits for the one before this one AND this one, so a request that leaves the queue early never lets the next one start while an earlier one is still out.
     chain = chain.then(() => mine);
-    await before;
+    const signal = init.signal;
+    const abortedError = () => signal?.reason ?? new DOMException("This operation was aborted", "AbortError");
+    // Aborted while it waits its turn: it is refused at once (its caller is not kept waiting for the request in flight), it gives its place back, nothing is sent and it is told as not sent.
+    if (signal !== undefined && signal !== null) {
+      let onAbort;
+      const aborted = new Promise((ok) => { onAbort = () => ok(true); if (signal.aborted === true) ok(true); else signal.addEventListener?.("abort", onAbort, { once: true }); });
+      const gotAborted = await Promise.race([before.then(() => false), aborted]);
+      signal.removeEventListener?.("abort", onAbort);
+      if (gotAborted || signal.aborted === true) { tell({ n: null, sent: false, streamed: false, status: "aborted", ms: 0, tools: [] }); release(); throw abortedError(); }
+    } else await before;
     const number = ++n;
     let streamed = false;
     let tools = [];
@@ -75,10 +85,9 @@ export function radianceOnlyFetch({ baseUrl, fetch: inner = globalThis.fetch, on
     } catch { /* not JSON: told as not streamed */ }
     const t0 = Date.now();
     let freed = false;
-    const free = (status) => { if (freed) return; freed = true; tell({ n: number, streamed, status, ms: Date.now() - t0, tools }); release(); };
-    // Aborted while it waited its turn: the place is given back at once and nothing is sent.
-    if (init.signal?.aborted === true) { free("aborted"); throw init.signal.reason ?? new DOMException("This operation was aborted", "AbortError"); }
-    init.signal?.addEventListener?.("abort", () => free("aborted"), { once: true });
+    const onSentAbort = () => free("aborted");
+    const free = (status) => { if (freed) return; freed = true; signal?.removeEventListener?.("abort", onSentAbort); tell({ n: number, sent: true, streamed, status, ms: Date.now() - t0, tools }); release(); };
+    signal?.addEventListener?.("abort", onSentAbort, { once: true });
     let res;
     try { res = await inner(input, { ...init, redirect: "manual" }); } catch (error) { free("failed"); throw error; }
     if (res.body === null) { free(res.status); return res; }
@@ -107,6 +116,8 @@ export async function openW09Installation(o) {
   if (!Number.isInteger(o.contextTokens) || o.contextTokens <= 0) throw new Error("contextTokens must be the route's real context window (a positive whole number)");
   if (typeof o.model !== "string" || !/^[\w.:-]{1,120}$/.test(o.model)) throw new Error("the model name must be a plain model ID");
   if (typeof o.fetch !== "function") throw new Error("give the run's fetch (radianceOnlyFetch)");
+  // The standby route must stay unreachable: the run's fetch lets through only the Radiance address, so the two may never be the same server.
+  if (new URL(radianceBase(o.baseUrl)).host === new URL(STANDBY_ENDPOINT).host) throw new Error("the Radiance address must not be the standby route's address");
   mkdirSync(o.dataDir, { recursive: true, mode: 0o700 });
   const load = o.load ?? ((pkg) => import(pathToFileURL(join(o.root, "packages", pkg, "dist", "index.js")).href));
   const { launch } = await load("controller");

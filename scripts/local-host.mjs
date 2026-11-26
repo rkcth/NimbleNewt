@@ -186,7 +186,11 @@ export function localHostBuilder(setup) {
               namespaceId: (order) => services.namespaceId(order),
               bridge: (order, call, token, request) => {
                 const refused = setup.bridgeFilter?.(order, request);
-                if (refused !== undefined) return Promise.resolve(refused);
+                // Only a refusal can be the filter's answer: it never answers for the controller.
+                if (refused !== undefined) {
+                  if (refused === null || typeof refused !== "object" || refused.ok !== false || typeof refused.code !== "string") throw new Error("a bridge filter may only refuse a request ({ ok: false, code, message })");
+                  return Promise.resolve({ ok: false, code: refused.code, message: String(refused.message ?? "refused").slice(0, 300) });
+                }
                 if (services.bridge === undefined) throw new Error("the tool bridge is not available");
                 return services.bridge(order, call, token, request);
               },

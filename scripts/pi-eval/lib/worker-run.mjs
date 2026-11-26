@@ -170,7 +170,7 @@ export async function runWorkerOne(ctx, task, variantName, repeat, { beforeAgent
       const g = await beforeAgent();
       if (!g.ok) { record.gateRefused = String(g.why ?? "refused"); throw new Error(`the Radiance gate refused the start: ${record.gateRefused}`); }
     }
-    const fetch = radianceOnlyFetch({ baseUrl: r.baseUrl, fetch: ctx.fetch ?? globalThis.fetch, onCall: (c) => { if (c.streamed) { requests.agent++; if (agentTools === null) agentTools = [...c.tools].sort(); } else requests.second++; }, onRefused: () => { requests.refused++; } });
+    const fetch = radianceOnlyFetch({ baseUrl: r.baseUrl, fetch: ctx.fetch ?? globalThis.fetch, onCall: (c) => { if (c.sent === false) return; if (c.streamed) { requests.agent++; if (agentTools === null) agentTools = [...c.tools].sort(); } else requests.second++; }, onRefused: () => { requests.refused++; } });
     inst = await openW09Installation({
       root: ctx.root, dataDir: join(nnDir, "data"), baseUrl: r.baseUrl, model: r.model, contextTokens: r.contextTokens, ...(r.maxTokens === undefined ? {} : { maxTokens: r.maxTokens }), ...(r.reasoningTokens === undefined ? {} : { reasoningTokens: r.reasoningTokens }),
       ...(r.apiKey === undefined ? {} : { apiKey: r.apiKey }), fetch, prepareCheckout: dependencyCopier(dir, task.copy ?? []), ...(bridgeFilterFor(variant) === undefined ? {} : { bridgeFilter: bridgeFilterFor(variant) }),

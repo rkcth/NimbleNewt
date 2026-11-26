@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadTaskset } from "./pi-eval/lib/taskset.mjs";
-import { radianceBase, radianceOnlyFetch, attemptSummary } from "./pi-eval/lib/worker-embedder.mjs";
+import { radianceBase, radianceOnlyFetch, attemptSummary, openW09Installation } from "./pi-eval/lib/worker-embedder.mjs";
 import { DESCRIPTION_MAX, SANDBOX_NODE, SHIPPED_VARIANT, WORKER_VARIANTS, bridgeFilterFor, buildCheck, classifyWorkerRun, fileToolsLine, offersFileTools, releaseBlocker, renderWorkerPrompt, runWorkerOne, workerTitle } from "./pi-eval/lib/worker-run.mjs";
 import { piContextWindow } from "./pi-eval/worker-run.mjs";
 
@@ -26,14 +26,16 @@ const ok200 = (text) => new Response(text, { status: 200, headers: { "content-ty
 
 test("the run's fetch sends only POST <base>/chat/completions to the Radiance address; any other method, path, query or host is refused before it leaves", async () => {
   const sent = [];
-  const f = radianceOnlyFetch({ baseUrl: `${BASE}/`, fetch: async (url, init) => { sent.push([String(url), init.method]); return ok200("{}"); } });
+  const f = radianceOnlyFetch({ baseUrl: `${BASE}/`, fetch: async (url, init) => { sent.push([String(url), init.method, init.redirect]); return ok200("{}"); } });
   assert.equal((await f(`${BASE}/chat/completions`, { method: "POST", body: "{}" })).status, 200);
   for (const [url, method] of [[`${BASE}/chat/completions`, "GET"], [`${BASE}/models`, "POST"], [`${BASE}/chat/completions?x=1`, "POST"], ["https://api.openai.com/v1/chat/completions", "POST"], ["http://127.0.0.1:8003/v1/chat/completions", "POST"], [`${BASE}/messages`, "POST"]]) {
     await assert.rejects(f(url, { method, body: "{}" }), /sends only POST http:\/\/127\.0\.0\.1:8002\/v1\/chat\/completions/, `${method} ${url}`);
   }
-  assert.deepEqual(sent, [[`${BASE}/chat/completions`, "POST"]], "nothing refused reached the transport");
+  assert.deepEqual(sent, [[`${BASE}/chat/completions`, "POST", "manual"]], "nothing refused reached the transport, and a redirect is never followed");
   assert.throws(() => radianceBase("http://u:p@127.0.0.1:8002/v1"), /credentials/);
   assert.throws(() => radianceBase("file:///etc/passwd"), /http or https/);
+  // The standby route's address can never be the one the fetch lets through.
+  await assert.rejects(openW09Installation({ root: repository, dataDir: "/nonexistent-w09", baseUrl: "http://127.0.0.1:9/v1", model: "m", contextTokens: 65536, fetch: async () => ok200("{}") }), /must not be the standby route's address/);
 });
 
 test("the run's fetch sends one request at a time: the next waits until the previous reply was read to its end, cancelled, aborted or failed; each call is told with its tools", async () => {
@@ -63,6 +65,30 @@ test("the run's fetch sends one request at a time: the next waits until the prev
   assert.equal(told[0].streamed, true);
   assert.deepEqual(told[0].tools, ["nimblenewt__work-end"]);
   assert.equal(told[1].streamed, false);
+});
+
+test("a request aborted while it waits behind one in flight is refused at once, is never sent or counted as sent, and the request after it still waits for the one in flight", async () => {
+  const order = [];
+  const told = [];
+  let n = 0;
+  let finishFirst;
+  const f = radianceOnlyFetch({ baseUrl: BASE, onCall: (c) => told.push(c), fetch: async () => { const i = ++n; order.push(`start ${i}`); return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(`r${i}`)); if (i === 1) finishFirst = () => { order.push("end 1"); c.close(); }; else c.close(); } }), { status: 200 }); } });
+  const first = await f(`${BASE}/chat/completions`, { method: "POST", body: "{}" });
+  const ac = new AbortController();
+  const waiting = f(`${BASE}/chat/completions`, { method: "POST", body: "{}", signal: ac.signal });
+  const third = f(`${BASE}/chat/completions`, { method: "POST", body: "{}" });
+  await new Promise((r) => setTimeout(r, 20));
+  ac.abort();
+  await assert.rejects(waiting, /abort/i, "refused while the first reply is still open");
+  assert.deepEqual(order, ["start 1"], "nothing else was sent while the first is out");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(order, ["start 1"], "the third still waits for the first");
+  const reading = first.text();
+  finishFirst();
+  assert.equal(await reading, "r1");
+  assert.equal(await (await third).text(), "r2");
+  assert.deepEqual(order, ["start 1", "end 1", "start 2"]);
+  assert.deepEqual(told.map((c) => [c.sent, c.status]), [[false, "aborted"], [true, 200], [true, 200]]);
 });
 
 // ---- the task text ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -142,7 +168,8 @@ test("a shipped variant whose W01 gates do not hold writes a release blocker wit
   try {
     const rec = (i, size, outcome, variant = "D") => ({ runId: `r${size}${i}${variant}`, taskId: `t-${size}`, size, variant, outcome, reason: "x", wallMs: 1, artifacts: `/a/${i}`, worker: { attemptId: `att-${i}`, questioning: "supported", verifications: ["passed"] } });
     const failing = [rec(1, "S", "verified-finish"), rec(2, "S", "wrong")];
-    const b = await releaseBlocker({ records: failing, resultsDir: dir, batchId: "w09-batch-x", benchCommit: "abc", route: { provider: "radiance", model: "m", kind: "radiance" }, now: () => "2026-11-26T00:00:00Z" });
+    // A run of another variant in the same batch is neither counted nor attached.
+    const b = await releaseBlocker({ records: [...failing, rec(3, "S", "wrong", "C")], resultsDir: dir, batchId: "w09-batch-x", benchCommit: "abc", route: { provider: "radiance", model: "m", kind: "radiance" }, now: () => "2026-11-26T00:00:00Z" });
     assert.equal(b.pass, false);
     const j = JSON.parse(readFileSync(b.json, "utf8"));
     assert.equal(j.kind, "release-blocker");
