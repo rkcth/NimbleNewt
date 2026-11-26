@@ -13,7 +13,9 @@ import { GitBridge, LocalWorkspaces, type HostWorkspaceCall, type LandingChecksO
 // re-applied (restacked) submission has its landing checks run again on the re-applied tree; and a task leaves the shared checkout's own Git metadata (config, hooks, info, worktrees) as it was.
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
 const skip = hasGit ? false : "git is not installed";
-const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
+// core.autocrlf=false as the host's own Git runs (GitBridge): git for Windows (and the hosted Windows runners) sets core.autocrlf=true system wide, so without it a reset of the shared tree here would write CRLF over
+// committed LF files, and the host would then rightly see them as uncommitted changes.
+const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
 let counter = 0;
 const rid = (): string => { const n = counter++; return `wsr-pzzzzzzzzzzzzzzz${"abcdefghijklmnopqrstuvwxyz"[Math.floor(n / 26) % 26]}${"abcdefghijklmnopqrstuvwxyz"[n % 26]}aa`; };
 const call = (operation: HostWorkspaceCall["operation"], more: Partial<HostWorkspaceCall> = {}): HostWorkspaceCall => ({ requestId: rid(), operation, taskId: "tsk-one", projectId: "prj-one", reason: "test", quietAttempts: [], ...more });
@@ -320,7 +322,7 @@ test("a task leaves the shared checkout's Git metadata as it was: .git/config, h
     sh(w.shared, "checkout", "-q", "--", ".");
     sh(w.shared, "clean", "-qfd");
     const landed = await w.ws.port.run(call("landing"));
-    assert.equal(landed.ok, true, JSON.stringify(landed));
+    assert.equal(landed.ok, true, `${JSON.stringify(landed)}; shared tree status: ${JSON.stringify(sh(w.shared, "status", "--porcelain=v1", "--untracked-files=all"))}`);
     sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "--no-verify", "-m", "landed");
     assert.equal((await w.ws.port.run(call("refresh"))).ok, true);
     await w.ws.ensure({ ...scope, attemptId: "att-2" });
