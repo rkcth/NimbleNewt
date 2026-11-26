@@ -9,7 +9,7 @@ import { DomainError } from "../domain/errors.js";
 export const BACKEND_KINDS = ["llama-cpp", "vllm", "radiance", "strata", "openai", "openai-compatible", "claude", "generic"] as const;
 export type BackendKind = (typeof BACKEND_KINDS)[number];
 
-/** `unsupported`: not offered. `available`: offered by the backend as read from its source or documentation, not yet measured here. `qualified`: measured by G10 on this installation (nothing is qualified until G10 has run). */
+/** `unsupported`: not offered. `available`: offered by the backend as read from its source or documentation, not yet measured here. `qualified`: measured working by G10 on a real server, with the evidence in the profile's `qualifications`. */
 export type SupportLevel = "unsupported" | "available" | "qualified";
 export interface Support { readonly level: SupportLevel; /** How, or why not. */ readonly via: string }
 
@@ -185,7 +185,18 @@ export interface CacheProfile {
    * Absent: the backend has no such cache the profile knows of (the adapter's behaviour is unchanged).
    */
   readonly eraseIsolation?: "attested" | "unattested";
+  /**
+   * What G10 measured working on a real server for this kind and configuration, each with the evidence file and the figures. Only these count as qualified (a `qualified` Support level has an entry here and
+   * the other way round); everything else is read from source or documentation. Absent or empty: nothing is qualified (Claude, Strata, OpenAI and generic profiles).
+   */
+  readonly qualifications?: readonly Qualification[];
 }
+
+/** `slot-affinity`: a call naming `id_slot` reuses that slot's prompt and not another slot's. `reuse-off`: `cache_prompt: false` computes the whole prompt (what isolation-required and unattested hand-overs rely on). */
+export type QualifiedCapability = Want | "slot-affinity" | "reuse-off";
+export interface Qualification { readonly capability: QualifiedCapability; /** The evidence file(s) and the measured figures. */ readonly evidence: string }
+/** Whether a profile's capability is qualified by G10 evidence. */
+export const isQualified = (profile: CacheProfile, capability: QualifiedCapability): boolean => (profile.qualifications ?? []).some((q) => q.capability === capability);
 
 export const CACHE_LIMITS = { model: 200, slots: 256, minPrefix: 100_000, tokens: 10_000_000, key: 128 } as const;
 const OPTION_KEYS = ["slots", "slotSave", "promptDetails", "prefixCaching", "promptCacheKey", "extendedRetention", "pinPrefix", "hostTier", "hybrid", "hostPromptCacheOff", "minPrefixTokens"] as const;
@@ -235,9 +246,9 @@ export function negotiate(profile: CacheProfile, wants: readonly Want[]): Negoti
   };
   for (const w of wants) {
     switch (w) {
-      case "prefix-reuse": give(w, c.prefixReuse !== "none", c.prefixReuse === "none" ? "no prefix reuse" : `prefix reuse by ${c.prefixReuse === "automatic" ? "the server's own cache" : "request markers"}`, false); break;
-      case "retention-control": give(w, c.retention.control !== "none", c.retention.via, false); break;
-      case "isolation": give(w, c.isolation !== "none", c.isolation === "none" ? "this backend cannot keep projects' entries apart" : `isolation by a ${c.isolation}`, false); break;
+      case "prefix-reuse": give(w, c.prefixReuse !== "none", c.prefixReuse === "none" ? "no prefix reuse" : `prefix reuse by ${c.prefixReuse === "automatic" ? "the server's own cache" : "request markers"}`, isQualified(profile, w)); break;
+      case "retention-control": give(w, c.retention.control !== "none", c.retention.via, isQualified(profile, w)); break;
+      case "isolation": give(w, c.isolation !== "none", c.isolation === "none" ? "this backend cannot keep projects' entries apart" : `isolation by a ${c.isolation}`, isQualified(profile, w)); break;
       case "pin": give(w, c.pin.level !== "unsupported", c.pin.via, c.pin.level === "qualified"); break;
       case "fork": give(w, c.fork.level !== "unsupported", c.fork.via, c.fork.level === "qualified"); break;
       case "slot-save-restore": give(w, c.slotSaveRestore.level !== "unsupported", c.slotSaveRestore.via, c.slotSaveRestore.level === "qualified"); break;

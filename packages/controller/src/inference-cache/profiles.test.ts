@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { DomainError } from "../domain/errors.js";
-import { BACKEND_KINDS, CLAUDE_EXPERIMENTAL_NOTICE, CLAUDE_MIN_TOKENS, STRATA_EXPERIMENTAL_NOTICE, SlotAffinity, cacheMaturityOf, cacheNoticeFor, describeCacheSupport, deriveKey, negotiate, profileFor, type CacheContext, type EndpointConfig, type WireRequest } from "./index.js";
+import { BACKEND_KINDS, CLAUDE_EXPERIMENTAL_NOTICE, CLAUDE_MIN_TOKENS, STRATA_EXPERIMENTAL_NOTICE, SlotAffinity, cacheMaturityOf, cacheNoticeFor, describeCacheSupport, deriveKey, isQualified, negotiate, profileFor, type CacheContext, type EndpointConfig, type EndpointOptions, type WireRequest } from "./index.js";
 
 const scope = deriveKey("installation-secret-0123", "scope", "proj-a");
 const ctx = (extra: Partial<CacheContext> = {}): CacheContext => ({ scopeKey: scope, ...extra });
@@ -9,6 +12,7 @@ const chat = (extra: WireRequest = {}): WireRequest => ({ model: "m", messages: 
 const refuses = (run: () => unknown, field?: string): void => assert.throws(run, (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); if (field !== undefined) assert.equal(e.field, field); return true; });
 const text = (n: number): string => "x".repeat(n * 3);
 
+const EVIDENCE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "docs", "nimblenewt", "implementation-plan", "evidence");
 test("the profile comes from the configured kind only: a model name, an address or a misspelt kind never selects a tuned profile", () => {
   for (const kind of BACKEND_KINDS) assert.equal(profileFor({ kind, model: "m" }).kind, kind);
   for (const model of ["claude-opus-5-5", "gpt-4o", "llama-3.1-8b", "qwen3.8-27b", "vllm/anything", "radiance-flash", "strata"]) assert.equal(profileFor({ model }).kind, "generic", model);
@@ -95,7 +99,7 @@ test("vLLM: cache_salt per project, hits from cached_tokens only when the server
   assert.match(blind.read(shape).caveat ?? "", /enable-prompt-tokens-details/);
   const off = profileFor({ kind: "vllm", model: "m", options: { prefixCaching: false } });
   assert.deepEqual([off.prepare(chat(), ctx()).applied, off.prepare(chat(), ctx()).expects, off.capabilities.prefixReuse, off.capabilities.fork.level], [[], "no", "none", "unsupported"]);
-  assert.deepEqual([p.capabilities.pin.level, p.capabilities.fork.level, p.capabilities.isolation], ["unsupported", "available", "request-salt"]);
+  assert.deepEqual([p.capabilities.pin.level, p.capabilities.fork.level, p.capabilities.isolation], ["unsupported", "qualified", "request-salt"]);
   assert.ok(p.neverCall.includes("/reset_prefix_cache"));
   assert.equal(p.refusedCacheSetting({ status: 400, message: "Unrecognized request argument: cache_salt" }), true);
   assert.equal(p.refusedCacheSetting({ status: 500, message: "cache_salt" }), false);
@@ -233,20 +237,45 @@ test("Claude: hits from cache_read_input_tokens, with writes split by lifetime; 
   assert.deepEqual([p.capabilities.pin.level, p.capabilities.retention.control, p.capabilities.retention.maxMs, p.capabilities.prefixReuse], ["unsupported", "request", 3_600_000, "markers"]);
 });
 
-test("pin, fork and decoder resume are advertised separately; only what G10 measured is qualified, and nothing claims to resume a decoder", () => {
-  const all = BACKEND_KINDS.map((kind) => profileFor({ kind, model: "m", options: { slots: 2, slotSave: true, pinPrefix: true } }));
-  for (const p of all) {
-    assert.equal(p.capabilities.decoderResume.level, "unsupported", p.kind);
-    // G10 measured Radiance's fork (a shared head read by a second conversation) on the owner's server; every other backend was not running and stays unqualified.
-    for (const [name, s] of [["pin", p.capabilities.pin], ["fork", p.capabilities.fork], ["slotSaveRestore", p.capabilities.slotSaveRestore]] as const) assert.equal(s.level === "qualified", p.kind === "radiance" && name === "fork", `${p.kind} ${name}: qualified only where G10 measured it`);
+test("pin, fork and decoder resume are advertised separately; only what G10 measured working is qualified, each with its evidence, and nothing claims to resume a decoder", () => {
+  const SUPPORT = [["pin", "pin"], ["fork", "fork"], ["slotSaveRestore", "slot-save-restore"]] as const;
+  const configs: EndpointOptions[] = [{}, { slots: 2 }, { slots: 2, slotSave: true, pinPrefix: true }, { slots: 2, slotSave: true, pinPrefix: true, hostPromptCacheOff: true }, { prefixCaching: false }, { promptDetails: false }, { extendedRetention: true, promptCacheKey: true }];
+  const qualifiedOf = (kind: (typeof BACKEND_KINDS)[number], options: EndpointOptions): string[] => (profileFor({ kind, model: "m", options }).qualifications ?? []).map((q) => q.capability).sort();
+  for (const kind of BACKEND_KINDS) {
+    for (const options of configs) {
+      const p = profileFor({ kind, model: "m", options });
+      assert.equal(p.capabilities.decoderResume.level, "unsupported", p.kind);
+      // A qualified level and a qualification entry go together.
+      for (const [field, capability] of SUPPORT) assert.equal(p.capabilities[field].level === "qualified", isQualified(p, capability), `${kind} ${field} ${JSON.stringify(options)}`);
+      for (const q of p.qualifications ?? []) {
+        assert.match(q.evidence, /G10|g10-/, `${kind} ${q.capability}`);
+        for (const file of q.evidence.match(/g10-[a-z0-9-]+\.(?:json|md)/g) ?? []) assert.ok(existsSync(join(EVIDENCE_DIR, file)) || existsSync(join(EVIDENCE_DIR, "..", file)), `${kind} ${q.capability}: ${file} exists`);
+        assert.ok((q.evidence.match(/g10-[a-z0-9-]+\.(?:json|md)/g) ?? []).length > 0, `${kind} ${q.capability} names its evidence file`);
+      }
+      // Never measured: nothing of Claude, Strata, OpenAI (only its usage fields were read through Hermes), an OpenAI-compatible service or the generic profile is qualified, whatever the options.
+      if (["claude", "strata", "openai", "openai-compatible", "generic"].includes(kind)) {
+        assert.deepEqual(qualifiedOf(kind, options), [], `${kind} ${JSON.stringify(options)}`);
+        for (const [field] of SUPPORT) assert.notEqual(p.capabilities[field].level, "qualified", `${kind} ${field}`);
+      }
+    }
   }
+  // The exact measured set. llama.cpp: reuse, cache_prompt false and (with slots) id_slot always; slot files only on a server attested to run with --cache-ram 0 (run 2); fork and pin stay unqualified.
+  assert.deepEqual(qualifiedOf("llama-cpp", {}), ["prefix-reuse", "reuse-off"]);
+  assert.deepEqual(qualifiedOf("llama-cpp", { slots: 2, slotSave: true }), ["prefix-reuse", "reuse-off", "slot-affinity"]);
+  assert.deepEqual(qualifiedOf("llama-cpp", { slots: 2, slotSave: true, hostPromptCacheOff: true }), ["prefix-reuse", "reuse-off", "slot-affinity", "slot-save-restore"]);
+  assert.deepEqual(qualifiedOf("vllm", {}), ["fork", "isolation", "prefix-reuse"]);
+  assert.deepEqual(qualifiedOf("vllm", { prefixCaching: false }), []);
+  assert.deepEqual(qualifiedOf("radiance", {}), ["fork", "prefix-reuse"]);
   assert.match(profileFor({ kind: "radiance", model: "m" }).capabilities.fork.via, /G10/);
-  const by = Object.fromEntries(all.map((p) => [p.kind, [p.capabilities.pin.level, p.capabilities.fork.level, p.capabilities.slotSaveRestore.level]]));
-  assert.deepEqual(by["llama-cpp"], ["available", "available", "available"]);
-  assert.deepEqual(by["strata"], ["available", "available", "available"]);
-  assert.deepEqual(by["vllm"], ["unsupported", "available", "unsupported"]);
-  assert.deepEqual(by["radiance"], ["unsupported", "qualified", "unsupported"]);
-  assert.deepEqual(by["claude"], ["unsupported", "available", "unsupported"]);
+  const levels = (kind: (typeof BACKEND_KINDS)[number], options: EndpointOptions): string[] => { const c = profileFor({ kind, model: "m", options }).capabilities; return [c.pin.level, c.fork.level, c.slotSaveRestore.level]; };
+  const all = { slots: 2, slotSave: true, pinPrefix: true };
+  assert.deepEqual(levels("llama-cpp", all), ["available", "available", "available"]);
+  assert.deepEqual(levels("llama-cpp", { ...all, hostPromptCacheOff: true }), ["available", "available", "qualified"]);
+  assert.deepEqual(levels("strata", all), ["available", "available", "available"]);
+  assert.deepEqual(levels("vllm", all), ["unsupported", "qualified", "unsupported"]);
+  assert.deepEqual(levels("radiance", all), ["unsupported", "qualified", "unsupported"]);
+  assert.deepEqual(levels("claude", all), ["unsupported", "available", "unsupported"]);
+  assert.deepEqual(levels("openai", all), ["unsupported", "available", "unsupported"]);
 });
 
 test("negotiation says what is granted, what is not, and what happens instead", () => {
@@ -254,7 +283,13 @@ test("negotiation says what is granted, what is not, and what happens instead", 
   assert.deepEqual(Object.keys(llama.granted).sort(), ["fork", "pin", "prefix-reuse", "slot-save-restore"]);
   assert.match(llama.fallbacks["decoder-resume"]!, /full context/);
   assert.match(llama.fallbacks["isolation"]!, /cannot keep projects/);
-  assert.deepEqual([...llama.unqualified].sort(), ["fork", "pin", "prefix-reuse", "slot-save-restore"]);
+  assert.deepEqual([...llama.unqualified].sort(), ["fork", "pin", "slot-save-restore"], "prefix reuse is qualified; slot files are not on a server not attested to run with --cache-ram 0");
+  const attested = negotiate(profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true, hostPromptCacheOff: true } }), ["prefix-reuse", "pin", "fork", "slot-save-restore"]);
+  assert.deepEqual([...attested.unqualified].sort(), ["fork", "pin"]);
+  const salted = negotiate(profileFor({ kind: "vllm", model: "m" }), ["prefix-reuse", "fork", "isolation", "retention-control", "pin"]);
+  assert.deepEqual([Object.keys(salted.granted).sort(), [...salted.unqualified]], [["fork", "isolation", "prefix-reuse", "retention-control"], ["retention-control"]]);
+  const hosted = negotiate(profileFor({ kind: "openai", model: "m" }), ["prefix-reuse", "fork"]);
+  assert.deepEqual([...hosted.unqualified].sort(), ["fork", "prefix-reuse"], "OpenAI: nothing qualified");
   const generic = negotiate(profileFor({ model: "m" }), ["prefix-reuse", "pin", "retention-control"]);
   assert.deepEqual([Object.keys(generic.granted), Object.keys(generic.fallbacks).length], [[], 3]);
   const claude = negotiate(profileFor({ kind: "claude", model: "claude-opus-5-5" }), ["retention-control", "isolation"]);

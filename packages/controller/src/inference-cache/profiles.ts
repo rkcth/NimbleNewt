@@ -1,10 +1,29 @@
 import { DomainError } from "../domain/errors.js";
-import { CLAUDE_EXPERIMENTAL_NOTICE, STRATA_EXPERIMENTAL_NOTICE, checkEndpoint, type BackendKind, type CacheContext, type CacheHit, type CacheProfile, type CacheCapabilities, type EndpointConfig, type EndpointOptions, type Prepared, type Retention, type Support, type Tuning, type WireRequest } from "./profile.js";
+import { CLAUDE_EXPERIMENTAL_NOTICE, STRATA_EXPERIMENTAL_NOTICE, checkEndpoint, type BackendKind, type CacheContext, type CacheHit, type CacheProfile, type CacheCapabilities, type EndpointConfig, type EndpointOptions, type Prepared, type Qualification, type Retention, type Support, type Tuning, type WireRequest } from "./profile.js";
 
 const UNSUPPORTED = (why: string): Support => ({ level: "unsupported", via: why });
 const AVAILABLE = (how: string): Support => ({ level: "available", via: how });
 const NO_DECODER_RESUME = UNSUPPORTED("no inference server offers resuming a stopped generation in mid-decode (backend-protocol-audit.md; unproven, would need a scoped engine patch)");
 const EMPTY_HIT = (source: string, caveat?: string): CacheHit => ({ known: false, source, promptTokens: 0, cachedTokens: 0, computedTokens: 0, writtenTokens: 0, ...(caveat === undefined ? {} : { caveat }) });
+
+// ---- G10 evidence: what was measured working, with the figures (docs/nimblenewt/implementation-plan/evidence/). One run per configuration on one build; another build or model is a new measurement. ----
+const LLAMA_RUNS = "g10-llamacpp-run1.json and run2.json (llama.cpp server-cuda sha256:2855fd7d, Qwen3-8B Q8_0, -np 4, 2026-11-25)";
+const VLLM_RUN = "g10-vllm-run1.json (vLLM v0.34.0, Qwen/Qwen3-8B, --enable-prompt-tokens-details, 2026-11-25)";
+const LLAMA_QUALIFIED = {
+  prefixReuse: { capability: "prefix-reuse", evidence: `${LLAMA_RUNS}: a new head computed in full (0 of 6,472 cached), the same head in a second and a third conversation 6,454 of 6,472; the same slot again 6,452 of 6,470 and 6,453 of 6,471; after idle gaps of 0 to 120 s (run 1) 6,451 to 6,455` },
+  reuseOff: { capability: "reuse-off", evidence: `${LLAMA_RUNS}: cache_prompt false computed everything with the host prompt cache on and off (0 of 6,470; 0 of 6,471)` },
+  slotAffinity: { capability: "slot-affinity", evidence: `${LLAMA_RUNS}: id_slot 0 again reused 6,452 of 6,470 and 6,453 of 6,471; the same head named into slot 1 reused 4 of 6,470 and 0 of 6,471` },
+  slotSaveRestore: { capability: "slot-save-restore", evidence: "g10-llamacpp-run2.json (with --cache-ram 0 and --slot-save-path): save, erase and restore answered 200; after the erase 0 of 6,471 cached, after the restore 6,470 of 6,471. With the default host cache (run 1) the erase did not remove the head, so the restore showed nothing: not qualified without hostPromptCacheOff" },
+} as const satisfies Record<string, Qualification>;
+const VLLM_QUALIFIED = {
+  prefixReuse: { capability: "prefix-reuse", evidence: `${VLLM_RUN}: a new head 0 of 6,470 cached, a second conversation 6,400 of 6,470 and a third 6,464 of 6,470 (whole 64-token blocks); after idle gaps of 0 to 120 s 6,400 each time` },
+  fork: { capability: "fork", evidence: `${VLLM_RUN}: other conversations on a read head reused it (6,400 of 6,470 and 6,464 of 6,470), every request at 1, 2, 4 and 8 at once reused it, and a new head sent to n at once was computed once (reuse in n-1 of n)` },
+  isolation: { capability: "isolation", evidence: `${VLLM_RUN}: the same head under the same cache_salt 6,400 of 6,472 cached; under another salt 0, with no salt 0` },
+} as const satisfies Record<string, Qualification>;
+const RADIANCE_QUALIFIED = {
+  prefixReuse: { capability: "prefix-reuse", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0, qwen3.8-flash-next-iq4r, 2026-11-16): a new head 0 of 13,471 cached, the same request again 12,288 of 13,471 in three repeats; run 2 (2.2.0, 2026-11-25): 6,144 of about 6,673 on every repeat at 1, 2, 4 and 8 streams" },
+  fork: { capability: "fork", evidence: "g10-evidence.md, g10-radiance-run1.json (Radiance 2.1.0): a second conversation on the same head 12,288 of 13,471 cached, answered right in 3 of 3, prompt 0.4 to 1.3 s against 2.8 to 12.3 s cold" },
+} as const satisfies Record<string, Qualification>;
 
 // ---- reading responses: defensive, because a response is data from a server we do not control ----------------------------------------------------------------------------------------
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -79,8 +98,11 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
     pin: o.slotSave === true ? AVAILABLE("a slot file saved with /slots/{id}?action=save is kept until erased and can be restored into any idle slot") : UNSUPPORTED("slots are overwritten by later prompts and no slot save path is configured"),
     fork: o.slotSave === true ? AVAILABLE("restore one saved slot file into a second idle slot") : AVAILABLE("a second conversation that starts with the same tokens reuses them when its slot is chosen by similarity (needs the prefix to still be in a slot)"),
     decoderResume: NO_DECODER_RESUME,
-    slotSaveRestore: o.slotSave === true ? AVAILABLE("POST /slots/{id}?action=save|restore|erase; the server queues the task until the slot is idle, so it cannot snapshot a running decode") : UNSUPPORTED("no --slot-save-path is configured"),
+    slotSaveRestore: o.slotSave !== true ? UNSUPPORTED("no --slot-save-path is configured")
+      : o.hostPromptCacheOff === true ? { level: "qualified", via: "POST /slots/{id}?action=save|restore|erase; the server queues the task until the slot is idle, so it cannot snapshot a running decode; measured by G10 with --cache-ram 0 (g10-llamacpp-run2.json)" }
+      : AVAILABLE("POST /slots/{id}?action=save|restore|erase; the server queues the task until the slot is idle, so it cannot snapshot a running decode"),
   };
+  const qualifications: Qualification[] = [LLAMA_QUALIFIED.prefixReuse, LLAMA_QUALIFIED.reuseOff, ...(o.slots !== undefined ? [LLAMA_QUALIFIED.slotAffinity] : []), ...(o.slotSave === true && o.hostPromptCacheOff === true ? [LLAMA_QUALIFIED.slotSaveRestore] : [])];
   const tuning: Tuning[] = [
     { where: "request", setting: "cache_prompt", value: "true", why: "reuse the longest common prefix of the slot (the documented default, sent explicitly)" },
     { where: "request", setting: "id_slot", why: "one slot per agent or shared-prefix group, so alternating agents do not overwrite each other's prompt" },
@@ -113,6 +135,7 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
     slotted: o.slots !== undefined,
     ...(o.slots === undefined ? {} : { slotCount: o.slots }),
     eraseIsolation: o.hostPromptCacheOff === true ? "attested" : "unattested",
+    qualifications,
     slotRequest: (action, slot, filename) => {
       if (o.slotSave !== true) throw new DomainError("invalid_command", "slot save and restore are not configured for this endpoint", { field: "slotSave" });
       return slotRequest("/slots", action, slot, filename);
@@ -132,7 +155,7 @@ function vllm(model: string, o: EndpointOptions): CacheProfile {
     retention: { control: "server", via: "blocks stay until the block pool needs them (least recently used); the request cannot extend it" },
     isolation: on ? "request-salt" : "none",
     pin: UNSUPPORTED("no per-request pin; vLLM's keep/pause options act on the whole engine and are not a per-agent pin"),
-    fork: on ? AVAILABLE("requests with the same cache_salt and the same token prefix share blocks (copy-on-write inside the engine)") : UNSUPPORTED("automatic prefix caching is off"),
+    fork: on ? { level: "qualified", via: "requests with the same cache_salt and the same token prefix share blocks (copy-on-write inside the engine); measured by G10 on vLLM v0.34.0 (g10-vllm-run1.json)" } : UNSUPPORTED("automatic prefix caching is off"),
     decoderResume: NO_DECODER_RESUME,
     slotSaveRestore: UNSUPPORTED("no named-slot snapshot API in the inspected routes"),
   };
@@ -158,6 +181,7 @@ function vllm(model: string, o: EndpointOptions): CacheProfile {
     read: (response) => (o.promptDetails === false ? EMPTY_HIT("usage.prompt_tokens_details.cached_tokens", "the server is configured without --enable-prompt-tokens-details") : readOpenAi(response)),
     refusedCacheSetting: refusedBy(/\bcache_salt\b/),
     slotted: false,
+    qualifications: on ? [VLLM_QUALIFIED.prefixReuse, VLLM_QUALIFIED.fork, VLLM_QUALIFIED.isolation] : [],
   };
 }
 
@@ -207,6 +231,7 @@ function radiance(model: string, o: EndpointOptions): CacheProfile {
     read: (response) => readTimings(response, hybrid ? "hybrid model: a hit may not include the linear-state snapshot" : undefined),
     refusedCacheSetting: refusedBy(/\bsession_id\b/),
     slotted: false,
+    qualifications: [RADIANCE_QUALIFIED.prefixReuse, RADIANCE_QUALIFIED.fork],
   };
 }
 
