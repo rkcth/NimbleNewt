@@ -25,6 +25,7 @@ const restarted = (c: Ctx): RemoteWorkerService => RemoteWorkerService.withEpoch
   principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts,
   dispatch: { gateway: (id: string) => c.current.gateway(id), get: (by: never, id: string) => c.current.get(by, id), relocate: (...a: never[]) => (c.current.relocate as (...x: unknown[]) => unknown)(...a), quiesce: (...a: never[]) => (c.current.quiesce as (...x: unknown[]) => unknown)(...a), release: (by: never, id: string) => c.current.release(by, id) },
   placementPolicy: async () => ({ dataHosts: ["host:a", "host:b", "host:c"] }),
+  workspaceAdmission: async () => [],
 } as never, c.options);
 
 for (const backend of backends) {

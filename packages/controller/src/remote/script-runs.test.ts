@@ -284,7 +284,7 @@ for (const backend of backends) {
     const { attemptId } = await c.started(r1, "Order seeds");
     const { epoch } = await c.storage.acquireEpoch({ holder: "controller-2", at: c.clock.now() });
     const hosts = HostService.withEpoch(c.storage, epoch, c.assignments, c.options);
-    const second = RemoteWorkerService.withEpoch(c.storage, epoch, { principal: c.dispatcherPrincipal, hosts, artifacts: c.artifacts, dispatch: c.current as never }, c.options);
+    const second = RemoteWorkerService.withEpoch(c.storage, epoch, { principal: c.dispatcherPrincipal, hosts, artifacts: c.artifacts, dispatch: c.current as never, workspaceAdmission: async () => [] }, c.options);
     try {
       await refuses("unavailable", () => second.runScript(c.dispatcherPrincipal, callOf(attemptId, r1.id), input(), new AbortController().signal), (e) => assert.match(e.message, /not connected to this controller in the session that holds the attempt/));
       assert.deepEqual((await second.placement(c.dispatcherPrincipal, attemptId))!.control.filter((m) => m.kind === "run"), [], "nothing was sent");

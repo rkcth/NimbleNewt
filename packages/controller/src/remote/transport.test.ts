@@ -138,7 +138,7 @@ for (const backend of backends) {
 
   suite("a controller that has dropped an old protocol refuses the old worker with the reason; a controller range that is nonsense is refused when it is built", async (c) => {
     const r1 = await c.host("r1", { connect: false });
-    const deps = { principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never };
+    const deps = { principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never, workspaceAdmission: async () => [] };
     assert.throws(() => RemoteWorkerService.withEpoch(c.storage, c.epoch, deps, { ...c.options, protocol: { min: 3, max: 2 } }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     const v2 = RemoteWorkerService.withEpoch(c.storage, c.epoch, deps, { ...c.options, protocol: { min: 2, max: 3 } });
     await assert.rejects(() => v2.connect(r1.principal, { commandId: "c-old", protocol: { min: 1, max: 1 }, workerVersion: "w", capabilities: REMOTE_CAPS }), (e: unknown) => {

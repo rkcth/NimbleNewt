@@ -383,9 +383,10 @@ export interface RemoteDeps {
   /**
    * Card P02 (remote hosts): whether the task's access scope admits the folder a host declared for the project (`ProjectResourceService.workspaceAdmissionByDigest` in the composed controller). Every remote attempt opens a
    * workspace on its host, so it is judged with the placement (refusals, place, candidates, delivery, relocation), and again before an integration or a landing is sent, since those write the shared repository. A host that
-   * declares no folder for the project (an older host) is refused that work; its other work (scripts, conversation stores, looks, checks) is not judged. Absent: not judged (the composed controller always gives it).
+   * declares no folder for the project (an older host) is refused that work; its other work (scripts, conversation stores, looks, checks) is not judged. Required (P02 second review): `withEpoch` refuses a service without it,
+   * so no composition can leave remote workspaces unjudged by leaving it out. A test that is not about it passes `async () => []`.
    */
-  readonly workspaceAdmission?: HostWorkspaceAdmission;
+  readonly workspaceAdmission: HostWorkspaceAdmission;
   /**
    * Whether a restore left this attempt's conversation store for this host and it has not been delivered yet (card K01i review). While it waits the host is not offered the attempt (a reason that passes): the agent would
    * otherwise run on the conversation that was there before the restore, and the delivery between two turns would then take its newest turns away. Absent: not judged.
@@ -530,6 +531,7 @@ export class RemoteWorkerService {
 
   static withEpoch(storage: ConstructorParameters<typeof CommandRunner>[0], epoch: number, deps: RemoteDeps, options: RemoteOptions = {}): RemoteWorkerService {
     if (deps.principal.kind !== "service" || deps.principal.id !== DISPATCHER_PRINCIPAL || deps.principal.taskScope !== undefined) throw new DomainError("invalid_command", "principal: the remote service acts as the dispatcher's service principal", { field: "principal" });
+    if (typeof deps.workspaceAdmission !== "function") invalid("workspaceAdmission", "must be given: a remote host is sent workspace work only on a folder the task's access scope admits (card P02)");
     const fileBytes = options.fileBytes ?? REMOTE_LIMITS.fileBytes;
     if (!Number.isSafeInteger(fileBytes) || fileBytes < 1 || fileBytes > REMOTE_LIMITS.fileBytes) invalid("fileBytes", `must be a whole number from 1 to ${REMOTE_LIMITS.fileBytes}`);
     const settleMs = options.settleMs ?? 10_000;
@@ -670,7 +672,7 @@ export class RemoteWorkerService {
     // narrowed since the attempt was placed, or a host whose folder changed, refuses it). A check that cannot be read refuses too. Nothing is sent either way. A repeat of a request already sent joins it as before.
     // The declaration judged is kept with the request: a host that reconnects with another one (its configuration changed) before it reads the request is refused it then, with nothing sent (`workspaceRequests`).
     let declared: string | undefined;
-    if ((wire.operation === "integration" || wire.operation === "landing") && this.#deps.workspaceAdmission !== undefined && !this.#asks.has(wire.requestId)) {
+    if ((wire.operation === "integration" || wire.operation === "landing") && !this.#asks.has(wire.requestId)) {
       let reasons: string[];
       try {
         const status = await this.#deps.hosts.status(this.#deps.principal, host);
@@ -761,12 +763,12 @@ export class RemoteWorkerService {
   }
 
   /**
-   * Card P02 (remote hosts): why the host may not open (or write) this task's workspace, from the folder it declared for the project and the project's access scope, read now. Empty when it may, when no admission is
-   * configured, or when the host has not announced anything yet (that is already a reason of its own). Throws when the admission cannot be read. `beforePin` for the dispatcher's looks before it pins the checkout.
+   * Card P02 (remote hosts): why the host may not open (or write) this task's workspace, from the folder it declared for the project and the project's access scope, read now. Empty when it may, or when the host has not
+   * announced anything yet (that is already a reason of its own). Throws when the admission cannot be read (or is missing: `withEpoch` refuses that, so it is never silently open). `beforePin` for the dispatcher's looks before it pins the checkout.
    */
   async #admissionReasons(hostId: string, scope: { readonly taskId: string; readonly projectId: string }, status?: HostStatus, beforePin = false): Promise<string[]> {
     const admit = this.#deps.workspaceAdmission;
-    if (admit === undefined) return [];
+    if (typeof admit !== "function") throw new DomainError("unavailable", "no workspace admission is configured on this controller");
     const caps = (status ?? await this.#deps.hosts.status(this.#deps.principal, hostId))?.capabilities;
     if (caps === undefined) return [];
     return [...await admit({ hostId, taskId: scope.taskId, projectId: scope.projectId, workspaces: caps.workspaces, ...(beforePin ? { beforePin: true } : {}) })];
@@ -1395,6 +1397,13 @@ export class RemoteWorkerService {
         if (now === undefined || now.hostId !== host.id || now.placement !== b!.placement || now.state === "ended" || now.state === "completed") throw new DomainError("fenced", `the placement of attempt ${id} changed`);
         if (now.state === "offered") throw new DomainError("unavailable", `the placement policy for attempt ${id} could not be read; ask again`);
       }
+    }
+    // Card P02 (remote hosts, second review): an attempt already accepted in an older session is taken up again in this one only if the folder the host declares NOW is still admitted. A host that restarted with another
+    // `projects` folder (or none) would otherwise go on opening the task's workspace there. Refused, not ended: binding the folder (or restoring the host's configuration) lets the next accept go through.
+    if (b!.state === "accepted" && b!.sessionId !== undefined && b!.sessionId !== session.sessionId) {
+      let reasons: string[];
+      try { reasons = await this.#admissionReasons(host.id, b!); } catch (error) { this.#reportError(error); throw new DomainError("unavailable", `whether ${host.id} may open the workspace of attempt ${id} could not be checked; ask again`); }
+      if (reasons.length > 0) throw new DomainError("unavailable", `attempt ${id} is not taken up again on ${host.id}: ${reasons.join("; ")}`.slice(0, 600));
     }
     const mode = await this.#reacceptMode();
     const patience = await this.#patienceMs();

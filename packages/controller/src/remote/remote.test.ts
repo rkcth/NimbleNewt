@@ -111,7 +111,7 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.remote.end(taskPrincipal, attemptId, "done"));
     // The service is built only for the dispatcher's own principal.
     const { RemoteWorkerService } = await import("./service.js");
-    assert.throws(() => RemoteWorkerService.withEpoch(c.storage, c.epoch, { principal: c.owner, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+    assert.throws(() => RemoteWorkerService.withEpoch(c.storage, c.epoch, { principal: c.owner, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never, workspaceAdmission: async () => [] }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
     // The placement disagrees with the dispatcher's own record: refused.
     await refuses("invalid_command", () => c.remote.place(c.dispatcherPrincipal, { hostId: "host:nowhere", order, requirements: { data: "cloud-allowed" } }));
     await refuses("invalid_command", () => c.remote.place(c.owner, { hostId: r1.id, order: { ...order, generation: order.generation + 1 }, requirements: { data: "cloud-allowed" } }));

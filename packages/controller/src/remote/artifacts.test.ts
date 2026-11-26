@@ -75,11 +75,11 @@ for (const backend of backends) {
     const { attempt } = await c.started(r1);
     // The service was built with the default limit; a service built with 5 bytes refuses the 10-byte file and serves the 3-byte one.
     const { RemoteWorkerService } = await import("./service.js");
-    const strict = RemoteWorkerService.withEpoch(c.storage, c.epoch, { principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never }, { ...c.options, fileBytes: 5 });
+    const strict = RemoteWorkerService.withEpoch(c.storage, c.epoch, { principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never, workspaceAdmission: async () => [] }, { ...c.options, fileBytes: 5 });
     const sid = r1.client.session!.sessionId;
     await refuses("invalid_command", () => strict.fetchFile(r1.principal, sid, attempt.attemptId, attempt.placement, big.id, "big.bin"), (e) => assert.match(e.message, /10 bytes; one fetch returns at most 5/));
     assert.equal(Buffer.from((await strict.fetchFile(r1.principal, sid, attempt.attemptId, attempt.placement, big.id, "small.bin")).bytes).toString(), "012");
-    assert.throws(() => RemoteWorkerService.withEpoch(c.storage, c.epoch, { principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never }, { ...c.options, fileBytes: 0 }));
+    assert.throws(() => RemoteWorkerService.withEpoch(c.storage, c.epoch, { principal: c.dispatcherPrincipal, hosts: c.hosts, artifacts: c.artifacts, dispatch: c.current as never, workspaceAdmission: async () => [] }, { ...c.options, fileBytes: 0 }));
   });
 
   suite("a worker publishes files as an artifact of its own placement: project and task are the placement's, the creator is the host, a repeat is the same artifact, and it travels with the placement", async (c) => {

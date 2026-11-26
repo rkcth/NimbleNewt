@@ -40,7 +40,7 @@ for (const backend of backends) {
     const { epoch } = await c.storage.acquireEpoch({ holder: "controller-2", at: c.clock.now() });
     assert.ok(epoch > c.epoch);
     const hosts = HostService.withEpoch(c.storage, epoch, c.assignments, c.options);
-    const second = RemoteWorkerService.withEpoch(c.storage, epoch, { principal: c.dispatcherPrincipal, hosts, artifacts: c.artifacts, dispatch: c.current as never }, c.options);
+    const second = RemoteWorkerService.withEpoch(c.storage, epoch, { principal: c.dispatcherPrincipal, hosts, artifacts: c.artifacts, dispatch: c.current as never, workspaceAdmission: async () => [] }, c.options);
     const transport = await WorkerTransport.listen({ remote: second, principals: c.principals });
     try {
       // The worker's session from the earlier primary is refused there as fenced (over the wire too): it connects again.
