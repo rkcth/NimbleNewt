@@ -63,7 +63,7 @@ export async function model(steps: Step[]): Promise<{ server: Server; url: strin
   return { server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, seen, bodies };
 }
 
-export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** Card M04h: set up the controller, the real local host and the owner and the project only (no agent, task or attempt); the test makes its own. */ readonly bare?: boolean; /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string; /** More start-up options of the controller (card W10: the second agent's model client). */ readonly start?: Partial<Parameters<typeof startController>[0]> } = {}) {
+export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /** Card M04h: set up the controller, the real local host and the owner and the project only (no agent, task or attempt); the test makes its own. */ readonly bare?: boolean; /** The endpoint's kind (card W07: it names the budget's request fields). */ readonly kind?: string; /** More start-up options of the controller (card W10: the second agent's model client). */ readonly start?: Partial<Parameters<typeof startController>[0]>; /** Card P03b: a real OpenAI-compatible endpoint (http) to send the model calls to instead of the scripted one, with its model ID and window; the steps are then not used. */ readonly model?: { readonly url: string; readonly id: string; readonly window: number } } = {}) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), "nn w03 ")));
   const shared = join(directory, "shared");
   mkdirSync(join(shared, "src"), { recursive: true });
@@ -82,9 +82,9 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
     dispatch: {
       manual: true,
       local: {
-        window: () => WINDOW,
+        window: () => options.model?.window ?? WINDOW,
         build: (services) => {
-          const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }), ...(options.kind === undefined ? {} : { kind: options.kind }) } : undefined) });
+          const relay = new ModelRelay({ fetch: loopbackFetch, endpoint: (route) => (route === "localp/small" ? { url: options.model?.url ?? answer.url, headers: () => ({ authorization: "Bearer sk-provider-secret" }), ...(options.kind === undefined ? {} : { kind: options.kind }) } : undefined) });
           const parts = localWorkerParts<Pick<ToolGateway, "call">["call"]>({
             launcher, app: appFromRepository(repository, { root: nodeRoot, executable: "bin/node" }), protectedPaths: [],
             workspace: async (order) => {
@@ -94,10 +94,10 @@ export async function rig(launcher: SandboxLauncher, steps: Step[], options: { /
               mkdirSync(home, { recursive: true }); mkdirSync(scratch, { recursive: true });
               return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
             },
-            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: "local", contextWindow: WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
+            model: () => ({ alias: "m0", provider: "localp", api: "openai-completions", modelId: options.model?.id ?? "local", contextWindow: options.model?.window ?? WINDOW, maxTokens: 1024, reasoning: false, input: ["text"] }),
             namespaceId: (order) => services.namespaceId(order as never),
             bridge: async (order, call, token, request) => services.bridge!(order as never, call, token, request) as never,
-            relay: (order, request) => services.attemptRelay(order as never, relay, { model: "local" }).relay(request),
+            relay: (order, request) => services.attemptRelay(order as never, relay, { model: options.model?.id ?? "local" }).relay(request),
             context: (order) => services.context(order as never),
             heldForReview: (order) => c.dispatch!.dispatcher.heldForReview(order.attemptId),
             ...ownerPolicyOptions(services),

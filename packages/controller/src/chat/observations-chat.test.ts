@@ -9,7 +9,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { ObservationService } from "../observations/index.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import { CHAT_OPS } from "./commands.js";
-import { ModelInterpreter } from "./model-interpreter.js";
+import { ModelInterpreter, promptAbout } from "./model-interpreter.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 // Card B02: the owner asks in any words what keeps going wrong in a project and settles an observation by chat; nothing needs a fixed phrase.
@@ -24,7 +24,7 @@ test("the interpreter prompt describes the observations view and settling one, f
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
   await m.interpret({ text: "what keeps going wrong", quoted: [], focus: {}, proposals: [] });
   const kind = STATUS_KINDS["observations"]!;
-  assert.ok(system.includes(`observations(${kind.keys.join(", ")}) - ${kind.about}`), "the view is listed from the one table");
+  assert.ok(system.includes(`observations(${kind.keys.join(", ")}) - ${promptAbout(kind.about)}`), "the view is listed from the one table");
   assert.ok(system.includes("observation.dispose(observationId, expectedRevision, to, reason, improvementId, owner"), "the operation is listed with the arguments the chat takes");
   assert.match(system, /what keeps going wrong in Garden\?/);
   assert.match(system, /observation\.dispose with the observationId shown there \(its revision is filled in\)/);

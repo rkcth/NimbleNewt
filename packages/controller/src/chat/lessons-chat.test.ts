@@ -9,7 +9,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { LessonService } from "../lessons/index.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import { CHAT_OPS } from "./commands.js";
-import { ModelInterpreter } from "./model-interpreter.js";
+import { ModelInterpreter, promptAbout } from "./model-interpreter.js";
 import { cid, openWorld, options, type World } from "./testing/harness.js";
 
 // Card B03: the owner asks in any words what the team learnt, records a lesson and judges one by chat; nothing needs a fixed phrase.
@@ -24,7 +24,7 @@ test("the interpreter prompt describes the lessons view, proposing and judging a
   const m = new ModelInterpreter({ complete: async (_route, r) => { system = r.system; return "[]"; } }, () => ["a/primary"]);
   await m.interpret({ text: "what have we learnt", quoted: [], focus: {}, proposals: [] });
   const kind = STATUS_KINDS["lessons"]!;
-  assert.ok(system.includes(`lessons(${kind.keys.join(", ")}) - ${kind.about}`), "the view is listed from the one table");
+  assert.ok(system.includes(`lessons(${kind.keys.join(", ")}) - ${promptAbout(kind.about)}`), "the view is listed from the one table");
   assert.ok(system.includes("lesson.decide(lessonId, expectedRevision, to, finding"), "the decision is listed with the arguments the chat takes");
   assert.ok(system.includes("lesson.propose(projectId, title, statement, applicability, evidence"), "proposing is listed too");
   assert.match(system, /what have we learnt in Garden\?/);

@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { deferredCommandState } from "../api/command-state.js";
 import { assignmentIdOf } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
+import type { SimulationService } from "../simulation/scopes.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
 import { versionIdOf } from "../catalog/catalog.js";
@@ -55,7 +56,7 @@ import type { ApprovalsFacade } from "../policy/facade.js";
 import type { AdminViewService } from "../admin/index.js";
 import type { ActivationStatus, Gate, GateCell, AttemptBody as ReleaseAttemptBody, CandidateRow, ReleaseService, ReleaseWindowService } from "../release/index.js";
 import { releaseDeadline } from "../release/index.js";
-import type { Aggregate, ControllerStorage } from "../storage/types.js";
+import type { Aggregate, ControllerStorage, JsonObject } from "../storage/types.js";
 import { CAP_NAMES, LIMIT_BOUNDS, type Limits } from "../admission/policy.js";
 import type { CapacityLimitsService } from "../admission/caps.js";
 import type { AdmissionService } from "../admission/service.js";
@@ -221,7 +222,55 @@ export interface Changes {
 }
 
 export interface ToolUse { readonly id: string; readonly taskId: string; readonly server: string; readonly capability: string; readonly outcome: string; readonly uncertain: boolean; readonly at: string; readonly protocolRevision: string; readonly catalogRevision: number }
-export interface EffectUse { readonly id: string; readonly taskId: string; readonly kind: string; readonly target: string; readonly status: string; readonly at: string }
+export interface EffectUse {
+  readonly id: string; readonly taskId: string; readonly kind: string; readonly target: string; readonly status: string; readonly at: string;
+  /** An effect of a simulation scope (card P07): shown as simulated, never as an outside action. */
+  readonly simulated?: true;
+  /** A service operation (card P03b): what was asked of which resource, by whom, and what the service itself reported (version and time) or why it was not confirmed. */
+  readonly service?: ServiceOpView;
+}
+export interface ServiceOpView {
+  readonly resource: string; readonly action: string; readonly by: string;
+  /** The ledger's evidence says the resource was read back from the service and judged (absent for a person's settlement). */
+  readonly verified: boolean;
+  readonly systemVersion?: string; readonly observedAt?: string; readonly neighboursChecked?: number;
+  /** Why it was refused or not confirmed, in the service's or the controller's words (shown quoted). */
+  readonly reason?: string;
+}
+
+/**
+ * One service operation in plain words (card P03b). The words of the outcome are the controller's; what the service or the agent wrote (a refusal, a reason) is quoted and cleaned. `confirmed` is said only for an
+ * effect the ledger confirmed AND whose evidence says it was read back and verified; anything else is never called done.
+ */
+/** How many of a task's service operations its task view shows (card P03b); the tools view lists the rest. */
+export const SERVICE_OPS_IN_TASK_VIEW = 5;
+export function serviceOpLine(e: { readonly id: string; readonly status: string; readonly service: ServiceOpView }, byName: string): string {
+  const v = e.service;
+  const what = `${byName} asked for ${quoted(v.action, 40)} on ${quoted(v.resource, 130)}`;
+  if (e.status === "confirmed" && v.verified) return `Service operation ${e.id}: ${what}. Done and confirmed: the service was read back afterwards and showed the change (version ${quoted(v.systemVersion ?? "", 60)}, seen at ${v.observedAt === undefined ? "an unknown time" : quoted(v.observedAt, 40)})${v.neighboursChecked === undefined ? "" : `, and the ${v.neighboursChecked} resource${v.neighboursChecked === 1 ? "" : "s"} next to it ${v.neighboursChecked === 1 ? "was" : "were"} unchanged`}. A deliverable may name it as its outcome.`;
+  if (e.status === "confirmed") return `Service operation ${e.id}: ${what}. Settled by a person, not by reading the service back${v.reason === undefined ? "" : ` (${quoted(v.reason, 160)})`}, so it cannot be named as a verified outcome.`;
+  if (e.status === "failed") return `Service operation ${e.id}: ${what}. Not done: ${v.reason === undefined ? "it was refused" : quoted(v.reason, 200)}. Nothing was changed.`;
+  if (e.status === "uncertain") return `Service operation ${e.id}: ${what}. Not confirmed: ${v.reason === undefined ? "the result could not be checked" : quoted(v.reason, 200)}. It may or may not have changed the service; it is not tried again by itself, and a person has to check the service and settle it.`;
+  return `Service operation ${e.id}: ${what}. Not finished: the outcome is not known yet, and asking the service again is safe (nothing is applied twice).`;
+}
+
+/** What the ledger holds about a service operation, as the view shows it: the request from the intent, the facts from the evidence the service gave. */
+export function serviceOpOf(e: { readonly input?: JsonObject; readonly createdBy?: string }, evidence: JsonObject | undefined): ServiceOpView {
+  const input = e.input ?? {};
+  const action = (input["action"] as JsonObject | undefined)?.["type"];
+  const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const reason = str(evidence?.["problem"]) ?? str(evidence?.["reason"]) ?? str(evidence?.["error"]);
+  return {
+    resource: `${String(input["service"] ?? "?")}/${String(input["resource"] ?? "?")}`, action: typeof action === "string" ? action : "?", by: e.createdBy ?? "unknown",
+    // A person's settlement keeps the evidence they gave (with `resolvedBy`): whatever it says, it was not read back from the service by the controller.
+    verified: evidence?.["verified"] === true && evidence["resolvedBy"] === undefined,
+    ...(str(evidence?.["systemVersion"]) === undefined ? {} : { systemVersion: str(evidence?.["systemVersion"])! }),
+    ...(str(evidence?.["observedAt"]) === undefined ? {} : { observedAt: str(evidence?.["observedAt"])! }),
+    ...(typeof evidence?.["collateralChecked"] === "number" ? { neighboursChecked: evidence["collateralChecked"] } : {}),
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
 export interface ToolsUsed {
   readonly observedAt: string;
   readonly summary: readonly { readonly server: string; readonly capability: string; readonly calls: number; readonly ok: number; readonly errors: number; readonly uncertain: number }[];
@@ -278,7 +327,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   task: { keys: ["taskId|taskTitle"], about: "how one task is going and what blocks it" },
   overview: { keys: ["projectId", "agentId|agentName", "state", "execution", "limit"], about: "the tasks of a project or of one agent, by state" },
   changes: { keys: ["projectId", "since", "limit"], about: "what changed in a project since a time" },
-  tools: { keys: ["projectId", "taskId|taskTitle", "since", "limit"], about: "which tools were used" },
+  tools: { keys: ["projectId", "taskId|taskTitle", "since", "limit"], about: "which tools were used, and each service operation and what came of it" },
   delivered: { keys: ["projectId", "taskId|taskTitle", "since"], about: "what was delivered" },
   noticeboard: { keys: ["projectId"], about: "the project's noticeboard" },
   failed_events: { keys: ["projectId", "taskId|taskTitle", "limit"], about: "events whose handling failed" },
@@ -292,6 +341,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   command_state: { keys: ["taskId|taskTitle"], about: "what became of the latest assignment or transfer of a task (card U13): accepted (recorded), queued (the owner's worker has it), running, completed, blocked, failed or outcome unknown, with why, worked out from the assignment and the owner's attempts" },
   defects: { keys: ["taskId|taskTitle"], about: "what was checked in a task's deliverables and what was found (card Q04): each deliverable with its newest version and state, and each defect found in it with its ID, severity, state (open, repair submitted, resolved, escalated to the owner, overridden by the owner, withdrawn as mistaken by its reporter or the owner, with who withdrew it and why; a corrected finding or severity says how many times it was edited and by whom last, and what the severity was), the repair and review cycles used against the limit, the latest check and the finding; an escalated defect waits for the owner's decision (defect.override)" },
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author (and why one of the first ten would not land now); and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked on the controller's regular rounds and when a landing is asked for behind it, only while approved work waits behind it; approved work coming back stops the count); an approved first place that has held the branch for twenty-four hours while newer approved work waits behind it is shown with when the controller moves it to the back (nothing is removed)" },
+  simulations: { keys: ["taskId|taskTitle"], about: "owner only: scopes, runs, grants" },
   landing_checks: { keys: ["taskId|taskTitle", "projectId", "after"], about: "owner only: each required check's result at the newest landing attempts of a task or project (after: how many shown), the tree judged, what the last re-read changed" },
   landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off, no unfinished defects; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
   submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, or approved it before a decision of yours (also one for that task alone overriding a project-wide one) or the criteria changed so the approval no longer counts (what changed, when; a new review restores it), and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
@@ -425,6 +475,7 @@ export type StatusRequest =
   | { readonly kind: "docs"; readonly projectId: string; readonly after?: number }
   | { readonly kind: "landing_queue"; readonly projectId: string; readonly branch?: string }
   | { readonly kind: "landing_checks"; readonly taskId?: string; readonly projectId?: string; readonly after?: number }
+  | { readonly kind: "simulations"; readonly taskId?: string }
   | { readonly kind: "landing_settings"; readonly projectId: string }
   | { readonly kind: "attempt_endings"; readonly taskId: string }
   | { readonly kind: "command_state"; readonly taskId: string }
@@ -800,6 +851,8 @@ export interface StatusDeps {
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
   readonly integration?: Pick<IntegrationPolicyService, "get">;
+  /** The owner's simulation scopes (card P07): the `simulations` view. Absent: the view says scopes are not kept here. */
+  readonly simulations?: Pick<SimulationService, "list">;
   /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
   readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<LandingPage> };
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
@@ -1065,6 +1118,7 @@ export class StatusService {
       case "qa_project": { onlyKnown(request, ["kind", "projectId"]); return this.qaProjectLines(by, request.projectId); }
       case "docs": { onlyKnown(request, ["kind", "projectId", "after"]); return this.docLines(by, request.projectId, undefined, request.after); }
       case "landing_checks": { onlyKnown(request, ["kind", "taskId", "projectId", "after"]); return this.landingChecksLines(by, request); }
+      case "simulations": { onlyKnown(request, ["kind", "taskId"]); return this.simulationLines(by, request.taskId); }
       case "landing_settings": { onlyKnown(request, ["kind", "projectId"]); return this.landingSettingsLines(by, request.projectId); }
       case "landing_queue": { onlyKnown(request, ["kind", "projectId", "branch"]); return this.landingQueueLines(by, request.projectId, request.branch); }
       case "command_state": { onlyKnown(request, ["kind", "taskId"]); return this.commandStateLines(by, request.taskId); }
@@ -2506,6 +2560,43 @@ export class StatusService {
   }
 
   /**
+   * The owner's simulation scopes in plain words (card P07): what each scope is (a stand-in where nothing real is written, sent or spent), what its newest runs did step by step (the R02
+   * fallback, a competing edit, a stop), the real access the owner granted after it (and that the scope itself grants nothing), and the replay reruns recorded in it. Read only, owner only.
+   */
+  async simulationLines(by: Principal, taskId?: string): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
+    if (by.kind !== "owner") return undefined;
+    const at = this.#runner.now();
+    let title: string | undefined;
+    if (taskId !== undefined) {
+      const task = await this.#runner.get("task", checkTaskId(taskId));
+      if (task === undefined) return undefined;
+      title = shown((task.body as unknown as TaskBody).title, 120);
+    }
+    if (by.taskScope !== undefined && taskId !== by.taskScope.taskId) return undefined;
+    const c = taskId === undefined ? cite("installation", "installation") : cite("task", taskId);
+    if (this.#deps.simulations === undefined) return { observedAt: at, lines: [line("Simulation scopes are not kept on this controller.", c)] };
+    const found = await this.#deps.simulations.list(by, { ...(taskId === undefined ? {} : { taskId }), limit: 5 });
+    if (found.scopes.length === 0) return { observedAt: at, lines: [line(`No simulation scope is on record${title === undefined ? "" : ` for task ${title}`}. A scope is a stand-in of a task's services where agents and tools can be tried before any real access is given; you can ask to open one.`, c)] };
+    const lines: Line[] = [line(`${found.scopes.length} simulation scope(s)${title === undefined ? "" : ` for task ${title}`}, newest first${found.truncated ? " (older ones are not shown)" : ""}. In a scope everything works on a stand-in: nothing real is written, sent or spent, every result is labelled simulated, and real access is only ever granted by you, separately.`, c)];
+    for (const s of found.scopes) {
+      const b = s.scope;
+      const sc = cite("simulation-scope", s.id);
+      lines.push(line(`Scope ${s.id} (task ${b.taskId}) is ${b.state}, opened ${b.openedAt}${b.purpose === undefined ? "" : ` for: ${shown(b.purpose, 200)}`}; it holds ${Object.keys(b.world.cells).length} stand-in resource(s), ${b.effects.length} single operation(s), ${(b.runs ?? []).length} workflow run(s) and ${(b.replays ?? []).length} replay rerun(s).`, sc));
+      // Second review: the chat shows a view's first lines only, so the real access granted comes before the runs, and the newest run comes first with its steps (older runs one line each).
+      const grants = b.grants ?? [];
+      if (grants.length === 0) lines.push(line(`No real access was granted after this scope. After a run that completed, you can ask to grant an agent the access that run used; nothing in the scope grants it by itself.`, sc));
+      else for (const g of grants.slice(-10).reverse()) lines.push(line(`Real access you granted after run ${g.runId}: ${g.grantee} may ${g.action === "effect.perform" ? "change" : g.action} ${g.resource} for real (grant ${g.grantId}, ${g.at}).`, cite("grant-record", g.grantId)));
+      for (const [k, r] of [...s.runs].reverse().entries()) {
+        const run = r.run;
+        const what = run.state !== "finished" ? "has not finished (sending the same run again goes on from where it stopped)" : run.outcome === "completed" ? "completed" : run.outcome === "stopped" ? "stopped before the end" : "completed with problems";
+        lines.push(line(`${k === 0 ? "Newest run" : "Earlier run"} ${r.id} ${what}: ${run.results.length} of ${run.script.length} step(s) recorded, stand-in providers ${run.providers.join(" then ")}.`, cite("simulation-run", r.id)));
+        if (k === 0) for (const x of run.results.slice(0, 30)) lines.push(line(`  Step ${x.index + 1}: ${shown(x.words, 400)}.`, cite("simulation-run", r.id)));
+      }
+    }
+    return { observedAt: at, lines };
+  }
+
+  /**
    * What the required checks said at the newest landing attempts (card P09): owner only (a task-scoped principal is not the owner here), every line citing its request record. A task or project that does not exist is answered
    * nothing, as anyone but the owner is. Nothing the host ran is shown beyond each command's name, state, exit code and time-out: not its output. Texts the gate wrote are cut, credentials are removed and host paths are
    * replaced by a mark.
@@ -3851,6 +3942,15 @@ export class StatusService {
       for (const a of open) lines.push(line(`Warning: ${startSizeAlertText(a)}. Ask for the start_size status of the task for the figures and where the originals are kept.`, cite("ctx-start-size", a.id), cite("task", id)));
     }
 
+    // Card P03b: the task's service operations, newest first, each with what the service itself reported (or why it is not confirmed).
+    if (toolsOk) {
+      const ops = await this.#serviceOpsOf(id, SERVICE_OPS_IN_TASK_VIEW);
+      const names = new Map<string, string>();
+      for (const o of ops.items) lines.push(line(serviceOpLine(o, await this.#principalName(o.service.by, names)), cite("effect", o.id), cite("task", id)));
+      if (ops.more > 0) lines.push(line(`${ops.more} older service operation${ops.more === 1 ? " is" : "s are"} not shown here; the tools used on the task list them.`, cite("task", id)));
+      if (ops.partial) lines.push(line("The search for service operations stopped before every record was read, so some may be missing.", cite("task", id)));
+    }
+
     // Completion, from the task record alone, with the doubts that are still open.
     const doubts = await this.#doubts(id, all, toolsOk);
     const completion: TaskStatus["completion"] = body.state === "cancelled" ? "cancelled" : body.state === "done" ? (doubts.length > 0 ? "done_with_open_doubts" : "done") : "not_done";
@@ -4365,10 +4465,11 @@ export class StatusService {
         const page = await this.#runner.list("effect", { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
         for (const a of page) {
           after = a.id;
-          const e = a.body as unknown as { taskId?: string; kind: string; target: string };
+          const e = a.body as unknown as { taskId?: string; kind: string; target: string; input?: JsonObject; createdBy?: string; simulation?: string };
           if (e.taskId === undefined || !wanted.has(e.taskId) || (since !== undefined && a.createdAt <= since)) continue;
           const ledger = await this.#storage.getEffect(a.id);
-          effects.push({ id: a.id, taskId: e.taskId, kind: shown(e.kind, 60), target: shown(e.target, 120), status: ledger?.status ?? "unknown", at: a.createdAt });
+          const service = e.kind === "service-op" && e.simulation === undefined ? serviceOpOf(e, ledger?.evidence) : undefined;
+          effects.push({ id: a.id, taskId: e.taskId, kind: shown(e.kind, 60), target: shown(e.target, 120), status: ledger?.status ?? "unknown", at: a.createdAt, ...(e.simulation === undefined ? {} : { simulated: true }), ...(service === undefined ? {} : { service }) });
         }
         if (page.length < this.#pageSize) break;
       }
@@ -4385,11 +4486,48 @@ export class StatusService {
     const summary = [...groups.values()].sort((x, y) => y.calls - x.calls || (x.server + x.capability < y.server + y.capability ? -1 : 1));
     const lines: Line[] = [];
     for (const g of summary) lines.push(line(`${g.server}, ${g.capability}: ${g.calls} call${g.calls === 1 ? "" : "s"} (${g.ok} ok, ${g.errors} failed${g.uncertain > 0 ? `, ${g.uncertain} with an unknown outcome` : ""}).`, ...calls.filter((c) => c.server === g.server && c.capability === g.capability).slice(0, 5).map((c) => cite(`mcp-call-${c.taskId}`, c.id))));
-    for (const e of effects.slice(0, limit)) lines.push(line(`Outside action ${e.kind} on ${e.target}: ${e.status}.`, cite("effect", e.id), cite("task", e.taskId)));
+    const names = new Map<string, string>();
+    for (const e of effects.slice(0, limit)) {
+      if (e.service !== undefined) lines.push(line(serviceOpLine({ id: e.id, status: e.status, service: e.service }, await this.#principalName(e.service.by, names)), cite("effect", e.id), cite("task", e.taskId)));
+      else lines.push(line(e.simulated === true ? `Simulated action ${e.kind} on ${e.target} in a simulation scope (nothing real was done): ${e.status}.` : `Outside action ${e.kind} on ${e.target}: ${e.status}.`, cite("effect", e.id), cite("task", e.taskId)));
+    }
     if (calls.length === 0 && effects.length === 0) lines.push(line("No tool use is recorded for this scope, among what you may read.", cite(query.taskId === undefined ? "project" : "task", query.taskId ?? projectId)));
     else lines.push(line("A tool call is activity, not progress; what was delivered is a separate question.", cite(query.taskId === undefined ? "project" : "task", query.taskId ?? projectId)));
     if (partial) lines.push(line("The search stopped before every record was read, so some tool use may be missing.", cite("project", projectId)));
     return { observedAt: now, summary, calls: calls.slice(0, limit), effects: effects.slice(0, limit), total: calls.length + effects.length, partial, lines };
+  }
+
+  /** The service operations of one task (card P03b), newest first: at most `limit`, how many more there are, and whether the scan stopped early. Operations of a simulation scope are not service operations here. */
+  async #serviceOpsOf(taskId: string, limit: number): Promise<{ items: { id: string; status: string; at: string; service: ServiceOpView }[]; more: number; partial: boolean }> {
+    const found: { id: string; status: string; at: string; service: ServiceOpView }[] = [];
+    let after: string | undefined, partial = false;
+    for (let reads = 0; ; reads++) {
+      if (reads >= this.#pages) { partial = true; break; }
+      const page = await this.#runner.list("effect", { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
+      for (const a of page) {
+        after = a.id;
+        const e = a.body as unknown as { taskId?: string; kind: string; input?: JsonObject; createdBy?: string; simulation?: string };
+        if (e.taskId !== taskId || e.kind !== "service-op" || e.simulation !== undefined) continue;
+        const ledger = await this.#storage.getEffect(a.id);
+        found.push({ id: a.id, status: ledger?.status ?? "unknown", at: a.createdAt, service: serviceOpOf(e, ledger?.evidence) });
+      }
+      if (page.length < this.#pageSize) break;
+    }
+    found.sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : x.id < y.id ? -1 : 1));
+    return { items: found.slice(0, limit), more: Math.max(0, found.length - limit), partial };
+  }
+
+  /** A principal as the owner knows it: an agent by its name (quoted), the owner as "you", anything else by its ID. Looked up once per answer. */
+  async #principalName(principal: string, cache: Map<string, string>): Promise<string> {
+    const known = cache.get(principal);
+    if (known !== undefined) return known;
+    let name = principal.startsWith("owner") ? "you" : shown(principal, 80);
+    if (principal.startsWith("agent:")) {
+      const friendly = ((await this.#runner.get("agent", principal.slice("agent:".length)).catch(() => undefined))?.body as unknown as { friendlyName?: unknown } | undefined)?.friendlyName;
+      if (typeof friendly === "string") name = `the agent ${quoted(friendly, 80)}`;
+    }
+    cache.set(principal, name);
+    return name;
   }
 
   // ---- what was delivered -------------------------------------------------------------------------------------------------------

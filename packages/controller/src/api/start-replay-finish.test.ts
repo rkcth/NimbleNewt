@@ -221,7 +221,9 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
     assert.equal(sim.status, 200, sim.text);
     assert.match(sim.body.simulation.label, /^Simulated\. Nothing was run, sent, spent or changed/);
     assert.deepEqual(sim.body.simulation.steps.map((s: { simulatedOutcome: string }) => s.simulatedOutcome), ["as-recorded", "as-recorded", "as-recorded", "as-recorded", "failed-injected", "not-reached", "not-reached", "not-reached"]);
-    assert.equal((await auditAll()).length, audit1 + 1, "one record: the simulation's own");
+    // Card P07: the rerun is recorded in the task's own simulation scope, opened by this first rerun: three records (the scope opened, the rerun's own record, the rerun noted in the scope), still no effect.
+    assert.match(sim.body.simulation.scope.scopeId, /^sms-/);
+    assert.equal((await auditAll()).length, audit1 + 3, "three records: the task's replay scope opened, the simulation's own, and the note in the scope");
     assert.equal((await c.storage.listAggregates("effect", { limit: 100 })).length, effects0, "no effect in the ledger");
     {
       const afterSim = await watched();
@@ -229,8 +231,8 @@ test("the replay of a task with a side line, a compaction, an approval, a submis
       assert.equal(afterSim.models, beforeSim.models, "the simulation called no model or route");
       assert.equal(afterSim.interpreted, beforeSim.interpreted);
       const written = await writtenSince(beforeSim.ops);
-      assert.equal(written.ids.length, 1, `exactly one write, the simulation's own record: ${JSON.stringify(written)}`);
-      assert.equal(written.audit.length, 1, JSON.stringify(written));
+      assert.equal(written.ids.length, 3, `exactly three writes, the scope opened, the simulation's own record and the note in the scope: ${JSON.stringify(written)}`);
+      assert.equal(written.audit.length, 3, JSON.stringify(written));
       assert.equal(written.effects, 0, "the simulation opened no effect");
     }
     assert.equal((await http("POST", `/web/replay/${task}/simulate`, { ...sess, body: { failAt: 5 }, key: "sim-1" })).body.replayed, true);
