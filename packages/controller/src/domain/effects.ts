@@ -221,6 +221,9 @@ export class EffectService {
       if (record.status === "uncertain") throw new DomainError("effect_uncertain", `effect ${effectId} (${record.target}) may or may not have happened and cannot be retried blindly; check the target and resolve it`, { field: "effectId" });
       const body = aggregate.body as unknown as EffectBody;
       // Card P07: an effect of a simulation scope never reaches a real bridge, and a simulated bridge never settles a real effect. Both are judged before any claim, so nothing is done.
+      // One that already started on the scope's stand-in may hold its change there, so it is not recorded as "nothing was done": it is left as it is, for the scope's own bridge to finish
+      // (the start-up reconciler asks the scope for it). One that never started is closed `failed`: truly nothing was done.
+      if (body.simulation !== undefined && bridge.simulated !== true && body.started) throw new DomainError("forbidden", `effect ${effectId} belongs to simulation scope ${body.simulation} and started on its stand-in; a real bridge cannot perform or settle it, and it is left for the scope to finish; nothing was done`, { field: "effectId" });
       if (body.simulation !== undefined && bridge.simulated !== true) return this.#settle(effectId, aggregate, "failed", { reason: SIMULATION_REFUSAL, refusedBridge: body.kind });
       if (body.simulation === undefined && bridge.simulated === true) throw new DomainError("forbidden", `effect ${effectId} is real and a simulated stand-in cannot perform or settle it; nothing was done`, { field: "effectId" });
       const now = Date.parse(this.#runner.now());
