@@ -304,4 +304,6 @@ test("the host says which folder it uses for each project, as a digest of the fo
   const out = workspaceDeclarations({ workspaceDeclaration: (p, f) => `repo:${p}:sha256:${digest(f)}` }, many, (l) => logged.push(l));
   assert.equal(out.length, 20, "a host announces at most 20 names");
   assert.equal(logged.filter((l) => /a host declares at most 20 projects/.test(l)).length, 2);
+  // P02 second review: the folder is digested exactly as written (the controller compares the bound location as written): a trailing slash, a "." segment or a different case is not tidied away.
+  for (const f of ["/srv/f/", "/srv/./f", "/SRV/f"]) assert.deepEqual(workspaceDeclarations({ workspaceDeclaration: (p, x) => `repo:${p}:sha256:${digest(x)}` }, new Map([["proj-aaaaaaaaaaaaaaaaaaaa", f]])), [`repo:proj-aaaaaaaaaaaaaaaaaaaa:sha256:${digest(f)}`], f);
 });

@@ -144,4 +144,15 @@ for (const backend of backends) {
     if (loose !== undefined) refused(await resources.workspaceAdmissionByDigest({ taskId: loose, projectId: project, folderDigest: digest(GARDEN), beforePin: true }), /not bound to the project|is not where repository/);
   });
 
+  suite("remote hosts: a digest of an output folder or of an unbound repository is not a bound repository, and the owner is told to bind the folder written as in the host's configuration (P02 second review)", async ({ owner, projects, resources, project }) => {
+    const plain = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Dig" })).id;
+    const HINT = /is not a repository bound to the project; bind that folder, written exactly as in the host's configuration/;
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: project, kind: "output", label: "reports", locator: "/srv/out/reports", access: "write" });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest("/srv/out/reports") }), HINT);
+    const bound = await resources.bindResource(owner, { commandId: cid("b"), projectId: project, kind: "repository", label: "garden", locator: GARDEN, repositoryId: "garden", access: "write" });
+    assert.equal((await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(GARDEN) })).admitted, true);
+    await resources.unbindResource(owner, { commandId: cid("u"), resourceId: bound.id, expectedRevision: (await resources.get(owner, bound.id))!.revision });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(GARDEN) }), HINT);
+  });
+
 }
