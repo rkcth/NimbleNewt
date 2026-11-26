@@ -62,7 +62,28 @@ pub(crate) fn home_needs_ui_limits(mode: WindowMode, ui_limits: bool) -> Result<
     Ok(())
 }
 
-/// The name of one run's home desktop: 64 random bits, so two runs never share one; a name that already exists is refused, never adopted.
+/// The job's UI limits (`--ui-limits`, JOBOBJECT_BASIC_UI_RESTRICTIONS.UIRestrictionsClass): all eight documented bits, JOB_OBJECT_UILIMIT_HANDLES 0x1, READCLIPBOARD 0x2, WRITECLIPBOARD 0x4,
+/// SYSTEMPARAMETERS 0x8, DISPLAYSETTINGS 0x10, GLOBALATOMS 0x20, DESKTOP 0x40, EXITWINDOWS 0x80. On the home desktop `DESKTOP` matters most: the container's desktop mask (DESKTOP_RIGHTS)
+/// includes DESKTOP_SWITCHDESKTOP, and its desktop lives on the VISIBLE WinSta0, so SwitchDesktop could make it the input desktop the user sees and types into. Microsoft documents that this
+/// limit "Prevents processes associated with the job from creating desktops and switching desktops using the CreateDesktop and SwitchDesktop functions"; that it does so on WinSta0 is not measured.
+pub(crate) const JOB_UI_LIMITS: u32 = 0x0000_00FF;
+
+/// After the job was told to end its processes (TerminateJobObject returns before they are gone): ask `count` (the job's ActiveProcesses, -1 when unreadable) up to `polls` times, calling `pause`
+/// between asks, and return the last answer: 0 when the job became empty, -1 when it could not be read (never waited on), else the number still there when the wait ran out. The window objects
+/// are closed after this, so the JSON line can say whether a process of the run could still be holding the desktop (`jobProcessesAtEnd`).
+pub(crate) fn wait_job_empty(mut count: impl FnMut() -> i64, polls: u32, mut pause: impl FnMut()) -> i64 {
+    let mut n = count();
+    for _ in 0..polls {
+        if n <= 0 { return n; }
+        pause();
+        n = count();
+    }
+    n
+}
+
+/// The name of one run's home desktop: 64 random bits, so two runs never share one. CreateDesktopW OPENS an existing desktop of that name (Microsoft: "If the specified desktop already exists,
+/// the function succeeds and returns a handle to the existing desktop"; no flag refuses it, unlike CWF_CREATE_ONLY for a station), so the refusal rests on ERROR_ALREADY_EXISTS (not documented
+/// for this call) AND on the read-back, which passes only an access list naming THIS run's new container exactly once.
 pub(crate) fn home_desktop_name(seed: u64) -> String { format!("nn-hd-{seed:016x}") }
 
 /// A SID in its text form (S-1-<authority>-<sub-authorities>), or None when the bytes are not a SID.
@@ -300,6 +321,49 @@ mod tests {
         assert!(!home_desktop_name(7).eq_ignore_ascii_case("default"));
         let lp = desktop_path(INTERACTIVE_STATION, &home_desktop_name(0xab));
         assert_eq!(lp, "WinSta0\\nn-hd-00000000000000ab");
+    }
+
+    #[test]
+    fn the_desktop_mask_is_read_control_and_all_nine_desktop_rights_and_nothing_else() {
+        // 131583 = 0x201FF. Decoded (Microsoft "Desktop Security and Access Rights"): READ_CONTROL 0x20000 plus every DESKTOP_* right, the risky ones included; the documents rely on this
+        // exact set (the home desktop's SwitchDesktop exposure is closed by the job's UI limit, not by the mask).
+        const READOBJECTS: u32 = 0x1; const CREATEWINDOW: u32 = 0x2; const CREATEMENU: u32 = 0x4; const HOOKCONTROL: u32 = 0x8; const JOURNALRECORD: u32 = 0x10;
+        const JOURNALPLAYBACK: u32 = 0x20; const ENUMERATE: u32 = 0x40; const WRITEOBJECTS: u32 = 0x80; const SWITCHDESKTOP: u32 = 0x100; const READ_CONTROL: u32 = 0x2_0000;
+        assert_eq!(DESKTOP_RIGHTS, READ_CONTROL | READOBJECTS | CREATEWINDOW | CREATEMENU | HOOKCONTROL | JOURNALRECORD | JOURNALPLAYBACK | ENUMERATE | WRITEOBJECTS | SWITCHDESKTOP);
+        assert_eq!(DESKTOP_RIGHTS, 0x0002_01FF);
+        // No WRITE_DAC, WRITE_OWNER or DELETE for the container: it cannot change or remove the desktop's access list.
+        for not in [0x4_0000u32, 0x8_0000, 0x1_0000] { assert_eq!(DESKTOP_RIGHTS & not, 0, "{not:#x}"); }
+        // CreateDesktop needs CREATEWINDOW; READ_CONTROL needs READOBJECTS and WRITEOBJECTS too (CreateDesktop page): the creating handle asks for DESKTOP_RIGHTS.
+        assert_ne!(DESKTOP_RIGHTS & CREATEWINDOW, 0);
+        assert_eq!(DESKTOP_RIGHTS & (READOBJECTS | WRITEOBJECTS), READOBJECTS | WRITEOBJECTS);
+        // The launcher's own account and SYSTEM get a superset (an AppContainer needs both its user AND its package SID granted).
+        assert_eq!(DESKTOP_RIGHTS & !DESKTOP_FULL, 0);
+        assert_eq!(STATION_RIGHTS & !STATION_FULL, 0);
+    }
+
+    #[test]
+    fn the_wait_for_an_empty_job_stops_at_zero_at_unreadable_and_at_the_limit() {
+        let mut pauses = 0;
+        let mut left = [3i64, 2, 0, 5].into_iter();
+        assert_eq!(wait_job_empty(|| left.next().unwrap(), 10, || pauses += 1), 0, "an empty job ends the wait");
+        assert_eq!(pauses, 2, "no pause after the job is empty");
+        let mut pauses = 0;
+        assert_eq!(wait_job_empty(|| 0, 10, || pauses += 1), 0);
+        assert_eq!(pauses, 0, "an empty job is not waited on");
+        let mut pauses = 0;
+        assert_eq!(wait_job_empty(|| -1, 10, || pauses += 1), -1, "an unreadable count is reported, not waited on");
+        assert_eq!(pauses, 0);
+        let mut pauses = 0;
+        assert_eq!(wait_job_empty(|| 2, 4, || pauses += 1), 2, "a job that does not empty is reported with what is left");
+        assert_eq!(pauses, 4, "the wait is bounded");
+    }
+
+    #[test]
+    fn the_job_ui_limits_are_all_eight_and_include_the_desktop_switch_limit() {
+        const JOB_UI_LIMIT_DESKTOP: u32 = 0x0000_0040; // JOB_OBJECT_UILIMIT_DESKTOP (winnt.h)
+        assert_eq!(JOB_UI_LIMITS, 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80);
+        assert_eq!(JOB_UI_LIMIT_DESKTOP, 0x40);
+        assert_ne!(JOB_UI_LIMITS & JOB_UI_LIMIT_DESKTOP, 0, "the only thing that stops SwitchDesktop on the visible WinSta0 for a home-desktop run");
     }
 
     #[test]

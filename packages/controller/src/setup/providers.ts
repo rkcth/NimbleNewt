@@ -8,7 +8,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { providerSecretRefusal } from "./reserved-secrets.js";
-import { BACKEND_KINDS } from "../inference-cache/profile.js";
+import { BACKEND_KINDS, cacheNoticeFor } from "../inference-cache/profile.js";
 import { smallWindowWarning } from "../context/fixed-part.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 
@@ -125,7 +125,7 @@ export class SetupProviderService {
       if (!Array.isArray(command.providers) || command.providers.length < 1 || command.providers.length > 10) return invalid("providers", "must list 1 to 10 providers");
       const specs = command.providers.map((p, i) => checkSpec(p, i, this.#kept()));
       if (new Set(specs.map((s) => s.name.toLowerCase())).size !== specs.length) invalid("providers", "names a provider twice");
-      warnings = specs.flatMap((spec) => { const w = smallWindowWarning(spec.contextTokens); return w === undefined ? [] : [`Provider ${spec.name}: ${w}.`]; });
+      warnings = specs.flatMap((spec) => { const w = smallWindowWarning(spec.contextTokens); const n = cacheNoticeFor(spec.kind); return [...(w === undefined ? [] : [`Provider ${spec.name}: ${w}.`]), ...(n === undefined ? [] : [`Provider ${spec.name}: ${n}`])]; });
       return {
         payload: { providers: specs as unknown as JsonObject[] },
         build: async () => {

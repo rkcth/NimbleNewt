@@ -53,7 +53,11 @@ What the home desktop closes, measured in the LPAC container: the window list (`
 
 **Supported configuration (owner decision 2026-11-26: "Let's require someone to be logged in").** The worker runs as the signed-in user, non-elevated, and uses the home desktop mode; the elevated named-station mode is an optional stronger path. Windows work stops when nobody is signed in (logout and reboot are meant to be handled by the existing suspend and resume paths: to be verified, not proven). An unattended Session-0 service identity is not a requirement.
 
-Not yet shown on Windows: the PRODUCT's `info` and a full `run` on this path (the experiment's home desktop was measured; the product is a separate copy of that creation).
+The figures above (495 windows, the masks, the 14 desktop steps) are from the owner's own `home-probe` output pasted into the working session on 2026-11-26; that output is not stored in this repository.
+
+The container's mask 131583 is 0x201FF: READ_CONTROL and all nine `DESKTOP_*` rights, `SWITCHDESKTOP`, `HOOKCONTROL` and both journal rights included, no WRITE_DAC, WRITE_OWNER or DELETE (the set the experiment measured; a Rust test pins it). On the home desktop `SWITCHDESKTOP` matters, because the desktop is on the visible WinSta0: what stops `SwitchDesktop` is the job's `JOB_OBJECT_UILIMIT_DESKTOP` (documented, not measured), which is why a home-desktop run without `--ui-limits` is refused. After the run the launcher waits up to 5 s for the job to be empty (`jobProcessesAtEnd`) and then closes its desktop handle; `windowObjects.closed` is about that handle (CloseDesktop does not fail because another process still uses the desktop; the desktop goes when its last user does). CreateDesktopW opens a desktop whose name already exists, so such a name is refused by ERROR_ALREADY_EXISTS and by the read-back (only this run's container may hold the one entry). Details: plan 12.5.1.
+
+Not yet shown on Windows: the PRODUCT's `info` and a full `run` on this path (the experiment's home desktop was measured; the product is a separate copy of that creation), and that the UI limit stops `SwitchDesktop` there.
 
 ## What is not in it
 

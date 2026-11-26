@@ -747,3 +747,27 @@ test("turns: a call that names no slot starts only after every running slot call
   assert.ok(at("end chat 1") < at("start chat undefined"), events.join());
   assert.ok(at("end chat undefined") < at("start /slots/0?action=erase"), events.join());
 });
+
+test("Claude through the adapter (experimental, isolation unattested): a project that requires isolation sends no cache setting, another project's calls still carry markers, and no call ever erases, saves or restores a slot", async () => {
+  const sim = new ClaudeSim();
+  const adapter = new CacheAdapter(profileFor({ kind: "claude", model: "claude-opus-5-5" }), sim);
+  const head = { model: "claude-opus-5-5", system: [{ type: "text", text: doc("head", 800) }], messages: [{ role: "user", content: [{ type: "text", text: "question" }] }] };
+  const open1 = await adapter.call(head, ctx());
+  assert.equal(open1.status, 200);
+  assert.ok(open1.applied.length > 0, "a project without the isolation rule still gets markers");
+  for (const scopeKey of [scopeA, scopeB]) {
+    const iso = await adapter.call(head, { scopeKey, isolationRequired: true, slot: 0 });
+    assert.equal(iso.status, 200);
+    assert.deepEqual(iso.applied, []);
+    assert.ok(iso.skipped.some((s) => /treated as unattested/.test(s)), iso.skipped.join("|"));
+    assert.equal(iso.isolation, undefined, "Claude has no slot, so no slot isolation mode is claimed");
+  }
+  assert.equal(sim.seen.length, 3, "one request per call: no erase or other slot request went out");
+  assert.ok(sim.seen.every((r) => r.method === "POST" && r.path === sim.seen[0]!.path && !/slots/.test(r.path)), JSON.stringify(sim.seen.map((r) => r.path)));
+  assert.match(JSON.stringify(sim.seen[0]!.body), /cache_control/);
+  for (const r of sim.seen.slice(1)) assert.doesNotMatch(JSON.stringify(r.body), /cache_control/);
+  assert.match((await adapter.slot("save", 0, slotFile("nn-abcdefgh2345.bin"), scopeA)).reason ?? "", /^unsupported/);
+  assert.match((await adapter.slot("restore", 0, slotFile("nn-abcdefgh2345.bin"), scopeA)).reason ?? "", /^unsupported/);
+  assert.equal((await adapter.clearSlot(0)).ok, false);
+  assert.equal(sim.seen.length, 3, "the refused slot actions sent nothing");
+});

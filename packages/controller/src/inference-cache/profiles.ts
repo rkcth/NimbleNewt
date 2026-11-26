@@ -1,5 +1,5 @@
 import { DomainError } from "../domain/errors.js";
-import { checkEndpoint, type BackendKind, type CacheContext, type CacheHit, type CacheProfile, type CacheCapabilities, type EndpointConfig, type EndpointOptions, type Prepared, type Retention, type Support, type Tuning, type WireRequest } from "./profile.js";
+import { CLAUDE_EXPERIMENTAL_NOTICE, STRATA_EXPERIMENTAL_NOTICE, checkEndpoint, type BackendKind, type CacheContext, type CacheHit, type CacheProfile, type CacheCapabilities, type EndpointConfig, type EndpointOptions, type Prepared, type Retention, type Support, type Tuning, type WireRequest } from "./profile.js";
 
 const UNSUPPORTED = (why: string): Support => ({ level: "unsupported", via: why });
 const AVAILABLE = (how: string): Support => ({ level: "available", via: how });
@@ -92,7 +92,7 @@ function llamaCpp(model: string, o: EndpointOptions): CacheProfile {
   ];
   return {
     kind: "llama-cpp", label: "llama.cpp (llama-server)", model, wire: "openai-chat", capabilities, tuning, minPrefixTokens: 1, defaultLifetimeMs: 3_600_000,
-    basis: "llama.cpp tools/server README and source as audited in backend-protocol-audit.md (2026-10-16); not measured here",
+    basis: "llama.cpp tools/server README and source as audited in backend-protocol-audit.md (2026-10-16); reuse across conversations, idle gaps to 120 s, eviction, concurrency, cache_prompt, id_slot and slot erase/restore measured by G10 on a rented GPU with Qwen3-8B (2026-11-25, one run per configuration)",
     hitFields: ["timings.cache_n", "timings.prompt_n"],
     caveats: ["Slot save and restore wait for an idle slot; they cannot snapshot a running decode.", "Slot files are specific to the model and build that wrote them.", "A short unrelated request may take a slot another agent's prompt was kept in; leave a spare slot for one-shot calls.", o.hostPromptCacheOff === true ? "Isolation between projects rests on the attestation that this server runs with --cache-ram 0 (hostPromptCacheOff); a slot is erased before another project uses it and the call then reuses only its own prompt. The setting is not detectable from the server, and the evidence is one run on one build." : "The server may keep a host prompt cache (--cache-ram, on by default) that a slot erase does not clear, so a call that crosses a project boundary is sent with cache_prompt false (no reuse). Run the server with --cache-ram 0 and set hostPromptCacheOff to keep reuse after an erase.", ...(o.hostPromptCacheOff === true ? [] : ["Not closed without --cache-ram 0: a later call of the same project is sent with cache_prompt true (llama-server has no request field that turns off only the host cache), and the server may then serve it a prompt another project left in the host cache when that prompt matches the new one further than the slot's own (identical tokens only: the other project's text never reaches this call, but the speed-up shows that it was sent). A project that requires isolation is never sent cache_prompt true, but other projects' later calls can still be sped up by its prompts. Not measured; only --cache-ram 0 (with hostPromptCacheOff) or a server of its own removes it."])],
     neverCall: [],
@@ -138,7 +138,7 @@ function vllm(model: string, o: EndpointOptions): CacheProfile {
   };
   return {
     kind: "vllm", label: "vLLM", model, wire: "openai-chat", capabilities, minPrefixTokens: 16, defaultLifetimeMs: 3_600_000,
-    basis: "vLLM entrypoint routes and docs as audited in backend-protocol-audit.md (2026-10-16); not measured here",
+    basis: "vLLM entrypoint routes and docs as audited in backend-protocol-audit.md (2026-10-16); reuse across conversations, idle gaps to 120 s, eviction, concurrency and cache_salt measured by G10 on a rented GPU with Qwen3-8B (2026-11-25, one run)",
     hitFields: ["usage.prompt_tokens_details.cached_tokens"],
     tuning: [
       { where: "request", setting: "cache_salt", why: "partitions prefix reuse by project, so one project cannot probe another's cache by timing" },
@@ -222,7 +222,7 @@ function strata(model: string, o: EndpointOptions): CacheProfile {
     slotSaveRestore: o.slotSave === true ? AVAILABLE("POST /slots/0?action=save|restore (session files; Host and API-key checks; JSON from no Origin)") : UNSUPPORTED("session files are not configured"),
   };
   return {
-    kind: "strata", label: "Strata", model, wire: "openai-chat", capabilities, minPrefixTokens: 1, defaultLifetimeMs: 3_600_000,
+    kind: "strata", maturity: "experimental", measured: false, notice: STRATA_EXPERIMENTAL_NOTICE, label: "Strata (experimental, not measured)", model, wire: "openai-chat", capabilities, minPrefixTokens: 1, defaultLifetimeMs: 3_600_000,
     basis: "Strata main 011c9e6 (CMakeLists reports 0.1.47, 2026-10-21) read as source and docs; the installed server is 0.1.43. Settings marked 'since' do not exist in 0.1.43. Nothing was run",
     hitFields: ["timings.cache_n", "timings.prompt_n", "usage.prompt_tokens_details.cached_tokens"],
     tuning: [
@@ -235,7 +235,7 @@ function strata(model: string, o: EndpointOptions): CacheProfile {
       { where: "server", setting: "--prompt-cache-spread", why: "thin checkpoints geometrically so an edit a few thousand tokens back does not re-read the whole conversation", since: "after 0.1.43 (present in main, 0.1.47)" },
       { where: "server", setting: "STRATA_CACHE_MESSAGE_BOUNDARY=1", why: "checkpoint the previous turn boundary so editing the last user message re-reads little" },
     ],
-    caveats: ["Switching conversations does not run requests concurrently; it only avoids re-reading.", "Prompt-cache options and the conversation cache are off or limited by default and layer-split runs exclude some of them.", "Strata is being replaced by Radiance on the owner's hardware; nothing may depend on a Strata-only feature."],
+    caveats: [STRATA_EXPERIMENTAL_NOTICE, "Switching conversations does not run requests concurrently; it only avoids re-reading.", "Prompt-cache options and the conversation cache are off or limited by default and layer-split runs exclude some of them.", "Strata is being replaced by Radiance on the owner's hardware; nothing may depend on a Strata-only feature."],
     neverCall: [],
     prepare(request, ctx): Prepared {
       const body = copy(request); const applied: string[] = []; const skipped: string[] = [];
@@ -278,7 +278,7 @@ function openai(model: string, o: EndpointOptions, compatible: boolean): CachePr
   };
   return {
     kind: compatible ? "openai-compatible" : "openai", label: compatible ? "OpenAI-compatible service" : "OpenAI", model, wire: "openai-chat", capabilities, minPrefixTokens: min, defaultLifetimeMs: extended ? 86_400_000 : 300_000,
-    basis: compatible ? "OpenAI prompt-caching guidance applied conservatively: a compatible service may ignore or reject these fields, so only fields the owner confirmed are sent" : "OpenAI prompt-caching guidance (automatic caching from 1,024 tokens in 128-token steps, prompt_cache_key, prompt_cache_retention); not measured here",
+    basis: compatible ? "OpenAI prompt-caching guidance applied conservatively: a compatible service may ignore or reject these fields, so only fields the owner confirmed are sent" : "OpenAI prompt-caching guidance (automatic caching from 1,024 tokens in 128-token steps, prompt_cache_key, prompt_cache_retention); G10 (2026-11-25) measured only the usage fields (cached tokens) through Hermes's ChatGPT route, which carries neither prompt_cache_key nor prompt_cache_retention; no capability is qualified by it",
     hitFields: ["usage.prompt_tokens_details.cached_tokens", "usage.input_tokens_details.cached_tokens"],
     tuning: [
       { where: "request", setting: "prompt_cache_key", why: "groups requests that share a prefix (per project or meeting, not per session) so they are routed to the same cache" },
@@ -354,7 +354,7 @@ function claude(model: string, o: EndpointOptions): CacheProfile {
     slotSaveRestore: UNSUPPORTED("hosted API; no slot files"),
   };
   return {
-    kind: "claude", label: "Claude (Messages API prompt caching)", model, wire: "anthropic-messages", capabilities, minPrefixTokens: min, defaultLifetimeMs: 300_000,
+    kind: "claude", maturity: "experimental", measured: false, notice: CLAUDE_EXPERIMENTAL_NOTICE, label: "Claude (Messages API prompt caching, experimental, not measured)", model, wire: "anthropic-messages", capabilities, minPrefixTokens: min, defaultLifetimeMs: 300_000,
     basis: `Claude API prompt-caching guidance (claude-api skill, cached 2026-10-06): at most ${CLAUDE_MAX_BREAKPOINTS} breakpoints, ttl 5m or 1h, per-model minimum prefix${listed ? "" : `; model ${model} is not in the minimum table, so the highest minimum (4096) is assumed`}`,
     hitFields: ["usage.cache_read_input_tokens", "usage.cache_creation_input_tokens", "usage.cache_creation.ephemeral_5m_input_tokens", "usage.cache_creation.ephemeral_1h_input_tokens"],
     tuning: [
@@ -362,6 +362,8 @@ function claude(model: string, o: EndpointOptions): CacheProfile {
       { where: "request", setting: "ttl", value: "1h for the stable head, 5m for the tail", why: "a head reused across gaps longer than 5 minutes is cheaper at 1h; the longer TTL must come first" },
     ],
     caveats: [
+      CLAUDE_EXPERIMENTAL_NOTICE,
+      "Isolation is treated as unattested: Claude's cache is shared inside one organization and model and nothing here has measured otherwise, so a project that requires isolation is sent with no cache settings.",
       "A prefix shorter than the model's minimum silently does not cache (no error).",
       "Any byte change before a breakpoint invalidates that breakpoint and everything after it; render order is tools, system, messages.",
       "A breakpoint looks back at most 20 blocks for an earlier entry; a turn that adds more than 20 blocks needs an intermediate breakpoint.",
@@ -484,7 +486,7 @@ export function profileFor(config: EndpointConfig): CacheProfile {
       if (inner.kind === "llama-cpp") { body["cache_prompt"] = false; applied.push("cache_prompt=false"); }
       // Strata cannot switch reuse off per request; the most we can do is not leave checkpoints or a pin of this project's prompt behind. Only a route of its own isolates on Strata.
       if (inner.kind === "strata") { body["strata_checkpoint"] = false; applied.push("strata_checkpoint=false"); }
-      return { body, headers: plain.headers, applied, skipped: [...plain.skipped, `no cache settings: this project requires isolation and ${inner.label} cannot keep projects apart${inner.kind === "llama-cpp" ? (inner.eraseIsolation === "attested" ? "" : " (its host prompt cache is not attested off, so other projects' later calls may still be sped up by this prompt; only --cache-ram 0 with hostPromptCacheOff, or a server of its own, isolates)") : " (its own cache may still run; only a route of its own isolates)"}`], expects: "no" };
+      return { body, headers: plain.headers, applied, skipped: [...plain.skipped, `no cache settings: this project requires isolation and ${inner.label} cannot keep projects apart${inner.kind === "llama-cpp" ? (inner.eraseIsolation === "attested" ? "" : " (its host prompt cache is not attested off, so other projects' later calls may still be sped up by this prompt; only --cache-ram 0 with hostPromptCacheOff, or a server of its own, isolates)") : inner.kind === "claude" ? " (Claude's cache isolation has not been measured, so it is treated as unattested: its own cache may still run; only a route of its own isolates)" : " (its own cache may still run; only a route of its own isolates)"}`], expects: "no" };
     },
   };
 }
