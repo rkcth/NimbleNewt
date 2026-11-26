@@ -11669,7 +11669,7 @@ ASSUMPTION: Radiance has no `/slots`, so the card's "read the server's slot stat
 ASSUMPTION: the local model costs no money, so the owner's spend budget for this batch is a token cap of 6,000,000 kept in a budget file (the same bookkeeping as before); 693,634 tokens were used.
 ASSUMPTION: the same settings as the two earlier local batches (medium reasoning, a fixed cap of 6,000 on every call, `parallel: 1`) so the numbers compare with them; three meetings per cell to keep the load on the shared server small.
 ASSUMPTION: the meeting runs themselves did not go through `/tmp/nn-slot.sh`: they are model calls to the server, one at a time, not test runs, and use almost no CPU here. The prototype's test file did go through it.
-ASSUMPTION: transcripts and call logs stay in the gitignored run directories, as for every earlier batch; the committed evidence file holds per-run figures and the checkpoint answers, never a key or a prompt.
+CORRECTED 2026-11-25 (see "M00 batch 4"): that assumption was wrong, the gitignored batch-3 folders were deleted by the merged-worktree clean-up and survive as figures only. Original text: ASSUMPTION: transcripts and call logs stay in the gitignored run directories, as for every earlier batch; the committed evidence file holds per-run figures and the checkpoint answers, never a key or a prompt.
 Not done: cloud repeats under identical settings (no cloud spend authorized for this batch; agents may not use keys on their own authority) and other local engines (only Radiance runs on this machine). The owner's acceptance of the M00 proposals is still open; nothing in M04 to M06 or the plan was changed, and the card is not flipped.
 
 **First review (Claude agent, Opus 5.5, 2026-11-17).** Reviewed `card20-m00` at fbaad22c; origin/main (8c967629) was already the merge base, so there was nothing to merge. Radiance and every other server were not contacted and no model call was made.
@@ -13126,7 +13126,15 @@ In plain words: the card asks that "an outer supervisor watches the release host
 
 ## M00 batch 4 (Claude agent, Sonnet 5.5, 2026-11-25): raw evidence kept and the audit's gaps closed
 
-ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 4 spend: $0 cloud, a 1,500,000-token cap on Radiance, recorded per meeting. Budget file: `evidence/m00-raw/batch4/budget.json` (cap written before the first run; committed first). Details and results are added below as the batch runs.
+ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 4 spend: $0 cloud, a 1,500,000-token cap on Radiance, recorded per meeting. Budget file: `evidence/m00-raw/batch4/budget.json` (cap written and committed, commit `681b9577`, before the first model call).
+
+**What was done.** One serial Radiance batch (details, table and deviations in `m00-meeting-experiments.md`, section "Fourth local batch"): ship-owner, ship-absent, desk-read, tabling-benchmark, tool-adoption shared-first and agent-first, digest-p1, one checkpoint set, then the 20-member chair-notes pair (once completed; rolling not completed, see below). 8 complete meetings (872,246 tokens), 1 checkpoint set (3,093), 2 interrupted rolling-notes runs (108,939 after the server stopped answering; 514,589 stopped by the runner at the cap). Total 1,498,867 of 1,500,000. Figures: `evidence/m00-radiance-batch4.json`. Evictions caused per meeting: 0 in six, 18 for agent-first, 65 for the 20-member meeting (mixed with about 43 requests from another user).
+
+**Raw evidence now in git** (`evidence/m00-raw/`): `batch4/` (11 run folders and the budget file, about 0.9 MB) and `2026-10-22/` (44 complete runs from the main checkout, about 1.5 MB). No redaction was needed (counts of key, address, port and URL patterns were 0 before and after copying). The 2026-10-23 hosted runs and batches 1 to 3 remain figures only; the record's deviation lines say why.
+
+**Record changes.** Acceptance row "every transcript, ballot record and chair question kept" corrected to "partly"; "kept on this machine" lines corrected; deviation lines added; the 17 ASSUMPTION lines on the open owner proposals added (section "Open owner proposals: accepted by delegation").
+
+**NOT done.** The rolling-notes meeting at 20 members did not finish (cap). No cloud repeat (not allowed). The M05/M06 code was not touched, the card was not flipped, nothing pushed.
 
 ## Test repair "m00win": the M00 Radiance tests find their fake Pi config on Windows (card20-m00win, Claude agent, 2026-11-17)
 

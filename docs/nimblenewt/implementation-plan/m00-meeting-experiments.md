@@ -6,7 +6,7 @@ Nothing here changes the plan by itself. Owner decisions are marked; everything 
 
 ## What was run
 
-Real-model runs came in two batches. All run directories are under `prototypes/meeting/runs/` (gitignored); times quoted below are the `HH-MM-SS` part of the directory name.
+Real-model runs came in two batches. The run directories were written under `prototypes/meeting/runs/` (gitignored). **Which raw evidence survives:** the 44 complete runs of 2026-10-22 and the 8 complete meetings, 2 interrupted runs and one checkpoint set of batch 4 are in git under `evidence/m00-raw/` (see "Fourth local batch" below). The 2026-10-23 cloud runs and Radiance batches 1 to 3 survive as recorded figures only: their raw folders were under the gitignored `runs/` of the worktrees that made them, and the automatic clean-up of merged worktrees deleted them. Times quoted below are the `HH-MM-SS` part of the directory name.
 
 | Batch | Meetings | Route and models | Tokens |
 |---|---|---|---|
@@ -30,7 +30,7 @@ Prototype additions made for this completion (all in `prototypes/meeting/`): a s
 |---|---|---|
 | At least five meetings on different subjects (tool proposal to eight coders, policy motion, real disagreement, absent member, a meeting the owner interrupts) | Yes: tool adoption (8 and 20 members), ship with a known bug, agents building NimbleNewt itself, the desk-read policy motion, a scheduler switch with a pending measurement; the owner interrupted 9 meetings and an absent member's desk was read in 15 | tables below |
 | Owner's model-spend budget set beforehand and the spend recorded | Yes | budget table above |
-| Every transcript, ballot record and chair question kept | Yes: each run directory holds `transcript.md`, `ballots.json` (every original ballot and revision with its trigger), `calls.jsonl` (raw text kept from the later runs), `summary.json` (chair questions and refused ones, inspections, inquiry checks) and `chair-notes.md` where notes were kept | run directories |
+| Every transcript, ballot record and chair question kept | **Partly (corrected 2026-11-25).** Kept in git: the 44 complete 2026-10-22 runs and all batch-4 runs (`evidence/m00-raw/`). Figures only, raw lost: the 2026-10-23 hosted runs and Radiance batches 1 to 3 (the clean-up of merged worktrees deleted the gitignored folders); the owner-interrupt, desk-read, hosted-cache, digest and tabling experiments were repeated on Radiance in batch 4 with the raw files kept. As written for the runs, each run directory held `transcript.md`, `ballots.json` (every original ballot and revision with its trigger), `calls.jsonl` (raw text kept from the later runs), `summary.json` (chair questions and refused ones, inspections, inquiry checks) and `chair-notes.md` where notes were kept | run directories |
 | Chair notes once after round 1 against rolling notes, with a 20-participant meeting | Yes (earlier batch) | rule 6 |
 | Role personalities and information habits, notes from the first round, tabling | Yes (earlier batch); tabling again here with a scenario where research matters | rules 13, 19 |
 | Blind or open first round | Yes (earlier batch, and all new `m00-full` runs are blind) | rule 3 |
@@ -151,6 +151,30 @@ The "no" votes on the chair reading an absent member's desk (an owner-decided de
 | Tie | chair casting vote, no double vote |
 | Prompt order | shared-first |
 
+## Open owner proposals: accepted by delegation (2026-11-25)
+
+ASSUMPTION: (Rob delegates; nothing waits on him) proposals 1-13 and the provisional defaults are accepted as configurable defaults for M05/M06; each is a setting the owner can change by chat; none removes a rule; revisit after the real-agent trial.
+
+Each line below restates one numbered proposal in "Proposed changes to M04-M06" (numbers match) as the accepted default:
+
+- ASSUMPTION: (proposal 1) a blind first round is the default; the owner can switch it to open.
+- ASSUMPTION: (proposal 2) members may propose amendments during discussion, and the chair checks before ballots open whether the motion matches where the discussion landed.
+- ASSUMPTION: (proposal 3) facts-style summaries above 8 members, full text below; the full text is always retrievable; the 8-member threshold is a setting.
+- ASSUMPTION: (proposal 4) the chair-question check is by structure (no position field, motion outcome not named); the keyword filter is dropped.
+- ASSUMPTION: (proposal 5) the desk read picks files from a list by id; the meeting summary lists the files read and the files quoted.
+- ASSUMPTION: (proposal 6) the turn limit counts visible tokens, reasoning is budgeted separately, and the hang timeout is kept; the visible cap is set per route (220 cloud, 300 local).
+- ASSUMPTION: (proposal 7) the prompt builder is shared-first.
+- ASSUMPTION: (proposal 8) direct questions are kept, at low priority, with only the floor round trip built.
+- ASSUMPTION: (proposal 9) the owner inquiry stays as decided, with a short revision prompt; the owner's question text is not held back from voters.
+- ASSUMPTION: (proposal 10) the echo flag and diverse seating are defaults (settings `meeting.echoFlag`, `meeting.seating`).
+- ASSUMPTION: (proposal 11) chair notes are written once after round 1; rolling notes are not a default.
+- ASSUMPTION: (proposal 12) checkpoint answers are wrapped by the controller (stamped, read-only, no actions).
+- ASSUMPTION: (proposal 13) tabling stays, and a pending-measurement test scenario is added.
+- ASSUMPTION: the provisional defaults table above is accepted as listed, except the turn-limit row, which becomes a per-route visible-token cap (220 cloud, 300 local).
+- ASSUMPTION: local guard: a meeting on the local server reads `/stats` before and after and reports the evictions it caused; a reserved snapshot store needs a server setting and is left alone.
+- ASSUMPTION: ties: the chair's casting vote stays.
+- ASSUMPTION: build order: the M05/M06 code written before this acceptance is kept and treated as built to these accepted defaults; nothing is reverted.
+
 ## Caveats
 
 - Fictional scenarios; models answer with the notes they are given, so some reasoning reflects what the scenario author seeded.
@@ -167,7 +191,7 @@ ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 4 spend: $0 cloud, a
 
 ## Local model batch (Radiance, 2026-11-15)
 
-Run on Rob's local server (Radiance, model `qwen3.8-flash-next-iq4r`, port 8002), one connection at a time, scenario `tool-adoption` (eight members). This is the first M00 data from the local model, so it does not compare with the cloud numbers above (different model, thinking on). Samples are tiny: three meetings per variant. Raw runs: `prototypes/meeting/runs/2026-11-15T23-*` (gitignored).
+Run on Rob's local server (Radiance, model `qwen3.8-flash-next-iq4r`, port 8002), one connection at a time, scenario `tool-adoption` (eight members). This is the first M00 data from the local model, so it does not compare with the cloud numbers above (different model, thinking on). Samples are tiny: three meetings per variant. Raw runs: `prototypes/meeting/runs/2026-11-15T23-*` (gitignored; the folders no longer exist, figures only).
 
 **Setup that mattered**
 - The model thinks by default and the thinking counts against the output cap. With the meeting's small per-turn caps (80 to 300 tokens) every reply came back empty and all eight members abstained (run `23-04-45`: all 26 calls finished with `length`). That run is invalid and is not counted. A run with thinking switched off (`23-06-47`, `23-07-20`, `23-07-42`) also worked but is not what the product would use, so it is not counted either.
@@ -218,7 +242,7 @@ Three of the 20 did not finish in the first pass because the cumulative token ca
 
 ### Third local batch (Radiance, 2026-11-17): prompt order, hidden reasoning, absent member, tabling, checkpoint questions
 
-Run 2026-11-17 04:59 to 05:22 UTC on the same server and model (Radiance 2.1.0, `qwen3.8-flash-next-iq4r`), the same settings as the earlier local batches (`reasoning_effort: medium`, one fixed 6,000-token cap on every call), one request at a time. It fills the local gaps the earlier batches left: the shared-first against agent-first comparison on the local server, hidden reasoning against visible text per turn (the runner now records the server's `reasoning_tokens`), the absent-member desk read, tabling, and the checkpoint questions on the local model. Each meeting first read `GET /stats` and started only when nothing was in flight, running or waiting (the two checkpoint sets went through `checkpoint.mjs`, whose `radiance:` route did not run this check at the time and left no server reading; the review added the check to every route, see the implementation notes); it read `/stats` and `/sessions` again at the end (`server.json` in the run directory). In every one of the 13 meetings the server's request counter rose by exactly the number of calls the meeting made, so nobody else used the server during any meeting and the server figures below are the meetings' own. 13 meetings (one smoke meeting and 12 counted) and 2 checkpoint sets (12 questions), 693,634 tokens in all, no money. Per-run figures: `evidence/m00-radiance-batch3.json`; raw runs (transcripts, ballots, every call): `prototypes/meeting/runs/2026-11-17T0*` (gitignored, kept on this machine).
+Run 2026-11-17 04:59 to 05:22 UTC on the same server and model (Radiance 2.1.0, `qwen3.8-flash-next-iq4r`), the same settings as the earlier local batches (`reasoning_effort: medium`, one fixed 6,000-token cap on every call), one request at a time. It fills the local gaps the earlier batches left: the shared-first against agent-first comparison on the local server, hidden reasoning against visible text per turn (the runner now records the server's `reasoning_tokens`), the absent-member desk read, tabling, and the checkpoint questions on the local model. Each meeting first read `GET /stats` and started only when nothing was in flight, running or waiting (the two checkpoint sets went through `checkpoint.mjs`, whose `radiance:` route did not run this check at the time and left no server reading; the review added the check to every route, see the implementation notes); it read `/stats` and `/sessions` again at the end (`server.json` in the run directory). In every one of the 13 meetings the server's request counter rose by exactly the number of calls the meeting made, so nobody else used the server during any meeting and the server figures below are the meetings' own. 13 meetings (one smoke meeting and 12 counted) and 2 checkpoint sets (12 questions), 693,634 tokens in all, no money. Per-run figures: `evidence/m00-radiance-batch3.json`; raw runs (transcripts, ballots, every call): `prototypes/meeting/runs/2026-11-17T0*` (gitignored; the folders were deleted by the merged-worktree clean-up, so these figures stand without raw files).
 
 **Prompt order on the local server** (`tool-adoption`, eight members; `m00-structural-p1` against `m00-structural-agentfirst-p1`, which differs only in putting each member's persona first; run alternately, three each):
 
@@ -266,6 +290,52 @@ Run 2026-11-17 04:59 to 05:22 UTC on the same server and model (Radiance 2.1.0, 
 - Timings come from one quiet period; G10 saw up to four-fold variation under load.
 - The meetings are fictional scenarios written for these tests, and the owner is a script, as in all M00 runs.
 - Not done from this machine: cloud repeats with identical settings (no new cloud spend was authorized for this batch, and agents may not use keys on their own authority), and other local engines (only Radiance runs here).
+
+### Fourth local batch (Radiance, 2026-11-26 04:45 to 05:32 UTC): the audit's gaps, raw evidence kept
+
+Why: a clean-context audit of M00 found the findings record complete but (1) no batch showed a spend budget set before its runs and (2) most raw run folders (transcripts, ballots, chair questions) were gone, because `prototypes/meeting/runs/` is gitignored and the merged-worktree clean-up deleted them. This batch repeats the experiments whose raw evidence was lost, on Radiance only, with the budget set first and every run folder copied into git. Server: Radiance 2.2.0 (batches 1 to 3 ran on 2.1.0), model `qwen3.8-flash-next-iq4r`, `reasoning_effort: medium`, a fixed 6,000-token cap on every call, one request at a time, each meeting started only after `GET /stats` showed nothing in flight, running or waiting. Per-run figures: `evidence/m00-radiance-batch4.json`; raw files: `evidence/m00-raw/batch4/<run-folder>/` (transcript, ballots, summary, every call, server readings, chair notes where written).
+
+**Budget.** The statement (`ASSUMPTION: (Rob delegates; nothing waits on him) M00 batch 4 spend: $0 cloud, a 1,500,000-token cap on Radiance, recorded per meeting.`) and the budget file with the cap were committed before the first model call (commit `681b9577`). The runner enforced it: 1,498,867 of 1,500,000 tokens used over 11 invocations (8 complete meetings 872,246; one checkpoint set 3,093; two interrupted runs 108,939 and 514,589). No cloud, ChatGPT or RunPod route was used. The first start found the server not answering within 5 seconds (exit code 3, nothing sent); the second start 60 seconds later ran.
+
+| Meeting | Scenario and variant | Outcome | Calls | Tokens (in plus out) | Cached input | Time | Evictions in the window |
+|---|---|---|---|---|---|---|---|
+| ship-owner (owner interrupt) | `ship-owner`, `m00-structural-p1` | passed 3-0 | 24 | 47,538 | 36.9% | 78 s | 0 |
+| ship-absent (absent member, desk read) | `ship-absent`, `m00-structural-p1` | failed 0-2 | 12 | 22,386 | 0% | 54 s | 0 |
+| policy motion | `desk-read`, `m00-structural-p1` | passed 2-1 | 20 | 39,896 | 27.1% | 88 s | 0 |
+| tabling | `tabling-benchmark`, `m00-structural-p1` | tabled, 6 research tasks | 13 | 23,760 | 0% | 62 s | 0 |
+| tool adoption, shared-first | `tool-adoption`, `m00-structural-p1` | passed 8-0 | 35 | 89,241 | 57.2% | 125 s | 0 |
+| tool adoption, agent-first | `tool-adoption`, `m00-structural-agentfirst-p1` | passed 8-0 | 44 | 109,763 | 2.0% | 166 s | 18 |
+| digest | `tool-adoption`, `digest-p1` | tabled, 4 research tasks | 30 | 59,273 | 5.9% | 136 s | 0 |
+| 20 members, chair notes once | `tool-adoption-20`, `tldr-facts` | passed 20-0 | 107 | 480,389 | 52.4% | 709 s | 65 (see below) |
+| 20 members, chair notes rolling | `tool-adoption-20`, `tldr-facts-rolling` | **not completed** (two attempts, below) | 40, then 139 | 108,939, then 514,589 | 8% / 37% | 259 s, 632 s | not reported |
+
+The checkpoint set (one set of the six questions, 3,093 tokens): 6 of 6 answers began "From my checkpoint of <time>", 6 of 6 held the expected facts, the standard staleness phrase was found in 3 of 6, none performed or promised an action. The scorer's false-claim flag fired once (the stale-risk question); reading the answer, it restates the checkpoint ("whether the bisect succeeded or the failures were fixed, is beyond my checkpoint"), so the flag is the pattern match, not an invented fact; stated here rather than silently corrected.
+
+**What each repeat shows (small samples, one meeting per cell except the pair).**
+- Owner interrupt (rule 11): two inquiries (after round 1 and during the vote), 2 held answers, 0 leaks, 2 revision turns, 0 changed a ballot, clock paused 15.8 s of 78 s. Same result as the cloud batch (0 of 24), now with the raw files kept.
+- Absent member and desk read (rule 12): Mei skipped and recorded, the scripted attempt to read a present member's desk refused, 3 files logged as read, 3 excerpts accepted and 0 refused (the chair used ids), no returning-member correction. The meeting failed 0-2 (batch 3: passed, tied, passed): outcomes of this scenario vary run to run.
+- Policy motion: passed 2-1 with 2 objection rounds; a real split of the kind the cloud batch rarely saw.
+- Tabling (rule 13): tabled with 6 research tasks, no vote; the digest meeting also tabled (4 tasks), as 1 of 5 and 3 of 10 digest meetings did in batch 2.
+- Prompt order (rule 15): shared-first reused 57.2% of its input and wrote 3 snapshots with 0 evictions; agent-first reused 2.0%, wrote 18 snapshots and was followed by 18 retention evictions. Both passed 8-0 this time (batch 3: two of three agent-first meetings tabled), so the outcome difference seen there is not repeated; the cache and server-load difference is. The shared-first meeting took 125 s against 166 s.
+- Digest (rule 14 summaries): 59.3k tokens against 89.2k, but only 5.9% cached against 57.2%, and it tabled the motion that structural passed; as in batches 1 and 2 it saves input tokens, not time or cache reuse.
+- Hidden reasoning (rule 14): 83.9% of all output tokens in the 8 meetings; of 128 statements, 54 (42%) were over 220 visible tokens (batch 3: 59% of round 1 and 2 statements), medians 183 to 230 per meeting. Every call ended `stop`; the 6,000 cap was not reached by one call. Chair questions: 15 accepted, 0 refused.
+- Twenty members (rule 18): passed 20-0, 107 calls, 480k tokens, 11.8 minutes, 52.4% of input cached. This meeting's evictions are not clean evidence of what the meeting caused: the server's request counter rose by 150 while the meeting made 107 calls, so about 43 requests came from someone else during it (in the other 7 meetings the counter rose by exactly the calls). The snapshots written (85) and evictions (38 retention, 27 store-full) therefore mix the meeting with another user's traffic.
+- **Chair notes once against rolling at 20 members (rule 6): not completed.** The first rolling attempt (05:09) was cut off after 40 calls (108,939 tokens) when the server stopped answering (connection refused, about 05:15; it came back before 05:21, same model, version 2.2.0), which was not a result of anything the meeting did. The retry (05:22) ran 139 calls and 514,589 tokens and was stopped by the runner at the cap ("token cap reached: 1,498,867 of 1,500,000") before any ballot, because rolling notes add a call per statement. The cap was not raised. So the pair is incomplete: the rolling attempt alone had spent 514,589 tokens without finishing, against 480,389 for the whole once-written-notes meeting; this points the same way as the cloud result (rolling cost more: 306k against 239k) but it is a lower bound on one aborted meeting, not a measurement. Rule 6 keeps its earlier verdict, now with an unfinished local repeat. Both aborted runs keep their `calls.jsonl` in git.
+
+**Raw evidence kept (all in git, under `docs/nimblenewt/implementation-plan/evidence/m00-raw/`).**
+- `batch4/`: 11 run folders (8 complete meetings with `transcript.md`, `ballots.json`, `summary.json`, `calls.jsonl`, `server.json`, plus `chair-notes.md` for the 20-member meeting; 2 interrupted runs with `calls.jsonl` only; the checkpoint set's `results.json`) and `budget.json`; about 0.9 MB.
+- `2026-10-22/`: the 44 complete runs of 2026-10-22 copied from the main checkout (`transcript.md`, `ballots.json`, `summary.json`, `calls.jsonl`, and `chair-notes.md` in 11); about 1.5 MB. The one run folder without a summary (`...T20-06-... rich-personas-tabling-pi`, aborted) is not copied. Folder names had a `:` (from `selfbuild:`); it is written `_` in the copies so the folders also check out on Windows.
+- Redaction: none was needed. Before copying, the source folders were searched (counts only, nothing printed) for `Bearer`, `sk-` followed by key characters, `api_key`/`apikey`, the server address, port 8002, any dotted IP address, `localhost`, and `http(s)://`: 0 files matched in both sets, the same counts in the copies (the word "authorization" appears in model text about standing authorization and is not a header). The runner already puts the key only in the request header and never writes it to a call log.
+
+**Deviations from the card text (stated, not hidden).**
+1. The 2026-10-22 runs were exploratory: run before any spend budget was set, with the spend recorded (about 1.84 million tokens) but not counted against a cap. Their raw files are now in git.
+2. The 2026-10-23 hosted runs (49 meetings, 3 checkpoint sets) and Radiance batches 1 to 3 survive as figures only (the record's tables and `evidence/m00-radiance-batch3.json`): their raw folders were in the gitignored `runs/` folders of the worktrees that made them, and the clean-up of merged worktrees deleted them. Batch 4 repeats the owner-interrupt, absent-member and desk-read, digest, tabling and prompt-order experiments on Radiance with raw files kept; the two-model hosted runs themselves cannot be repeated without cloud spend.
+3. The hosted cache comparison (rule 15: GLM 76.8 against 31.0 percent, Qwen 55.3 against 20.7 percent) rests on those recorded figures, because no cloud spend is allowed for M00; the local repeat in this batch and batch 3 agrees in direction.
+4. The batch-4 budget (1,500,000 tokens) is a cap on a local server with no money cost; the earlier Radiance batches used a 2,000,000 and then a 6,000,000 cap (batch 2 began at 2,000,000), none recorded before its runs.
+5. The rolling-notes pair at 20 members did not complete (above).
+6. Radiance was 2.2.0 here and 2.1.0 in batch 3; figures are comparable in direction only.
+
+**Local guard report (accepted default).** Per meeting, `server.json` holds the `/stats` and `/sessions` readings before and after and `evictionsCausedByMeeting`: 0 in six of the eight complete meetings, 18 for the agent-first meeting, 65 for the 20-member meeting (with foreign traffic in that window, above). A snapshot store reserved for meetings needs a server setting and is left alone.
 
 ## Reproduce
 
