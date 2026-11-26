@@ -14,7 +14,8 @@ pub(crate) const SE_GROUP_ENABLED: u32 = 0x4;
 pub(crate) const SE_GROUP_DENY_ONLY: u32 = 0x10;
 
 /// The groups a de-elevated (UAC-filtered style) token holds as deny-only: Administrators and the operator groups that carry administrative rights. Matching is by exact SID text.
-pub(crate) const ADMIN_LIKE_GROUPS: [&str; 6] = ["S-1-5-32-544", "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-556"];
+/// S-1-5-114 ("Local account and member of Administrators group") is deny-only in a UAC-filtered token too.
+pub(crate) const ADMIN_LIKE_GROUPS: [&str; 7] = ["S-1-5-32-544", "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-556", "S-1-5-114"];
 pub(crate) fn is_admin_like(sid: &str) -> bool { ADMIN_LIKE_GROUPS.contains(&sid) }
 
 /// What the Administrators group is in a token: `absent`, `enabled`, `deny-only` (what a UAC-filtered token has) or `disabled`.
@@ -131,6 +132,21 @@ pub(crate) const HOME_STATION_READ: u32 = 0x0002_0103;
 pub(crate) const HOME_STATION_FULL: u32 = 0x0002_037F;
 pub(crate) fn home_station_mask(mode: DesktopMode) -> Option<u32> {
     match mode { DesktopMode::HomeStationRead => Some(HOME_STATION_READ), DesktopMode::HomeStationFull => Some(HOME_STATION_FULL), _ => None }
+}
+
+/// The name of home-probe's own work folder (a new folder inside --cwd or the temp folder; the folder --cwd names is never the one removed).
+pub(crate) fn work_folder_name(seed: u64) -> String { format!("nn-home-{:08x}", seed & 0xFFFF_FFFF) }
+
+/// The two clean-up commands printed before a station entry is written (for a launcher killed in that step): the entry (home-revoke) and the per-run profile itself (delete-profile), each with
+/// the record this launcher wrote as its proof. A killed launcher leaves BOTH: the profile is deleted only at the end of the run.
+pub(crate) fn cleanup_commands(name: &str, sid: &str, record: &str) -> String {
+    format!(".\\nn-appc-launcher.exe home-revoke --name {name} --profile-record {r} ; .\\nn-appc-launcher.exe delete-profile --name {name} --sid {sid} --profile-record {r}", r = quote_arg(record))
+}
+
+/// May `home-revoke` remove entries for this name's SID from WinSta0? Only with the proof `delete-profile` needs (profile::may_delete): a per-run name, and a record file this launcher wrote that
+/// names this profile and the SID the name derives to now. `derived` is the string form of the derived SID. The error says which part failed; nothing is written then.
+pub(crate) fn may_revoke(name: &str, record_text: Option<&str>, derived: &str) -> Result<(), String> {
+    crate::profile::may_delete(name, record_text, derived, None).map_err(|e| format!("home-revoke refused: {}", e.replace("nothing is deleted", "nothing is written")))
 }
 
 /// May a desktop be made on this window station? Any named station the launcher runs in; not an unreadable name.
@@ -386,6 +402,29 @@ mod tests {
         assert_eq!(split_deelevate_args(&v(&["--exe", "a.exe", "--", "info"])).unwrap().1, v(&["info"]));
         for bad in [v(&[]), v(&["--exe"]), v(&["--exe", ""]), v(&["--"])] { assert!(split_deelevate_args(&bad).is_err(), "{bad:?}"); }
         assert_eq!(split_deelevate_args(&v(&["a", "--exe", "b"])).unwrap().1, v(&["a", "--exe", "b"]), "--exe only counts first");
+    }
+
+    #[test]
+    fn home_revoke_needs_the_same_proof_as_delete_profile() {
+        let name = "NimbleNewtRun-0123456789abcdef";
+        let sid = "S-1-15-2-1-2-3-4-5-6-7";
+        let rec = crate::profile::format_record(name, sid);
+        assert!(may_revoke(name, Some(&rec), sid).is_ok());
+        assert!(may_revoke(name, None, sid).unwrap_err().contains("no record"));
+        assert!(may_revoke(name, Some(&rec), "S-1-15-2-9-9-9-9-9-9-9").unwrap_err().contains("not the SID of this name"));
+        assert!(may_revoke("NimbleNewtRun-fedcba9876543210", Some(&rec), sid).unwrap_err().contains("names another profile"));
+        assert!(may_revoke("NimbleNewtExperiment", Some(&rec), sid).unwrap_err().contains("not a per-run profile name"));
+        assert!(may_revoke(name, Some("garbage"), sid).unwrap_err().contains("nothing is written"));
+    }
+
+    #[test]
+    fn the_clean_up_commands_name_the_record_and_both_leftovers() {
+        let c = cleanup_commands("NimbleNewtRun-0123456789abcdef", "S-1-15-2-1-2-3-4-5-6-7", "C:\\Users\\A B\\AppData\\Local\\Temp\\nn-home-1\\rec\\NimbleNewtRun-0123456789abcdef.sid");
+        assert!(c.contains("home-revoke --name NimbleNewtRun-0123456789abcdef --profile-record \"C:\\Users\\A B\\"), "{c}");
+        assert!(c.contains("delete-profile --name NimbleNewtRun-0123456789abcdef --sid S-1-15-2-1-2-3-4-5-6-7 --profile-record \""), "{c}");
+        assert_eq!(work_folder_name(0x1_2345_6789), "nn-home-23456789");
+        assert_eq!(work_folder_name(0), "nn-home-00000000");
+        assert!(is_admin_like("S-1-5-114"), "the local-admin group is deny-only in a UAC-filtered token");
     }
 
     #[test]

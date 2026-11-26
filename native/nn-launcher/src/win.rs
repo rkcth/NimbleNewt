@@ -1119,11 +1119,20 @@ pub fn main() {
         }
         #[cfg(feature = "experiment")]
         "home-revoke" => {
-            // Removes the container's explicit entries from WinSta0 (after a killed `--desktop home-desktop-station-*` run); the SID is derived from the name, no profile is made.
+            // Removes the container's explicit entries from WinSta0 (after a killed `--desktop home-desktop-station-*` run); the SID is derived from the name, no profile is made. The same proof as
+            // delete-profile (homerules::may_revoke): a per-run name and the record this launcher wrote for it, naming that profile and the SID the name derives to. Without it nothing is written.
             let mut j = j;
             match desk::derived_sid(&a.name) {
                 Err(e) => fail(j, "container", &e),
-                Ok(sid) => { let ok = home::home_revoke(&mut j, sid.0); j.b("ok", ok); Outcome { j, code: if ok { 0 } else { EXIT_LAUNCHER_FAILED } } }
+                Ok(sid) => {
+                    let text = sid_string(sid.0);
+                    let record = a.profile_record.as_deref().and_then(|p| std::fs::read_to_string(p).ok());
+                    j.s("containerSid", &text);
+                    match crate::homerules::may_revoke(&a.name, record.as_deref(), &text) {
+                        Err(e) => fail(j, "profile", &e),
+                        Ok(()) => { let ok = home::home_revoke(&mut j, sid.0); j.b("ok", ok); Outcome { j, code: if ok { 0 } else { EXIT_LAUNCHER_FAILED } } }
+                    }
+                }
             }
         }
         #[cfg(feature = "experiment")]

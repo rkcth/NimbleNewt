@@ -15,7 +15,8 @@
 // What is written, and how it is undone: the desktop made for a step is created with its final access list (the launcher's own account, SYSTEM, the container) and closed at the end of the step.
 // The ONLY write to a shared object is ONE temporary allow entry for ONE throw-away container SID on WinSta0 (the two `home-desktop-station-*` modes, only when asked for or when the desktop alone
 // failed): taken out again in the same step (a Drop guard covers a panic), read back and compared with the copy taken before. A launcher KILLED between the write and the removal leaves that entry
-// until sign-out; it names a profile that no longer exists (no account), and `home-revoke --name <the name printed on the ATTEMPT line>` removes it.
+// until sign-out, and also leaves that run's per-run profile and its record (the profile is deleted only at the end of a run); the ATTEMPT line prints both clean-up commands
+// (`home-revoke` and `delete-profile`, each with the record as its proof, as delete-profile requires).
 use super::*;
 use crate::homerules::{self as hr, Group, Kind, Prog, Verdict};
 
@@ -270,7 +271,8 @@ fn step_run(base: &Args, id: &str, group: Group, prog: Prog, limits: bool, ws: &
     let j = describe(&a, j);
     if group.mode().is_home() && hr_writes_station(group) {
         let sid = derived_sid(&name).map(|s| sid_string(s.0)).unwrap_or_default();
-        log(&format!("ATTEMPT {id}: a temporary entry for the container {sid} (profile {name}) is written to WinSta0 and removed in this step; if this program is killed, run: home-revoke --name {name}"));
+        let record = format!("{rec}\\{name}.sid");
+        log(&format!("ATTEMPT {id}: a temporary entry for the container {sid} (profile {name}) is written to WinSta0 and removed in this step; if this program is killed, run: {}", hr::cleanup_commands(&name, &sid, &record)));
     }
     let mut o = run(&a, j);
     let works = get(&o.j, "ok") == Some("true") && get(&o.j, "childExitCode") == Some("0") && get(&o.j, "timedOut") == Some("false");
@@ -286,11 +288,14 @@ fn hr_writes_station(g: Group) -> bool { matches!(g, Group::StationRead | Group:
 /// `home-probe`: runs the steps (all, or `--steps`), one JSON line each, then a summary line. Returns the process exit code (0 when the probe itself ran; the lines hold the findings).
 pub(crate) fn home_probe(a: &Args) -> i32 {
     let steps = match hr::select_steps(hr::all_steps(), &a.steps) { Ok(s) => s, Err(e) => { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &e); println!("{}", j.render()); return 125; } };
-    let root = match a.cwd.as_deref() { Some(c) => std::path::PathBuf::from(c), None => std::env::temp_dir().join(format!("nn-home-{:x}", random_seed() & 0xFFFF_FFFF)) };
+    // The work folder is ALWAYS a new folder of its own (create-new) inside --cwd or the temp folder, never the folder --cwd names: it is removed whole at the end.
+    let base = a.cwd.as_deref().map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let root = base.join(hr::work_folder_name(random_seed()));
+    if let Err(e) = std::fs::create_dir(&root) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made (it must be new): {e}")); println!("{}", j.render()); return 125; }
     // `rec` (the launcher's profile records) is outside the work folder the container is granted, as the product keeps them out of its reach.
     let (ws, dir, rec) = (root.join("ws"), root.join("steps"), root.join("rec"));
     for d in [&ws, &dir, &rec] {
-        if let Err(e) = std::fs::create_dir_all(d) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made: {e}")); println!("{}", j.render()); return 125; }
+        if let Err(e) = std::fs::create_dir(d) { let mut j = base_line("arguments", ""); j.b("ok", false); j.s("error", &format!("the work folder could not be made: {e}")); println!("{}", j.render()); return 125; }
     }
     let (ws, dir, rec) = (ws.to_string_lossy().into_owned(), dir.to_string_lossy().into_owned(), rec.to_string_lossy().into_owned());
     // The program that loads user32 inside the container is this same executable, copied into the work folder (the folder carries the container's only grant, so it can start there).
@@ -335,7 +340,8 @@ pub(crate) fn home_probe(a: &Args) -> i32 {
     for g in hr::GROUPS { s.s(&format!("group_{}", g.name().replace('-', "_")), verdicts.iter().find(|(x, _)| *x == g).map(|(_, v)| v.name()).unwrap_or("not-run")); }
     s.n("stepsRun", ran);
     s.b("stationEntryLeftBehind", entry_left);
-    s.b("workFolderRemoved", std::fs::remove_dir_all(&root).is_ok());
+    // With an entry left behind the folder is KEPT: its `rec` folder holds the record home-revoke needs as proof (the summary names it).
+    if entry_left { s.b("workFolderRemoved", false); s.s("workFolderKept", &root.to_string_lossy()); } else { s.b("workFolderRemoved", std::fs::remove_dir_all(&root).is_ok()); }
     s.b("ok", !entry_left);
     println!("{}", s.render());
     0
@@ -345,7 +351,7 @@ pub(crate) fn home_probe(a: &Args) -> i32 {
 // ---------------------------------------------------------------------------------------------------------------- inside the container
 
 /// `ui-test`: read-only look at the desktop the confined program got. Nothing is sent: no input, no window message, no clipboard read; the clipboard is opened and closed, one pixel is read (only
-/// whether it could be), a low-level keyboard hook is installed and removed at once without a message loop (no key is ever delivered to it), one atom is added and deleted. Titles, pixel values,
+/// whether it could be), a low-level keyboard hook is installed and removed at once without a message loop (its procedure never runs; a key pressed in that instant waits at most the system's LowLevelHooksTimeout), one atom is added and deleted. Titles, pixel values,
 /// the cursor position and key states are never printed (only counts and success).
 pub(crate) fn ui_test() -> String {
     unsafe extern "system" fn count(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -435,7 +441,8 @@ pub(crate) fn deelevate(rest: &[String]) -> i32 {
     let fail = |mut j: Json, stage: &str, e: u32| -> i32 { j.b("ok", false); j.s("stage", stage); j.n("error", e as i64); println!("{}", j.render()); 125 };
     let (program, rest) = match hr::split_deelevate_args(rest) { Ok(v) => v, Err(_) => return fail(j, "arguments", 0) };
     unsafe {
-        let Some(tok) = open_own_token(TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY) else { return fail(j, "open-token", GetLastError()) };
+        // TOKEN_ADJUST_DEFAULT is needed by SetTokenInformation(TokenIntegrityLevel) below: CreateRestrictedToken's new handle "has the same access rights as ExistingTokenHandle" (Microsoft).
+        let Some(tok) = open_own_token(TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT) else { return fail(j, "open-token", GetLastError()) };
         let Some(gbuf) = token_info(tok.0, TokenGroups) else { return fail(j, "groups", GetLastError()) };
         let tg = gbuf.as_ptr() as *const TOKEN_GROUPS;
         let first = (*tg).Groups.as_ptr();

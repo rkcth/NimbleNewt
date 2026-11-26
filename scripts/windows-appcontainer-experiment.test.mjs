@@ -2628,7 +2628,7 @@ test("the launcher source (round 5): the window objects are touched only in the 
   assert.match(win, /"context" => \{/);
   // a set-up that failed stops the run before anything starts
   assert.match(win, /if let Some\(e\) = &desk\.failed \{ return Err\(\("grant", e\.clone\(\)\)\);/);
-  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 12, "every set-up failure message starts with the marker the harness looks for (7 of round 5, 5 of the home modes)");
+  assert.equal([...desk.matchAll(/self\.failed = Some\(format!\("window objects: /g)].length, 13, "every set-up failure message starts with the marker the harness looks for (7 of round 5, 6 of the home modes)");
   // before and after lines on standard error for each step of the set-up
   for (const phrase of ["before grant", "after grant", "before create desktop", "after create desktop", "before create window station", "after create window station", "before revoke", "after revoke"]) assert.ok(desk.includes(phrase), phrase);
   // no registry, no service, no persistent setting
@@ -3020,7 +3020,8 @@ test("the home case (source): experiment only, one temporary station entry and o
   assert.match(home, /desk::remove_entries\(h, sid\)/);
   assert.match(rules, /name == "WinSta0"|eq_ignore_ascii_case\("winsta0"\)/);
   assert.ok(rules.includes("flags & 1 == 0"), "the visible flag is required");
-  assert.ok(home.includes("ATTEMPT {id}: a temporary entry") && home.includes("home-revoke --name {name}"), "the name and the clean-up command are printed before the entry is written");
+  assert.ok(home.includes("ATTEMPT {id}: a temporary entry") && home.includes("hr::cleanup_commands(&name, &sid, &record)"), "the name and the clean-up commands are printed before the entry is written");
+  assert.ok(rules.includes("home-revoke --name {name} --profile-record {r}") && rules.includes("delete-profile --name {name} --sid {sid} --profile-record {r}"), "both clean-up commands carry the record as proof");
   // the desktop is created with its final access list (no write afterwards) and read back with the product's own allow-list check
   assert.match(desk, /creation_sd\(&own\[0\], &sid_b, crate::winobj::DESKTOP_RIGHTS, crate::winobj::DESKTOP_FULL, "desktop"\)/);
   assert.match(desk, /crate::winobj::private_acl_ok\(c\.bytes\(\), &sid_b, crate::winobj::DESKTOP_RIGHTS, &own\)/);
@@ -3062,7 +3063,8 @@ test("the home case (documents): the measurement is recorded as measured, the co
   assert.ok(readme.includes(".\\nn-appc-launcher.exe home-probe --steps context,station-access,profile | Out-File -Encoding utf8 home-readonly.jsonl"));
   assert.ok(readme.includes(".\\nn-appc-launcher.exe home-probe --aap-policy optout --timeout-ms 20000 | Out-File -Encoding utf8 home-lpac.jsonl"));
   assert.ok(readme.includes(".\\nn-appc-launcher.exe home-probe --aap-policy none   --timeout-ms 20000 | Out-File -Encoding utf8 home-plain.jsonl"));
-  assert.ok(readme.includes(".\\nn-appc-launcher.exe home-revoke --name NimbleNewtRun-<16 hex from the ATTEMPT line>"));
+  assert.ok(readme.includes(".\\nn-appc-launcher.exe home-revoke --name NimbleNewtRun-<16 hex from the ATTEMPT line> --profile-record <the record path it printed>"));
+  assert.ok(readme.includes(".\\nn-appc-launcher.exe delete-profile --name NimbleNewtRun-<16 hex> --sid <the SID it printed> --profile-record <the record path it printed>"));
   assert.ok(readme.includes('NOT "Run as administrator"') || readme.includes('a NORMAL PowerShell, not "Run as administrator"'));
   assert.ok(!/(set|store|pass) a password|temporary password|Set-LocalUser|net user/i.test(readme.replace(/It does not write a password anywhere and creates no account\./, "")));
   const notes = readFileSync(join(root, "docs", "nimblenewt", "implementation-plan", "implementation-notes.md"), "utf8");
@@ -3089,4 +3091,63 @@ test("the home case (workflow): a report step in the hosted job, never in the ow
   assert.ok(!/uses:|permissions:|secrets\./.test(step));
   assert.ok(!own.includes("home-probe") && !own.includes("deelevate"), "the owner's runner is never given the de-elevation helper");
   assert.equal(hosted.split("run_home elevated-lpac").length, 2, "one home-case step");
+});
+
+test("the home case (review fixes): token access, the profile-SID rule, a fresh work folder, the clean-up proof", () => {
+  const read = (f) => readFileSync(join(root, "native", "nn-launcher", "src", f), "utf8");
+  const home = read("home.rs"), desk = read("desk.rs"), win = read("win.rs"), args = read("args.rs"), rules = read("homerules.rs");
+  // SetTokenInformation(TokenIntegrityLevel) needs TOKEN_ADJUST_DEFAULT on the restricted token, whose handle has the rights of the handle it was made from
+  const open = /let Some\(tok\) = open_own_token\(([^)]*)\) else \{ return fail\(j, "open-token"/.exec(home);
+  assert.ok(open, "deelevate opens its own token");
+  for (const r of ["TOKEN_DUPLICATE", "TOKEN_QUERY", "TOKEN_ASSIGN_PRIMARY", "TOKEN_ADJUST_DEFAULT"]) assert.ok(open[1].includes(r), r);
+  assert.ok(home.indexOf("open_own_token(TOKEN_DUPLICATE") < home.indexOf("SetTokenInformation(restricted.0, TokenIntegrityLevel"));
+  // the home path checks the container SID first, like every other mode
+  const ph = desk.slice(desk.indexOf("fn prepare_home("), desk.indexOf("pub(crate) fn finish("));
+  const check = ph.indexOf("if !crate::winobj::is_profile_sid(&sid_string(self.sid))");
+  assert.ok(check > 0 && check < ph.indexOf("self.grant(") && check < ph.indexOf("CreateDesktopW("), "the SID check comes before any write");
+  // the work folder: always a new folder of its own; only it is removed; kept when an entry was left (it holds the record)
+  const hp = home.slice(home.indexOf("pub(crate) fn home_probe("), home.indexOf("// ---", home.indexOf("pub(crate) fn home_probe(")));
+  assert.match(hp, /let root = base\.join\(hr::work_folder_name\(random_seed\(\)\)\);/);
+  assert.match(hp, /std::fs::create_dir\(&root\)/);
+  assert.ok(!hp.includes("create_dir_all"), "create-new only");
+  assert.ok(!/PathBuf::from\(c\)\s*,/.test(hp) && !/let root = match a\.cwd/.test(hp), "the --cwd folder itself is never the root");
+  assert.equal([...hp.matchAll(/remove_dir_all\(/g)].length, 1);
+  assert.match(hp, /if entry_left \{ s\.b\("workFolderRemoved", false\); s\.s\("workFolderKept"/);
+  // home-revoke: per-run name and record proof, checked before anything is written
+  assert.ok(args.includes('if a.command == "home-revoke" && !profile::is_run_name(&a.name)'));
+  assert.match(args, /"run" \| "info" \| "delete-profile" \| "home-revoke"\);/);
+  const hr = win.slice(win.indexOf('"home-revoke" => {'), win.indexOf('"desktop-revoke" => {'));
+  assert.ok(hr.indexOf("crate::homerules::may_revoke(") > 0 && hr.indexOf("crate::homerules::may_revoke(") < hr.indexOf("home::home_revoke("), "the proof comes first");
+  assert.ok(rules.includes("crate::profile::may_delete(name, record_text, derived, None)"));
+  assert.ok(rules.includes('"S-1-5-114"'));
+});
+
+test("the home case (review fixes): the workflow's cross-check record is in the user's own temp folder, and the summary names a kept folder", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const from = wf.indexOf('- name: "Home case: one account, not elevated');
+  const step = wf.slice(from, wf.indexOf("\n      # Card A03b slice 3", from));
+  assert.ok(from > 0 && step.length > 500 && step.length < 6000, "the step alone");
+  assert.ok(step.includes('rec_dir="/tmp/nn-home-records"') && step.includes('--profile-record "$(cygpath -w "$rec_dir/$home_name.sid")"') && step.includes('rm -rf "$rec_dir"'));
+  assert.ok(!step.includes("RUNNER_TEMP/home-records"));
+  const lines = [{ probe: "home", step: "summary", stationEntryLeftBehind: true, workFolderKept: "C:\\T\\nn-home-0000abcd" }];
+  const md = renderHomeMarkdown(lines, "k");
+  assert.match(md, /left on the window station/);
+  assert.ok(md.includes("`C:\\T\\nn-home-0000abcd`") && md.includes("delete-profile"), md);
+  assert.equal(judgeHome(lines).keptFolder, "C:\\T\\nn-home-0000abcd");
+  assert.equal(judgeHome([{ probe: "home", step: "summary", stationEntryLeftBehind: false }]).entryLeft, false);
+});
+
+test("the home case (review fixes): the documents state what a killed launcher leaves and do not count desktops from old heap numbers", () => {
+  const plan = readFileSync(join(root, "docs", "nimblenewt", "windows-isolation-plan.md"), "utf8");
+  const s = plan.slice(plan.indexOf("### 12.5 The common home case"), plan.indexOf("## 13. What we would tell users"));
+  assert.ok(!s.includes("about 15 at a time"));
+  assert.ok(s.includes("how many such desktops fit is NOT known") && s.includes("dynamic in later systems"));
+  assert.ok(s.includes("together with that run's per-run profile"));
+  const readme = readFileSync(join(root, "experiments", "windows-appcontainer", "README.md"), "utf8").split("## The home case")[1];
+  assert.ok(!readme.includes("a container that no longer exists") && readme.includes("It ALSO leaves that step's per-run profile"));
+  assert.ok(!readme.includes("no key reaches it") && readme.includes("LowLevelHooksTimeout"));
+  assert.ok(!readme.includes("a few minutes at most") && readme.includes("at most about 10 minutes each"));
+  assert.ok(readme.includes("never the folder `--cwd` names"));
+  const home = readFileSync(join(root, "native", "nn-launcher", "src", "home.rs"), "utf8");
+  assert.ok(!home.includes("it names a profile that no longer exists") && !home.includes("no key is ever delivered"));
 });

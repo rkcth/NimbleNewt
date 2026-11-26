@@ -239,8 +239,10 @@ jobs:
           # the cross-check: the product launcher's info, de-elevated
           if [ -f "$prod" ]; then
             hex16="$(node -e "process.stdout.write(require('crypto').randomBytes(8).toString('hex'))")"; home_name="NimbleNewtRun-$hex16"
-            mkdir -p "$RUNNER_TEMP/home-records"
-            "$exp" deelevate --exe "$(cygpath -w "$prod")" info --name "$home_name" --profile-record "$(cygpath -w "$RUNNER_TEMP/home-records/$home_name.sid")" > "$out/product-info-deelevated.txt" 2>&1
+            # The record goes to the user's own temp folder (Git Bash's /tmp): a de-elevated child (Administrators deny-only) may not be able to write where only the elevated runner's group can.
+            rec_dir="/tmp/nn-home-records"; mkdir -p "$rec_dir"
+            "$exp" deelevate --exe "$(cygpath -w "$prod")" info --name "$home_name" --profile-record "$(cygpath -w "$rec_dir/$home_name.sid")" > "$out/product-info-deelevated.txt" 2>&1
+            rm -rf "$rec_dir"
             node scripts/redact-log.mjs < "$out/product-info-deelevated.txt"
             { echo "### Cross-check: the product launcher's info, de-elevated"; echo; echo '```'; grep -o '"windowStationOk":[a-z]*\|"windowStationError":"[^"]*"\|"elevated":[a-z]*\|"profileGone":[a-z]*' "$out/product-info-deelevated.txt" | sort -u; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi

@@ -239,6 +239,8 @@ impl Desk {
     /// container, nothing written afterwards), and, for the two `home-desktop-station-*` modes, ONE temporary allow entry for the container on that station first (removed again in `finish`, read back,
     /// compared with the copy taken before). The entry is written only to the interactive station WinSta0 (deskrules::may_write_interactive_station); a station of a service is never touched here.
     fn prepare_home(&mut self, mode: DesktopMode, station: &str) {
+        // The same rule as every other mode: only the SID of one AppContainer profile ever gets an entry (on the station or in the desktop's list), never a group, an account or a capability.
+        if !crate::winobj::is_profile_sid(&sid_string(self.sid)) { self.failed = Some(format!("window objects: refused: the SID is not one AppContainer profile's (error {ERR_NOT_PROFILE_SID})")); return; }
         if let Err(e) = crate::homerules::may_make_home_desktop(station) { self.failed = Some(format!("window objects: {e}")); return; }
         let Some(sid_b) = sid_bytes(self.sid) else { self.failed = Some(format!("window objects: refused: the SID is not well formed (error {ERR_NOT_PROFILE_SID})")); return };
         if let Some(mask) = crate::homerules::home_station_mask(mode) {

@@ -478,7 +478,7 @@ test("the launcher calls use only commands and flags the launcher's own parser a
   assert.match(inner, /\$checkArgs = 'check --name ' \+ \$RunName \+ ' --grant ' \+ \(Format-Arg \('rx:' \+ \$InstallDir\)\)/);
   assert.ok(argsRs.includes('"rx" => Some(Mode::Rx)'), "the read-only check names a grant mode the product accepts");
   // the rules the parser enforces, as the argument tests state them
-  assert.ok(argsRs.includes('with a per-run profile needs --profile-record') && argsRs.includes('--profile-record is only for run, info and delete-profile') && argsRs.includes('delete-profile needs --sid') && argsRs.includes('--sid is only for check, revoke and delete-profile'));
+  assert.ok(argsRs.includes('with a per-run profile needs --profile-record') && argsRs.includes('--profile-record is only for run, info, delete-profile and home-revoke') && argsRs.includes('delete-profile needs --sid') && argsRs.includes('--sid is only for check, revoke and delete-profile'));
   assert.ok(!/\bInvoke-Native \$Launcher \('run /.test(inner) && !/--exe|--cmdline|--stdin|--stdout/.test(inner), "no contained run: it needs the files and limits the backend's plan writes");
   assert.match(inner, /\$RunName -cmatch '\^NimbleNewtRun-\[0-9a-f\]\{16\}\$'/);
   assert.match(fnText("New-RunName"), /New-Object byte\[\] 8[\s\S]*RNGCryptoServiceProvider[\s\S]*ToString\('x2'\)/);

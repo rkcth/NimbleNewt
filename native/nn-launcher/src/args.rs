@@ -162,10 +162,12 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
     if !EXPERIMENT && !matches!(a.command.as_str(), "run" | "check" | "revoke" | "info" | "delete-profile") { return Err(format!("command {} is not in this build (run, check, revoke, info, delete-profile)", a.command)); }
     // Per-run profiles (card A03b): the product's only container name is NimbleNewtRun-<16 lower-case hex digits>; there is no shared, default or administrator-chosen name any more.
     if !EXPERIMENT && !profile::is_run_name(&a.name) { return Err(format!("--name must be {}<{} lower-case hex digits> in this build", profile::RUN_PREFIX, profile::RUN_HEX_LEN)); }
+    // home-revoke (experiment only) writes to the user's own window station, so it takes the same proof as delete-profile: a per-run name and the record this launcher wrote for it.
+    if a.command == "home-revoke" && !profile::is_run_name(&a.name) { return Err(format!("home-revoke needs --name {}<{} lower-case hex digits> (the name on the ATTEMPT line)", profile::RUN_PREFIX, profile::RUN_HEX_LEN)); }
     if profile::is_run_name(&a.name) {
-        let needs_record = matches!(a.command.as_str(), "run" | "info" | "delete-profile");
+        let needs_record = matches!(a.command.as_str(), "run" | "info" | "delete-profile" | "home-revoke");
         if needs_record && a.profile_record.is_none() { return Err(format!("{} with a per-run profile needs --profile-record", a.command)); }
-        if !needs_record && a.profile_record.is_some() { return Err(format!("--profile-record is only for run, info and delete-profile, not {}", a.command)); }
+        if !needs_record && a.profile_record.is_some() { return Err(format!("--profile-record is only for run, info, delete-profile and home-revoke, not {}", a.command)); }
         if a.command == "delete-profile" && a.sid.is_none() { return Err("delete-profile needs --sid (the SID the supervisor recorded for the profile)".into()); }
         if !matches!(a.command.as_str(), "check" | "revoke" | "delete-profile") && a.sid.is_some() { return Err(format!("--sid is only for check, revoke and delete-profile, not {}", a.command)); }
     }
@@ -419,6 +421,11 @@ mod tests {
         for bad in ["", "context,", ",context", "a,,b"] { assert!(parse(&["home-probe", "--steps", bad]).is_err(), "--steps {bad:?}"); }
         assert!(parse(&["home-probe", "--steps"]).unwrap_err().ends_with("needs a value"));
         assert!(!parse(&["home-probe"]).unwrap().force_station_entry && parse(&["home-probe"]).unwrap().steps.is_empty());
-        for command in ["home-probe", "home-revoke", "ui-test"] { assert!(parse(&[command]).is_ok(), "{command}"); }
+        for command in ["home-probe", "ui-test"] { assert!(parse(&[command]).is_ok(), "{command}"); }
+        // home-revoke: a per-run name and its record, as delete-profile
+        assert!(parse(&["home-revoke"]).unwrap_err().contains("home-revoke needs --name NimbleNewtRun-"));
+        assert!(parse(&["home-revoke", "--name", "NimbleNewtExperiment"]).unwrap_err().contains("home-revoke needs --name"));
+        assert!(parse(&["home-revoke", "--name", NAME]).unwrap_err().contains("needs --profile-record"));
+        assert!(parse(&["home-revoke", "--name", NAME, "--profile-record", "C:\\c\\p.sid"]).is_ok());
     }
 }
