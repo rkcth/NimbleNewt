@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion validates Lintwise’s findings and CI impact through a non-blocking trial before any later decision on required rules and safeguards."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion measures build time and queue impact without blocking merges and requires a later decision with explicit CI limits and a rollback path before any rules become mandatory."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us validate secret detection against our known test-key incident without assuming broader security coverage or requiring unvalidated merge gates."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us validate JavaScript findings, false positives, and CI impact before deciding whether any rules should block merges."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us validate Python and SQL coverage against our pipeline failure cases and measure CI impact before any rules become mandatory."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The non-blocking trial will measure actionable signal and false positives before any merge gate requires a separate decision with explicit safeguards."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion supports a non-blocking trial while reserving mandatory rules for a later evidence-based decision with explicit ownership, CI limits, dispute handling, and rollback."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess whether Lintwise provides clear guidance consistent with our conventions before any rules become mandatory."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

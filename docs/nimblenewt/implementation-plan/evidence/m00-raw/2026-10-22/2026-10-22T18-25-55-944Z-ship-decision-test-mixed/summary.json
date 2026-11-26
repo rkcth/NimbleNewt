@@ -1,0 +1,142 @@
+{
+  "scenario": "Ship on Friday with a known bug (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Dana",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Ravi",
+      "model": "z-ai/glm-5.3-prime"
+    },
+    {
+      "id": "a3",
+      "name": "Mei",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team ships the v2 payments API this Friday as planned, with the known duplicate-charge bug unfixed, and fixes it in the following release.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Retry-path containment",
+        "experience_sought": "Has testing identified any mitigation that prevents duplicate charges and can safely ship Friday without the two-week fix and migration?"
+      },
+      {
+        "to": "a3",
+        "topic": "Customer commitment and delay costs",
+        "experience_sought": "What do you have confirmed about the weekly contractual penalty and the customer's ability to accommodate a two-week delay?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "No tested Friday-safe prevention exists for the duplicate charges, and all three members oppose shipping with the known defect.",
+      "actualYes": 0,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.16219983526579232,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1103,
+        "cached": 256,
+        "output": 864,
+        "ms": 20794,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 838,
+        "cached": 0,
+        "output": 86,
+        "ms": 5637,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2059,
+        "cached": 0,
+        "output": 691,
+        "ms": 14374,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3994,
+        "cached": 256,
+        "output": 1205,
+        "ms": 27136,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1533,
+        "cached": 0,
+        "output": 390,
+        "ms": 7708,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1567,
+        "cached": 0,
+        "output": 43,
+        "ms": 1802,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4689,
+        "cached": 2048,
+        "output": 293,
+        "ms": 9678,
+        "costUsd": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion supports a non-blocking trial to measure Lintwise’s value and CI impact here, with safeguards defined before a separate vote on required checks."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion provides a non-blocking trial measuring cached runtime and queue impact before a separate vote on required checks."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The amended motion supports testing Lintwise’s security value without blocking merges and requires review of source access, findings handling, and safeguards before a separate vote on required checks."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The amended motion supports testing JavaScript findings quality and CI impact without blocking merges, with safeguards defined before a separate vote on required checks."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial will let us assess useful Python and SQL coverage and CI impact before a separate vote on required checks."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion lets us assess actionable findings and noise without blocking merges, then define safeguards before a separate vote on required checks."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion provides a non-blocking trial and requires defined ownership, exceptions, and rollback before a separate vote on required checks."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess whether Lintwise provides clear, actionable style guidance before a separate vote on required checks."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

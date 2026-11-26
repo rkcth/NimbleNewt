@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us measure Lintwise’s benefits and CI impact in our monorepo before requiring individual rules, with a review date and rollback path."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion keeps the trial non-blocking and measures CI runtime and queue impact before any rules become required, with a review date and rollback path."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess secret-rule findings without assuming dependency coverage or requiring unproven checks."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess JavaScript findings and rule tuning alongside CI impact before deciding which individual rules warrant enforcement."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial will let us assess actionable findings, false positives, and Python and SQL pipeline coverage before requiring individual rules, with a review date and rollback path."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The non-blocking trial will measure actionable findings and false positives before any individual rule is required, with a review date and rollback path."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion meets our trial and rollback requirements while preserving merge speed and deferring individual rule enforcement until we review measured results."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess whether Lintwise provides clear guidance consistent with our conventions before deciding which individual rules to require."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

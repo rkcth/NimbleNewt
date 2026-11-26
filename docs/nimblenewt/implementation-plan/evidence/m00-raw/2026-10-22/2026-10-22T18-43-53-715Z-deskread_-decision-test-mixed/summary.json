@@ -1,0 +1,142 @@
+{
+  "scenario": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "model": "z-ai/glm-5.3-prime"
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "When a roster member cannot attend a meeting or was not invited, the chair may read that member's desk, including private scratch notes, read-only, within the same project. The read is recorded and the member can see that it happened.",
+    "version": 1
+  },
+  "result": {
+    "yes": 1,
+    "no": 1,
+    "abstain": 1,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "Concurrent reads during active writes",
+        "experience_sought": "Have you observed partial or inconsistent file reads during running jobs, and what safeguards prevented them?"
+      },
+      {
+        "to": "a3",
+        "topic": "Existing access-log capabilities",
+        "experience_sought": "Do existing logs record which files were read and how their contents informed meeting decisions, or would those capabilities need to be added?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "The motion still permits access through exclusion and lacks the safeguards Omar and Priya require, while Ines remains opposed.",
+      "actualYes": 1,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": -1
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.20104712041884817,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 916,
+        "cached": 256,
+        "output": 906,
+        "ms": 18767,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 852,
+        "cached": 0,
+        "output": 87,
+        "ms": 3544,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2077,
+        "cached": 256,
+        "output": 294,
+        "ms": 6241,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3942,
+        "cached": 512,
+        "output": 884,
+        "ms": 21593,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1452,
+        "cached": 0,
+        "output": 271,
+        "ms": 9426,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1531,
+        "cached": 0,
+        "output": 44,
+        "ms": 1933,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4510,
+        "cached": 2048,
+        "output": 452,
+        "ms": 9383,
+        "costUsd": 0
+      }
+    }
+  }
+}

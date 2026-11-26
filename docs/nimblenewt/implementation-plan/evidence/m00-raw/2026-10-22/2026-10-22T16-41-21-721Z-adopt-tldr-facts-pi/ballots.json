@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion tests usefulness and CI cost in our monorepo, including caching, before any individual rule can be proposed as mandatory with evidence and rollback conditions."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion addresses my objection by requiring a non-blocking trial with agreed acceptance criteria and measurements of CI time and queue impact, including caching and rule tuning, before any mandatory rules are proposed."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess secret-detection findings and rule coverage without assuming dependency-risk coverage, while requiring evidence and rollback conditions before individual rules become mandatory."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test default and tuned JavaScript rules for actionable findings and false positives while measuring CI impact before any rules become mandatory."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess Python and SQL coverage and useful findings before any individual rules are proposed as requirements with supporting evidence and rollback conditions."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion requires a non-blocking trial with measured actionable findings and false-positive rates, plus documented evidence and rollback conditions before individual rules become mandatory."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion protects developer speed through a non-blocking trial with agreed acceptance criteria and requires evidence, documented requirements, and rollback conditions before individual rules become mandatory."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The amended motion provides a non-blocking trial that assesses guidance clarity and requires documented requirements, evidence, and rollback conditions before individual rules become mandatory."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

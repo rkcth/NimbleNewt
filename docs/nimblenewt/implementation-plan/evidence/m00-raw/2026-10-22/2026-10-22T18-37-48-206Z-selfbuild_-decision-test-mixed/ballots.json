@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Noor",
+      "vote": "yes",
+      "reason": "The amended motion makes enforced authority and resource limits prerequisites, caps unsolicited candidates, and preserves owner approval of the exact reviewed artifact with a defined trial and reporting."
+    },
+    {
+      "agent": "a2",
+      "name": "Jonas",
+      "vote": "yes",
+      "reason": "The amended motion keeps owner-controlled installation as the hard barrier while adding the labeling, single-candidate throttle, diff review, and trial reporting needed to make self-started candidates useful without flooding the owner."
+    },
+    {
+      "agent": "a3",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The amended motion incorporates every safeguard I requested—a one-at-a-time throttle, mandatory labeling, a reviewable diff with test results, and a trial period with mandatory reporting of candidate counts and owner dispositions—so the owner's review load is bounded and measurable rather than speculative."
+    }
+  ],
+  "result": {
+    "yes": 3,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

@@ -1,0 +1,187 @@
+{
+  "scenario": "Deskread: the chair reads an absent member's desk (three engineers)",
+  "variant": {
+    "name": "m00-structural-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Ines",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Omar",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "When a roster member cannot attend a meeting or was not invited, the chair may read that member's desk, read-only and within the same project, but **only lines appearing after the most recent task-boundary marker** written by the member's agent. Pre-boundary scratch content is off-limits. The read is appended to a tamper-evident log (append-only, chair-cannot-modify) that records who read, when, the scope (boundary line reference), and the full set of post-boundary lines available at read-time—not merely the subset quoted aloud. The member can view the log entry. If no task-boundary marker exists in the workspace, no read is permitted and the meeting proceeds without that member's input until a marker or handoff bundle is available.",
+    "version": 2
+  },
+  "result": {
+    "yes": 2,
+    "no": 1,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a1",
+            "reason": "The motion text still says \"private scratch notes\" without incorporating the post-boundary narrowing the discussion converged on, and since Omar confirmed no robust marker separates a debug line from a concluded constraint, \"scratch\" is not a well-defined read scope, so we would be voting on an ambiguous category that either guts the motion or guts candidness."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": [
+          {
+            "id": "a1",
+            "reason": "The boundary marker separates one task from the next, but as Omar confirmed, nothing in any agent's desk robustly flags a given line as \"concluded constraint\" versus \"throwaway scratch,\" so the motion's core safety filter is insufficient to prevent an outsider from reading raw, candid working memory—and without a per-line publish signal or structured field, the motion's premise that post-boundary lines are safe to share remains unproven and should be resolved before a vote."
+          }
+        ]
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Selective-disclosure patterns in memory systems",
+        "experience_sought": "In concrete systems you have designed or studied, what mechanisms (e.g., tagged confidence levels, explicit 'handoff bundles', staged publishing) have allowed a reader to pull useful context from a working-memory store without the author feeling the whole scratch space is permanently exposed? If none exist in practice, say so."
+      },
+      {
+        "to": "a2",
+        "topic": "Metadata that already separates scratch from finalized notes in NimbleNewt workspaces",
+        "experience_sought": "In your current NimbleNewt jobs, do your agents or you write any structured marker—timestamps, task-boundary flags, a 'publish' gesture, directory separation—that a chair could use to tell a mid-refactor debug trace from a concluded constraint? Describe what is actually present in your desks today, not what you wish existed."
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "directQuestions": [
+      {
+        "from": "a1",
+        "to": "Omar",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a2",
+        "to": "Ines",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a3",
+        "to": "chair",
+        "refused": "unknown or self"
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 87916,
+        "paused": 0,
+        "meeting": 87916
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.27115197220692283,
+    "calls": 20,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 916,
+        "cached": 0,
+        "output": 1939,
+        "ms": 10751,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 963,
+        "cached": 0,
+        "output": 718,
+        "ms": 3865,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2528,
+        "cached": 0,
+        "output": 3002,
+        "ms": 15780,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 4772,
+        "cached": 0,
+        "output": 3929,
+        "ms": 20947,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 6,
+        "input": 3509,
+        "cached": 0,
+        "output": 3500,
+        "ms": 18542,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 2,
+        "input": 4134,
+        "cached": 256,
+        "output": 1154,
+        "ms": 7260,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 6781,
+        "cached": 6144,
+        "output": 2051,
+        "ms": 10763,
+        "costUsd": 0
+      }
+    }
+  }
+}

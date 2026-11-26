@@ -1,0 +1,16 @@
+{"phase":"round1-blind","agent":"a2","task":"statement","model":"openai-codex/gpt-6.1-sol","usage":{"input":290,"cached":0,"output":149},"ms":6360,"finish":"stop","costUsd":0}
+{"phase":"round1-blind","agent":"a3","task":"statement","model":"qwen/qwen3.8-max-prime","usage":{"input":334,"cached":0,"output":554},"ms":7759,"finish":"stop","costUsd":0}
+{"phase":"round1-blind","agent":"a1","task":"statement","model":"openai-codex/gpt-6-astra","usage":{"input":290,"cached":0,"output":172},"ms":9737,"finish":"stop","costUsd":0}
+{"phase":"chair-questions","agent":"chair","task":"chair-questions","model":"z-ai/glm-5.3-prime","usage":{"input":833,"cached":0,"output":103},"ms":2851,"finish":"stop","costUsd":0}
+{"phase":"chair-answer","agent":"a3","task":"statement","model":"qwen/qwen3.8-max-prime","usage":{"input":1001,"cached":0,"output":209},"ms":3187,"finish":"stop","costUsd":0}
+{"phase":"chair-answer","agent":"a2","task":"statement","model":"openai-codex/gpt-6.1-sol","usage":{"input":1087,"cached":0,"output":100},"ms":4012,"finish":"stop","costUsd":0}
+{"phase":"round2","agent":"a1","task":"statement","model":"openai-codex/gpt-6-astra","usage":{"input":1149,"cached":0,"output":184},"ms":8706,"finish":"stop","costUsd":0}
+{"phase":"round2","agent":"a2","task":"statement","model":"openai-codex/gpt-6.1-sol","usage":{"input":1306,"cached":0,"output":185},"ms":6298,"finish":"stop","costUsd":0}
+{"phase":"round2","agent":"a3","task":"statement","model":"qwen/qwen3.8-max-prime","usage":{"input":1512,"cached":0,"output":416},"ms":5397,"finish":"stop","costUsd":0}
+{"phase":"objection-check","agent":"a1","task":"objection","model":"openai-codex/gpt-6-astra","usage":{"input":457,"cached":0,"output":7},"ms":1869,"finish":"stop","costUsd":0}
+{"phase":"objection-check","agent":"a2","task":"objection","model":"openai-codex/gpt-6.1-sol","usage":{"input":457,"cached":0,"output":7},"ms":1974,"finish":"stop","costUsd":0}
+{"phase":"objection-check","agent":"a3","task":"objection","model":"qwen/qwen3.8-max-prime","usage":{"input":506,"cached":0,"output":134},"ms":2012,"finish":"stop","costUsd":0}
+{"phase":"chair-decision","agent":"chair","task":"chair-decision","model":"z-ai/glm-5.3-prime","usage":{"input":1537,"cached":512,"output":53},"ms":1878,"finish":"stop","costUsd":0}
+{"phase":"ballot","agent":"a1","task":"ballot","model":"openai-codex/gpt-6-astra","usage":{"input":1473,"cached":0,"output":40},"ms":2506,"finish":"stop","costUsd":0}
+{"phase":"ballot","agent":"a2","task":"ballot","model":"openai-codex/gpt-6.1-sol","usage":{"input":1473,"cached":0,"output":50},"ms":2572,"finish":"stop","costUsd":0}
+{"phase":"ballot","agent":"a3","task":"ballot","model":"qwen/qwen3.8-max-prime","usage":{"input":1533,"cached":1024,"output":212},"ms":3028,"finish":"stop","costUsd":0}

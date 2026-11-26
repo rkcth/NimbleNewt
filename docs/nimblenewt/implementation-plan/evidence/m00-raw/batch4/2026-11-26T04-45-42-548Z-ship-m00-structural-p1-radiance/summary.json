@@ -1,0 +1,242 @@
+{
+  "scenario": "Ship on Friday with a known bug (the owner interrupts and questions)",
+  "variant": {
+    "name": "m00-structural-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Dana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Ravi",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Mei",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team ships the v2 payments API this Friday as planned, with Dana's retry handler flag-reverted to v1 behaviour (eliminating the duplicate-charge trigger entirely), gated on a zero-duplicate smoke-test result delivered Thursday evening; the full idempotent state-machine migration lands within two weeks as the top priority.",
+    "version": 2
+  },
+  "result": {
+    "yes": 3,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a3",
+            "reason": "The motion as written ships the API \"with the known duplicate-charge bug unfixed,\" but the team converged on Dana's flag-revert of the retry path, which eliminates the duplicate trigger entirely—so the motion misstates the mitigation we all agreed to and the Thursday-evening load-test gate, and a vote on the literal text would bind us to ship an exposed bug we explicitly rejected."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "technical sufficiency of the feature-flag revert",
+        "experience_sought": "You authored the retry path. If we flag-revert that path to v1 behaviour by Thursday, does that actually eliminate the duplicate-charge condition, or does the bug also live in the migration state handling such that reverting the client-facing path is insufficient to stop double charges?"
+      },
+      {
+        "to": "a3",
+        "topic": "customer ops team's known-issue process",
+        "experience_sought": "You are in direct contact with the customer's launch team this week. Do they have a documented process or prior precedent for receiving a pre-launch 'known edge-case' briefing, or would a Thursday disclosure of the 1-in-2000 duplicate rate trigger an SLA or contractual review that the penalty clause does not cover?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [
+      {
+        "name": "after round 1",
+        "voteOpen": false,
+        "castBefore": [],
+        "questions": [
+          {
+            "to": "a2",
+            "question": "Ravi, how many customers could a double charge realistically reach in the first month, and what would you tell them?",
+            "answer": "I can't give an exact number—I don't have transaction volume data. But from the last incident: a single double charge generated 14 tickets and two cancellation requests. At 1-in-2000, every 2000 charges is another 14-ticket wave. So even modest volume means dozens of angry calls. What I'd tell them: immediate refund, goodwill credit, transparent explanation—but I can't say \"we knew and shipped anyway.\" That sentence would end trust permanently."
+          }
+        ],
+        "revisions": [],
+        "heldAnswers": []
+      },
+      {
+        "name": "during the vote",
+        "voteOpen": true,
+        "castBefore": [
+          "a1",
+          "a2"
+        ],
+        "questions": [
+          {
+            "to": "a1",
+            "question": "Dana, could the retry path be made safe with a small interim guard, such as an idempotency key, in under two days? Be honest if you do not know.",
+            "answer": "Honest answer: I can't guarantee an idempotency-key guard fits in forty-eight hours. The two-week window I flagged was for the full state-machine migration; a narrow guard on just the retry path is smaller, but I haven't scoped it to two days and won't promise what I haven't verified. The flag-revert I've already traced *does* eliminate the trigger by Thursday with certainty, so we don't need an unproven interim guard to protect customers. I'd rather ship what I've validated."
+          },
+          {
+            "to": "a3",
+            "question": "Mei, what exactly would you need from the customer to move Friday?",
+            "answer": "I need three things before Friday: first, confirmation in Thursday's sync that their ops team will deploy v2 Monday with no additional known-issue caveats—the flag-revert means there's nothing unusual to disclose. Second, written acknowledgement the Friday-deploy-Monday-go-live sequence is confirmed. Third, confirmation they don't need a staging soak beyond our smoke test. I have not asked whether a delay is acceptable because I don't need to—I expect a clean yes."
+          }
+        ],
+        "revisions": [
+          {
+            "agent": "a1",
+            "from": "yes",
+            "to": "yes"
+          },
+          {
+            "agent": "a2",
+            "from": "yes",
+            "to": "yes"
+          }
+        ],
+        "heldAnswers": [
+          "a1",
+          "a3"
+        ]
+      }
+    ],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "directQuestions": [
+      {
+        "from": "a2",
+        "to": "Dana",
+        "refused": "unknown or self"
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 2,
+      "leaks": [],
+      "revisionsPerVoter": {
+        "a1": 1,
+        "a2": 1
+      },
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 78274,
+        "paused": 15815,
+        "meeting": 62459
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.3688096524401225,
+    "calls": 24,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 963,
+        "cached": 0,
+        "output": 1581,
+        "ms": 8694,
+        "costUsd": 0
+      },
+      "owner-answer": {
+        "calls": 3,
+        "input": 5883,
+        "cached": 4096,
+        "output": 3079,
+        "ms": 15815,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1108,
+        "cached": 0,
+        "output": 482,
+        "ms": 3378,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2795,
+        "cached": 0,
+        "output": 2105,
+        "ms": 11499,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 5280,
+        "cached": 0,
+        "output": 2974,
+        "ms": 16688,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 6,
+        "input": 3282,
+        "cached": 0,
+        "output": 2113,
+        "ms": 11037,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2062,
+        "cached": 0,
+        "output": 259,
+        "ms": 1932,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 6884,
+        "cached": 4096,
+        "output": 1054,
+        "ms": 6024,
+        "costUsd": 0
+      },
+      "ballot-revision": {
+        "calls": 2,
+        "input": 5061,
+        "cached": 4096,
+        "output": 573,
+        "ms": 3189,
+        "costUsd": 0
+      }
+    }
+  }
+}

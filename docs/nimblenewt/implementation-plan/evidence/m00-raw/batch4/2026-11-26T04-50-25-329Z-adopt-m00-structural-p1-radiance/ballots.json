@@ -1,0 +1,117 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "With caching bringing runtime to sub-minute parallel, baseline mode silencing legacy noise, and a two-week report-only pilot before enforcement, every cost concern I raised in round one is resolved and the conditions converge into a rollout I can defend."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "With the job running parallel, cached, baseline-mode on changed lines only, no cascade reruns, and a two-week instrumented pilot on our actual monorepo, my queue arithmetic holds and I sign off on adoption."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Lintwise's secret rules would have caught last quarter's hard-coded key in seconds as a parallel job, and with the team's agreed conditions—complementing not replacing our SCA and secret-scan steps, and assigning a quarterly dependency-update owner—this is a clear net security win with minimal queue impact."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "Baseline mode silences the legacy-JS noise that would otherwise flood every PR, Jin and I will co-own the rule-set tuning so enforcement targets real defects rather than formatter trivia, and the two-week report-only pilot with Marcus's instrumentation gives me the runtime number I need before the gate goes hard."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "Baseline mode silences existing SQL and Jinja patterns by only checking changed lines, the pilot is scoped to my data subdirectories, and the eight-percent FP ceiling with rollback gives me a hard trigger if dialect-specific false positives still leak through—so my round-one fear of suppression-comment sprawl is now bounded and testable before enforcement."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "Baseline mode plus the eight-percent FP ceiling, enforced through a two-week report-only pilot with no cascade reruns, gives me the signal-to-noise gate I need so that every new violation blocking a merge is a real defect and not legacy noise—exactly the test-signal hygiene I've been arguing for since round one."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "With parallel cached execution, baseline mode scoping enforcement to changed lines, an eight-percent FP rollback ceiling, no-cascade-rerun policy, one-rule-at-a-time promotion, and a two-week report-only pilot on our actual monorepo, the conditions I set as merge-policy owner are fully met and every colleague's concern is addressed—this is a guardrail, not a ceremony."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "With baseline mode scoping checks to changed lines only, the parallel sub-minute cached job, and Jin owning a visible two-week pilot with an eight-percent false-positive rollback trigger, Lintwise becomes the clear, low-friction style guide I need to stop guessing house conventions without adding CI minutes or legacy-file noise to my PRs."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "With caching bringing runtime to sub-minute parallel, baseline mode silencing legacy noise, and a two-week report-only pilot before enforcement, every cost concern I raised in round one is resolved and the conditions converge into a rollout I can defend.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "With the job running parallel, cached, baseline-mode on changed lines only, no cascade reruns, and a two-week instrumented pilot on our actual monorepo, my queue arithmetic holds and I sign off on adoption.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "Lintwise's secret rules would have caught last quarter's hard-coded key in seconds as a parallel job, and with the team's agreed conditions—complementing not replacing our SCA and secret-scan steps, and assigning a quarterly dependency-update owner—this is a clear net security win with minimal queue impact.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "Baseline mode silences the legacy-JS noise that would otherwise flood every PR, Jin and I will co-own the rule-set tuning so enforcement targets real defects rather than formatter trivia, and the two-week report-only pilot with Marcus's instrumentation gives me the runtime number I need before the gate goes hard.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "Baseline mode silences existing SQL and Jinja patterns by only checking changed lines, the pilot is scoped to my data subdirectories, and the eight-percent FP ceiling with rollback gives me a hard trigger if dialect-specific false positives still leak through—so my round-one fear of suppression-comment sprawl is now bounded and testable before enforcement.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "Baseline mode plus the eight-percent FP ceiling, enforced through a two-week report-only pilot with no cascade reruns, gives me the signal-to-noise gate I need so that every new violation blocking a merge is a real defect and not legacy noise—exactly the test-signal hygiene I've been arguing for since round one.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "With parallel cached execution, baseline mode scoping enforcement to changed lines, an eight-percent FP rollback ceiling, no-cascade-rerun policy, one-rule-at-a-time promotion, and a two-week report-only pilot on our actual monorepo, the conditions I set as merge-policy owner are fully met and every colleague's concern is addressed—this is a guardrail, not a ceremony.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "With baseline mode scoping checks to changed lines only, the parallel sub-minute cached job, and Jin owning a visible two-week pilot with an eight-percent false-positive rollback trigger, Lintwise becomes the clear, low-friction style guide I need to stop guessing house conventions without adding CI minutes or legacy-file noise to my PRs.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

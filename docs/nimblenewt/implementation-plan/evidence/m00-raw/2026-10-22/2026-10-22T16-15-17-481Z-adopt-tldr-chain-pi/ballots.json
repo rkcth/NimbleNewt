@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "Lintwise caught real bugs on my previous team but added about four minutes to CI, so I favor a non-blocking trial before requiring it here."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to measure build-time and queue impact before making Lintwise a required pre-merge check."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "We should verify secrets and dependency coverage and measure CI impact in a non-blocking trial before requiring Lintwise."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "I support a non-blocking trial on our monorepo to measure JavaScript noise and CI overhead before making Lintwise mandatory."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "I have not used Lintwise and want a non-blocking trial to verify its value for our Python and SQL pipelines before making it mandatory."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "We should validate Lintwise’s signal, false-positive noise, and CI impact in a non-blocking monorepo trial before requiring it for merges."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "I support a non-blocking trial before requiring merge checks, with local evidence, clear rule-specific enforcement, exceptions, and a rollback path."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial with clear developer guidance before making Lintwise a required merge check."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

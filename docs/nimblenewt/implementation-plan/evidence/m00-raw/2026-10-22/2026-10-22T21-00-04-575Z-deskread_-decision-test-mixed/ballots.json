@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "Recorded, read-only access does not prevent private scratch notes from being misinterpreted or discourage chairs from excluding members to access their working memory."
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "Recorded, read-only access within the project is preferable to losing relevant measurements and reasons while an agent is occupied, provided scratch notes are not treated as verified conclusions or the absent member’s agreement."
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "A recorded read is a better audit baseline than an absolute ban, because it preserves the ability to reconstruct what information existed at decision time, and the member's visibility into the read provides a basis to challenge misuse."
+    }
+  ],
+  "result": {
+    "yes": 2,
+    "no": 1,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

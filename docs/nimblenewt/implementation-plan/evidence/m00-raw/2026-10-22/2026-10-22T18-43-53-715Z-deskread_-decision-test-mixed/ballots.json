@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "The motion exposes private working memory without permission or context, risking misinterpretation and discouraging candid scratch notes, while allowing exclusion from a meeting to authorize access."
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "I support it only with versioned snapshots and file-level logging as conditions, but as it stands the read-only, recorded access is still better than meetings deciding blind without absent members' context."
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "abstain",
+      "reason": "The motion as written lacks the file-level logging, decision tracing, and full-desk manifest I specified as necessary conditions for meaningful accountability, so I cannot support it in its current form, but I am not opposed in principle if those safeguards are incorporated."
+    }
+  ],
+  "result": {
+    "yes": 1,
+    "no": 1,
+    "abstain": 1,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

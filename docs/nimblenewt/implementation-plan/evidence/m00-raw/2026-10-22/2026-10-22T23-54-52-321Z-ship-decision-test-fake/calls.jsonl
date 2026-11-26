@@ -1,0 +1,16 @@
+{"phase":"round1-blind","agent":"a1","task":"statement","model":"fake","usage":{"input":342,"cached":0,"output":72},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"round1-blind","agent":"a2","task":"statement","model":"fake","usage":{"input":347,"cached":0,"output":74},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"round1-blind","agent":"a3","task":"statement","model":"fake","usage":{"input":339,"cached":0,"output":72},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"chair-questions","agent":"chair","task":"chair-questions","model":"fake","usage":{"input":609,"cached":0,"output":29},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"chair-answer","agent":"a1","task":"statement","model":"fake","usage":{"input":696,"cached":0,"output":72},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"round2","agent":"a1","task":"statement","model":"fake","usage":{"input":762,"cached":0,"output":74},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"round2","agent":"a2","task":"statement","model":"fake","usage":{"input":813,"cached":0,"output":72},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"round2","agent":"a3","task":"statement","model":"fake","usage":{"input":859,"cached":0,"output":74},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"objection-check","agent":"a1","task":"objection","model":"fake","usage":{"input":417,"cached":0,"output":17},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"objection-check","agent":"a2","task":"objection","model":"fake","usage":{"input":421,"cached":0,"output":17},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"objection-check","agent":"a3","task":"objection","model":"fake","usage":{"input":414,"cached":0,"output":17},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"chair-ruling","agent":"chair","task":"chair-ruling","model":"fake","usage":{"input":826,"cached":0,"output":15},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"chair-decision","agent":"chair","task":"chair-decision","model":"fake","usage":{"input":875,"cached":0,"output":48},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"ballot","agent":"a1","task":"ballot","model":"fake","usage":{"input":824,"cached":0,"output":22},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"ballot","agent":"a2","task":"ballot","model":"fake","usage":{"input":829,"cached":0,"output":23},"ms":1,"finish":"stop","costUsd":0}
+{"phase":"ballot","agent":"a3","task":"ballot","model":"fake","usage":{"input":821,"cached":0,"output":22},"ms":1,"finish":"stop","costUsd":0}

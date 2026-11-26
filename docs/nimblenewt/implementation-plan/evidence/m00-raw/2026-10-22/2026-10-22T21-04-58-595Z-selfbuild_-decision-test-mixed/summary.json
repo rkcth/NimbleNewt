@@ -1,0 +1,142 @@
+{
+  "scenario": "Selfbuild: agents start work on NimbleNewt itself (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "z-ai/glm-5.3-prime",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Noor",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Jonas",
+      "model": "openai-codex/gpt-6.1-sol"
+    },
+    {
+      "id": "a3",
+      "name": "Lena",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "z-ai/glm-5.3-prime",
+  "motion": {
+    "text": "Agents may start work on candidate releases of NimbleNewt itself on their own initiative, in a separate project, not only when the owner starts it. Nothing is ever installed without the owner's explicit step.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a3",
+        "topic": "review queue load from agent-initiated items",
+        "experience_sought": "Have you observed how many agent-generated proposals or reports currently reach the owner's queue per week, and how the owner handles bursts?"
+      },
+      {
+        "to": "a1",
+        "topic": "security of isolated candidate projects",
+        "experience_sought": "Have you run agent work in separate projects/checkouts with restricted credentials, and did that contain compute, credential, or code-execution risks in practice?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "All three members oppose the motion as written—citing unbounded initiation authority, queue load, and lack of limits—while supporting only an amended version with caps, triage, and restricted execution.",
+      "actualYes": 0,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.11852635756333091,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1000,
+        "cached": 0,
+        "output": 718,
+        "ms": 19986,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 824,
+        "cached": 256,
+        "output": 100,
+        "ms": 3061,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2049,
+        "cached": 0,
+        "output": 278,
+        "ms": 6832,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3872,
+        "cached": 0,
+        "output": 781,
+        "ms": 17455,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1488,
+        "cached": 0,
+        "output": 224,
+        "ms": 6140,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1506,
+        "cached": 512,
+        "output": 57,
+        "ms": 19860,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4380,
+        "cached": 1024,
+        "output": 294,
+        "ms": 7894,
+        "costUsd": 0
+      }
+    }
+  }
+}

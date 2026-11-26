@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "My previous team saw useful bug detection, but we need this non-blocking trial to measure benefits, costs, and effort in our monorepo before separately deciding on required checks."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The non-blocking trial will measure CI time, queue impact, compute cost, and maintenance effort before any separate decision on required checks."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial can test detection of our documented hard-coded test key incident and assess false positives and effort without requiring checks before a separate decision."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test whether the JavaScript noise I observed on my side project persists here and measure review effort before any separate decision on required checks."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "A non-blocking trial lets us test whether Lintwise detects our documented config-key mistakes and measure its costs and workload before separately deciding on required checks."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The non-blocking trial will measure detection and false positives in our monorepo while reserving required checks for a separate decision with agreed acceptance criteria and a rollback path."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess benefits and developer workload without changing merge policy, while reserving required checks for a separate decision with acceptance criteria and a rollback path."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess whether messages clarify our style expectations and help reviews, while leaving required checks to a separate decision."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Noor",
+      "vote": "no",
+      "reason": "Version 1 permits autonomous work with unchanged agent grants and no specified resource or isolation limits; separate checkouts and owner-controlled installation do not bound development-time risks."
+    },
+    {
+      "agent": "a2",
+      "name": "Jonas",
+      "vote": "no",
+      "reason": "I favor scoped owner-delegated maintenance authority with resource limits and bounded concurrent work, not general permission to initiate candidate releases."
+    },
+    {
+      "agent": "a3",
+      "name": "Lena",
+      "vote": "no",
+      "reason": "The motion lacks any concurrency cap or consolidation requirement, leaving the owner's review queue unbounded and their attention cost unprotected against a flood of unsolicited candidates."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

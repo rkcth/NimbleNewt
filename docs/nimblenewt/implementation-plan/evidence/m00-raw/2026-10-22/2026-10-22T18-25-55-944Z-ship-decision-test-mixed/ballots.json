@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "no",
+      "reason": "The retry path can duplicate charges, and I have no testing evidence of a safe Friday mitigation, so we should complete the fix and safe migration before shipping."
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "no",
+      "reason": "Shipping a known duplicate-charge defect that hits real users within days, with incident data showing each duplicate multiplies into tickets and churn, is worse than a bounded $40,000 penalty, and no Friday-safe mitigation exists."
+    },
+    {
+      "agent": "a3",
+      "name": "Mei",
+      "vote": "no",
+      "reason": "A known duplicate-charge defect in a payments API is unacceptable to ship regardless of the contractual penalty, and I will call the customer today to explore whether a partial launch or other interim arrangement can protect their Monday go-live while we complete the two-week fix."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

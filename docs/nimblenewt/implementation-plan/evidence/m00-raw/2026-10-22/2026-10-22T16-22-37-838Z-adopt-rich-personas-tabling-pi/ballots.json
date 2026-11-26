@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "My previous team’s results justify a non-blocking trial, not a blanket requirement without measurements from our monorepo."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "Requiring Lintwise now is premature without monorepo measurements of added build time, peak queue wait, and compute cost against agreed limits."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "My notes do not substantiate secret detection, so I support a non-blocking trial before requiring any rules."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "My side-project experience showed substantial noise from default JavaScript rules, and we need a non-blocking trial in our monorepo before requiring checks."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to measure pipeline findings and CI overhead before requiring Lintwise."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "The blanket requirement lacks monorepo evidence of useful findings, acceptable false-positive rates, and CI overhead; I support a non-blocking trial first."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "I oppose the blanket requirement without a non-blocking trial establishing local value, acceptable CI impact, and manageable developer workload before promoting individual rules."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial, but want demonstrated value, documented rules, and clear remediation guidance before Lintwise becomes required."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

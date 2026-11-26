@@ -1,0 +1,106 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "open-two-rounds",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Findings and CI overhead in prior use",
+        "experience_sought": "What kinds of real bugs did Lintwise catch on your previous team, and how was the roughly four-minute CI increase measured?"
+      },
+      {
+        "to": "a4",
+        "topic": "JavaScript side-project findings",
+        "experience_sought": "What findings did Lintwise produce on your JavaScript side project, and which required useful fixes versus dismissal?"
+      }
+    ],
+    "rejectedChairQuestions": []
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 35,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 4987,
+        "cached": 0,
+        "output": 1108,
+        "ms": 53194,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1199,
+        "cached": 0,
+        "output": 96,
+        "ms": 6851,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2562,
+        "cached": 0,
+        "output": 194,
+        "ms": 9235,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 15561,
+        "cached": 0,
+        "output": 1442,
+        "ms": 61415,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 5502,
+        "cached": 0,
+        "output": 121,
+        "ms": 27072,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 20494,
+        "cached": 0,
+        "output": 355,
+        "ms": 25070,
+        "costUsd": 0
+      }
+    }
+  }
+}
