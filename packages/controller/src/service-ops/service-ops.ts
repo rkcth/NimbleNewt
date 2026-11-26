@@ -237,7 +237,8 @@ export class ServiceOperations {
     if (e.simulation !== undefined || e.evidence?.["simulated"] === true) return bad("is a simulated operation of a simulation scope; a simulated result cannot be named as a real outcome");
     if (e.status !== "confirmed") return bad(`is an operation that is ${e.status}, not confirmed`);
     const ev = e.evidence;
-    if (ev === undefined || ev["verified"] !== true) return bad("is an operation whose result was not verified against the target");
+    // A person's settlement (`resolvedBy`) keeps the evidence the person gave: it is never a verification against the target, whatever it says.
+    if (ev === undefined || ev["verified"] !== true || ev["resolvedBy"] !== undefined) return bad("is an operation whose result was not verified against the target");
     if (ev["systemVersion"] !== outcome.systemVersion || ev["observedAt"] !== outcome.observedAt) return bad(`was observed at ${String(ev["observedAt"])} on system version ${String(ev["systemVersion"])}, not as the outcome says`);
   }
 }
