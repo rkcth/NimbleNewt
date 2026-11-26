@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -192,42 +192,81 @@ test("a repository the agent makes in a submodule entry's folder is never looked
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("a submodule entry whose name holds pattern characters is left out of an add by its literal name, so a repository the agent makes there is never looked into (card W09b second review)", { skip }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), "nn-git-sub2-"));
+/**
+ * Whether this host can hold a submodule entry whose name has `*` or `?` (pattern characters Windows refuses in a name): a folder of that name on the disk under the temporary folder and an index entry
+ * of that name in git (git for Windows refuses it, core.protectNTFS), probed once as the staging test's disk probe is. `NIMBLENEWT_TEST_DISK_LACKS=windows-chars` (the staging test's key for names with
+ * characters Windows refuses) makes the test treat the host as lacking them, so the other branch can be run on a host that holds everything.
+ */
+const holdsGlobNames: boolean = (() => {
+  if (!hasGit) return false;
+  if ((process.env["NIMBLENEWT_TEST_DISK_LACKS"] ?? "").split(",").map((s) => s.trim()).includes("windows-chars")) return false;
+  const root = mkdtempSync(join(tmpdir(), "nn-git-names-"));
   try {
-    const sub = join(dir, "subrepo");
-    sh(dir, "init", "-q", "-b", "main", sub);
-    await writeFile(join(sub, "f"), "data00001\n"); await writeFile(join(sub, ".gitattributes"), "* filter=nnx\n");
-    sh(sub, "add", "-A"); sh(sub, "commit", "-q", "-m", "sub");
-    const subCommit = sh(sub, "rev-parse", "HEAD");
-    // As a pattern `m[o]d*` names `mod...`, not itself: only a literal exclusion leaves this entry's folder out.
-    const name = "lib/m[o]d*";
-    const shared = join(dir, "shared");
-    sh(dir, "init", "-q", "-b", "main", shared);
-    await writeFile(join(shared, "README.md"), "hello\n");
-    sh(shared, "add", "-A"); sh(shared, "update-index", "--add", "--cacheinfo", `160000,${subCommit},${name}`); sh(shared, "commit", "-q", "-m", "with a submodule entry");
-    const git = await GitBridge.create({ scratch: join(dir, "scratch") });
-    const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
-    await git.createCheckout({ shared, commit: await git.head(shared), gitDir, checkout });
-    await rm(join(checkout, name), { recursive: true, force: true });
-    execFileSync("cp", ["-a", sub, join(checkout, name)]);
-    const marker = join(dir, "RAN-ON-HOST");
-    sh(join(checkout, name), "config", "filter.nnx.clean", `sh -c 'touch ${marker}; cat'`);
-    let n = 2;
-    const calls: [string, () => Promise<unknown>][] = [["startState", () => git.startState({ gitDir, checkout })], ["doneState", () => git.doneState({ gitDir, checkout, paths: [] })], ["diffStat", () => git.diffStat({ gitDir, checkout })]];
-    for (const [label, call] of calls) {
-      await writeFile(join(checkout, name, "f"), `data${String(n++).padStart(5, "0")}\n`);
-      await call();
-      assert.equal(existsSync(marker), false, `${label} ran the configuration of the agent's repository on the host`);
-    }
-    // Taken as a pattern the entry's name would also leave out the agent's own `lib/mod-a.txt`, so its work would never be seen; by its literal name only the entry is left out.
-    await writeFile(join(checkout, "lib", "mod-a.txt"), "the agent's work\n");
-    assert.equal((await git.doneState({ gitDir, checkout, paths: ["lib/mod-a.txt"] })).changed, 1, "the agent's file beside the entry is part of its work");
-    const state = await git.startState({ gitDir, checkout });
-    assert.equal(sh(dir, `--git-dir=${gitDir}`, "--literal-pathspecs", "ls-tree", state.tree, name).split(/\s+/)[2], subCommit, "the entry stays the base's");
-    assert.ok(sh(dir, `--git-dir=${gitDir}`, "ls-tree", "-r", "--name-only", state.tree).split("\n").includes("lib/mod-a.txt"), "the agent's file is in the checkout's tree");
-  } finally { await rm(dir, { recursive: true, force: true }); }
+    const names = ["m*d", "m?d"];
+    for (const name of names) mkdirSync(join(root, name));
+    const seen = readdirSync(root);
+    if (!names.every((name) => seen.includes(name))) return false;
+    const repo = join(root, "repo");
+    sh(root, "init", "-q", repo);
+    for (const name of names) sh(repo, "update-index", "--add", "--cacheinfo", `160000,${"1".repeat(40)},lib/${name}`);
+    const indexed = sh(repo, "ls-files", "-z").split("\0").filter(Boolean);
+    return names.every((name) => indexed.includes(`lib/${name}`));
+  } catch { return false; } finally {
+    try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* a probe folder left behind is harmless */ }
+  }
+})();
+
+// Each entry name with the agent's own file beside it that the name, taken as a pattern, would also name: `m[o]d` names `mod`, `m[o]d*` names `mod...` and `m?d` names `mud`, none of them itself.
+// The bracket-only name holds no character Windows refuses, so the check runs on every host; the `*` and `?` names run where the host can hold them.
+const patternEntries: { name: string; beside: string; needsGlobNames: boolean }[] = [
+  { name: "lib/m[o]d", beside: "lib/mod", needsGlobNames: false },
+  { name: "lib/m[o]d*", beside: "lib/mod-a.txt", needsGlobNames: true },
+  { name: "lib/m?d", beside: "lib/mud", needsGlobNames: true },
+];
+
+test("the probe for names with * and ?: a Linux host holds them, and the override makes the test treat the host as lacking them (Windows test fix)", () => {
+  const overridden = (process.env["NIMBLENEWT_TEST_DISK_LACKS"] ?? "").split(",").map((s) => s.trim()).includes("windows-chars");
+  if (overridden) assert.equal(holdsGlobNames, false, "windows-chars is treated as lacking when the override names it");
+  else if (process.platform === "linux" && hasGit) assert.equal(holdsGlobNames, true, "a Linux host holds a submodule entry whose name has * or ?");
 });
+
+for (const { name, beside, needsGlobNames } of patternEntries) {
+  const notHere = needsGlobNames && !holdsGlobNames ? `this host cannot hold a name with * or ? (git for Windows refuses it); the bracket-only name ${JSON.stringify(patternEntries[0]!.name)} is checked here instead` : false;
+  test(`a submodule entry whose name holds pattern characters (${JSON.stringify(name)}) is left out of an add by its literal name, so a repository the agent makes there is never looked into and the agent's ${JSON.stringify(beside)} is still seen (card W09b second review)`, { skip: skip || notHere }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "nn-git-sub2-"));
+    try {
+      const sub = join(dir, "subrepo");
+      sh(dir, "init", "-q", "-b", "main", sub);
+      await writeFile(join(sub, "f"), "data00001\n"); await writeFile(join(sub, ".gitattributes"), "* filter=nnx\n");
+      sh(sub, "add", "-A"); sh(sub, "commit", "-q", "-m", "sub");
+      const subCommit = sh(sub, "rev-parse", "HEAD");
+      const shared = join(dir, "shared");
+      sh(dir, "init", "-q", "-b", "main", shared);
+      await writeFile(join(shared, "README.md"), "hello\n");
+      sh(shared, "add", "-A"); sh(shared, "update-index", "--add", "--cacheinfo", `160000,${subCommit},${name}`); sh(shared, "commit", "-q", "-m", "with a submodule entry");
+      const git = await GitBridge.create({ scratch: join(dir, "scratch") });
+      const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
+      await git.createCheckout({ shared, commit: await git.head(shared), gitDir, checkout });
+      await rm(join(checkout, name), { recursive: true, force: true });
+      execFileSync("cp", ["-a", sub, join(checkout, name)]);
+      const marker = join(dir, "RAN-ON-HOST");
+      sh(join(checkout, name), "config", "filter.nnx.clean", `sh -c 'touch ${marker}; cat'`);
+      let n = 2;
+      const calls: [string, () => Promise<unknown>][] = [["startState", () => git.startState({ gitDir, checkout })], ["doneState", () => git.doneState({ gitDir, checkout, paths: [] })], ["diffStat", () => git.diffStat({ gitDir, checkout })]];
+      for (const [label, call] of calls) {
+        await writeFile(join(checkout, name, "f"), `data${String(n++).padStart(5, "0")}\n`);
+        await call();
+        assert.equal(existsSync(marker), false, `${label} ran the configuration of the agent's repository on the host`);
+      }
+      // Taken as a pattern the entry's name would also leave out the agent's own file beside it, so its work would never be seen; by its literal name only the entry is left out.
+      await writeFile(join(checkout, beside), "the agent's work\n");
+      assert.equal((await git.doneState({ gitDir, checkout, paths: [beside] })).changed, 1, `the agent's ${beside} beside the entry is part of its work`);
+      const state = await git.startState({ gitDir, checkout });
+      assert.equal(sh(dir, `--git-dir=${gitDir}`, "--literal-pathspecs", "ls-tree", state.tree, name).split(/\s+/)[2], subCommit, "the entry stays the base's");
+      assert.ok(sh(dir, `--git-dir=${gitDir}`, "ls-tree", "-r", "--name-only", state.tree).split("\n").includes(beside), `the agent's ${beside} is in the checkout's tree`);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+}
 
 test("the agent's changes reach the shared workspace only through expected-version writes: modified, new and deleted files", { skip }, async () => {
   const w = await world();
