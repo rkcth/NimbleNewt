@@ -285,7 +285,7 @@ for (const backend of backends) {
 
   suite("card W09b first review: a repeated call ID never runs a checkout write or command twice (answered as it was), the same ID with other arguments is refused, oversized or NUL arguments never reach the host, and a refusal's words are scrubbed", async (c) => {
     const ann = await c.agentFor("ann");
-    await c.task("code it", ann);
+    const { taskId } = await c.task("code it", ann);
     const credential = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     const asked: string[] = [];
     c.checkoutHost.run = async (_call, request) => {
@@ -305,8 +305,12 @@ for (const backend of backends) {
       seen["longPath"] = await s.send("work.checkout", { action: "read", path: "p".repeat(1001) });
       seen["longText"] = await s.send("work.checkout", { action: "write", path: "big.txt", text: "t".repeat(60_001) });
       seen["refused"] = await s.send("work.checkout", { action: "write", path: "refused.txt", text: "x" }, "rep-refused");
+      // A command is a write for the bridge's own pause gate (refused there, before the tool path, as an edit is).
+      await c.pauses.pause(c.owner, { commandId: uid("p"), scope: { kind: "task", id: taskId }, reason: "hold" });
+      seen["pausedRun"] = await s.send("work.checkout", { action: "run", command: "ls" }, "rep-paused");
     });
     await c.tick();
+    assert.equal(bad(seen["pausedRun"]!).code, "paused");
     assert.deepEqual(asked, ["write:a.txt", "run:echo once >> log", "write:refused.txt"], "each call reached the host once; the bad ones never");
     assert.equal(good(seen["write1"]!)["state"], "confirmed");
     assert.equal(good(seen["write2"]!)["state"], "confirmed");
