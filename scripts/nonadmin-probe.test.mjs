@@ -143,9 +143,53 @@ test("the clean-up survives Ctrl+C: no cmdlet, no call of the script's own funct
   assert.ok(!/\|(?!\|)/.test(code.replace(/-join/g, "")), "no pipeline");
   assert.ok(!/@\(/.test(code), "no array subexpression (its contents run as a pipeline)");
   // and every step has its own try, so one failure does not skip the next
-  for (const step of ["$own.Stop(0)", "$taskFolder.DeleteTask(", "[System.IO.File]::Delete($f)", "[System.IO.File]::Delete($recordPath)", "[System.IO.Directory]::Delete($profilesPath, $false)"]) {
+  for (const step of ["$own.Stop(0)", "$taskFolder.DeleteTask(", "[System.IO.File]::Delete($innerPath)", "[System.IO.File]::Delete($tmpPath)", "[System.IO.File]::Delete($recordPath)", "[System.IO.Directory]::Delete($profilesPath, $false)"]) {
     const at = code.indexOf(step); assert.ok(at > 0, step);
     assert.ok(code.lastIndexOf("try {", at) > code.lastIndexOf("}", at - 1) - 40 && at - code.lastIndexOf("try {", at) < 60, `${step} is inside its own try`);
+  }
+});
+
+test("the clean-up has no loop statement: every loop turn checks for Ctrl+C, so a loop in the finally would end the block at its first turn after Ctrl+C", () => {
+  const f = finallyBody();
+  const code = f.split("\n").map((l) => l.replace(/^\s*#.*$/, "")).join("\n").replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"`]|`.)*"/g, '""');
+  const loop = /(^|[\s;{}])(foreach|for|while|do)\s*[({]/i;
+  assert.ok(!loop.test(code), `no loop: ${code.match(loop)?.[0]}`);
+  assert.ok(!/\.ForEach\(|\.Where\(|%\s*\{/.test(code), "no ForEach()/Where() method or % alias");
+  for (const v of ["$innerPath", "$tmpPath", "$recordPath"]) assert.ok(code.includes(`[System.IO.File]::Delete(${v})`), v);
+  assert.equal((code.match(/GetAttributes\(\$recordPath\)/g) ?? []).length, 2, "the record is read back after its removal, and before it is named as kept");
+  const keptAt = f.indexOf("(kept: the profile");
+  assert.ok(keptAt > 0 && f.lastIndexOf("if (-not $gone)", keptAt) > f.lastIndexOf("} else {", keptAt), "the record is named as kept only when it is there");
+});
+
+test("every variable the clean-up reads is given a value before the work starts, or inside the clean-up before it is read (StrictMode 3 and Ctrl+C at any point)", () => {
+  const f = finallyBody();
+  const code = f.split("\n").map((l) => l.replace(/^\s*#.*$/, "")).join("\n");
+  const q = outer.indexOf("if ($PSCmdlet.ShouldProcess(");
+  const work = outer.indexOf("\n  try {", q);
+  assert.ok(q > 0 && work > q && work - q < 600);
+  const before = outer.slice(0, work);
+  const automatic = new Set(["_", "null", "true", "false"]);
+  // braces counted with string contents blanked (same length, so positions agree)
+  const blank = code.replace(/'(?:[^']|'')*'|"(?:[^"`]|`.)*"/g, (s) => s[0] + " ".repeat(s.length - 2) + s[0]);
+  const block = (at) => { // the innermost { ... } around position `at` (the whole block when none)
+    let depth = 0; let start = -1;
+    for (let i = at - 1; i >= 0; i--) { if (blank[i] === "}") depth++; else if (blank[i] === "{") { if (depth === 0) { start = i; break; } depth--; } }
+    if (start < 0) return [0, blank.length];
+    depth = 0;
+    for (let i = start; i < blank.length; i++) { if (blank[i] === "{") depth++; else if (blank[i] === "}" && --depth === 0) return [start, i]; }
+    return [start, blank.length];
+  };
+  const used = new Set([...code.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)(?!:)/g)].map((m) => m[1]));
+  assert.ok(used.size > 10, [...used].join(","));
+  for (const v of used) {
+    if (automatic.has(v.toLowerCase())) continue;
+    if (new RegExp(`(^|\\n)\\$${v}\\s*=[^=]`).test(before)) continue;
+    // otherwise every read must follow an assignment in the clean-up whose own block also holds the read (an assignment on one branch does not cover a read on another)
+    const assigns = [...blank.matchAll(new RegExp(`\\$${v}\\s*=(?!=)`, "g"))].map((m) => m.index);
+    for (const u of [...blank.matchAll(new RegExp(`\\$${v}\\b(?!\\s*=[^=])`, "g"))].map((m) => m.index)) {
+      const covered = assigns.some((a) => { if (a >= u) return false; const [s, e] = block(a); return u > s && u < e; });
+      assert.ok(covered, `$${v} is read in the clean-up (at ${JSON.stringify(code.slice(u, u + 60))}) without a value given before the work starts or on the same path`);
+    }
   }
 });
 
@@ -325,15 +369,17 @@ test("Invoke-Read switches -WhatIf off inside its own scope, and every read cmdl
 test("the wait is bounded and conditional (task state and result file, a deadline), never one fixed pause", () => {
   assert.match(outer, /\$deadline = \[DateTime\]::UtcNow\.AddSeconds\(\$TimeoutSeconds\)/);
   assert.match(outer, /if \(\[DateTime\]::UtcNow -gt \$deadline\)/);
-  assert.match(outer, /Get-Prop \$result 'complete'\) -eq \$true\) \{ break \}/);
+  assert.match(outer, /Get-Prop \$result 'complete'\) -eq \$true\) \{\n/, "a complete result ends the wait (after the grace below)");
   assert.match(outer, /\(\$taskState -eq 'Ready'\) -and \(\$last -ne 267011\) -and \(\$last -ne 267009\)/);
   // the state is the COM interface's number, named by the documented TASK_STATE values
   assert.match(ps, /\$TaskStateNames = @\{ 0 = 'Unknown'; 1 = 'Disabled'; 2 = 'Queued'; 3 = 'Ready'; 4 = 'Running' \}/);
   assert.match(outer, /\$taskState = \[string\]\$TaskStateNames\[\[int\]\$own\.State\]\n\s*\$last = \[int64\]\$own\.LastTaskResult/);
   assert.match(outer, /\$result = Read-Result \$resultPath \$runName/);
   const sleeps = [...outer.matchAll(/Start-Sleep[^\n]*/g)].map((m) => m[0]);
-  assert.equal(sleeps.length, 1);
-  assert.match(sleeps[0], /-Milliseconds 500$/, "a short poll inside the bounded loop");
+  assert.equal(sleeps.length, 2);
+  assert.match(sleeps[1], /-Milliseconds 500$/, "a short poll inside the bounded loop");
+  // after the result says complete: a bounded grace for powershell.exe to end (so the paste block does not show 'still running' and the clean-up need not stop it)
+  assert.match(outer, /'complete'\) -eq \$true\) \{\n(\s*#[^\n]*\n)?\s*\$grace = \[DateTime\]::UtcNow\.AddSeconds\(20\)\n\s*while \(\(\[int\]\$taskFolder\.GetTask\(\$TaskName\)\.State -eq 4\) -and \(\[DateTime\]::UtcNow -lt \$grace\)\) \{ Start-Sleep -Milliseconds 250 \}\n\s*break\n/);
   assert.match(ps, /\[ValidateRange\(480, 900\)\] \[int\] \$TimeoutSeconds = 540/);
   // the shortest allowed wait outlasts the task's own worst case (each launcher and whoami call bounded, plus 5 s for each pipe and kill), and the task's limit outlasts the default
   const bounds = [...inner.matchAll(/Invoke-Native [^\n]*? (\d{4,6})\n/g)].map((m) => Number(m[1]));
@@ -460,6 +506,10 @@ test("each launcher call is bounded and captured, the result is written after ev
   assert.match(inner, /\} catch \{\s*\$Result\.fatal = \$_\.Exception\.Message[\s\S]*\} finally \{\s*Save-Result \$true\s*\}/);
   assert.ok((inner.match(/Save-Result \$false/g) ?? []).length >= 4, "partial results are saved as it goes");
   assert.match(inner, /\[System\.IO\.File\]::Copy\(\$Tmp, \$Final, \$true\)/);
+  // the waiting script reads probe-result.json every half second: a copy over it at that moment is a sharing violation, so the copy is retried (bounded) and the final 'complete' is not lost
+  const save = inner.slice(inner.indexOf("function Save-Result"), inner.indexOf("function Get-P"));
+  assert.match(save, /for \(\$i = 0; \(\$i -lt 20\) -and \(-not \$copied\); \$i\+\+\) \{\n\s*try \{ \[System\.IO\.File\]::Copy\(\$Tmp, \$Final, \$true\); \$copied = \$true \} catch \{ \[System\.Threading\.Thread\]::Sleep\(100\) \}/);
+  assert.ok(save.indexOf("$copied = $false") > 0 && save.indexOf("$copied = $false") < save.indexOf("for ($i"), "initialised before the loop (StrictMode)");
   for (const part of ["WindowsIdentity]::GetCurrent()", "IsSystem", "administratorRole", "integrityLevel", "sessionId", "'/user', '/groups', '/priv'", "userProfile", "temp = "]) assert.ok(inner.includes(part), part);
 });
 

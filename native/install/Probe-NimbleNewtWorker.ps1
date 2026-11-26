@@ -231,7 +231,11 @@ function Save-Result([bool] $Complete) {
     $Result.complete = $Complete
     $Result.endedUtc = [DateTime]::UtcNow.ToString('o')
     [System.IO.File]::WriteAllText($Tmp, ($Result | ConvertTo-Json -Depth 8), [System.Text.Encoding]::ASCII)
-    [System.IO.File]::Copy($Tmp, $Final, $true)
+    # the script that waits reads probe-result.json every half second; a copy over it at that moment fails with a sharing violation, so it is tried again (2 s at most)
+    $copied = $false
+    for ($i = 0; ($i -lt 20) -and (-not $copied); $i++) {
+      try { [System.IO.File]::Copy($Tmp, $Final, $true); $copied = $true } catch { [System.Threading.Thread]::Sleep(100) }
+    }
   } catch { }
 }
 function Get-P($Obj, [string] $Name) {
@@ -554,7 +558,12 @@ if ($PSCmdlet.ShouldProcess("task $TaskName and the files probe-inner.ps1, probe
       $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
       while ($true) {
         $result = Read-Result $resultPath $runName
-        if ($null -ne $result -and (Get-Prop $result 'complete') -eq $true) { break }
+        if ($null -ne $result -and (Get-Prop $result 'complete') -eq $true) {
+          # its last word is written; powershell.exe is still ending. A short bounded wait (20 s) lets the task's own result be read (not 'still running') and the clean-up need not stop it.
+          $grace = [DateTime]::UtcNow.AddSeconds(20)
+          while (([int]$taskFolder.GetTask($TaskName).State -eq 4) -and ([DateTime]::UtcNow -lt $grace)) { Start-Sleep -Milliseconds 250 }
+          break
+        }
         $own = $taskFolder.GetTask($TaskName)
         $taskState = [string]$TaskStateNames[[int]$own.State]
         $last = [int64]$own.LastTaskResult
@@ -596,13 +605,16 @@ if ($PSCmdlet.ShouldProcess("task $TaskName and the files probe-inner.ps1, probe
         $unregistered = ($null -eq $own) -and ($lookup -eq '')
       }
     }
-    # the files this script made, by their exact names
-    foreach ($f in $innerPath, $tmpPath) {
-      try { [System.IO.File]::Delete($f) } catch { }
-      $gone = $false
-      try { [void][System.IO.File]::GetAttributes($f) } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $gone = $true } catch { }
-      if (-not $gone) { [void]$filesLeft.Add($f) }
-    }
+    # the files this script made, by their exact names. Written out one by one, NO loop: every loop turn checks for Ctrl+C, so after Ctrl+C a loop here would end this block at its
+    # first turn (PipelineStoppedException) and skip everything below it.
+    try { [System.IO.File]::Delete($innerPath) } catch { }
+    $gone = $false
+    try { [void][System.IO.File]::GetAttributes($innerPath) } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $gone = $true } catch { }
+    if (-not $gone) { [void]$filesLeft.Add($innerPath) }
+    try { [System.IO.File]::Delete($tmpPath) } catch { }
+    $gone = $false
+    try { [void][System.IO.File]::GetAttributes($tmpPath) } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $gone = $true } catch { }
+    if (-not $gone) { [void]$filesLeft.Add($tmpPath) }
     # the profile record is the proof for deleting a profile that survived: it is removed only when the profile is settled (deleted and gone), or when the task never started
     if ($ran -and (-not $started -or $settled)) {
       try { [System.IO.File]::Delete($recordPath) } catch { }
@@ -617,7 +629,12 @@ if ($PSCmdlet.ShouldProcess("task $TaskName and the files probe-inner.ps1, probe
           else { try { [System.IO.Directory]::Delete($profilesPath, $false) } catch { [void]$filesLeft.Add("$profilesPath (not empty or not removable)") } }
         }
       }
-    } else { [void]$filesLeft.Add("$recordPath (kept: the profile $runName may remain; this record is the proof for deleting it)") }
+    } else {
+      # named only when the record is there (a task that never reached info wrote none)
+      $gone = $false
+      try { [void][System.IO.File]::GetAttributes($recordPath) } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { $gone = $true } catch { }
+      if (-not $gone) { [void]$filesLeft.Add("$recordPath (kept: the profile $runName may remain; this record is the proof for deleting it)") }
+    }
     if (-not $finished) { [Console]::WriteLine('Probe stopped before the end. Task ' + $TaskName + ' removed: ' + $unregistered + ' (tried: ' + $registerAttempted + '); files left: ' + ($filesLeft -join ' | ')) }
   }
 }
