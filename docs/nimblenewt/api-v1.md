@@ -3157,6 +3157,7 @@ Arguments:
 - `notBefore` (optional): ISO time the grant starts
 - `expiresAt` (optional): ISO time the grant ends
 - `idleDays` (optional): whole days the grant may go unused before it lapses; each use renews it (card A07h)
+- `resource` (optional): the one resource the right covers, `{ kind, id }`: for a service operation (card P03b) `{ kind: "service", id: "<service>/<resource>" }` with the action `effect.perform`; absent, the right covers the whole project
 
 Result: `{ id, revision, replayed }`.
 

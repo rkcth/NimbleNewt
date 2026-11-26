@@ -51,3 +51,5 @@ export type { EnvironmentRuntime, TrialInput as EnvironmentTrialInput, TrialResu
 export { NetworkGrantService, NetworkRelay, NetworkRefused, WebFetch, WEB_FETCH_TOOL, NETWORK_LIMITS, type NetworkOpener, type NetworkRelayOptions } from "./network/index.js";
 export * from "./admin/index.js";
 export * as recovery from "./recovery/index.js";
+// Card P03b: the real service connector a host passes to startController({ serviceTarget }), and the port it implements.
+export { LocalFolderServices, LOCAL_FOLDER_LIMITS, type ServiceTarget } from "./service-ops/index.js";

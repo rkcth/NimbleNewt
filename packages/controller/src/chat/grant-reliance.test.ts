@@ -35,7 +35,7 @@ test("the interpreter is told to ask what running work relies on a right, and th
   await m.interpret({ text: "would taking back that right stop anything?", quoted: [], focus: {}, proposals: [] });
   assert.match(system, /grant_reliance\(grantId\)/, "the status kind comes from the table");
   assert.match(system, /what is running that needs that right/);
-  assert.match(system, /the preview names the running work that may rely on the right/);
+  assert.match(system, /it is shown first, naming the running work that may rely on it, except that a right on one service resource is taken back at once/);
   assert.match(system, /It says what the right covers, not what the work will use/);
 });
 
