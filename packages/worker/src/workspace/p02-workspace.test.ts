@@ -200,6 +200,7 @@ test("a submit's staging refuses, plainly and with the index left as it was, wha
     for (const n of ["x.", "K", "k"]) await writeFile(join(w.shared, "docs", n), `${n}\n`);
     sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "odd names");
     const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    assert.equal(await w.git.patchId({ gitDir: made.gitDir, base: sh(w.shared, "rev-parse", "HEAD") }), undefined, "an index with no change has no patch ID");
     const g = gitOf(made);
     const clean = async (): Promise<void> => { for (const n of await readdir(made.checkout)) if (n !== "src" && n !== "docs") await rm(join(made.checkout, n), { recursive: true, force: true }); for (const n of await readdir(join(made.checkout, "src"))) if (n !== "a.ts") await rm(join(made.checkout, "src", n), { force: true }); };
     const refused = async (label: string, plant: () => Promise<void>, code: string, reason: RegExp): Promise<void> => {
@@ -230,6 +231,8 @@ test("a submit's staging refuses, plainly and with the index left as it was, wha
     const diff = execFileSync("git", ["--git-dir", made.gitDir, "-c", "core.autocrlf=false", "diff", "--cached", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", staged.base], { maxBuffer: 1 << 30 });
     assert.ok(diff.length > 64 * 1024 * 1024, `the diff (${diff.length} bytes) is past the old buffer`);
     assert.equal(staged.patchId, execFileSync("git", ["patch-id", "--verbatim"], { input: diff, encoding: "utf8", maxBuffer: 1 << 20 }).trim().split(/\s+/)[0]);
+    // A diff that fails (a base the git directory does not hold) is a failure with git's reason, never "no change".
+    await assert.rejects(w.git.patchId({ gitDir: made.gitDir, base: "0".repeat(40) }), (e: Error & { code?: string }) => e.code === "unavailable" && /^git diff failed: .*bad (?:object|revision)/i.test(e.message));
   } finally { await w.done(); }
 });
 
@@ -254,6 +257,15 @@ test("a submit's error names no folder of the host, and a checkout gone while th
     for (const [what, p] of [["staging", staging], ["view", view]] as const) await assert.rejects(p, (e: Error & { code?: string }) => e.code === "unavailable" && /the task's checkout is no longer on this host as it was/.test(e.message), what);
     assert.equal(gitOf(made)("ls-files", "-s"), indexBefore, "nothing was staged");
   } finally { await w.done(); }
+  // A path that is none of this host's own folders (here in the admission check's failure) is still not shown.
+  let down = false;
+  const w2 = await world({ admit: async () => { if (down) throw new Error("the store at /var/lib/nimblenewt/db is not answering"); return { admitted: true, binding: BINDING }; } });
+  try {
+    const made = await w2.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 3;\n");
+    down = true;
+    for (const p of [w2.ws.stageWork(scope), w2.ws.submitView(scope)]) await assert.rejects(p, (e: Error & { code?: string }) => e.code === "unavailable" && /could not be checked \(the store at <a host path> is not answering\)/.test(e.message) && !e.message.includes("/var/lib"));
+  } finally { await w2.done(); }
 });
 
 test("a start record's file name means one attempt on every filesystem: an ID with a capital letter, a colon or an end dot is kept under a digest of it, and is read back by its ID (card P02 review)", { skip }, async () => {
