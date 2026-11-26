@@ -109,3 +109,56 @@ test("an attempt makes at most callsPerAttempt checkout calls, and a launcher th
     assert.equal(h.asked.length, 0);
   } finally { await hs?.close(); }
 });
+
+test("second review of W09b: a call needs every limit enforced unless the owner allows best effort, takes the contract's limits too, is said to have possibly acted when stopped while it changes the checkout (a stopped read is not), and a launch that ends after the sandbox closed is ended at once", async () => {
+  // The owner's setting decides whether a limit this host cannot enforce refuses the call; the contract's limits are the strictest of the three.
+  const asked: LaunchRequest[] = [];
+  const killed: number[] = [];
+  let gate: Promise<void> | undefined;
+  let never = false;
+  const launcher = {
+    launch: async (request: LaunchRequest) => {
+      const index = asked.push(request) - 1;
+      if (gate !== undefined) await gate;
+      let stop!: () => void;
+      const stopped = new Promise<RunResult>((resolve) => { stop = () => resolve(done({ exitCode: null, signal: "SIGKILL", killed: true })); });
+      return { result: never ? stopped : Promise.race([Promise.resolve(helperAnswer()), stopped]), kill: () => { killed.push(index); stop(); } } as never;
+    },
+  };
+  let allow = false;
+  const parts = localWorkerParts<unknown>({
+    launcher: launcher as never, app, protectedPaths: [], workspace: () => ({ ...work, limits: { memoryMb: 1024, cpus: 2, processes: 4096 } }), model: () => { throw new Error("unused"); }, namespaceId: () => "abcdef0123456789",
+    bridge: async () => ({ ok: false, code: "x", message: "y" }), relay: async () => { throw new Error("unused"); }, checkBase: dir("calls2"), requireEnforced: true,
+    limits: () => ({ memoryMb: 768 }), bestEffort: async () => allow, onLaunch: async () => undefined,
+  });
+  const contracted: HostOrder = { ...order, contract: { limits: { cpus: 1, memoryMb: 2048 } } as never };
+  const session = await parts.sandbox.open(contracted.recipe, contracted);
+  try {
+    await parts.checkout.run("att-1", { action: "read", path: "a.txt" }, signal());
+    assert.equal(asked[0]!.requireEnforced, true, "the owner did not allow best effort: every limit must be enforced");
+    assert.deepEqual(asked[0]!.limits, { memoryMb: 768, cpus: 1, processes: CHECKOUT_TOOL_LIMITS.processes }, "the attempt's, the owner's and the contract's, the smallest of each");
+    allow = true;
+    await parts.checkout.run("att-1", { action: "read", path: "a.txt" }, signal());
+    assert.equal(asked[1]!.requireEnforced, false, "the owner allows best effort");
+    // Stopped while it runs: a write or a command may have acted; a read only looked.
+    never = true;
+    for (const [call, acted] of [[{ action: "read", path: "a.txt" }, false], [{ action: "write", path: "a.txt", text: "x" }, true], [{ action: "run", command: "sleep 600" }, true]] as const) {
+      const ctl = new AbortController();
+      const pending = parts.checkout.run("att-1", call, ctl.signal);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      ctl.abort();
+      await assert.rejects(pending, (e: Error & { mayHaveActed?: boolean }) => (e.mayHaveActed === true) === acted, `${call.action}: may have acted is ${String(acted)}`);
+    }
+    // The sandbox closes while a call's launch is still under way: the run it gets is ended at once, not left running.
+    let release!: () => void;
+    gate = new Promise<void>((resolve) => { release = resolve; });
+    const late = parts.checkout.run("att-1", { action: "run", command: "sleep 600" }, signal());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const index = asked.length - 1;
+    await session.close();
+    release();
+    const ended = await late;
+    assert.equal(ended.ok && ended.facts["signal"], "SIGKILL", JSON.stringify(ended));
+    assert.ok(killed.includes(index), "the run that started after the close was ended");
+  } finally { await session.close().catch(() => undefined); }
+});

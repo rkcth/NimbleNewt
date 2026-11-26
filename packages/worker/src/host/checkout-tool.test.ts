@@ -96,7 +96,9 @@ describe("the checkout tool in a sandbox of its own (card W09b)", () => {
     refused(await call({ action: "write", path: "link-out", text: "overwritten" }), /is a link|leads outside/);
     refused(await call({ action: "edit", path: "link-out", old: "outside", text: "changed" }), /is a link|leads outside|does not exist/);
     refused(await call({ action: "edit", path: "link-sys", old: "a", text: "b" }), /is a link|leads outside/);
-    refused(await call({ action: "write", path: "dir-out/planted.txt", text: "x" }), /leads outside your checkout|does not exist|no such file/);
+    // Second review: said for what it is (a link out), not as a missing file, and for an edit through a folder link to a file the sandbox does show.
+    refused(await call({ action: "write", path: "dir-out/planted.txt", text: "x" }), /leads outside your checkout through a link/);
+    if (existsSync("/usr/lib/os-release")) refused(await call({ action: "edit", path: "dir-sys/os-release", old: "=", text: "-" }), /leads outside your checkout through a link/);
     refused(await call({ action: "read", path: "dir-out/secret.txt" }), /leads outside your checkout|does not exist|no such file/);
     assert.equal(readFileSync(join(outside, "secret.txt"), "utf8"), "outside secret\n");
     assert.equal(existsSync(join(outside, "planted.txt")), false);
@@ -145,6 +147,11 @@ describe("the checkout tool in a sandbox of its own (card W09b)", () => {
     const read = await call({ action: "read", path: "big.txt" });
     assert.equal(factsOf(read).truncated, true);
     assert.equal(factsOf(read).chars, 100_000);
+    // Second review: a file over the bound is refused, not read (the helper never holds more than it may hand on).
+    writeFileSync(join(checkout, "huge.txt"), "h".repeat(CHECKOUT_TOOL_LIMITS.fileBytes + 1));
+    refused(await call({ action: "read", path: "huge.txt" }), /larger than 4194304 bytes/);
+    refused(await call({ action: "edit", path: "huge.txt", old: "h", text: "i" }), /larger than 4194304 bytes/);
+    rmSync(join(checkout, "huge.txt"));
   });
 
   ifUsable("a fork bomb and a command that runs too long are ended at the time limit, and the next call works", async () => {
@@ -165,6 +172,10 @@ describe("the checkout tool in a sandbox of its own (card W09b)", () => {
     const r = new AbortController();
     r.abort();
     await assert.rejects(call({ action: "read", path: "src/a.txt" }, {}, r.signal), (e: Error & { mayHaveActed?: boolean }) => e.mayHaveActed !== true);
+    // Second review: a write or command stopped before it started (it waited its turn while the ending settled) is never launched: nothing is written and it did not act.
+    await assert.rejects(call({ action: "write", path: "never.txt", text: "x" }, {}, r.signal), (e: Error & { mayHaveActed?: boolean }) => e.mayHaveActed !== true && /stopped before it started/.test(e.message));
+    await assert.rejects(call({ action: "run", command: "echo x > /work/never-run.txt" }, {}, r.signal), (e: Error & { mayHaveActed?: boolean }) => e.mayHaveActed !== true && /stopped before it started/.test(e.message));
+    assert.equal(existsSync(join(checkout, "never.txt")) || existsSync(join(checkout, "never-run.txt")), false);
     assert.equal(tracked.size, 0);
   });
 

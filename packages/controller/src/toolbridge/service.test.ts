@@ -248,6 +248,39 @@ for (const backend of backends) {
     assert.equal(good(seen["read"]!)["state"], "confirmed");
   });
 
+  suite("card W09b second review: every changing action is a workspace edit (with workspace edits set to ask the owner, an edit and a command wait as a write does and none reaches the host; their operations are not read-only), and a tool of another kind that bears a checkout name gets no right from the right to work", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("code it", ann);
+    const asked: string[] = [];
+    c.checkoutHost.run = async (_call, request) => { asked.push(request.action); return { ok: true, body: "", facts: {} }; };
+    const seen: Record<string, BridgeResponse> = {};
+    let other: { state: string; reason?: string } | undefined;
+    let attemptId = "";
+    c.worker.script = c.session(async (s) => {
+      attemptId = s.attemptId;
+      // Before the policy changes: an edit and a command run, and are recorded as operations that change the checkout.
+      seen["edit"] = await s.send("work.checkout", { action: "edit", path: "a.txt", old: "a", text: "b" }, "sr-edit");
+      seen["run"] = await s.send("work.checkout", { action: "run", command: "true" }, "sr-run");
+      // A tool of another kind under a checkout name (an MCP server's, say): the right to work on the task does not cover it, its own grant is needed.
+      other = await s.gateway.call({ callId: "sr-mcp", tool: { name: "nimblenewt.checkout-read", version: "1.0.0", kind: "mcp", server: "mcs-aaaaaaaaaaaaaaaaaaaa" }, args: {}, target: { kind: "workspace", id: taskId } }, { kind: "local", run: async () => ({ text: "should not run" }) }) as { state: string; reason?: string };
+      await c.policy.set(c.owner, { scope: c.project, commandId: uid("pol"), overrides: { "workspace-edit.free": "owner" } } as never);
+      seen["editAsked"] = await s.send("work.checkout", { action: "edit", path: "a.txt", old: "b", text: "c" });
+      seen["runAsked"] = await s.send("work.checkout", { action: "run", command: "rm -rf src" });
+    });
+    await c.tick();
+    assert.equal(good(seen["edit"]!)["state"], "confirmed");
+    assert.equal(good(seen["run"]!)["state"], "confirmed");
+    assert.equal(good(seen["editAsked"]!)["state"], "awaiting-approval", JSON.stringify(seen["editAsked"]));
+    assert.equal(good(seen["runAsked"]!)["state"], "awaiting-approval", JSON.stringify(seen["runAsked"]));
+    assert.deepEqual(asked, ["edit", "run"], "the calls waiting for the owner never reached the host");
+    assert.equal(other?.state, "refused", JSON.stringify(other));
+    assert.match(String(other?.reason), /no grant for tool\.nimblenewt\.checkout-read/);
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
+    const byCall = new Map(ops.map((o) => [o.callId, o]));
+    assert.deepEqual([byCall.get("sr-edit")!.tool.name, byCall.get("sr-edit")!.readOnly], ["nimblenewt.checkout-edit", false]);
+    assert.deepEqual([byCall.get("sr-run")!.tool.name, byCall.get("sr-run")!.readOnly], ["nimblenewt.checkout-run", false]);
+  });
+
   suite("card W09b: a checkout write stopped while it runs (the ending's settle) is left uncertain, so it counts as a killed write; a stopped read is cancelled; a host that cannot run the tool refuses it", async (c) => {
     const ann = await c.agentFor("ann");
     await c.task("code it", ann);
