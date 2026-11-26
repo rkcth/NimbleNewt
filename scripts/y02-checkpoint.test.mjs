@@ -30,8 +30,12 @@ function containment(p) {
   };
   if (p === "darwin") r.macosVersion = "15.1";
   if (p === "win32") {
-    const phase = { launch: true, exec: true, results: true, teardown: true };
-    r.windows = { serviceIdentity: { account: "svc", session: "service" }, afterLogout: phase, afterReboot: phase, mappedOutputAcl: { positive: true, negative: true }, packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict" };
+    // Card A03b: the native AppContainer evidence (no Windows Sandbox).
+    r.backend = "windows-native";
+    r.nativeWindows = {
+      launcher: { recordCommit: COMMIT, recordSha256: "e".repeat(64), fileSha256: "e".repeat(64) }, elevated: false, accountKind: "standard", sessionId: 1, windowStation: "home-desktop", windowStationOk: true,
+      profiles: { created: true, deleted: true, gone: true, leftover: 0 }, grantsReadBack: "clean", symlinkRight: false, packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict",
+    };
   }
   return r;
 }
@@ -226,8 +230,9 @@ test("containment evidence is judged by the G05 gate: a report for another commi
   blocked(judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "fail"; })), /containment linux: case /);
   blocked(judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "inconclusive"; })), /containment linux: case .*inconclusive/);
   blocked(judgeAltered(edit("linux", (r) => { r.cases = []; })), /containment linux: case .* is missing/);
-  blocked(judgeAltered(edit("win32", (r) => { r.windows.supervisorAclCheck = "report-only"; })), /containment win32: .*strict/);
-  blocked(judgeAltered(edit("win32", (r) => { delete r.windows; })), /containment win32: the Windows host evidence is missing/);
+  blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.supervisorAclCheck = "report-only"; })), /containment win32: .*strict/);
+  blocked(judgeAltered(edit("win32", (r) => { delete r.nativeWindows; })), /containment win32: the native Windows host evidence is missing/);
+  blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.elevated = true; })), /containment win32: the Windows run was elevated/);
   blocked(judgeAltered(edit("darwin", (r) => { r.weakerThanLinux = false; })), /containment darwin: .*weaker/);
   blocked(judgeAltered(edit("win32", (r) => { r.weakerThanLinux = false; })), /containment win32: .*weaker/);
   blocked(judgeAltered(edit("linux", (r) => { r.platform = "darwin"; })), /containment-linux\.json is a report for darwin/);

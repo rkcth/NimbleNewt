@@ -1,8 +1,8 @@
 // Card G05: produce and judge isolation-boundary evidence.
 //   node scripts/containment-evidence.mjs run  --out DIR [--allow-unavailable]   run the suite here, write DIR/containment-<platform>.json
-//        --allow-unavailable: exit 0 when this Windows host has no sandbox capacity at all (an honest skip; ignored on Linux and macOS, for a CI cell such as a GitHub-hosted Windows runner that cannot run
-//        Windows Sandbox). The report still records every case as not_run with the reason, and the gate still blocks on it. A run that had capacity is judged in full.
-//        --windows-summary FILE [--workdir-check FILE]: Windows only. Fill the report's `windows` block from the real Windows Sandbox tests' summary.json (windows-real.test.ts) and the
+//        --allow-unavailable: exit 0 when this Windows host has no sandbox capacity at all (an honest skip; ignored on Linux and macOS, for a CI cell such as a GitHub-hosted Windows runner where the
+//        native launcher is not installed). The report still records every case as not_run with the reason, and the gate still blocks on it. A run that had capacity is judged in full.
+//        --windows-summary FILE [--workdir-check FILE]: SUPERSEDED (Windows Sandbox era; the release gate refuses that block since card A03b). Fill the report's `windows` block from the real Windows Sandbox tests' summary.json (windows-real.test.ts) and the
 //        working-directory check (scripts/g05-workdir-check.mjs); what they cannot show stays false (packages/worker/src/sandbox/containment-windows-evidence.ts). Without it there is no block.
 //        --redact [--local DIR]: the written report has account, machine and home names, SIDs and addresses replaced (windows-redact.ts), for a public artifact; with --local the
 //        unredacted report is also written to DIR (keep that folder on the machine). A redacted report that no longer reads as a report is not written.
@@ -11,7 +11,8 @@
 //        bundle's root (next to scripts/), which must hold exactly 40 lower-case hex digits (one trailing line break allowed), else exit 2 before anything runs. The report says dirty: false (the bundle's files are
 //        checked against its SHA256SUMS by run-g05.ps1 before this starts).
 // `run` builds the tree first (tsc --build; the compiled code is not tracked by git, so a stale build would otherwise be reported under HEAD's commit) and needs a committed checkout; the report names the commit and says if the tree was dirty.
-// `gate` exits 1 while anything blocks, so a release step can call it. Reports are read as data: size-bounded and shape-checked.
+// `gate` exits 1 while anything blocks, so a release step can call it. What it accepted without a pass (card A03b: a file-link case inconclusive for want of the symbolic-link right) is printed.
+// A Windows report needs the native AppContainer block `nativeWindows` (packages/worker/src/sandbox/containment-windows-native-evidence.ts); this script does not fill it yet (A03b follow-up). Reports are read as data: size-bounded and shape-checked.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -47,9 +48,8 @@ if (command === "run") {
     console.error(usage); process.exit(2);
   }
   if (out === undefined || (flag("workdir-check") !== undefined && flag("windows-summary") === undefined) || (flag("local") !== undefined && !rest.includes("--redact"))) { console.error(usage); process.exit(2); }
-  // Windows: the owner and share account default to the console user, as in windows-real.test.ts; which default was taken is printed (source words only, never the name).
+  // Windows: the account signed in at the console, only so redaction can hide its name too (card A03b: the native launcher runs as this signed-in account; nothing here is Windows Sandbox).
   const consoleUser = await worker.windowsConsoleUser();
-  if (process.platform === "win32") { const id = worker.evidenceIdentity(process.env, consoleUser); console.log(`  Windows Sandbox owner: ${id.ownerSource}; share account: ${id.shareSource} (configured = NIMBLENEWT_WSB_OWNER / NIMBLENEWT_WSB_SHARE_IDENTITY, console = the account signed in at the console, runner = this process's account)`); }
   let report = await worker.produceReport(root, {}, provenance);
   const summaryFile = flag("windows-summary");
   if (summaryFile !== undefined) {
@@ -104,6 +104,7 @@ if (command === "run") {
   const result = worker.assessRelease(reports, { commit });
   for (const p of problems) console.log(`unreadable report: ${p}`);
   for (const b of result.blockers) console.log(`blocked: ${b}`);
+  for (const a of result.accepted) console.log(`accepted (not a pass): ${a}`);
   console.log(result.ok && problems.length === 0 ? "isolation evidence complete for this commit" : "isolation evidence incomplete: the release is blocked");
   process.exit(result.ok && problems.length === 0 ? 0 : 1);
 } else {

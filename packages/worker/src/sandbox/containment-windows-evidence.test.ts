@@ -26,9 +26,10 @@ test("everything the tests showed: ACL controls and the strict check are true; l
   assert.deepEqual(evidence.serviceIdentity, { account: "<user>", session: "service" });
   assert.deepEqual([evidence.afterLogout, evidence.afterReboot], [{ launch: false, exec: false, results: false, teardown: false }, { launch: false, exec: false, results: false, teardown: false }]);
   assert.deepEqual(notProven, ["launch, exec, results and teardown after logout and after a reboot under the unattended service identity: not automated, recorded as false"]);
+  // Card A03b (owner decision 2026-11-26, no Windows Sandbox): the gate refuses this block and this backend outright, however complete, and asks for the native AppContainer evidence.
   const b = blockers({ ...winReport(), windows: evidence });
-  assert.equal(b.length, 8, b.join("\n"));
-  assert.ok(b.every((x) => /win32: Windows (launch|exec|results|teardown) not proven after (logout|reboot)/.test(x)), b.join("\n"));
+  for (const want of [/only the native AppContainer launcher/, /Windows Sandbox era evidence block/, /native Windows host evidence is missing/]) assert.ok(b.some((x) => want.test(x)), `${want}: ${b.join("\n")}`);
+  assert.ok(!b.some((x) => /not proven after (logout|reboot)/.test(x)), "the Windows Sandbox requirements are gone from the gate");
   // The produced report reads back as a report.
   assert.ok("report" in parseReport(raw({ ...winReport(), windows: evidence })));
 });
@@ -55,7 +56,7 @@ test("the strict supervisor-ACL check counts only when strict was in use AND its
   assert.deepEqual(r.evidence.packagedControllerWorkingDirectory, { packaged: false, passed: false });
   for (const want of [/interactive session/, /strict supervisor-ACL/, /not run on a packaged controller/]) assert.ok(r.notProven.some((n) => want.test(n)), String(want));
   const b = blockers({ ...winReport(), windows: r.evidence });
-  for (const want of [/interactive session/, /report-only/, /not run on the packaged controller/]) assert.ok(b.some((x) => want.test(x)), String(want));
+  assert.ok(b.some((x) => /Windows Sandbox era evidence block/.test(x)), b.join("\n"));
   assert.ok(windowsEvidenceFromSummary(summary(), { session: "service", workingDirectory: { packaged: true, passed: false } }).notProven.some((n) => /working-directory check failed/.test(n)));
 });
 
@@ -63,7 +64,7 @@ test("a run where no real sandbox test passed is the feature being present only,
   const onlyFacts = Object.fromEntries(Object.values(WSB_TESTS).map((n) => [n, n === WSB_TESTS.facts || n === WSB_TESTS.failClosed ? "pass" : "fail"]));
   const r = windowsEvidenceFromSummary(summary({ tests: onlyFacts }), { session: "service" });
   assert.equal(r.evidence.featureEnabledOnly, true);
-  assert.ok(blockers({ ...winReport(), windows: r.evidence }).some((x) => /feature being enabled only/.test(x)));
+  assert.ok(blockers({ ...winReport(), windows: r.evidence }).some((x) => /Windows Sandbox era evidence block/.test(x)));
   // One real confined test passing is enough to not be "feature only"; it does not make anything else true.
   const one = windowsEvidenceFromSummary(summary({ tests: { ...onlyFacts, [WSB_TESTS.exitCode]: "pass" } }), { session: "service" }).evidence;
   assert.deepEqual([one.featureEnabledOnly, one.mappedOutputAcl.positive], [false, false]);

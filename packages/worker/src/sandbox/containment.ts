@@ -6,9 +6,10 @@ import { arch as osArch, release as osRelease, tmpdir } from "node:os";
 import { basename, dirname, join, relative, win32 } from "node:path";
 import type { SandboxBackend } from "./backend.js";
 import { runWindowsNodeCases } from "./containment-windows-cases.js";
-import { windowsConsoleUser, windowsEvidenceBackend } from "./containment-windows.js";
+import { windowsEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher } from "./launcher.js";
 import { GUEST, type SandboxRecipe } from "./recipe.js";
+import { NATIVE_BACKEND_NAME as NATIVE_BACKEND, RUN_PROFILE_PREFIX } from "./windows-native-plan.js";
 import { GUEST_PATHS, guestPathFor } from "./windows-plan.js";
 
 /*
@@ -18,8 +19,10 @@ import { GUEST_PATHS, guestPathFor } from "./windows-plan.js";
  *    through links, read credentials, reach the network and change protected names. Every verdict is decided from the host side (a file that must not change, a server that must not be reached),
  *    not from what the confined program prints. The suite also runs positive controls (the same attempts on the agent's own directories succeed) so a denial cannot be a broken probe.
  * 2. A release gate (`assessRelease`) that reads the reports of the platforms and says what still blocks a release: a missing platform, a failed or missing case, evidence about another commit,
- *    and the evidence only a real Windows host can give (the unattended service identity after logout and reboot, the mapped-output ACL controls, the packaged controller working directory,
- *    the strict supervisor-ACL check). Evidence from an interactive session or from "the feature is switched on" never satisfies it.
+ *    and the evidence only a real Windows PC can give. Since the owner's decision of 2026-11-26 (keep the AppContainer launcher, no Windows Sandbox) that is the native launcher's evidence
+ *    (`NativeWindowsEvidence`): the launcher is the released one for this commit, the run was not elevated, in the signed-in user's interactive session with its window objects made, every
+ *    per-run profile gone and every grant read back clean, plus the packaged controller working directory and the strict supervisor-ACL check. The Windows Sandbox era block (`windows`: the
+ *    unattended service identity after logout and reboot, the mapped-output ACL controls) no longer satisfies it. A run refused cleanly after the owner signs out is NOT yet required (open item, A03b).
  */
 
 export const CONTAINMENT_SCHEMA = "nimblenewt.containment/1";
@@ -47,6 +50,7 @@ export interface TrustedHostException {
   readonly refusedWithoutAuthority: boolean;
 }
 
+/** SUPERSEDED (Windows Sandbox era): still read so an old report parses, but the release gate refuses a Windows report that carries it (it is not AppContainer evidence). */
 export interface WindowsEvidence {
   /** The account the launch/exec/results/teardown ran as, and how it was running. */
   readonly serviceIdentity: { readonly account: string; readonly session: "service" | "interactive" };
@@ -61,6 +65,33 @@ export interface WindowsEvidence {
   readonly supervisorAclCheck: "strict" | "report-only";
   /** The Windows Sandbox feature being enabled, or one smoke run in a signed-in session, is recorded but never counts. */
   readonly featureEnabledOnly?: boolean;
+}
+
+/**
+ * Card A03b: the Windows host evidence of the native AppContainer launcher (`backend` = `windows-native`), filled from what the run itself recorded (containment-windows-native-evidence.ts), never
+ * typed in by hand. What a run did not record is `not-measured` / `null`, which the gate refuses.
+ */
+export interface NativeWindowsEvidence {
+  /** The launcher that ran: its release record's commit and SHA-256, and the SHA-256 of the file itself. */
+  readonly launcher: { readonly recordCommit: string; readonly recordSha256: string; readonly fileSha256: string };
+  /** From the launcher's `info`: whether the token was elevated. */
+  readonly elevated: boolean;
+  /** The account the run was made as: a standard user, or an administrator running with its filtered (UAC) token. */
+  readonly accountKind: "standard" | "administrator-filtered" | "not-measured";
+  /** From the launcher's `info`: the Windows session. 0 is the services session (no signed-in user's desktop), which this release does not support. */
+  readonly sessionId: number;
+  /** From the launcher's `info`: the window-object mode (`private` or `home-desktop`) and whether it could be made. */
+  readonly windowStation: string;
+  readonly windowStationOk: boolean;
+  /** The per-run container profiles: `info`'s throw-away profile created, deleted and found gone, and the count of `NimbleNewtRun-*` profiles left after the whole run (`null`: not counted). */
+  readonly profiles: { readonly created: boolean; readonly deleted: boolean; readonly gone: boolean; readonly leftover: number | null };
+  /** The independent read-back of every grant after every run (the backend's run records): `clean` only when every record says so. */
+  readonly grantsReadBack: "clean" | "left" | "not-measured";
+  /** Whether the account held SeCreateSymbolicLinkPrivilege (`null`: not recorded). Only `false` lets a file-link case be inconclusive for want of it. */
+  readonly symlinkRight: boolean | null;
+  /** As in the Windows Sandbox era: the packaged controller's working directory check and the strict supervisor-ACL check (the native backend's control folder is never granted to the container). */
+  readonly packagedControllerWorkingDirectory: { readonly packaged: boolean; readonly passed: boolean };
+  readonly supervisorAclCheck: "strict" | "report-only" | "not-run";
 }
 
 export interface ContainmentReport {
@@ -84,6 +115,7 @@ export interface ContainmentReport {
   readonly cases: readonly CaseResult[];
   readonly trustedHost?: TrustedHostException;
   readonly windows?: WindowsEvidence;
+  readonly nativeWindows?: NativeWindowsEvidence;
 }
 
 /** Every case a platform must pass. A report missing one of these cannot satisfy the gate. */
@@ -196,7 +228,7 @@ interface CaseDef {
 export interface SuiteOptions {
   /** The launcher under test. Default: a production launcher for this platform. */
   readonly launcher?: SandboxLauncher;
-  /** The backend of the default launcher (ignored when `launcher` is given). Default: the launcher's own default for this OS; `produceReport` passes the Windows Sandbox backend on Windows. */
+  /** The backend of the default launcher (ignored when `launcher` is given). Default: the launcher's own default for this OS; `produceReport` passes the native launcher (`windowsEvidenceBackend`) on Windows. */
   readonly backend?: SandboxBackend;
   /** Tests only: the launcher of the unconfined pairing. Default: a production launcher allowed trusted-host runs for the suite alone. */
   readonly unconfinedLauncher?: SandboxLauncher;
@@ -507,7 +539,7 @@ export async function produceReport(repo: string, options: SuiteOptions = {}, pr
   const dirty = provenance === undefined ? git(repo, "status", "--porcelain").length > 0 : provenance.dirty;
   // Windows: the backend is the native launcher (windowsEvidenceBackend, card A03b), configured from the environment of the administrator's install step; the cases are the node runner's
   // (containment-windows-cases.ts). Where the launcher is not installed every case is reported not_run with that reason.
-  const suite = await runContainmentSuite(platform === "win32" && options.launcher === undefined && options.backend === undefined ? { ...options, backend: windowsEvidenceBackend(process.env, await windowsConsoleUser()) } : options);
+  const suite = await runContainmentSuite(platform === "win32" && options.launcher === undefined && options.backend === undefined ? { ...options, backend: windowsEvidenceBackend(process.env) } : options);
   const macos = macosProductVersion();
   return {
     schema: CONTAINMENT_SCHEMA, generatedAt: new Date().toISOString(), implementationCommit: commit, dirty, platform, arch: osArch(), osVersion: osRelease(),
@@ -520,7 +552,7 @@ export async function produceReport(repo: string, options: SuiteOptions = {}, pr
 
 /**
  * The exit status of `containment-evidence.mjs run`: 0 only when there was capacity, every case passed and the trusted-host exception was shown. With `allowUnavailable` (a CI cell
- * that cannot run this OS's sandbox at all, such as a GitHub-hosted Windows runner without Windows Sandbox), a Windows run with NO capacity exits 0 as an honest skip: the report
+ * that cannot run this OS's sandbox at all, such as a GitHub-hosted Windows runner without the native launcher installed), a Windows run with NO capacity exits 0 as an honest skip: the report
  * still says `not_run` for every case and the release gate still blocks on it. A Linux or macOS report never skips. A run that had capacity is judged in full either way.
  */
 export function runOutcome(report: ContainmentReport, options: { readonly allowUnavailable?: boolean } = {}): { readonly exitCode: 0 | 1; readonly skipped: boolean } {
@@ -548,6 +580,32 @@ const str = (v: unknown, max = 500): v is string => typeof v === "string" && v.l
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const bool = (v: unknown): v is boolean => typeof v === "boolean";
 const phases = (v: unknown): boolean => isObject(v) && PHASES.every((k) => bool(v[k]));
+
+const SHA256 = /^[0-9a-f]{64}$/;
+/** The shape of the native Windows block, every field required (a missing field is malformed, not "not measured": the producer writes `not-measured` or `null` itself). */
+export function isNativeWindowsEvidence(n: unknown): n is NativeWindowsEvidence {
+  if (!isObject(n)) return false;
+  const l = n["launcher"], p = n["profiles"], wd = n["packagedControllerWorkingDirectory"];
+  return isObject(l) && typeof l["recordCommit"] === "string" && COMMIT.test(l["recordCommit"]) && typeof l["recordSha256"] === "string" && SHA256.test(l["recordSha256"])
+    && typeof l["fileSha256"] === "string" && SHA256.test(l["fileSha256"])
+    && bool(n["elevated"]) && (n["accountKind"] === "standard" || n["accountKind"] === "administrator-filtered" || n["accountKind"] === "not-measured")
+    && Number.isSafeInteger(n["sessionId"]) && (n["sessionId"] as number) >= 0 && (n["sessionId"] as number) <= 0xffff
+    && str(n["windowStation"], 40) && bool(n["windowStationOk"])
+    && isObject(p) && bool(p["created"]) && bool(p["deleted"]) && bool(p["gone"]) && (p["leftover"] === null || (Number.isSafeInteger(p["leftover"]) && (p["leftover"] as number) >= 0))
+    && (n["grantsReadBack"] === "clean" || n["grantsReadBack"] === "left" || n["grantsReadBack"] === "not-measured")
+    && (n["symlinkRight"] === null || bool(n["symlinkRight"]))
+    && isObject(wd) && bool(wd["packaged"]) && bool(wd["passed"])
+    && (n["supervisorAclCheck"] === "strict" || n["supervisorAclCheck"] === "report-only" || n["supervisorAclCheck"] === "not-run");
+}
+
+/** The two cases that plant FILE symbolic links (besides directory junctions), and the file links they plant (containment-windows-cases.ts). */
+const FILE_LINK_CASES = new Set(["deny-symlink-read", "deny-symlink-write"]);
+/**
+ * The one inconclusive a native Windows report may carry: the host could not plant a FILE symbolic link (an account without SeCreateSymbolicLinkPrivilege), so the unconfined pairing was skipped and the
+ * case could not be judged. Exactly the suite's own wording, naming a file link (a junction needs no privilege, so a junction not planted is never excused).
+ */
+const LINK_RIGHT_INCONCLUSIVE = /^without the sandbox the same attempt did not get through \((link-abs-file|link-rel-key|link-write): skipped not-planted\), so a refusal would prove nothing$/;
+export const isLinkRightInconclusive = (c: CaseResult): boolean => FILE_LINK_CASES.has(c.id) && c.verdict === "inconclusive" && LINK_RIGHT_INCONCLUSIVE.test(c.detail);
 
 /** Checks the shape of one report read from a file. Returns the report or the reason it is not one. Nothing in a report is trusted before this. */
 export function parseReport(raw: string): { report: ContainmentReport } | { error: string } {
@@ -577,6 +635,8 @@ export function parseReport(raw: string): { report: ContainmentReport } | { erro
       || !isObject(acl) || !bool(acl["positive"]) || !bool(acl["negative"]) || !isObject(wd) || !bool(wd["packaged"]) || !bool(wd["passed"])
       || (w["supervisorAclCheck"] !== "strict" && w["supervisorAclCheck"] !== "report-only") || (w["featureEnabledOnly"] !== undefined && !bool(w["featureEnabledOnly"]))) return { error: "windows: incomplete or malformed evidence" };
   }
+  const n = v["nativeWindows"];
+  if (n !== undefined && !isNativeWindowsEvidence(n)) return { error: "nativeWindows: incomplete or malformed evidence" };
   return { report: v as unknown as ContainmentReport };
 }
 
@@ -592,6 +652,33 @@ export interface GateResult {
   readonly blockers: readonly string[];
   /** Per required platform: whether its report satisfied every check. */
   readonly platforms: Readonly<Record<string, boolean>>;
+  /** What was accepted although it is not a pass (card A03b: a file-link case inconclusive for want of the symbolic-link right), so a release log shows it. Never a blocker. */
+  readonly accepted: readonly string[];
+}
+
+/**
+ * The native Windows block's requirements (card A03b, owner decision 2026-11-26), each a separate problem. `commit` is the report's own commit, already compared with the release commit by the caller.
+ * Not required in this slice: a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step is still open).
+ */
+function nativeWindowsProblems(n: NativeWindowsEvidence, commit: string): string[] {
+  const problems: string[] = [];
+  if (n.launcher.recordCommit !== commit) problems.push(`the launcher's release record is for commit ${n.launcher.recordCommit.slice(0, 12)}, not the evidence's ${commit.slice(0, 12)}`);
+  if (n.launcher.fileSha256 !== n.launcher.recordSha256) problems.push("the launcher that ran does not match its release record (SHA-256)");
+  if (n.elevated) problems.push("the Windows run was elevated; the evidence must come from a token that is not elevated");
+  if (n.accountKind === "not-measured") problems.push("the kind of account the run was made as (standard user or administrator with a filtered token) is not recorded");
+  if (n.sessionId === 0) problems.push("the Windows run was in the services session (session 0), not a signed-in user's interactive session; unattended service mode is not supported in this release");
+  if (n.windowStation !== "private" && n.windowStation !== "home-desktop") problems.push(`the window-object mode ${JSON.stringify(n.windowStation)} is not one this launcher knows (private or home-desktop)`);
+  if (!n.windowStationOk) problems.push("the launcher could not make the container's window objects (windowStationOk is false)");
+  if (!n.profiles.created) problems.push("the launcher's info did not create its throw-away container profile");
+  if (!n.profiles.deleted || !n.profiles.gone) problems.push("the launcher's info did not delete its throw-away container profile and find it gone");
+  if (n.profiles.leftover === null) problems.push(`the ${RUN_PROFILE_PREFIX}* container profiles left after the run were not counted`);
+  else if (n.profiles.leftover !== 0) problems.push(`${n.profiles.leftover} ${RUN_PROFILE_PREFIX}* container profile(s) were left after the run`);
+  if (n.grantsReadBack === "not-measured") problems.push("the grants' read-back after each run is not recorded");
+  else if (n.grantsReadBack !== "clean") problems.push("a grant for the container was still present after a run (read-back not clean)");
+  if (!n.packagedControllerWorkingDirectory.packaged) problems.push("the controller working-directory check was not run on the packaged controller");
+  else if (!n.packagedControllerWorkingDirectory.passed) problems.push("the packaged controller working-directory check failed");
+  if (n.supervisorAclCheck !== "strict") problems.push(`the supervisor-ACL check was ${n.supervisorAclCheck}; the strict check is required before release`);
+  return problems;
 }
 
 /** Says what still blocks a release. Pure: it reads only the reports it is given. Exactly one report per platform counts (two for one platform is itself a blocker, since the better could hide the worse). */
@@ -599,10 +686,11 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
   const blockers: string[] = [];
   const now = (options.now ?? new Date()).getTime();
   const required = options.platforms ?? REQUIRED_PLATFORMS;
-  if (typeof options.commit !== "string" || !COMMIT.test(options.commit)) return { ok: false, blockers: ["the release commit must be 40 hex digits"], platforms: {} };
-  if (!Number.isFinite(now)) return { ok: false, blockers: ["the gate's clock is not a valid time"], platforms: {} };
-  if (required.length === 0) return { ok: false, blockers: ["no platform is required: an empty platform list proves nothing"], platforms: {} };
+  if (typeof options.commit !== "string" || !COMMIT.test(options.commit)) return { ok: false, blockers: ["the release commit must be 40 hex digits"], platforms: {}, accepted: [] };
+  if (!Number.isFinite(now)) return { ok: false, blockers: ["the gate's clock is not a valid time"], platforms: {}, accepted: [] };
+  if (required.length === 0) return { ok: false, blockers: ["no platform is required: an empty platform list proves nothing"], platforms: {}, accepted: [] };
   const platforms: Record<string, boolean> = {};
+  const accepted: string[] = [];
   for (const platform of required) {
     const mine = reports.filter((r) => r.platform === platform);
     const problems: string[] = [];
@@ -625,7 +713,12 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
       for (const id of REQUIRED_CASE_IDS) {
         const c = r.cases.find((x) => x.id === id);
         if (c === undefined) problems.push(`case ${id} is missing`);
-        else if (c.verdict !== "pass") problems.push(`case ${id}: ${c.verdict}${c.detail === "" ? "" : ` (${c.detail})`}`);
+        else if (c.verdict === "pass") continue;
+        else if (platform === "win32" && isLinkRightInconclusive(c)) {
+          // Card A03b (owner decision 2026-11-26): acceptable only when the run recorded that the account lacks the symbolic-link right. Recorded as accepted, never as a pass.
+          if (r.nativeWindows?.symlinkRight === false) accepted.push(`${platform}: case ${id} inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege, so the file link was not planted and the case (its junction attempts included) was not judged`);
+          else problems.push(`case ${id}: inconclusive (${c.detail}); a file link not planted is accepted only when the run recorded that the account lacks SeCreateSymbolicLinkPrivilege`);
+        } else problems.push(`case ${id}: ${c.verdict}${c.detail === "" ? "" : ` (${c.detail})`}`);
       }
       if (r.trustedHost === undefined) problems.push("the trusted-host exception is not recorded");
       else {
@@ -636,30 +729,24 @@ export function assessRelease(reports: readonly ContainmentReport[], options: Ga
         if (r.macosVersion === undefined || r.macosVersion.trim() === "") problems.push("the macOS version the boundary was proven on is not recorded");
         if (!r.weakerThanLinux) problems.push("the report does not state that the macOS boundary is weaker than Linux's");
       } else if (platform === "win32") {
-        if (r.backend === WINDOWS_SANDBOX_BACKEND) { if (r.weakerThanLinux) problems.push("a Windows Sandbox report may not claim the weaker boundary"); }
+        // Card A03b (owner decision 2026-11-26): only the native AppContainer launcher's evidence counts on Windows; Windows Sandbox is not used.
+        if (r.backend !== NATIVE_BACKEND) problems.push(`the Windows evidence is from backend ${r.backend}; only the native AppContainer launcher (${NATIVE_BACKEND}) counts`);
         else if (!r.weakerThanLinux) problems.push("the report does not state that the native Windows boundary is process-level and weaker than Linux's");
       } else if (r.weakerThanLinux) problems.push("only a macOS or native Windows report may claim the weaker boundary");
       if (platform === "win32") {
-        const w = r.windows;
-        if (w === undefined) problems.push("the Windows host evidence is missing (unattended identity, mapped-output ACL, packaged working directory, strict supervisor ACL)");
-        else {
-          if (w.featureEnabledOnly === true) problems.push("the Windows evidence is the feature being enabled only");
-          if (w.serviceIdentity.session !== "service") problems.push("the Windows run was in an interactive session, not under the unattended service identity");
-          for (const [when, p] of [["after logout", w.afterLogout], ["after reboot", w.afterReboot]] as const) {
-            for (const k of PHASES) if (!p[k]) problems.push(`Windows ${k} not proven ${when}`);
-          }
-          if (!w.mappedOutputAcl.positive) problems.push("the mapped-output ACL positive control did not pass");
-          if (!w.mappedOutputAcl.negative) problems.push("the mapped-output ACL negative control did not pass");
-          if (!w.packagedControllerWorkingDirectory.packaged) problems.push("the controller working-directory check was not run on the packaged controller");
-          else if (!w.packagedControllerWorkingDirectory.passed) problems.push("the packaged controller working-directory check failed");
-          if (w.supervisorAclCheck !== "strict") problems.push("the supervisor-ACL check was report-only; the strict check is required before release");
-        }
-      } else if (r.windows !== undefined) problems.push("Windows evidence in a non-Windows report");
+        if (r.windows !== undefined) problems.push("the report carries the Windows Sandbox era evidence block (windows), which is not AppContainer evidence and is no longer accepted");
+        const n = r.nativeWindows;
+        if (n === undefined) problems.push("the native Windows host evidence is missing (launcher release record, elevation, account, session, window station, profiles, grant read-back)");
+        else problems.push(...nativeWindowsProblems(n, r.implementationCommit));
+      } else {
+        if (r.windows !== undefined) problems.push("Windows evidence in a non-Windows report");
+        if (r.nativeWindows !== undefined) problems.push("native Windows evidence in a non-Windows report");
+      }
     }
     platforms[platform] = problems.length === 0;
     for (const p of problems) blockers.push(`${platform}: ${p}`);
   }
-  return { ok: blockers.length === 0, blockers, platforms };
+  return { ok: blockers.length === 0, blockers, platforms, accepted: blockers.length === 0 ? accepted : [] };
 }
 
 /** Digest of a report file, for the evidence index. */

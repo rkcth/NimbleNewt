@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
-import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, produceReport, runContainmentSuite, runOutcome, statesWeakerBoundary, type ContainmentReport, type PlatformName, type WindowsEvidence } from "./containment.js";
+import { CONTAINMENT_SCHEMA, MAX_REPORT_BYTES, REQUIRED_CASE_IDS, assessRelease, parseReport, produceReport, runContainmentSuite, runOutcome, statesWeakerBoundary, type ContainmentReport, type NativeWindowsEvidence, type PlatformName, type WindowsEvidence } from "./containment.js";
 import { evidenceIdentity, unavailableBackend, windowsConsoleUser, windowsEvidenceBackend, windowsSandboxEvidenceBackend } from "./containment-windows.js";
 import { SandboxLauncher, type LaunchRequest, type RunResult } from "./launcher.js";
 import { bubblewrapBackend } from "./linux.js";
@@ -129,13 +129,19 @@ const goodWindows = (): WindowsEvidence => ({
   afterLogout: { launch: true, exec: true, results: true, teardown: true }, afterReboot: { launch: true, exec: true, results: true, teardown: true },
   mappedOutputAcl: { positive: true, negative: true }, packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict",
 });
+/** Card A03b: complete native AppContainer evidence (the gate's Windows requirement since the owner's decision of 2026-11-26). The detailed rules are in containment-native-gate.test.ts. */
+const goodNative = (): NativeWindowsEvidence => ({
+  launcher: { recordCommit: COMMIT, recordSha256: "e".repeat(64), fileSha256: "e".repeat(64) }, elevated: false, accountKind: "standard", sessionId: 1, windowStation: "home-desktop", windowStationOk: true,
+  profiles: { created: true, deleted: true, gone: true, leftover: 0 }, grantsReadBack: "clean", symlinkRight: false,
+  packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict",
+});
 function report(platform: PlatformName, extra: Partial<Record<keyof ContainmentReport, unknown>> = {}): ContainmentReport {
   const base: ContainmentReport = {
-    schema: CONTAINMENT_SCHEMA, generatedAt: "2026-11-10T12:00:00Z", implementationCommit: COMMIT, dirty: false, platform, arch: "x64", osVersion: "1.0", backend: "b", capacityAvailable: true,
+    schema: CONTAINMENT_SCHEMA, generatedAt: "2026-11-10T12:00:00Z", implementationCommit: COMMIT, dirty: false, platform, arch: "x64", osVersion: "1.0", backend: platform === "win32" ? "windows-native" : "b", capacityAvailable: true,
     weakerThanLinux: platform !== "linux", ...(platform === "darwin" ? { macosVersion: "15.1" } : {}),
     cases: REQUIRED_CASE_IDS.map((id) => ({ id, category: "control" as const, verdict: "pass" as const, detail: "held" })),
     trustedHost: { mode: "trusted-host", authority: "owner", reachesHostFiles: true, refusedWithoutAuthority: true },
-    ...(platform === "win32" ? { windows: goodWindows() } : {}),
+    ...(platform === "win32" ? { nativeWindows: goodNative() } : {}),
   };
   return { ...base, ...extra } as ContainmentReport;
 }
@@ -173,34 +179,22 @@ describe("G05 release gate", () => {
     blocked(all({ darwin: report("darwin", { weakerThanLinux: false }) }), /weaker than Linux/);
     blocked(all({ linux: report("linux", { weakerThanLinux: true }) }), /only a macOS or native Windows report/);
   });
-  test("native Windows must state the weaker boundary; the Windows Sandbox variant may not; Linux and macOS are unchanged", () => {
+  test("native Windows must state the weaker boundary; only the native launcher counts on Windows (A03b: no Windows Sandbox); Linux and macOS are unchanged", () => {
     blocked(all({ win32: report("win32", { backend: "windows-native", weakerThanLinux: false }) }), /native Windows boundary is process-level and weaker/);
-    blocked(all({ win32: report("win32", { backend: "none", weakerThanLinux: false }) }), /native Windows boundary/);
+    blocked(all({ win32: report("win32", { backend: "none", weakerThanLinux: true }) }), /from backend none; only the native AppContainer launcher/);
     assert.deepEqual(gate(all({ win32: report("win32", { backend: "windows-native", weakerThanLinux: true }) })).blockers, []);
-    assert.deepEqual(gate(all({ win32: report("win32", { backend: "windows-sandbox", weakerThanLinux: false }) })).blockers, []);
-    blocked(all({ win32: report("win32", { backend: "windows-sandbox", weakerThanLinux: true }) }), /Windows Sandbox report may not claim/);
+    blocked(all({ win32: report("win32", { backend: "windows-sandbox", weakerThanLinux: false }) }), /from backend windows-sandbox; only the native AppContainer launcher/);
     assert.deepEqual(gate(all({ darwin: report("darwin", { weakerThanLinux: true }) })).blockers, []);
     assert.equal(statesWeakerBoundary("linux", "bubblewrap"), false);
     assert.equal(statesWeakerBoundary("darwin", "seatbelt"), true);
     assert.equal(statesWeakerBoundary("win32", "windows-native"), true);
     assert.equal(statesWeakerBoundary("win32", "windows-sandbox"), false);
   });
-  test("Windows: each piece of host evidence is separately required", () => {
-    const w = goodWindows();
-    const win = (windows: unknown): ContainmentReport[] => all({ win32: report("win32", { windows }) });
-    blocked(all({ win32: report("win32", { windows: undefined }) }), /Windows host evidence is missing/);
-    blocked(win({ ...w, serviceIdentity: { account: "rob", session: "interactive" } }), /interactive session/);
-    blocked(win({ ...w, featureEnabledOnly: true }), /feature being enabled only/);
-    for (const k of ["launch", "exec", "results", "teardown"] as const) {
-      blocked(win({ ...w, afterLogout: { ...w.afterLogout, [k]: false } }), new RegExp(`${k} not proven after logout`));
-      blocked(win({ ...w, afterReboot: { ...w.afterReboot, [k]: false } }), new RegExp(`${k} not proven after reboot`));
-    }
-    blocked(win({ ...w, mappedOutputAcl: { positive: false, negative: true } }), /positive control/);
-    blocked(win({ ...w, mappedOutputAcl: { positive: true, negative: false } }), /negative control/);
-    blocked(win({ ...w, packagedControllerWorkingDirectory: { packaged: false, passed: true } }), /not run on the packaged controller/);
-    blocked(win({ ...w, packagedControllerWorkingDirectory: { packaged: true, passed: false } }), /packaged controller working-directory check failed/);
-    blocked(win({ ...w, supervisorAclCheck: "report-only" }), /report-only/);
-    blocked(all({ linux: report("linux", { windows: w }) }), /Windows evidence in a non-Windows report/);
+  test("Windows: the Windows Sandbox era block no longer satisfies the gate, even complete; Windows evidence in another platform's report blocks", () => {
+    blocked(all({ win32: report("win32", { nativeWindows: undefined, windows: goodWindows() }) }), /native Windows host evidence is missing/);
+    blocked(all({ win32: report("win32", { windows: goodWindows() }) }), /Windows Sandbox era evidence block/);
+    blocked(all({ linux: report("linux", { windows: goodWindows() }) }), /Windows evidence in a non-Windows report/);
+    blocked(all({ linux: report("linux", { nativeWindows: goodNative() }) }), /native Windows evidence in a non-Windows report/);
   });
   test("a malformed release commit blocks everything", () => assert.equal(assessRelease(all(), { commit: "HEAD", now: NOW }).ok, false));
   test("an empty platform list, an invalid clock or an invalid report time never passes (review of G05)", () => {
