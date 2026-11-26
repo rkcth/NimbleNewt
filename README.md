@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **302 of 364 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **306 of 364 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -112,7 +112,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Pause, suspend and resume | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 29 of 30 |
 | Security: identity, approvals and sandboxing | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 19 of 22 |
 | Context and memory | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 33 of 33 |
-| State API and MCP state | `▓▓▓▓▓▓▓▓░░░░` 66% | 2 of 3 |
+| State API and MCP state | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 3 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓▓▓▓▓░` 95% | 19 of 20 |
 | Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓░░` 86% | 43 of 50 |
@@ -120,8 +120,8 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
-| Projects, repositories and workspaces | `▓▓▓▓▓░░░░░░░` 44% | 8 of 18 |
-| Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
+| Projects, repositories and workspaces | `▓▓▓▓▓▓░░░░░░` 50% | 9 of 18 |
+| Quality: deliverables, QA and defects | `▓▓▓▓░░░░░░░░` 40% | 2 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Backup, updates and operations | `▓▓▓▓▓▓▓▓▓▓░░` 83% | 15 of 18 |
@@ -138,7 +138,7 @@ The accepted scope and the experiments that proved the foundations (durable engi
 - [x] **G01** · P1 · Record accepted scope and experiment prerequisites — recorded; open owner decisions (N00 budget, PostgreSQL versions, minimum OS versions) listed in the record
 - [x] **G07** · P2 · Record current architecture and executable task manifest _(needs G01)_
 - [x] **G04** · P31 · Prove supporting durable engine integration _(needs S09, F04d, F04f, F04g, G09)_
-- [ ] **G08** · P41 · Prove remote stop and failover authority contracts _(needs H09, K05)_
+- [ ] **G08** · P39 · Prove remote stop and failover authority contracts _(needs H09, K05)_
 
 </details>
 
@@ -330,13 +330,13 @@ Separated task, chat and meeting context, working notes, source-backed retrieval
 </details>
 
 <details>
-<summary><strong>State API and MCP state</strong> — ▓▓▓▓▓▓▓▓░░░░ 2 of 3</summary>
+<summary><strong>State API and MCP state</strong> — ▓▓▓▓▓▓▓▓▓▓▓▓ 3 of 3</summary>
 
 The versioned state API that every client uses, and the controller-backed MCP state.
 
 - [x] **U01** · P23 · Implement versioned state query/write API _(needs S01, A01, C02)_
 - [x] **T04** · P24 · Implement controller-backed MCP state adapter _(needs U01, T03)_
-- [ ] **U13** · P37 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
+- [x] **U13** · P32 · Expose lifecycle, decisions, deliverables and activity through the state API _(needs U01, L02, Q01, C08, C09)_
 
 </details>
 
@@ -436,14 +436,14 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
 - [x] **H07e** · P33 · Pass over remote hosts that would refuse the attempt _(needs H07, H07c)_
 - [x] **H09** · P33 · Implement reconnect reconciliation and primary epochs _(needs H08, L04, S05)_
+- [ ] **H12n** · P33 · End agent work with work.end _(needs H12, H12l, Q01b, P08)_
 - [x] **H13f** · P33 · Finish event watching: other real sources, choosing sources in settings, chat _(needs H13e, H12k)_
 - [x] **H09b** · P34 · Finish reconnect reconciliation: recovery handshake, explicit re-accept, adoption by a new primary _(needs H09)_
 - [x] **H10** · P34 · Implement distributed agent capacity and fan-in limits _(needs H07, H09, H03, R05)_
-- [ ] **H12n** · P38 · End agent work with work.end _(needs H12, H12l, Q01b, P08)_
-- [ ] **H12o** · P39 · Commit an approved submission exactly once _(needs H12n, A06)_
-- [ ] **H12p** · P39 · Let the author refresh its own checkout before submitting _(needs H12n, H12m)_
-- [ ] **H12s** · P40 · Wire the landing policy from the settings into the worker host builder _(needs H12q, H12k, H12o)_
-- [ ] **H12t** · P41 · Compose the production workspace port into the product worker host _(needs H12s, H12q, H12k, H12o)_
+- [ ] **H12o** · P34 · Commit an approved submission exactly once _(needs H12n, A06)_
+- [ ] **H12p** · P34 · Let the author refresh its own checkout before submitting _(needs H12n, H12m)_
+- [ ] **H12s** · P35 · Wire the landing policy from the settings into the worker host builder _(needs H12q, H12k, H12o)_
+- [ ] **H12t** · P36 · Compose the production workspace port into the product worker host _(needs H12s, H12q, H12k, H12o)_
 
 </details>
 
@@ -546,41 +546,41 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓░░░░░░░ 8 of 18</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓▓░░░░░░ 9 of 18</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
 - [x] **P01** · P29 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [x] **P01b** · P30 · Mend the checkout pin edge cases _(needs P01)_
+- [x] **P03** · P30 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, H12)_
 - [x] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
+- [ ] **P03b** · P31 · Give agents the non-code and service-operation tools and connect real services _(needs P03)_
+- [ ] **P07** · P31 · Implement simulation mode _(needs P03, R02, T03)_
 - [x] **P08** · P31 · Store the integration policy per project with an installation default _(needs P01, A07f, U10, H11b, A06)_
 - [x] **P08b** · P32 · Change integration settings and create projects with them in chat _(needs P08, C08c, U03)_
 - [x] **P04** · P33 · Implement ongoing responsibility checks, incidents and coverage _(needs P01, S08, H13, V01, L03)_
 - [x] **P08c** · P33 · Guide project creation in chat and list integration defaults _(needs P08b)_
+- [ ] **P09** · P33 · Gate landing on required checks for the exact integrated tree _(needs P08, Q01b, Q02)_
 - [x] **P06** · P34 · Implement project and agent retirement and archival _(needs P01, H11, L03, K06)_
-- [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12)_
-- [ ] **P03** · P35 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, Y02, H12)_
+- [ ] **P02** · P35 · Implement isolated coding workspaces and integration _(needs P01, A04, L04, Y02, H12, Q01)_
+- [ ] **P10** · P35 · Land submissions with one leased integrator per project _(needs P08, P09, H12o, H12d, Q01b, A07f, Q04)_
 - [ ] **P02b** · P36 · Implement optional work-in-progress branch backup (after the first release) _(needs P02, A06, A07, F09)_
-- [ ] **P03b** · P36 · Give agents the non-code and service-operation tools and connect real services _(needs P03)_
 - [ ] **P05** · P36 · Implement external contribution and pull-request workflow _(needs P02, A06, A07, T03, F09)_
-- [ ] **P07** · P36 · Implement simulation mode _(needs P03, R02, T03)_
-- [ ] **P09** · P38 · Gate landing on required checks for the exact integrated tree _(needs P08, Q01b, Q02)_
-- [ ] **P10** · P40 · Land submissions with one leased integrator per project _(needs P08, P09, H12o, H12d, Q01b, A07f, Q04)_
-- [ ] **P10b** · P41 · Share integrators across projects as a pool _(needs P10, H03, A10b, R05)_
-- [ ] **P10c** · P41 · Promote to main automatically or by a human _(needs P10, A07f, P05)_
+- [ ] **P10b** · P36 · Share integrators across projects as a pool _(needs P10, H03, A10b, R05)_
+- [ ] **P10c** · P37 · Promote to main automatically or by a human _(needs P10, A07f, P05)_
 
 </details>
 
 <details>
-<summary><strong>Quality: deliverables, QA and defects</strong> — ░░░░░░░░░░░░ 0 of 5</summary>
+<summary><strong>Quality: deliverables, QA and defects</strong> — ▓▓▓▓░░░░░░░░ 2 of 5</summary>
 
 Deliverable submission and acceptance, independent QA, documentation impact and defect tracking.
 
-- [ ] **Q01** · P36 · Implement deliverable submission and acceptance _(needs S06, U01, P02, P03, S10)_
-- [ ] **Q01b** · P37 · Record submission kinds by role _(needs Q01, H11b)_
-- [ ] **Q02** · P37 · Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
-- [ ] **Q03** · P38 · Implement documentation impact and release evidence links _(needs Q02, C02)_
-- [ ] **Q04** · P38 · Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
+- [x] **Q01** · P31 · Implement deliverable submission and acceptance _(needs S06, U01, P03, S10)_
+- [x] **Q01b** · P32 · Record submission kinds by role _(needs Q01, H11b)_
+- [ ] **Q02** · P32 · Implement independent QA and dependency-bound evidence _(needs Q01, A06, C03, H05, C08)_
+- [ ] **Q03** · P33 · Implement documentation impact and release evidence links _(needs Q02, C02)_
+- [ ] **Q04** · P33 · Implement defect tracking, review cycles and overrides _(needs Q02, C08)_
 
 </details>
 
@@ -589,7 +589,7 @@ Deliverable submission and acceptance, independent QA, documentation impact and 
 
 How capacity is split between production work and work that improves NimbleNewt.
 
-- [ ] **B01** · P39 · Implement production/improvement budget admission _(needs H03, R02, Q01, Y03, R05)_
+- [ ] **B01** · P37 · Implement production/improvement budget admission _(needs H03, R02, Q01, Y03, R05)_
 
 </details>
 
@@ -598,11 +598,11 @@ How capacity is split between production work and work that improves NimbleNewt.
 
 Observations, versioned lessons, bounded experiments, scoped adoption and optional agent work on NimbleNewt itself.
 
-- [ ] **B02** · P40 · Implement observations and provenance deduplication _(needs B01, H06, C01)_
-- [ ] **B03** · P41 · Implement versioned lessons and triage _(needs B02, T01)_
-- [ ] **B04** · P42 · Implement bounded baseline experiments _(needs B03, Q02, A08)_
-- [ ] **B05** · P43 · Implement scoped adoption and monitored withdrawal _(needs B04, T02, L04)_
-- [ ] **B06** · P44 · Implement optional agent work on NimbleNewt itself (off by default, asked ahead, owner-approved launch) _(needs B05, A10b, A08, K02, C09, H05)_
+- [ ] **B02** · P38 · Implement observations and provenance deduplication _(needs B01, H06, C01)_
+- [ ] **B03** · P39 · Implement versioned lessons and triage _(needs B02, T01)_
+- [ ] **B04** · P40 · Implement bounded baseline experiments _(needs B03, Q02, A08)_
+- [ ] **B05** · P41 · Implement scoped adoption and monitored withdrawal _(needs B04, T02, L04)_
+- [ ] **B06** · P42 · Implement optional agent work on NimbleNewt itself (off by default, asked ahead, owner-approved launch) _(needs B05, A10b, A08, K02, C09, H05)_
 
 </details>
 
@@ -627,8 +627,8 @@ Backup and restore, release staging, migration recovery, maintenance windows and
 - [ ] **K07** · P35 · Implement maintenance windows and update orchestration _(needs K02, K01, L06, U11, G05)_
 - [x] **K01h** · P36 · Finish backup: Pi state, maintenance barrier, in-controller restore _(needs K01g)_
 - [x] **K01i** · P37 · Finish backup: PostgreSQL restore, remote Pi state, production wiring _(needs K01h)_
-- [ ] **K04** · P39 · Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
-- [ ] **K05** · P40 · Implement fenced primary promotion and recovery chat _(needs K04, U06)_
+- [ ] **K04** · P37 · Implement selected standby replication and recovery watermarks _(needs K01, K03, H09, Y03)_
+- [ ] **K05** · P38 · Implement fenced primary promotion and recovery chat _(needs K04, U06)_
 
 </details>
 
@@ -643,16 +643,16 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 - [x] **X09** · P34 · Implement external release-test job protocol _(needs H07, H09, F03, S06)_
 - [ ] **Y02** · P34 · QA checkpoint 2: isolation, stop and recovery _(needs G05, G06, A06, L04, H09, A03b, A08b, F04i, F04j, H06b)_
 - [x] **X09b** · P35 · Finish release testing: job delivery to the host, outer supervisor, chat wording _(needs X09)_
-- [ ] **X01** · P38 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
-- [ ] **Y03** · P38 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, P02, P03, Q02, K03, A07d)_
-- [ ] **X10** · P42 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
-- [ ] **X03** · P44 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U09b, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
-- [ ] **X02** · P45 · Run policy, isolation and adversarial campaign _(needs A06, U04, H12n, H12p, P08, P10, P10b, A07f, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
-- [ ] **X04** · P46 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03, W09)_
-- [ ] **X05** · P46 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03, W09)_
-- [ ] **X06** · P46 · Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, W09, G06)_
-- [ ] **X07** · P47 · Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
-- [ ] **X08** · P48 · Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
+- [ ] **X01** · P36 · Run integrated crash and handoff campaign _(needs S09, V02, H02, Q02, K03, G04, H12, T07, K06, L06)_
+- [ ] **Y03** · P36 · QA checkpoint 3: first complete chat-driven workflow _(needs U07, M02, Y02, P02, P03, Q02, K03, A07d)_
+- [ ] **X10** · P40 · Run partition and remote-worker safety campaign _(needs X09, H10, K05, G08)_
+- [ ] **X03** · P42 · Run chat-only complete product workflow _(needs U05, U06, U07, M02, P03, Q03, B05, K03, C06, L05, G09, C07, U09, U09b, U11, U12, U13, M03, M05, M06, R03, R04, P04, P06, P07, Q04, U08, H13, L06)_
+- [ ] **X02** · P43 · Run policy, isolation and adversarial campaign _(needs A06, U04, H12n, H12p, P08, P10, P10b, A07f, T05, Q02, G05, A07, A09, A10, T08, T09, P05, H05b, A10b, M05b, B06, H12i)_
+- [ ] **X04** · P44 · Qualify fresh macOS release candidate _(needs X01, X02, X03, X09, F03, W09)_
+- [ ] **X05** · P44 · Qualify fresh Linux release candidate _(needs X01, X02, X03, X09, F03, W09)_
+- [ ] **X06** · P44 · Qualify fresh Windows release candidate _(needs X01, X02, X03, X09, F03, W09, G06)_
+- [ ] **X07** · P45 · Measure load, inquiry latency and budget behavior _(needs X04, X05, X06)_
+- [ ] **X08** · P46 · Run representative soak and independent release audit _(needs X07, X10, F04e, G10, K07, G11)_
 
 </details>
 
@@ -662,11 +662,11 @@ Crash, policy, isolation and partition campaigns, QA checkpoints, Windows and ma
 Installation, documentation, QA on real machines, the release decision and closing the plan.
 
 - [x] **D02** · P36 · Finish developer/API/security and license guidance _(needs T05, K03, F03)_
-- [ ] **D01** · P45 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
-- [ ] **D03** · P49 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
-- [ ] **D04** · P50 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
-- [ ] **D04b** · P51 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P52 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, A07h, W11, W12, W13, W01b, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, L04g, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09)_
+- [ ] **D01** · P43 · Finish installation and chat-first user guidance _(needs X03, Q03, U11b)_
+- [ ] **D03** · P47 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
+- [ ] **D04** · P48 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
+- [ ] **D04b** · P49 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
+- [ ] **D05** · P50 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, A07h, W11, W12, W13, W01b, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, L04g, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09)_
 
 </details>
 
