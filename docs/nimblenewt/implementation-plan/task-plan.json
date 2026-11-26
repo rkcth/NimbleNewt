@@ -10533,12 +10533,40 @@
       ],
       "deliverable": "Submission record per attempt: kind (code tree with base, tree, patch-id and refresh round; review verdict; QA report; document change; director sign-off), the submitting role, and the check evidence bound to the exact tree or artifact version",
       "acceptance_and_verification": "A role may submit only its own kinds; a code submission names base and tree; a non-code submission makes no commit; a director sign-off cannot be given on the director's own work; evidence for a different tree is rejected",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "3fdfebd9",
+          "867dfc5b",
+          "e783dd81",
+          "9930a7fb",
+          "17280f42",
+          "0f42d7b7",
+          "0b23c580",
+          "d1d998c5",
+          "3200c57b",
+          "9eac882f",
+          "caa479e3",
+          "36f93317",
+          "1020bc48",
+          "3b2458c9",
+          "61e99c79",
+          "7e85e4db",
+          "fbadc5f7",
+          "08abc6f5"
+        ],
+        "ci_runs": [
+          "45762730007"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A submission record per attempt with kind (code with base, tree, patch ID and the controller-counted refresh round; review verdict; QA report; document change; director sign-off), the role it was made in and check evidence bound to the exact tree or artifact digest. A role submits only its own kinds (author code, reviewer review, qa report, docs document, director sign-off) and only a role the agent holds in the task's project; a code submission must name base, tree and patch ID and comes from the owner of the task's current attempt, written only while that attempt is still current; non-code kinds make no commit and refuse base, tree and patch fields; evidence bound to another tree or artifact is refused, not ignored; a review or QA report on one's own submission and a director sign-off on the director's own work are refused, with no override. Running agents record non-code kinds through the bridge tool submission.record; the owner and chat read a task's submissions and the code waiting across a project. Limits: base, tree and patch ID are the submitter's word at record time (the landing gate recomputes the patch, P08 and P09); KIND_ROLES is fixed and project-scoped roles are read as built (owner policy questions); the reviewAssignments read grant is not wired, so there is no reviewer's own waiting list; evidence and submission.get are not offered through the bridge; a project with more than 500 code (task, agent) pairs or old code and no new submission is scanned, bounded, and says partial. Follow-ups, not clauses here."
+      }
     },
     {
       "id": "A07f",
