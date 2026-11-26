@@ -49,9 +49,11 @@ for (const backend of backends) {
       const qa = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf }, options);
       // The artifacts the document changes name, by ID: the text the controller would read from the artifact store.
       const texts = new Map<string, string>();
+      /** Run once while the next document's text is read (inside the verification): a rating changed meanwhile. */
+      let duringRead: (() => Promise<unknown>) | undefined;
       const docs = DocObligationService.withEpoch(world.storage, projects.epoch, {
         rolesOf, gate: (by, s) => qa.gate(by, s), projects, assignments,
-        readDocument: async (d) => { const t = texts.get(d.artifactId); if (t === undefined) throw new DomainError("invalid_command", "documentSubmissionId: its artifact is not stored"); if (t.startsWith("\u0000unread")) return { files: [{ path: "index.html", text: t.slice(7) }], skipped: ["big.md", "logo.png"], unread: [{ path: "big.md", why: "larger than 256 KiB" }] }; return { files: [{ path: "index.html", text: t }], skipped: ["logo.png"] }; },
+        readDocument: async (d) => { if (duringRead !== undefined) { const f = duringRead; duringRead = undefined; await f(); } const t = texts.get(d.artifactId); if (t === undefined) throw new DomainError("invalid_command", "documentSubmissionId: its artifact is not stored"); if (t.startsWith("\u0000unread")) return { files: [{ path: "index.html", text: t.slice(7) }], skipped: ["big.md", "logo.png"], unread: [{ path: "big.md", why: "larger than 256 KiB" }] }; return { files: [{ path: "index.html", text: t }], skipped: ["logo.png"] }; },
       }, options);
       const ann = await agent("ann", ["author"]);
       const quinn = await agent("quinn", ["qa"]);
@@ -63,11 +65,11 @@ for (const backend of backends) {
       await qa.record(quinn, { commandId: cid("qa"), submissionId: sub1, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-26T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] });
       let arts = 0;
       /** A document change; with `text`, it names an artifact holding that text. */
-      const change = async (text?: string): Promise<string> => {
+      const change = async (text?: string, by: Principal = dora): Promise<string> => {
         const id = derivedId("sbm", cid("doc"));
         const artifactId = text === undefined ? undefined : `art-${String.fromCharCode(97 + arts++).repeat(20)}`;
         if (artifactId !== undefined) texts.set(artifactId, text!);
-        await plant("submission", id, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: dora.id, submittedAt: "2026-11-26T09:40:00.000Z", makesCommit: false, ...(artifactId === undefined ? {} : { artifactId }), artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
+        await plant("submission", id, { taskId: login, projectId: project, kind: "document", role: "docs", submittedBy: by.id, submittedAt: "2026-11-26T09:40:00.000Z", makesCommit: false, ...(artifactId === undefined ? {} : { artifactId }), artifactDigest: `sha256:${"e".repeat(64)}`, evidence: [] });
         return id;
       };
       const read = async (id: string) => (await docs.get(owner, id)) as unknown as DocObligationBody & { revision: number };
@@ -185,6 +187,40 @@ for (const backend of backends) {
       assert.deepEqual([manyAgain.replayed, manyAgain.verified, manyAgain.flags.length, manyAgain.total], [true, false, 20, 25], "a repeat answers with the same 20 and the same total");
       const big = await docs.verify(dora, { commandId: cid("v"), obligationId: guide, expectedRevision: (await read(guide)).revision, documentSubmissionId: await change("\u0000unreadSign in with a passkey (experimental)."), evidence: [sub1] });
       assert.deepEqual([big.verified, big.total, big.flags.map((f) => [f.rule, f.where, f.quote])], [false, 1, [["text_unread", "file \"big.md\"", "larger than 256 KiB"]]]);
+
+      // Second review. An agent holding both the docs and the director roles rates a capability its own document names: the rating does not vouch for that document until the owner (or another
+      // director) sets it. A rating it sets no higher than unsupported needs nobody else.
+      const both = await agent("bo", ["docs", "director"]);
+      await docs.setCapability(both, { commandId: cid("c"), projectId: project, capabilityId: "offline-mode", maturity: "supported", name: "offline mode", names: ["works offline"] });
+      const own = (await docs.record(owner, { commandId: cid("r"), ...base, owner: both.id, title: "Offline guide", location: "docs/offline.md", audience: "user" })).id;
+      const selfRated = await docs.verify(both, { commandId: cid("v"), obligationId: own, expectedRevision: 1, documentSubmissionId: await change("The app works offline.", both), evidence: [sub1] });
+      assert.deepEqual([selfRated.verified, selfRated.flags.map((f) => [f.rule, f.capabilityId, f.where, f.quote])], [false, [["capability_rated_by_writer", "offline-mode", "capability register", `offline-mode was rated supported by ${both.id}`]]]);
+      const byDora = await docs.verify(owner, { commandId: cid("v"), obligationId: own, expectedRevision: (await read(own)).revision, documentSubmissionId: await change("The app works offline."), evidence: [sub1] });
+      assert.equal(byDora.verified, false, "the keeper's own rating does not vouch for the document either, whoever wrote the change");
+      await docs.setCapability(dirk, { commandId: cid("c"), projectId: project, capabilityId: "offline-mode", maturity: "supported" });
+      assert.equal((await docs.verify(both, { commandId: cid("v"), obligationId: own, expectedRevision: (await read(own)).revision, documentSubmissionId: await change("The app works offline.", both), evidence: [sub1] })).verified, true, "another director's rating does");
+
+      // A rating changed while the document is read refuses the verification (verify again, under the new rating); nothing is recorded as verified under the old one.
+      const racing = (await docs.record(owner, { commandId: cid("r"), ...base, title: "Offline FAQ", location: "help/offline", audience: "support", kind: "support_guidance", channel: "help desk" })).id;
+      duringRead = () => docs.setCapability(owner, { commandId: cid("c"), projectId: project, capabilityId: "offline-mode", maturity: "unsupported" });
+      const racingDoc = await change("It works offline.");
+      await refuses("stale_revision", () => docs.verify(dora, { commandId: cid("v"), obligationId: racing, expectedRevision: 1, documentSubmissionId: racingDoc, evidence: [sub1] }));
+      assert.equal((await read(racing)).state, "unverified");
+      const fresh = await docs.verify(dora, { commandId: "v-fresh", obligationId: racing, expectedRevision: (await read(racing)).revision, documentSubmissionId: await change("It works offline."), evidence: [sub1] });
+      assert.deepEqual(fresh.flags.map((f) => f.rule), ["unsupported_mention"], "checked again under the new rating");
+
+      // A repeat whose audit entry cannot be read for its detail is answered from the record when the record still tells (a refusal stays a refusal, never "verified"), and is otherwise unavailable.
+      const listAudit = world.storage.listAudit.bind(world.storage);
+      let reads = 0;
+      (world.storage as { listAudit: typeof listAudit }).listAudit = async (q) => { if (++reads % 2 === 0) throw new Error("unreadable for this test"); return listAudit(q); };
+      try {
+        const replay = await docs.verify(dora, { commandId: "v-fresh", obligationId: racing, expectedRevision: (await read(racing)).revision - 1, documentSubmissionId: (await read(racing)).claimCheck!.documentSubmissionId, evidence: [sub1] });
+        assert.equal(reads, 2, "the replay's own lookup, then the detail");
+        assert.deepEqual([replay.replayed, replay.verified, replay.flags.map((f) => f.rule)], [true, false, ["unsupported_mention"]]);
+        await refuses("unavailable", () => docs.verify(dora, { commandId: "v-blocked", obligationId: page, expectedRevision: 1, documentSubmissionId: bare, evidence: [sub1] }), /ask again/);
+      } finally {
+        (world.storage as { listAudit: typeof listAudit }).listAudit = listAudit;
+      }
     } finally {
       await world.close();
     }

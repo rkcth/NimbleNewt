@@ -71,6 +71,7 @@ export const CLAIM_RULES = {
   experimental_claim_unlabelled: "a claim names an experimental capability without saying it is experimental",
   unsupported_mention: "the text names an unsupported capability without saying it is not supported, in the same sentence",
   experimental_mention_unlabelled: "the text names an experimental capability without an experimental label or a negation, in the same sentence",
+  capability_rated_by_writer: "the capability's rating was set by the agent that wrote or keeps this document: the owner or another director rates it",
   text_unread: "a file named as text was not read (over 50 files, over 256 KiB, over 1 MiB in all, or not UTF-8), so what it says is unchecked: split it or save it as UTF-8",
 } as const;
 export type ClaimRule = keyof typeof CLAIM_RULES;
@@ -85,21 +86,82 @@ export interface ClaimFlag {
   readonly quote: string;
 }
 
-/** Labels that make a mention of an experimental capability acceptable anywhere in its sentence: words that say nothing else. */
-const EXPERIMENTAL_LABEL = /(?<![\p{L}\p{N}])(experimental|not measured|unmeasured|untested)(?![\p{L}\p{N}])/iu;
+/** How many words on each side of a name a negation (or a weak label) may be. */
+export const NEAR = 8;
+
+/**
+ * The words of a text as the label and negation tests read them (second review): lower case, edge punctuation off, curly apostrophes made plain, hyphenated words split ("non-experimental" is "non"
+ * "experimental"). A word inside a link, a path or an address (`x.io/experimental`, `a@b`, `k=v`) is no word of the prose and is kept as an empty place; so is a word in quotation marks (`the
+ * "experimental" tag` mentions the word, it does not label anything).
+ */
+function wordsOf(s: string): string[] {
+  const out: string[] = [];
+  for (const token of s.split(/\s+/)) {
+    if (token === "") continue;
+    if (/[/\\@=]|\p{L}\.\p{L}/u.test(token) || /^[^\p{L}\p{N}]*["'`\p{Pi}\p{Pf}]\p{L}.*\p{L}["'`\p{Pi}\p{Pf}][^\p{L}\p{N}]*$/u.test(token)) { out.push(""); continue; }
+    const core = token.replace(/\u2019/g, "'").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase();
+    for (const w of core.split("-")) out.push(w);
+  }
+  return out;
+}
+/** Words that, one or two places before a label, take it back: "not experimental", "no longer experimental", "non-experimental". */
+const UNSAYS = new Set(["not", "no", "non", "never", "nor", "isn't", "aren't", "wasn't", "hardly"]);
+const unsaid = (w: readonly string[], i: number): boolean => UNSAYS.has(w[i - 1] ?? "") || UNSAYS.has(w[i - 2] ?? "");
+/** An experimental label that counts anywhere in its sentence: "experimental", "unmeasured", "untested", "not (yet) measured"; not taken back just before it. */
+function plainLabel(s: string): boolean {
+  const w = wordsOf(s);
+  return w.some((x, i) => ((x === "experimental" || x === "unmeasured" || x === "untested") && !unsaid(w, i))
+    || (x === "not" && (w[i + 1] === "measured" || (w[i + 1] === "yet" && w[i + 2] === "measured")) && !unsaid(w, i)));
+}
 /** Labels that count only near the name (within `NEAR` words): they are common words otherwise ("Preview your bill: X halves it"). */
-const NEAR_LABEL = /(?<![\p{L}\p{N}])(preview|beta)(?![\p{L}\p{N}])/iu;
+const weakLabel = (w: readonly string[]): boolean => w.some((x, i) => (x === "preview" || x === "beta") && !unsaid(w, i));
 /**
  * Plain negations, counted only near the name (within `NEAR` words before or after it): "Don't worry: X halves your bill" is not a denial of X. "no" alone is not one (too loose: "no setup needed: X
  * does it"); "not just", "not only", "not merely" and "not simply" are not denials either.
  */
-const NEGATION = /(?<![\p{L}\p{N}])(not|never|cannot|can't|can\u2019t|isn't|isn\u2019t|doesn't|doesn\u2019t|don't|don\u2019t|won't|won\u2019t|unsupported|unavailable)(?![\p{L}\p{N}])/iu;
-const NOT_A_DENIAL = /(?<![\p{L}\p{N}])not\s+(just|only|merely|simply)(?![\p{L}\p{N}])/giu;
-/** How many words on each side of a name a negation (or a weak label) may be. */
-export const NEAR = 8;
+const NEGATIONS = new Set(["not", "never", "cannot", "can't", "isn't", "aren't", "doesn't", "don't", "won't", "unsupported", "unavailable"]);
+/** A negation that takes back a label ("not experimental", "isn't beta any more") denies the label, not the capability. */
+const LABEL_WORDS = new Set(["experimental", "unmeasured", "untested", "beta", "preview"]);
+const negated = (w: readonly string[]): boolean => w.some((x, i) => NEGATIONS.has(x) && !(x === "not" && ["just", "only", "merely", "simply"].includes(w[i + 1] ?? "")) && !LABEL_WORDS.has(w[i + 1] ?? "") && !LABEL_WORDS.has(w[i + 2] ?? ""));
 
-const BLOCK_TAG = /<\/?(?:p|div|h[1-6]|li|ul|ol|dl|dt|dd|tr|td|th|table|thead|tbody|br|hr|section|article|header|footer|nav|aside|main|blockquote|pre|figure|figcaption|title|option)\b[^<>]{0,500}>/gi;
-const ENTITY = /&(#\d{1,7}|#x[0-9a-f]{1,6}|nbsp|amp|lt|gt|quot|apos|shy|zwj|zwnj|ensp|emsp|thinsp|rsquo|lsquo|ndash|mdash|hyphen);/gi;
+/**
+ * The form names are matched in (second review): NFKD with every combining mark removed (so `Stra\u0301ta` and variation selectors do not hide a name), every format character removed (zero-width,
+ * direction, tag characters, invisible operators), filler characters made spaces, letters of other scripts that look like Latin ones folded to them (Cyrillic `а`, Greek `ο`), and a word broken by a
+ * hyphen at a line wrap joined (`Stra- ta`). Only for matching: what the owner sees quoted is the cleaned sentence.
+ */
+const CONFUSABLE: Readonly<Record<string, string>> = Object.fromEntries([
+  ..."аa вb еe кk мm нh оo рp сc тt уy хx іi јj ѕs һh ԁd ԛq ԝw ӏl ѵv ґr".split(" ").map((p) => [p[0], p[1]]),
+  ..."АA ВB ЕE КK МM НH ОO РP СC ТT УY ХX ІI ЈJ ЅS ҺH ԚQ ԜW ӀI ѴV".split(" ").map((p) => [p[0], p[1]]),
+  ..."αa βb εe ιi κk νv οo ρp τt υu χx ϲc ϳj ΑA ΒB ΕE ΖZ ΗH ΙI ΚK ΜM ΝN ΟO ΡP ΤT ΥY ΧX".split(" ").map((p) => [p[0], p[1]]),
+  ..."ıi ȷj ɑa ɡg ɩi ɪi ʏy ʀr ʟl ɴn ʜh ʙb ᴀa ᴄc ᴅd ᴇe ᴊj ᴋk ᴍm ᴏo ᴘp ᴛt ᴜu ᴠv ᴡw ᴢz øo ØO đd ĐD ħh łl ŁL ƚl օo սu հh ոn ԃd".split(" ").map((p) => [p[0], p[1]]),
+]);
+export function matchForm(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (!/[^\u0000-\u007F]/.test(s)) return s.includes("-") ? s.replace(/(?<=[A-Za-z])-[ \t]+(?=[A-Za-z])/g, "") : s;
+  return s.normalize("NFKD").replace(/[\p{M}\p{Cf}]+/gu, "").replace(/[\u115F\u1160\u3164\uFFA0\u2800]/g, " ")
+    .replace(/[^\u0000-\u007F]/g, (c) => CONFUSABLE[c] ?? c).replace(/(?<=\p{L})-[ \t]+(?=\p{L})/gu, "");
+}
+
+const BLOCK_TAG = /^<\/?(?:p|div|h[1-6]|li|ul|ol|dl|dt|dd|tr|td|th|table|thead|tbody|br|hr|section|article|header|footer|nav|aside|main|blockquote|pre|figure|figcaption|title|option)\b/i;
+/** Attributes a reader is shown or read aloud (an image's alt text, a tooltip, an accessible label): their text is scanned, as its own sentence. */
+const SHOWN_ATTR = /(?:^|\s)(?:alt|title|aria-label)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+/** Joins what it stands between when both sides are letters or digits (a tag or Markdown mark inside a word, `Stra<b>ta</b>`); otherwise a space. A noncharacter, never text. */
+const JOIN = "\uFDD0";
+/** HTML comments are not shown, so they are removed whole (by search, not a pattern: an unclosed one ends the text, as a browser reads it). */
+function withoutComments(s: string): string {
+  let out = "";
+  let from = 0;
+  for (;;) {
+    const at = s.indexOf("<!--", from);
+    if (at < 0) return out + s.slice(from);
+    out += `${s.slice(from, at)}${JOIN}`;
+    const end = s.indexOf("-->", at + 4);
+    if (end < 0) return out;
+    from = end + 3;
+  }
+}
+/** A browser also decodes most references without their `;` (`Strata&nbspcaching`), so the `;` is optional here. */
+const ENTITY = /&(#\d{1,7}|#x[0-9a-f]{1,6}|nbsp|amp|lt|gt|quot|apos|shy|zwj|zwnj|ensp|emsp|thinsp|rsquo|lsquo|ndash|mdash|hyphen);?/gi;
 const NAMED: Readonly<Record<string, string>> = { nbsp: " ", amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", shy: "", zwj: "", zwnj: "", ensp: " ", emsp: " ", thinsp: " ", rsquo: "\u2019", lsquo: "\u2018", ndash: "-", mdash: "-", hyphen: "-" };
 const entity = (_m: string, e: string): string => {
   const k = e.toLowerCase();
@@ -117,14 +179,22 @@ const entity = (_m: string, e: string): string => {
 export function cleanText(raw: string, oneLine = false): string {
   let s = String(raw).normalize("NFKC");
   s = s.replace(/\r\n?|[\u2028\u0085]/g, "\n").replace(/\u2029/g, "\n\n");
-  s = s.replace(BLOCK_TAG, "\n\n").replace(/<[^<>]{0,500}>/g, " ").replace(ENTITY, entity).normalize("NFKC");
-  s = s.replace(/[\u200B-\u200D\u2060\uFEFF\u00AD\u180E]/g, "");
-  s = s.replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "");
+  s = withoutComments(s).replace(/<[^<>]{0,500}>/g, (tag) => {
+    const shown = [...tag.matchAll(SHOWN_ATTR)].map((m) => m[1] ?? m[2] ?? "").filter((x) => x.trim() !== "");
+    if (shown.length > 0) return `\n\n${shown.join("\n\n")}\n\n`;
+    return BLOCK_TAG.test(tag) ? "\n\n" : JOIN;
+  });
+  s = s.replace(/(?<=[\p{L}\p{N}])\uFDD0+(?=[\p{L}\p{N}])/gu, "").replace(/\uFDD0/g, " ").replace(ENTITY, entity).normalize("NFKC");
+  // Format characters (zero-width, soft hyphen, tag characters, invisible operators) and variation selectors are removed: they show nothing and can carry hidden text into the owner's view.
+  s = s.replace(/[\p{Cf}\u180B-\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, "");
   s = s.replace(/\r\n?|[\u2028\u0085]/g, "\n").replace(/\u2029/g, "\n\n");
   // eslint-disable-next-line no-control-regex
   s = s.replace(/[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/g, " ");
   // A wrapped line goes on its paragraph: a break is kept before a blank line, a list item, a heading, a quote, a table row, a code fence or a setext underline.
   s = s.replace(/([^\s])[ \t]*\n(?![ \t]*(?:\n|$|[-*+#>|=]|```|~~~|\d{1,9}[.)][ \t]))/g, "$1 ");
+  // A Markdown link shows its text, not its address; a reference link its text, not its label. A mark inside a word (`Stra**ta**`, `Stra`ta``) joins it, as it is shown.
+  s = s.replace(/\]\([^()\n]{0,2000}\)/g, "]").replace(/\]\[[^\]\n]{0,100}\]/g, "]");
+  s = s.replace(/(?<=[\p{L}\p{N}])[*`~[\]]+(?=[\p{L}\p{N}])/gu, "");
   s = s.replace(/[*_`~#>|[\]]/g, " ");
   s = s.replace(/[ \t\f\v\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]+/g, " ");
   if (oneLine) s = s.replace(/\s*\n\s*/g, " ");
@@ -150,7 +220,7 @@ const PATTERNS = new Map<string, string>();
 function patternSource(name: string): string {
   let src = PATTERNS.get(name);
   if (src === undefined) {
-    const words = cleanText(name, true).split(/[\s-]+/).filter((w) => w !== "").map(escape);
+    const words = matchForm(cleanText(name, true)).split(/[\s-]+/).filter((w) => w !== "").map(escape);
     src = `(?<![\\p{L}\\p{N}])${words.map((w, i) => `${w}${i === words.length - 1 ? "(?:e?s)?" : ""}(?:['\u2019]s)?`).join("[\\s-]*")}(?![\\p{L}\\p{N}])`;
     if (PATTERNS.size > 5000) PATTERNS.clear();
     PATTERNS.set(name, src);
@@ -159,33 +229,39 @@ function patternSource(name: string): string {
 }
 const patternOf = (name: string): RegExp => new RegExp(patternSource(name), "giu");
 /** "no" or "without" right before a name (at most two words between): "there is no unattended Windows service", "works without Claude caching". Tested on the 120 characters before the name only. */
-const DENIED_BEFORE = /(?<![\p{L}\p{N}])(no|without)(\s+[\p{L}\p{N}'-]+){0,2}\s*$/iu;
+const DENIED_BEFORE = /(?:^|\s)(no|without)(\s+[\p{L}\p{N}'-]+){0,2}\s*$/iu;
 const WINDOW_CHARS = 400;
-/** The `NEAR` words before `at` and after `end` in `s` (looked for within a bounded stretch, so a long sentence costs no more per name). */
-function near(s: string, at: number, end: number): string {
-  const before = s.slice(Math.max(0, at - WINDOW_CHARS), at).split(/\s+/).filter((w) => w !== "");
-  const after = s.slice(end, end + WINDOW_CHARS).split(/\s+/).filter((w) => w !== "");
+/** The `NEAR` words before `at` and after `end` in `s` (looked for within a bounded stretch, so a long sentence costs no more per name), not past a `;` (another clause). */
+function near(s: string, at: number, end: number): { before: string[]; after: string[] } {
+  let b = s.slice(Math.max(0, at - WINDOW_CHARS), at);
+  const semi = b.lastIndexOf(";");
+  const cutStart = semi >= 0 || at <= WINDOW_CHARS;
+  if (semi >= 0) b = b.slice(semi + 1);
+  let a = s.slice(end, end + WINDOW_CHARS);
+  if (a.includes(";")) a = a.slice(0, a.indexOf(";"));
+  const before = b.split(/\s+/).filter((w) => w !== "");
   // A word cut at the stretch's start is dropped: it may be the tail of a longer word.
-  if (at > WINDOW_CHARS) before.shift();
-  return `${before.slice(-NEAR).join(" ")} \u0000 ${after.slice(0, NEAR).join(" ")}`;
+  if (!cutStart) before.shift();
+  return { before: wordsOf(before.slice(-NEAR).join(" ")), after: wordsOf(a.split(/\s+/).filter((w) => w !== "").slice(0, NEAR).join(" ")) };
 }
 
 /**
- * Whether `sentence` carries the label the maturity needs, for every place a name of the capability stands: "no" or "without" directly before it, or a negation (or, for an experimental one, "preview" or
- * "beta") within `NEAR` words of it, or (experimental only) a plain experimental label anywhere in the sentence. Every name of the capability is blanked first (a name such as "nobody signed in" must
- * not count as its own negation). A sentence naming the capability twice must label both places, unless the plain label covers the whole sentence.
+ * Whether `sentence` (in its matching form) carries the label the maturity needs, for every place a name of the capability stands: "no" or "without" directly before it, or a negation (or, for an
+ * experimental one, "preview" or "beta") within `NEAR` words of it in the same clause, or (experimental only) a plain experimental label anywhere in the sentence. Labels and negations are whole words of
+ * the prose (not inside a link or another word, not quoted, not taken back by "not" or "non-"). Every name of the capability is blanked first (a name such as "nobody signed in" must not count as its own
+ * negation). A sentence naming the capability twice must label both places, unless the plain label covers the whole sentence.
  */
 function labelled(sentence: string, entry: CapabilityEntry): boolean {
   let blanked = sentence;
   const spots: [number, number][] = [];
   for (const n of entry.names) for (const m of sentence.matchAll(patternOf(n))) spots.push([m.index, m.index + m[0].length]);
   for (const n of entry.names) blanked = blanked.replace(patternOf(n), (m) => " ".repeat(m.length));
-  if (entry.maturity === "experimental" && EXPERIMENTAL_LABEL.test(blanked)) return true;
+  if (entry.maturity === "experimental" && plainLabel(blanked)) return true;
   return spots.every(([at, end]) => {
     const from = Math.max(0, at - 120);
     if (DENIED_BEFORE.test(`${from > 0 ? "x" : ""}${sentence.slice(from, at)}`)) return true;
-    const around = near(blanked, at, end).replace(NOT_A_DENIAL, " ");
-    return NEGATION.test(around) || (entry.maturity === "experimental" && NEAR_LABEL.test(around));
+    const { before, after } = near(blanked, at, end);
+    return negated(before) || negated(after) || (entry.maturity === "experimental" && (weakLabel(before) || weakLabel(after)));
   });
 }
 
@@ -203,7 +279,7 @@ export function checkDeclared(claims: readonly DeclaredClaim[], register: readon
     if (entry === undefined) { flags.push({ rule: "unknown_capability", capabilityId: c.capabilityId, source: "claim", where, quote }); return; }
     capabilities[entry.id] = entry.maturity;
     if (entry.maturity === "unsupported") flags.push({ rule: "unsupported_capability_claimed", capabilityId: entry.id, source: "claim", where, quote });
-    else if (entry.maturity === "experimental" && !EXPERIMENTAL_LABEL.test(cleanText(c.text, true)) && !NEAR_LABEL.test(cleanText(c.text, true))) flags.push({ rule: "experimental_claim_unlabelled", capabilityId: entry.id, source: "claim", where, quote });
+    else if (entry.maturity === "experimental" && !plainLabel(matchForm(cleanText(c.text, true))) && !weakLabel(wordsOf(matchForm(cleanText(c.text, true))))) flags.push({ rule: "experimental_claim_unlabelled", capabilityId: entry.id, source: "claim", where, quote });
   });
   return { flags, capabilities };
 }
@@ -215,11 +291,18 @@ export function scanText(raw: string, register: readonly CapabilityEntry[], wher
   if (register.length === 0) return { flags, capabilities };
   // Supported capabilities are looked for too, but only to record that the text names them: a later lower rating then flags the document (card Q03), as it does one that claimed it.
   const any = register.map((e) => new RegExp(e.names.map(patternSource).join("|"), "iu"));
-  for (const sentence of sentencesOf(cleanText(raw))) {
+  const cleaned = cleanText(raw);
+  // Only the capabilities named somewhere in the text are looked for sentence by sentence (the matching form is per character, so a name in a sentence is a name in the whole text).
+  const whole = matchForm(cleaned);
+  const present = any.map((r) => r.test(whole));
+  if (!present.includes(true)) return { flags, capabilities };
+  for (const sentence of sentencesOf(cleaned)) {
+    // Matched in its matching form; quoted as it was cleaned.
+    const folded = matchForm(sentence);
     for (const [i, entry] of register.entries()) {
-      if (!any[i]!.test(sentence)) continue;
+      if (!present[i] || !any[i]!.test(folded)) continue;
       capabilities[entry.id] = entry.maturity;
-      if (entry.maturity === "supported" || labelled(sentence, entry)) continue;
+      if (entry.maturity === "supported" || labelled(folded, entry)) continue;
       flags.push({ rule: entry.maturity === "unsupported" ? "unsupported_mention" : "experimental_mention_unlabelled", capabilityId: entry.id, source: "text", where, quote: quoteOf(sentence) });
     }
   }
@@ -231,7 +314,7 @@ export const TEXT_FILE = /\.(md|markdown|mdx|txt|text|rst|adoc|asciidoc|html?|xh
 
 /** Where a flag stands for a file of the document: its path, cleaned to one line, redacted, cut and JSON-quoted (a path is the writer's text, like the sentence). */
 // eslint-disable-next-line no-control-regex
-export const fileWhere = (path: string): string => `file ${JSON.stringify(cut(redactText(String(path).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF\u061C\u00AD\u180E]/g, " ")), 120))}`;
+export const fileWhere = (path: string): string => `file ${JSON.stringify(cut(redactText(String(path).replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\p{Cf}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/gu, " ")), 120))}`;
 
 /** A flag in plain words, for the owner: the rule, the capability and the quoted sentence. */
 export function claimFlagText(f: ClaimFlag): string {

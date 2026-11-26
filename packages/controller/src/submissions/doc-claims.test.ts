@@ -105,6 +105,76 @@ test("first review: wrapped lines, HTML blocks and references, plurals and posse
   assert.equal(scanText("Claude caching halves bills.", narrowed, "f").flags.length, 1);
 });
 
+test("second review: look-alike letters, marks, format characters, wraps, Markdown and HTML inside a name, links, comments and shown attributes do not hide a name; labels are words of the prose", () => {
+  const strata = ["experimental_mention_unlabelled:strata-caching"];
+  const hidden: Record<string, string> = {
+    "Cyrillic a": "Str\u0430ta caching halves your bill.",
+    "Greek omicron and Cyrillic es": "\u0421laude caching is the cheapest.",
+    "a combining accent": "Stra\u0301ta caching halves your bill.",
+    "a tag character": "Stra\u{E0041}ta caching halves your bill.",
+    "a combining grapheme joiner": "Stra\u034Fta caching halves your bill.",
+    "an invisible operator": "Stra\u2062ta caching halves your bill.",
+    "a variation selector": "Stra\uFE0Fta caching halves your bill.",
+    "a Hangul filler": "Strata\u3164caching halves your bill.",
+    "Latin alpha": "Str\u0251ta caching halves.",
+    "a hyphen at a wrap": "Stra-\nta caching halves your bill.",
+    "emphasis inside the word": "Stra**ta** caching halves your bill.",
+    "code inside the word": "Stra`ta` caching halves your bill.",
+    "an inline tag inside the word": "Stra<b>ta</b> caching halves your bill.",
+    "a comment inside the word": "Stra<!-- x -->ta caching halves your bill.",
+    "a Markdown link": "[Strata](https://x.io) caching halves your bill.",
+    "a reference link": "[Strata][1] caching halves your bill.\n\n[1]: https://x.io",
+    "an image's alt text": "<img alt=\"Strata caching halves your bill\" src=x.png>",
+    "a tooltip": "<a title='Strata caching halves your bill' href=x>more</a>",
+    "a reference without its semicolon": "Strata&nbspcaching halves.",
+  };
+  for (const [what, text] of Object.entries(hidden)) {
+    const expected = text.startsWith("\u0421laude") ? ["experimental_mention_unlabelled:claude-prompt-caching"] : strata;
+    assert.deepEqual(rules(text), expected, what);
+  }
+  // Text a reader is not shown labels nothing: a comment holding ">" is removed whole, an attribute's text is its own sentence.
+  assert.deepEqual(rules("Strata caching <!-- a > not --> halves your bill."), strata, "a comment with > in it");
+  assert.deepEqual(rules("Strata caching halves your bill. <!-- not closed, not supported"), strata, "an unclosed comment ends the text");
+  assert.deepEqual(rules("Strata caching <span title=\"not supported\">halves</span> your bill."), strata, "a tooltip is not part of the sentence");
+  // Labels and negations are whole words of the prose, not taken back.
+  const unlabelled: Record<string, string> = {
+    "non-experimental": "Strata caching is non-experimental and production ready.",
+    "not experimental": "Strata caching is not experimental: it is production ready.",
+    "no longer experimental": "Strata caching is no longer experimental.",
+    "isn't beta": "Strata caching isn't beta any more.",
+    "in a link": "Strata caching halves your bill (see https://x.io/experimental/notes).",
+    "a negation in a link": "Strata caching halves your bill, see x.io/not-a-scam.",
+    "a quoted word": "Strata caching halves your bill; we dropped the \"experimental\" tag.",
+    "beta in a path": "Strata caching halves your bill: x.io/beta.",
+    "another clause": "Strata caching halves your bill; it will never cost more.",
+    "another clause before": "It will never cost more; Strata caching halves your bill.",
+    "a label after a hyphen in a link": "Strata caching halves your bill (x.io/docs-experimental).",
+    "a negation after a hyphen in a link": "Strata caching halves your bill, see x.io/why-not.",
+  };
+  for (const [what, text] of Object.entries(unlabelled)) assert.deepEqual(rules(text), strata, what);
+  const labelled: Record<string, string> = {
+    "in parentheses": "Strata caching (experimental) halves your bill.",
+    "capitalised": "EXPERIMENTAL: Strata caching halves your bill.",
+    "beta in brackets": "Strata caching [beta] halves bills.",
+    "not yet measured": "Strata caching is not yet measured.",
+    "a curly apostrophe": "Strata caching isn\u2019t available.",
+    "a denial": "Strata caching is not available.",
+    "an experimental-only tag": "Strata caching is an experimental-only option.",
+    "a denial with a colon": "Strata caching: not supported.",
+  };
+  for (const [what, text] of Object.entries(labelled)) assert.deepEqual(rules(text), [], what);
+  // A capability name with an accent is matched with or without it; quotes keep the text cleaned of format characters.
+  const accented = effectiveRegister({ projectId: "prj-a", changedAt: "x", entries: [{ id: "cafe-sync", name: "caf\u00e9 sync", names: ["caf\u00e9 sync"], maturity: "unsupported", setBy: "owner:rob", setAt: "x" }] });
+  assert.equal(scanText("Cafe sync works everywhere.", accented, "f").flags.length, 1);
+  assert.equal(scanText("Caf\u00e9 sync works everywhere.", accented, "f").flags.length, 1);
+  const q = scanText("Save with Strata caching\u{E0049}\u{E0067}\u{E006E} now.", register, "f").flags[0]!.quote;
+  assert.equal(q, "Save with Strata caching now.", "tag characters never reach the owner's view");
+  assert.equal(fileWhere("a\u{E0041}b\uFE0F.md"), "file \"a b .md\"");
+  // A declared claim's label follows the same rules.
+  assert.deepEqual(checkDeclared([{ text: "Strata caching, not experimental any more", taskId: "t", capabilityId: "strata-caching" }], register).flags.map((f) => f.rule), ["experimental_claim_unlabelled"]);
+  assert.deepEqual(checkDeclared([{ text: "Strata caching (beta)", taskId: "t", capabilityId: "strata-caching" }], register).flags, []);
+});
+
 test("declared claims: each names a capability of the register, not an unsupported one, and an experimental one only with the label", () => {
   const r = checkDeclared([
     { text: "Sign in with a passkey", taskId: "t", capabilityId: "passkey-sign-in" },

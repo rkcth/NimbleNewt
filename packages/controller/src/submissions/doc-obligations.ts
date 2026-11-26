@@ -397,7 +397,9 @@ export class DocObligationService {
         }
         const now = this.#runner.now();
         // The claims (card Q03): every claim against the capability register, and the document's own text scanned for experimental or unsupported capabilities named without a label.
-        const claimed = await this.#claimCheck(b, doc!);
+        // The register as read for the check: its revision guards the verification (a rating changed meanwhile refuses it, to be verified again under the new rating; second review).
+        const registerRecord = await this.#runner.get("doc-capabilities", b.projectId);
+        const claimed = await this.#claimCheck(b, doc!, registerRecord?.body as unknown as CapabilityRegisterBody | undefined);
         flags = claimed.flags;
         total = flags.length;
         scanned = claimed.scanned;
@@ -419,7 +421,7 @@ export class DocObligationService {
         const checks: Change[] = [...bound.values()].filter((r) => r.kind !== "doc-obligation" && !(r.kind === "submission" && r.id === command.documentSubmissionId)).map((r) => ({ type: "check", ref: { kind: r.kind, id: r.id }, expectedRevision: r.revision }));
         return {
           ref: { kind: "doc-obligation", id: current.id }, creates: false,
-          changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }, ...checks],
+          changes: [{ type: "update", ref: { kind: "doc-obligation", id: current.id }, expectedRevision: current.revision, body: json(next) }, { type: "check", ref: { kind: "submission", id: command.documentSubmissionId }, expectedRevision: docFound!.revision }, ...checks, ...(registerRecord === undefined ? [] : [{ type: "check" as const, ref: { kind: "doc-capabilities", id: b.projectId }, expectedRevision: registerRecord.revision }])],
           detail: { settled, verified: true, scanned },
           contention: async () => {
             const now = await this.#runner.get("doc-obligation", current.id);
@@ -433,9 +435,21 @@ export class DocObligationService {
       settled = [];
       // The same command again: answered as it was (a refusal for claims is a write, so its flags come from its own audit entry).
       const detail = await this.#recordedDetail(scoped);
-      flags = detail?.["verified"] === false && Array.isArray(detail["flags"]) ? (detail["flags"] as unknown as ClaimFlag[]) : [];
-      scanned = detail?.["scanned"] === true;
-      total = typeof detail?.["total"] === "number" ? detail["total"] : flags.length;
+      if (detail === undefined) {
+        // The audit entry cannot be read: the record says it (second review). A refusal for this document change that no verification with it followed is this command's refusal; never answered "verified".
+        const now = (await this.#runner.get("doc-obligation", command.obligationId))?.body as unknown as DocObligationBody | undefined;
+        const refused = now?.claimCheck !== undefined && now.claimCheck.documentSubmissionId === command.documentSubmissionId && now.verification?.documentSubmissionId !== command.documentSubmissionId;
+        const passed = !refused && now?.verification?.documentSubmissionId === command.documentSubmissionId;
+        if (!refused && !passed) throw new DomainError("unavailable", "this verification was recorded, but its result cannot be read now and the record has moved on: ask again");
+        flags = refused ? [...now!.claimCheck!.flags] : [];
+        scanned = refused ? now!.claimCheck!.scanned : now?.verification?.claims?.scanned === true;
+        total = refused ? Math.max(now!.claimCheck!.total, flags.length, 1) : 0;
+      } else {
+        flags = detail["verified"] === false && Array.isArray(detail["flags"]) ? (detail["flags"] as unknown as ClaimFlag[]) : [];
+        scanned = detail["scanned"] === true;
+        total = typeof detail["total"] === "number" ? detail["total"] : flags.length;
+        if (detail["verified"] === false) total = Math.max(total, 1);
+      }
     }
     // At most 20 flags are returned, as the record keeps them; `total` counts all.
     return { id: result.id, revision: result.revision, replayed: result.replayed, settled, verified: total === 0, flags: flags.slice(0, CLAIM_LIMITS.flags), total, scanned };
@@ -447,8 +461,8 @@ export class DocObligationService {
    * promotional asset of text (the marketing the card means) is verified only when it was read, since what it claims cannot otherwise be checked. An image, video or other medium is not read: its
    * declared claims are what is checked.
    */
-  async #claimCheck(b: DocObligationBody, doc: SubmissionBody): Promise<{ flags: ClaimFlag[]; scanned: boolean; files: number; capabilities: Record<string, CapabilityMaturity> }> {
-    const register = effectiveRegister(await this.#register(b.projectId));
+  async #claimCheck(b: DocObligationBody, doc: SubmissionBody, own: CapabilityRegisterBody | undefined): Promise<{ flags: ClaimFlag[]; scanned: boolean; files: number; capabilities: Record<string, CapabilityMaturity> }> {
+    const register = effectiveRegister(own);
     const declared = checkDeclared(b.claims, register);
     const flags = [...declared.flags];
     const capabilities: Record<string, CapabilityMaturity> = { ...declared.capabilities };
@@ -460,9 +474,21 @@ export class DocObligationService {
       const read = await this.#ports.readDocument({ artifactId: doc.artifactId, artifactDigest: doc.artifactDigest, projectId: b.projectId });
       scanned = read.files.length > 0;
       files = read.files.length;
-      for (const f of read.files) add(scanText(f.text, register, fileWhere(f.path)));
+      // One file at a time, letting other work run between files: a file costs up to about a second with a full register (100 capabilities of 10 names; second review, measured).
+      for (const f of read.files) { add(scanText(f.text, register, fileWhere(f.path))); await new Promise<void>((r) => setImmediate(r)); }
       // A file named as text that was not read (too many, too large, not UTF-8) is a flag: its claims would otherwise pass unchecked.
       for (const u of read.unread ?? []) flags.push({ rule: "text_unread", source: "text", where: fileWhere(u.path), quote: u.why });
+    }
+    // A rating set by the agent that wrote the document change or keeps the document (an agent holding both the docs and director roles) does not vouch for its own claims (second review): every
+    // capability the document claims or names that such an agent rated above what it could claim otherwise (above unsupported, or above the controller's own label) is flagged, for the owner or
+    // another director to rate.
+    const writers = new Set([doc.submittedBy, b.owner]);
+    for (const id of Object.keys(capabilities).sort()) {
+      const e = register.find((x) => x.id === id);
+      if (e === undefined || e.source !== "project" || e.setBy === undefined || !writers.has(e.setBy) || e.maturity === "unsupported") continue;
+      const builtIn = builtInCapabilities().find((x) => x.id === id);
+      if (builtIn !== undefined && maturityRank(e.maturity) <= maturityRank(builtIn.maturity)) continue;
+      flags.push({ rule: "capability_rated_by_writer", capabilityId: id, source: "claim", where: "capability register", quote: `${id} was rated ${e.maturity} by ${e.setBy}` });
     }
     if (b.audience === "promotional" && (b.mediaType ?? "text") === "text" && !scanned) {
       bad("documentSubmissionId", doc.artifactId === undefined ? "a promotional text is verified only once its text is read: submit the document change naming its artifact (artifactId)"
