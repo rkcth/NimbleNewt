@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { LaunchRequest, RunResult } from "../sandbox/index.js";
-import { GitBridge, LocalWorkspaces, type HostWorkspaceCall, type LandingChecksOptions, type WorkspaceAdmissionAnswer } from "./index.js";
+import { GitBridge, LocalWorkspaces, collisions, splitRelative, type HostWorkspaceCall, type LandingChecksOptions, type WorkspaceAdmissionAnswer } from "./index.js";
 
 // Card P02: isolated coding workspaces. The workspace admits only a repository in the task's access scope; each attempt's initial working state is recorded; dirty and untracked work survives a killed host; a
 // re-applied (restacked) submission has its landing checks run again on the re-applied tree; and a task leaves the shared checkout's own Git metadata (config, hooks, info, worktrees) as it was.
@@ -193,12 +193,75 @@ test("a submit's staging: a link is refused as a link before any content is read
   } finally { await w.done(); }
 });
 
-test("a submit's staging refuses, plainly and with the index left as it was, what a landing could not carry: too many files, a file or a set too large, a name some system cannot hold, two spellings of one file; a change just inside the bounds gets git's own patch ID (card H12n, product launcher, second review)", { skip }, async () => {
+/**
+ * What the disk under the temporary folder can hold, probed once: two names that differ only in case (not on Windows' NTFS or macOS' default APFS), two Unicode spellings of one name (not on APFS, which
+ * normalises), a name ending in a dot (Windows drops it), a name with `"` or a newline (not on Windows) and a device name with an extension such as `CON.ts` (a device on older Windows). A sub-case whose setup the
+ * disk cannot hold is not run on disk there (it would test the disk, not the product); its refusal is still checked on the name list. `NIMBLENEWT_TEST_DISK_LACKS` (a comma list of these keys) makes the test treat
+ * the disk as lacking them, so the other branch can be run on a disk that holds everything.
+ */
+type DiskFeature = "case" | "normalisation" | "trailing-dot" | "windows-chars" | "device-names";
+const disk: Record<DiskFeature, boolean> = (() => {
+  const lacks = new Set((process.env["NIMBLENEWT_TEST_DISK_LACKS"] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  for (const k of lacks) if (!["case", "normalisation", "trailing-dot", "windows-chars", "device-names"].includes(k)) throw new Error(`NIMBLENEWT_TEST_DISK_LACKS: unknown feature ${JSON.stringify(k)}`);
+  const root = mkdtempSync(join(tmpdir(), "nn-p02-disk-"));
+  let n = 0;
+  const holds = (names: readonly string[]): boolean => {
+    const d = join(root, String(n++));
+    try {
+      mkdirSync(d);
+      for (const name of names) writeFileSync(join(d, name), "");
+      const seen = readdirSync(d);
+      if (seen.length !== names.length || !names.every((name) => seen.includes(name))) return false;
+      // And this host's git can index them (git for Windows refuses a device or trailing-dot name even where the disk holds it), as the test's own setup and the staging both do.
+      if (!hasGit) return true;
+      sh(d, "init", "-q"); sh(d, "add", "-A");
+      const indexed = sh(d, "ls-files", "-z").split("\0").filter(Boolean);
+      return indexed.length === names.length && names.every((name) => indexed.includes(name));
+    } catch { return false; }
+  };
+  try {
+    const found: Record<DiskFeature, boolean> = { "case": holds(["a", "A"]), "normalisation": holds(["\u00e9", "e\u0301"]), "trailing-dot": holds(["x."]), "windows-chars": holds(["a\"b", "a\nb"]), "device-names": holds(["CON.ts"]) };
+    for (const k of Object.keys(found) as DiskFeature[]) if (lacks.has(k)) found[k] = false;
+    return found;
+  } finally {
+    // Best effort: this runs as the file loads, so a folder Windows still holds open (a virus scan of the files just made) must not fail every test in the file; retried, then left for the system to clear.
+    try { rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* a probe folder left behind is harmless */ }
+  }
+})();
+
+test("the disk probe: a disk that holds everything is seen so (Linux), and the override names only features the probe knows (card H12n, staging test fix)", () => {
+  assert.deepEqual(Object.keys(disk).sort(), ["case", "device-names", "normalisation", "trailing-dot", "windows-chars"]);
+  for (const k of (process.env["NIMBLENEWT_TEST_DISK_LACKS"] ?? "").split(",").map((s) => s.trim()).filter(Boolean)) assert.equal(disk[k as DiskFeature], false, `${k} is treated as lacking when the override names it`);
+  if (process.platform === "linux" && (process.env["NIMBLENEWT_TEST_DISK_LACKS"] ?? "") === "") assert.ok(Object.values(disk).every(Boolean), `a Linux temporary folder holds every name the staging test makes: ${JSON.stringify(disk)}`);
+});
+
+test("a submit's staging refuses, plainly and with the index left as it was, what a landing could not carry: too many files, a file or a set too large, a name some system cannot hold, two spellings of one file; a change just inside the bounds gets git's own patch ID (card H12n, product launcher, second review)", { skip }, async (t) => {
+  // The same refusals on the name lists, on every disk (the checks the staging and the landing make: `splitRelative` for one name, `collisions` for two spellings of one file).
+  const nameRefused = (path: string, why: RegExp, options: { forWindows?: boolean } = {}): void => assert.throws(() => splitRelative(path, options), (e: Error & { code?: string }) => e.code === "invalid_path" && why.test(e.message), path);
+  const collide = (paths: readonly string[]): void => assert.deepEqual(collisions(paths), [[...paths].sort()], `${paths.join(" and ")} are one file on a case-insensitive or normalising filesystem`);
+  for (const forWindows of [false, true]) {
+    nameRefused("src/a\nb.ts", /holds a character that is not allowed on every system/, { forWindows });
+    nameRefused("src/a\"b.ts", /holds a character that is not allowed on every system/, { forWindows });
+    nameRefused("src/CON.ts", /is a reserved Windows device name/, { forWindows });
+    nameRefused("src/x.", /^the name "x\." ends in a dot or a space/, { forWindows });
+    nameRefused("docs/x.", /^the name "x\." ends in a dot or a space/, { forWindows });
+  }
+  collide(["a/B", "a/b"]); collide(["src/A.ts", "src/a.ts"]); collide(["src/\u00e9.ts", "src/e\u0301.ts"]); collide(["docs/K", "docs/k"]);
+  const ran: string[] = [];
+  const notRun: string[] = [];
+  const onDisk = (label: string, needs: readonly DiskFeature[]): boolean => {
+    const missing = needs.filter((f) => !disk[f]);
+    if (missing.length > 0) t.diagnostic(`not run on this disk (it cannot hold the setup: ${missing.join(", ")}); its refusal is checked on the name list: ${label}`);
+    const run = missing.length === 0;
+    (run ? ran : notRun).push(label);
+    return run;
+  };
   const w = await world();
   try {
-    // The base holds names a landing cannot write (made on this system by someone else): deleting them is a change the landing could not carry either.
-    for (const n of ["x.", "K", "k"]) await writeFile(join(w.shared, "docs", n), `${n}\n`);
-    sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "odd names");
+    // The base holds names a landing cannot write (made on this system by someone else): deleting them is a change the landing could not carry either. Only those this disk can hold.
+    const odd = [...(disk["trailing-dot"] ? ["x."] : []), ...(disk["case"] ? ["K", "k"] : [])];
+    for (const n of odd) await writeFile(join(w.shared, "docs", n), `${n}\n`);
+    if (odd.length > 0) { sh(w.shared, "add", "-A"); sh(w.shared, "commit", "-q", "-m", "odd names"); }
     const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
     assert.equal(await w.git.patchId({ gitDir: made.gitDir, base: sh(w.shared, "rev-parse", "HEAD") }), undefined, "an index with no change has no patch ID");
     const g = gitOf(made);
@@ -212,16 +275,22 @@ test("a submit's staging refuses, plainly and with the index left as it was, wha
     await refused("501 files", async () => { await mkdir(join(made.checkout, "many")); for (let i = 0; i < 501; i++) await writeFile(join(made.checkout, "many", `f${i}`), `${i}\n`); }, "invalid_path", /^the change touches 501 files; a landing carries at most 500 as one step/);
     await refused("a file over 8 MB", async () => { await writeFile(join(made.checkout, "big.bin"), Buffer.alloc(8 * 1024 * 1024 + 1, 7)); }, "invalid_path", /^"big\.bin" is 8388609 bytes; a landing carries at most 8388608 bytes per file/);
     await refused("a set over 64 MB", async () => { for (let i = 0; i < 9; i++) await writeFile(join(made.checkout, `p${i}.bin`), Buffer.alloc(7.5 * 1024 * 1024, i)); }, "invalid_path", /^the change's files hold 70778880 bytes; a landing carries at most 67108864 bytes as one step/);
-    for (const [name, why] of [["src/a\nb.ts", /holds a character that is not allowed on every system/], ["src/a\"b.ts", /holds a character that is not allowed on every system/], ["src/CON.ts", /reserved Windows device name/], ["src/x.", /ends in a dot or a space/]] as const) {
-      await refused(JSON.stringify(name), async () => { await writeFile(join(made.checkout, name), "x\n"); }, "invalid_path", new RegExp(`^${JSON.stringify(name).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} cannot be carried: .*${why.source}.*; nothing was staged$`));
+    for (const [name, why, needs] of [["src/a\nb.ts", /holds a character that is not allowed on every system/, "windows-chars"], ["src/a\"b.ts", /holds a character that is not allowed on every system/, "windows-chars"], ["src/CON.ts", /reserved Windows device name/, "device-names"], ["src/x.", /ends in a dot or a space/, "trailing-dot"]] as const) {
+      if (onDisk(JSON.stringify(name), [needs])) await refused(JSON.stringify(name), async () => { await writeFile(join(made.checkout, name), "x\n"); }, "invalid_path", new RegExp(`^${JSON.stringify(name).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} cannot be carried: .*${why.source}.*; nothing was staged$`));
     }
-    await refused("a/B and a/b", async () => { await mkdir(join(made.checkout, "a")); await writeFile(join(made.checkout, "a", "B"), "1\n"); await writeFile(join(made.checkout, "a", "b"), "2\n"); }, "collision", /cannot be carried: "B" collides with "b", which is the same name on a case-insensitive or normalising filesystem/);
-    await refused("src/A.ts beside the base's src/a.ts", async () => { await writeFile(join(made.checkout, "src", "A.ts"), "1\n"); }, "collision", /^"src\/A\.ts" cannot be carried: "A\.ts" collides with "a\.ts"/);
-    await refused("composed and decomposed é", async () => { await writeFile(join(made.checkout, "src", "é.ts"), "1\n"); await writeFile(join(made.checkout, "src", "é.ts"), "2\n"); }, "collision", /collides with/);
-    await refused("deleting the base's docs/x.", async () => { await rm(join(made.checkout, "docs", "x.")); }, "invalid_path", /^the change holds "docs\/x\.", which a landing cannot write \(the name "x\." ends in a dot or a space/);
-    await writeFile(join(made.checkout, "docs", "x."), "x.\n");
-    await refused("deleting both docs/K and docs/k", async () => { await rm(join(made.checkout, "docs", "K")); await rm(join(made.checkout, "docs", "k")); }, "collision", /^the change holds "docs\/K" and "docs\/k", which are one file on a case-insensitive or normalising filesystem/);
-    for (const n of ["K", "k"]) await writeFile(join(made.checkout, "docs", n), `${n}\n`);
+    if (onDisk("a/B and a/b", ["case"])) await refused("a/B and a/b", async () => { await mkdir(join(made.checkout, "a")); await writeFile(join(made.checkout, "a", "B"), "1\n"); await writeFile(join(made.checkout, "a", "b"), "2\n"); }, "collision", /cannot be carried: "B" collides with "b", which is the same name on a case-insensitive or normalising filesystem/);
+    if (onDisk("src/A.ts beside the base's src/a.ts", ["case"])) await refused("src/A.ts beside the base's src/a.ts", async () => { await writeFile(join(made.checkout, "src", "A.ts"), "1\n"); }, "collision", /^"src\/A\.ts" cannot be carried: "A\.ts" collides with "a\.ts"/);
+    if (onDisk("composed and decomposed \u00e9", ["normalisation"])) await refused("composed and decomposed \u00e9", async () => { await writeFile(join(made.checkout, "src", "\u00e9.ts"), "1\n"); await writeFile(join(made.checkout, "src", "e\u0301.ts"), "2\n"); }, "collision", /collides with/);
+    if (onDisk("deleting the base's docs/x.", ["trailing-dot"])) {
+      await refused("deleting the base's docs/x.", async () => { await rm(join(made.checkout, "docs", "x.")); }, "invalid_path", /^the change holds "docs\/x\.", which a landing cannot write \(the name "x\." ends in a dot or a space/);
+      await writeFile(join(made.checkout, "docs", "x."), "x.\n");
+    }
+    if (onDisk("deleting both docs/K and docs/k", ["case"])) {
+      await refused("deleting both docs/K and docs/k", async () => { await rm(join(made.checkout, "docs", "K")); await rm(join(made.checkout, "docs", "k")); }, "collision", /^the change holds "docs\/K" and "docs\/k", which are one file on a case-insensitive or normalising filesystem/);
+      for (const n of ["K", "k"]) await writeFile(join(made.checkout, "docs", n), `${n}\n`);
+    }
+    assert.equal(ran.length + notRun.length, 9, "each sub-case that makes an odd name on disk is either run or said to be not run");
+    if (Object.values(disk).every(Boolean)) assert.deepEqual(notRun, [], "a disk that holds every name runs every sub-case on disk");
     // Just inside every bound, and past the output buffer the patch ID's diff used to be held in (about 50 MB of change): staged, with git's own ID. Random bytes, so the binary diff does not compress below it.
     await clean();
     for (let i = 0; i < 8; i++) await writeFile(join(made.checkout, `p${i}.bin`), randomBytes(Math.floor(7.9 * 1024 * 1024)));
