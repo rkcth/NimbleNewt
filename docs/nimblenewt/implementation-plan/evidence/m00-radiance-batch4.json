@@ -7,7 +7,8 @@
   "capTokens": 1500000,
   "tokensUsedAtEnd": 1498867,
   "runnerInvocationsCounted": 11,
-  "cloudSpendUsd": 0
+  "cloudSpendUsd": 0,
+  "usdCapNote": "the runs were given --cap-tokens but no --cap-usd, so the final budget.json shows capUsd null (an unset cap, Infinity, written as JSON null); the pre-run file said 0. The $0 was held by the route: every one of the 464 recorded calls went to the local model with costUsd 0."
  },
  "note": "Per-run figures from prototypes/meeting/radiance-report.mjs (reportRun) over the run folders; the raw transcripts, ballots, summaries, calls and server readings are in git under evidence/m00-raw/batch4/<run-folder>/. server = this run's effect on Radiance from GET /stats and /sessions before and after; evictionsCausedByMeeting = retention plus store-full evictions seen in that window. No key or address is in these files (counted, 0 matches).",
  "meetings": [
