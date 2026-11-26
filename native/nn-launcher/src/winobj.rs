@@ -24,6 +24,47 @@ pub(crate) fn private_names(seed: u64) -> (String, String) { (format!("nn-ws-{se
 /// The text for STARTUPINFO.lpDesktop: `station\desktop`.
 pub(crate) fn desktop_path(station: &str, desktop: &str) -> String { format!("{station}\\{desktop}") }
 
+/// Which window objects a run's container gets (card A03b, home case, plan 12.5). `Private`: a window station of the run's own with a desktop in it (needs a launcher that may NAME a window
+/// station: an administrator's elevated token). `HomeDesktop`: ONE private desktop on the user's own interactive window station WinSta0, made with its final access list, no write to the station's
+/// access list, `lpDesktop` `WinSta0\<name>` (the non-elevated user's case, where naming a station is refused with error 5). There is NO third mode: the inherited desktop is never used.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum WindowMode { Private, HomeDesktop }
+impl WindowMode {
+    /// The word the launcher's JSON line and the backend use (`windowStation`).
+    pub(crate) fn name(self) -> &'static str { match self { WindowMode::Private => "private", WindowMode::HomeDesktop => "home-desktop" } }
+}
+
+/// ERROR_ACCESS_DENIED: what CreateWindowStationW returned to the owner's non-elevated user (measured, build 26200) and what Microsoft documents for a non-administrator naming a station.
+pub(crate) const ERROR_STATION_REFUSED: u32 = 5;
+/// The interactive window station of a signed-in session, the only one the home desktop is made on.
+pub(crate) const INTERACTIVE_STATION: &str = "WinSta0";
+
+/// After the NAMED private window station failed with this error: does the launcher try the home desktop? Only for a launcher KNOWN to be not elevated (`elevation` is the process token's
+/// TokenElevation: Some(false); None when it could not be read) and only for the refusal (error 5) that Microsoft documents for a non-administrator. Any other error, an elevated launcher that
+/// was refused, and a launcher whose elevation is unknown stay failures: the home desktop is not a general fallback, and nothing ever inherits a desktop.
+pub(crate) fn try_home_desktop(elevation: Option<bool>, station_error: u32) -> bool { elevation == Some(false) && station_error == ERROR_STATION_REFUSED }
+
+/// May the home desktop be made on this window station? Only the interactive WinSta0 with WSF_VISIBLE set (`flags` is USEROBJECTFLAGS.dwFlags, -1 when unreadable), in a signed-in user's
+/// session (`session` is the launcher's session id, -1 when unreadable; session 0 is the services' session, which has a WinSta0 of its own but no signed-in user). A service's station
+/// (`Service-0x0-<logon id>$`), session 0, an unreadable name, flag word or session fail closed: those cases were never measured, and the owner's supported configuration is a signed-in user.
+pub(crate) fn may_make_home_desktop(station: &str, flags: i64, session: i64) -> Result<(), String> {
+    if !station.eq_ignore_ascii_case(INTERACTIVE_STATION) { return Err(format!("refused: the launcher's window station is {station}, not the interactive {INTERACTIVE_STATION}; the home desktop is made only there")); }
+    if flags < 0 { return Err("refused: the flags of the launcher's window station could not be read, so it is not known to be the visible station".into()); }
+    if flags & 1 == 0 { return Err("refused: the launcher's window station is not marked visible (WSF_VISIBLE clear), so this is not a signed-in session's station".into()); }
+    if session < 0 { return Err("refused: the launcher's session could not be read, so it is not known to be a signed-in user's session".into()); }
+    if session == 0 { return Err("refused: the launcher runs in session 0 (the services' session, no signed-in user); the home desktop is made only in a signed-in user's session".into()); }
+    Ok(())
+}
+
+/// The home desktop shares the user's window station (clipboard, atoms), so a run on it must have the job's UI limits on: without `--ui-limits` the run is refused (the backend always passes it). Err: the message.
+pub(crate) fn home_needs_ui_limits(mode: WindowMode, ui_limits: bool) -> Result<(), String> {
+    if mode == WindowMode::HomeDesktop && !ui_limits { return Err("window objects: refused: a run on the home desktop needs the job's UI limits (--ui-limits)".into()); }
+    Ok(())
+}
+
+/// The name of one run's home desktop: 64 random bits, so two runs never share one; a name that already exists is refused, never adopted.
+pub(crate) fn home_desktop_name(seed: u64) -> String { format!("nn-hd-{seed:016x}") }
+
 /// A SID in its text form (S-1-<authority>-<sub-authorities>), or None when the bytes are not a SID.
 pub(crate) fn sid_text(sid: &[u8]) -> Option<String> {
     if !sid_ok(sid) { return None; }
@@ -211,6 +252,66 @@ mod tests {
         assert_eq!(desktop_path(&s, &d), "nn-ws-deadbeef01234567\\nn-d");
         assert!(!desktop_path(&s, &d).to_ascii_lowercase().contains("winsta0"), "never the interactive station");
         for name in [&s, &d] { assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')); }
+    }
+
+    #[test]
+    fn the_mode_names_are_the_ones_the_backend_reads() {
+        assert_eq!(WindowMode::Private.name(), "private");
+        assert_eq!(WindowMode::HomeDesktop.name(), "home-desktop");
+    }
+
+    #[test]
+    fn the_home_desktop_is_tried_only_for_a_non_elevated_launcher_refused_with_error_5() {
+        assert!(try_home_desktop(Some(false), 5), "the owner's measured case");
+        assert!(!try_home_desktop(Some(true), 5), "an elevated launcher that was refused is a failure, not a reason to change mode");
+        assert!(!try_home_desktop(None, 5), "a launcher whose elevation could not be read is not known to be non-elevated: no change of mode");
+        for other in [0u32, 1, 2, 6, 87, 1314, 0x2000_0006] { assert!(!try_home_desktop(Some(false), other), "error {other} is not the documented refusal"); }
+        assert_eq!(ERROR_STATION_REFUSED, 5);
+    }
+
+    #[test]
+    fn the_home_desktop_is_made_only_on_the_visible_interactive_station() {
+        assert_eq!(may_make_home_desktop("WinSta0", 1, 1), Ok(()));
+        assert_eq!(may_make_home_desktop("winsta0", 1, 1), Ok(()), "the name is not case sensitive");
+        assert_eq!(may_make_home_desktop("WinSta0", 0x3, 2), Ok(()), "other flag bits and another signed-in session do not matter");
+        for (station, flags) in [("Service-0x0-3e7$", 1), ("nn-ws-0000000000000000", 1), ("?", 1), ("", 1), ("WinSta1", 1), ("WinSta0x", 1), ("WinSta0\\Default", 1), ("WinSta0\0", 1)] {
+            assert!(may_make_home_desktop(station, flags, 1).unwrap_err().contains("not the interactive"), "{station}");
+        }
+        assert!(may_make_home_desktop("WinSta0", -1, 1).unwrap_err().contains("could not be read"));
+        assert!(may_make_home_desktop("WinSta0", 0, 1).unwrap_err().contains("not marked visible"));
+        assert!(may_make_home_desktop("WinSta0", 2, 1).unwrap_err().contains("not marked visible"));
+        assert!(may_make_home_desktop("WinSta0", 1, 0).unwrap_err().contains("session 0"), "the services' session has a visible WinSta0 but no signed-in user");
+        assert!(may_make_home_desktop("WinSta0", 1, -1).unwrap_err().contains("session could not be read"));
+    }
+
+    #[test]
+    fn a_home_desktop_run_needs_the_ui_limits_and_a_private_station_run_is_as_before() {
+        assert!(home_needs_ui_limits(WindowMode::HomeDesktop, false).unwrap_err().contains("--ui-limits"));
+        assert_eq!(home_needs_ui_limits(WindowMode::HomeDesktop, true), Ok(()));
+        assert_eq!(home_needs_ui_limits(WindowMode::Private, false), Ok(()), "the named-station path is unchanged");
+        assert_eq!(home_needs_ui_limits(WindowMode::Private, true), Ok(()));
+    }
+
+    #[test]
+    fn the_home_desktop_name_is_unique_plain_and_never_the_users_own_desktop() {
+        assert_eq!(home_desktop_name(0xdead_beef_0123_4567), "nn-hd-deadbeef01234567");
+        assert_eq!(home_desktop_name(0), "nn-hd-0000000000000000");
+        assert_ne!(home_desktop_name(1), home_desktop_name(2));
+        assert!(!home_desktop_name(7).eq_ignore_ascii_case("default"));
+        let lp = desktop_path(INTERACTIVE_STATION, &home_desktop_name(0xab));
+        assert_eq!(lp, "WinSta0\\nn-hd-00000000000000ab");
+    }
+
+    #[test]
+    fn the_home_desktop_takes_the_same_creation_list_and_read_back_as_the_private_desktop() {
+        let me = container();
+        let user = sid(5, &[21, 1, 2, 3, 1001]);
+        let d = private_dacl(&user, &me, DESKTOP_RIGHTS, DESKTOP_FULL).unwrap();
+        assert_eq!(private_acl_ok(&d, &me, DESKTOP_RIGHTS, &[user.clone()]), Ok(()));
+        // a Default-desktop style entry (ALL APPLICATION PACKAGES holding 0xf00ff) is NOT acceptable on a made object: nothing inherits it
+        let mut tainted = acl_entries(&d).unwrap().1.iter().map(|e| e.to_vec()).collect::<Vec<_>>();
+        tainted.push(ace(0, 0, 0xf00ff, &sid(15, &[2, 1])));
+        assert!(private_acl_ok(&acl(&tainted), &me, DESKTOP_RIGHTS, &[user]).unwrap_err().contains("S-1-15-2-1"));
     }
 
     #[test]

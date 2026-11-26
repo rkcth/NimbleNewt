@@ -255,8 +255,11 @@ export interface LauncherLine {
   readonly leftoverProcesses?: number;
   readonly allGrantsRevoked?: boolean;
   readonly clean?: boolean;
-  /** The window station of the child: "private" in the product launcher (card A03b: one made for each run). */
+  /** The window objects of the child (card A03b): "private" (a window station of its own, made for each run; needs an elevated launcher) or "home-desktop" (one private desktop on the user's own interactive
+   * window station WinSta0, the non-elevated user's case, plan 12.5). Any other word is not a mode this backend knows (see `isWindowStationMode`). */
   readonly windowStation?: string;
+  /** `info`, `check` and `run`: when the home desktop was used because the named private window station was refused, that refusal's own message (never present for `private`). */
+  readonly privateStationError?: string;
   /** `info` and `check`: whether the launcher could make (and close) a private window station for the container; with `windowStationError` when not. */
   readonly windowStationOk?: boolean;
   readonly windowStationError?: string;
@@ -269,6 +272,11 @@ export interface LauncherLine {
 }
 
 /** The launcher's one JSON line: the last line of its output that parses as an object from `nn-appc-launcher`. Undefined when there is none. */
+/** The two window-object modes the launcher reports in `windowStation`. There is no third: a launcher that inherited the user's desktop would be a different, weaker mode that needs its own decision. */
+export const WINDOW_STATION_MODES = ["private", "home-desktop"] as const;
+export type WindowStationMode = (typeof WINDOW_STATION_MODES)[number];
+export function isWindowStationMode(value: unknown): value is WindowStationMode { return typeof value === "string" && (WINDOW_STATION_MODES as readonly string[]).includes(value); }
+
 export function parseLauncherLine(text: string): LauncherLine | undefined {
   const lines = String(text).split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -292,7 +300,7 @@ export function parseLauncherLine(text: string): LauncherLine | undefined {
       ...(bool("timedOut") === undefined ? {} : { timedOut: bool("timedOut")! }), ...(num("leftoverProcesses") === undefined ? {} : { leftoverProcesses: num("leftoverProcesses")! }),
       ...(bool("allGrantsRevoked") === undefined ? {} : { allGrantsRevoked: bool("allGrantsRevoked")! }), ...(bool("clean") === undefined ? {} : { clean: bool("clean")! }),
       ...(str("windowStation") === undefined ? {} : { windowStation: str("windowStation")! }), ...(bool("windowStationOk") === undefined ? {} : { windowStationOk: bool("windowStationOk")! }),
-      ...(str("windowStationError") === undefined ? {} : { windowStationError: str("windowStationError")! }),
+      ...(str("windowStationError") === undefined ? {} : { windowStationError: str("windowStationError")! }), ...(str("privateStationError") === undefined ? {} : { privateStationError: str("privateStationError")! }),
       ...(str("containerSid") === undefined ? {} : { containerSid: str("containerSid")! }),
       ...(bool("profileDeleted") === undefined ? {} : { profileDeleted: bool("profileDeleted")! }), ...(bool("profileGone") === undefined ? {} : { profileGone: bool("profileGone")! }),
     };
