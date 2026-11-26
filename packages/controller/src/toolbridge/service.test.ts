@@ -26,6 +26,12 @@ const manifest = (extra: Record<string, unknown> = {}) => ({
 });
 const bad = (r: BridgeResponse): { code: string; message: string } => { assert.equal(r.ok, false, JSON.stringify(r)); return r as never; };
 const good = (r: BridgeResponse): JsonObject => { assert.equal(r.ok, true, JSON.stringify(r)); return (r as { result: JsonObject }).result; };
+/** The operation of a call; when there is none, the failure names the call, the calls that have one and what the call answered (never a bare TypeError on a missing entry). */
+const opOf = <T extends { readonly callId: string }>(ops: readonly T[], callId: string, answered?: unknown): T => {
+  const found = ops.find((o) => o.callId === callId);
+  assert.ok(found !== undefined, `call ${callId} has no operation record (calls with one: ${JSON.stringify(ops.map((o) => o.callId))}; it answered ${JSON.stringify(answered)})`);
+  return found;
+};
 const deferred = <T = void>() => { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; };
 
 for (const backend of backends) {
@@ -227,9 +233,9 @@ for (const backend of backends) {
     assert.deepEqual(asked[0], { action: "read", path: "src/a.txt" });
     // Each call is a durable operation of the attempt under the tool's name; a read is read-only and a write is not.
     const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, c.worker.starts[0]!.attemptId))!;
-    const byCall = new Map(ops.map((o) => [o.callId, o]));
-    assert.deepEqual([byCall.get("co-read")!.tool.name, byCall.get("co-read")!.readOnly], ["nimblenewt.checkout-read", true]);
-    assert.deepEqual([byCall.get("co-write")!.tool.name, byCall.get("co-write")!.readOnly], ["nimblenewt.checkout-write", false]);
+    const coRead = opOf(ops, "co-read", seen["read"]), coWrite = opOf(ops, "co-write", seen["write"]);
+    assert.deepEqual([coRead.tool.name, coRead.readOnly], ["nimblenewt.checkout-read", true]);
+    assert.deepEqual([coWrite.tool.name, coWrite.readOnly], ["nimblenewt.checkout-write", false]);
     assert.ok(!JSON.stringify(ops).includes(credential), "the operation record keeps no credential either");
   });
 
@@ -276,9 +282,9 @@ for (const backend of backends) {
     assert.equal(other?.state, "refused", JSON.stringify(other));
     assert.match(String(other?.reason), /no grant for tool\.nimblenewt\.checkout-read/);
     const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
-    const byCall = new Map(ops.map((o) => [o.callId, o]));
-    assert.deepEqual([byCall.get("sr-edit")!.tool.name, byCall.get("sr-edit")!.readOnly], ["nimblenewt.checkout-edit", false]);
-    assert.deepEqual([byCall.get("sr-run")!.tool.name, byCall.get("sr-run")!.readOnly], ["nimblenewt.checkout-run", false]);
+    const srEdit = opOf(ops, "sr-edit", seen["edit"]), srRun = opOf(ops, "sr-run", seen["run"]);
+    assert.deepEqual([srEdit.tool.name, srEdit.readOnly], ["nimblenewt.checkout-edit", false]);
+    assert.deepEqual([srRun.tool.name, srRun.readOnly], ["nimblenewt.checkout-run", false]);
   });
 
   suite("card W09b: a checkout write stopped while it runs (the ending's settle) is left uncertain, so it counts as a killed write; a stopped read is cancelled; a host that cannot run the tool refuses it", async (c) => {
@@ -296,10 +302,13 @@ for (const backend of backends) {
     const states: Record<string, BridgeResponse> = {};
     c.worker.script = c.session(async (s) => {
       attemptId = s.attemptId;
-      const run = s.send("work.checkout", { action: "run", command: "sleep 60" }, "co-run");
-      const look = s.send("work.checkout", { action: "read", path: "a" }, "co-look");
-      const end = Date.now() + 5000;
-      while (entered.length < 2 && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+      // Both calls are made at once, so their judgements interleave (the first calls of the attempt also create the task's pause gates): see the next test.
+      let answered = 0;
+      const run = s.send("work.checkout", { action: "run", command: "sleep 60" }, "co-run").finally(() => { answered++; });
+      const look = s.send("work.checkout", { action: "read", path: "a" }, "co-look").finally(() => { answered++; });
+      // Until both are running on the host; a call answered before it got there is not waited for (the assertions below say what it answered).
+      const end = Date.now() + 30_000;
+      while (entered.length + answered < 2 && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
       await c.dispatcher.settle(c.dispatcherPrincipal, s.attemptId, { cancel: true });
       states["run"] = await run; states["look"] = await look;
       c.checkoutHost.run = undefined;
@@ -308,12 +317,44 @@ for (const backend of backends) {
     await c.tick();
     void release;
     const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
-    const byCall = new Map(ops.map((o) => [o.callId, o]));
-    assert.deepEqual([byCall.get("co-run")!.state, byCall.get("co-run")!.readOnly], ["uncertain", false], "a killed command may have changed the checkout: settle reports it as a killed write (H12n: a submit becomes release_failed)");
-    assert.deepEqual([byCall.get("co-look")!.state, byCall.get("co-look")!.readOnly], ["cancelled", true]);
+    assert.deepEqual(entered.slice().sort(), ["read", "run"], `both calls reached the host before the settle (answers: ${JSON.stringify(states)})`);
+    const coRun = opOf(ops, "co-run", states["run"]), coLook = opOf(ops, "co-look", states["look"]);
+    assert.deepEqual([coRun.state, coRun.readOnly], ["uncertain", false], "a killed command may have changed the checkout: settle reports it as a killed write (H12n: a submit becomes release_failed)");
+    assert.deepEqual([coLook.state, coLook.readOnly], ["cancelled", true]);
     const noHost = good(states["noHost"]!);
     assert.equal(noHost["state"], "failed");
     assert.match(String(noHost["reason"]), /cannot run the checkout tool/);
+  });
+
+  suite("two calls judged at once are never refused for a commit that names a record twice: when one call's guards read the task's pause gates before the other call's commit creates them and another of its guards reads them after, the call is judged again (CI run 45886436143)", async (c) => {
+    const ann = await c.agentFor("ann");
+    await c.task("code it", ann);
+    c.checkoutHost.run = async () => ({ ok: true, body: "", facts: {} });
+    // The outer call reads the gates three times: the bridge's own pause check (not committed), the tool path's judgement, and the generation guard inside that judgement. The judgement's
+    // read (the second) is held until a whole other call has run and created the gates, so the judgement's two reads straddle that commit every time.
+    const pauses = c.pauses as unknown as { guard: (taskId: string) => Promise<{ blockedBy: readonly unknown[]; changes: readonly { type: string; ref: { kind: string } }[] }> };
+    const original = pauses.guard.bind(c.pauses);
+    let between: (() => Promise<void>) | undefined;
+    let reads = 0;
+    pauses.guard = async (taskId: string) => {
+      const read = await original(taskId);
+      const step = between;
+      if (step !== undefined && read.changes.some((ch) => ch.type === "create" && ch.ref.kind === "pause-gate") && ++reads === 2) { between = undefined; await step(); }
+      return read;
+    };
+    const seen: Record<string, BridgeResponse> = {};
+    let attemptId = "";
+    c.worker.script = c.session(async (s) => {
+      attemptId = s.attemptId;
+      between = async () => { seen["inner"] = await s.send("work.checkout", { action: "read", path: "b.txt" }, "st-inner"); };
+      seen["outer"] = await s.send("work.checkout", { action: "write", path: "a.txt", text: "x" }, "st-outer");
+    });
+    await c.tick();
+    assert.equal(between, undefined, "the outer call's first read of the gates saw them absent, and the other call ran in between");
+    assert.equal(good(seen["inner"]!)["state"], "confirmed", JSON.stringify(seen["inner"]));
+    assert.equal(good(seen["outer"]!)["state"], "confirmed", JSON.stringify(seen["outer"]));
+    const ops = (await c.dispatcher.operations(c.dispatcherPrincipal, attemptId))!;
+    assert.deepEqual([opOf(ops, "st-outer", seen["outer"]).state, opOf(ops, "st-inner", seen["inner"]).state], ["confirmed", "confirmed"]);
   });
 
   suite("card W09b first review: a repeated call ID never runs a checkout write or command twice (answered as it was), the same ID with other arguments is refused, oversized or NUL arguments never reach the host, and a refusal's words are scrubbed", async (c) => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { chmod, link, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -168,7 +168,7 @@ test("a repository the agent makes in a submodule entry's folder is never looked
     await git.createCheckout({ shared, commit: await git.head(shared), gitDir, checkout });
     // What a command in the agent's sandbox can do: a repository in the entry's (empty) folder, with a filter of its own, and a file changed at the same size so git must read it again.
     await rm(join(checkout, "sub"), { recursive: true, force: true });
-    execFileSync("cp", ["-a", sub, join(checkout, "sub")]);
+    cpSync(sub, join(checkout, "sub"), { recursive: true });
     const marker = join(dir, "RAN-ON-HOST");
     sh(join(checkout, "sub"), "config", "filter.nnx.clean", `sh -c 'touch ${marker}; cat'`);
     const touch = async (n: number): Promise<void> => { await writeFile(join(checkout, "sub", "f"), `data${String(n).padStart(5, "0")}\n`); };
@@ -248,7 +248,8 @@ for (const { name, beside, needsGlobNames } of patternEntries) {
       const gitDir = join(dir, "task.git"); const checkout = join(dir, "checkout");
       await git.createCheckout({ shared, commit: await git.head(shared), gitDir, checkout });
       await rm(join(checkout, name), { recursive: true, force: true });
-      execFileSync("cp", ["-a", sub, join(checkout, name)]);
+      // Node's copy, not a shell's cp: the name is taken literally on every host (Git Bash's cp on Windows read the brackets in "m[o]d" as a pattern).
+      cpSync(sub, join(checkout, name), { recursive: true });
       const marker = join(dir, "RAN-ON-HOST");
       sh(join(checkout, name), "config", "filter.nnx.clean", `sh -c 'touch ${marker}; cat'`);
       let n = 2;
