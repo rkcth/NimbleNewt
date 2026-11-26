@@ -9450,12 +9450,33 @@
       ],
       "deliverable": "Self-check/QA records and stale-evidence propagation; review policy (scope, triggers including periodic and incident, required checks, whether independent review gates completion) and a project QA view",
       "acceptance_and_verification": "Reviewer inspects actual version; changed dependency invalidates affected test/review; role title grants no access; a verdict cites the current acceptance-criteria and decision revisions and a rejection must cite an unmet owner requirement; a team vote cannot override an owner decision and work bound to a superseded decision fails review (C08); findings record environment, criteria revision and time; passed, failed, blocked and not-run are distinct and absent evidence fails the gate; invalidation schedules revalidation; independent evidence is counted by original source (DeskService.independence): a copy and the original are one source; amended 2026-10-28: evidence is bound to a tree id and a reviewer verdict carries over only by unchanged patch-id (P09)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "332d43af",
+          "425b85b0",
+          "5a36787d",
+          "c1d90cc2",
+          "0b4dc969",
+          "c1780089",
+          "fe94cd39",
+          "14ebdcfd",
+          "fc7f07b5",
+          "f718c5a8",
+          "b6983809"
+        ],
+        "ci_runs": [
+          "45846069820"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "QA evidence names one code submission and so its exact tree, the task contract version in force, the owner decisions, the environment and the times, with passed, failed, blocked and not-run kept apart; absent evidence, any non-passing required check and stale evidence fail the gate. Only the owner or an agent that may read the task and holds the qa or reviewer role records evidence (a role alone reads as not found); a self-check is kept and never counted. A contract change, a superseded or disputed decision, a newly relied-on decision and a changed recorded dependency (C03 manifest, kept as a snapshot per record) invalidate evidence and take approvals back everywhere they are read, including one-agent code; invalidation schedules a re-check for the recorder, and a stale approval schedules a re-review request once per stale episode (reapproval trigger), preferring the original reviewer, the owner told when nobody is eligible. An entry recorded again while the controller judges it changed is acknowledged ('seen', set by the controller only), so later work counts again while earlier evidence and approvals stay taken back. A verdict records the criteria version and decisions it was judged against; by default a rejection must name the unmet requirement; a team vote or every reviewer approving cannot pass work bound to a superseded decision. The project review policy sets scope, triggers (submission, periodic, incident), extra required checks, whether review gates completion and the independent-source count (a copy and its original are one source); the qa, qa_project and qa_policy views and chat show it. A verdict and QA evidence carry over only by an unchanged patch ID the host confirms. Limits: unmet is free text (1 to 500 characters), not checked against a criterion or decision; the owner may make citing optional; the record binds a verdict to the exact tree but cannot prove what the reviewer read; a file changed on disk that nobody records again is not seen; the scheduler looks at 200 tasks per round from an in-memory cursor and the first 500 active projects (gates judge on every read); a queued entry whose approval stopped counting stays queued (the landing refuses it) and director sign-offs are not re-judged; prerequisite tasks and artifacts are not dependency edges here (only what the manifest records)."
+      }
     },
     {
       "id": "Q03",
