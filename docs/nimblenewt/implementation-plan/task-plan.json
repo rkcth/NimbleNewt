@@ -5169,12 +5169,26 @@
       ],
       "deliverable": "Split from H12q (2026-10-31); narrowed 2026-10-31 (the product host composition is H12t): the landing settings workspace.landing.branch, requirePermit, protectedPaths and protectDefaults are registered, and the running controller gives the host builder a landingPolicy function that reads them for the task, fresh at each landing, to pass as the landing option of LocalWorkspaces",
       "acceptance_and_verification": "A host builder given the controller's landingPolicy lands under the owner's chat-set branch and protected paths, a change counts from the next landing, and a setting that cannot be read refuses the landing",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "00fab556",
+          "771d1781",
+          "a85310fa",
+          "f946ddc0"
+        ],
+        "ci_runs": [
+          "45803960092"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The landing settings workspace.landing.branch, requirePermit, protectedPaths and protectDefaults are registered and chat-settable; startController gives the host builder services.landingPolicy (api/landing-policy.ts landingPolicyFrom), read fresh for the task at each landing as one combination of the layers, and a host composer passes it as the landing option of LocalWorkspaces. A landing follows the owner's branch, permit and protected paths from the next landing on; no branch set refuses (nothing guessed); a setting that cannot be read refuses the landing and says so; only the owner can turn the permit off, and the branch and protectDefaults are installation-only; the owner sees the policy in force in an owner-only landing view. Limits: the composed test builds the host in the test's own builder, the product launcher's composition is H12t; the per-project branch and project layer came later (H12t, H12u)."
+      }
     },
     {
       "id": "H12t",
