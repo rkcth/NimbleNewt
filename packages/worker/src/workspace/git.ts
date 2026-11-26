@@ -567,7 +567,7 @@ export class GitBridge {
    * are returned (with the files an ignore rule keeps out, so that nothing is unseen). A Git-named entry, a link or a submodule entry anywhere refuses the whole thing. The tree ID is what a
    * reviewer approves and what `commit` will insist on.
    */
-  async stage(options: { gitDir: string; checkout: string }): Promise<{ base: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[] }> {
+  async stage(options: { gitDir: string; checkout: string; /** Asked with the staged files and sizes before the staging is answered; a throw refuses it and the index is put back to the head, as for a refusal here. */ check?: (files: readonly { path: string; op: "write" | "delete" }[], sizes: ReadonlyMap<string, number>) => void }): Promise<{ base: string; tree: string; files: { path: string; op: "write" | "delete" }[]; ignored: string[]; /** The size in bytes of each written file as it was staged (read again without following a link). */ sizes: Map<string, number> }> {
     await this.#neutralAttributes(options.gitDir);
     await this.#refuseGitData(options.checkout);
     await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout });
@@ -589,12 +589,16 @@ export class GitBridge {
     // Git reads a file it saw as plain by opening its path, which follows a link: a file swapped for a link (or a directory on the way swapped for one) between git's look and its read would put the content of a
     // file outside the checkout, read with the host's rights, into the commit. So every written file is read again here without following any link and must be exactly what was staged (H12o review).
     // H12o second review: on a refusal the index is put back to the head, so it no longer names a blob git read from outside the checkout.
-    try { for (const f of files) if (f.op === "write") await this.#sameAsStaged(options.checkout, f.path, blobs.get(f.path)); } catch (error) {
+    const sizes = new Map<string, number>();
+    try {
+      for (const f of files) if (f.op === "write") sizes.set(f.path, await this.#sameAsStaged(options.checkout, f.path, blobs.get(f.path)));
+      options.check?.(files, sizes);
+    } catch (error) {
       await this.#run(["read-tree", base], { gitDir: options.gitDir }).catch(() => undefined);
       throw error;
     }
     const status = await this.status(options);
-    return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path) };
+    return { base, tree, files, ignored: status.entries.filter((e) => e.code === "!!").map((e) => e.path), sizes };
   }
 
   /**
@@ -635,27 +639,51 @@ export class GitBridge {
   async patchId(options: { gitDir: string; base: string; /** Card P09: a commit or tree to compare the base with instead of the index (the committed change a landing would carry). The diff has the same form, so the same change gives the same ID. */ to?: string }): Promise<string | undefined> {
     if (!COMMIT.test(options.base)) throw new WorkspaceError("invalid_path", "a patch ID is taken against a full base commit");
     if (options.to !== undefined && !OBJECT.test(options.to)) throw new WorkspaceError("invalid_path", "a patch ID is taken up to a full object ID");
-    const run = (args: readonly string[], input?: Buffer): Promise<Buffer> => new Promise((resolveRun, reject) => {
-      const child = execFile(this.#git, ["--git-dir", options.gitDir, ...this.#flags(), ...args], { env: this.#env(), encoding: "buffer", maxBuffer: GIT_LIMITS.output * 4, timeout: GIT_LIMITS.timeoutMs, windowsHide: true, cwd: this.#empty }, (error, stdout, stderr) => {
-        if (error === null) return resolveRun(stdout as unknown as Buffer);
-        reject(new WorkspaceError("unavailable", `git ${String(args[0])} failed: ${String(stderr).replace(/\s+/g, " ").slice(0, 200)}`, { cause: error }));
-      });
-      child.stdin?.on("error", () => undefined);
-      child.stdin?.end(input ?? Buffer.alloc(0));
+    // The diff is streamed into `patch-id` (second review of the product launcher slice): held in memory it failed past the output buffer (about 50 MB of change) with an empty "git diff failed:" text, so a large change
+    // could never be submitted and the owner was told nothing. Both processes are bounded by the same time limit; only the few bytes of `patch-id`'s answer and the start of each error text are kept.
+    const diffArgs = ["diff", ...(options.to === undefined ? ["--cached"] : []), "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base, ...(options.to === undefined ? [] : [options.to])];
+    const { bytes, out } = await new Promise<{ bytes: number; out: string }>((resolveRun, reject) => {
+      const spawnOptions = { env: this.#env(), windowsHide: true, cwd: this.#empty };
+      const diff = spawn(this.#git, ["--git-dir", options.gitDir, ...this.#flags(), ...diffArgs], { ...spawnOptions, stdio: ["ignore", "pipe", "pipe"] });
+      const ids = spawn(this.#git, ["--git-dir", options.gitDir, ...this.#flags(), "patch-id", "--verbatim"], { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] });
+      let bytes = 0, out = "", diffErr = "", idsErr = "", failed: Error | undefined, pending = 2;
+      const codes: { diff?: number | null; ids?: number | null } = {};
+      const keep = (text: string, chunk: Buffer): string => (text.length < 400 ? text + chunk.toString("utf8") : text);
+      const timer = setTimeout(() => { failed ??= new WorkspaceError("unavailable", `git diff did not finish within ${GIT_LIMITS.timeoutMs} ms`); diff.kill("SIGKILL"); ids.kill("SIGKILL"); }, GIT_LIMITS.timeoutMs);
+      const done = (): void => {
+        if (--pending > 0) return;
+        clearTimeout(timer);
+        if (failed !== undefined) return reject(failed);
+        if (codes.diff !== 0) return reject(new WorkspaceError("unavailable", `git diff failed: ${diffErr.replace(/\s+/g, " ").slice(0, 200)}`));
+        if (codes.ids !== 0) return reject(new WorkspaceError("unavailable", `git patch-id failed: ${idsErr.replace(/\s+/g, " ").slice(0, 200)}`));
+        resolveRun({ bytes, out });
+      };
+      const broke = (error: Error & { code?: string }): void => { failed ??= error.code === "ENOENT" ? new WorkspaceError("unavailable", "git is not installed on this host") : new WorkspaceError("unavailable", `git could not be run: ${error.message.slice(0, 120)}`); };
+      diff.on("error", (error) => { broke(error); ids.stdin.end(); }); ids.on("error", broke);
+      diff.stdout.on("data", (chunk: Buffer) => { bytes += chunk.length; });
+      diff.stdout.pipe(ids.stdin);
+      ids.stdin.on("error", () => undefined);
+      diff.stderr.on("data", (chunk: Buffer) => { diffErr = keep(diffErr, chunk); });
+      ids.stderr.on("data", (chunk: Buffer) => { idsErr = keep(idsErr, chunk); });
+      ids.stdout.on("data", (chunk: Buffer) => { out = keep(out, chunk); });
+      diff.on("close", (code) => { codes.diff = code; done(); });
+      ids.on("close", (code) => { codes.ids = code; done(); });
     });
-    const diff = await run(["diff", ...(options.to === undefined ? ["--cached"] : []), "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", options.base, ...(options.to === undefined ? [] : [options.to])]);
-    if (diff.length === 0) return undefined;
-    const out = (await run(["patch-id", "--verbatim"], diff)).toString("utf8").trim();
-    const id = out.split(/\s+/)[0] ?? "";
+    if (bytes === 0) return undefined;
+    const id = out.trim().split(/\s+/)[0] ?? "";
     if (!/^[0-9a-f]{40,64}$/.test(id)) throw new WorkspaceError("unavailable", "git patch-id gave no ID for the staged change");
     return id;
   }
 
   /** Refuses unless the file at `path` in the checkout, opened without following a link at any name and without blocking, is a plain file whose Git blob ID is `staged`. */
-  async #sameAsStaged(checkout: string, path: string, staged: string | undefined): Promise<void> {
+  async #sameAsStaged(checkout: string, path: string, staged: string | undefined): Promise<number> {
     const changed = (): WorkspaceError => new WorkspaceError("link_refused", `${JSON.stringify(path.slice(0, 80))} changed or was replaced by a link while it was being staged; nothing was committed`, { tamper: true });
     if (staged === undefined || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(staged)) throw changed();
-    const safe = await resolveSafe(checkout, path).catch(() => { throw changed(); });
+    // A name no system-wide path can hold (a control character, `"`, a device name, a trailing dot, too long) or one that is another spelling of a file beside it is refused as what it is, not as a swap (second review of the
+    // product launcher slice: it read "changed or was replaced by a link" and was reported as an escape attempt). Neither depends on a race: the name and its neighbours are the agent's own.
+    const unfit = (error: WorkspaceError): WorkspaceError => new WorkspaceError(error.code, `${JSON.stringify(path.slice(0, 80))} cannot be carried: ${error.message}; nothing was staged`);
+    try { splitRelative(path, { rootLength: (await realpath(checkout)).length }); } catch (error) { throw error instanceof WorkspaceError ? unfit(error) : changed(); }
+    const safe = await resolveSafe(checkout, path).catch((error: unknown) => { throw error instanceof WorkspaceError && error.code === "collision" ? unfit(error) : changed(); });
     if (safe.exists !== "file") throw changed();
     await this.#beforeOpen?.(safe.absolute);
     const handle = await open(safe.absolute, constants.O_RDONLY | NOFOLLOW | (constants.O_NONBLOCK ?? 0)).catch(() => { throw changed(); });
@@ -668,6 +696,7 @@ export class GitBridge {
       let read = 0;
       for await (const chunk of handle.createReadStream({ autoClose: false, highWaterMark: 1 << 20 }) as AsyncIterable<Buffer>) { read += chunk.length; hash.update(chunk); }
       if (read !== info.size || hash.digest("hex") !== staged) throw changed();
+      return read;
     } finally { await handle.close(); }
   }
 

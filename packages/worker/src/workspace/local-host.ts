@@ -8,7 +8,8 @@ import type { GitBridge } from "./git.js";
 import { WipBackupHost, type HostRestoreTarget } from "./wip-host.js";
 import { WorkspaceHost, type WorkspaceHostOptions, type CheckoutLocation, type HostWorkspaceCall, type HostWorkspaceOutcome, type HostRestackCall, type HostRestackOutcome, type LandingPolicy } from "./host.js";
 import { landingChecks, type LandingCheckCall, type LandingCheckReport, type LandingChecksOptions } from "./landing-checks.js";
-import { fold, plainName } from "./names.js";
+import { BRIDGE_LIMITS } from "./bridge.js";
+import { collisions, fold, plainName, splitRelative } from "./names.js";
 import { NOFOLLOW } from "./paths.js";
 
 /**
@@ -169,11 +170,22 @@ export class LocalWorkspaces {
     if (where === undefined) return undefined;
     // In the checkout's turn (first review of the product launcher slice): a re-apply, release or landing on the same checkout finishes before this reads it, and none starts while it reads.
     return this.host.exclusive(where.checkout, async () => {
-      await this.#submitAdmitted(call, where.shared);
-      const tip = await this.host.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: where.shared }, "the submit could not be checked");
+      const now = this.#stillHere(call, where.checkout, "the submit could not be checked");
+      await this.#submitAdmitted(call, now.shared);
+      const tip = await this.host.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: now.shared }, "the submit could not be checked");
       if ("refuse" in tip) throw new WorkspaceError("unavailable", tip.refuse);
-      return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout, head: tip.head });
-    });
+      return this.#options.git.submitView({ shared: now.shared, gitDir: now.gitDir, checkout: now.checkout, head: tip.head });
+    }).catch((error: unknown) => { throw plainError(error, where, this.#options.root); });
+  }
+
+  /**
+   * The task's location again, inside the checkout's turn (second review of the product launcher slice): the wait may have been behind a quarantine of the checkout, and the project's shared repository may have been
+   * changed meanwhile, so the location found before the wait is not used. A checkout that is gone, or is now another one, refuses (`unavailable`).
+   */
+  #stillHere(call: { readonly taskId: string; readonly projectId: string }, checkout: string, what: string): CheckoutLocation {
+    const now = this.locate(call);
+    if (now === undefined || now.checkout !== checkout || !existsSync(now.checkout)) throw new WorkspaceError("unavailable", `${what}: the task's checkout is no longer on this host as it was (it was moved, quarantined or removed)`);
+    return now;
   }
 
   /**
@@ -185,12 +197,14 @@ export class LocalWorkspaces {
     if (where === undefined) throw new WorkspaceError("unavailable", "this host holds no checkout for the task, so its work cannot be staged");
     // In the checkout's turn, as the view: the index, the head and the files cannot be changed by another request of this host between the staging and the patch ID.
     return this.host.exclusive(where.checkout, async () => {
-      await this.#submitAdmitted(call, where.shared);
-      const staged = await this.#options.git.stage({ gitDir: where.gitDir, checkout: where.checkout });
-      const patchId = await this.#options.git.patchId({ gitDir: where.gitDir, base: staged.base });
-      if (patchId === undefined || staged.files.length === 0) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
+      const now = this.#stillHere(call, where.checkout, "the work cannot be staged");
+      await this.#submitAdmitted(call, now.shared);
+      const staged = await this.#options.git.stage({ gitDir: now.gitDir, checkout: now.checkout, check: landable });
+      if (staged.files.length === 0) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
+      const patchId = await this.#options.git.patchId({ gitDir: now.gitDir, base: staged.base });
+      if (patchId === undefined) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
       return { base: staged.base, tree: staged.tree, patchId, files: staged.files.map((f) => f.path) };
-    });
+    }).catch((error: unknown) => { throw plainError(error, where, this.#options.root); });
   }
 
   /**
@@ -379,6 +393,48 @@ export class LocalWorkspaces {
       if (info !== undefined && Date.now() - info.mtimeMs > 10 * 60_000) await rm(join(staging, name), { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+/**
+ * Refuses a staging that a landing could never carry (second review of the product launcher slice), so a submission is not reviewed and approved only to fail at its landing: the landing writes the change through the
+ * bridge as one set (`WorkspaceBridge.writeSet`), which takes at most `BRIDGE_LIMITS.setFiles` files, `BRIDGE_LIMITS.fileBytes` bytes per file and `BRIDGE_LIMITS.setBytes` in all, only names every system can hold
+ * (`splitRelative`), and no two names that are one file on a case-insensitive or normalising filesystem. Before this a change of about 50 MB failed with an empty "git diff failed:" text, and a larger set was approved but
+ * could not land. The reason says which bound and names at most one file (cut).
+ */
+function landable(files: readonly { readonly path: string; readonly op: "write" | "delete" }[], sizes: ReadonlyMap<string, number>): void {
+  const shown = (path: string): string => JSON.stringify(path.slice(0, 120));
+  if (files.length > BRIDGE_LIMITS.setFiles) throw new WorkspaceError("invalid_path", `the change touches ${files.length} files; a landing carries at most ${BRIDGE_LIMITS.setFiles} as one step, so it cannot be submitted (split the work into smaller tasks)`);
+  let total = 0;
+  for (const f of files) {
+    try { splitRelative(f.path); } catch (error) { throw new WorkspaceError("invalid_path", `the change holds ${shown(f.path)}, which a landing cannot write (${(error as Error).message.slice(0, 160)}); rename it before submitting`); }
+    const size = sizes.get(f.path) ?? 0;
+    if (size > BRIDGE_LIMITS.fileBytes) throw new WorkspaceError("invalid_path", `${shown(f.path)} is ${size} bytes; a landing carries at most ${BRIDGE_LIMITS.fileBytes} bytes per file, so the change cannot be submitted`);
+    total += size;
+  }
+  if (total > BRIDGE_LIMITS.setBytes) throw new WorkspaceError("invalid_path", `the change's files hold ${total} bytes; a landing carries at most ${BRIDGE_LIMITS.setBytes} bytes as one step, so it cannot be submitted`);
+  const clash = collisions(files.map((f) => f.path))[0];
+  if (clash !== undefined) throw new WorkspaceError("collision", `the change holds ${clash.slice(0, 2).map(shown).join(" and ")}, which are one file on a case-insensitive or normalising filesystem; a landing cannot write both, so it cannot be submitted`);
+}
+
+/**
+ * A submit's error as the owner reads it (second review of the product launcher slice): the same code and tamper mark, with this host's folders named by what they are instead of by their path (git's own text names
+ * them, for example an `index.lock` left in the task's git directory), and any other absolute path replaced. A thrown value that is not a workspace error becomes `unavailable`.
+ */
+function plainError(error: unknown, where: CheckoutLocation, root: string): WorkspaceError {
+  const message = String((error as Error)?.message ?? error);
+  const real = (p: string): string => { try { return realpathSync(p); } catch { return p; } };
+  const labels: [string, string][] = [
+    [where.gitDir, "the task's git directory"], [where.checkout, "the checkout"], [join(where.checkout, ".."), "the task's folder"], [where.shared, "the shared repository"], [root, "the host's workspace folder"],
+  ];
+  const named = labels.flatMap(([p, label]): [string, string][] => [[real(p), label], [p, label]]).filter(([p]) => p.length > 1).sort((a, b) => b[0].length - a[0].length);
+  let text = message;
+  for (const [p, label] of named) text = text.split(p).join(label);
+  text = text.replace(/(?<![\w.~-])(?:\/[^\s'"`]+|[A-Za-z]:\\[^\s'"`]+)/g, "<a host path>");
+  if (error instanceof WorkspaceError) {
+    if (text === message) return error;
+    return new WorkspaceError(error.code, text, { cause: error, ...(error.tamper === true ? { tamper: true as const } : {}), ...(error.detail === undefined ? {} : { detail: error.detail }) });
+  }
+  return new WorkspaceError("unavailable", text.slice(0, 500), { cause: error });
 }
 
 const ATTEMPT = /^[A-Za-z0-9._:-]{1,120}$/;
