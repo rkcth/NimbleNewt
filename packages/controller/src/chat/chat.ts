@@ -2530,7 +2530,8 @@ export class ChatService {
   async #overrideNote(token: string, projectId: string, taskId: string, topic: string): Promise<string[]> {
     const history = ((await this.#get(token, "decision.history", { projectId, topic, taskId })) as unknown as Record<string, unknown>[] | undefined) ?? [];
     const wide = history.filter((e) => e["taskId"] === undefined && e["state"] === "active");
-    if (wide.length === 0) return [];
+    // The task already has its own decision on the topic: this one corrects it, and the project-wide decision was already overridden for the task (its links were taken back then).
+    if (wide.length === 0 || history.some((e) => e["taskId"] === taskId && e["state"] === "active")) return [];
     const ids = wide.map((e) => String(e["id"]));
     const reliance = (await this.#get(token, "decision.reliance", { taskId })) as { links?: { decisionId?: unknown; state?: unknown; subject?: { kind?: unknown } }[] } | undefined;
     const linked = (reliance?.links ?? []).filter((l) => l.state === "current" && ids.includes(String(l.decisionId)));

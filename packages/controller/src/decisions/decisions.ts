@@ -722,7 +722,9 @@ export class DecisionService implements DecisionGuard {
         for (const l of rel.links) {
           // A dispute the owner settled by keeping a project-wide decision over a task-level one that had overridden it for this task: the link that override marked counts again (the work was made on the
           // decision chosen, as an approval judged on a decision a dispute kept counts again).
-          if (rec.reason === "resolved" && l.decisionId === rec.newId && l.state === "superseded" && l.because !== undefined && l.supersededBy !== undefined && losing.has(l.supersededBy)) {
+          // Only while the kept decision still governs this task: a task-level decision the owner recorded for it after the settlement, before this pass reached it, keeps the link marked (that decision
+          // writes this reliance record, so this mark is ordered against it).
+          if (rec.reason === "resolved" && l.decisionId === rec.newId && l.state === "superseded" && l.because !== undefined && l.supersededBy !== undefined && losing.has(l.supersededBy) && (await this.#governs(rel.projectId, taskId, l))) {
             const { supersededBy: _by, markedAt: _at, because: _why, ...kept } = l;
             links.push({ ...kept, state: "current" });
             continue;
@@ -752,6 +754,12 @@ export class DecisionService implements DecisionGuard {
         return { ref: relRef, creates: false, changes: mergeChanges(changes), detail: { propagationId: propId, taskId, marked: links.filter((l) => l.state === "superseded").length } };
       },
     })));
+  }
+
+  /** Whether the link's decision is the one that governs the task on its topic now. */
+  async #governs(projectId: string, taskId: string, l: LinkBody): Promise<boolean> {
+    const now = await this.#authority(projectId, taskId, l.topic);
+    return now.status === "decided" && now.decision.id === l.decisionId;
   }
 
   /** A running generation of the task is interrupted (L05 `correct`), so what it was producing cannot be applied. A task that never generated, or is finished, needs nothing. */

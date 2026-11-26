@@ -19,6 +19,7 @@ import { QaEvidenceService, SubmissionService } from "../submissions/index.js";
 import { StatusService } from "../status/index.js";
 import { BlockerService } from "../domain/blockers.js";
 import { WaitService } from "../domain/waits.js";
+import { SwarmService } from "../swarm/index.js";
 import { DecisionService, type DecisionDeps, type RecordDecision } from "./index.js";
 import { propagationIdOf, relianceIdOf } from "./records.js";
 
@@ -353,5 +354,143 @@ for (const backend of backends) {
     const q3 = "And the first task now?";
     r.script[q3] = [{ kind: "status", request: { kind: "task", taskTitle: "first task" }, evidence: q3, basis: "owner" }];
     assert.doesNotMatch(((await chat.submit(r.w.ownerToken, { messageId: "m-why3", text: q3 })).outcomes[0] as Outcome).lines!.map((l) => l.text).join("\n"), /next action waits/);
+  });
+
+  // Second review (2026-11-26): the paths below were not covered.
+  const broken = (r: Rig) => DecisionService.withEpoch(r.st, r.w.projects.epoch, { effects: { get: async () => { throw new DomainError("unavailable", "the effect records cannot be read now"); } } } as never, options);
+
+  suite("a dispute settled for the project-wide decision gives no link back while the owner's newer task-level decision governs the task (it was recorded before the settlement reached the task)", async (r) => {
+    const wide = await r.recorded({ topic: "cache", statement: "Use Redis", wording: "we use Redis" });
+    const act = await r.intend(r.t1);
+    await r.link(r.t1, [wide.id]);
+    await r.link(r.t1, [wide.id], { kind: "action", id: act });
+    const over = await r.recorded({ topic: "cache", taskId: r.t1, statement: "Task one uses Memcached", wording: "task one uses Memcached", basedOn: 1 });
+    await r.decisions.revalidate(r.ann, { commandId: cid("rv"), taskId: r.t1, decisions: [over.id], note: "re-read", subjects: [{ kind: "action", id: act }] });
+    const late = await r.recorded({ topic: "cache", statement: "Use Valkey", wording: "we use Valkey", basedOn: 1 });
+    assert.ok(late.disputeId !== undefined);
+    // The settlement commits, but passing it on to the task fails (the effect records cannot be read): it stays pending.
+    assert.equal((await broken(r).resolveDispute(r.w.owner, { commandId: cid("rd"), disputeId: late.disputeId!, chosen: wide.id })).propagation, "pending");
+    // Before it reaches the task, the owner decides again for that task.
+    const again = await r.recorded({ topic: "cache", taskId: r.t1, statement: "Task one uses Hazelcast", wording: "task one uses Hazelcast", basedOn: 1 });
+    await r.decisions.resume(r.w.owner, { projectId: r.a });
+    const contract = (await r.rel(r.t1)).links.find((l) => l.subject.kind === "contract")!;
+    assert.deepEqual([contract.decisionId, contract.state, contract.stale], [wide.id, "superseded", true], "the project-wide decision does not govern the task: its own newer decision does");
+    await r.revalidate(r.t1, [again.id]);
+    assert.deepEqual(await r.blocked(r.t1), []);
+    assert.deepEqual((await r.rel(r.t1)).links.map((l) => [l.decisionId, l.state]), [[again.id, "current"], [again.id, "current"]]);
+  });
+
+  suite("a dispute between another task's decision and the project-wide one, settled for the project-wide one, leaves a third task's own override in force", async (r) => {
+    const wide = await r.recorded();
+    await r.link(r.t2, [wide.id]);
+    const own = await r.recorded({ taskId: r.t2, statement: "Task two uses SQLite", wording: "task two uses SQLite", basedOn: 1 });
+    // Task one's decision is based on nothing seen: it conflicts with the project-wide decision.
+    const late = await r.recorded({ taskId: r.t1, statement: "Task one uses DuckDB", wording: "task one uses DuckDB", basedOn: 0 });
+    assert.ok(late.disputeId !== undefined);
+    await r.decisions.resolveDispute(r.w.owner, { commandId: cid("rd"), disputeId: late.disputeId!, chosen: wide.id });
+    const l = (await r.rel(r.t2)).links[0]!;
+    assert.deepEqual([l.decisionId, l.state, l.supersededBy], [wide.id, "superseded", own.id]);
+    assert.equal((await r.blocked(r.t2)).length, 1);
+    assert.equal((await r.decisions.get(r.w.owner, own.id))?.state, "active");
+  });
+
+  suite("a task linked to several decisions: an override of one topic marks only that topic's link, and revalidating onto the override clears it", async (r) => {
+    const db = await r.recorded();
+    const log = await r.recorded({ topic: "logging", statement: "Log JSON", wording: "we log JSON" });
+    await r.link(r.t1, [db.id, log.id]);
+    const c = await r.code(r.t1);
+    await r.approve(c, r.t1);
+    const over = await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite", basedOn: 1 });
+    assert.deepEqual(over.overridden, { taskId: r.t1, decisionIds: [db.id] });
+    assert.deepEqual((await r.rel(r.t1)).links.map((l) => [l.decisionId, l.state]).sort(), [[db.id, "superseded"], [log.id, "current"]].sort());
+    const b = await r.blocked(r.t1);
+    assert.equal(b.length, 1);
+    assert.match(b[0]!, new RegExp(`decision ${db.id}, which no longer applies`));
+    assert.match((await r.subs.approvalOf(c))!.outdated!.because, new RegExp(db.id));
+    assert.deepEqual(await r.revalidate(r.t1, [over.id]), { revalidated: 1, remaining: 0, replayed: false });
+    assert.deepEqual(await r.blocked(r.t1), []);
+    assert.deepEqual((await r.decisions.context(r.w.owner, { projectId: r.a, taskId: r.t1 }))!.decisions.map((d) => d.id).sort(), [over.id, log.id].sort());
+  });
+
+  suite("a crash between the override's commit and its passing on: the block holds without it, and the pass is finished once later", async (r) => {
+    const wide = await r.recorded();
+    const done = await r.intend(r.t1);
+    assert.equal((await r.effects.run(done, bridge)).status, "confirmed");
+    await r.link(r.t1, [wide.id]);
+    await r.link(r.t1, [wide.id], { kind: "action", id: done });
+    const c = await r.code(r.t1);
+    await r.approve(c, r.t1);
+    r.published.length = 0;
+    const cmd = { commandId: cid("dec"), projectId: r.a, taskId: r.t1, category: "decision", topic: "database", statement: "Task one uses SQLite", wording: "task one uses SQLite", source: { channel: "direct" }, basedOn: 1 } as never;
+    const first = await broken(r).record(r.w.owner, cmd);
+    assert.deepEqual([first.recorded, (first as { propagation: string }).propagation], [true, "pending"]);
+    // Durable without the pass: the links are marked, the guard blocks, the approval does not count, nothing was told yet.
+    assert.ok((await r.rel(r.t1)).links.every((l) => l.state === "superseded"));
+    assert.equal((await r.blocked(r.t1)).length, 2);
+    assert.equal((await r.subs.approvalOf(c))?.approved, false);
+    assert.deepEqual([(await r.rel(r.t1)).followUps, r.published], [[], []]);
+    // The regular round finishes it: one follow-up, one notice; a repeat of the command and another round add nothing.
+    await r.decisions.resume(r.w.owner, { projectId: r.a });
+    const again = await r.decisions.record(r.w.owner, cmd);
+    assert.deepEqual([(again as { replayed: boolean }).replayed, (again as { propagation: string }).propagation, (again as { overridden?: unknown }).overridden], [true, "done", { taskId: r.t1, decisionIds: [wide.id] }]);
+    await r.decisions.resume(r.w.owner, { projectId: r.a });
+    assert.deepEqual((await r.rel(r.t1)).followUps.map((f) => [f.effectId, f.state]), [[done, "open"]]);
+    assert.deepEqual(r.published, [`task:${r.t1}:decision-superseded`]);
+  });
+
+  suite("ASSUMPTION: a child task spawned from an overridden task does not inherit the override (a task-level decision names one task); the owner decides for the child separately", async (r) => {
+    const swarm = SwarmService.withEpoch(r.st, r.w.projects.epoch, {
+      projects: r.w.projects, contracts: r.w.contracts, limits: { depth: 3, children: 4 },
+      budgets: { canManage: async () => true, delegate: async () => ({}), reclaim: async () => ({}) } as never,
+      stops: { request: async () => ({ intentId: "x" }), advance: async () => ({}), holding: async () => false } as never,
+    }, options);
+    const wide = await r.recorded();
+    await r.link(r.t1, [wide.id]);
+    const over = await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite", basedOn: 1 });
+    const child = (await swarm.spawn(r.w.owner, { commandId: cid("sp"), parentTaskId: r.t1, title: "child of task one", expectedResult: "one part of it", acceptanceCriteria: ["the part works"] })).taskId;
+    const governs = await r.decisions.authoritative(r.w.owner, { projectId: r.a, taskId: child, topic: "database" });
+    assert.equal(governs?.status === "decided" ? governs.decision.id : undefined, wide.id, "the child is governed by the project-wide decision");
+    await r.link(child, [wide.id]);
+    assert.deepEqual([await r.blocked(child), (await r.blocked(r.t1)).length], [[], 1]);
+    assert.deepEqual((await r.decisions.context(r.w.owner, { projectId: r.a, taskId: child }))!.decisions.map((d) => d.id), [wide.id]);
+    // The owner can decide for the child too: then it is overridden there as well.
+    const forChild = await r.recorded({ taskId: child, statement: "The child uses SQLite too", wording: "the child uses SQLite too", basedOn: 1 });
+    assert.deepEqual(forChild.overridden, { taskId: child, decisionIds: [wide.id] });
+    assert.notEqual(forChild.id, over.id);
+  });
+
+  suite("a dispute holding two tasks' overrides, settled for the project-wide decision, gives both tasks their links back; the task view read by the task's agent names the owner, not 'you'", async (r) => {
+    const wide = await r.recorded();
+    await r.link(r.t1, [wide.id]); await r.link(r.t2, [wide.id]);
+    await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite", basedOn: 1 });
+    await r.recorded({ taskId: r.t2, statement: "Task two uses DuckDB", wording: "task two uses DuckDB", basedOn: 1 });
+    const status = StatusService.withEpoch(r.st, r.w.projects.epoch, { assignments: r.w.assignments, waits: WaitService.withEpoch(r.st, r.w.projects.epoch, r.w.assignments, options), blockers: BlockerService.withEpoch(r.st, r.w.projects.epoch, options), contracts: r.w.contracts }, options);
+    const seen = (await status.task(r.ann, r.t1))!.lines.map((l) => l.text).join("\n");
+    assert.match(seen, new RegExp(`relies on the owner's decision ${wide.id} .*no longer applies to it.*The way out: its agent \\(or the owner\\) revalidates`));
+    assert.doesNotMatch(seen, /your decision|or you\)/);
+    const late = await r.recorded({ statement: "Use MariaDB", wording: "we use MariaDB", basedOn: 1 });
+    assert.ok(late.disputeId !== undefined);
+    // While the owner's instructions conflict, the owner's task view says so and that the choice is theirs.
+    assert.match((await status.task(r.w.owner, r.t1))!.lines.map((l) => l.text).join("\n"), new RegExp(`relies on your decision ${wide.id} .*which is disputed \\(two of your instructions conflict\\) until you choose`));
+    await r.decisions.resolveDispute(r.w.owner, { commandId: cid("rd"), disputeId: late.disputeId!, chosen: wide.id });
+    for (const t of [r.t1, r.t2]) {
+      assert.deepEqual((await r.rel(t)).links.map((l) => [l.decisionId, l.state]), [[wide.id, "current"]]);
+      assert.deepEqual(await r.blocked(t), []);
+    }
+  });
+
+  suite("in chat, a second decision for a task that already has its own on the topic is not described as overriding the project-wide decision with nothing stopping counting", async (r) => {
+    const chat = r.w.chat();
+    await chat.setFocus(r.w.ownerToken, { commandId: cid("f"), projectId: r.a });
+    const wide = await r.recorded();
+    await r.link(r.t1, [wide.id]);
+    const first = await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite", basedOn: 1 });
+    await r.revalidate(r.t1, [first.id]);
+    const text = "For the first task the database will be DuckDB instead.";
+    r.script[text] = [{ kind: "command", op: "decision.record", args: { category: "decision", topic: "database", taskTitle: "first task", statement: "the database will be DuckDB", wording: "For the first task the database will be DuckDB instead" }, evidence: "For the first task the database will be DuckDB instead", basis: "owner" }];
+    r.w.profile.value = "strict";
+    const shown = (await chat.submit(r.w.ownerToken, { messageId: "m-o9", text })).outcomes[0] as Outcome;
+    assert.equal(shown.status, "proposed", JSON.stringify(shown));
+    assert.doesNotMatch(JSON.stringify(shown.preview), /nothing of it stops counting|overrides the project-wide decision/);
   });
 }
