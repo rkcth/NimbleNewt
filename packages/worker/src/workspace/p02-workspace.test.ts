@@ -152,6 +152,31 @@ test("a submit's view and its staging ask the admission again on the checkout's 
   } finally { await w.done(); }
 });
 
+test("a submit's view and its staging wait for the checkout's turn: while another request of the host holds the checkout (a re-apply, a release, a landing) neither asks, reads nor stages; then both answer (card H12n, product launcher, first review)", { skip }, async () => {
+  const asked: string[] = [];
+  const w = await world({ admit: async (c) => { asked.push(c.shared); return { admitted: true, binding: BINDING }; } });
+  try {
+    const made = await w.ws.ensure({ ...scope, attemptId: "att-1" });
+    await writeFile(join(made.checkout, "src", "a.ts"), "export const a = 2;\n");
+    asked.length = 0;
+    const indexBefore = gitOf(made)("ls-files", "-s");
+    let release!: () => void;
+    const held = w.ws.host.exclusive(made.checkout, () => new Promise<void>((r) => { release = r; }));
+    const settled: string[] = [];
+    const view = w.ws.submitView(scope).then((v) => { settled.push("view"); return v; });
+    const staging = w.ws.stageWork(scope).then((s) => { settled.push("stage"); return s; });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual([settled, asked.length], [[], 0], "nothing answered and nothing asked while another request holds the checkout");
+    assert.equal(gitOf(made)("ls-files", "-s"), indexBefore, "nothing was staged while another request holds the checkout");
+    release();
+    await held;
+    const base = sh(w.shared, "rev-parse", "HEAD");
+    assert.deepEqual(await view, { base, head: base, mine: ["src/a.ts"], landed: [] });
+    assert.deepEqual((await staging).files, ["src/a.ts"]);
+    assert.deepEqual(settled, ["view", "stage"], "in the order they were asked");
+  } finally { await w.done(); }
+});
+
 test("a start record's file name means one attempt on every filesystem: an ID with a capital letter, a colon or an end dot is kept under a digest of it, and is read back by its ID (card P02 review)", { skip }, async () => {
   const w = await world();
   try {

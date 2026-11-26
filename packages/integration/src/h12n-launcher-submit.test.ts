@@ -24,7 +24,11 @@ const facts: EnvironmentFacts = { platform: "linux", arch: "x64", osRelease: "6.
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const until = async (ok: () => boolean | Promise<boolean>, ms: number, why: string | (() => string)): Promise<void> => { const end = Date.now() + ms; while (!(await ok())) { if (Date.now() > end) assert.fail(typeof why === "function" ? why() : why); await sleep(50); } };
 const hasGit = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
-const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }).trim();
+// Every git call of the test reads no system or user configuration (first review): a machine's core.autocrlf, color.ui=always or diff.external would otherwise change the files committed, or the diff the expected patch ID is taken from.
+const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+const G = ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+const git = (args: string[], options: { cwd?: string; input?: string } = {}): string => execFileSync("git", [...G, ...args], { ...options, env: gitEnv, encoding: "utf8" }).trim();
+const sh = (cwd: string, ...args: string[]): string => git(args, { cwd });
 const memorySecrets = (seed: Record<string, string>): LauncherSecrets => { const values = new Map(Object.entries(seed)); return { resolve: async (n) => values.get(n), set: async (n, v) => { values.set(n, v); }, remove: async (n) => values.delete(n) }; };
 const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
 const REPORT = "did the work; found nothing; left nothing; could not do nothing";
@@ -136,8 +140,8 @@ test("the launcher's product worker host answers a submit: work.end { submit: tr
     const sub = await api("submission.get", { submissionId: one.ending.submissionId });
     assert.equal(sub.ok, true, JSON.stringify(sub));
     const t1 = taskDir(project, one.taskId);
-    const g = (...args: string[]): string => execFileSync("git", ["--git-dir", join(t1, "task.git"), "--work-tree", join(t1, "checkout"), ...args], { encoding: "utf8" }).trim();
-    const patch = execFileSync("git", ["patch-id", "--verbatim"], { input: execFileSync("git", ["--git-dir", join(t1, "task.git"), "diff", "--cached", "--binary", "--full-index", base1], { encoding: "utf8" }), encoding: "utf8" }).trim().split(/\s+/)[0];
+    const g = (...args: string[]): string => git(["--git-dir", join(t1, "task.git"), "--work-tree", join(t1, "checkout"), ...args]);
+    const patch = git(["patch-id", "--verbatim"], { input: `${git(["--git-dir", join(t1, "task.git"), "diff", "--cached", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", base1])}\n` }).split(/\s+/)[0];
     assert.deepEqual([sub.result.item.kind, sub.result.item.role, sub.result.item.taskId, sub.result.item.base, sub.result.item.tree, sub.result.item.patchId], ["code", "author", one.taskId, base1, g("write-tree"), patch], "the submission carries what the product host staged in the task's checkout");
     assert.equal(g("diff", "--cached", "--name-only", base1), "src/b.ts", "only the agent's file is staged (the landing branch's README is not the agent's)");
     // The submission is frozen: a change of the checkout after the ending does not change what was submitted.
@@ -178,7 +182,7 @@ test("the launcher's product worker host answers a submit: work.end { submit: tr
     assert.deepEqual([op?.state, op?.readOnly], ["uncertain", false]);
     assert.deepEqual(await submissionsOf(three.taskId), []);
     const t3 = taskDir(project, three.taskId);
-    assert.equal(execFileSync("git", ["--git-dir", join(t3, "task.git"), "diff", "--cached", "--name-only"], { encoding: "utf8" }).trim(), "", "nothing was staged");
+    assert.equal(git(["--git-dir", join(t3, "task.git"), "diff", "--cached", "--name-only"]), "", "nothing was staged");
     const blocker = await BlockerService.withEpoch(c.storage, c.epoch).openFor("runtime_hold", { kind: "task", id: three.taskId });
     assert.ok(blocker !== undefined, "the owner has an open blocker on the task");
     assert.equal(blocker.id, three.ending.blocker);
@@ -205,7 +209,7 @@ test("the launcher's product worker host answers a submit: work.end { submit: tr
     assert.notEqual(four.ending.outcome, "submitted", JSON.stringify(four.ending));
     assert.deepEqual(await submissionsOf(four.taskId), []);
     const t4 = taskDir(project, four.taskId);
-    assert.equal(execFileSync("git", ["--git-dir", join(t4, "task.git"), "diff", "--cached", "--name-only"], { encoding: "utf8" }).trim(), "", "nothing was staged");
+    assert.equal(git(["--git-dir", join(t4, "task.git"), "diff", "--cached", "--name-only"]), "", "nothing was staged");
     await l.close();
     second = undefined;
   } finally {

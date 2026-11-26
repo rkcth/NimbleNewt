@@ -167,10 +167,13 @@ export class LocalWorkspaces {
   async submitView(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; head: string; mine: string[]; landed: string[] } | undefined> {
     const where = this.locate(call);
     if (where === undefined) return undefined;
-    await this.#submitAdmitted(call, where.shared);
-    const tip = await this.host.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: where.shared }, "the submit could not be checked");
-    if ("refuse" in tip) throw new WorkspaceError("unavailable", tip.refuse);
-    return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout, head: tip.head });
+    // In the checkout's turn (first review of the product launcher slice): a re-apply, release or landing on the same checkout finishes before this reads it, and none starts while it reads.
+    return this.host.exclusive(where.checkout, async () => {
+      await this.#submitAdmitted(call, where.shared);
+      const tip = await this.host.landingHead({ taskId: call.taskId, projectId: call.projectId, shared: where.shared }, "the submit could not be checked");
+      if ("refuse" in tip) throw new WorkspaceError("unavailable", tip.refuse);
+      return this.#options.git.submitView({ shared: where.shared, gitDir: where.gitDir, checkout: where.checkout, head: tip.head });
+    });
   }
 
   /**
@@ -180,11 +183,14 @@ export class LocalWorkspaces {
   async stageWork(call: { readonly taskId: string; readonly projectId: string }): Promise<{ base: string; tree: string; patchId: string; files: string[] }> {
     const where = this.locate(call);
     if (where === undefined) throw new WorkspaceError("unavailable", "this host holds no checkout for the task, so its work cannot be staged");
-    await this.#submitAdmitted(call, where.shared);
-    const staged = await this.#options.git.stage({ gitDir: where.gitDir, checkout: where.checkout });
-    const patchId = await this.#options.git.patchId({ gitDir: where.gitDir, base: staged.base });
-    if (patchId === undefined || staged.files.length === 0) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
-    return { base: staged.base, tree: staged.tree, patchId, files: staged.files.map((f) => f.path) };
+    // In the checkout's turn, as the view: the index, the head and the files cannot be changed by another request of this host between the staging and the patch ID.
+    return this.host.exclusive(where.checkout, async () => {
+      await this.#submitAdmitted(call, where.shared);
+      const staged = await this.#options.git.stage({ gitDir: where.gitDir, checkout: where.checkout });
+      const patchId = await this.#options.git.patchId({ gitDir: where.gitDir, base: staged.base });
+      if (patchId === undefined || staged.files.length === 0) throw new WorkspaceError("invalid_path", "the checkout holds no change against its base, so there is nothing to submit");
+      return { base: staged.base, tree: staged.tree, patchId, files: staged.files.map((f) => f.path) };
+    });
   }
 
   /**

@@ -291,6 +291,13 @@ export class WorkspaceHost {
     return undefined;
   }
 
+  /**
+   * Runs `work` in the checkout's turn: after every request already queued for that checkout (the same queue `run` and `restack` use), and before any queued after it. A submit's view and staging (card H12n) read and stage
+   * the checkout through it, so an author's re-apply (which runs while the attempt is live), a release or a landing still in progress on the same checkout cannot write the files, the index or the head half-way through them.
+   * `checkout` is the location's `checkout` as `locate` gave it.
+   */
+  exclusive<T>(checkout: string, work: () => Promise<T>): Promise<T> { return this.#serial(checkout, work); }
+
   async #serial<T>(key: string, work: () => Promise<T>): Promise<T> {
     const previous = this.#tails.get(key) ?? Promise.resolve();
     const run = previous.then(work, work);
