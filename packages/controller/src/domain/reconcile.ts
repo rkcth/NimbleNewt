@@ -30,6 +30,8 @@ export interface ReconcilerDependencies {
   readonly destinations: readonly Destination[];
   /** The bridge for each effect kind. An effect of a kind with no bridge is left for a person (it is reported, never guessed at). */
   readonly bridges: Readonly<Record<string, EffectBridge>>;
+  /** Card P07: the simulated bridge for an effect of a simulation scope (its stand-in), asked instead of `bridges`, which are real and which the ledger refuses for such an effect. Absent, or answering none: the effect is left, counted as unbridged. */
+  readonly simulated?: (effectId: string, body: EffectBody) => Promise<EffectBridge | undefined>;
 }
 
 export interface ReconcilerOptions extends RunnerOptions {
@@ -376,7 +378,7 @@ export class Reconciler {
       // intended
       if (body.taskId !== undefined && (await this.#deps.blockers.openFor("manual_hold", { kind: "task", id: body.taskId })) !== undefined) { report.effectsHeld += 1; continue; }
       if ((await this.#deps.blockers.openFor("manual_hold", { kind: "effect", id: aggregate.id })) !== undefined) { report.effectsHeld += 1; continue; }
-      const bridge = this.#deps.bridges[body.kind];
+      const bridge = body.simulation !== undefined ? (body.started ? await this.#deps.simulated?.(aggregate.id, body).catch(() => undefined) : undefined) : this.#deps.bridges[body.kind];
       // G04 follow-up: a tool bridge call admitted as an effect (card L05d) has no bridge here; only the tool bridge runs it, when the attempt presents the call (again, after a restart). Once that attempt can no longer present
       // it, the ledger closes it without running anything: never started, failed; started by an executor that vanished, uncertain, and the owner is told by the blocker below. Until then it is counted as before.
       if (bridge === undefined && body.kind === BRIDGE_CALL_KIND) {

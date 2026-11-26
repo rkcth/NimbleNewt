@@ -153,7 +153,7 @@ export interface StateApiDeps {
   readonly taskArtifacts?: Pick<TaskArtifactPublisher, "publish">;
   readonly serviceOps?: Pick<ServiceOperations, "operate" | "observe">;
   /** Simulation scopes (card P07). */
-  readonly simulation?: Pick<SimulationService, "open" | "get" | "observe" | "operate" | "close">;
+  readonly simulation?: Pick<SimulationService, "open" | "get" | "observe" | "operate" | "close" | "run" | "getRun" | "grant" | "list">;
   readonly acceptance?: Pick<AcceptanceService, "draft" | "revise" | "newVersion" | "submit" | "startReview" | "accept" | "reject" | "check" | "get" | "list" | "events">;
   /** Defects, repair and review cycles and owner overrides (card Q04). */
   readonly defects?: Pick<DefectService, "report" | "repair" | "review" | "override" | "withdraw" | "edit" | "get" | "list">;
