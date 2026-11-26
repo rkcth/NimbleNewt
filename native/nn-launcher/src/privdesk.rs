@@ -2,8 +2,10 @@
 // ONE private desktop on the user's own interactive WinSta0 (the home desktop, `create_home`; plan 12.5.1). Never the inherited desktop. The pure rules (names, masks, the DACL check) are in winobj.rs.
 //
 // What it does, for ONE run: make a window station with a name of its own, give the container's SID one explicit allow entry on it, make a desktop in it and give the container one entry there
-// too, hand `station\desktop` to CreateProcessW as lpDesktop, and close the desktop and then the station when the run is over (the job's kill-on-close has ended the child by then; an object
-// with no handle left is destroyed). A window station of the launcher's own session is never opened, never changed and never named: not WinSta0 (the interactive station), not the service's
+// too, hand `station\desktop` to CreateProcessW as lpDesktop, and close the desktop and then the station when the run is over. By then the job has been told to end every process (TerminateJobObject
+// on a timeout or leftovers; kill-on-close when the job handle went at the end of run_inner) and the launcher waited, bounded, for the job to be empty (`jobProcessesAtEnd`). Closing is closing
+// the LAUNCHER's handle: CloseDesktop fails only when a thread of the calling process uses the desktop (Microsoft), never because another process still does; the object itself is destroyed
+// when its last handle and last user are gone, so a process still ending keeps it alive that long and `closed:true` does not claim more than the handle. A window station of the launcher's own session is never opened, never changed and never named: not WinSta0 (the interactive station), not the service's
 // `Service-0x0-<logon id>$`, and no DACL of the launcher's own objects is written.
 //
 // Both objects are CREATED with their final DACL (winobj::private_dacl in the SECURITY_ATTRIBUTES of the creating call): the launcher's own token user and SYSTEM with every specific right of the
@@ -235,6 +237,10 @@ impl PrivateDesktop {
             let e = GetLastError();
             if hd.is_null() { return Err(trouble("home desktop could not be made", e)); }
             p.desktop = hd; // closed by Drop on every path out
+            // CreateDesktopW OPENS a desktop that already has this name (documented) and does not document the error code for it: an open is caught here by ERROR_ALREADY_EXISTS where Windows sets
+            // it, and in any case by the read-back below (only a list naming THIS run's new container exactly once, with the launcher's account and SYSTEM, passes; the descriptor given above is
+            // ignored for an existing desktop). The CreateDesktop page also says it "assigns it to the calling thread": if that were so, CloseDesktop would fail for this handle, which `close`
+            // reports (`closeError`) and `info` turns into windowStationOk:false: only a run on Windows shows which.
             if e == ERROR_ALREADY_EXISTS { return Err(trouble("home desktop name is already taken", ERR_NAME_TAKEN)); }
             p.check(hd, &sid_b, DESKTOP_RIGHTS, "home desktop")?;
         }

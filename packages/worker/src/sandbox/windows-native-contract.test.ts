@@ -299,6 +299,23 @@ test("`info` and `check` report whether a private window station can be made (in
   assert.deepEqual([odd?.windowStation, odd?.windowStationOk, odd?.windowStationError], [undefined, undefined, undefined]);
 });
 
+test("the window objects are closed only after the job was ended and waited on, and the job's UI limits are the pinned word (the home desktop's SwitchDesktop rests on it)", () => {
+  const w = code(win);
+  const inner = between(w, "fn run_inner(", "fn creation_flags(");
+  const end = inner.indexOf("if leftover != 0 { TerminateJobObject(job.0, 1); }");
+  const wait = inner.indexOf("crate::winobj::wait_job_empty(|| active_processes(job.0)");
+  const report = inner.indexOf('j.n("jobProcessesAtEnd", at_end)');
+  assert.ok(end > 0 && wait > end && report > wait, "leftovers are ended, then the job is waited on, then what is left is reported");
+  assert.match(inner, /let at_end = if leftover == 0 \{ 0 \} else \{ crate::winobj::wait_job_empty\(\|\| active_processes\(job\.0\), 100, \|\| std::thread::sleep\(std::time::Duration::from_millis\(50\)\)\) \};/, "bounded: 100 polls of 50 ms");
+  const core = between(w, "fn run_core(", "fn run_inner(");
+  const ran = core.indexOf("let result = run_inner(");
+  const closed = core.indexOf('if let Some(p) = private.as_mut() { p.close(); j.raw("windowObjects", p.json()); }');
+  assert.ok(ran > 0 && closed > ran, "the objects are closed after run_inner returned (its job handle is gone by then)");
+  assert.match(w, /UIRestrictionsClass: crate::winobj::JOB_UI_LIMITS \}/, "the one word the Rust test pins");
+  assert.match(crate("src/winobj.rs"), /pub\(crate\) const JOB_UI_LIMITS: u32 = 0x0000_00FF;/);
+  assert.match(crate("src/winobj.rs"), /if mode == WindowMode::HomeDesktop && !ui_limits \{ return Err/, "a home-desktop run without the limits is refused");
+});
+
 // ---------------------------------------------------------------------------------------------------------------- per-run container profiles
 
 const profileRs = crate("src/profile.rs");

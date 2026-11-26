@@ -772,6 +772,19 @@ describe("A03b native launcher: health is a real confined start", () => {
     const refused = await healthy(noStation).health();
     assert.equal(refused.healthy, false);
     assert.match(refused.reason ?? "", /could not make a private window station and desktop for the container \(window objects: the private window station could not be made \(error 5\)\)/);
+    // the home desktop was tried and failed too: the reason names the home desktop and carries both refusals (not the named station's wording alone)
+    const noHome = new SimHost();
+    const realRunHome = noHome.run.bind(noHome);
+    const homeErr = "window objects: the home desktop refused: the launcher runs in session 0 (after: window objects: the private window station could not be made (error 5))";
+    noHome.run = async (file: string, args: readonly string[], o?: { readonly signal?: AbortSignal }): Promise<ProcessResult> => (args[0] === "info"
+      ? ok(`${JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "grant", error: homeErr, windowStation: "home-desktop", privateStationError: "window objects: the private window station could not be made (error 5)", windowStationOk: false, windowStationError: homeErr })}\n`)
+      : realRunHome(file, args, o));
+    const homeRefused = await healthy(noHome).health();
+    assert.equal(homeRefused.healthy, false);
+    assert.match(homeRefused.reason ?? "", /could not make the home desktop \(a private desktop on the user's own window station WinSta0\)/);
+    assert.match(homeRefused.reason ?? "", /session 0/);
+    assert.match(homeRefused.reason ?? "", /the named private window station before it: window objects: the private window station could not be made \(error 5\)/);
+    assert.doesNotMatch(homeRefused.reason ?? "", /could not make a private window station and desktop/);
     // the non-elevated user's case: the named station was refused, the launcher made a private desktop on WinSta0 and says so; the backend is healthy and the note states what stays shared
     const homeHost = new SimHost();
     homeHost.script = { onProgram: probeBehaviour("none"), windowStation: "home-desktop" };
