@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
+import { EffectRejected } from "../domain/effects.js";
+import { serviceOpLine, serviceOpOf } from "../status/status.js";
 import { EffectService } from "../domain/effects.js";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -17,6 +19,9 @@ import { LOCAL_FOLDER_KEYS, LOCAL_FOLDER_LIMITS, LocalFolderServices, ServiceOpe
 // before anything is written; a file that cannot be read back afterwards ends uncertain. The ledger, the scope and the outcome rules are the ones every target goes through (`ServiceOperations`).
 
 after(stopServer);
+
+// The connector refuses to bind on Windows (its link and mode checks are made and tested on Linux and macOS only), so its tests run there only; the refusal itself is tested everywhere.
+const posixOnly = process.platform === "win32" ? "the folder connector refuses to bind on Windows" : false;
 
 let now = Date.parse("2026-11-26T10:00:00.000Z");
 const options = { clock: () => new Date((now += 1000)).toISOString(), pause: async () => undefined };
@@ -80,7 +85,7 @@ async function world(backend: (typeof backends)[number], target: ServiceTarget) 
   return { w, owner, task, ops, op, effects };
 }
 
-test("the connector reads a file back as the disk holds it and refuses names, links and hard links that leave the bound folder, without following them (card P03b)", async () => {
+test("the connector reads a file back as the disk holds it and refuses names, links and hard links that leave the bound folder, without following them (card P03b)", { skip: posixOnly }, async () => {
   const f = folders();
   try {
     const t = await LocalFolderServices.open(f.root);
@@ -115,7 +120,7 @@ test("the connector reads a file back as the disk holds it and refuses names, li
 });
 
 for (const backend of backends) {
-  test(`${backend.name}: an operation on a folder service is confirmed only by reading the file back, applies once per command and is named as a verified outcome (card P03b)`, async () => {
+  test(`${backend.name}: an operation on a folder service is confirmed only by reading the file back, applies once per command and is named as a verified outcome (card P03b)`, { skip: posixOnly }, async () => {
     const f = folders();
     const target = await LocalFolderServices.open(f.root, { clock: options.clock });
     const w = await world(backend, target);
@@ -154,7 +159,7 @@ for (const backend of backends) {
     } finally { await w.w.close(); rmSync(f.base, { recursive: true, force: true }); }
   });
 
-  test(`${backend.name}: a folder service refuses before writing anything when the file, a neighbour or the folder cannot be checked, and an unreadable read-back is never confirmed (card P03b)`, async () => {
+  test(`${backend.name}: a folder service refuses before writing anything when the file, a neighbour or the folder cannot be checked, and an unreadable read-back is never confirmed (card P03b)`, { skip: posixOnly }, async () => {
     const f = folders();
     const target = await LocalFolderServices.open(f.root, { clock: options.clock });
     const w = await world(backend, target);
@@ -215,6 +220,16 @@ for (const backend of backends) {
           assert.match(String(r.evidence?.["reason"] ?? r.note), why, `${label}: ${JSON.stringify(r)}`);
           await assert.rejects(wrapped.ops.checkOutcome(wrapped.task, { reference: r.effectId, systemVersion: "sha256:x", observedAt: "2026-11-26T10:00:00.000Z" }), (e: unknown) => e instanceof DomainError && /uncertain, not confirmed/.test(e.message));
           await assert.rejects(wrapped.op(`${label}.txt`, { type: "write", params: { text: "after\n" } }, `swap-${label}`), (e: unknown) => e instanceof DomainError && e.code === "effect_uncertain", `${label}: never retried blindly`);
+          if (label === "rewritten") {
+            // A person settles it as confirmed, with evidence that reads like a verification: it is still not a verified outcome, and the view says a person settled it.
+            const fake = { verified: true, systemVersion: "sha256:0000000000000000", observedAt: "2026-11-26T10:00:00.000Z", checked: "by hand" };
+            await wrapped.effects.resolve({ commandId: cid("resolve"), actor: wrapped.owner.id, effectId: r.effectId, outcome: "confirmed", evidence: fake });
+            await assert.rejects(wrapped.ops.checkOutcome(wrapped.task, { reference: r.effectId, systemVersion: fake.systemVersion, observedAt: fake.observedAt }), /not verified against the target/);
+            const settled = await wrapped.effects.get(r.effectId);
+            const view = serviceOpOf(settled as never, settled?.evidence);
+            assert.equal(view.verified, false);
+            assert.match(serviceOpLine({ id: r.effectId, status: "confirmed", service: view }, "you"), /Settled by a person, not by reading the service back/);
+          }
         } finally { await wrapped.w.close(); rmSync(join(f.billing, `${label}.txt`), { force: true }); }
       }
       assert.equal(tree(f.outside), outside, "nothing outside the bound folder was ever written");
@@ -222,7 +237,7 @@ for (const backend of backends) {
   });
 }
 
-test("whether a key was applied is read from the connector's own record; an unreadable record is not taken for 'not applied' (card P03b)", { skip: process.getuid?.() === 0 ? "root reads a file whatever its mode" : false }, async () => {
+test("whether a key was applied is read from the connector's own record; an unreadable record is not taken for 'not applied' (card P03b)", { skip: posixOnly || (process.getuid?.() === 0 ? "root reads a file whatever its mode" : false) }, async () => {
   const f = folders();
   try {
     const t = await LocalFolderServices.open(f.root);
@@ -247,5 +262,66 @@ test("whether a key was applied is read from the connector's own record; an unre
     assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "one\n");
     assert.deepEqual(readdirSync(f.outside), ["secret.txt"], "nothing was written through the link");
     assert.deepEqual(readdirSync(f.billing).filter((x) => x.startsWith(".")), [], "the staged file was removed");
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test("the connector refuses to bind on Windows, where its link and mode checks are not made (card P03b review)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "nn-p03b-win-"));
+  try {
+    await assert.rejects(LocalFolderServices.open(base, { platform: "win32" }), /not available on Windows/);
+    assert.deepEqual(readdirSync(base), [], "nothing was made");
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("a folder or file swapped in while a change is being made is never written into or moved, and two changes to one file run one after the other (card P03b review)", { skip: posixOnly }, async () => {
+  const f = folders();
+  try {
+    const ref = { service: "billing", resource: "motd.txt" };
+    const outside = tree(f.outside);
+    const moved = join(f.root, "billing-moved");
+    const swapFolder = (): void => { renameSync(f.billing, moved); mkdirSync(f.billing); cpSync(moved, f.billing, { recursive: true }); for (const n of readdirSync(f.billing)) if (n.startsWith(".")) rmSync(join(f.billing, n)); };
+    const reset = (): void => { rmSync(f.billing, { recursive: true, force: true }); renameSync(moved, f.billing); for (const n of readdirSync(f.billing)) if (n.startsWith(".")) rmSync(join(f.billing, n)); };
+    let at: "staged" | "recorded" | undefined, then: (() => void) | undefined;
+    const t = await LocalFolderServices.open(f.root, { onStep: (step) => { if (step === at && then !== undefined) { const run = then; then = undefined; run(); } } });
+
+    // The service folder swapped after the new text was staged: refused before the key is recorded; neither folder is changed.
+    at = "staged"; then = swapFolder;
+    await assert.rejects(t.apply("swap-staged", ref, { type: "write", params: { text: "changed\n" } }), (e: unknown) => e instanceof EffectRejected && /service folder was replaced/.test(e.message) && /nothing was changed/.test(e.message));
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "Back soon.\n");
+    assert.equal(readFileSync(join(moved, "motd.txt"), "utf8"), "Back soon.\n");
+    assert.equal(await t.applied("swap-staged"), false, "no key was recorded");
+    reset();
+
+    // The service folder swapped after the key was recorded: the new file is not put in place in either folder; the key over-reports (the read-back then decides), it never under-reports.
+    at = "recorded"; then = swapFolder;
+    await assert.rejects(t.apply("swap-recorded", ref, { type: "write", params: { text: "changed\n" } }), (e: unknown) => !(e instanceof EffectRejected) && /service folder was replaced/.test((e as Error).message));
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "Back soon.\n");
+    assert.equal(readFileSync(join(moved, "motd.txt"), "utf8"), "Back soon.\n");
+    assert.notEqual(await t.applied("swap-recorded"), false);
+    const back = await t.observe(ref);
+    assert.notEqual(t.verify(ref, { type: "write", params: { text: "changed\n" } }, back!, back!), undefined, "the read-back does not confirm it");
+    reset();
+
+    // The staged new text swapped for a link to a file outside: refused, the outside file is not moved in or changed.
+    at = "staged"; then = () => { const tmp = readdirSync(f.billing).find((n) => n.startsWith(".nn-"))!; unlinkSync(join(f.billing, tmp)); symlinkSync(join(f.outside, "secret.txt"), join(f.billing, tmp)); };
+    await assert.rejects(t.apply("swap-link", ref, { type: "write", params: { text: "changed\n" } }), /staged new text was replaced/);
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "Back soon.\n");
+    assert.equal(lstatSync(join(f.billing, "motd.txt")).isSymbolicLink(), false);
+    assert.equal(tree(f.outside), outside);
+    assert.deepEqual(readdirSync(f.billing).filter((n) => n.startsWith(".")), [], "the link put in its place was removed, not followed");
+
+    // Two changes to one file at once: the second merges into what the first wrote (nothing is lost, neither is refused).
+    at = undefined;
+    const settings = { service: "billing", resource: "settings.json" };
+    await Promise.all([t.apply("set-a", settings, { type: "set", params: { fields: { a: 1 } } }), t.apply("set-b", settings, { type: "set", params: { fields: { b: 2 } } })]);
+    assert.deepEqual(JSON.parse(readFileSync(join(f.billing, "settings.json"), "utf8")), { replicas: 1, mode: "slow", a: 1, b: 2 });
+
+    // The bound folder itself replaced by another folder at the same path: nothing in it is read as a service, and nothing is written.
+    renameSync(f.root, `${f.root}-old`); mkdirSync(join(f.root, "billing"), { recursive: true }); writeFileSync(join(f.root, "billing", "motd.txt"), "new root\n");
+    const seen = await t.observe(ref);
+    assert.match(String(seen?.state["unreadable"]), /no longer the folder bound at the start/);
+    await assert.rejects(t.apply("new-root", ref, { type: "write", params: { text: "changed\n" } }), /no longer the folder bound at the start/);
+    assert.equal(readFileSync(join(f.root, "billing", "motd.txt"), "utf8"), "new root\n");
+    assert.deepEqual(readdirSync(f.root), ["billing"], "no keys folder was made in the new one");
   } finally { rmSync(f.base, { recursive: true, force: true }); }
 });

@@ -20,6 +20,11 @@ const refKey = (r: ServiceRef): string => `${r.service}/${r.resource}`;
 const isObject = (v: unknown): v is JsonObject => typeof v === "object" && v !== null && !Array.isArray(v);
 const code = (e: unknown): string | undefined => (e as { code?: string } | null)?.code;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+// A file is opened for reading without waiting: a pipe or device swapped in after the look at it then opens at once and is refused by the check that follows, instead of blocking the read.
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+/** The identity of a folder or file on the disk: the same path naming another one (swapped in between two checks) has another identity. */
+interface Identity { readonly dev: number; readonly ino: number }
+const sameId = (a: Identity, b: Identity): boolean => a.dev === b.dev && a.ino === b.ino;
 
 /**
  * A real service target (card P03b): the files of a folder on this computer, bound to one folder when the controller starts. A service is a folder directly inside the bound folder; a resource is
@@ -37,14 +42,23 @@ const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
  */
 export class LocalFolderServices implements ServiceTarget {
   readonly root: string;
+  readonly #rootId: Identity;
   readonly #clock: () => string;
-  private constructor(root: string, clock: () => string) { this.root = root; this.#clock = clock; }
+  readonly #onStep: ((step: "staged" | "recorded", ref: ServiceRef) => void | Promise<void>) | undefined;
+  /** The change in progress on each file, so two operations on one file of this connector run one after the other (a second `set` merges into what the first wrote, never into the same old text). */
+  readonly #busy = new Map<string, Promise<void>>();
+  private constructor(root: string, rootId: Identity, clock: () => string, onStep?: (step: "staged" | "recorded", ref: ServiceRef) => void | Promise<void>) { this.root = root; this.#rootId = rootId; this.#clock = clock; this.#onStep = onStep; }
 
   /** Binds the connector to `folder`, which must exist and be a folder (not a link to one). The folder's real path is kept, so a later change of a link above it does not move the binding. */
-  static async open(folder: string, options: { clock?: () => string } = {}): Promise<LocalFolderServices> {
+  /** `onStep` is for tests only: called after the new text is staged and after the key is recorded, so a test can change the disk at exactly that moment. */
+  static async open(folder: string, options: { clock?: () => string; platform?: string; onStep?: (step: "staged" | "recorded", ref: ServiceRef) => void | Promise<void> } = {}): Promise<LocalFolderServices> {
+    // Windows: opening without following a link (O_NOFOLLOW), a file's mode and the link checks this connector relies on are not what they are on Linux and macOS, and it is untested there: refused, not run on guesses.
+    if ((options.platform ?? process.platform) === "win32") throw new Error("the folder connector is not available on Windows: its checks that nothing outside the bound folder is reached are made and tested on Linux and macOS only");
     const seen = await lstat(folder).catch(() => undefined);
     if (seen === undefined || !seen.isDirectory() || seen.isSymbolicLink()) throw new Error(`the service folder ${folder} is not a folder (a link to one is not accepted)`);
-    return new LocalFolderServices(await realpath(folder), options.clock ?? (() => new Date().toISOString()));
+    const root = await realpath(folder);
+    const id = await lstat(root);
+    return new LocalFolderServices(root, { dev: id.dev, ino: id.ino }, options.clock ?? (() => new Date().toISOString()), options.onStep);
   }
 
   #names(ref: ServiceRef): { dir: string; file: string } {
@@ -53,21 +67,32 @@ export class LocalFolderServices implements ServiceTarget {
     return { dir, file: join(dir, ref.resource) };
   }
 
-  /** The service folder, checked: a real folder directly inside the bound folder. `undefined` when it does not exist; throws a plain reason when it is something else. */
-  async #folder(dir: string): Promise<"absent" | "ok"> {
+  /** The service folder, checked: a real folder directly inside the bound folder, which is still the folder bound at the start. `absent` when it does not exist (its identity otherwise); throws a plain reason when it is something else. */
+  async #folder(dir: string): Promise<"absent" | Identity> {
+    const r = await lstat(this.root).catch(() => undefined);
+    if (r === undefined || r.isSymbolicLink() || !r.isDirectory() || !sameId(r, this.#rootId)) throw new Error("the bound folder is no longer the folder bound at the start");
     let s;
     try { s = await lstat(dir); } catch (e) { if (code(e) === "ENOENT") return "absent"; throw new Error(`the service folder cannot be read (${code(e) ?? "error"})`); }
     if (s.isSymbolicLink()) throw new Error("the service folder is a link, which is not followed");
     if (!s.isDirectory()) throw new Error("the service is not a folder");
     if ((await realpath(dir)) !== dir) throw new Error("the service folder resolves outside the bound folder");
-    return "ok";
+    return { dev: s.dev, ino: s.ino };
+  }
+
+  /** Throws unless the service folder is still the one first checked (same identity, not a link): a folder swapped in between the checks and the write is never written into. */
+  async #sameFolder(dir: string, was: Identity): Promise<void> {
+    const now = await this.#folder(dir);
+    if (now === "absent" || !sameId(now, was)) throw new Error("the service folder was replaced while the change was being made");
   }
 
   /** Reads a resource without following links. `absent`, or the facts, or the reason it cannot be read. */
-  async #read(ref: ServiceRef): Promise<{ kind: "absent" } | { kind: "unreadable"; reason: string } | { kind: "file"; bytes: number; digest: string; text?: string; stamp: string; mode: number }> {
+  async #read(ref: ServiceRef): Promise<{ kind: "absent" } | { kind: "unreadable"; reason: string } | { kind: "file"; bytes: number; digest: string; text?: string; stamp: string; mode: number; folder: Identity }> {
     const { dir, file } = this.#names(ref);
+    let folder: Identity;
     try {
-      if ((await this.#folder(dir)) === "absent") return { kind: "absent" };
+      const f = await this.#folder(dir);
+      if (f === "absent") return { kind: "absent" };
+      folder = f;
     } catch (e) { return { kind: "unreadable", reason: (e as Error).message }; }
     let s;
     try { s = await lstat(file); } catch (e) { return code(e) === "ENOENT" ? { kind: "absent" } : { kind: "unreadable", reason: `the file cannot be looked at (${code(e) ?? "error"})` }; }
@@ -75,16 +100,16 @@ export class LocalFolderServices implements ServiceTarget {
     if (!s.isFile()) return { kind: "unreadable", reason: "it is not a plain file" };
     if (s.nlink > 1) return { kind: "unreadable", reason: "the file has another name elsewhere (a hard link), so it may belong to something outside the folder" };
     const stamp = `${s.size}:${s.ino}:${s.ctimeMs}`;
-    if (s.size > LOCAL_FOLDER_LIMITS.readBytes) return { kind: "file", bytes: s.size, digest: `large:${sha256(stamp).slice(0, 24)}`, stamp, mode: s.mode & 0o777 };
+    if (s.size > LOCAL_FOLDER_LIMITS.readBytes) return { kind: "file", bytes: s.size, digest: `large:${sha256(stamp).slice(0, 24)}`, stamp, mode: s.mode & 0o777, folder };
     let h: FileHandle | undefined;
     try {
-      h = await open(file, constants.O_RDONLY | NOFOLLOW);
+      h = await open(file, constants.O_RDONLY | NOFOLLOW | NONBLOCK);
       const st = await h.stat();
       if (st.ino !== s.ino || !st.isFile()) return { kind: "unreadable", reason: "the file changed while it was being read" };
       const buf = await h.readFile();
       const digest = createHash("sha256").update(buf).digest("hex").slice(0, 32);
       const text = buf.length <= LOCAL_FOLDER_LIMITS.fileBytes ? new TextDecoder("utf-8", { fatal: true }).decode(buf) : undefined;
-      return { kind: "file", bytes: buf.length, digest, ...(text === undefined ? {} : { text }), stamp, mode: s.mode & 0o777 };
+      return { kind: "file", bytes: buf.length, digest, ...(text === undefined ? {} : { text }), stamp, mode: s.mode & 0o777, folder };
     } catch (e) {
       if (e instanceof TypeError) return { kind: "unreadable", reason: "the file is not UTF-8 text" };
       return { kind: "unreadable", reason: `the file cannot be read (${code(e) ?? "error"})` };
@@ -131,15 +156,36 @@ export class LocalFolderServices implements ServiceTarget {
     return dir;
   }
 
-  /** Writes `content` to a new file beside `target` and returns its path (nothing replaced yet). */
-  async #stage(folder: string, content: string, mode: number): Promise<string> {
+  /** Writes `content` to a new file beside `target` and returns its path and identity (nothing replaced yet). */
+  async #stage(folder: string, content: string, mode: number): Promise<{ path: string; id: Identity }> {
     const tmp = join(folder, `.nn-${randomBytes(8).toString("hex")}.tmp`);
     const h = await open(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW, mode);
-    try { await h.writeFile(content, "utf8"); await h.sync(); } finally { await h.close(); }
-    return tmp;
+    let id: Identity;
+    try { await h.writeFile(content, "utf8"); await h.sync(); const st = await h.stat(); id = { dev: st.dev, ino: st.ino }; } finally { await h.close(); }
+    return { path: tmp, id };
+  }
+
+  /** Throws unless the path still names the file staged (a link or another file put there instead is never moved into place). */
+  async #sameStaged(staged: { path: string; id: Identity }): Promise<void> {
+    const s = await lstat(staged.path);
+    if (s.isSymbolicLink() || !s.isFile() || !sameId(s, staged.id)) throw new Error("the staged new text was replaced before it was put in place");
   }
 
   async apply(key: string, ref: ServiceRef, action: ServiceAction, context?: JsonObject): Promise<void> {
+    const at = refKey(ref);
+    const before = this.#busy.get(at) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((resolve) => { release = resolve; });
+    const queued = before.then(() => mine);
+    this.#busy.set(at, queued);
+    await before;
+    try { await this.#apply(key, ref, action, context); } finally {
+      release();
+      if (this.#busy.get(at) === queued) this.#busy.delete(at);
+    }
+  }
+
+  async #apply(key: string, ref: ServiceRef, action: ServiceAction, context?: JsonObject): Promise<void> {
     const keyFile = this.#keyFile(key);
     if ((await this.applied(key)) !== false) return;
     const { dir, file } = this.#names(ref);
@@ -171,23 +217,38 @@ export class LocalFolderServices implements ServiceTarget {
     } else return refuse(`the action ${action.type} is not known to a folder service (write or set)`);
     if (Buffer.byteLength(content, "utf8") > LOCAL_FOLDER_LIMITS.fileBytes) refuse(`the new text is larger than ${LOCAL_FOLDER_LIMITS.fileBytes} bytes`);
     // 1. The new file is written beside the old one. 2. The key is recorded. 3. The new file replaces the old one. A failure before 3 changes nothing (the staged files are removed).
-    let staged: string | undefined, stagedKey: string | undefined;
+    // The folder, the staged file and the file itself are checked again just before the key is recorded, and the folder and the staged file once more just before the new file is put in place: a folder or
+    // file swapped in between is never written into or moved. (Node has no rename relative to an open folder, so a moment remains between the last check and the rename; the bound folder must not be
+    // writable by anything untrusted.)
+    let staged: { path: string; id: Identity } | undefined, stagedKey: { path: string; id: Identity } | undefined;
     try {
       staged = await this.#stage(dir, content, cur.mode);
       const keys = await this.#keysFolder();
       stagedKey = await this.#stage(keys, JSON.stringify({ ref: refKey(ref), action: action.type, ...(context === undefined ? {} : { context }) }), 0o600);
+      await this.#onStep?.("staged", ref);
+      await this.#sameFolder(dir, cur.folder);
+      await this.#sameStaged(staged);
       const again = await lstat(file);
       if (again.isSymbolicLink() || !again.isFile() || `${again.size}:${again.ino}:${again.ctimeMs}` !== cur.stamp) throw new Error(`${refKey(ref)} changed while the change was being prepared`);
-      await rename(stagedKey, keyFile);
+      await rename(stagedKey.path, keyFile);
       stagedKey = undefined;
     } catch (e) {
-      if (staged !== undefined) await rm(staged, { force: true }).catch(() => undefined);
-      if (stagedKey !== undefined) await rm(stagedKey, { force: true }).catch(() => undefined);
+      if (staged !== undefined) await rm(staged.path, { force: true }).catch(() => undefined);
+      if (stagedKey !== undefined) await rm(stagedKey.path, { force: true }).catch(() => undefined);
       if (e instanceof EffectRejected) throw e;
       return refuse(`the change could not be prepared: ${(e as Error).message}`);
     }
-    // From here the key says applied: a failure is a lost answer, settled by reading the file back (never by writing again).
-    await rename(staged, file);
+    // From here the key says applied: a failure is a lost answer, settled by reading the file back (never by writing again). A check that fails here leaves the old file in place (the read-back then
+    // shows it: uncertain) and removes the staged one.
+    try {
+      await this.#onStep?.("recorded", ref);
+      await this.#sameFolder(dir, cur.folder);
+      await this.#sameStaged(staged);
+      await rename(staged.path, file);
+    } catch (e) {
+      await rm(staged.path, { force: true }).catch(() => undefined);
+      throw e;
+    }
     const d = await open(dir, constants.O_RDONLY).catch(() => undefined);
     if (d !== undefined) { await d.sync().catch(() => undefined); await d.close().catch(() => undefined); }
   }

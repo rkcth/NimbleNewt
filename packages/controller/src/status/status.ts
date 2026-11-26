@@ -244,7 +244,7 @@ export const SERVICE_OPS_IN_TASK_VIEW = 5;
 export function serviceOpLine(e: { readonly id: string; readonly status: string; readonly service: ServiceOpView }, byName: string): string {
   const v = e.service;
   const what = `${byName} asked for ${quoted(v.action, 40)} on ${quoted(v.resource, 130)}`;
-  if (e.status === "confirmed" && v.verified) return `Service operation ${e.id}: ${what}. Done and confirmed: the service was read back afterwards and showed the change (version ${quoted(v.systemVersion ?? "", 60)}, seen at ${v.observedAt ?? "an unknown time"})${v.neighboursChecked === undefined ? "" : `, and the ${v.neighboursChecked} resource${v.neighboursChecked === 1 ? "" : "s"} next to it ${v.neighboursChecked === 1 ? "was" : "were"} unchanged`}. A deliverable may name it as its outcome.`;
+  if (e.status === "confirmed" && v.verified) return `Service operation ${e.id}: ${what}. Done and confirmed: the service was read back afterwards and showed the change (version ${quoted(v.systemVersion ?? "", 60)}, seen at ${v.observedAt === undefined ? "an unknown time" : quoted(v.observedAt, 40)})${v.neighboursChecked === undefined ? "" : `, and the ${v.neighboursChecked} resource${v.neighboursChecked === 1 ? "" : "s"} next to it ${v.neighboursChecked === 1 ? "was" : "were"} unchanged`}. A deliverable may name it as its outcome.`;
   if (e.status === "confirmed") return `Service operation ${e.id}: ${what}. Settled by a person, not by reading the service back${v.reason === undefined ? "" : ` (${quoted(v.reason, 160)})`}, so it cannot be named as a verified outcome.`;
   if (e.status === "failed") return `Service operation ${e.id}: ${what}. Not done: ${v.reason === undefined ? "it was refused" : quoted(v.reason, 200)}. Nothing was changed.`;
   if (e.status === "uncertain") return `Service operation ${e.id}: ${what}. Not confirmed: ${v.reason === undefined ? "the result could not be checked" : quoted(v.reason, 200)}. It may or may not have changed the service; it is not tried again by itself, and a person has to check the service and settle it.`;
@@ -252,14 +252,15 @@ export function serviceOpLine(e: { readonly id: string; readonly status: string;
 }
 
 /** What the ledger holds about a service operation, as the view shows it: the request from the intent, the facts from the evidence the service gave. */
-function serviceOpOf(e: { readonly input?: JsonObject; readonly createdBy?: string }, evidence: JsonObject | undefined): ServiceOpView {
+export function serviceOpOf(e: { readonly input?: JsonObject; readonly createdBy?: string }, evidence: JsonObject | undefined): ServiceOpView {
   const input = e.input ?? {};
   const action = (input["action"] as JsonObject | undefined)?.["type"];
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   const reason = str(evidence?.["problem"]) ?? str(evidence?.["reason"]) ?? str(evidence?.["error"]);
   return {
     resource: `${String(input["service"] ?? "?")}/${String(input["resource"] ?? "?")}`, action: typeof action === "string" ? action : "?", by: e.createdBy ?? "unknown",
-    verified: evidence?.["verified"] === true,
+    // A person's settlement keeps the evidence they gave (with `resolvedBy`): whatever it says, it was not read back from the service by the controller.
+    verified: evidence?.["verified"] === true && evidence["resolvedBy"] === undefined,
     ...(str(evidence?.["systemVersion"]) === undefined ? {} : { systemVersion: str(evidence?.["systemVersion"])! }),
     ...(str(evidence?.["observedAt"]) === undefined ? {} : { observedAt: str(evidence?.["observedAt"])! }),
     ...(typeof evidence?.["collateralChecked"] === "number" ? { neighboursChecked: evidence["collateralChecked"] } : {}),

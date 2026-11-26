@@ -884,9 +884,12 @@ export function ownerSaysMove(op: string, args: Readonly<Record<string, unknown>
   const named = names.map((n) => new RegExp(`(^|[^a-z0-9])${esc(dotless(n))}($|[^a-z0-9])`, "i"));
   // A question is not an order: sentences ending in "?" never count.
   const sentences = (joined.match(/[^.!?;\n]+[.!?;]*/g) ?? []).filter((s) => !s.trimEnd().endsWith("?"));
-  // A pause applies at once (second review): the verb must stand outside the target's name, so an agent called Parker or Holden is not paused by a sentence that only names it.
-  const outside = (s: string): string => (key === "lifecycle.pause" ? named.reduce((t, r) => t.replace(new RegExp(r.source, "gi"), "$1 $2"), s) : s);
-  return sentences.some((s) => verb.test(outside(s)) && named.some((r) => r.test(s)));
+  // A pause applies at once (second review): the verb must stand outside the target's name, so an agent called Parker or Holden is not paused by a sentence that only names it. The same for taking
+  // back a right on one service resource (card P03b review), which also applies at once: a resource called stop-list or end.json, or an agent called Block, does not order it by being named.
+  const outside = (s: string): string => (key === "lifecycle.pause" || key === "grant.revoke" ? named.reduce((t, r) => t.replace(new RegExp(r.source, "gi"), "$1 $2"), s) : s);
+  // Taking a right back at once (card P03b review): a sentence that says not to ("don't take back ...", "never mind revoking ...", "not yet") is not an order; it is shown first instead.
+  const negated = (s: string): boolean => key === "grant.revoke" && /\b(?:don'?t|don\u2019t|do not|never|won'?t|won\u2019t|will not|not yet|hold off)\b/i.test(s);
+  return sentences.some((s) => !negated(outside(s)) && verb.test(outside(s)) && named.some((r) => r.test(s)));
 }
 
 /** Commands that are plain edits of text or fields: with quoted material in the message they may still apply; every other command becomes a proposal. */

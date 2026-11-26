@@ -21,7 +21,7 @@ export interface ModelCall {
 /** What the model is told of each operation: its name, what it does and the argument names the chat accepts for it. Derived from the same table the answer is checked against, so the two cannot drift apart. */
 const OPERATION_LINES = Object.keys(CHAT_OPS).map((op) => `${op}(${promptArgs(op).join(", ")}) - ${CHAT_OPS[op]!.verb}`).join("; ");
 // The card references in the descriptions ("(card Q04)") are for people reading the code; the model is not told them (card P03b, room in the prompt).
-export const promptAbout = (about: string): string => about.replace(/ \(card [A-Z][0-9A-Za-z]*\)/g, "");
+export const promptAbout = (about: string): string => about.replace(/ \(card [A-Z][0-9A-Za-z]*(?:\/[A-Z][0-9A-Za-z]*)*\)/g, "");
 const STATUS_LINES = Object.entries(STATUS_KINDS).map(([kind, k]) => `${kind}(${k.keys.join(", ")}) - ${promptAbout(k.about)}`).join("; ");
 
 const SYSTEM = [

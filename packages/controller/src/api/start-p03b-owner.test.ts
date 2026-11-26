@@ -48,7 +48,7 @@ function armable(inner: LocalFolderServices): ServiceTarget & { swapNext?: strin
 }
 
 for (const store of stores) {
-  test(`${store.name}: a right on one service resource is proposed in chat with what it allows and granted only on yes, taking one back in chat applies at once, and the chat says what each operation did (card P03b)`, async () => {
+  test(`${store.name}: a right on one service resource is proposed in chat with what it allows and granted only on yes, taking one back in chat applies at once, and the chat says what each operation did (card P03b)`, { skip: process.platform === "win32" ? "the folder connector refuses to bind on Windows" : false }, async () => {
     const d = mkdtempSync(join(tmpdir(), "nn-p03b-owner-"));
     const root = join(d, "services"), billing = join(root, "billing"), outside = join(d, "outside");
     mkdirSync(billing, { recursive: true }); mkdirSync(outside);
@@ -150,7 +150,7 @@ for (const store of stores) {
       assert.equal(view[0]!.status, "answered", JSON.stringify(view));
       const text = (view[0]!.lines ?? []).map((l) => l.text).join("\n");
       const version = setOk.result.outcome.systemVersion as string;
-      assert.ok(text.includes(`Service operation ${setOk.result.effectId}: the agent "Ann" asked for "set" on "billing/settings.json". Done and confirmed: the service was read back afterwards and showed the change (version "${version}", seen at ${setOk.result.outcome.observedAt})`), text);
+      assert.ok(text.includes(`Service operation ${setOk.result.effectId}: the agent "Ann" asked for "set" on "billing/settings.json". Done and confirmed: the service was read back afterwards and showed the change (version "${version}", seen at "${setOk.result.outcome.observedAt}")`), text);
       assert.match(text, new RegExp(`Service operation ${refused.result.effectId}: the agent "Ann" asked for "set" on "billing/notes.txt"\\. Not done: "billing/notes.txt does not hold a JSON object, so set cannot merge fields into it; nothing was changed"\\. Nothing was changed\\.`), text);
       assert.match(text, new RegExp(`Service operation ${unsure.result.effectId}: the agent "Ann" asked for "set" on "billing/settings.json"\\. Not confirmed: "billing/settings.json cannot be read back: the file is a link, which is not followed"\\. It may or may not have changed the service; it is not tried again by itself, and a person has to check the service and settle it\\.`), text);
       assert.doesNotMatch(text, new RegExp(`${unsure.result.effectId}[^\\n]*Done and confirmed`), "an unverified change is never called done");
