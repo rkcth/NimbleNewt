@@ -2404,12 +2404,25 @@
       ],
       "deliverable": "The owner can see, for each attempt of a task, its end kind, the nudges used, the plan progress (x of y steps) and the blocker if any. It is a status kind in STATUS_KINDS (packages/controller/src/status/status.ts line 213) so that the chat interpreter's prompt lists it (packages/controller/src/chat/model-interpreter.ts line 22) and it is reachable by free-form chat, with no magic words",
       "acceptance_and_verification": "Free-form questions such as why did the last attempt stop, or how far did it get, reach the view through the chat interpreter in a test with the model interpreter; the view shows end kind, nudges, plan progress and the agent_stopped_early blocker with its last text; the status and browser views show the same figures; no fixed phrase is needed",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "15203b23",
+          "970c46ed",
+          "d160c88d"
+        ],
+        "ci_runs": [
+          "45737155506"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A status kind attempt_endings (status/status.ts STATUS_KINDS, so the chat interpreter's prompt describes it as answering questions such as why did the last attempt stop or how far did it get; status.ask { kind: 'attempt_endings', taskId }, and in chat the task may be named by its title) shows a head line and, per attempt newest first (at most 6, older ones counted), the agent, route and role, when it started and how it ended or stands, its last turn's end kind in plain words (unknown for any kind the controller does not know), the nudges to go on (the attempt's total and the last turn's), the plan as x of y steps checked (recorded per completed turn from a plan-only ask of the host, bounded at 10 s), its stops before the work was done, the checks of its done (W05), whether its report was questioned (W10, never the text), its job waits (W11) and the blocker it left; then the open agent_stopped_early, done_unverified and report_unsupported blockers with their summaries, the agent's last text quoted once. A per-task record (dispatch-task-attempts, newest 20) is written in the same commit as each claim. It is read as the work report is (owner, assignment.read or manage, the assigned agent; anyone else not_found). Proof: api/start-attempt-endings (the chat's real ModelInterpreter with a scripted model that finds the view by the description in its prompt, two different free-form questions give the same lines with each end kind, Nudges to go on: 9 (3 in its last turn), Plan: 1 of 3 and the agent_stopped_early blocker with the last text; status.ask gives the same lines; another agent is refused), dispatch/attempt-endings (real dispatcher, four backends; a stop or a move to another host while the plan is asked), dispatch/endings (words, bounds, quoting, 300 seeded records), ui views (the Status page and the browser chat draw the same lines one per line as plain text). Limits: the browser has no tab that asks for this view by itself (its Status tab asks only for the overview and this view needs a task), so the browser shows it through the chat; a remote host does not report plan progress, so its attempts show the plan as not known; attempts claimed before this card that neither wrote a report nor stopped early are not found; the chat test uses a scripted model, not a real one; agent/tier is shown as agent, route and role (recorded ASSUMPTION)."
+      }
     },
     {
       "id": "W10",
