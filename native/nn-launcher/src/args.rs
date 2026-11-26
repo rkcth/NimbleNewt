@@ -184,9 +184,38 @@ pub(crate) fn parse_args(raw: &[String]) -> Result<Args, String> {
 
 // ---- end of parse_args
 
+/// The child's environment block: only what --env named (nothing is inherited), sorted by name (case-insensitively) as Windows expects, each entry `NAME=VALUE` as UTF-16 ending in one NUL,
+/// the whole block ended by one more NUL (an empty environment is two NULs). The process is started with CREATE_UNICODE_ENVIRONMENT, so the block must be UTF-16.
+pub(crate) fn env_block(env: &[(String, String)]) -> Vec<u16> {
+    let mut sorted: Vec<&(String, String)> = env.iter().collect();
+    sorted.sort_by_key(|(k, _)| k.to_uppercase());
+    let mut b: Vec<u16> = Vec::new();
+    for (k, v) in sorted {
+        b.extend(format!("{k}={v}").encode_utf16());
+        b.push(0);
+    }
+    if b.is_empty() { b.push(0); }
+    b.push(0);
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block_entries(b: &[u16]) -> Vec<String> { b.split(|c| *c == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect() }
+    #[test]
+    fn the_environment_block_is_utf16_sorted_and_ended_by_a_double_nul() {
+        let env = vec![("windir".to_string(), "C:\\Windows".to_string()), ("PATH".into(), "C:\\a;C:\\b".into()), ("SystemRoot".into(), "C:\\Windows".into()), ("LOCALAPPDATA".into(), "C:\\w".into()), ("Temp".into(), "C:\\w\\\u{e9}".into())];
+        let b = env_block(&env);
+        assert_eq!(&b[b.len() - 2..], &[0, 0], "ended by two NULs");
+        assert!(b[..b.len() - 1].iter().rposition(|c| *c == 0) == Some(b.len() - 2) && b[b.len() - 3] != 0, "exactly one NUL ends the last entry");
+        let e = block_entries(&b);
+        assert_eq!(e, vec!["LOCALAPPDATA=C:\\w", "PATH=C:\\a;C:\\b", "SystemRoot=C:\\Windows", "Temp=C:\\w\\\u{e9}", "windir=C:\\Windows"], "sorted by upper-cased name; non-ASCII kept as UTF-16");
+        assert!(e.iter().any(|x| x.starts_with("SystemRoot=")));
+        assert_eq!(env_block(&[]), vec![0, 0], "an empty environment is two NULs");
+        assert_eq!(env_block(&[("A".into(), String::new())]), vec![65, 61, 0, 0], "an empty value is `A=` then the double NUL");
+    }
 
     fn argv(parts: &[&str]) -> Vec<String> { std::iter::once("nn-launcher").chain(parts.iter().copied()).map(String::from).collect() }
     fn parse(parts: &[&str]) -> Result<Args, String> { parse_args(&argv(parts)) }

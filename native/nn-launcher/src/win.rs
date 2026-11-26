@@ -673,19 +673,7 @@ fn drain_pipe(read_end: Handle, path: String) -> std::thread::JoinHandle<()> {
 
 fn file_size(path: &str) -> i64 { std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(-1) }
 
-/// The child's environment: only what --env named (nothing is inherited), sorted by name as Windows expects.
-fn env_block(env: &[(String, String)]) -> Vec<u16> {
-    let mut sorted: Vec<&(String, String)> = env.iter().collect();
-    sorted.sort_by_key(|(k, _)| k.to_uppercase());
-    let mut b: Vec<u16> = Vec::new();
-    for (k, v) in sorted {
-        b.extend(OsStr::new(&format!("{k}={v}")).encode_wide());
-        b.push(0);
-    }
-    if b.is_empty() { b.push(0); }
-    b.push(0);
-    b
-}
+use crate::args::env_block;
 
 // ---------------------------------------------------------------------------------------------------------------- run
 

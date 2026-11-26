@@ -251,6 +251,21 @@ pub(crate) fn split_deelevate_args(rest: &[String]) -> Result<(Option<String>, V
     Ok((exe, tail.to_vec()))
 }
 
+/// The environment of one home step's program. Windows refuses to start an AppContainer program (CreateProcessW error 203, ERROR_ENVVAR_NOT_FOUND) when the block it is given has no
+/// LOCALAPPDATA (it places the container's TEMP and TMP from it and then rewrites them to the container's own folders): measured by the first hosted run of the home case, where every step failed
+/// with 203 for that reason. So the block has the same names as the product's plan (windows-native-plan.ts: HOME, USERPROFILE, APPDATA, LOCALAPPDATA, TEMP, TMP, PATH, SystemRoot, windir) plus ComSpec
+/// and PATHEXT; every user folder points into the step's work folder, so nothing of the user's is named.
+#[cfg(test)]
+pub(crate) const HOME_ENV_REQUIRED: [&str; 9] = ["SystemRoot", "windir", "LOCALAPPDATA", "USERPROFILE", "APPDATA", "HOME", "TEMP", "TMP", "PATH"];
+pub(crate) fn home_env(sys: &str, ws: &str) -> Vec<(String, String)> {
+    let kv = |k: &str, v: &str| (k.to_string(), v.to_string());
+    vec![
+        kv("SystemRoot", sys), kv("windir", sys), kv("ComSpec", &format!("{sys}\\System32\\cmd.exe")), kv("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+        kv("LOCALAPPDATA", ws), kv("USERPROFILE", ws), kv("APPDATA", ws), kv("HOME", ws), kv("TEMP", ws), kv("TMP", ws),
+        kv("PATH", &format!("{sys}\\System32;{sys}")),
+    ]
+}
+
 /// One argument quoted for a Windows command line (CommandLineToArgvW rules: backslashes before a quote are doubled, the quote is escaped, the whole is wrapped when it holds a space, tab or quote or is empty).
 pub(crate) fn quote_arg(a: &str) -> String {
     if !a.is_empty() && !a.chars().any(|c| c == ' ' || c == '\t' || c == '"') { return a.to_string(); }
@@ -287,6 +302,16 @@ mod tests {
     fn acl(entries: &[Vec<u8>]) -> Vec<u8> {
         let refs: Vec<&[u8]> = entries.iter().map(|e| &e[..]).collect();
         crate::winobj::build_acl(2, &refs).unwrap()
+    }
+
+    #[test]
+    fn the_home_step_environment_has_localappdata_and_the_names_the_product_sends() {
+        let env = home_env("C:\\Windows", "C:\\w\\ws");
+        for name in HOME_ENV_REQUIRED { assert!(env.iter().any(|(k, v)| k == name && !v.is_empty()), "{name} is missing: CreateProcessW fails with 203 for an AppContainer program without LOCALAPPDATA"); }
+        let block = crate::args::env_block(&env);
+        let text = String::from_utf16(&block).unwrap();
+        assert!(text.contains("LOCALAPPDATA=C:\\w\\ws\0") && text.contains("SystemRoot=C:\\Windows\0") && text.ends_with("\0\0"));
+        assert!(env.iter().filter(|(k, _)| k != "SystemRoot" && k != "windir" && k != "ComSpec" && k != "PATH").all(|(k, v)| k == "PATHEXT" || v == "C:\\w\\ws"), "user folders point into the work folder only");
     }
 
     #[test]

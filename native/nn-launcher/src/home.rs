@@ -259,7 +259,7 @@ fn step_run(base: &Args, id: &str, group: Group, prog: Prog, limits: bool, ws: &
     a.stdout = Some(out.clone());
     a.stderr = Some(err.clone());
     a.profile_record = Some(format!("{rec}\\{name}.sid"));
-    a.env = vec![("SystemRoot".into(), sys.clone()), ("windir".into(), sys.clone()), ("TEMP".into(), ws.to_string()), ("TMP".into(), ws.to_string()), ("PATH".into(), format!("{sys}\\System32;{sys}"))];
+    a.env = hr::home_env(&sys, ws);
     // The ONLY grant: the work folder (a new folder of this run, removed at the end). No folder of the user's (node's own install folder included) is given an entry.
     a.grants = vec![GrantSpec { mode: Mode::Modify, path: ws.to_string(), soft: false }];
     // The product's LPAC form when the caller chose `--aap-policy optout`; the plain AppContainer when it chose `none` (or gave nothing).

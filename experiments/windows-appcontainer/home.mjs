@@ -40,6 +40,27 @@ export function groupVerdict(lines, group) {
   return deciding.every((l) => l.works === true) ? "works" : "fails";
 }
 
+/** The program steps of a run (not the single steps, not a skipped one). */
+const runSteps = (lines) => lines.filter((l) => typeof l.group === "string" && typeof l.program === "string" && l.skipped !== true);
+
+/**
+ * A tool bug, not a policy verdict: every program step of every group failed in `create-process` with the same Windows error (the program never started, so nothing was measured about the options).
+ * Returns { code, error, steps } or null. The code is read from the launcher's own message ("CreateProcessW failed: 203"), never guessed.
+ */
+export function createProcessToolBug(lines) {
+  const steps = runSteps(lines);
+  if (steps.length === 0) return null;
+  const errors = new Set(steps.map((l) => (l.ok === false && l.stage === "create-process" ? String(l.error) : "")));
+  if (errors.size !== 1) return null;
+  const [error] = [...errors];
+  if (!error) return null;
+  const m = /(\d+)\s*$/.exec(error);
+  return { code: m ? Number(m[1]) : null, error, steps: steps.length };
+}
+
+/** The Windows error names this probe has met, so the note can say what the number is (only ones that were seen; anything else prints the bare number). */
+const WIN_ERRORS = { 5: "ERROR_ACCESS_DENIED", 203: "ERROR_ENVVAR_NOT_FOUND" };
+
 /** The judgement of one probe run: facts, per-group verdicts and the strongest option that worked. Claims only what the lines show. */
 export function judgeHome(lines) {
   const ctx = byStep(lines, "context");
@@ -57,15 +78,18 @@ export function judgeHome(lines) {
     if (Array.isArray(s.allApplicationPackagesAllow)) facts.push(s.allApplicationPackagesAllow.length ? `ALL APPLICATION PACKAGES holds allow entries on the station: ${s.allApplicationPackagesAllow.join(", ")}` : "ALL APPLICATION PACKAGES holds NO allow entry on the station");
   }
   if (profile) facts.push(`a throw-away per-run profile was ${profile.ok ? "made, deleted and shown gone" : "NOT cleanly made and deleted"}`);
-  const verdicts = Object.fromEntries(OPTIONS.map((o) => [o.group, groupVerdict(lines, o.group)]));
+  const toolBug = createProcessToolBug(lines);
+  // When the program never started in any step, no group's result says anything about the option: it is "not-measured", never "fails".
+  const verdicts = Object.fromEntries(OPTIONS.map((o) => [o.group, toolBug && groupVerdict(lines, o.group) === "fails" ? "not-measured" : groupVerdict(lines, o.group)]));
   const best = OPTIONS.find((o) => verdicts[o.group] === "works") ?? null;
+  const started = runSteps(lines).filter((l) => l.childStarted !== false).length; // the launcher always says childStarted:false when it did not start the program
   const summary = lines.find((l) => l.step === "summary");
   const entryLeft = summary?.stationEntryLeftBehind === true;
   const keptFolder = typeof summary?.workFolderKept === "string" ? summary.workFolderKept : null;
   const listDiffers = summary?.stationListDiffers === true;
   const stopped = summary?.stopped === true || lines.some((l) => l.skipped === true && /^stopped:/.test(String(l.reason)));
   const closeErrors = lines.flatMap((l) => (l.desktop && Array.isArray(l.desktop.closeErrors) ? l.desktop.closeErrors : []));
-  return { facts, verdicts, strongestWorking: best ? best.group : null, entryLeft, keptFolder, listDiffers, stopped, summaryFound: Boolean(summary), closeErrors: closeErrors.length, steps: lines.length };
+  return { toolBug, started, facts, verdicts, strongestWorking: best ? best.group : null, entryLeft, keptFolder, listDiffers, stopped, summaryFound: Boolean(summary), closeErrors: closeErrors.length, steps: lines.length };
 }
 
 const cell = (v) => (v === undefined ? "?" : String(v));
@@ -83,9 +107,16 @@ export function renderHomeMarkdown(lines, label = "") {
   md.push("| --- | --- | --- |");
   for (const o of OPTIONS) md.push(`| ${o.title} | ${o.writesToStation ? "a temporary entry, removed" : "no"} | ${j.verdicts[o.group]} |`);
   md.push("");
-  md.push(j.strongestWorking
-    ? `Strongest option that worked here: **${j.strongestWorking}**. This is one machine, one build and one run; it is not a general finding.`
-    : "No option worked here: the launcher would fail closed (no confined run).");
+  if (j.toolBug) {
+    const name = WIN_ERRORS[j.toolBug.code];
+    md.push(`**TOOL BUG, NOT A POLICY VERDICT.** All ${j.toolBug.steps} program steps in all groups failed in the same way before any program started: \`create-process\`, \`${j.toolBug.error}\`${j.toolBug.code !== null && name ? ` (${name})` : ""}. Windows never judged any option, so this run says nothing about whether an option works; the tool has to be fixed and the run repeated. Do not read this table as "no option works".`);
+  } else if (j.strongestWorking) {
+    md.push(`Strongest option that worked here: **${j.strongestWorking}**. This is one machine, one build and one run; it is not a general finding.`);
+  } else if (j.started === 0) {
+    md.push("No option was measured: no program step started a program (see the notes column for the error of each step). This is not the finding \"no option works\".");
+  } else {
+    md.push(`No option worked here: the launcher would fail closed (no confined run). Programs did start in ${j.started} step(s) and the deciding ones failed. This is one machine, one build and one run.`);
+  }
   if (j.entryLeft) md.push("", `**An entry for a throw-away container was left on the window station**: run the \`home-revoke\` command printed on that step's ATTEMPT line (it needs the profile's record, in the \`rec\` folder of ${j.keptFolder ? `\`${j.keptFolder}\`` : "the work folder"}). The ATTEMPT line also prints \`delete-profile\` for the profile, needed only if the launcher was killed.`);
   if (j.listDiffers) md.push("", "**WinSta0's access list did not read back exactly as it was copied before the entry** (the container's entry is gone, but another entry or the descriptor's flags differ: another program may have changed the list meanwhile). Nothing was written back; send this file.");
   if (j.stopped) md.push("", "The run was stopped (Ctrl+C or the window closing): the steps after that point did not run.");

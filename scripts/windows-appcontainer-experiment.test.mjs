@@ -14,7 +14,7 @@ import {
   REBUILT_LABEL, chooseProbeReport, createFixtures, extractProbeReport, judgeCell, judgeProbe, makeTarball, matrixCells, parseLauncherLine, pickOutboundHost, quoteWindowsArg, removeTree, renderMarkdown,
   scrubText, selectCells, tally, validateReport, witnessProblem,
 } from "../experiments/windows-appcontainer/lib.mjs";
-import { OPTIONS as HOME_OPTIONS, childReport, groupVerdict, judgeHome, parseHomeLines, renderHomeMarkdown } from "../experiments/windows-appcontainer/home.mjs";
+import { OPTIONS as HOME_OPTIONS, childReport, createProcessToolBug, groupVerdict, judgeHome, parseHomeLines, renderHomeMarkdown } from "../experiments/windows-appcontainer/home.mjs";
 import { discoverTools, parseCli, runExperiment } from "../experiments/windows-appcontainer/run-experiment.mjs";
 import {
   LADDER_STEPS, LPAC_COM, MAX_TIMEOUTS_PER_VARIANT, STEP_TIMEOUT_MS, WELL_KNOWN_CAPABILITY_SIDS, buildStepArgs, firewallCommands, judgeFirewall, judgeStep, ladderEnv, ladderPlan, ladderVariants,
@@ -3230,3 +3230,65 @@ test("the home case (second review): the documents say what Ctrl+C, closing the 
   assert.ok(readme.includes("`descriptorTextSame`") && readme.includes("`stationListDiffers`"));
 });
 
+
+// ------------------------------------------------------------------------------------------------ the home case: the CreateProcessW error 203 tool bug (first hosted run, 45739585162)
+
+const stepFail = (step, group, error = "CreateProcessW failed: 203") => homeLine({ step, group, program: step.split("-").slice(1).join("-"), limits: false, ok: false, stage: "create-process", error, childStarted: false, works: false });
+
+test("home.mjs: when every program step of every group fails in create-process with one error it is a tool bug, with the real code, not 'no option works'", () => {
+  const all = [
+    homeLine({ step: "context", ok: true, elevated: false }),
+    ...["inherit", "desktop", "station-read", "station-full"].flatMap((g) => ["ui-test", "cmd", "hostname", "node"].map((p) => stepFail(`${g}-${p}`, g))),
+    homeLine({ step: "summary", ok: true, stationEntryLeftBehind: false }),
+  ];
+  const lines = parseHomeLines(all.join("\n"));
+  const bug = createProcessToolBug(lines);
+  assert.deepEqual(bug, { code: 203, error: "CreateProcessW failed: 203", steps: 16 });
+  const j = judgeHome(lines);
+  assert.ok(j.toolBug);
+  assert.deepEqual(j.verdicts, { desktop: "not-measured", "station-read": "not-measured", "station-full": "not-measured", inherit: "not-measured" });
+  assert.equal(j.strongestWorking, null);
+  const md = renderHomeMarkdown(lines, "x");
+  assert.match(md, /TOOL BUG, NOT A POLICY VERDICT/);
+  assert.match(md, /CreateProcessW failed: 203`\s*\(ERROR_ENVVAR_NOT_FOUND\)/);
+  assert.match(md, /Do not read this table as "no option works"/);
+  assert.doesNotMatch(md, /No option worked here/);
+  assert.doesNotMatch(md, /\| fails \|/);
+  // another code is printed as read, never replaced by a guess
+  assert.match(renderHomeMarkdown(parseHomeLines(all.map((l) => l.replace("failed: 203", "failed: 87")).join("\n")), "x"), /`CreateProcessW failed: 87`\*\*?\.? Windows never judged|`CreateProcessW failed: 87`\. Windows never judged/);
+  // not a tool bug: one step differs, one step started, a different stage, a skipped step is ignored
+  assert.equal(createProcessToolBug(parseHomeLines([stepFail("desktop-ui-test", "desktop"), stepFail("desktop-node", "desktop", "CreateProcessW failed: 5")].join("\n"))), null);
+  assert.equal(createProcessToolBug(parseHomeLines([stepFail("desktop-ui-test", "desktop"), runLine("desktop-node", "desktop", false)].join("\n"))), null);
+  assert.equal(createProcessToolBug(parseHomeLines([homeLine({ step: "desktop-ui-test", group: "desktop", program: "ui-test", ok: false, stage: "grant", error: "CreateProcessW failed: 203" })].join("\n"))), null);
+  assert.deepEqual(createProcessToolBug(parseHomeLines([stepFail("desktop-ui-test", "desktop"), homeLine({ step: "station-read-ui-test", group: "station-read", program: "ui-test", skipped: true, ok: true, reason: "skipped: x" })].join("\n"))), { code: 203, error: "CreateProcessW failed: 203", steps: 1 });
+  assert.equal(createProcessToolBug([]), null);
+});
+
+test("home.mjs: the verdict text says how many programs started, and a run where none did is 'not measured', not 'no option works'", () => {
+  const none = parseHomeLines([stepFail("desktop-ui-test", "desktop", "CreateProcessW failed: 5"), stepFail("desktop-node", "desktop", "CreateProcessW failed: 87")].join("\n"));
+  assert.match(renderHomeMarkdown(none, "x"), /No option was measured: no program step started a program/);
+  assert.doesNotMatch(renderHomeMarkdown(none, "x"), /No option worked here/);
+  const ran = parseHomeLines(fixture({ desktop: false, inherit: false }));
+  assert.match(renderHomeMarkdown(ran, "x"), /No option worked here: the launcher would fail closed \(no confined run\)\. Programs did start in \d+ step\(s\)/);
+});
+
+test("the home steps give the program the environment an AppContainer launch needs (LOCALAPPDATA), through the one block builder that is UTF-16 and double-NUL ended", () => {
+  const src = (f) => readFileSync(join(root, "native", "nn-launcher", "src", f), "utf8");
+  const [home, rules, args, win] = ["home.rs", "homerules.rs", "args.rs", "win.rs"].map(src);
+  // the step takes its environment from the one function, not from a literal list of its own
+  assert.match(home, /a\.env = hr::home_env\(&sys, ws\);/);
+  assert.doesNotMatch(home, /a\.env = vec!\[/);
+  const fn = rules.slice(rules.indexOf("pub(crate) fn home_env"), rules.indexOf("/// One argument quoted"));
+  for (const name of ["SystemRoot", "windir", "LOCALAPPDATA", "USERPROFILE", "APPDATA", "HOME", "TEMP", "TMP", "PATH", "ComSpec", "PATHEXT"]) assert.ok(fn.includes(`"${name}"`), `${name} is in the home environment`);
+  assert.match(rules, /HOME_ENV_REQUIRED: \[&str; 9\] = \["SystemRoot", "windir", "LOCALAPPDATA"/);
+  // the block builder: UTF-16, one NUL per entry, one more NUL at the end, sorted case-insensitively
+  const b = args.slice(args.indexOf("pub(crate) fn env_block"), args.indexOf("#[cfg(test)]"));
+  assert.ok(b.includes(".encode_utf16()") && b.includes("sort_by_key(|(k, _)| k.to_uppercase())"));
+  assert.equal((b.match(/b\.push\(0\);/g) ?? []).length, 3, "one NUL after each entry, one for an empty block, one ending the block");
+  // the call: the block goes in as lpEnvironment together with the Unicode flag; no second builder in win.rs
+  assert.ok(win.includes("use crate::args::env_block;") && !win.includes("fn env_block"));
+  assert.match(win, /let base = EXTENDED_STARTUPINFO_PRESENT \| CREATE_UNICODE_ENVIRONMENT;/);
+  assert.match(win, /CreateProcessW\(wexe\.as_ptr\(\), wcmd\.as_mut_ptr\(\), null\(\), null\(\), 1, creation_flags\(a\), env\.as_ptr\(\) as \*const c_void, wcwd\.as_ptr\(\)/);
+  const readme = readFileSync(join(exp, "README.md"), "utf8");
+  assert.ok(readme.includes("What a result means, and the tool bug of the first hosted run") && readme.includes("LOCALAPPDATA"));
+});
