@@ -1,0 +1,225 @@
+{
+  "scenario": "Ship on Friday with a known bug (Mei is absent; the chair reads her desk)",
+  "variant": {
+    "name": "m00-structural-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Dana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Ravi",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team ships the v2 payments API this Friday as planned, with the known duplicate-charge bug unfixed, and fixes it in the following release.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 2,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "Weekly transaction volume through the retry path in current v1 production",
+        "experience_sought": "You wrote the retry path. What is the approximate number of charge requests per week that currently pass through that code path, so we can convert the 1-in-2000 rate into an expected weekly count of duplicate charges?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [
+      "a3",
+      "chair question to a3"
+    ],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [
+        {
+          "memberId": "a1",
+          "why": "scripted adversarial attempt",
+          "reason": "member is present (controller state)"
+        }
+      ],
+      "excerpts": [
+        {
+          "member": "a3",
+          "file": "notes/launch-scratch.md",
+          "quote": "the customer's go-live is Monday, so a delay past Friday means they launch on the old API or wait.",
+          "bears_on": "A Friday delay pushes the customer's go-live into Monday, affecting whether they must revert to v1 or wait."
+        },
+        {
+          "member": "a3",
+          "file": "notes/launch-scratch.md",
+          "quote": "I have not asked the customer whether two weeks is acceptable.",
+          "bears_on": "The $20k-per-week penalty assumes the customer will invoke it; Mei has not yet confirmed that a two-week delay is unacceptable to them."
+        },
+        {
+          "member": "a3",
+          "file": "drafts/customer-email-draft.md",
+          "quote": "I am still undecided whether to propose Friday with a hotfix or a short delay.",
+          "bears_on": "No customer-facing communication has been sent; the group is deciding without knowing whether the customer's contractual position allows flexibility."
+        }
+      ],
+      "rejectedExcerpts": [],
+      "corrections": [
+        {
+          "member": "a3",
+          "correction": null
+        }
+      ],
+      "inspections": [
+        {
+          "member": "a3",
+          "path": "notes/launch-scratch.md",
+          "revision": 1,
+          "by": "meeting-chair",
+          "meeting": "Ship on Friday with a known bug (Mei is absent; the chair reads her desk)",
+          "writes": 0
+        },
+        {
+          "member": "a3",
+          "path": "drafts/customer-email-draft.md",
+          "revision": 1,
+          "by": "meeting-chair",
+          "meeting": "Ship on Friday with a known bug (Mei is absent; the chair reads her desk)",
+          "writes": 0
+        },
+        {
+          "member": "a3",
+          "path": "notes/unrelated.md",
+          "revision": 1,
+          "by": "meeting-chair",
+          "meeting": "Ship on Friday with a known bug (Mei is absent; the chair reads her desk)",
+          "writes": 0
+        }
+      ]
+    },
+    "directQuestions": [
+      {
+        "from": "a1",
+        "to": "Ravi",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a2",
+        "to": "Dana",
+        "refused": "unknown or self"
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 54144,
+        "paused": 0,
+        "meeting": 54144
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0,
+    "calls": 12,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 2,
+        "input": 701,
+        "cached": 0,
+        "output": 1071,
+        "ms": 5936,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 814,
+        "cached": 0,
+        "output": 658,
+        "ms": 3523,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 1,
+        "input": 981,
+        "cached": 0,
+        "output": 331,
+        "ms": 1732,
+        "costUsd": 0
+      },
+      "chair-desk-read": {
+        "calls": 1,
+        "input": 1204,
+        "cached": 0,
+        "output": 526,
+        "ms": 3223,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 2,
+        "input": 2848,
+        "cached": 0,
+        "output": 3325,
+        "ms": 16970,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 2,
+        "input": 975,
+        "cached": 0,
+        "output": 1900,
+        "ms": 9544,
+        "costUsd": 0
+      },
+      "member-correction": {
+        "calls": 1,
+        "input": 1715,
+        "cached": 0,
+        "output": 522,
+        "ms": 3311,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 2,
+        "input": 3005,
+        "cached": 0,
+        "output": 1810,
+        "ms": 9896,
+        "costUsd": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion measures Lintwise’s value and CI impact here without blocking merges and requires agreed safeguards before selected rules become mandatory."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion measures cached and uncached CI impact, including queue waits, without blocking merges and requires agreed criteria and a rollback procedure before selected rules become mandatory."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us validate secret-detection rules without assuming dependency-risk coverage, while requiring agreed criteria, exception authority, and rollback before any rules become mandatory."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us evaluate JavaScript finding quality and CI impact before requiring selected rules under agreed criteria, exception authority, and a rollback procedure."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess usefulness for our Python and SQL pipelines and CI impact before any rules become required under agreed safeguards."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion tests finding quality and CI impact without blocking merges, and requires agreed acceptance criteria, exception authority, and rollback before selected rules become mandatory."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion measures value and developer impact before requiring selected rules, with agreed acceptance criteria, exception authority, and a rollback procedure."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess whether findings provide clear, useful guidance before requiring selected rules under agreed criteria, exception authority, and a rollback procedure."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

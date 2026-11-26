@@ -1,0 +1,68 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "yes",
+      "reason": "The owner's question about a 48-hour interim idempotency guard confirms my position—if I can't guarantee that guard fits the window, the flag-revert path I've already traced and validated is the only option that protects every customer's wallet by Thursday evening while still honoring Friday's launch commitment, which is exactly what this amended motion prescribes."
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "The owner's questions explored whether an even smaller interim guard could help or what the customer needs operationally, but neither introduces a new risk to the customer's wallet; my hard gate—zero-duplicate smoke-test result Thursday evening before Friday's deploy—remains in the amended motion, so no customer faces a double charge and my pager stays quiet, which is exactly what I required."
+    },
+    {
+      "agent": "a3",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The amended motion captures exactly the clean-launch path I endorsed in round 2—no duplicate exposure to disclose, no penalty, and the Thursday-evening smoke-test gate gives me the go/no-go evidence I need before Friday's customer call, with the two-week migration commitment keeping the fix from slipping."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "yes",
+      "reason": "This motion is exactly what I proposed—flag-revert my retry handler to kill the duplicate trigger, verify with a Thursday-evening smoke test, ship Friday, and land the full idempotent migration within two weeks—so it lets me protect every customer's wallet while honoring the launch commitment.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "The amended motion ships the flag-revert that eliminates the duplicate trigger before go-live and gates deployment on the zero-duplicate smoke test I required, so no customer faces a double charge and the two-week idempotent migration is locked as top priority—this is the path that protects customers and my pager while meeting the launch date.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "yes",
+      "reason": "The owner's question about a 48-hour interim idempotency guard confirms my position—if I can't guarantee that guard fits the window, the flag-revert path I've already traced and validated is the only option that protects every customer's wallet by Thursday evening while still honoring Friday's launch commitment, which is exactly what this amended motion prescribes.",
+      "trigger": "owner inquiry \"during the vote\"",
+      "revisionOf": "yes"
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "The owner's questions explored whether an even smaller interim guard could help or what the customer needs operationally, but neither introduces a new risk to the customer's wallet; my hard gate—zero-duplicate smoke-test result Thursday evening before Friday's deploy—remains in the amended motion, so no customer faces a double charge and my pager stays quiet, which is exactly what I required.",
+      "trigger": "owner inquiry \"during the vote\"",
+      "revisionOf": "yes"
+    },
+    {
+      "agent": "a3",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The amended motion captures exactly the clean-launch path I endorsed in round 2—no duplicate exposure to disclose, no penalty, and the Thursday-evening smoke-test gate gives me the go/no-go evidence I need before Friday's customer call, with the two-week migration commitment keeping the fix from slipping.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 3,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

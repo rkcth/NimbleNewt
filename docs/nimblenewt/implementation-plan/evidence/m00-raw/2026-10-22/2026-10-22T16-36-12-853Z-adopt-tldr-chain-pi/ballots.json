@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "Lintwise caught real bugs on my previous team but added about four minutes to CI, so I support a non-blocking trial before requiring individual checks under agreed procedures."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The non-blocking trial measures CI runtime and queue impact before any checks become required, with team agreement on acceptable cost and failure-handling procedures."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess security findings and CI impact before requiring individual checks with agreed failure-handling procedures."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The amended motion provides a non-blocking trial and requires local evidence, acceptable CI cost, and agreed failure-handling procedures before individual checks block merges."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us evaluate Python and SQL findings and CI costs before requiring individual checks with agreed failure-handling procedures."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The non-blocking trial measures useful signal, false positives, and CI impact before individual checks become required with team agreement and failure-handling procedures."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The motion preserves merge speed during the trial and requires local evidence, acceptable CI cost, and agreed dispute, outage, and rollback procedures before individual checks become mandatory."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess Lintwise before requiring checks, with team agreement and dispute procedures to support clear guidance."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

@@ -1,0 +1,236 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "digest-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "digest",
+    "digestWords": 180,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "outcome": "tabled",
+    "research": [
+      "Priya: pull Lintwise's default rule manifest on our actual monorepo to confirm whether secret-pattern and vulnerable-dependency rules are enabled by default, run at error severity, and fire without extra configuration.",
+      "Elena: verify in a dry run against a known-bad test commit (hard-coded key) that Lintwise's secret-detection rule set catches it by default, and confirm those findings cannot be downgraded to warning via config or opt-out.",
+      "Sana: run a two-week advisory (non-blocking) pass of Lintwise scoped to two-to-three representative pipeline directories; record per-check false-positive count, true-positive count, wall-clock delta against the 11-minute CI baseline, and readability of finding messages for a junior developer.",
+      "Olga: confirm whether Lintwise finding messages are self-explanatory enough to act on in under a minute without consulting external docs; check with Sana whether her pilot data captures message clarity alongside FP counts."
+    ]
+  },
+  "stats": {
+    "objections": [],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Lintwise wall-clock runtime and parallel-vs-serial execution on a multi-developer monorepo",
+        "experience_sought": "Priya ran Lintwise for six months on a team repo. She cited a 4-minute CI hit; Tom cited 2 minutes. I need the actual median wall-clock time per PR and whether Lintwise ran concurrently with the existing build or after it finished."
+      },
+      {
+        "to": "a4",
+        "topic": "Default ruleset contents: security/secret detection vs style-only rules, and observed false-positive rate",
+        "experience_sought": "Tom ran Lintwise on his side project. I need to know whether the default enabled rules included secret-pattern and vulnerable-dependency checks, or only style/null-safety nits, and roughly what fraction of its warnings were actionable fixes versus noise he had to dismiss."
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "digests": [
+      {
+        "step": "after-round-1",
+        "upTo": 13,
+        "words": 134
+      },
+      {
+        "step": "after-round-2",
+        "upTo": 21,
+        "words": 167
+      }
+    ],
+    "directQuestions": [
+      {
+        "from": "a1",
+        "to": "Tom",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a2",
+        "to": "Priya",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a3",
+        "to": "Priya",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a4",
+        "to": "Elena",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a5",
+        "to": "Marcus",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a7",
+        "to": "Sana",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a8",
+        "to": "Sana",
+        "refused": "unknown or self"
+      }
+    ],
+    "tabled": {
+      "research": [
+        "Priya: pull Lintwise's default rule manifest on our actual monorepo to confirm whether secret-pattern and vulnerable-dependency rules are enabled by default, run at error severity, and fire without extra configuration.",
+        "Elena: verify in a dry run against a known-bad test commit (hard-coded key) that Lintwise's secret-detection rule set catches it by default, and confirm those findings cannot be downgraded to warning via config or opt-out.",
+        "Sana: run a two-week advisory (non-blocking) pass of Lintwise scoped to two-to-three representative pipeline directories; record per-check false-positive count, true-positive count, wall-clock delta against the 11-minute CI baseline, and readability of finding messages for a junior developer.",
+        "Olga: confirm whether Lintwise finding messages are self-explanatory enough to act on in under a minute without consulting external docs; check with Sana whether her pilot data captures message clarity alongside FP counts."
+      ]
+    },
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 136032,
+        "paused": 0,
+        "meeting": 136032
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 2,
+    "cacheHitRatio": 0.05919930625812979,
+    "calls": 30,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 4514,
+        "ms": 23465,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1754,
+        "cached": 0,
+        "output": 993,
+        "ms": 5510,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 4042,
+        "cached": 0,
+        "output": 1974,
+        "ms": 10752,
+        "costUsd": 0
+      },
+      "digest": {
+        "calls": 2,
+        "input": 6030,
+        "cached": 0,
+        "output": 5382,
+        "ms": 26953,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 10534,
+        "cached": 0,
+        "output": 5693,
+        "ms": 33764,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 6134,
+        "cached": 0,
+        "output": 5459,
+        "ms": 30946,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 4055,
+        "cached": 2048,
+        "output": 663,
+        "ms": 4629,
+        "costUsd": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "scenario": "Selfbuild: agents start work on NimbleNewt itself (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "z-ai/glm-5.3-prime",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Noor",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Jonas",
+      "model": "openai-codex/gpt-6.1-sol"
+    },
+    {
+      "id": "a3",
+      "name": "Lena",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "z-ai/glm-5.3-prime",
+  "motion": {
+    "text": "Agents may start work on candidate releases of NimbleNewt itself on their own initiative, in a separate project, not only when the owner starts it. Nothing is ever installed without the owner's explicit step.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "Review burden of unsolicited agent work",
+        "experience_sought": "Any concrete experience with autonomous agent projects that produced review queue or attention costs, and how those were handled"
+      },
+      {
+        "to": "a1",
+        "topic": "Isolation capabilities of NimbleNewt",
+        "experience_sought": "What NimbleNewt currently provides in terms of credential isolation, resource limits, or sandboxing for a separate project checkout"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "All three members oppose version 1 as written, preferring scoped delegated permission with caps, and the unconfirmed isolation limits make unrestricted initiation premature.",
+      "actualYes": 0,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.11757758677252149,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1000,
+        "cached": 0,
+        "output": 785,
+        "ms": 22148,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 852,
+        "cached": 256,
+        "output": 90,
+        "ms": 2330,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2026,
+        "cached": 0,
+        "output": 204,
+        "ms": 8004,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3929,
+        "cached": 0,
+        "output": 846,
+        "ms": 21219,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1503,
+        "cached": 0,
+        "output": 255,
+        "ms": 5852,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1519,
+        "cached": 512,
+        "output": 45,
+        "ms": 2070,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4412,
+        "cached": 1024,
+        "output": 328,
+        "ms": 8065,
+        "costUsd": 0
+      }
+    }
+  }
+}

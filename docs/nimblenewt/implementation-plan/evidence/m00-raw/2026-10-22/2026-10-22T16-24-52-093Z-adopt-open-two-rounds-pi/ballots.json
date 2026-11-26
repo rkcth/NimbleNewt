@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "My previous team saw real bugs caught, but we need a non-blocking trial to establish Lintwise’s value and CI impact on our monorepo before requiring it."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "We have not measured Lintwise’s impact on our 11-minute builds or peak queue waits, so I support a non-blocking trial before mandatory enforcement."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "Secret detection warrants evaluation, but mandatory adoption should await a non-blocking trial, verified access requirements, and a clear process for handling security findings."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "My side-project experience showed substantial JavaScript noise, so I support a non-blocking trial before requiring Lintwise on every merge."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "We have not verified useful Python and SQL coverage or measured CI impact on our monorepo, so I support a non-blocking trial before mandatory enforcement."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "We have not established Lintwise’s signal quality or CI impact on our monorepo; a non-blocking trial should precede mandatory enforcement."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "Mandatory adoption should follow a non-blocking trial demonstrating useful findings and acceptable workflow impact, with clear handling and rollback procedures."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to assess whether Lintwise provides clear guidance consistent with our conventions before making it mandatory."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

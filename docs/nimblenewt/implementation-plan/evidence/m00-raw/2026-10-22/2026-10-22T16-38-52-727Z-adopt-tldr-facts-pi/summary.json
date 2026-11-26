@@ -1,0 +1,161 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "tldr-facts",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70,
+    "chairNotes": true,
+    "chairReminders": 2
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team adopts a non-blocking Lintwise trial in its monorepo, with agreed evaluation criteria, a review date, and a rollback path; results on actionable findings, false positives, language coverage, CI runtime, and queue impact will inform a later decision on requiring individual rules.",
+    "version": 2
+  },
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a2",
+            "reason": "We have not measured Lintwise’s effect on our 11-minute CI builds or queue length before making it a required pre-merge check."
+          },
+          {
+            "id": "a7",
+            "reason": "The motion still requires the whole tool, rather than a non-blocking trial followed by review of individual rules and a rollback path."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Prior Lintwise results and comparability",
+        "experience_sought": "What bugs did Lintwise catch during your six months of use, and how comparable were that codebase and CI setup to ours?"
+      },
+      {
+        "to": "a7",
+        "topic": "Merge-policy constraints on a non-blocking trial",
+        "experience_sought": "What existing merge-policy requirements would affect running Lintwise as a non-blocking check in our monorepo?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "reminders": [
+      {
+        "step": "before-ballots",
+        "from": "Lars",
+        "quote": "Lintwise’s documentation describes a baseline mode that ignores existing findings and reports only new ones; we should test that, while separately assessing existing findings."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Sana",
+        "quote": "Our pipeline code has no static checks today, and two outages last year came from typos in config keys."
+      }
+    ]
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 47,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 4745,
+        "cached": 0,
+        "output": 820,
+        "ms": 34820,
+        "costUsd": 0
+      },
+      "chair-notes": {
+        "calls": 1,
+        "input": 1039,
+        "cached": 0,
+        "output": 334,
+        "ms": 10872,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1400,
+        "cached": 0,
+        "output": 102,
+        "ms": 3402,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2589,
+        "cached": 0,
+        "output": 178,
+        "ms": 7563,
+        "costUsd": 0
+      },
+      "chair-reminders": {
+        "calls": 2,
+        "input": 7407,
+        "cached": 0,
+        "output": 126,
+        "ms": 6057,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 13799,
+        "cached": 0,
+        "output": 1273,
+        "ms": 46568,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 16,
+        "input": 6140,
+        "cached": 0,
+        "output": 353,
+        "ms": 49811,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 1903,
+        "cached": 0,
+        "output": 96,
+        "ms": 4407,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 16598,
+        "cached": 0,
+        "output": 320,
+        "ms": 19875,
+        "costUsd": 0
+      }
+    }
+  }
+}

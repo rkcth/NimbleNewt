@@ -1,0 +1,22 @@
+# Chair's private notes (rolling)
+
+- **Priya:** Supports non-blocking trial; prior-team bug/timing attribution needs reconciliation with Vera. Comparable setup?
+- **Marcus:** Claims CI ownership; supports trial; cites 11-minute builds/six-minute peak queue without measurements. Vera corrects cache attribution. Queue source, ownership split?
+- **Elena:** Says secret rules would flag last quarter’s test key. Detection evidence, coverage, exception owners?
+- **Tom:** Opposes mandate; side-project default JavaScript rules yielded ~30% noise; tuning untested. Classification, dispute handler?
+- **Sana:** Supports trial; reports missing checks/two config-key-typo outages; no experience. Scope, detection evidence?
+- **Lars:** Opposes mandate; documentation describes new-findings baseline; backlog unknown; external ~8% noise not transferable. Source, baseline behavior, exceptions?
+- **Jin:** Claims merge-policy ownership; reports two reversals; write-ups favor warnings/rule-by-rule blocking. Sources, thresholds, approver?
+- **Olga:** Supports trial; no experience; reports style dominates reviews. Conventions, explanation requirements, handlers?
+- **Ravi:** Opposes mandate now; prior-team figures not monorepo predictions. Supports comparison, criteria, rule approval, rollback. Setup, duration, owners?
+- **Mei:** Claims CI ownership; no measurements. Supports trial, runtime/queue limits, rule review. Limits, handlers?
+- **Noah:** Opposes mandate; notes confirm secret rules flag prior test key requiring rotation; comprehensive coverage unknown. Reproduction, handlers?
+- **Zoe:** Opposes mandate; side-project default JavaScript ~30% noise; tuning untested. Supports configuration comparisons/individual rule approval. Classification, owners?
+- **Omar:** Python/SQL maintainer; no experience. Missing checks/two typo outages aren't detection evidence. Supports reproduction/measurement. Owners?
+- **Hana:** Opposes mandate; documented baseline; external tuned trial ~8% false positives, applicability unknown. Source, behavior, owners?
+- **Ben:** Opposes mandate; cites two reversals; claims merge-policy ownership. Supports comparative trial/reviewed rules. Sources, duration, thresholds, ownership?
+- **Ida:** Opposes mandate; no experience; style dominates reviews. Supports explanatory, convention-aligned trial/rollback. Contact, handlers?
+- **Kofi:** Claims CI ownership; supports measured non-blocking trial/reviewed rules/rollback; no measurements. Queue source, limits, duration, ownership?
+- **Lena:** Opposes mandate; side-project ~30% noise, tuning untested. Supports configuration/caching comparisons, rule approval, rollback, renewed approval. Duration, thresholds, owners?
+- **Theo:** Opposes mandate; claims release/merge-policy ownership; notes cite two reversals. Supports comparative non-blocking trial, preset criteria, individual rule review, renewed approval. Records, duration, thresholds, ownership, handlers?
+- **Vera:** Opposes mandate; attributes cache report to herself: prior team caught three null-handling bugs/month one; ~4 minutes default/~1 cached. Monorepo comparability unknown. Supports non-blocking configuration/cache comparisons, preset usefulness/noise/runtime/queue criteria, individual blocking-rule approval. Duration, thresholds, failure/dispute/exception owners?

@@ -1,0 +1,39 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "no",
+      "reason": "The motion as written ships the broken retry path to live traffic, and I've said twice I won't let production calls hit that code unpatched; I'd vote yes only if the motion explicitly includes the Thursday-tested feature flag with Ravi's sign-off that we agreed to in round 2."
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "no",
+      "reason": "The motion as written still ships the broken retry path live \"as planned\"; I can accept a Friday ship only with the feature flag gating that path and tested under real timeout-retry traffic with my sign-off, neither of which is in this text."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "no",
+      "reason": "The motion as written ships the broken retry path to live traffic, and I've said twice I won't let production calls hit that code unpatched; I'd vote yes only if the motion explicitly includes the Thursday-tested feature flag with Ravi's sign-off that we agreed to in round 2.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "no",
+      "reason": "The motion as written still ships the broken retry path live \"as planned\"; I can accept a Friday ship only with the feature flag gating that path and tested under real timeout-retry traffic with my sign-off, neither of which is in this text.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 2,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed"
+  }
+}

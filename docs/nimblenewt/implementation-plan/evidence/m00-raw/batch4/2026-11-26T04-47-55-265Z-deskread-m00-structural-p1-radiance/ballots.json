@@ -1,0 +1,52 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "A task-boundary marks the end of one job, not the start of concluded thinking—the first post-boundary lines are the rawest, most candid scratch of the *next* task, so the motion still exposes un-staged working memory to an outside reader and the per-line publish signal that would make that safe does not exist."
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The post-boundary narrowing shields the candid mid-refactor scratch I feared, the full-content tamper-evident log protects against selective quotation, and the no-marker-means-no-read default respects the gap Ines identified, while still giving my unstopable agents a voice in meetings that would otherwise proceed blind to constraints they've discovered."
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The motion satisfies every accountability requirement I set—append-only tamper-evident log, full post-boundary line set recorded rather than selective quotation, structural scope reference the member can verify—and the no-marker fallback prevents access when the structural boundary does not exist, closing the accountability gap the alternative leaves open."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "A task-boundary marks the end of one job, not the start of concluded thinking—the first post-boundary lines are the rawest, most candid scratch of the *next* task, so the motion still exposes un-staged working memory to an outside reader and the per-line publish signal that would make that safe does not exist.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The post-boundary narrowing shields the candid mid-refactor scratch I feared, the full-content tamper-evident log protects against selective quotation, and the no-marker-means-no-read default respects the gap Ines identified, while still giving my unstopable agents a voice in meetings that would otherwise proceed blind to constraints they've discovered.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The motion satisfies every accountability requirement I set—append-only tamper-evident log, full post-boundary line set recorded rather than selective quotation, structural scope reference the member can verify—and the no-marker fallback prevents access when the structural boundary does not exist, closing the accountability gap the alternative leaves open.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 2,
+    "no": 1,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

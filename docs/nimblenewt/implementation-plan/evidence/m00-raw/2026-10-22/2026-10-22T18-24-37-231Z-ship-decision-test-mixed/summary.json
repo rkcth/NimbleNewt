@@ -1,0 +1,164 @@
+{
+  "scenario": "Ship on Friday with a known bug (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Dana",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Ravi",
+      "model": "z-ai/glm-5.3-prime"
+    },
+    {
+      "id": "a3",
+      "name": "Mei",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team delays Friday’s v2 payments API release until the duplicate-charge fix and safe migration are complete, expected in about two weeks, and promptly consults the customer about the impact and revised schedule.",
+    "version": 2
+  },
+  "result": {
+    "yes": 3,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a3",
+            "reason": "The customer's position on a potential delay has not yet been confirmed, and that answer directly affects the tradeoff at the heart of this motion."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": [
+          {
+            "id": "a2",
+            "reason": "Mei's support may hinge on the customer's answer about delaying their Monday go-live, and the motion promises to promptly consult them but doesn't wait for that input, so we risk a decision made without the essential missing fact."
+          }
+        ]
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a3",
+        "topic": "Verification of proposed monitoring and refunds",
+        "experience_sought": "What has been tested to establish that duplicate charges can be detected and refunded within hours?"
+      },
+      {
+        "to": "a1",
+        "topic": "Scope of duplicate-charge rate",
+        "experience_sought": "Does the observed 1-in-2000 rate apply to all charges or only retries after network timeouts, and what testing established that denominator?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "yes",
+      "predictYes": 2,
+      "reason": "The known duplicate-charge bug and unverified mitigation justify delaying for the fix and safe migration; Dana and Ravi support delay, while Mei’s support remains conditional on customer input.",
+      "actualYes": 3,
+      "passed": true,
+      "matchesOutcome": true,
+      "predictionError": -1
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.5,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.09261939218523878,
+    "calls": 21,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1103,
+        "cached": 256,
+        "output": 900,
+        "ms": 20590,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 834,
+        "cached": 0,
+        "output": 92,
+        "ms": 5635,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2040,
+        "cached": 0,
+        "output": 301,
+        "ms": 8943,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 3931,
+        "cached": 256,
+        "output": 973,
+        "ms": 23015,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 6,
+        "input": 3036,
+        "cached": 0,
+        "output": 760,
+        "ms": 18296,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 2,
+        "input": 3125,
+        "cached": 0,
+        "output": 233,
+        "ms": 11177,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1667,
+        "cached": 1408,
+        "output": 55,
+        "ms": 3136,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4994,
+        "cached": 0,
+        "output": 396,
+        "ms": 9309,
+        "costUsd": 0
+      }
+    }
+  }
+}

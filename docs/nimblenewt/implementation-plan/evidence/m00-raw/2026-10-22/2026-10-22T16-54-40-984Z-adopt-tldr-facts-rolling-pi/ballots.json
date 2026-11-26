@@ -1,0 +1,131 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion measures usefulness and CI overhead in our monorepo before separately approving blocking rules with clear ownership and rollback."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The motion requires agreed CI overhead limits and measurement of build and queue impact for default and cached runs before any blocking rules return for approval."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test actual secrets and dependency-risk coverage and CI impact before any individual rule becomes blocking, with ownership, exceptions, and rollback."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test JavaScript findings and CI impact in our monorepo before any individual rule becomes mandatory."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The amended motion lets us verify Python and SQL coverage and measure useful findings, false positives, and CI impact without blocking merges before individual rules are approved."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The non-blocking trial measures useful signal, false positives, coverage, and CI impact before individual blocking rules return for approval with ownership, dispute procedures, exceptions, and rollback."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion measures value and CI impact without blocking merges, then requires approval of individual blocking rules with clear ownership, dispute and exception procedures, and rollback."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess whether findings provide clear guidance consistent with our conventions before approving individual blocking rules with ownership and dispute procedures."
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "My prior experience supports a non-blocking trial, not predicted results here, with measured CI impact and separate approval of any blocking rules."
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "The non-blocking trial sets acceptable CI overhead beforehand and measures default and cached build and queue impact before any blocking rules return for approval."
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test actual secrets and dependency-risk coverage and CI impact before any blocking rule is individually approved with ownership, dispute and exception procedures, and rollback."
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test JavaScript findings, false positives, and CI impact in our monorepo before we approve individual blocking rules with clear ownership and rollback."
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The non-blocking trial will let us verify Python and SQL coverage and measure useful findings, false positives, and CI impact before approving individual blocking rules."
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The non-blocking trial will measure useful signal, false positives, coverage, and CI impact before individual blocking rules return for approval with clear ownership and rollback."
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The motion balances consistency with developer speed by measuring value and CI impact before seeking approval for individually owned blocking rules with dispute, exception, and rollback procedures."
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us check whether style findings match our conventions before approving individual blocking rules with clear ownership and dispute procedures."
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The amended motion keeps the trial non-blocking, sets acceptable CI overhead beforehand, and measures default and cached build and queue impact before any blocking rules are approved."
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test JavaScript findings, false positives, and CI impact in our monorepo before we approve individual blocking rules with clear ownership and rollback."
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The non-blocking trial measures value and CI impact before individual blocking rules return for approval with clear ownership, dispute and exception procedures, and rollback."
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "The amended motion tests usefulness and default versus cached CI impact without blocking merges, then requires separate approval of individual blocking rules with ownership and rollback."
+    }
+  ],
+  "result": {
+    "yes": 20,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

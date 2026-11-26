@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Noor",
+      "vote": "no",
+      "reason": "Separate checkouts and installation approval do not establish limits on unsolicited execution, credential access, or resource use before installation."
+    },
+    {
+      "agent": "a2",
+      "name": "Jonas",
+      "vote": "no",
+      "reason": "I want this capability, but fact-finding showed we lack execution isolation, resource bounds, deduplication, and a review queue, so I'd only support a revised version with those prerequisites."
+    },
+    {
+      "agent": "a3",
+      "name": "Lena",
+      "vote": "no",
+      "reason": "Version 1 provides no cap, deduplication, or triage mechanism, so it converts agent initiative into an unbounded, unpredictable stream of review requests on the owner's desk without any throttle to protect their attention."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

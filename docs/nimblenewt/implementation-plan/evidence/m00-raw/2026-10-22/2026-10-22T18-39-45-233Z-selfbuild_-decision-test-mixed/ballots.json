@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Noor",
+      "vote": "no",
+      "reason": "Version 1 permits preparation-time authority without verified isolation, credential restrictions, or resource limits, which owner approval at installation does not address."
+    },
+    {
+      "agent": "a2",
+      "name": "Jonas",
+      "vote": "no",
+      "reason": "Version 1 lacks the evidence threshold, intake cap, and preparation-time safeguards the group converged on, so I support only the amended version, not the motion as written."
+    },
+    {
+      "agent": "a3",
+      "name": "Lena",
+      "vote": "no",
+      "reason": "Version 1 provides no evidence threshold, no per-agent cap, no consolidation step, and no verified preparation-time safeguards, so it adds an unbounded intake source to the owner's review queue without any of the controls I identified as necessary."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

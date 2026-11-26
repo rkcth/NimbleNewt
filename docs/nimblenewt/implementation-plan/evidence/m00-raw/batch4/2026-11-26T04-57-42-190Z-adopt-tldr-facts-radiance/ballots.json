@@ -1,0 +1,273 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion resolves my CI-timing concern via parallel cached execution under ninety seconds, bakes in the two-week advisory sprint and baseline suppression I required from my prior rollout, and gates enforcement on the canaries—so the bugs Lintwise caught for me in six months get enforced without the serial four-minute penalty that nearly derailed us last time."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion names the 20-PR burst p95 queue criterion in the rollback clause and the two-week advisory sprint gives me the window to run that load test before enforcement, so my structural objection—quantifying peak-queue impact before any merge-blocking—is now encoded as a binding condition."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The amended motion routes security-tier findings exclusively to my and Noah's logged exception path with no self-service waiver, gates enforcement on the seeded-secret canary passing, and blocks on CVSS 7+ CVEs and leaked secrets—exactly the controls I need so a junior cannot suppress a real key leak to unblock a sprint."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—advisory sprint, critical-tier-only blocking, baseline suppression, parallel CI, canary gates, and the 8%/10% FP thresholds Zoe, Lena, and I will track on real frontend PRs—so my round-two firm yes now applies to the text as written."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The amended motion gates enforcement on my seeded SQL/config-key canary passing in both pipeline repos, so if raw .sql files turn out to be a blind spot the gate never activates and my two config-key outages stay covered only when detection is proven to work on the files I actually ship."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion encodes every safeguard I required—two-week advisory sprint, baseline suppression, critical-tier-only blocking (null-derefs, secrets, CVEs 7+, unparameterized SQL), parallel CI with a sub-ninety-second cap, the 8%/10% FP thresholds matching my tuned-noise data, Sana's canary gate, a pre-written 24-hour rollback, and separate security exception routing—so lint noise can no longer drown test-failure signal and my objection at #48 is fully resolved."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—monorepo scope, two-week advisory, critical-tier-only blocking gated on both canaries, 8%/10% FP policy with auto-demote, parallel sub-90-second CI, Noah/Elena security exception path, 24-hour pre-written rollback, and per-finding explanations—so the policy is now as tight and exit-ramped as the two past reversals I flagged require."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The amended motion gives me exactly what I asked for—a narrow critical-only blocking list, a two-week advisory window to learn the rules before they can stall my PRs, per-finding \"why this matters\" messages, and a one-page guide—so I can finally tell which findings are must-fix and which are suggestions without drowning in noise."
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "The amended motion now encodes every condition I set—parallel cached CI under ninety seconds, critical-tier-only blocking with baseline suppression, canary-gated enforcement (so my unproven raw .sql parsing concern is addressed before any merge is blocked), Jin's eight-percent FP threshold with ten-percent auto-demote, and Ben's pre-written 24-hour rollback—so the gate is safe to adopt on the monorepo."
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "Condition (4) locks the parallel cached sub-ninety-second job and condition (8) encodes my p95-queue-wait-plus-ten-seconds trigger with a 24-hour rollback during a 20-PR burst, which is exactly the metric I co-own with Marcus and the stability threshold I refused to sign off without."
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The amended motion encodes every security condition I require—seeded-secret canary in two repos gating enforcement, security-tier findings routed exclusively to my logged exception path with no self-service waiver, CVEs at CVSS 7+ and leaked secrets in the blocking set, a 24-hour pre-written rollback on canary failure, and baseline suppression—so the gate is a real security control rather than cosmetic theater."
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "The amended motion encodes every precondition I set—monorepo scope, two-week advisory with baseline suppression, critical-tier-only blocking, the 8%/10% FP policy with auto-demote, per-finding \"why this matters\" messages, and real-PR measurement—and with Lena and I co-owning JS/TS tuning, my side-project's untuned 30 percent noise gives us the headroom to drive frontend false positives well under 8 percent before enforcement flips."
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The amended motion gates enforcement on Sana's SQL/config-key canary passing in my pipeline repos and includes a 24-hour rollback if it fails, which directly protects against the raw-.sql blind spot I identified, and all my structural conditions—severity-tiered blocking, baseline suppression, parallel sub-90-second CI, 8%/10% FP thresholds, and the two-week advisory window—are now encoded; I will use the advisory sprint to validate schema-drift detection and noqa suppression on .sql files myself and will oppose enforcement before it activates if raw SQL proves unparseable."
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The amended motion delivers parallel execution with its own pass/fail signal separate from test output, critical-tier-only blocking with baseline suppression, and an 8 percent FP cap—all of which protect the test-failure signal I care about—while the two-week advisory sprint gives me the window to run my flaky-suite stress test and confirm triage speed holds before enforcement goes live."
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The amended motion encodes every safeguard I required as merge-policy owner—two-week advisory sprint, critical-tier-only blocking, canary-gated enforcement, the pre-written 24-hour rollback on queue regression or canary failure, and the separate security exception path—so the policy is now specific enough to survive the trial without the kind of ambiguous wording that caused our two past reversals."
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "The amended motion encodes everything I need as a newcomer—a two-week advisory learning window, a narrow blocking list that can't stall me over a missing JSDoc, per-finding \"why this matters\" messages so I can triage in under two minutes, and the one-page guide—so I can finally distinguish must-fix from suggestion without guessing from scattered PR comments."
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—parallel cached sub-90-second execution, the 20-PR burst p95 queue-wait guard with a ten-second ceiling, the pre-written 24-hour rollback, and the two-week advisory window that prevents enforcement without a tuned ruleset—so the policy I was asking for is now the policy itself."
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I named—sub-ninety-second parallel execution with no serial fallback, critical-tier-only blocking gated on the canaries, eight-percent FP with ten-percent auto-demote, baseline suppression, per-finding \"why this matters\" messages, and the one-page guide—so my round-two \"firm yes\" now matches the actual text I'm voting on."
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The amended motion now reads \"the monorepo,\" encodes the advisory-first two-week sprint with severity-tiered enforcement gated on both canaries, locks security findings to Noah and Elena's logged path with no self-service waiver, and includes Ben's pre-written 24-hour rollback—every condition I flagged in my objection and in round two is now in the binding text, so it closes the policy-reversal gap I have carried from two prior rollouts."
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—monorepo scoping, baseline suppression (which destroyed trust on my prior rollout when it was skipped), severity-tiered blocking, canary-gated enforcement, and the 8%/10% FP tolerance—and since enforcement is explicitly locked behind Noah's secret canary and Sana's SQL canary passing, I can endorse it now while my unresolved question about default secret-rule packaging is handled by the validation gate rather than by blind enforcement."
+    }
+  ],
+  "ballotHistory": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion resolves my CI-timing concern via parallel cached execution under ninety seconds, bakes in the two-week advisory sprint and baseline suppression I required from my prior rollout, and gates enforcement on the canaries—so the bugs Lintwise caught for me in six months get enforced without the serial four-minute penalty that nearly derailed us last time.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion names the 20-PR burst p95 queue criterion in the rollback clause and the two-week advisory sprint gives me the window to run that load test before enforcement, so my structural objection—quantifying peak-queue impact before any merge-blocking—is now encoded as a binding condition.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The amended motion routes security-tier findings exclusively to my and Noah's logged exception path with no self-service waiver, gates enforcement on the seeded-secret canary passing, and blocks on CVSS 7+ CVEs and leaked secrets—exactly the controls I need so a junior cannot suppress a real key leak to unblock a sprint.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—advisory sprint, critical-tier-only blocking, baseline suppression, parallel CI, canary gates, and the 8%/10% FP thresholds Zoe, Lena, and I will track on real frontend PRs—so my round-two firm yes now applies to the text as written.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The amended motion gates enforcement on my seeded SQL/config-key canary passing in both pipeline repos, so if raw .sql files turn out to be a blind spot the gate never activates and my two config-key outages stay covered only when detection is proven to work on the files I actually ship.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion encodes every safeguard I required—two-week advisory sprint, baseline suppression, critical-tier-only blocking (null-derefs, secrets, CVEs 7+, unparameterized SQL), parallel CI with a sub-ninety-second cap, the 8%/10% FP thresholds matching my tuned-noise data, Sana's canary gate, a pre-written 24-hour rollback, and separate security exception routing—so lint noise can no longer drown test-failure signal and my objection at #48 is fully resolved.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—monorepo scope, two-week advisory, critical-tier-only blocking gated on both canaries, 8%/10% FP policy with auto-demote, parallel sub-90-second CI, Noah/Elena security exception path, 24-hour pre-written rollback, and per-finding explanations—so the policy is now as tight and exit-ramped as the two past reversals I flagged require.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The amended motion gives me exactly what I asked for—a narrow critical-only blocking list, a two-week advisory window to learn the rules before they can stall my PRs, per-finding \"why this matters\" messages, and a one-page guide—so I can finally tell which findings are must-fix and which are suggestions without drowning in noise.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b1",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "The amended motion now encodes every condition I set—parallel cached CI under ninety seconds, critical-tier-only blocking with baseline suppression, canary-gated enforcement (so my unproven raw .sql parsing concern is addressed before any merge is blocked), Jin's eight-percent FP threshold with ten-percent auto-demote, and Ben's pre-written 24-hour rollback—so the gate is safe to adopt on the monorepo.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b2",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "Condition (4) locks the parallel cached sub-ninety-second job and condition (8) encodes my p95-queue-wait-plus-ten-seconds trigger with a 24-hour rollback during a 20-PR burst, which is exactly the metric I co-own with Marcus and the stability threshold I refused to sign off without.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b3",
+      "name": "Noah",
+      "vote": "yes",
+      "reason": "The amended motion encodes every security condition I require—seeded-secret canary in two repos gating enforcement, security-tier findings routed exclusively to my logged exception path with no self-service waiver, CVEs at CVSS 7+ and leaked secrets in the blocking set, a 24-hour pre-written rollback on canary failure, and baseline suppression—so the gate is a real security control rather than cosmetic theater.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b4",
+      "name": "Zoe",
+      "vote": "yes",
+      "reason": "The amended motion encodes every precondition I set—monorepo scope, two-week advisory with baseline suppression, critical-tier-only blocking, the 8%/10% FP policy with auto-demote, per-finding \"why this matters\" messages, and real-PR measurement—and with Lena and I co-owning JS/TS tuning, my side-project's untuned 30 percent noise gives us the headroom to drive frontend false positives well under 8 percent before enforcement flips.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b5",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "The amended motion gates enforcement on Sana's SQL/config-key canary passing in my pipeline repos and includes a 24-hour rollback if it fails, which directly protects against the raw-.sql blind spot I identified, and all my structural conditions—severity-tiered blocking, baseline suppression, parallel sub-90-second CI, 8%/10% FP thresholds, and the two-week advisory window—are now encoded; I will use the advisory sprint to validate schema-drift detection and noqa suppression on .sql files myself and will oppose enforcement before it activates if raw SQL proves unparseable.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b6",
+      "name": "Hana",
+      "vote": "yes",
+      "reason": "The amended motion delivers parallel execution with its own pass/fail signal separate from test output, critical-tier-only blocking with baseline suppression, and an 8 percent FP cap—all of which protect the test-failure signal I care about—while the two-week advisory sprint gives me the window to run my flaky-suite stress test and confirm triage speed holds before enforcement goes live.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b7",
+      "name": "Ben",
+      "vote": "yes",
+      "reason": "The amended motion encodes every safeguard I required as merge-policy owner—two-week advisory sprint, critical-tier-only blocking, canary-gated enforcement, the pre-written 24-hour rollback on queue regression or canary failure, and the separate security exception path—so the policy is now specific enough to survive the trial without the kind of ambiguous wording that caused our two past reversals.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b8",
+      "name": "Ida",
+      "vote": "yes",
+      "reason": "The amended motion encodes everything I need as a newcomer—a two-week advisory learning window, a narrow blocking list that can't stall me over a missing JSDoc, per-finding \"why this matters\" messages so I can triage in under two minutes, and the one-page guide—so I can finally distinguish must-fix from suggestion without guessing from scattered PR comments.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b9",
+      "name": "Kofi",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—parallel cached sub-90-second execution, the 20-PR burst p95 queue-wait guard with a ten-second ceiling, the pre-written 24-hour rollback, and the two-week advisory window that prevents enforcement without a tuned ruleset—so the policy I was asking for is now the policy itself.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b10",
+      "name": "Lena",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I named—sub-ninety-second parallel execution with no serial fallback, critical-tier-only blocking gated on the canaries, eight-percent FP with ten-percent auto-demote, baseline suppression, per-finding \"why this matters\" messages, and the one-page guide—so my round-two \"firm yes\" now matches the actual text I'm voting on.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b11",
+      "name": "Theo",
+      "vote": "yes",
+      "reason": "The amended motion now reads \"the monorepo,\" encodes the advisory-first two-week sprint with severity-tiered enforcement gated on both canaries, locks security findings to Noah and Elena's logged path with no self-service waiver, and includes Ben's pre-written 24-hour rollback—every condition I flagged in my objection and in round two is now in the binding text, so it closes the policy-reversal gap I have carried from two prior rollouts.",
+      "trigger": "original ballot"
+    },
+    {
+      "agent": "b12",
+      "name": "Vera",
+      "vote": "yes",
+      "reason": "The amended motion encodes every condition I set—monorepo scoping, baseline suppression (which destroyed trust on my prior rollout when it was skipped), severity-tiered blocking, canary-gated enforcement, and the 8%/10% FP tolerance—and since enforcement is explicitly locked behind Noah's secret canary and Sana's SQL canary passing, I can endorse it now while my unresolved question about default secret-rule packaging is handled by the validation gate rather than by blind enforcement.",
+      "trigger": "original ballot"
+    }
+  ],
+  "result": {
+    "yes": 20,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Noor",
+      "vote": "no",
+      "reason": "Installation approval does not bound initiation authority, and the motion lacks owner-enabled standing authorization, resource limits, and restricted execution permissions."
+    },
+    {
+      "agent": "a2",
+      "name": "Jonas",
+      "vote": "no",
+      "reason": "I support delegated initiation, but this motion lacks owner-enabled standing authorization, resource limits, duplicate detection, and a cap on pending candidates."
+    },
+    {
+      "agent": "a3",
+      "name": "Lena",
+      "vote": "no",
+      "reason": "The motion as written provides no cap on pending candidates, no deduplication, and no triage layer, leaving the owner's review queue as an uncontrolled variable that installation approval alone cannot protect."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "open-two-rounds",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team adopts a non-blocking Lintwise trial in its monorepo, agreeing beforehand on acceptable CI overhead and rule-level promotion criteria. The trial will assess actionable findings, false positives, remediation effort, message clarity, and coverage gaps; measure CI duration and queue wait; and test caching, tuning, baseline mode, and known bug cases. Any later required checks must be approved individually, with documented dispute and exception processes, ownership, and rollback triggers.",
+    "version": 2
+  },
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a6",
+            "reason": "The motion still mandates checks everywhere, while the discussion favors a non-blocking trial before deciding which rules should block merges."
+          },
+          {
+            "id": "a7",
+            "reason": "The motion still mandates a blanket merge gate; it should first be amended to a non-blocking trial with evidence-based promotion of individual rules, clear exceptions, and a rollback path."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Findings and CI overhead in prior use",
+        "experience_sought": "During your six months using Lintwise, what kinds of real bugs did it catch, and how was the roughly four-minute CI increase measured?"
+      },
+      {
+        "to": "a4",
+        "topic": "JavaScript findings in side-project use",
+        "experience_sought": "What specific useful or incorrect JavaScript findings did you encounter, and what effort did they take to resolve?"
+      }
+    ],
+    "rejectedChairQuestions": []
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 44,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 4990,
+        "cached": 0,
+        "output": 1125,
+        "ms": 41676,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1237,
+        "cached": 0,
+        "output": 100,
+        "ms": 4134,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2753,
+        "cached": 0,
+        "output": 215,
+        "ms": 8149,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 16076,
+        "cached": 0,
+        "output": 1413,
+        "ms": 53136,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 16,
+        "input": 11244,
+        "cached": 0,
+        "output": 269,
+        "ms": 42947,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2679,
+        "cached": 0,
+        "output": 131,
+        "ms": 4501,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 22702,
+        "cached": 0,
+        "output": 332,
+        "ms": 24651,
+        "costUsd": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "My previous team saw real bug catches, but we have no monorepo measurements to justify requiring Lintwise before a cached, non-blocking trial."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "I need monorepo trial measurements of added build time, peak queue wait, and runner cost before supporting a required pre-merge check."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "My notes support evaluating secret detection against our documented incident, not requiring all Lintwise checks before a measured, non-blocking trial in our monorepo."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "My side-project findings included about 30 percent noise under default JavaScript rules, so I support a measured, non-blocking monorepo trial before requiring checks."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "I support a measured, non-blocking trial in our monorepo before requiring Lintwise, since its ability to catch our pipeline config-key errors and its CI overhead remain unverified."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "We lack monorepo measurements of false-positive rates and CI overhead, and baseline behavior remains unverified, so I support a non-blocking trial before requiring checks."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "Requiring Lintwise now is premature; I support a non-blocking monorepo trial measuring signal, CI overhead, and team workload before promoting individual rules with owners and rollback."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial first to assess message clarity and clarify baseline behavior before making checks mandatory."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}
