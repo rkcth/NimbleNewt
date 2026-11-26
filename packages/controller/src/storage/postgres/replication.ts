@@ -134,12 +134,21 @@ export interface DatabasePromotion {
  */
 export async function promoteStandby(url: string, waitSeconds = 60): Promise<DatabasePromotion> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 1 || waitSeconds > 600) throw new RangeError("waitSeconds: 1 to 600");
-  return withShortConnection(url, { name: "promoting the standby", ...STEP_WRITE }, async (c) => {
-    if ((await c.query("SELECT pg_is_in_recovery() AS r")).rows[0]!.r !== true) throw new StorageError("invalid_input", "this PostgreSQL node is not a standby; nothing was changed", { path: "url" });
-    const done = (await c.query("SELECT pg_promote(true, $1) AS ok", [waitSeconds])).rows[0]!.ok === true;
-    if (!done) throw new StorageError("retryable", `the standby did not become writable within ${waitSeconds} s; check the node (it may still be replaying) before trying again`);
-    return { promoted: true as const, positionLsn: (await c.query("SELECT pg_current_wal_lsn()::text AS lsn")).rows[0]!.lsn as string };
-  });
+  // `SELECT pg_promote(...)` reads as a SELECT to the connection's own bookkeeping, which would call a lost answer "nothing was changed": once it is sent, any failure is reported
+  // here as not known.
+  let asked = false;
+  try {
+    return await withShortConnection(url, { name: "promoting the standby", ...STEP_WRITE }, async (c) => {
+      if ((await c.query("SELECT pg_is_in_recovery() AS r")).rows[0]!.r !== true) throw new StorageError("invalid_input", "this PostgreSQL node is not a standby; nothing was changed", { path: "url" });
+      asked = true;
+      const done = (await c.query("SELECT pg_promote(true, $1) AS ok", [waitSeconds])).rows[0]!.ok === true;
+      if (!done) throw new StorageError("uncertain_commit", `the standby was asked to promote and did not become writable within ${waitSeconds} s: it may still finish; read the node's role (probeNode) before doing anything else`);
+      return { promoted: true as const, positionLsn: (await c.query("SELECT pg_current_wal_lsn()::text AS lsn")).rows[0]!.lsn as string };
+    });
+  } catch (error) {
+    if (!asked || (error instanceof StorageError && error.kind === "uncertain_commit")) throw error;
+    throw new StorageError("uncertain_commit", "the standby was asked to promote and the answer did not arrive: whether it was promoted is not known; read the node's role (probeNode) before doing anything else", { cause: error });
+  }
 }
 
 /**

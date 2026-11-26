@@ -216,7 +216,7 @@ test("promotion is refused, with the standby untouched, for each of: no manifest
     await manifestFor(join(dir, "withblob"), [{ kind: "artifact", id: "x", revision: 1 }], artifact);
     let promoted = 0;
     const steps = (over: Record<string, unknown> = {}) => ({ probe: async () => standbyFacts, state: stateOf({}, [record]), promote: async () => { promoted++; return { promoted: true as const, positionLsn: "0/6000000" }; }, ...over }) as Parameters<typeof promoteDatabaseWith>[1];
-    const base = { standby: { url: "postgres://x/y", schema: "nimblenewt" }, blobs: allBlobs, replayWaitMs: 60 };
+    const base = { standby: { url: "postgres://x/y", schema: "nimblenewt" }, blobs: allBlobs, oldPrimaryUrl: null, replayWaitMs: 60 };
     const oldIs = (old: Record<string, unknown> | "down") => ({ probe: async (url: string) => { if (!url.includes("old")) return standbyFacts; if (old === "down") throw new Error("connect ECONNREFUSED"); return { ...standbyFacts, ...old }; } });
     const refused = async (options: Parameters<typeof promoteDatabase>[0], s: Parameters<typeof promoteDatabaseWith>[1], pattern: RegExp): Promise<PromotionRefused> => {
       const before = promoted;
@@ -291,4 +291,95 @@ test("no custom PostgreSQL replication protocol: nothing in the replication code
   for (const forbidden of [/START_REPLICATION/i, /replication\s*=\s*(?:true|database)/i, /CopyBoth/i, /from "node:net"/, /from "node:dgram"/, /pg_receivewal|pg_basebackup/i, /pg-logical|pg-copy-streams|pg-protocol/i]) assert.doesNotMatch(text, forbidden);
   // and the one thing that changes the database's role is PostgreSQL's own function
   assert.match(text, /pg_promote\(/);
+});
+
+test("second review: an omitted old primary, an address that would fall back to the environment, a named standby already promoted, an old primary that comes back during the checks, and a standby whose state cannot be read are all refused before promote", async () => {
+  const dir = tmp();
+  try {
+    const record = { kind: "task", id: "t1", revision: 2 };
+    await manifestFor(join(dir, "ok"), [record]);
+    let promoted = 0;
+    const steps = (over: Record<string, unknown> = {}) => ({ probe: async () => standbyFacts, state: stateOf({}, [record]), promote: async () => { promoted++; return { promoted: true as const, positionLsn: "0/6000000" }; }, ...over }) as Parameters<typeof promoteDatabaseWith>[1];
+    const ok = { manifestDirectory: join(dir, "ok"), standby: { url: "postgres://standby/y", schema: "nimblenewt" }, blobs: allBlobs, oldPrimaryUrl: null, replayWaitMs: 60 } as Parameters<typeof promoteDatabase>[0];
+    const refused = async (options: unknown, s: Parameters<typeof promoteDatabaseWith>[1], pattern: RegExp): Promise<void> => {
+      const before = promoted;
+      const e = await promoteDatabaseWith(options as Parameters<typeof promoteDatabase>[0], s).then(() => undefined, (error: unknown) => error);
+      assert.ok(e instanceof PromotionRefused, String(e));
+      assert.match(e.message, pattern);
+      assert.equal(promoted, before, "promote was not called");
+    };
+    // leaving the old primary out is not the same as saying it is not known
+    const { oldPrimaryUrl: _omit, ...withoutOld } = ok;
+    await refused(withoutOld, steps(), /oldPrimaryUrl: give the old primary's address, or null/);
+    // an address the driver would complete from PGHOST and its local defaults
+    for (const url of ["", "postgres:///nimblenewt", "http://standby/y", "not a url", 7]) await refused({ ...ok, standby: { url, schema: "nimblenewt" } }, steps(), /standby\.url: a postgres:\/\/ address with a host/);
+    for (const url of ["", "postgres:///x"]) await refused({ ...ok, oldPrimaryUrl: url }, steps(), /oldPrimaryUrl: a postgres:\/\/ address/);
+    await refused({ ...ok, otherStandbyUrls: [""] }, steps(), /otherStandbyUrls/);
+    await refused({ ...ok, otherStandbyUrls: "postgres://b/x" }, steps(), /otherStandbyUrls/);
+    await refused({ ...ok, oldPrimaryUrl: "postgres://standby/y" }, steps(), /own address is also given/);
+    // a second standby that was already promoted: two primaries
+    const nodes = (table: Record<string, Partial<typeof standbyFacts> | "down">, counts: Record<string, number> = {}) => ({ probe: async (url: string) => {
+      const host = new URL(url).hostname; counts[host] = (counts[host] ?? 0) + 1;
+      const row = table[host]; if (row === "down") throw new Error("connect ECONNREFUSED"); return { ...standbyFacts, ...(row ?? {}) };
+    } });
+    await refused({ ...ok, otherStandbyUrls: ["postgres://b/x"] }, steps(nodes({ b: { inRecovery: false, writable: true } })), /another standby named here .* already promoted/);
+    await refused({ ...ok, otherStandbyUrls: ["postgres://b/x"] }, steps(nodes({ b: { systemIdentifier: "8" } })), /not a copy of the same primary/);
+    // the old primary did not answer at first and is back as a primary by the time the checks are done: asked again just before pg_promote
+    let oldCalls = 0;
+    await refused({ ...ok, oldPrimaryUrl: "postgres://old/x" }, steps({ probe: async (url: string) => {
+      if (!url.includes("old")) return standbyFacts; oldCalls++; if (oldCalls === 1) throw new Error("connect ECONNREFUSED"); return { ...standbyFacts, inRecovery: false, writable: true };
+    } }), /old primary still answers as a writable database/);
+    assert.equal(oldCalls, 2);
+    // the same for a named standby promoted by someone else while this one was checked
+    let bCalls = 0;
+    await refused({ ...ok, otherStandbyUrls: ["postgres://b/x"] }, steps({ probe: async (url: string) => {
+      if (!url.includes("//b/")) return standbyFacts; bCalls++; return bCalls === 1 ? standbyFacts : { ...standbyFacts, inRecovery: false, writable: true };
+    } }), /already promoted/);
+    // the standby is promoted by something else while this waits for it to replay: refused, never promoted a second time
+    let sCalls = 0;
+    await refused(ok, steps({ probe: async () => { sCalls++; return sCalls === 1 ? { ...standbyFacts, positionLsn: "0/4000000" } : { ...standbyFacts, inRecovery: false, writable: true }; } }), /stopped being a standby while it was checked/);
+    // reading the standby's state fails: nothing was changed, so it is a refusal (not an unknown)
+    await refused(ok, steps({ state: () => { throw new Error("schema nimblenewt has no controller state on this node"); } }), /could not be read and compared .*no controller state/);
+    await refused(ok, steps({ state: () => ({ watermark: async () => ({ epoch: 2, auditSeq: 10, deliverySeq: 3 }), aggregates: async function* () { throw new Error("the connection dropped"); } }) }), /could not be read.*connection dropped/);
+    // an error from promote itself is not dressed up as "nothing was changed"
+    const fromPromote = await promoteDatabaseWith(ok, steps({ promote: async () => { throw new Error("the answer did not arrive"); } })).then(() => undefined, (e: unknown) => e);
+    assert.ok(fromPromote instanceof Error && !(fromPromote instanceof PromotionRefused), String(fromPromote));
+    // whole: promoted, and the notes say what was not checked, the manifest's time included
+    const counts: Record<string, number> = {};
+    const result = await promoteDatabaseWith({ ...ok, oldPrimaryUrl: "postgres://old/x", otherStandbyUrls: ["postgres://b/x"] }, steps(nodes({ old: "down" }, counts)));
+    assert.equal(result.database, "promoted");
+    assert.deepEqual({ old: counts["old"], b: counts["b"] }, { old: 2, b: 2 }, "both asked before the checks and just before pg_promote");
+    assert.match(result.notes.join(" | "), /only what the recovery manifest of .* lists was checked/);
+    assert.match(result.notes.join(" | "), /old primary did not answer/);
+    assert.doesNotMatch(result.notes.join(" | "), /no other standbys were named/);
+    assert.match((await promoteDatabaseWith(ok, steps())).notes.join(" | "), /no other standbys were named/);
+  } finally { gone(dir); }
+});
+
+test("second review: a record is compared by its kind and ID, never by a joined name a different record could share", async () => {
+  const dir = tmp();
+  try {
+    await manifestFor(join(dir, "m"), [{ kind: "a/b", id: "c", revision: 1 }]);
+    const node: RecoverySource = { watermark: async () => ({ epoch: 2, auditSeq: 10, deliverySeq: 3 }), aggregates: async function* () { yield { kind: "a", id: "b/c", revision: 5 }; } };
+    const c = await compareToManifest(readRecoveryManifest(join(dir, "m")), node, allBlobs);
+    assert.deepEqual(c.problems.map((p) => p.kind), ["workflow_missing"]);
+  } finally { gone(dir); }
+});
+
+test("second review: only recovery/promotion.ts calls promoteStandby, and nothing else in the repository asks PostgreSQL to promote", () => {
+  const root = join(import.meta.dirname, "..", "..", "..", "..");
+  const hits: string[] = [];
+  const walk = (d: string): void => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (["node_modules", "dist", ".git", "target"].includes(e.name)) continue;
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(ts|mjs|js|cjs|sh|ps1|py|sql)$/.test(e.name) && !/\.test\.(ts|mjs)$/.test(e.name)) {
+        const text = readFileSync(p, "utf8");
+        if (/pg_promote\s*\(|\bpromoteStandby\s*\(|pg_ctl[^\n]*\bpromote\b|promote_trigger_file/.test(text)) hits.push(p.slice(root.length + 1).replaceAll("\\", "/"));
+      }
+    }
+  };
+  for (const top of ["packages", "scripts", "native", "docs"]) if (existsSync(join(root, top))) walk(join(root, top));
+  assert.deepEqual(hits.sort(), ["packages/controller/src/recovery/promotion.ts", "packages/controller/src/storage/postgres/replication.ts"]);
 });

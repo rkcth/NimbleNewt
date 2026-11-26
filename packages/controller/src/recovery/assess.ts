@@ -42,11 +42,13 @@ export async function compareToManifest(manifest: ReadManifest, node: RecoverySo
   // records: what the node has, by name, against what the manifest wants
   const wanted = manifest.aggregateRefs();
   const onNode = new Map<string, number>();
-  for await (const r of node.aggregates()) onNode.set(`${r.kind}/${r.id}`, r.revision);
+  // keyed by both parts, not "kind/id": a kind or ID with a slash in it can never stand in for another record
+  const key = (kind: string, id: string): string => JSON.stringify([kind, id]);
+  for await (const r of node.aggregates()) onNode.set(key(r.kind, r.id), r.revision);
   let missing = 0; let stale = 0;
   for (const r of wanted) {
     const name = `${r.kind}/${r.id}`;
-    const revision = onNode.get(name);
+    const revision = onNode.get(key(r.kind, r.id));
     if (revision === undefined) { missing++; add({ kind: "workflow_missing", record: name }); } else if (revision < r.revision) { stale++; add({ kind: "workflow_behind", record: name, have: revision, want: r.revision }); }
   }
 

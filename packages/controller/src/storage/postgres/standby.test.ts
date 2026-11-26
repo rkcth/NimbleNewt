@@ -16,6 +16,7 @@ import { findWritablePrimary, measureLag, probeNode, promoteStandby, readControl
 import { PostgresStorage } from "./storage.js";
 import { STANDBY_NAME, startReplicaPair, type ReplicaPair } from "./testing/replica.js";
 import { withClient } from "./testing/server.js";
+import { FaultProxy } from "./testing/proxy.js";
 
 // Card K04 against a real PostgreSQL primary and a real streaming standby (two disposable embedded servers). The replication is PostgreSQL's own; these tests only ask it questions and promote.
 
@@ -90,7 +91,7 @@ test("lag is measured from the primary: caught up reads zero, a standby that has
       try {
         const src = snapshotSource(storage);
         try { await writeRecoveryManifest(src, join(dir, "m")); } finally { await src.close(); }
-        await assert.rejects(promoteDatabase({ manifestDirectory: join(dir, "m"), standby: { url: pair.standby.url(), schema: SCHEMA }, blobs: noBlobs, replayWaitMs: 500 }), (e: unknown) => e instanceof PromotionRefused && /received WAL it has not replayed/.test(e.message));
+        await assert.rejects(promoteDatabase({ manifestDirectory: join(dir, "m"), standby: { url: pair.standby.url(), schema: SCHEMA }, blobs: noBlobs, oldPrimaryUrl: null, replayWaitMs: 500 }), (e: unknown) => e instanceof PromotionRefused && /received WAL it has not replayed/.test(e.message));
         assert.equal((await probeNode(pair.standby.url())).inRecovery, true, "still a standby");
       } finally { gone(dir); }
       await withClient(pair.standby.url("postgres"), async (c) => { await c.query("SELECT pg_wal_replay_resume()"); });
@@ -274,7 +275,7 @@ test("a promotion is refused while the old primary still answers as a writable d
       try { await storage.acquireEpoch({ holder: "c1", at: T0 }); await pair.waitForCatchUp(); const s = snapshotSource(storage); try { await writeRecoveryManifest(s, join(dir, "m")); } finally { await s.close(); } } finally { await storage.close(); }
       await assert.rejects(promoteDatabase({ manifestDirectory: join(dir, "m"), standby: { url: pair.standby.url(), schema: SCHEMA }, blobs: noBlobs, oldPrimaryUrl: pair.primary.url() }), (e: unknown) => e instanceof PromotionRefused && /still answers as a writable database/.test(e.message));
       assert.equal((await probeNode(pair.standby.url())).inRecovery, true, "the standby is as it was");
-      await assert.rejects(promoteDatabase({ manifestDirectory: join(dir, "m"), standby: { url: pair.primary.url(), schema: SCHEMA }, blobs: noBlobs }), (e: unknown) => e instanceof PromotionRefused && /already a writable database/.test(e.message));
+      await assert.rejects(promoteDatabase({ manifestDirectory: join(dir, "m"), standby: { url: pair.primary.url(), schema: SCHEMA }, blobs: noBlobs, oldPrimaryUrl: null }), (e: unknown) => e instanceof PromotionRefused && /already a writable database/.test(e.message));
       await assert.rejects(promoteStandby(pair.primary.url()), (e: unknown) => e instanceof StorageError && /not a standby/.test(e.message));
       // a store opened on a standby can be read but never written: a write is refused by the server, never half-applied, which is why a controller picks its node with findWritablePrimary first
       const onStandby = await openOn(pair.standby.url(), { connectTimeoutMs: 3000 });
@@ -352,5 +353,20 @@ test("backups stay independently restorable: a backup made beside a standby rest
         } finally { await target.close(); }
       }
     } finally { await storage.close().catch(() => undefined); gone(dir); }
+  });
+});
+
+test("second review: when the answer to pg_promote is lost the outcome is reported as not known, and the standby did in fact become writable (card K04)", { timeout: 120_000 }, async () => {
+  await withPair({}, async (pair) => {
+    const proxy = await FaultProxy.start({ host: "127.0.0.1", port: pair.standby.port });
+    try {
+      proxy.inject({ match: /pg_promote/, when: "after" });
+      const viaProxy = pair.standby.url().replace(`:${pair.standby.port}/`, `:${proxy.port}/`);
+      const e = await promoteStandby(viaProxy).then(() => undefined, (error: unknown) => error);
+      assert.ok(e instanceof StorageError && e.kind === "uncertain_commit", String(e));
+      assert.match(e.message, /whether it was promoted is not known/);
+      assert.doesNotMatch(e.message, /nothing was changed|password/i);
+      await until("the standby to finish promoting", async () => ((await probeNode(pair.standby.url())).inRecovery ? undefined : true));
+    } finally { await proxy.stop(); }
   });
 });
