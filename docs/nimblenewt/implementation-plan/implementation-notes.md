@@ -19935,3 +19935,10 @@ Residual risks (beyond those listed above):
 - the accepted wording is matched in report text, so a hand-written report can claim it (the known "a report is a file" limit);
 - a console user name that equals a word of the wording ("link", "planted") would be scrubbed by `--redact`, and the case would then be refused (fail closed);
 - run-g05.ps1 has still never run on Windows.
+
+### A03b gate: re-check of the second review's change (2026-11-26, Claude agent, Opus 5.5, clean context; on a5d3ab16; not pushed; no workflow run)
+
+- **Fixed: `accepted` was empty only when the G05 gate blocked, not when anything blocked.** A QA, CI, scenario or sign-off blocker left the gate's acceptances in a blocked verdict, against the rule stated above. `complete` stayed false, so nothing passed wrongly. The verdict now lists acceptances only when it has no blocker, like the gate's own list. The test now covers a missing sign-off and a missing QA record.
+- The added field breaks no reader. Nothing parses the verdict file, and the workflows call `run`, not `gate`. The early `invalid` verdict carries `accepted: []`, so the field is always an array.
+- Deliberate breakages (7, restored by sha256), all caught: Y02 dropping `accepted`; acceptances kept while Y02 blocks (the pre-fix code, caught only by the new assertions); an inconclusive gate blocker dropped, so it counts as a pass; `gate` not printing acceptances; the `containment ` prefix dropped; the gate returning acceptances while it blocks; the gate accepting without a recorded link right.
+- tsc --build --force is clean. y02-checkpoint, plan and the worker containment tests: 135/135 on Node 22.23.0 and on 24.21.0.

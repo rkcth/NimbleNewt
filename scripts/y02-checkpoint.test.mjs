@@ -115,6 +115,13 @@ test("card A03b: what the G05 gate accepted without a pass is carried into the v
   assert.equal(await main(["gate", "--dir", d, "--commit", COMMIT, "--now", NOW.toISOString()], { out: (s) => lines.push(s), err: (s) => lines.push(s) }), 0, lines.join("\n"));
   assert.equal(lines.filter((l) => l.startsWith("accepted (not a pass): containment win32: ")).length, 2, lines.join("\n"));
   rmSync(d, { recursive: true, force: true });
+  // a blocker outside containment (no sign-off; a missing QA record): the gate still accepts, yet the verdict lists nothing as accepted
+  const noSignoff = judge(Object.fromEntries(Object.entries(raws).map(([k, v]) => [k, { raw: v }])));
+  assert.ok(noSignoff.blockers.length > 0 && noSignoff.platforms.win32.containment === "ok", noSignoff.blockers.join(" | "));
+  assert.deepEqual(noSignoff.accepted, []);
+  const noQa = judge(withSignoff({ ...raws, [evidenceNames("linux").qa]: undefined }));
+  assert.ok(noQa.blockers.length > 0 && noQa.platforms.win32.containment === "ok");
+  assert.deepEqual(noQa.accepted, []);
   // a refusal anywhere: nothing is listed as accepted (the gate returns none while it blocks)
   w.dirty = true; raws[evidenceNames("win32").containment] = JSON.stringify(w);
   assert.deepEqual(judge(withSignoff(raws)).accepted, []);

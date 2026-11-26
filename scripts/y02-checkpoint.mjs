@@ -607,8 +607,8 @@ export function assessCheckpoint({ files, unexpected = [], dirError }, { commit,
     schema: VERDICT_SCHEMA, commit, evaluatedAt: new Date(nowMs).toISOString(), scenarioMapDigest: mapDigest, platforms: verdictPlatforms,
     automatedPart: automated ? "complete" : "incomplete", hardwarePart: hardware ? "complete" : "incomplete", complete, blockers: sorted,
     // Card A03b: what the G05 gate accepted although it is not a pass (a file-link case inconclusive for want of the link right; the packaged working-directory check while none exists), so a
-    // containment "ok" is never read as every case held.
-    accepted: (Array.isArray(g05.accepted) ? g05.accepted : []).map((a) => `containment ${show(a, 300)}`), notVerified: NOT_VERIFIED,
+    // containment "ok" is never read as every case held. Empty whenever anything blocks (like the gate's own list): an acceptance stands only beside a pass.
+    accepted: sorted.length === 0 && Array.isArray(g05.accepted) ? g05.accepted.map((a) => `containment ${show(a, 300)}`) : [], notVerified: NOT_VERIFIED,
   };
 
   function invalid(why) {
