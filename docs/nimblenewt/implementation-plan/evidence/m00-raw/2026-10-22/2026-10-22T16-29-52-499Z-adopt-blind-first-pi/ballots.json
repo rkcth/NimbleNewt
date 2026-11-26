@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "I support a non-blocking monorepo trial to measure useful findings and CI impact before making Lintwise a required pre-merge check."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "We should measure Lintwise’s runtime, runner usage, and queue impact in a non-blocking monorepo trial before requiring it for merges."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to assess security coverage, permissions, data handling, and CI impact before requiring Lintwise as a merge gate."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "My side-project trial had noisy default JavaScript findings, so I support a non-blocking monorepo trial before requiring Lintwise for merges."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to establish useful coverage for our Python, SQL, and configuration files and measure CI impact before requiring Lintwise."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "We should first validate actionable findings, false positives, and CI impact in a non-blocking monorepo trial before requiring specific checks."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "I support a non-blocking monorepo trial before requiring specific rules, with measured CI impact, documented exceptions, and rollback criteria."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to assess clear, useful guidance and agree on rules and exceptions before making Lintwise mandatory."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

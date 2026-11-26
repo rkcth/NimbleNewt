@@ -1,0 +1,169 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "tldr-facts-rolling",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70,
+    "chairNotes": "rolling",
+    "chairReminders": 2
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team adopts a non-blocking trial of Lintwise in our monorepo to assess actionable findings, false positives, overlap with existing checks, language coverage, rule clarity, and CI runtime and queue impact, including cached and uncached runs; mandatory enforcement requires a separate decision after reviewing results and agreeing on blocking rules, exceptions, and rollback.",
+    "version": 2
+  },
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a1",
+            "reason": "The motion requires immediate enforcement without a trial or agreed blocking criteria, despite Lintwise adding about four minutes to CI on my previous team."
+          },
+          {
+            "id": "a2",
+            "reason": "The motion still requires immediate enforcement, without a trial to measure CI time and queue impact or a separate enforcement decision."
+          },
+          {
+            "id": "a4",
+            "reason": "The motion still requires immediate enforcement rather than the trial and separate enforcement decision discussed."
+          },
+          {
+            "id": "a8",
+            "reason": "The motion requires Lintwise immediately, while the discussion calls for a trial and a separate enforcement decision."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Prior Lintwise findings and CI comparability",
+        "experience_sought": "Which real bugs did Lintwise catch on your prior team, and how did that team's CI setup compare with our monorepo?"
+      },
+      {
+        "to": "a2",
+        "topic": "CI baseline measurements",
+        "experience_sought": "Beyond the current 11-minute average build time, what runtime and queue measurements are already available to assess a non-blocking trial?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "reminders": [
+      {
+        "step": "before-ballots",
+        "from": "Sana",
+        "quote": "My notes show our pipeline code has no static checks today, and two outages last year came from typos in config keys."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Jin",
+        "quote": "Our merge policy requires a trial period and a rollback path; we have reversed two past policy changes after rolling them out repo-wide at once."
+      }
+    ]
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.1782218764077153,
+    "calls": 64,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 5208,
+        "cached": 0,
+        "output": 921,
+        "ms": 37716,
+        "costUsd": 0
+      },
+      "chair-notes": {
+        "calls": 18,
+        "input": 14259,
+        "cached": 0,
+        "output": 7928,
+        "ms": 184155,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 790,
+        "cached": 0,
+        "output": 100,
+        "ms": 3701,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2739,
+        "cached": 0,
+        "output": 178,
+        "ms": 8526,
+        "costUsd": 0
+      },
+      "chair-reminders": {
+        "calls": 2,
+        "input": 8500,
+        "cached": 0,
+        "output": 122,
+        "ms": 5869,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 15051,
+        "cached": 0,
+        "output": 1272,
+        "ms": 46023,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 16,
+        "input": 5580,
+        "cached": 0,
+        "output": 310,
+        "ms": 45488,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2172,
+        "cached": 0,
+        "output": 103,
+        "ms": 4110,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 18958,
+        "cached": 13056,
+        "output": 351,
+        "ms": 22026,
+        "costUsd": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion tests Lintwise’s value and CI overhead here without blocking merges, while requiring evidence and individual approval before any rule becomes mandatory."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The amended motion requires a non-blocking trial with agreed CI overhead limits and measurements of build duration and queue wait before any individual check becomes required."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us test secret detection against our known case, document dependency-risk coverage gaps, and require evidence before approving individual blocking checks."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial will test JavaScript rule tuning and measure noise, remediation effort, and CI overhead before any individual checks become required."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess Python and SQL coverage and our known config-key bug cases without assuming Lintwise catches them, while requiring evidence before individual checks become blocking."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The amended motion measures signal and noise in a non-blocking trial and requires individual rule approval with dispute, exception, and rollback safeguards before checks become mandatory."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion protects developer speed with a non-blocking trial and requires evidence, individual rule approval, clear ownership, and rollback safeguards before changing merge policy."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial assesses message clarity and requires individual approval and documented dispute processes before any rules become required checks."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

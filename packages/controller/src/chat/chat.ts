@@ -21,6 +21,7 @@ import type { ApprovedCodeLookup } from "./approved-code.js";
 import { WINDOW_DEFAULTS } from "../release/windows.js";
 import { DEFAULT_REPLY_TOKENS, smallWindowWarning } from "../context/fixed-part.js";
 import { MIN_WORKABLE_CONTEXT_TOKENS, PROVIDER_NAME } from "../setup/providers.js";
+import { cacheNoticeFor } from "../inference-cache/profile.js";
 import { ROUTING_LIMITS } from "../routing/index.js";
 import { ACTIVATION_LIMITS } from "../release/activation.js";
 import type { CoordinatorService } from "./coordinator.js";
@@ -2190,6 +2191,13 @@ export class ChatService {
         if (typeof contextTokens !== "number" || !Number.isSafeInteger(contextTokens) || contextTokens < MIN_WORKABLE_CONTEXT_TOKENS || contextTokens > ROUTING_LIMITS.contextTokens) continue;
         const warning = smallWindowWarning(contextTokens);
         if (warning !== undefined) notes.push(`Provider ${typeof name === "string" && PROVIDER_NAME.test(name) ? name : "(unnamed)"}: ${warning}`);
+      }
+      // Claude's cache support is experimental and unmeasured (owner decision 2026-11-26): the owner reads that before saying yes.
+      for (const p of args["providers"].slice(0, 10)) {
+        if (p === null || typeof p !== "object") continue;
+        const { name, kind } = p as Record<string, unknown>;
+        const notice = cacheNoticeFor(typeof kind === "string" ? kind : undefined);
+        if (notice !== undefined) notes.push(`Provider ${typeof name === "string" && PROVIDER_NAME.test(name) ? name : "(unnamed)"}: ${notice}`);
       }
     }
     if (intent.op === "routing.budget.set" && typeof args["route"] === "string" && Object.hasOwn(args, "maxTokens")) {

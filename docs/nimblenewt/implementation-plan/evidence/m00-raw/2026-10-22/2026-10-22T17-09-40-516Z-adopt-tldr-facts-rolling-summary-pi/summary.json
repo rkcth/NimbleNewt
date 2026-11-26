@@ -1,0 +1,244 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "tldr-facts-rolling-summary",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70,
+    "chairNotes": "rolling",
+    "chairReminders": 2,
+    "chairSummary": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team conducts a non-blocking Lintwise trial on its monorepo, measuring rule coverage, actionable findings, false positives, build time, and queue impact. Any required pre-merge rules require a later decision based on trial results, with explicit ownership, blocking criteria, CI limits, dispute handling, and a rollback path.",
+    "version": 2
+  },
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a1",
+            "reason": "The motion mandates Lintwise before validating coverage and CI impact; on my previous team, it caught real bugs but added about four minutes to CI."
+          },
+          {
+            "id": "a2",
+            "reason": "The motion mandates Lintwise before validation, without defined CI time limits or evidence of its impact on build time and queue length."
+          },
+          {
+            "id": "a3",
+            "reason": "We have not validated Lintwise’s secret-detection rules against our known test-key incident before making it mandatory."
+          },
+          {
+            "id": "a4",
+            "reason": "The motion requires Lintwise before we have validated its rules, false-positive rates, and impact on our 11-minute CI builds."
+          },
+          {
+            "id": "a5",
+            "reason": "We have not validated whether Lintwise catches our actual pipeline failure cases, which is essential before making it mandatory."
+          },
+          {
+            "id": "a6",
+            "reason": "The motion requires adoption before validating rule coverage, false-positive rates, ownership, and CI impact."
+          },
+          {
+            "id": "a8",
+            "reason": "The motion still requires Lintwise immediately, without clarifying which validated rules would block merges or who would own them."
+          }
+        ]
+      },
+      {
+        "attempt": 1,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Findings and CI overhead in prior use",
+        "experience_sought": "Priya, what bugs did Lintwise catch, how often, and how comparable was that setup to our monorepo?"
+      },
+      {
+        "to": "a7",
+        "topic": "Existing merge-policy provisions",
+        "experience_sought": "Jin, what existing merge-policy provisions cover blocking criteria, check ownership, disputes, and exceptions?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "summaryPoints": [
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Priya",
+          "Marcus",
+          "Elena",
+          "Tom",
+          "Sana",
+          "Lars",
+          "Jin",
+          "Olga"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Marcus",
+          "Tom",
+          "Sana",
+          "Lars",
+          "Jin"
+        ]
+      },
+      {
+        "kind": "omitted",
+        "speakers": [
+          "Priya"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Sana",
+          "Tom",
+          "Elena"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Lars",
+          "Jin",
+          "Olga"
+        ]
+      },
+      {
+        "kind": "omitted",
+        "speakers": [
+          "Olga",
+          "Lars"
+        ]
+      }
+    ],
+    "reminders": [
+      {
+        "step": "before-ballots",
+        "from": "Elena",
+        "quote": "My notes confirm that Lintwise includes a secret-detection rule set that would have flagged the hard-coded test key that reached main last quarter and had to be rotated."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Sana",
+        "quote": "My notes show that our pipeline code has no static checks today, and two outages last year came from typos in config keys."
+      }
+    ]
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 64,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 5066,
+        "cached": 0,
+        "output": 894,
+        "ms": 50600,
+        "costUsd": 0
+      },
+      "chair-notes": {
+        "calls": 18,
+        "input": 14414,
+        "cached": 0,
+        "output": 8095,
+        "ms": 199901,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 831,
+        "cached": 0,
+        "output": 93,
+        "ms": 3762,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2717,
+        "cached": 0,
+        "output": 180,
+        "ms": 8643,
+        "costUsd": 0
+      },
+      "chair-summary": {
+        "calls": 1,
+        "input": 3057,
+        "cached": 0,
+        "output": 387,
+        "ms": 11205,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 17789,
+        "cached": 0,
+        "output": 1306,
+        "ms": 49147,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 16,
+        "input": 5204,
+        "cached": 0,
+        "output": 469,
+        "ms": 55213,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 2750,
+        "cached": 0,
+        "output": 105,
+        "ms": 4224,
+        "costUsd": 0
+      },
+      "chair-reminders": {
+        "calls": 1,
+        "input": 6455,
+        "cached": 0,
+        "output": 128,
+        "ms": 4936,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 23590,
+        "cached": 0,
+        "output": 319,
+        "ms": 22320,
+        "costUsd": 0
+      }
+    }
+  }
+}

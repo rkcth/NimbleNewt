@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The amended motion tests Lintwise’s value and CI impact in our monorepo without blocking merges, reserving enforcement for a separate decision with agreed rules, exceptions, and rollback."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "yes",
+      "reason": "The non-blocking trial will measure cached and uncached runtime and queue impact against our 11-minute build average and six-minute peak queue wait before a separate enforcement decision."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us evaluate secret-detection value without assuming comprehensive security coverage, while reserving enforcement for a separate decision with agreed rules, exceptions, and rollback."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess JavaScript findings and tune the noisy defaults I encountered on my side project, while reserving enforcement for a separate decision."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "yes",
+      "reason": "The non-blocking trial lets us assess Python and SQL coverage, including config-key typo detection, and CI impact before a separate enforcement decision."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "yes",
+      "reason": "The non-blocking trial evaluates actionable findings and noise alongside CI impact, while reserving enforcement for a separate decision with agreed rules, exceptions, and rollback."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "yes",
+      "reason": "The amended motion supports a non-blocking trial consistent with our merge policy and reserves enforcement for a separate decision on evidence, blocking rules, exceptions, and rollback."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "yes",
+      "reason": "The non-blocking trial will assess rule clarity and usefulness before a separate enforcement decision with agreed blocking rules, exceptions, and rollback."
+    }
+  ],
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

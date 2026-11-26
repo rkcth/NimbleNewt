@@ -1,0 +1,118 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "tldr-facts",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70
+  },
+  "model": "fake",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 4,
+    "no": 4,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": [
+          {
+            "id": "a4",
+            "reason": "word1 word2 word3 word4 word5 word6 word0 word1"
+          }
+        ]
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "experience with the tool",
+        "experience_sought": "how long and with what result"
+      }
+    ],
+    "rejectedChairQuestions": []
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0,
+    "calls": 35,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 4204,
+        "cached": 0,
+        "output": 584,
+        "ms": 8,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 816,
+        "cached": 0,
+        "output": 29,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 1,
+        "input": 907,
+        "cached": 0,
+        "output": 72,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 9379,
+        "cached": 0,
+        "output": 584,
+        "ms": 8,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 3728,
+        "cached": 0,
+        "output": 136,
+        "ms": 8,
+        "costUsd": 0
+      },
+      "chair-ruling": {
+        "calls": 1,
+        "input": 1328,
+        "cached": 0,
+        "output": 15,
+        "ms": 1,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 10578,
+        "cached": 0,
+        "output": 180,
+        "ms": 8,
+        "costUsd": 0
+      }
+    }
+  }
+}

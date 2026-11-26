@@ -1,0 +1,203 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "tldr-facts-rolling-summary",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "tldr",
+    "fullTail": 1,
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "tldrStyle": "facts",
+    "summaryWords": 60,
+    "summarizeAbove": 70,
+    "chairNotes": "rolling",
+    "chairReminders": 2,
+    "chairSummary": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Previously observed bugs and CI overhead",
+        "experience_sought": "Which real bugs did Lintwise catch on your previous team, and how was the roughly four-minute CI increase measured?"
+      },
+      {
+        "to": "a7",
+        "topic": "Existing merge-policy procedures",
+        "experience_sought": "What existing procedures govern blocking checks, disputed findings, and exceptions in our monorepo?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "summaryPoints": [
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Priya",
+          "Marcus",
+          "Elena",
+          "Tom",
+          "Sana",
+          "Lars",
+          "Jin",
+          "Olga"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Priya",
+          "Marcus",
+          "Tom",
+          "Sana",
+          "Lars",
+          "Jin"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Priya"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Tom",
+          "Sana",
+          "Olga"
+        ]
+      },
+      {
+        "kind": "omitted",
+        "speakers": [
+          "Elena"
+        ]
+      },
+      {
+        "kind": "repeated",
+        "speakers": [
+          "Jin",
+          "Lars",
+          "Olga"
+        ]
+      }
+    ],
+    "reminders": [
+      {
+        "step": "before-ballots",
+        "from": "Lars",
+        "quote": "My notes say Lintwise has a baseline mode that ignores existing findings and reports only new ones."
+      },
+      {
+        "step": "before-ballots",
+        "from": "Elena",
+        "quote": "My notes confirm that Lintwise includes a secret-detection rule set that would have flagged the hard-coded test key that reached main last quarter and had to be rotated."
+      }
+    ]
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 1,
+    "membersWhoChangedStanceInRound2": 0,
+    "cacheHitRatio": 0.18577120091064314,
+    "calls": 55,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 5054,
+        "cached": 0,
+        "output": 870,
+        "ms": 38375,
+        "costUsd": 0
+      },
+      "chair-notes": {
+        "calls": 18,
+        "input": 14751,
+        "cached": 0,
+        "output": 8503,
+        "ms": 202234,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 888,
+        "cached": 0,
+        "output": 87,
+        "ms": 3384,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2652,
+        "cached": 0,
+        "output": 172,
+        "ms": 6735,
+        "costUsd": 0
+      },
+      "chair-summary": {
+        "calls": 1,
+        "input": 3021,
+        "cached": 0,
+        "output": 356,
+        "ms": 9941,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 16847,
+        "cached": 0,
+        "output": 1283,
+        "ms": 46700,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 2598,
+        "cached": 0,
+        "output": 56,
+        "ms": 16227,
+        "costUsd": 0
+      },
+      "chair-reminders": {
+        "calls": 1,
+        "input": 5479,
+        "cached": 0,
+        "output": 115,
+        "ms": 3985,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 18990,
+        "cached": 13056,
+        "output": 328,
+        "ms": 25049,
+        "costUsd": 0
+      }
+    }
+  }
+}

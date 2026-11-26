@@ -1,0 +1,59 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "Lintwise caught bugs on my previous team, but we should measure its findings and CI impact in a non-blocking monorepo trial before requiring it."
+    },
+    {
+      "agent": "a2",
+      "name": "Marcus",
+      "vote": "no",
+      "reason": "We should measure Lintwise’s added build time and peak queue impact in a non-blocking monorepo trial before making it required."
+    },
+    {
+      "agent": "a3",
+      "name": "Elena",
+      "vote": "no",
+      "reason": "Lintwise’s secret-detection rules offer potential value, but we should verify coverage, noise, and CI impact in a non-blocking monorepo trial before requiring it."
+    },
+    {
+      "agent": "a4",
+      "name": "Tom",
+      "vote": "no",
+      "reason": "My side-project experience showed about 30 percent noise with default JavaScript rules, so I support a non-blocking monorepo trial before requiring Lintwise."
+    },
+    {
+      "agent": "a5",
+      "name": "Sana",
+      "vote": "no",
+      "reason": "We should first run a non-blocking trial in our monorepo to verify Python, SQL, and configuration coverage and measure useful findings, noise, and CI impact."
+    },
+    {
+      "agent": "a6",
+      "name": "Lars",
+      "vote": "no",
+      "reason": "We should first run a non-blocking trial in our monorepo to measure actionable findings, false positives, triage effort, and CI impact before choosing which rules warrant blocking merges."
+    },
+    {
+      "agent": "a7",
+      "name": "Jin",
+      "vote": "no",
+      "reason": "We need a non-blocking trial in our monorepo before requiring Lintwise, with agreed blocking rules, acceptable CI impact, ownership, exceptions, and rollback criteria."
+    },
+    {
+      "agent": "a8",
+      "name": "Olga",
+      "vote": "no",
+      "reason": "I support a non-blocking trial to assess useful findings and clear style guidance before requiring Lintwise to block merges."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

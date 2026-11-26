@@ -1,0 +1,142 @@
+{
+  "scenario": "Selfbuild: agents start work on NimbleNewt itself (three engineers)",
+  "variant": {
+    "name": "decision-test",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 3,
+    "chairDecides": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Noor",
+      "model": "openai-codex/gpt-6-astra"
+    },
+    {
+      "id": "a2",
+      "name": "Jonas",
+      "model": "z-ai/glm-5.3-prime"
+    },
+    {
+      "id": "a3",
+      "name": "Lena",
+      "model": "qwen/qwen3.8-max-prime"
+    }
+  ],
+  "chairModel": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "Agents may start work on candidate releases of NimbleNewt itself on their own initiative, in a separate project, not only when the owner starts it. Nothing is ever installed without the owner's explicit step.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a2",
+        "topic": "Recurring defects awaiting owner initiation",
+        "experience_sought": "Can you give a concrete example from your defect queue, including what evidence would justify starting candidate work?"
+      },
+      {
+        "to": "a1",
+        "topic": "Existing isolation and permission controls",
+        "experience_sought": "Which execution, credential, network, and resource restrictions are known to apply to separate candidate projects today, and which remain unverified?"
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "chairDecision": {
+      "decide": "no",
+      "predictYes": 0,
+      "reason": "Version 1 lacks verified preparation-time safeguards and intake limits, and all three members now oppose it as written.",
+      "actualYes": 0,
+      "passed": false,
+      "matchesOutcome": true,
+      "predictionError": 0
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0.2307048599935629,
+    "calls": 16,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 3,
+        "input": 1003,
+        "cached": 256,
+        "output": 837,
+        "ms": 18275,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 852,
+        "cached": 0,
+        "output": 91,
+        "ms": 6595,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 2046,
+        "cached": 256,
+        "output": 204,
+        "ms": 9712,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 3,
+        "input": 4001,
+        "cached": 768,
+        "output": 808,
+        "ms": 18193,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 3,
+        "input": 1512,
+        "cached": 256,
+        "output": 108,
+        "ms": 4473,
+        "costUsd": 0
+      },
+      "chair-decision": {
+        "calls": 1,
+        "input": 1548,
+        "cached": 0,
+        "output": 43,
+        "ms": 2004,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 3,
+        "input": 4573,
+        "cached": 2048,
+        "output": 216,
+        "ms": 6598,
+        "costUsd": 0
+      }
+    }
+  }
+}

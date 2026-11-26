@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "The amendments improve traceability and prevent access through exclusion, but exposing private scratch still risks discouraging candid memory-writing and stripping tentative notes of context."
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "Previously invited agents occupied with uninterruptible jobs can still provide useful context through bounded, logged access that distinguishes scratch material from authorization and records its use in decisions."
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "yes",
+      "reason": "The motion now addresses both objections I raised: the \"not invited\" trigger is replaced with a prior-invitation requirement, and provision (c) provides the omission-detection mechanism I needed to consider the audit trail fit for accountability purposes."
+    }
+  ],
+  "result": {
+    "yes": 2,
+    "no": 1,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

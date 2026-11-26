@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Dana",
+      "vote": "yes",
+      "reason": "We should inform the customer of the duplicate-charge bug and ask about a two-week delay before deciding the launch plan, since the proposed safeguards remain unverified."
+    },
+    {
+      "agent": "a2",
+      "name": "Ravi",
+      "vote": "yes",
+      "reason": "The customer's informed answer on delay tolerance is essential input, and deciding now would mean shipping a known, undisclosed payment-correctness bug with no live detection."
+    },
+    {
+      "agent": "a3",
+      "name": "Mei",
+      "vote": "yes",
+      "reason": "This motion formalizes exactly what I committed to doing—disclose the bug to the customer and ask about delay tolerance—so we can reconvene with the information needed to make a responsible decision."
+    }
+  ],
+  "result": {
+    "yes": 3,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  }
+}

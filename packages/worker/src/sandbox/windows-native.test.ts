@@ -58,6 +58,8 @@ interface Script {
   /** `check` reports this after the launcher's own revoke, though the entry was removed; a later `revoke` command removes it. */
   lingering?: (path: string) => boolean;
   noAnswer?: boolean;
+  /** The window-object mode the launcher's run and info lines name (default: none for a run, `private` for info; "" leaves the key out of both). */
+  windowStation?: string;
   throws?: boolean;
   exitCode?: number;
   timedOut?: boolean;
@@ -133,7 +135,7 @@ class SimHost implements NativeHost {
       return undefined;
     };
     const gl = (g: { mode: string; path: string; soft: boolean }[], extra: (p: string) => Record<string, unknown>): unknown[] => g.map((x) => ({ path: x.path, mode: x.mode, soft: x.soft, ...extra(x.path), entriesLeft: this.entries.get(key(x.path)) ?? 0 }));
-    if (args[0] === "info") { const early = beginProfile(); if (early !== undefined) return early; return line({ command: "info", ok: true, containerSid: sid, profile: "created", windowStation: "private", windowStationOk: true, ...deleteIt() }); }
+    if (args[0] === "info") { const early = beginProfile(); if (early !== undefined) return early; return line({ command: "info", ok: true, containerSid: sid, profile: "created", ...(this.script.windowStation === "" ? {} : { windowStation: this.script.windowStation ?? "private" }), windowStationOk: true, ...(this.script.windowStation === "home-desktop" ? { privateStationError: "window objects: the private window station could not be made (error 5)" } : {}), ...deleteIt() }); }
     if (args[0] === "check") return line({ command: "check", ok: true, clean: true, containerSid: sid, grants: gl(grants(args), () => ({ applied: false, revoked: false })) });
     if (args[0] === "revoke") { for (const g of grants(args)) this.entries.set(key(g.path), this.script.stubborn?.(g.path) ? 1 : 0); return line({ command: "revoke", ok: true, containerSid: sid, grants: gl(grants(args), () => ({ applied: true, revoked: true })) }); }
     if (args[0] === "delete-profile") {
@@ -173,7 +175,7 @@ class SimHost implements NativeHost {
     this.writeText(val("--stdout"), this.script.out ?? "");
     this.writeText(val("--stderr"), this.script.err ?? "");
     await this.script.onProgram?.(args, this, options?.signal);
-    return render({ ok: true, childStarted: true, childExitCode: this.script.exitCode ?? 0, timedOut: this.script.timedOut === true });
+    return render({ ok: true, childStarted: true, childExitCode: this.script.exitCode ?? 0, timedOut: this.script.timedOut === true, ...(this.script.windowStation === undefined || this.script.windowStation === "" ? {} : { windowStation: this.script.windowStation }) });
   }
 }
 
@@ -426,6 +428,35 @@ const record = (host: SimHost, job: NativeJob): RunRecord => readRecord(host, jo
 const hasEntries = (host: SimHost): string[] => [...host.entries].filter(([, n]) => n > 0).map(([p]) => p);
 
 describe("A03b native launcher: a run, its files, its record and the revoke read back on every path out", () => {
+  test("the home desktop (plan 12.5): the backend knows the mode, records it for a run, and refuses a mode it does not know", async () => {
+    const host = new SimHost();
+    host.script = { out: "x", windowStation: "home-desktop" };
+    const { job, jobDir } = jobFor(host);
+    const out = await runNativeJob(host, job, "in", jobDir);
+    assert.equal(out.exitCode, 0);
+    const rec = record(host, job);
+    assert.equal(rec.failure, undefined);
+    assert.equal(rec.windowStation, "home-desktop");
+    const priv = new SimHost();
+    priv.script = { windowStation: "private" };
+    const p = jobFor(priv);
+    await runNativeJob(priv, p.job, "in", p.jobDir);
+    assert.equal(record(priv, p.job).windowStation, "private");
+    const none = new SimHost();
+    const n = jobFor(none);
+    await runNativeJob(none, n.job, "in", n.jobDir);
+    assert.equal("windowStation" in record(none, n.job), false, "an older launcher that names no mode records none");
+    for (const bad of ["inherit", "winsta0", "Private", "home-desktop2"]) {
+      const h = new SimHost();
+      h.script = { windowStation: bad };
+      const j = jobFor(h);
+      await runNativeJob(h, j.job, "in", j.jobDir).catch(() => undefined);
+      assert.equal(record(h, j.job).failure?.kind, "launcher", bad);
+      assert.match(record(h, j.job).failure?.message ?? "", /window-object mode this backend does not know/, bad);
+      assert.equal("windowStation" in record(h, j.job), false, "an unknown word is never recorded as a mode");
+    }
+  });
+
   test("a run: output and exit code come back from files, the program's stdin was a file, grants applied then removed and read back, a record is kept, the lock is released", async () => {
     const host = new SimHost();
     host.script = { out: "hello\n", err: "warn\n", exitCode: 3, onProgram: (_a, h) => assert.ok(hasEntries(h).length > 0, "the grants are in place while the program runs") };
@@ -741,6 +772,43 @@ describe("A03b native launcher: health is a real confined start", () => {
     const refused = await healthy(noStation).health();
     assert.equal(refused.healthy, false);
     assert.match(refused.reason ?? "", /could not make a private window station and desktop for the container \(window objects: the private window station could not be made \(error 5\)\)/);
+    // the home desktop was tried and failed too: the reason names the home desktop and carries both refusals (not the named station's wording alone)
+    const noHome = new SimHost();
+    const realRunHome = noHome.run.bind(noHome);
+    const homeErr = "window objects: the home desktop refused: the launcher runs in session 0 (after: window objects: the private window station could not be made (error 5))";
+    noHome.run = async (file: string, args: readonly string[], o?: { readonly signal?: AbortSignal }): Promise<ProcessResult> => (args[0] === "info"
+      ? ok(`${JSON.stringify({ tool: "nn-appc-launcher", ok: false, stage: "grant", error: homeErr, windowStation: "home-desktop", privateStationError: "window objects: the private window station could not be made (error 5)", windowStationOk: false, windowStationError: homeErr })}\n`)
+      : realRunHome(file, args, o));
+    const homeRefused = await healthy(noHome).health();
+    assert.equal(homeRefused.healthy, false);
+    assert.match(homeRefused.reason ?? "", /could not make the home desktop \(a private desktop on the user's own window station WinSta0\)/);
+    assert.match(homeRefused.reason ?? "", /session 0/);
+    assert.match(homeRefused.reason ?? "", /the named private window station before it: window objects: the private window station could not be made \(error 5\)/);
+    assert.doesNotMatch(homeRefused.reason ?? "", /could not make a private window station and desktop/);
+    // the non-elevated user's case: the named station was refused, the launcher made a private desktop on WinSta0 and says so; the backend is healthy and the note states what stays shared
+    const homeHost = new SimHost();
+    homeHost.script = { onProgram: probeBehaviour("none"), windowStation: "home-desktop" };
+    const homeHealth = await healthy(homeHost).health();
+    assert.equal(homeHealth.healthy, true, homeHealth.reason);
+    const homeNote = (homeHealth.notes ?? []).find((n) => /private DESKTOP on the user's own window station/.test(n)) ?? "";
+    assert.match(homeNote, /error 5/);
+    assert.match(homeNote, /clipboard and the atom table .* stay shared .* accepted exposure/);
+    assert.ok(!(homeHealth.notes ?? []).some((n) => /private window station and desktop made for it/.test(n)), "the named-station note is not claimed for the home desktop");
+    // a launcher that names no mode is not described as having the named private station (nothing is claimed that the line did not say)
+    const silent = new SimHost();
+    silent.script = { onProgram: probeBehaviour("none"), windowStation: "" };
+    const silentHealth = await healthy(silent).health();
+    assert.equal(silentHealth.healthy, true, silentHealth.reason);
+    assert.ok(!(silentHealth.notes ?? []).some((n) => /private window station and desktop made for it|private DESKTOP on the user's own/.test(n)), "no mode is claimed");
+    assert.ok((silentHealth.notes ?? []).some((n) => /did not name their mode/.test(n)));
+    // a mode this backend does not know is unhealthy, never passed
+    for (const bad of ["inherit", "winsta0", "Home-Desktop"]) {
+      const odd = new SimHost();
+      odd.script = { onProgram: probeBehaviour("none"), windowStation: bad };
+      const r = await healthy(odd).health();
+      assert.equal(r.healthy, false, bad);
+      assert.match(r.reason ?? "", /window-object mode this backend does not know/);
+    }
     const dirty = new SimHost();
     dirty.script = { stubborn: () => true };
     const { dir, job } = ((): { dir: string; job: NativeJob } => { const j = jobFor(dirty).job; const d = `${CONTROL}\\jobs\\old-run-0001`; dirty.writeText(jobFile(d), JSON.stringify(j)); markStarted(dirty, j, d, { runnerPid: 7 }); return { dir: d, job: j }; })();

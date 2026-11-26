@@ -1,0 +1,109 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "rich-personas-tabling",
+    "firstRound": "open",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 4,
+    "richPersonas": true,
+    "deskFromStart": true,
+    "allowTabling": true
+  },
+  "model": "openai-codex/gpt-6.1-sol",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 0,
+    "no": 8,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Cached CI performance",
+        "experience_sought": "In your previous team's six months using Lintwise, did the roughly one-minute cached overhead remain consistent, and what codebase did that measurement cover?"
+      },
+      {
+        "to": "a3",
+        "topic": "Secret-detection evidence",
+        "experience_sought": "What evidence in your notes confirms that Lintwise's secret-detection rules would have flagged the hard-coded test key?"
+      }
+    ],
+    "rejectedChairQuestions": []
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.8571428571428571,
+    "membersWhoChangedStanceInRound2": 1,
+    "cacheHitRatio": 0,
+    "calls": 35,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1": {
+        "calls": 8,
+        "input": 6245,
+        "cached": 0,
+        "output": 1274,
+        "ms": 43703,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1378,
+        "cached": 0,
+        "output": 96,
+        "ms": 3281,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 3086,
+        "cached": 0,
+        "output": 210,
+        "ms": 9003,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 17691,
+        "cached": 0,
+        "output": 1493,
+        "ms": 50265,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 5820,
+        "cached": 0,
+        "output": 56,
+        "ms": 15093,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 22820,
+        "cached": 0,
+        "output": 306,
+        "ms": 22456,
+        "costUsd": 0
+      }
+    }
+  }
+}

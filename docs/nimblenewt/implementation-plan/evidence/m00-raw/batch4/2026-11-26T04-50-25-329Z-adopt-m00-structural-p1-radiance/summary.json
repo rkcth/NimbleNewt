@@ -1,0 +1,195 @@
+{
+  "scenario": "Adopt Lintwise as a required pre-merge check (eight engineers)",
+  "variant": {
+    "name": "m00-structural-p1",
+    "firstRound": "blind",
+    "rounds": 2,
+    "transcriptMode": "full",
+    "promptOrder": "shared-first",
+    "chairQuestions": 2,
+    "chairQuestionCheck": "structural",
+    "deskCheck": true,
+    "tokenLimit": 220,
+    "objectionCheck": true,
+    "maxObjectionReruns": 2,
+    "parallel": 1,
+    "allowTabling": true,
+    "directQuestions": true,
+    "deskRead": true
+  },
+  "model": "qwen3.8-flash-next-iq4r",
+  "roster": [
+    {
+      "id": "a1",
+      "name": "Priya",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a2",
+      "name": "Marcus",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a3",
+      "name": "Elena",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a4",
+      "name": "Tom",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a5",
+      "name": "Sana",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a6",
+      "name": "Lars",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a7",
+      "name": "Jin",
+      "model": "qwen3.8-flash-next-iq4r"
+    },
+    {
+      "id": "a8",
+      "name": "Olga",
+      "model": "qwen3.8-flash-next-iq4r"
+    }
+  ],
+  "chairModel": "qwen3.8-flash-next-iq4r",
+  "motion": {
+    "text": "The team adopts Lintwise, an automated code-quality checker, as a required pre-merge check on every repository.",
+    "version": 1
+  },
+  "result": {
+    "yes": 8,
+    "no": 0,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "passed"
+  },
+  "stats": {
+    "objections": [
+      {
+        "attempt": 0,
+        "objectors": []
+      }
+    ],
+    "chairQuestions": [
+      {
+        "to": "a1",
+        "topic": "Over your six months running Lintwise, what was the typical false-positive rate per PR, and how many suppression comments or rule-set overrides did the team end up adding to silence noise on legacy or mixed-language files?",
+        "experience_sought": "Quantified false-positive burden and suppression overhead observed across a team of engineers working with varied code styles over six months."
+      },
+      {
+        "to": "a3",
+        "topic": "With our 11-minute build and eight engineers pushing to one monorepo, does a static check that finishes in under one minute as a parallel job materially change queue depth, versus one that runs serially for three-to-four minutes? Please give the rough wall-clock delta per PR in both scenarios.",
+        "experience_sought": "Concrete queue-depth arithmetic comparing a sub-minute parallel check against a 3–4 minute serial check across concurrent PRs."
+      }
+    ],
+    "rejectedChairQuestions": [],
+    "skippedAbsent": [],
+    "inquiries": [],
+    "ownerReports": [],
+    "deskRead": {
+      "refused": [],
+      "excerpts": [],
+      "rejectedExcerpts": [],
+      "corrections": []
+    },
+    "directQuestions": [
+      {
+        "from": "a4",
+        "to": "Lars",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a5",
+        "to": "Marcus",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a6",
+        "to": "Tom",
+        "refused": "unknown or self"
+      },
+      {
+        "from": "a8",
+        "to": "Tom",
+        "refused": "unknown or self"
+      }
+    ],
+    "inquiryChecks": {
+      "heldAnswers": 0,
+      "leaks": [],
+      "revisionsPerVoter": {},
+      "voterRevisionTurnsOk": true,
+      "clockMs": {
+        "total": 124598,
+        "paused": 0,
+        "meeting": 124598
+      }
+    }
+  },
+  "metrics": {
+    "round1StanceAgreementWithPrevious": 0.42857142857142855,
+    "membersWhoChangedStanceInRound2": 2,
+    "cacheHitRatio": 0.5723466820262527,
+    "calls": 35,
+    "estimatedCostUsd": 0,
+    "byPhase": {
+      "round1-blind": {
+        "calls": 8,
+        "input": 2046,
+        "cached": 0,
+        "output": 5235,
+        "ms": 27716,
+        "costUsd": 0
+      },
+      "chair-questions": {
+        "calls": 1,
+        "input": 1818,
+        "cached": 0,
+        "output": 713,
+        "ms": 4364,
+        "costUsd": 0
+      },
+      "chair-answer": {
+        "calls": 2,
+        "input": 4166,
+        "cached": 0,
+        "output": 1512,
+        "ms": 8824,
+        "costUsd": 0
+      },
+      "round2": {
+        "calls": 8,
+        "input": 23204,
+        "cached": 14336,
+        "output": 9266,
+        "ms": 48499,
+        "costUsd": 0
+      },
+      "objection-check": {
+        "calls": 8,
+        "input": 6302,
+        "cached": 0,
+        "output": 3380,
+        "ms": 17419,
+        "costUsd": 0
+      },
+      "ballot": {
+        "calls": 8,
+        "input": 28438,
+        "cached": 23424,
+        "output": 3161,
+        "ms": 17765,
+        "costUsd": 0
+      }
+    }
+  }
+}

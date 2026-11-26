@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Noor",
+      "vote": "no",
+      "reason": "Separate checkouts and owner-controlled installation do not bound agents’ access or resource use during candidate preparation; autonomous work needs owner-authorized limits."
+    },
+    {
+      "agent": "a2",
+      "name": "Jonas",
+      "vote": "no",
+      "reason": "Autonomous candidate work could reduce maintenance delays, but the motion lacks owner-configured limits on scope, resources, access, and concurrent projects."
+    },
+    {
+      "agent": "a3",
+      "name": "Lena",
+      "vote": "no",
+      "reason": "The motion removes the initiation throttle without replacing it with owner-configured limits on scope, resources, or concurrency, leaving the owner's review queue agent-paced rather than owner-paced."
+    }
+  ],
+  "result": {
+    "yes": 0,
+    "no": 3,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}

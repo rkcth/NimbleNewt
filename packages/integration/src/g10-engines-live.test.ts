@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { profileFor } from "@nimblenewt/controller";
 import { fileURLToPath } from "node:url";
 import { fakeEngine, type FakeOptions } from "./g10-engines-fake.js";
 import { concurrencyRun, evictionRun, extrasRun, idleRun, makeHead, parseMetrics, readCache, readEngineInfo, readMetrics, realEngineEnv, send, sharedRun, type EngineEnv } from "./g10-engines-live.js";
@@ -260,4 +261,19 @@ test("the committed evidence (2026-11-25) holds the figures the note states, rec
   const idle = v["idle"]!.steps.filter((s) => s.step.startsWith("after-")).map((s) => [s.cachedTokens, s.clientTtftMs]);
   assert.deepEqual(idle, [[6400, 244], [6400, 1794], [6400, 369], [6400, 757], [6400, 668]]);
   for (const run of [v, l1, l2]) for (const p of Object.values(run)) if (typeof p === "object" && p !== null && "steps" in p) assert.ok(p.steps.every((s) => s.status === 200 && s.correct));
+});
+
+test("the bench's reader and the production C06 profile read every captured response the same; where they differ (a body without the engine's own field) the production profile says why", () => {
+  const read = (name: string): Record<string, unknown> => (JSON.parse(readFileSync(fileURLToPath(new URL(`../test-fixtures/g10-engines/${name}.json`, import.meta.url)), "utf8")) as { body: Record<string, unknown> }).body;
+  const profiles = { llamacpp: profileFor({ kind: "llama-cpp", model: "qwen3-8b-q8", options: { slots: 4 } }), vllm: profileFor({ kind: "vllm", model: "Qwen/Qwen3-8B", options: { promptDetails: true } }) } as const;
+  for (const kind of ["llamacpp", "vllm"] as const) {
+    for (const name of [`${kind}-cold`, `${kind}-shared-hit`]) {
+      const bench = readCache(kind, read(name)); const prod = profiles[kind].read(read(name));
+      assert.deepEqual([prod.known, prod.promptTokens, prod.cachedTokens, prod.computedTokens], [bench.reported, bench.promptTokens, bench.cachedTokens, bench.computedTokens], name);
+      assert.equal(prod.source, kind === "llamacpp" ? "timings.cache_n + timings.prompt_n" : "usage.prompt_tokens_details.cached_tokens", name);
+    }
+  }
+  // A llama.cpp body with only usage: the bench records "not reported" (it trusts only the engine's own timings); the production profile falls back to the usage copy, which this build fills with the same figure.
+  const { timings: _t, ...usageOnly } = read("llamacpp-shared-hit");
+  assert.deepEqual([readCache("llamacpp", usageOnly).reported, profiles.llamacpp.read(usageOnly).known, profiles.llamacpp.read(usageOnly).cachedTokens], [false, true, 6454]);
 });

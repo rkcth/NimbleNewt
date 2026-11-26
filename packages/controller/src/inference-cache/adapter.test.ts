@@ -489,13 +489,16 @@ const REPLAYED = ["slot0-warm", "slot0-again", "slot1-same-head", "cache-prompt-
 const reused = (cached: number, prompt: number): boolean => cached / prompt >= 0.5;
 const question = (q: number): WireRequest => ({ model: "m", messages: [{ role: "system", content: doc("head", 400) }, { role: "user", content: `question ${q}` }] });
 
-/** The G10 extras sequence (`g10-engines-live.ts` extrasRun, llama.cpp branch) sent straight to the stand-in: which steps reused at least half the prompt. */
+/** The production llama.cpp profile the replay reads every reply with (the same `read` the adapter uses), so the stand-in is judged through the real response reading, not its own fields. */
+const replayProfile = profileFor({ kind: "llama-cpp", model: "m", options: { slots: 2, slotSave: true } });
+/** The G10 extras sequence (`g10-engines-live.ts` extrasRun, llama.cpp branch) sent straight to the stand-in: which steps reused at least half the prompt, as the production profile reads each reply. */
 async function replayExtras(hostCache: boolean): Promise<Record<string, boolean>> {
   const sim = new LlamaSim(2, { hostCache });
   const chat = async (q: number, slot: number, cachePrompt: boolean): Promise<boolean> => {
     const r = await sim.send({ method: "POST", path: "/v1/chat/completions", headers: {}, body: { ...question(q), id_slot: slot, cache_prompt: cachePrompt } });
-    const t = (r.body as { timings: { cache_n: number; prompt_n: number } }).timings;
-    return reused(t.cache_n, t.cache_n + t.prompt_n);
+    const hit = replayProfile.read(r.body);
+    assert.deepEqual([hit.known, hit.source], [true, "timings.cache_n + timings.prompt_n"], "the stand-in's reply is read through the fields the captured llama.cpp reply is read through");
+    return reused(hit.cachedTokens, hit.promptTokens);
   };
   const out: Record<string, boolean> = {};
   out["slot0-warm"] = await chat(0, 0, true);
@@ -524,6 +527,28 @@ test("G10 replay: the committed rows say what the fix rests on, and the stand-in
   for (const s of REPLAYED) assert.ok(sim1[s]! || !real1[s]!, `${s}: the stand-in never reuses less than run 1 measured`);
   assert.deepEqual(REPLAYED.filter((s) => sim1[s] !== real1[s]), ["slot1-same-head"], "the only difference: the stand-in also serves the kept head to an empty slot (leakier than measured, stated in simulators.ts)");
 });
+
+const CAPTURED = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "integration", "test-fixtures", "g10-engines");
+test("G10 replay: the stand-in's reply has the captured llama.cpp reply's shape where the production profile reads it, so the replay's judgement is the one a real reply gets", async () => {
+  const captured = ["llamacpp-cold", "llamacpp-shared-hit"].map((n) => (JSON.parse(readFileSync(join(CAPTURED, `${n}.json`), "utf8")) as { body: Record<string, unknown> }).body);
+  const sim = new LlamaSim(1);
+  const simReplies = [await sim.send({ method: "POST", path: "/v1/chat/completions", headers: {}, body: { ...question(0), id_slot: 0, cache_prompt: true } }), await sim.send({ method: "POST", path: "/v1/chat/completions", headers: {}, body: { ...question(1), id_slot: 0, cache_prompt: true } })].map((r) => r.body as Record<string, unknown>);
+  const fieldsRead = (b: Record<string, unknown>): string[] => { const t = b["timings"] as Record<string, unknown>; return ["cache_n", "prompt_n"].filter((k) => typeof t?.[k] === "number").map((k) => `timings.${k}`); };
+  for (const [i, real] of captured.entries()) {
+    const fake = simReplies[i]!;
+    assert.deepEqual(fieldsRead(fake), fieldsRead(real), "the same timing fields are present");
+    const [h, r] = [replayProfile.read(fake), replayProfile.read(real)];
+    assert.deepEqual([h.known, h.source], [r.known, r.source]);
+    for (const x of [[h, fake], [r, real]] as const) assert.equal(x[0].promptTokens, (x[1]["usage"] as { prompt_tokens: number }).prompt_tokens, "cache_n + prompt_n is usage.prompt_tokens in both");
+  }
+  // cold then the same head again, judged by the adapter's own rule: both replies say cold, then hit
+  assert.deepEqual([judge(replayProfile.read(simReplies[0]), "yes", 0), judge(replayProfile.read(simReplies[1]), "yes", 1)], ["cold", "hit"]);
+  assert.deepEqual([judge(replayProfile.read(captured[0]), "yes", 0), judge(replayProfile.read(captured[1]), "yes", 1)], ["cold", "hit"]);
+  // What the stand-in leaves out: this llama.cpp build also repeats cache_n in usage.prompt_tokens_details.cached_tokens; the profile reads timings first, so the replay does not depend on it.
+  assert.equal(at(captured[1]!, "usage", "prompt_tokens_details", "cached_tokens"), 6454);
+  assert.equal(at(simReplies[1]!, "usage", "prompt_tokens_details"), undefined);
+});
+const at = (o: unknown, ...path: string[]): unknown => path.reduce<unknown>((c, k) => (c !== null && typeof c === "object" ? (c as Record<string, unknown>)[k] : undefined), o);
 
 test("G10 replay: an unattested adapter never sends run 1's leaking shape (erase, then cache_prompt true into that slot) across a project boundary; an attested one sends exactly run 2's", async () => {
   // run 1's leaking shape: a chat with cache_prompt true and id_slot N directly after /slots/N?action=erase
@@ -746,4 +771,28 @@ test("turns: a call that names no slot starts only after every running slot call
   const at = (e: string): number => events.indexOf(e);
   assert.ok(at("end chat 1") < at("start chat undefined"), events.join());
   assert.ok(at("end chat undefined") < at("start /slots/0?action=erase"), events.join());
+});
+
+test("Claude through the adapter (experimental, isolation unattested): a project that requires isolation sends no cache setting, another project's calls still carry markers, and no call ever erases, saves or restores a slot", async () => {
+  const sim = new ClaudeSim();
+  const adapter = new CacheAdapter(profileFor({ kind: "claude", model: "claude-opus-5-5" }), sim);
+  const head = { model: "claude-opus-5-5", system: [{ type: "text", text: doc("head", 800) }], messages: [{ role: "user", content: [{ type: "text", text: "question" }] }] };
+  const open1 = await adapter.call(head, ctx());
+  assert.equal(open1.status, 200);
+  assert.ok(open1.applied.length > 0, "a project without the isolation rule still gets markers");
+  for (const scopeKey of [scopeA, scopeB]) {
+    const iso = await adapter.call(head, { scopeKey, isolationRequired: true, slot: 0 });
+    assert.equal(iso.status, 200);
+    assert.deepEqual(iso.applied, []);
+    assert.ok(iso.skipped.some((s) => /treated as unattested/.test(s)), iso.skipped.join("|"));
+    assert.equal(iso.isolation, undefined, "Claude has no slot, so no slot isolation mode is claimed");
+  }
+  assert.equal(sim.seen.length, 3, "one request per call: no erase or other slot request went out");
+  assert.ok(sim.seen.every((r) => r.method === "POST" && r.path === sim.seen[0]!.path && !/slots/.test(r.path)), JSON.stringify(sim.seen.map((r) => r.path)));
+  assert.match(JSON.stringify(sim.seen[0]!.body), /cache_control/);
+  for (const r of sim.seen.slice(1)) assert.doesNotMatch(JSON.stringify(r.body), /cache_control/);
+  assert.match((await adapter.slot("save", 0, slotFile("nn-abcdefgh2345.bin"), scopeA)).reason ?? "", /^unsupported/);
+  assert.match((await adapter.slot("restore", 0, slotFile("nn-abcdefgh2345.bin"), scopeA)).reason ?? "", /^unsupported/);
+  assert.equal((await adapter.clearSlot(0)).ok, false);
+  assert.equal(sim.seen.length, 3, "the refused slot actions sent nothing");
 });

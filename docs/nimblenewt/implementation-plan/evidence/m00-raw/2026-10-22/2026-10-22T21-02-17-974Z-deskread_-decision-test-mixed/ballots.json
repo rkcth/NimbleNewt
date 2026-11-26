@@ -1,0 +1,29 @@
+{
+  "ballots": [
+    {
+      "agent": "a1",
+      "name": "Ines",
+      "vote": "no",
+      "reason": "Recorded, read-only access does not prevent misinterpretation of private scratch notes, and allowing access merely because a member was not invited undermines trustworthy working memory."
+    },
+    {
+      "agent": "a2",
+      "name": "Omar",
+      "vote": "yes",
+      "reason": "Recorded, read-only access within the project is preferable to deciding without an occupied agent’s working context, despite the risks of interpreting provisional notes."
+    },
+    {
+      "agent": "a3",
+      "name": "Priya",
+      "vote": "no",
+      "reason": "The motion as written lacks decision links in the minutes and includes a \"was not invited\" clause that exceeds the motivating case, so I cannot verify that scratch-note information was used fairly or detect cherry-picking, which means the audit trail is insufficient for accountability."
+    }
+  ],
+  "result": {
+    "yes": 1,
+    "no": 2,
+    "abstain": 0,
+    "quorum": true,
+    "outcome": "failed (ties fail)"
+  }
+}
