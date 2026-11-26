@@ -484,6 +484,8 @@ for (const backend of backends) {
     assert.deepEqual(u.cache, { cachedTokens: 950, computedTokens: 20, writtenTokens: 10, calls: 2 });
     assert.deepEqual(u.cacheByBackend, { claude: { cachedTokens: 900, computedTokens: 10, writtenTokens: 5, calls: 1 }, radiance: { cachedTokens: 50, computedTokens: 10, writtenTokens: 5, calls: 1 } });
     assert.deepEqual(u.totals, { costMicros: 21, computeMs: 0 }, "tokens never mix into money");
+    assert.deepEqual(Object.keys(u.cacheNotes ?? {}), ["claude"], "only the experimental backend carries a note");
+    assert.match(u.cacheNotes!["claude"]!, /Claude cache support is experimental and has not been measured against the real service/);
     // The same command with different cache figures is a conflict, and bad figures are refused.
     const r3 = await c.reserve(c.root, 5);
     const sc3 = cid("s");

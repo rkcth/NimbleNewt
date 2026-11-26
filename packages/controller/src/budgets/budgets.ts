@@ -9,6 +9,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import { AGGREGATE_SCOPES, DEFAULT_AGGREGATE_CURRENCY, capReadable, capState, checkAggregateFields, windowStart, type AggregateBody, type AggregateScope } from "./aggregate.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
+import { cacheNoticeFor } from "../inference-cache/profile.js";
 
 /** A command refused because the budget it names was closed by the owner (a reader that must tell this from other refusals, such as the dispatcher, checks for this class). */
 export class BudgetClosedError extends DomainError {
@@ -123,6 +124,8 @@ export interface UsageSummary {
   /** Cache figures of the entries that reported them: all together and by backend. Entries without cache figures are not counted (unknown is not zero). */
   readonly cache: CacheTotals;
   readonly cacheByBackend: Record<string, CacheTotals>;
+  /** For a backend in `cacheByBackend` whose cache support is experimental (Claude: built from documentation and simulators, never measured against the real service), the sentence that says so. Absent when none applies. */
+  readonly cacheNotes?: Record<string, string>;
   readonly entries: number;
   /** True when more entries matched than the scan limit; the figures are then a lower bound. */
   readonly truncated: boolean;
@@ -1029,7 +1032,9 @@ export class BudgetService {
       }
       if (page.length < BUDGET_LIMITS.page) break;
     }
-    return { totals, byCategory, byActivity, byAgent, byTask, byProject, cache, cacheByBackend, entries, truncated, overheadRules: [...rules].sort() };
+    const cacheNotes: Record<string, string> = {};
+    for (const b of Object.keys(cacheByBackend)) { const n = cacheNoticeFor(b); if (n !== undefined) cacheNotes[b] = n; }
+    return { totals, byCategory, byActivity, byAgent, byTask, byProject, cache, cacheByBackend, ...(Object.keys(cacheNotes).length === 0 ? {} : { cacheNotes }), entries, truncated, overheadRules: [...rules].sort() };
   }
 
   // ---- internals ------------------------------------------------------------------------------------------------------------

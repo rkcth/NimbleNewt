@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DomainError } from "../domain/errors.js";
-import { BACKEND_KINDS, CLAUDE_MIN_TOKENS, SlotAffinity, deriveKey, negotiate, profileFor, type CacheContext, type EndpointConfig, type WireRequest } from "./index.js";
+import { BACKEND_KINDS, CLAUDE_EXPERIMENTAL_NOTICE, CLAUDE_MIN_TOKENS, SlotAffinity, cacheMaturityOf, cacheNoticeFor, describeCacheSupport, deriveKey, negotiate, profileFor, type CacheContext, type EndpointConfig, type WireRequest } from "./index.js";
 
 const scope = deriveKey("installation-secret-0123", "scope", "proj-a");
 const ctx = (extra: Partial<CacheContext> = {}): CacheContext => ({ scopeKey: scope, ...extra });
@@ -375,4 +375,44 @@ test("slot affinity: a group keeps its slot, new groups take free slots, the lea
   assert.deepEqual(two.assign("p2", "x"), { slot: 0 }, "slots freed by one project are free for another");
   assert.deepEqual(two.assign("p1", "same-name"), { slot: 1 });
   assert.deepEqual(two.assign("p3", "same-name"), { refused: "every slot belongs to another project; a project does not take another's slot" }, "groups are keyed by project too");
+});
+
+test("Claude cache support is reported as experimental and unmeasured (owner decision 2026-11-26); every other kind keeps its own claims", () => {
+  const claude = profileFor({ kind: "claude", model: "claude-opus-5-5" });
+  assert.equal(claude.maturity, "experimental");
+  assert.equal(claude.measured, false);
+  assert.equal(claude.notice, CLAUDE_EXPERIMENTAL_NOTICE);
+  assert.match(claude.label, /experimental, not measured/);
+  assert.match(describeCacheSupport(claude), /Claude cache support is experimental and has not been measured against the real service/);
+  assert.ok(claude.caveats.includes(CLAUDE_EXPERIMENTAL_NOTICE), "the caveats the owner reads say so");
+  assert.ok(claude.caveats.some((c) => /Isolation is treated as unattested/.test(c)));
+  assert.doesNotMatch(describeCacheSupport(claude), /\bverified\b|\bqualified\b/);
+  assert.match(CLAUDE_EXPERIMENTAL_NOTICE, /no cache-hit saving is promised/);
+  // The wrapper for isolation keeps the fields.
+  assert.equal(profileFor({ kind: "claude", model: "m" }).maturity, "experimental");
+  for (const kind of BACKEND_KINDS.filter((k) => k !== "claude")) {
+    const p = profileFor({ kind, model: "m" });
+    assert.equal(p.maturity, undefined, kind);
+    assert.equal(p.measured, undefined, kind);
+    assert.equal(p.notice, undefined, kind);
+    assert.doesNotMatch(describeCacheSupport(p), /experimental/i, kind);
+    assert.equal(cacheMaturityOf(kind), "measured", kind);
+    assert.equal(cacheNoticeFor(kind), undefined, kind);
+  }
+  assert.equal(cacheMaturityOf("claude"), "experimental");
+  assert.equal(cacheNoticeFor("claude"), CLAUDE_EXPERIMENTAL_NOTICE);
+});
+
+test("Claude's isolation is treated as unattested: a project that requires isolation gets no cache settings and is told why, while the call still works for other projects", () => {
+  const p = profileFor({ kind: "claude", model: "claude-opus-5-5" });
+  const big = { model: "claude-opus-5-5", system: [{ type: "text", text: text(2000) }], messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] };
+  const isolated = p.prepare(big, ctx({ isolationRequired: true }));
+  assert.deepEqual(isolated.applied, []);
+  assert.equal(isolated.expects, "no");
+  assert.ok(isolated.skipped.some((s) => /has not been measured, so it is treated as unattested/.test(s)), isolated.skipped.join("|"));
+  assert.doesNotMatch(JSON.stringify(isolated.body), /cache_control/);
+  const open = p.prepare(big, ctx());
+  assert.ok(open.applied.length > 0, "the call path still places markers when isolation is not required");
+  assert.equal(p.capabilities.isolation, "none");
+  assert.equal(p.capabilities.prefixReuse, "markers");
 });

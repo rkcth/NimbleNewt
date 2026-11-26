@@ -1,5 +1,5 @@
 import { DomainError } from "../domain/errors.js";
-import { checkEndpoint, type BackendKind, type CacheContext, type CacheHit, type CacheProfile, type CacheCapabilities, type EndpointConfig, type EndpointOptions, type Prepared, type Retention, type Support, type Tuning, type WireRequest } from "./profile.js";
+import { CLAUDE_EXPERIMENTAL_NOTICE, checkEndpoint, type BackendKind, type CacheContext, type CacheHit, type CacheProfile, type CacheCapabilities, type EndpointConfig, type EndpointOptions, type Prepared, type Retention, type Support, type Tuning, type WireRequest } from "./profile.js";
 
 const UNSUPPORTED = (why: string): Support => ({ level: "unsupported", via: why });
 const AVAILABLE = (how: string): Support => ({ level: "available", via: how });
@@ -354,7 +354,7 @@ function claude(model: string, o: EndpointOptions): CacheProfile {
     slotSaveRestore: UNSUPPORTED("hosted API; no slot files"),
   };
   return {
-    kind: "claude", label: "Claude (Messages API prompt caching)", model, wire: "anthropic-messages", capabilities, minPrefixTokens: min, defaultLifetimeMs: 300_000,
+    kind: "claude", maturity: "experimental", measured: false, notice: CLAUDE_EXPERIMENTAL_NOTICE, label: "Claude (Messages API prompt caching, experimental, not measured)", model, wire: "anthropic-messages", capabilities, minPrefixTokens: min, defaultLifetimeMs: 300_000,
     basis: `Claude API prompt-caching guidance (claude-api skill, cached 2026-10-06): at most ${CLAUDE_MAX_BREAKPOINTS} breakpoints, ttl 5m or 1h, per-model minimum prefix${listed ? "" : `; model ${model} is not in the minimum table, so the highest minimum (4096) is assumed`}`,
     hitFields: ["usage.cache_read_input_tokens", "usage.cache_creation_input_tokens", "usage.cache_creation.ephemeral_5m_input_tokens", "usage.cache_creation.ephemeral_1h_input_tokens"],
     tuning: [
@@ -362,6 +362,8 @@ function claude(model: string, o: EndpointOptions): CacheProfile {
       { where: "request", setting: "ttl", value: "1h for the stable head, 5m for the tail", why: "a head reused across gaps longer than 5 minutes is cheaper at 1h; the longer TTL must come first" },
     ],
     caveats: [
+      CLAUDE_EXPERIMENTAL_NOTICE,
+      "Isolation is treated as unattested: Claude's cache is shared inside one organization and model and nothing here has measured otherwise, so a project that requires isolation is sent with no cache settings.",
       "A prefix shorter than the model's minimum silently does not cache (no error).",
       "Any byte change before a breakpoint invalidates that breakpoint and everything after it; render order is tools, system, messages.",
       "A breakpoint looks back at most 20 blocks for an earlier entry; a turn that adds more than 20 blocks needs an intermediate breakpoint.",
@@ -484,7 +486,7 @@ export function profileFor(config: EndpointConfig): CacheProfile {
       if (inner.kind === "llama-cpp") { body["cache_prompt"] = false; applied.push("cache_prompt=false"); }
       // Strata cannot switch reuse off per request; the most we can do is not leave checkpoints or a pin of this project's prompt behind. Only a route of its own isolates on Strata.
       if (inner.kind === "strata") { body["strata_checkpoint"] = false; applied.push("strata_checkpoint=false"); }
-      return { body, headers: plain.headers, applied, skipped: [...plain.skipped, `no cache settings: this project requires isolation and ${inner.label} cannot keep projects apart${inner.kind === "llama-cpp" ? (inner.eraseIsolation === "attested" ? "" : " (its host prompt cache is not attested off, so other projects' later calls may still be sped up by this prompt; only --cache-ram 0 with hostPromptCacheOff, or a server of its own, isolates)") : " (its own cache may still run; only a route of its own isolates)"}`], expects: "no" };
+      return { body, headers: plain.headers, applied, skipped: [...plain.skipped, `no cache settings: this project requires isolation and ${inner.label} cannot keep projects apart${inner.kind === "llama-cpp" ? (inner.eraseIsolation === "attested" ? "" : " (its host prompt cache is not attested off, so other projects' later calls may still be sped up by this prompt; only --cache-ram 0 with hostPromptCacheOff, or a server of its own, isolates)") : inner.kind === "claude" ? " (Claude's cache isolation has not been measured, so it is treated as unattested: its own cache may still run; only a route of its own isolates)" : " (its own cache may still run; only a route of its own isolates)"}`], expects: "no" };
     },
   };
 }
