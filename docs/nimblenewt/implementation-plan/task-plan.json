@@ -10759,12 +10759,41 @@
       ],
       "deliverable": "The agent tool work.end {submit, result, note, message}: checked at once, a durable ending intent and freeze, the controller completes the ending (settle, kill hung calls with a reason, stage, open a submission, finish the attempt); submit is refused when the base is stale and overlapping files changed",
       "acceptance_and_verification": "Owner stop wins; an emergency stop drops the intent; a restart resumes the ending once; a repeated finish gives one ending; a killed write call turns submit into end with a typed release_failed blocker; a stale overlapping submit is refused with the head commit and the overlapping files; plain end is never refused",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "cd047811",
+          "59ac73c7",
+          "7eaaeb06",
+          "f079219c",
+          "cd591770",
+          "d88b16cf",
+          "588227a1",
+          "409749f9",
+          "6e0adb79",
+          "6a0c1c42",
+          "e49cf5bc",
+          "f535bad2",
+          "3e038c3a",
+          "5bd2a66f",
+          "f8038a01",
+          "d77127ec",
+          "460a3e52",
+          "5a4649a2",
+          "1a6c90c9"
+        ],
+        "ci_runs": [
+          "45803960092"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "The agent tool work.end {submit, result, note, message} is checked at once, writes one durable ending intent and freezes the attempt; the controller completes the ending once (settle through the dispatcher, hung calls cut with a reason, stage on the host that holds the checkout, open a code submission, tell, finish), resumed once after a restart and joined when repeated. An owner stop wins and an emergency stop drops the intent with nothing staged; a killed write call turns submit into a plain end with a typed release_failed runtime_hold blocker; a submit on a stale base whose changed files overlap the landing branch is refused with the head commit and the files (checked at request, after the settle and again after staging); a plain end is never refused. Limits: a remote host does not answer submitView or stage (no wire protocol yet), so a submit from a remote host fails closed as submit_unavailable with a blocker, and only a composer's or the local host's stage submits; no product code composes LocalWorker (H12t); the staged tree still carries PLAN.md (H12o); P08/P09 recompute tree and patch at landing. Follow-ups, not clauses here."
+      }
     },
     {
       "id": "H12p",
