@@ -5,6 +5,7 @@ import { ProjectService } from "../domain/service.js";
 import { FallbackService, RoutingService, type Step } from "../routing/index.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import { MemoryStorage } from "../storage/memory.js";
+import { canonicalJson } from "../storage/json.js";
 import type { JsonObject } from "../storage/types.js";
 import type { ServiceAction } from "../service-ops/target.js";
 
@@ -16,7 +17,7 @@ import type { ServiceAction } from "../service-ops/target.js";
  * services. The fallback is the real R02 `FallbackService`, run on its own in-memory store that holds only the scope's stand-in routes: what it decides is the real rule, and
  * nothing it records reaches the task's real spend, retry budget or routing state.
  */
-export const RUN_LIMITS = { steps: 30, agentSteps: 20, providers: 4, times: 4, runsPerScope: 50, grantsPerScope: 50, replaysPerScope: 200, agent: 64 } as const;
+export const RUN_LIMITS = { steps: 30, agentSteps: 20, providers: 4, times: 4, runsPerScope: 50, grantsPerScope: 50, replaysPerScope: 200, agent: 64, scriptChars: 64 * 1024 } as const;
 export const PROVIDER_FAILURES = ["outage", "rate-limit", "credit", "auth"] as const;
 export type ProviderFailure = (typeof PROVIDER_FAILURES)[number];
 /** The stand-in routes a run uses when the owner names none, in fallback order. */
@@ -35,6 +36,9 @@ export type RunStep =
   | { readonly kind: "competing-edit"; readonly service: string; readonly resource: string; readonly fields: JsonObject };
 
 const NAME = /^[a-z][a-z0-9._-]{0,63}$/;
+/** Review: the fields an agent or the other writer sets are bounded like a scope's states (`SIMULATION_SCOPE_LIMITS.stateBytes`), so a script always fits its run record. */
+const FIELDS_CHARS = 8 * 1024;
+const boundedFields = (v: JsonObject, field: string): void => { if (canonicalJson(v).length > FIELDS_CHARS) invalid(field, `must be at most ${FIELDS_CHARS} characters`); };
 const ROUTE = /^[a-z][a-z0-9-]{0,39}\/[a-z0-9][a-z0-9._-]{0,63}$/;
 const isObject = (v: unknown): v is JsonObject => typeof v === "object" && v !== null && !Array.isArray(v);
 const invalid = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
@@ -44,6 +48,7 @@ function checkAction(raw: unknown, field: string): ServiceAction {
   onlyKnown(raw, ["type", "params"]);
   if (typeof raw["type"] !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(raw["type"])) invalid(`${field}.type`, "must be 1 to 40 lower-case letters, digits or hyphens");
   if (raw["params"] !== undefined && !isObject(raw["params"])) invalid(`${field}.params`, "must be an object");
+  if (raw["params"] !== undefined) boundedFields(raw["params"] as JsonObject, `${field}.params`);
   return { type: raw["type"] as string, ...(raw["params"] === undefined ? {} : { params: raw["params"] as JsonObject }) };
 }
 
@@ -65,6 +70,7 @@ export function checkScript(raw: { steps: unknown; providers?: unknown }): { ste
       if (typeof s["resource"] !== "string" || !NAME.test(s["resource"])) invalid(`${f}.resource`, "must be a resource name of the scope");
       if ((s["action"] === undefined) === (s["fields"] === undefined)) invalid(f, "gives either action { type, params } or fields (a set of those fields), not both or neither");
       if (s["fields"] !== undefined && !isObject(s["fields"])) invalid(`${f}.fields`, "must be an object of fields");
+      if (s["fields"] !== undefined) boundedFields(s["fields"] as JsonObject, `${f}.fields`);
       const action = s["action"] !== undefined ? checkAction(s["action"], `${f}.action`) : { type: "set", params: { fields: s["fields"] as JsonObject } };
       steps.push({ kind: "agent", agent: s["agent"] as string, service: s["service"] as string, resource: s["resource"] as string, action });
     } else if (s["event"] === "provider-failure") {
@@ -81,10 +87,12 @@ export function checkScript(raw: { steps: unknown; providers?: unknown }): { ste
       if (typeof s["service"] !== "string" || !NAME.test(s["service"])) invalid(`${f}.service`, "must be a service name of the scope");
       if (typeof s["resource"] !== "string" || !NAME.test(s["resource"])) invalid(`${f}.resource`, "must be a resource name of the scope");
       if (!isObject(s["fields"]) || Object.keys(s["fields"]).length === 0) invalid(`${f}.fields`, "must be the fields the other writer sets");
+      boundedFields(s["fields"] as JsonObject, `${f}.fields`);
       steps.push({ kind: "competing-edit", service: s["service"] as string, resource: s["resource"] as string, fields: s["fields"] as JsonObject });
     } else invalid(`${f}.event`, "must be provider-failure or competing-edit");
   }
   if (steps.filter((s) => s.kind === "agent").length === 0 || steps.filter((s) => s.kind === "agent").length > RUN_LIMITS.agentSteps) invalid("steps", `must hold 1 to ${RUN_LIMITS.agentSteps} agent steps`);
+  if (canonicalJson(steps as unknown as JsonObject).length > RUN_LIMITS.scriptChars) invalid("steps", `must be at most ${RUN_LIMITS.scriptChars} characters in all, so the run's record keeps the script and every step's result`);
   for (const [i, s] of steps.entries()) {
     if (s.kind !== "competing-edit") continue;
     const next = steps.slice(i + 1).find((n) => n.kind !== "provider-failure");

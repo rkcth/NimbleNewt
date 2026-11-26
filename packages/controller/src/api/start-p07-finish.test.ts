@@ -97,6 +97,10 @@ async function story(storage: Storage): Promise<void> {
     assert.equal((await c.storage.listAggregates("model-call", { limit: 10 })).length, 0, "the real routing state holds no call");
     assert.equal((await c.storage.listAggregates(`msp-${task}`, { limit: 10 })).length, 0, "nothing was spent on the task");
     assert.equal(await grantCount(), grants0, "the scope granted nothing");
+    // Review: the task's tools view says the scope's effects are simulated, never "outside actions".
+    const tools = JSON.stringify((await call(boot.token, "status.ask", { request: { kind: "tools", taskId: task, limit: 50 } })).result);
+    assert.match(tools, /Simulated action model-call on simulation:sms-[a-z2-7]+\/provider:sim-primary\/model in a simulation scope \(nothing real was done\)/);
+    assert.doesNotMatch(tools, /Outside action/);
 
     // ---- The owner reads it in plain words (status view, from chat) ----
     const why = "what is that simulation doing?";
@@ -121,6 +125,12 @@ async function story(storage: Storage): Promise<void> {
     const proposed = (await chat("m3", give)).outcomes as readonly { status: string; proposalId?: string }[];
     assert.equal(proposed[0]!.status, "proposed", JSON.stringify(proposed));
     assert.equal(await grantCount(), grants0, "nothing is granted until the owner agrees");
+    // Review: the proposal says exactly what it grants, from the run it was worked out from, and that the grants have no end.
+    const shownFirst = ((proposed[0] as unknown as { preview: string[] }).preview).join("\n");
+    assert.match(shownFirst, new RegExp(`What this grants, worked out just now from run ${runId}: effect\\.perform for real on billing/db \\(done by ann in the simulation\\), shop/cart \\(done by bob in the simulation\\), billing/api \\(done by ann in the simulation\\); no end`), shownFirst);
+    // A newer run of the scope before the owner's yes does not change what the yes grants (it is pinned to the run shown): that run changed billing/cache, which stays ungranted below.
+    const later = await call(boot.token, "simulation.run", { scopeId, steps: [{ agent: "ann", service: "billing", resource: "cache", fields: { ttl: 5 } }] }, "later-run");
+    assert.equal(later.result.run.outcome, "completed", JSON.stringify(later));
     assert.equal((await s.grants.explain((await s.principals.authenticate(ann)) as never, "effect.perform", project, new Date().toISOString(), { kind: "service", id: "billing/db" })).allowed, false);
     say["yes, go ahead"] = [{ kind: "apply_proposal", proposalId: proposed[0]!.proposalId, evidence: "yes, go ahead", basis: "owner" }];
     const applied = (await chat("m4", "yes, go ahead")).outcomes as readonly { status: string }[];
@@ -187,7 +197,7 @@ async function story(storage: Storage): Promise<void> {
     assert.equal(await outbox(), outbox0);
     // Kept over the restart: the scope's runs and grants.
     const listed = (await call(boot.token, "simulation.list", { taskId: task })).result.scopes.find((x: any) => x.id === scopeId);
-    assert.deepEqual(listed.runs.map((r: any) => r.id), [runId, crashRun]);
+    assert.deepEqual(listed.runs.map((r: any) => r.id), [runId, later.result.id, crashRun]);
     assert.equal(listed.scope.grants.length, 3);
     assert.ok(interpreted > 0);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }

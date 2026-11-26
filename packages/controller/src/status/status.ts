@@ -222,7 +222,7 @@ export interface Changes {
 }
 
 export interface ToolUse { readonly id: string; readonly taskId: string; readonly server: string; readonly capability: string; readonly outcome: string; readonly uncertain: boolean; readonly at: string; readonly protocolRevision: string; readonly catalogRevision: number }
-export interface EffectUse { readonly id: string; readonly taskId: string; readonly kind: string; readonly target: string; readonly status: string; readonly at: string }
+export interface EffectUse { readonly id: string; readonly taskId: string; readonly kind: string; readonly target: string; readonly status: string; readonly at: string; /** An effect of a simulation scope (card P07): shown as simulated, never as an outside action. */ readonly simulated?: true }
 export interface ToolsUsed {
   readonly observedAt: string;
   readonly summary: readonly { readonly server: string; readonly capability: string; readonly calls: number; readonly ok: number; readonly errors: number; readonly uncertain: number }[];
@@ -803,9 +803,9 @@ export interface StatusDeps {
   readonly landingQueue?: Pick<LandingQueueOps, "list">;
   /** A project's landing settings (card P09), read with the settings reader's own rule (owner only). Absent: the `landing_settings` view says they are not kept here. */
   readonly integration?: Pick<IntegrationPolicyService, "get">;
-  /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
   /** The owner's simulation scopes (card P07): the `simulations` view. Absent: the view says scopes are not kept here. */
   readonly simulations?: Pick<SimulationService, "list">;
+  /** The newest landing requests of a task or a project with the checks judged for each (card P09), read-only and taking no caller (the view is owner only). Absent: the `landing_checks` view says they are not kept here. */
   readonly landingChecks?: { landings(scope: { readonly taskId: string } | { readonly projectId: string }, after: number, limit: number): Promise<LandingPage> };
   /** Documentation obligations of a project (card Q03). Absent: the `docs` view says they are not kept here. */
   readonly docs?: Pick<DocObligationService, "list"> & Partial<Pick<DocObligationService, "capabilities">>;
@@ -2512,11 +2512,6 @@ export class StatusService {
   }
 
   /**
-   * What the required checks said at the newest landing attempts (card P09): owner only (a task-scoped principal is not the owner here), every line citing its request record. A task or project that does not exist is answered
-   * nothing, as anyone but the owner is. Nothing the host ran is shown beyond each command's name, state, exit code and time-out: not its output. Texts the gate wrote are cut, credentials are removed and host paths are
-   * replaced by a mark.
-   */
-  /**
    * The owner's simulation scopes in plain words (card P07): what each scope is (a stand-in where nothing real is written, sent or spent), what its newest runs did step by step (the R02
    * fallback, a competing edit, a stop), the real access the owner granted after it (and that the scope itself grants nothing), and the replay reruns recorded in it. Read only, owner only.
    */
@@ -2552,6 +2547,11 @@ export class StatusService {
     return { observedAt: at, lines };
   }
 
+  /**
+   * What the required checks said at the newest landing attempts (card P09): owner only (a task-scoped principal is not the owner here), every line citing its request record. A task or project that does not exist is answered
+   * nothing, as anyone but the owner is. Nothing the host ran is shown beyond each command's name, state, exit code and time-out: not its output. Texts the gate wrote are cut, credentials are removed and host paths are
+   * replaced by a mark.
+   */
   async landingChecksLines(by: Principal, request: { readonly taskId?: string; readonly projectId?: string; readonly after?: unknown }): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
     if (by.kind !== "owner" || by.taskScope !== undefined) return undefined;
     const hasTask = request.taskId !== undefined, hasProject = request.projectId !== undefined;
@@ -4407,10 +4407,10 @@ export class StatusService {
         const page = await this.#runner.list("effect", { ...(after === undefined ? {} : { afterId: after }), limit: this.#pageSize });
         for (const a of page) {
           after = a.id;
-          const e = a.body as unknown as { taskId?: string; kind: string; target: string };
+          const e = a.body as unknown as { taskId?: string; kind: string; target: string; simulation?: string };
           if (e.taskId === undefined || !wanted.has(e.taskId) || (since !== undefined && a.createdAt <= since)) continue;
           const ledger = await this.#storage.getEffect(a.id);
-          effects.push({ id: a.id, taskId: e.taskId, kind: shown(e.kind, 60), target: shown(e.target, 120), status: ledger?.status ?? "unknown", at: a.createdAt });
+          effects.push({ id: a.id, taskId: e.taskId, kind: shown(e.kind, 60), target: shown(e.target, 120), status: ledger?.status ?? "unknown", at: a.createdAt, ...(e.simulation === undefined ? {} : { simulated: true }) });
         }
         if (page.length < this.#pageSize) break;
       }
@@ -4427,7 +4427,7 @@ export class StatusService {
     const summary = [...groups.values()].sort((x, y) => y.calls - x.calls || (x.server + x.capability < y.server + y.capability ? -1 : 1));
     const lines: Line[] = [];
     for (const g of summary) lines.push(line(`${g.server}, ${g.capability}: ${g.calls} call${g.calls === 1 ? "" : "s"} (${g.ok} ok, ${g.errors} failed${g.uncertain > 0 ? `, ${g.uncertain} with an unknown outcome` : ""}).`, ...calls.filter((c) => c.server === g.server && c.capability === g.capability).slice(0, 5).map((c) => cite(`mcp-call-${c.taskId}`, c.id))));
-    for (const e of effects.slice(0, limit)) lines.push(line(`Outside action ${e.kind} on ${e.target}: ${e.status}.`, cite("effect", e.id), cite("task", e.taskId)));
+    for (const e of effects.slice(0, limit)) lines.push(line(e.simulated === true ? `Simulated action ${e.kind} on ${e.target} in a simulation scope (nothing real was done): ${e.status}.` : `Outside action ${e.kind} on ${e.target}: ${e.status}.`, cite("effect", e.id), cite("task", e.taskId)));
     if (calls.length === 0 && effects.length === 0) lines.push(line("No tool use is recorded for this scope, among what you may read.", cite(query.taskId === undefined ? "project" : "task", query.taskId ?? projectId)));
     else lines.push(line("A tool call is activity, not progress; what was delivered is a separate question.", cite(query.taskId === undefined ? "project" : "task", query.taskId ?? projectId)));
     if (partial) lines.push(line("The search stopped before every record was read, so some tool use may be missing.", cite("project", projectId)));

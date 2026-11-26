@@ -1454,6 +1454,22 @@ export class ChatService {
       args["grantee"] = `agent:${String(exact[0]!["id"])}`;
       labels[args["grantee"] as string] = String(exact[0]!["friendlyName"]).slice(0, 80);
       args["basis"] = `owner chat: ${words}`.slice(0, 200);
+      // Review (P07 finish): the proposal is pinned to the run it was worked out from and says exactly what it gives, so a later run of the scope cannot change what the owner's yes grants.
+      if (typeof args["scopeId"] === "string" && args["runId"] === undefined) {
+        const scope = await this.#deps.api.handle(token, { v: API_VERSION, op: "simulation.get", args: { scopeId: args["scopeId"] } });
+        if (!scope.ok) return refuse(scope.error.code, scope.error.message);
+        const runs = ((scope.result["scope"] as { runs?: unknown[] } | undefined)?.runs ?? []).filter((r): r is string => typeof r === "string");
+        const runId = runs.at(-1);
+        if (runId === undefined) return refuse("invalid_transition", "this simulation scope has no run yet; real access is granted after a run has completed");
+        const got = await this.#deps.api.handle(token, { v: API_VERSION, op: "simulation.run.get", args: { runId } });
+        if (!got.ok) return refuse(got.error.code, got.error.message);
+        const run = got.result["run"] as { state?: string; outcome?: string; results?: { kind?: string; outcome?: string; target?: string; agent?: string }[] };
+        if (run.state !== "finished" || run.outcome !== "completed") return refuse("invalid_transition", `the newest run of that scope ${run.state !== "finished" ? "has not finished" : `ended ${String(run.outcome)}`}, so nothing would be granted; run the simulation again first`);
+        const used = (run.results ?? []).filter((r) => r.kind === "agent" && (r.outcome === "done" || r.outcome === "retried") && typeof r.target === "string");
+        const resources = [...new Set(used.map((r) => r.target!))];
+        args["runId"] = runId;
+        fillNotes.push(`What this grants, worked out just now from run ${runId}: effect.perform for real on ${resources.map((t) => `${t} (done by ${[...new Set(used.filter((r) => r.target === t).map((r) => String(r.agent)))].join(", ")} in the simulation)`).join(", ")}; no end: each stays until you revoke it.`);
+      }
     }
     if (intent.op.startsWith("grant.")) {
       if (args["projectId"] !== undefined) return refuse("invalid_command", "projectId is not an argument of a right; its scope is `project`");

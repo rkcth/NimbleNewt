@@ -1,4 +1,4 @@
-import { DomainError } from "../domain/errors.js";
+import { DomainError, isDomainError } from "../domain/errors.js";
 import { EffectRejected, SIMULATED_EFFECT_LABEL, SIMULATION_SCOPE_ID, type EffectBody, type EffectBridge, type EffectService } from "../domain/effects.js";
 import { derivedId } from "../domain/ids.js";
 import { commandId as checkCommandId, onlyKnown, taskId as checkTaskId } from "../domain/model.js";
@@ -570,12 +570,12 @@ export class SimulationService {
     let editResult: { effectId: string; status: string } | undefined;
     if (edit !== undefined) {
       const o = await this.#serviceOp(body, `${key}:edit`, "simulation:other-writer", { service: edit.service, resource: edit.resource }, { type: "set", params: { fields: edit.fields } });
-      effects.push(o.effectId);
+      if (o.recorded !== false) effects.push(o.effectId);
       editResult = { effectId: o.effectId, status: o.status };
     }
     // 4. The tool call, judged against the version the agent read.
     const tool = await this.#serviceOp(body, `${key}:tool`, `simulation:${step.agent}`, ref, step.action, saw);
-    effects.push(tool.effectId);
+    if (tool.recorded !== false) effects.push(tool.effectId);
     const base = { index, kind: "agent" as const, agent: step.agent, target, attempts, fallback, saw, tool: { effectId: tool.effectId, status: tool.status }, ...(editResult === undefined ? {} : { edit: editResult }), simulated: true as const };
     if (tool.status === "confirmed") return { result: { ...base, outcome: "done", words: `${asked}; ${step.agent} did ${step.action.type} on ${target} (simulated)` }, armed, effects };
     if (tool.evidence?.["competingEdit"] !== true) return { result: { ...base, outcome: "failed", words: `${asked}; ${step.agent}'s ${step.action.type} on ${target} ended ${tool.status}: ${String(tool.evidence?.["reason"] ?? tool.note ?? "")}`.slice(0, 600) }, armed, effects };
@@ -587,13 +587,13 @@ export class SimulationService {
     const retryKnown = await this.#ports.effects.get(keyRetry);
     const again = typeof retryKnown?.input["expect"] === "string" ? retryKnown.input["expect"] as string : (await SimulatedServices.fromSnapshot((await this.#scope(body.scopeId)).body.world, () => this.#runner.now()).observe(ref))?.systemVersion ?? "absent";
     const retry = await this.#serviceOp(body, `${key}:retry`, `simulation:${step.agent}`, ref, step.action, again);
-    effects.push(retry.effectId);
+    if (retry.recorded !== false) effects.push(retry.effectId);
     const done = retry.status === "confirmed";
     return { result: { ...base, retry: { effectId: retry.effectId, status: retry.status }, outcome: done ? "retried" : "failed", words: `${asked}; another writer changed ${target} after ${step.agent} read it, so its first write was refused with nothing changed; it read ${target} again (${again}) and ${done ? `did ${step.action.type} on the newer version` : `its second try ended ${retry.status}`} (simulated)` }, armed, effects };
   }
 
   /** One service operation of a run on the scope's stand-in, through the ledger as an effect of the scope; `expect` is the version the writer read. A repeat finishes the recorded one. */
-  async #serviceOp(run: SimulationRunBody, intentId: string, actor: string, ref: ServiceRef, action: ServiceAction, expect?: string): Promise<{ effectId: string; status: string; evidence?: JsonObject; note?: string }> {
+  async #serviceOp(run: SimulationRunBody, intentId: string, actor: string, ref: ServiceRef, action: ServiceAction, expect?: string): Promise<{ effectId: string; status: string; evidence?: JsonObject; note?: string; recorded?: false }> {
     const effectId = derivedId("eff", intentId);
     const known = await this.#ports.effects.get(effectId);
     if (known === undefined) {
@@ -606,7 +606,11 @@ export class SimulationService {
       for (const n of guarded) baseline[refKey(n)] = (await sim.observe(n))?.systemVersion ?? "absent";
       const trial = SimulatedServices.fromSnapshot(s.body.world, () => this.#runner.now());
       try { await trial.apply(effectId, ref, action, { baseline: baseline as unknown as JsonObject }); } catch { /* refused on the copy: refused for real too */ }
-      fits({ ...s.body, world: trial.snapshot() }, "steps");
+      // Review: a change that would not fit the scope's record is not done and not recorded; the step ends failed with why (a throw here would leave the run running for good).
+      try { fits({ ...s.body, world: trial.snapshot() }, "steps"); } catch (error) {
+        if (!isDomainError(error, "invalid_command")) throw error;
+        return { effectId, status: "not-done", note: `the change would not fit the simulation scope's record, so it was not done (${error.message})`.slice(0, 400), recorded: false };
+      }
       const input: JsonObject = { service: ref.service, resource: ref.resource, action: action as unknown as JsonObject, allowed: all.map((r) => ({ service: r.service, resource: r.resource })), before: before as unknown as JsonObject, baseline: baseline as unknown as JsonObject, ...(expect === undefined ? {} : { expect }) };
       await this.#ports.effects.intend({ commandId: intentId, actor, kind: "service-op", target: `simulation:${run.scopeId}/service:${refKey(ref)}`, input, taskId: run.taskId, simulation: run.scopeId });
     }
@@ -639,7 +643,8 @@ export class SimulationService {
     if (resources.length === 0) throw new DomainError("invalid_transition", "the run changed no service resource, so there is no access to grant");
     const grants: { id: string; action: string; project: string; resource: string; replayed: boolean }[] = [];
     for (const [k, resource] of resources.entries()) {
-      const g = await this.#ports.grants.grant(by, { commandId: `${commandId.slice(0, 100)}:sg${k}`, grantee: command.grantee, action: "effect.perform", project: s.body.projectId, resource: { kind: "service", id: resource }, source: "direct", basis: command.basis });
+      // Review: the grant's own command ID is derived from the whole command ID (a cut prefix could make two different commands one grant, or a conflict).
+      const g = await this.#ports.grants.grant(by, { commandId: `simgrant:${derivedId("grt", commandId).slice(4)}:${k}`, grantee: command.grantee, action: "effect.perform", project: s.body.projectId, resource: { kind: "service", id: resource }, source: "direct", basis: command.basis });
       grants.push({ id: g.id, action: "effect.perform", project: s.body.projectId, resource, replayed: g.replayed });
     }
     await this.#serial(s.id, async () => {
@@ -726,7 +731,15 @@ export class SimulationService {
     const s = await this.#scope(body.simulation).catch(() => undefined);
     if (s === undefined) return undefined;
     const expect = typeof body.input["expect"] === "string" && typeof body.input["service"] === "string" && typeof body.input["resource"] === "string" ? { ref: { service: body.input["service"], resource: body.input["resource"] }, version: body.input["expect"] } : undefined;
-    return this.#bridge(s.id, s.body.world, {}, expect);
+    // Review: the reconciler also runs on the dispatcher's ticks, beside the scope's own commands. Each call takes the scope's turn and works on the world as it is then, so its save never
+    // writes an older world over a change made in between.
+    const fresh = async (): Promise<EffectBridge> => this.#bridge(s.id, (await this.#scope(s.id)).body.world, {}, expect);
+    return {
+      idempotent: true,
+      simulated: true,
+      execute: (req) => this.#serial(s.id, async () => (await fresh()).execute(req)),
+      reconcile: (req) => this.#serial(s.id, async () => (await fresh()).reconcile!(req)),
+    };
   }
 }
 
