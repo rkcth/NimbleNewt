@@ -64,6 +64,9 @@ export function makeBundle({ out, launcher, record, node, nodeSha256, commit, sc
     copyFile(launcher, join(out, "bin", "nn-launcher.exe"));
     copyFile(record, join(out, "bin", "nn-launcher.record.json"));
     copyFile(node, join(out, "node", "node.exe"));
+    // the copy itself is what ships: checked again, so a file changed between the check above and the copy is never bundled
+    const copied = sha256(join(out, "node", "node.exe"));
+    if (copied !== nodeSha256) throw new Error(`the copied node.exe has SHA-256 ${copied}, not the official ${nodeSha256}; no bundle is made`);
     for (const p of ["worker", "contracts"]) {
       copyFile(join(repo, "packages", p, "package.json"), join(out, "packages", p, "package.json"));
       copyTree(join(repo, "packages", p, "dist"), join(out, "packages", p, "dist"));

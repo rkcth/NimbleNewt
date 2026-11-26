@@ -165,7 +165,7 @@ export class AdminViewService {
     return { writable: this.#d.secrets !== undefined, ...(this.#d.secrets?.kind === undefined ? {} : { store: this.#d.secrets.kind }), items, truncated: names.length > ADMIN_LIMITS.secrets };
   }
 
-  /** The sandbox each host uses to confine agents, and a warning where its boundary is weaker than the strongest one (macOS Seatbelt is process-level; decision G01). */
+  /** The sandbox each host uses to confine agents, and a warning where its boundary is weaker than the strongest one (macOS Seatbelt and the Windows AppContainer launcher are process-level; decision G01). */
   async sandbox(by: Principal): Promise<{ readonly local?: SandboxFacts; readonly hosts: readonly (SandboxFacts & { readonly hostId: string; readonly freshness: string; readonly identity: string })[]; readonly warn: boolean; readonly truncated: boolean }> {
     this.#owner(by, "read the sandbox of the hosts");
     const hosts = await this.#d.hosts(by);

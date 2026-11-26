@@ -251,7 +251,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `sandbox.status`
 
-Owner only (card U08, decision G01): which sandbox mechanism each host uses to confine agents (bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox on Windows), read from the operating system the host reported, and a warning where the boundary is weaker (macOS Seatbelt is process-level with weaker limits than Linux). Read it wherever you choose or review where work runs.
+Owner only (card U08, decision G01): which sandbox mechanism each host uses to confine agents (bubblewrap on Linux, Seatbelt on macOS, AppContainer on Windows), read from the operating system the host reported, and a warning where the boundary is weaker (macOS and Windows are process-level, weaker than Linux). Read it wherever you choose or review where work runs.
 
 Arguments:
 

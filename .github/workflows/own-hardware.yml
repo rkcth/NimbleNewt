@@ -424,7 +424,8 @@ jobs:
         with:
           name: g05-owner-bundle-own-hardware
           path: ${{ runner.temp }}/g05-owner-download
-      # Nothing of the bundle runs before its SHA256SUMS matches the hosted job's output; run-g05.ps1 then checks every file against SHA256SUMS. The bundle is placed under this account's
+      # Nothing of the bundle runs before its SHA256SUMS matches the hosted job's output AND every file it names matches it, with nothing else in the download (here, before run-g05.ps1, node.exe
+      # or redact-log.mjs is run, and again after the copy); run-g05.ps1 then checks every file once more. The bundle is placed under this account's
       # LOCALAPPDATA (a long path), keeping its control folder from an earlier run so the backend can sweep that run's leftovers. Its output is redacted (the bundle's redact-log.mjs) before
       # it reaches the log; the zip it made (personal-data checked by run-g05.ps1) and the redacted log are uploaded.
       - name: Check the bundle, then run run-g05.ps1 as this runner's own account
@@ -435,15 +436,57 @@ jobs:
           EXPECT_SUMS: ${{ needs.g05-bundle-build.outputs.sums_sha256 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $started = [DateTime]::UtcNow
           if ($env:EXPECT_SUMS -cnotmatch '^[0-9a-f]{64}$') { Write-Output '::error::no SHA-256 of SHA256SUMS from the hosted job; nothing was run'; exit 1 }
           $src = Join-Path $env:RUNNER_TEMP 'g05-owner-download'
-          $sha = [System.Security.Cryptography.SHA256]::Create()
-          $got = (($sha.ComputeHash([System.IO.File]::ReadAllBytes((Join-Path $src 'SHA256SUMS'))) | ForEach-Object { $_.ToString('x2') }) -join '')
+          function Get-Sha256Hex([string] $path) { $sha = [System.Security.Cryptography.SHA256]::Create(); try { return (($sha.ComputeHash([System.IO.File]::ReadAllBytes($path)) | ForEach-Object { $_.ToString('x2') }) -join '') } finally { $sha.Dispose() } }
+          $got = Get-Sha256Hex (Join-Path $src 'SHA256SUMS')
           if ($got -cne $env:EXPECT_SUMS) { Write-Output "::error::the downloaded SHA256SUMS has SHA-256 $got, the hosted job made $($env:EXPECT_SUMS); nothing was run"; exit 1 }
+          # Every file SHA256SUMS names must have its hash HERE, before run-g05.ps1, node.exe or redact-log.mjs of the bundle is run (run-g05.ps1's own check cannot vouch for run-g05.ps1),
+          # and the download must hold nothing else (no control or results folder, no link): returns the problems, empty when there are none.
+          function Test-Sums([string] $dir, [bool] $exact) {
+            $bad = New-Object System.Collections.Generic.List[string]; $listed = @{}; $n = 0
+            foreach ($line in [System.IO.File]::ReadAllLines((Join-Path $src 'SHA256SUMS'))) {
+              $n++
+              if ($line.Length -eq 0) { continue }
+              if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9._@/-]+)$') { $bad.Add("line $n"); continue }
+              $hash = $Matches[1]; $rel = $Matches[2]
+              if ($rel.StartsWith('/') -or ($rel.Split('/') | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }) -or $rel -match '^(control|results)(/|$)' -or $rel -eq 'SHA256SUMS' -or $listed.ContainsKey($rel.ToLowerInvariant())) { $bad.Add("line $n"); continue }
+              $listed[$rel.ToLowerInvariant()] = $true
+              $f = Join-Path $dir ($rel -replace '/', '\')
+              if (-not [System.IO.File]::Exists($f) -or ([System.IO.File]::GetAttributes($f) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or (Get-Sha256Hex $f) -cne $hash) { $bad.Add($rel) }
+            }
+            if ($listed.Count -eq 0) { $bad.Add('no file listed') }
+            if ($exact) {
+              $stack = New-Object System.Collections.Generic.Stack[System.IO.DirectoryInfo]; $stack.Push((New-Object System.IO.DirectoryInfo($dir)))
+              while ($stack.Count -gt 0) {
+                foreach ($e in $stack.Pop().GetFileSystemInfos()) {
+                  $rel = $e.FullName.Substring($dir.Length + 1) -replace '\\', '/'
+                  if (($e.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $bad.Add("link $rel"); continue }
+                  if (($e.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) { $stack.Push([System.IO.DirectoryInfo] $e); continue }
+                  if ($rel -ne 'SHA256SUMS' -and -not $listed.ContainsKey($rel.ToLowerInvariant())) { $bad.Add("extra $rel") }
+                }
+              }
+            }
+            return ,$bad
+          }
+          $bad = Test-Sums $src $true
+          if ($bad.Count -gt 0) { Write-Output "::error::the downloaded bundle does not match its SHA256SUMS ($($bad.Count) problem(s), first: $($bad[0])); nothing was run"; exit 1 }
           $b = Join-Path $env:LOCALAPPDATA 'nn-g05-own-runner'
-          if (Test-Path -LiteralPath $b) { Get-ChildItem -LiteralPath $b -Force | Where-Object { $_.Name -ne 'control' } | Remove-Item -Recurse -Force }
+          # The earlier copy is removed except its control folder (kept for the backend's sweep), with [System.IO.Directory]::Delete, which never follows a link inside (Remove-Item -Recurse in
+          # Windows PowerShell 5.1 may); a link where the bundle or its control folder belongs is refused.
+          foreach ($p in @($b, (Join-Path $b 'control'))) { if ([System.IO.Directory]::Exists($p) -and ([System.IO.File]::GetAttributes($p) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { Write-Output "::error::$p is a link; nothing was run"; exit 1 } }
+          if ([System.IO.Directory]::Exists($b)) {
+            foreach ($e in (New-Object System.IO.DirectoryInfo($b)).GetFileSystemInfos()) {
+              if ($e.Name -eq 'control') { continue }
+              if (($e.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) { [System.IO.Directory]::Delete($e.FullName, $true) } else { [System.IO.File]::Delete($e.FullName) }
+            }
+          }
           New-Item -ItemType Directory -Path $b -Force | Out-Null
           Copy-Item -Path (Join-Path $src '*') -Destination $b -Recurse -Force
+          $bad = Test-Sums $b $false
+          if ((Get-Sha256Hex (Join-Path $b 'SHA256SUMS')) -cne $env:EXPECT_SUMS) { $bad.Add('SHA256SUMS') }
+          if ($bad.Count -gt 0) { Write-Output "::error::the bundle copied to the runner's folder does not match SHA256SUMS ($($bad.Count) problem(s)); nothing was run"; exit 1 }
           $out = Join-Path $env:RUNNER_TEMP 'g05-owner-out'; New-Item -ItemType Directory -Path $out -Force | Out-Null
           $utf8 = New-Object System.Text.UTF8Encoding $false
           function Invoke-Piped([string] $exe, [string] $argText, [string] $inFile) {
@@ -465,7 +508,12 @@ jobs:
           Remove-Item -LiteralPath $rawFile -Force
           [System.IO.File]::WriteAllText((Join-Path $out 'run-g05.redacted.txt'), $red.Text, $utf8)
           Write-Output $red.Text
-          foreach ($d in @('Desktop', 'Downloads')) { $z = Join-Path (Join-Path $env:USERPROFILE $d) 'nn-g05-results.zip'; if ([System.IO.File]::Exists($z)) { Copy-Item -LiteralPath $z -Destination (Join-Path $out 'nn-g05-results.zip') -Force; break } }
+          # the zip run-g05.ps1 wrote in THIS run (it removes an older one first; one older than this step is never taken): the Desktop Explorer shows, else Downloads, else the bundle folder
+          foreach ($d in @([System.Environment]::GetFolderPath('Desktop'), (Join-Path $env:USERPROFILE 'Downloads'), $b)) {
+            if ([string]::IsNullOrEmpty($d)) { continue }
+            $z = Join-Path $d 'nn-g05-results.zip'
+            if ([System.IO.File]::Exists($z) -and [System.IO.File]::GetLastWriteTimeUtc($z) -ge $started) { Copy-Item -LiteralPath $z -Destination (Join-Path $out 'nn-g05-results.zip') -Force; break }
+          }
           $tally = @($red.Text -split "`r?`n" | Where-Object { $_ -match 'cases hold|REFUSED|FAILED|finished' })
           [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## G05 owner bundle on the own Windows runner (exit $($run.Code))`n``````text`n$($tally -join "`n")`n```````n", $utf8)
           exit $run.Code

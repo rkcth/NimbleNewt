@@ -234,7 +234,19 @@ test("own-hardware (card A03b): the G05 owner bundle runs only when its input is
   for (const later of ["Copy-Item -Path (Join-Path $src '*')", "Invoke-Piped $ps", "(Join-Path $b 'run-g05.ps1')"]) assert.ok(code.indexOf(later) > check, `${later} only after the hash check`);
   assert.ok(code.includes("('-NoProfile -ExecutionPolicy Bypass -File \"' + (Join-Path $b 'run-g05.ps1') + '\"')"));
   assert.ok(code.includes("scripts\\redact-log.mjs") && code.indexOf("Write-Output $red.Text") > code.indexOf("$red = Invoke-Piped") && !/Write-Output \$run\.Text/.test(code), "only the redacted text reaches the log");
-  assert.ok(code.includes("$b = Join-Path $env:LOCALAPPDATA 'nn-g05-own-runner'") && code.includes("Where-Object { $_.Name -ne 'control' }"), "the control folder of an earlier run is kept for the sweep");
+  assert.ok(code.includes("$b = Join-Path $env:LOCALAPPDATA 'nn-g05-own-runner'") && code.includes("if ($e.Name -eq 'control') { continue }"), "the control folder of an earlier run is kept for the sweep");
+  // every file SHA256SUMS names is checked HERE, in the download (exactly: nothing else, no control or results folder, no link) before anything is copied, and in the copy before anything runs:
+  // run-g05.ps1's own check cannot vouch for run-g05.ps1, and node.exe and redact-log.mjs of the bundle run after it whatever it found
+  const fn = code.slice(code.indexOf("function Test-Sums"), code.indexOf("$bad = Test-Sums $src $true"));
+  for (const piece of ["(Get-Sha256Hex $f) -cne $hash", "ReparsePoint", "$rel -match '^(control|results)(/|$)'", "'..'", "$listed.ContainsKey($rel.ToLowerInvariant())", "extra $rel", "link $rel", "no file listed"]) assert.ok(fn.includes(piece), piece);
+  const exact = code.indexOf("$bad = Test-Sums $src $true"), copied = code.indexOf("$bad = Test-Sums $b $false");
+  assert.ok(exact > check && code.indexOf("Copy-Item -Path (Join-Path $src '*')") > exact && copied > code.indexOf("Copy-Item -Path (Join-Path $src '*')"));
+  assert.ok(/\$bad = Test-Sums \$src \$true\n\s+if \(\$bad\.Count -gt 0\) \{[^\n]*exit 1 \}/.test(code) && /if \(\$bad\.Count -gt 0\) \{ Write-Output "::error::the bundle copied[^\n]*exit 1 \}/.test(code));
+  assert.ok(code.includes("if ((Get-Sha256Hex (Join-Path $b 'SHA256SUMS')) -cne $env:EXPECT_SUMS) { $bad.Add('SHA256SUMS') }"), "the copied SHA256SUMS is the one the hosted job made");
+  for (const later of ["Invoke-Piped $ps", "Invoke-Piped (Join-Path $b 'node\\node.exe')"]) assert.ok(code.indexOf(later) > copied, `${later} only after both checks`);
+  // the earlier copy is deleted without following a link; only a zip written during this step is taken (an older one on the Desktop is never uploaded as this run's)
+  assert.ok(!/Remove-Item[^\n]*-Recurse/.test(code) && code.includes("[System.IO.Directory]::Delete($e.FullName, $true)"));
+  assert.ok(code.includes("$started = [DateTime]::UtcNow") && code.includes("[System.IO.File]::GetLastWriteTimeUtc($z) -ge $started") && code.includes("[System.Environment]::GetFolderPath('Desktop')"));
   // no secrets, no elevation, nothing installed, no Windows Sandbox in the owner bundle jobs
   for (const j of [build, run]) assert.ok(!/secrets\.|permissions:|RunAs|Install-NimbleNewtLauncher|New-LocalUser|Set-MpPreference|Set-ExecutionPolicy|wsb|deelevate/.test(j.replace(/^\s*#.*$/gm, "")));
   for (const m of (build + run).matchAll(/uses: ([^\s]+)/g)) assert.match(m[1], /@[0-9a-f]{40}$/, m[1]);

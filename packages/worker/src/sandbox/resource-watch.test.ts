@@ -288,7 +288,12 @@ describe("the sampling monitor: the plan and what is reported", () => {
     assert.deepEqual(r.report.map((x) => [x.limit, x.enforced]), [["cpus", "none"], ["diskMb", "partial"], ["memoryMb", "none"], ["processes", "none"]]);
     const honest = limitedPlan(base, all, sampled("win32", { diskSampler: true }));
     assert.deepEqual(honest.report.map((x) => [x.limit, x.enforced]), [["cpus", "none"], ["diskMb", "partial"], ["memoryMb", "none"], ["processes", "none"]]);
-    assert.match(honest.report.find((x) => x.limit === "memoryMb")!.detail, /Windows Sandbox guest.*Job Object/);
+    // card A03b: the reason names the native launcher (AppContainer and Job Object), not the Windows Sandbox guest it replaced
+    for (const limit of ["memoryMb", "processes", "cpus"]) {
+      const detail = honest.report.find((x) => x.limit === limit)!.detail ?? "";
+      assert.match(detail, /native Windows launcher does not take a per-run limit.*Job Object holds only the backend's own fixed memory and process limits/, limit);
+      assert.doesNotMatch(detail, /Windows Sandbox|guest|virtual machine/, limit);
+    }
     assert.deepEqual(honest.watch, { diskMb: 10 });
   });
 

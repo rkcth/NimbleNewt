@@ -74,6 +74,9 @@ test("make refuses a wrong or missing node hash, a malformed commit, an existing
   assert.ok(!existsSync(out2), "removed again");
   rmSync(join(repo, "packages", "worker", "dist", "linked.js"));
   assert.equal(makeBundle({ ...args(out2), repo, script: ps1Path }).files > 5, true, "the same fake repository without the link is accepted");
+  // the shipped copy of node.exe is hashed again after the copy (a file changed between the first check and the copy is never bundled)
+  const src = readFileSync(join(root, "scripts", "g05-owner-bundle.mjs"), "utf8");
+  assert.ok(/copyFile\(node, join\(out, "node", "node\.exe"\)\);\n[^\n]*\n\s+const copied = sha256\(join\(out, "node", "node\.exe"\)\);\n\s+if \(copied !== nodeSha256\) throw/.test(src));
 });
 
 test("the command line: usage errors exit 2, a failure exits 1 with no bundle, success prints the SHA-256 of SHA256SUMS", () => {
@@ -182,13 +185,29 @@ test("run-g05.ps1 runs the launcher's info and the ten cases exactly as the brie
 });
 
 test("run-g05.ps1 refuses to zip when results hold a personal name, path, SID or address, naming the kind of text only", () => {
-  const scan = code.slice(at("$patterns = New-Object"), at("$zip = $null"));
-  for (const piece of ["$env:USERNAME", "$env:COMPUTERNAME", "$env:USERPROFILE", "[regex]::Escape('C:\\Users\\')", "'S-1-5-21-'", "'S-1-15-2-'", "'an IPv4 address'", "'a MAC address'"]) assert.ok(scan.includes(piece), piece);
-  const decide = code.slice(at("$zip = $null"), at("CreateFromDirectory"));
-  assert.match(decide, /if \(\$found\.Count -gt 0\) \{[\s\S]*REFUSED to make the zip[\s\S]*\} else \{/);
-  assert.ok(code.indexOf("CreateFromDirectory") > code.indexOf("} else {", at("$zip = $null")), "the zip only on the clean branch");
+  const scan = code.slice(at("$patterns = New-Object"), at("$found = New-Object"));
+  for (const piece of ["$env:USERNAME", "$env:COMPUTERNAME", "$env:USERDOMAIN", "GetHostName()", "$env:USERPROFILE", "$env:LOCALAPPDATA", "$env:TEMP", "'an IPv4 address'", "'an IPv6 address'", "'a MAC address'"]) assert.ok(scan.includes(piece), piece);
+  const decide = code.slice(at("$found = New-Object"), at("CreateFromDirectory"));
+  assert.match(decide, /if \(\$found\.Count -gt 0\) \{[\s\S]*REFUSED to make the zip[\s\S]*\} elseif \(\$zipBlocked\) \{[\s\S]*\} else \{/);
+  assert.ok(code.indexOf("CreateFromDirectory") > code.indexOf("} else {", at("$found = New-Object")), "the zip only on the clean branch");
   assert.ok(/\$found\.Add\("\$rel contains \$\(\$p\[0\]\)"\)/.test(code), "the label, never the matched text");
-  assert.ok(!/\.Match\(|\$Matches\[0\]/.test(code.slice(at("$found = New-Object"), at("$zip = $null"))), "the matching text is not taken out");
+  assert.ok(code.includes("if ($p[1].IsMatch($text) -or $p[1].IsMatch($rel))"), "a file's name inside the zip is checked as well as its text");
+  assert.ok(!/\.Match\(|\$Matches\[0\]/.test(code.slice(at("$found = New-Object"), at("CreateFromDirectory"))), "the matching text is not taken out");
+  // the patterns, as .NET reads them (IgnoreCase), tried on what the redaction leaves and on what it should have replaced
+  const pat = (label) => { const m = new RegExp(`Add-Pattern '${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' '([^']+)'`).exec(code); assert.ok(m, label); return new RegExp(m[1], "i"); };
+  const users = pat("a ...\\Users\\ path");
+  for (const t of ["C:\\Users\\rob\\x", "C:/Users/rob", "\"C:\\\\Users\\\\rob\"", "d:\\users\\x"]) assert.ok(users.test(t), t);
+  assert.ok(!users.test("<home>\\AppData") && !users.test("ABC:\\Users\\"));
+  const sid = pat("an account SID (S-1-5-21-...)");
+  assert.ok(sid.test("S-1-5-21-1004336348-1177238915-682003330-1001") && !sid.test("S-1-5-21-<domain>-<account>") && !sid.test("S-1-5-21-<domain>-500"), "an unredacted account SID only, not the redaction's placeholder form");
+  const aad = pat("an Azure AD account SID (S-1-12-1-...)");
+  assert.ok(aad.test("S-1-12-1-111-222-333-444") && !aad.test("S-1-12-1-<account>"));
+  assert.ok(!scan.includes("'S-1-15-2-'"), "per-run container SIDs (from the random profile name) are kept by the redaction on purpose and do not block the zip");
+  const v6 = pat("an IPv6 address");
+  for (const t of ["fe80::1c2b:3d4e:5f60:7a8b", "2001:db8:0:0:0:0:2:1", "2001:db8::2:1"]) assert.ok(v6.test(t), t);
+  for (const t of ["2026-11-26T10:20:30.123Z", "[::1]:8080", "<ip>", "sha 3fb3cefad590cd3f4b32", "12:34:56"]) assert.ok(!v6.test(t), t);
+  // the path patterns accept any run of separators (the JSON form of a path doubles each backslash)
+  assert.ok(code.includes("function ConvertTo-PathPattern([string] $p) { return ((@($p -split '[\\\\/]+') | Where-Object { $_ -ne '' } | ForEach-Object { [regex]::Escape($_) }) -join '[\\\\/]+') }"));
   // the IPv4 pattern is the redaction's own (windows-redact.ts), so what redaction replaced is not refused again, and what it missed is
   const redact = readFileSync(join(root, "packages", "worker", "src", "sandbox", "windows-redact.ts"), "utf8");
   const ip = /Add-Pattern 'an IPv4 address' '([^']+)'/.exec(code)[1];
@@ -201,13 +220,28 @@ test("run-g05.ps1 refuses to zip when results hold a personal name, path, SID or
 
 test("run-g05.ps1 writes the zip with ZipFile to the Desktop (Downloads when there is none) and prints the tally; a failure prints the clean-up commands", () => {
   assert.ok(code.includes("Add-Type -AssemblyName System.IO.Compression.FileSystem") && code.includes("[System.IO.Compression.ZipFile]::CreateFromDirectory($results, $zip)"));
-  assert.ok(code.includes("$dest = Join-Path $env:USERPROFILE 'Desktop'") && code.includes("$dest = Join-Path $env:USERPROFILE 'Downloads'") && code.includes("Join-Path $dest 'nn-g05-results.zip'"));
+  assert.ok(code.includes("$dest = [System.Environment]::GetFolderPath('Desktop')") && code.includes("$dest = Join-Path $env:USERPROFILE 'Downloads'") && code.includes("Join-Path $dest 'nn-g05-results.zip'"), "the Desktop Explorer shows (a OneDrive-moved one too), else Downloads");
+  // an older zip is removed BEFORE the personal-data check, so a refused run never leaves an older zip that looks like its own
+  assert.ok(at("[System.IO.File]::Delete($zip)") < at("$found = New-Object") && at("[System.IO.File]::Delete($zip)") > at("$zip = Join-Path $dest 'nn-g05-results.zip'"));
   assert.ok(code.includes('Write-Host "$hold/$total cases hold, $inconclusive inconclusive"'));
   assert.ok(code.includes("(Get-Field $_ 'verdict') -eq 'pass'") && code.includes("(Get-Field $_ 'verdict') -eq 'inconclusive'"));
   const clean = code.slice(at("function Show-Cleanup {"), code.indexOf("\n}\n", at("function Show-Cleanup {")));
-  assert.ok(clean.includes("delete-profile --name $pname --sid $psid --profile-record '$rec'") && clean.includes("Get-ChildItem $env:LOCALAPPDATA\\Packages -Filter NimbleNewtRun-*"));
+  assert.ok(clean.includes("& '$launcherQ' delete-profile --name $pname --sid $psid --profile-record '$($rec -replace \"'\", \"''\")'") && clean.includes("$launcherQ = $launcher -replace \"'\", \"''\"") && clean.includes("Get-ChildItem $env:LOCALAPPDATA\\Packages -Filter NimbleNewtRun-*"), "the printed command is pasteable for a path with an apostrophe");
+  // a confined write that got through to a system folder is checked for afterwards and named, with its clean-up
+  assert.ok(code.includes("$script:systemLeft = @(@((Join-Path $env:SystemRoot 'g05-x'), (Join-Path $env:SystemRoot 'System32\\g05-x'), 'C:\\g05-x', 'C:\\Program Files\\g05-x') | Where-Object { Test-Path -LiteralPath $_ })"));
+  assert.ok(/if \(\$script:systemLeft\.Count -gt 0\) \{ Add-Problem/.test(code) && clean.includes("foreach ($x in $script:systemLeft)"));
   assert.ok(/if \(\$script:problems\.Count -gt 0\) \{\n\s+Show-Cleanup[\s\S]*exit 1\n\}/.test(code), "every failure ends with the clean-up text and exit 1");
   assert.ok(code.includes("Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -Filter 'NimbleNewtRun-*'"), "the leftover-profile check runs");
+});
+
+test("run-g05.ps1 writes only into plain folders (a link or junction at control, raw, info, profiles or results is refused), deletes without following links, and clears node's environment options", () => {
+  const kinds = code.slice(at("function Get-EntryKind"), at("New-Item -ItemType Directory"));
+  assert.ok(kinds.includes("[System.IO.FileAttributes]::ReparsePoint) -ne 0) { return 'link' }"));
+  assert.ok(kinds.includes("foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $results))") && /if \(\$kind -eq 'link' -or \$kind -eq 'file'\) \{[^}]*REFUSED[^}]*exit 2/.test(kinds));
+  assert.ok(kinds.includes("[System.IO.Directory]::Delete($d, $true)"));
+  assert.ok(!/Remove-Item[^\n]*-Recurse/.test(code), "no Remove-Item -Recurse (Windows PowerShell 5.1 may follow a directory link)");
+  assert.ok(at("foreach ($v in @('NODE_OPTIONS', 'NODE_PATH', 'NODE_PRESERVE_SYMLINKS', 'NODE_REPL_EXTERNAL_MODULE')) { [System.Environment]::SetEnvironmentVariable($v, $null, 'Process') }") < at("Invoke-Captured $launcher"));
+  assert.ok(at("check = Test-Bundle") < at("function Get-EntryKind"), "after the bundle check");
 });
 
 test("run-g05.ps1 changes nothing on the machine: no Defender, policy, registry, firewall, service, task, account or download command", () => {

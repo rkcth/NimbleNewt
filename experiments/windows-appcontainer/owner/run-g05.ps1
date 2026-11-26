@@ -14,11 +14,13 @@
 #   - runs bin\nn-launcher.exe info once (a throw-away per-run container profile, made and deleted again);
 #   - runs the ten cases with the bundle's own node.exe and scripts (no network: scripts\offline-guard.mjs is loaded first);
 #   - keeps the raw output only under control\raw\ in this folder, and puts copies with names, paths, SIDs and addresses replaced into results\;
-#   - refuses to make the zip when results\ still holds your account name, computer name, home folder, a C:\Users\ path, an account or container SID, or an IP or MAC address
-#     (it prints which kind of text, never the text itself);
+#   - refuses to make the zip when results\ (file contents or file names) still holds your account name, computer, domain or network host name, home folder, a ...\Users\ path
+#     (also written with / or doubled \\ as in JSON), an account, Azure AD account or logon-session SID, or an IPv4, IPv6 or MAC address (it prints which kind of text, never the text itself);
 #   - writes nn-g05-results.zip and prints "N/10 cases hold, M inconclusive".
 # It downloads nothing, installs nothing, and changes no security setting, policy, registry value, firewall rule, service or scheduled task.
-# Everything it writes is inside this folder, the container profiles the launcher makes and deletes again under your own AppData, and the zip.
+# Everything it writes is inside this folder, a throw-away folder nn-g05-* under your TEMP (the cases' own files, removed at the end), the container profiles the launcher makes and
+# deletes again under your own AppData, and the zip. The confined (sandboxed) run TRIES to create a file g05-x in C:\Windows, C:\Windows\System32, C:\ and C:\Program Files: that must be
+# refused; if one ever exists afterwards the run says so (and the case fails). The cases listen on 127.0.0.1 only, on a free port, for the loopback case.
 [CmdletBinding()]
 param()
 
@@ -27,6 +29,7 @@ $ErrorActionPreference = 'Stop'
 
 $b = $PSScriptRoot
 $script:problems = New-Object System.Collections.Generic.List[string]
+$script:systemLeft = @()
 function Add-Problem([string] $m) { $script:problems.Add($m); Write-Host "FAILED: $m" }
 
 Write-Host 'NimbleNewt G05 owner run: the ten containment cases on this PC (card A03b).'
@@ -35,7 +38,7 @@ Write-Host 'NimbleNewt G05 owner run: the ten containment cases on this PC (card
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
 if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  Write-Host 'REFUSED: this PowerShell is elevated (Run as administrator). Close it, open a NORMAL PowerShell window and run the script again. Nothing was run.'
+  Write-Host 'REFUSED: this PowerShell is elevated (Run as administrator, or an administrator account with User Account Control switched off). Close it, open a NORMAL PowerShell window and run the script again. Nothing was run.'
   exit 2
 }
 Write-Host 'not elevated: good'
@@ -121,10 +124,29 @@ $control = Join-Path $b 'control'
 $raw = Join-Path $control 'raw'
 $infoDir = Join-Path $control 'info'
 $results = Join-Path $b 'results'
-foreach ($d in @($results, $raw)) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force } }
+# The folders this script writes (not covered by SHA256SUMS) must be plain folders: a link or junction there would send writes, or the delete below, somewhere else.
+function Get-EntryKind([string] $p) {
+  # GetAttributes reads the entry itself, never a link's target (a dangling link is still a link)
+  if (-not ([System.IO.File]::Exists($p) -or [System.IO.Directory]::Exists($p))) { return 'none' }
+  $a = [System.IO.File]::GetAttributes($p)
+  if (($a -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return 'link' }
+  if (($a -band [System.IO.FileAttributes]::Directory) -ne 0) { return 'dir' }
+  return 'file'
+}
+foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $results)) {
+  $kind = Get-EntryKind $d
+  if ($kind -eq 'link' -or $kind -eq 'file') {
+    Write-Host "REFUSED: $($d.Substring($b.Length + 1)) in this folder is a $kind, not a plain folder. Extract the artifact again into an EMPTY folder. Nothing was run."
+    exit 2
+  }
+}
+# Removed with [System.IO.Directory]::Delete, which deletes a link inside without following it (Remove-Item -Recurse in Windows PowerShell 5.1 may follow a directory link).
+foreach ($d in @($results, $raw)) { if ((Get-EntryKind $d) -eq 'dir') { [System.IO.Directory]::Delete($d, $true) } }
 New-Item -ItemType Directory -Path $control, $raw, $infoDir, $results -Force | Out-Null
 $env:NIMBLENEWT_WIN_LAUNCHER = "$b\bin\nn-launcher.exe"
 $env:NIMBLENEWT_WIN_CONTROL_DIR = "$b\control"
+# The bundle's node must load only the bundle's code: options a user environment may carry for node are not passed on.
+foreach ($v in @('NODE_OPTIONS', 'NODE_PATH', 'NODE_PRESERVE_SYMLINKS', 'NODE_REPL_EXTERNAL_MODULE')) { [System.Environment]::SetEnvironmentVariable($v, $null, 'Process') }
 $utf8 = New-Object System.Text.UTF8Encoding $false
 
 function ConvertTo-WinArg([string] $a) {
@@ -173,6 +195,7 @@ function Show-Cleanup {
   Write-Host 'CLEAN-UP. The backend sweeps its own leftovers (grants and profiles recorded under control\profiles) the next time this script runs: running it again is the first step.'
   Write-Host 'A per-run profile that is still there can be deleted by the launcher, with the proof its record file holds (name and SID on its second line):'
   $packages = Join-Path $env:LOCALAPPDATA 'Packages'
+  $launcherQ = $launcher -replace "'", "''"
   $shown = 0
   foreach ($dir in @($infoDir, (Join-Path $control 'profiles'))) {
     if (-not [System.IO.Directory]::Exists($dir)) { continue }
@@ -181,16 +204,20 @@ function Show-Cleanup {
       if ($lines.Count -lt 2 -or $lines[1] -cnotmatch '^(NimbleNewtRun-[0-9a-f]{16}) (S-1-15-2-[0-9-]+)$') { continue }
       $pname = $Matches[1]; $psid = $Matches[2]
       if (-not (Test-Path -LiteralPath (Join-Path $packages $pname.ToLowerInvariant()))) { continue }
-      Write-Host "  & '$launcher' delete-profile --name $pname --sid $psid --profile-record '$rec'"
+      Write-Host "  & '$launcherQ' delete-profile --name $pname --sid $psid --profile-record '$($rec -replace "'", "''")'"
       $shown++
     }
   }
   if ($shown -eq 0) {
-    Write-Host "  & '$launcher' delete-profile --name NimbleNewtRun-<16 hex> --sid <the SID on the second line of its .sid record> --profile-record <that .sid file under control\info or control\profiles>"
+    Write-Host "  & '$launcherQ' delete-profile --name NimbleNewtRun-<16 hex> --sid <the SID on the second line of its .sid record> --profile-record <that .sid file under control\info or control\profiles>"
     Write-Host '  (no record here names a profile that still exists)'
   }
   Write-Host 'Leftover-profile check (should list nothing):'
   Write-Host '  Get-ChildItem $env:LOCALAPPDATA\Packages -Filter NimbleNewtRun-*'
+  if ($script:systemLeft.Count -gt 0) {
+    Write-Host 'A confined write got through: these files were left in system folders (the case fails). Delete each, from an administrator PowerShell if a normal one is refused:'
+    foreach ($x in $script:systemLeft) { Write-Host "  Remove-Item -LiteralPath '$($x -replace "'", "''")'" }
+  }
 }
 
 # ---------------------------------------------------------------------------------------------- 5. the launcher's info (one throw-away profile)
@@ -231,38 +258,62 @@ foreach ($name in @('info.stdout.txt', 'info.stderr.txt', 'evidence.stdout.txt',
 }
 
 # ---------------------------------------------------------------------------------------------- 8. nothing personal may leave in the zip
+# The zip's place: the Desktop Explorer shows (a OneDrive-moved Desktop too), else Downloads, else this folder. An older zip of this name (an earlier run's) is removed first, so a refused run never
+# leaves an older zip that looks like this run's.
+$dest = [System.Environment]::GetFolderPath('Desktop')
+if ([string]::IsNullOrEmpty($dest) -or -not [System.IO.Directory]::Exists($dest)) { $dest = Join-Path $env:USERPROFILE 'Downloads' }
+if (-not [System.IO.Directory]::Exists($dest)) { $dest = $b }
+$zip = Join-Path $dest 'nn-g05-results.zip'
+$zipBlocked = $false
+try { if ([System.IO.File]::Exists($zip)) { [System.IO.File]::Delete($zip); Write-Host 'removed the nn-g05-results.zip of an earlier run' } }
+catch { $zipBlocked = $true; Add-Problem 'the nn-g05-results.zip of an earlier run could not be removed; no new zip is made (delete it and run the script again)' }
+
+# The redaction (scripts\redact-log.mjs and --redact) leaves placeholders such as <user>, <home>, <ip>, S-1-5-21-<domain>-<account>; what is looked for here is the text it should have replaced.
+# Per-run container SIDs (S-1-15-2-...) are made from the random per-run profile name, not from this PC or account, and the redaction keeps them on purpose: they are not looked for.
 $patterns = New-Object System.Collections.Generic.List[object]
 function Add-Pattern([string] $label, [string] $regex) { $patterns.Add(@($label, (New-Object System.Text.RegularExpressions.Regex($regex, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)))) }
-if ($env:USERNAME -and $env:USERNAME.Length -ge 2) { Add-Pattern 'your account name (USERNAME)' ('(?<![A-Za-z0-9])' + [regex]::Escape($env:USERNAME) + '(?![A-Za-z0-9])') }
-if ($env:COMPUTERNAME -and $env:COMPUTERNAME.Length -ge 2) { Add-Pattern 'the computer name (COMPUTERNAME)' ('(?<![A-Za-z0-9])' + [regex]::Escape($env:COMPUTERNAME) + '(?![A-Za-z0-9])') }
-if ($env:USERPROFILE) { Add-Pattern 'your home folder (USERPROFILE)' ([regex]::Escape($env:USERPROFILE)) }
-Add-Pattern 'a C:\Users\ path' ([regex]::Escape('C:\Users\'))
-Add-Pattern 'an account SID (S-1-5-21-)' 'S-1-5-21-'
-Add-Pattern 'a container SID (S-1-15-2-)' 'S-1-15-2-'
+function Add-WordPattern([string] $label, [string] $word) { if ($word -and $word.Length -ge 2) { Add-Pattern $label ('(?<![A-Za-z0-9])' + [regex]::Escape($word) + '(?![A-Za-z0-9])') } }
+# A path matched with any run of \ or / between its parts, so C:\Users\x, C:/Users/x and the JSON form C:\\Users\\x are all found.
+function ConvertTo-PathPattern([string] $p) { return ((@($p -split '[\\/]+') | Where-Object { $_ -ne '' } | ForEach-Object { [regex]::Escape($_) }) -join '[\\/]+') }
+Add-WordPattern 'your account name (USERNAME)' $env:USERNAME
+Add-WordPattern 'the computer name (COMPUTERNAME)' $env:COMPUTERNAME
+if ($env:USERDOMAIN -ne $env:COMPUTERNAME) { Add-WordPattern 'the account domain name (USERDOMAIN)' $env:USERDOMAIN }
+$dnsName = ''
+try { $dnsName = [System.Net.Dns]::GetHostName() } catch { $dnsName = '' }
+if ($dnsName -ne $env:COMPUTERNAME) { Add-WordPattern 'the network host name' $dnsName }
+foreach ($pair in @(@('your home folder (USERPROFILE)', $env:USERPROFILE), @('your local AppData folder (LOCALAPPDATA)', $env:LOCALAPPDATA), @('your TEMP folder', $env:TEMP))) {
+  if ($pair[1]) { Add-Pattern $pair[0] (ConvertTo-PathPattern $pair[1]) }
+}
+if ($env:USERPROFILE) {
+  $leaf = [System.IO.Path]::GetFileName($env:USERPROFILE.TrimEnd('\'))
+  if ($leaf -ne $env:USERNAME) { Add-WordPattern 'the name of your home folder' $leaf }
+}
+Add-Pattern 'a ...\Users\ path' '(?<![A-Za-z])[A-Za-z]:[\\/]+Users[\\/]+'
+Add-Pattern 'an account SID (S-1-5-21-...)' 'S-1-5-21-\d'
+Add-Pattern 'an Azure AD account SID (S-1-12-1-...)' 'S-1-12-1-\d'
+Add-Pattern 'a logon session SID (S-1-5-5-...)' 'S-1-5-5-\d'
 Add-Pattern 'an IPv4 address' '\b(?!127\.|0\.)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b'
+Add-Pattern 'an IPv6 address' '(?<![0-9A-F:.])[0-9A-F]{1,4}(?:(?::[0-9A-F]{1,4}){7}|(?::[0-9A-F]{1,4}){0,5}::(?:[0-9A-F]{1,4}:){0,5}[0-9A-F]{1,4})(?![0-9A-F:])'
 Add-Pattern 'a MAC address' '(?<![0-9A-F])[0-9A-F]{2}([-:])[0-9A-F]{2}(?:\1[0-9A-F]{2}){4}(?![0-9A-F])'
 $found = New-Object System.Collections.Generic.List[string]
 foreach ($f in [System.IO.Directory]::GetFiles($results, '*', [System.IO.SearchOption]::AllDirectories)) {
   $text = [System.IO.File]::ReadAllText($f)
   $rel = $f.Substring($b.Length + 1)
-  foreach ($p in $patterns) { if ($p[1].IsMatch($text)) { $found.Add("$rel contains $($p[0])") } }
+  # the file's name inside the zip is checked as well as its text
+  foreach ($p in $patterns) { if ($p[1].IsMatch($text) -or $p[1].IsMatch($rel)) { $found.Add("$rel contains $($p[0])") } }
 }
-$zip = $null
 if ($found.Count -gt 0) {
   foreach ($x in $found) { Write-Host "  $x" }
   Add-Problem 'REFUSED to make the zip: the results still hold the text named above (the text itself is not shown). Nothing was zipped; the results stay in results\ in this folder.'
+} elseif ($zipBlocked) {
+  Write-Host 'no zip: the older one is still there'
 } else {
   # ---------------------------------------------------------------------------------------------- 9. the zip
-  $dest = Join-Path $env:USERPROFILE 'Desktop'
-  if (-not [System.IO.Directory]::Exists($dest)) { $dest = Join-Path $env:USERPROFILE 'Downloads' }
-  if (-not [System.IO.Directory]::Exists($dest)) { $dest = $b }
-  $zip = Join-Path $dest 'nn-g05-results.zip'
   try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    if ([System.IO.File]::Exists($zip)) { [System.IO.File]::Delete($zip) }
     [System.IO.Compression.ZipFile]::CreateFromDirectory($results, $zip)
     Write-Host "wrote nn-g05-results.zip in your $(Split-Path -Leaf $dest) folder: please send that file"
-  } catch { $zip = $null; Add-Problem "the zip could not be written: $($_.Exception.Message)" }
+  } catch { Add-Problem "the zip could not be written: $($_.Exception.Message)" }
 }
 
 # ---------------------------------------------------------------------------------------------- 10. the answer
@@ -279,6 +330,10 @@ if ([System.IO.File]::Exists($report)) {
 } elseif ($infoOk) { Add-Problem 'the evidence run wrote no report' }
 Write-Host ''
 Write-Host "$hold/$total cases hold, $inconclusive inconclusive"
+
+# A confined write to a system folder that got through leaves its file (the case fails); the unconfined pairing run never tries these paths.
+$script:systemLeft = @(@((Join-Path $env:SystemRoot 'g05-x'), (Join-Path $env:SystemRoot 'System32\g05-x'), 'C:\g05-x', 'C:\Program Files\g05-x') | Where-Object { Test-Path -LiteralPath $_ })
+if ($script:systemLeft.Count -gt 0) { Add-Problem "$($script:systemLeft.Count) file(s) named g05-x were left in a system folder" }
 
 $left = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Packages') -Directory -Filter 'NimbleNewtRun-*' -ErrorAction SilentlyContinue)
 Write-Host "leftover NimbleNewtRun-* container profiles under your AppData: $($left.Count)"

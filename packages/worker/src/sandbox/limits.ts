@@ -128,6 +128,8 @@ export interface LimitedPlan {
 }
 
 const SAMPLED = "sampling monitor";
+/** Windows (card A03b): the native launcher's Job Object holds only the backend's own fixed memory and process limits (its settings), not a run's own limit, and no host-side sampler is wired in. */
+const WINDOWS_NO_LIMIT = "the native Windows launcher does not take a per-run limit (its Job Object holds only the backend's own fixed memory and process limits), and no host-side sampler is wired in on Windows";
 /** The limits other systems hold by sampling (card A08c); each entry says exactly what the sampling misses. */
 function sampledLimits(names: readonly LimitName[], limits: ResourceLimits, caps: LimitCapabilities): { report: LimitEnforcement[]; watch: WatchLimits } {
   const report: LimitEnforcement[] = [];
@@ -139,15 +141,15 @@ function sampledLimits(names: readonly LimitName[], limits: ResourceLimits, caps
     switch (limit) {
       case "memoryMb":
         if (ps) { watch.memoryMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when the resident memory of its process tree passes the limit at a look; a burst between two looks can pass it first, memory the system has compressed or swapped out is not counted, and memory several processes share is counted once for each of them (so a build of many processes sharing pages can be ended below its real use)" }); }
-        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host, and a Job Object on the host side does not bound a virtual machine" : "ps could not list the process tree here"}`);
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? WINDOWS_NO_LIMIT : "ps could not list the process tree here"}`);
         break;
       case "processes":
         if (ps) { watch.processes = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (ps every 250 ms)`, detail: "the run is ended when its process tree holds more processes than the limit at a look; threads are not counted, a fork storm can pass the limit between two looks, and a process that starts its own session and is handed to init before any look sees it is no longer followed (the whole tree, its process group and every process once seen are)" }); }
-        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host" : "ps could not list the process tree here"}`);
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? WINDOWS_NO_LIMIT : "ps could not list the process tree here"}`);
         break;
       case "cpus":
         if (ps) { watch.cpus = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (SIGSTOP/SIGCONT)`, detail: `the process tree is paused whenever its average use passes ${value} core(s) (a burst of ${CPU_BURST_SECONDS_TEXT} is allowed); CPU time of processes that exited between two looks is not seen, and a process that continues itself escapes a pause until the next look` }); }
-        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? "the Windows Sandbox guest's processes cannot be seen from the host" : "ps could not list the process tree here"}`);
+        else none(limit, `no way to limit ${limit} is available for ${caps.platform}: ${caps.platform === "win32" ? WINDOWS_NO_LIMIT : "ps could not list the process tree here"}`);
         break;
       case "diskMb":
         if (caps.diskSampler === true) { watch.diskMb = value; report.push({ limit, value, enforced: "partial", by: `${SAMPLED} (directory walk every 5 s)`, detail: "the run is ended when the files under its checkout, home and scratch have grown by more than the limit since the run began; sizes are the files' lengths (a sparse file counts at its full length, a second name of a file counts once), deleting files offsets writing, a fast writer can pass the limit between two looks, and a directory tree larger than 500000 entries is measured only in part" }); }

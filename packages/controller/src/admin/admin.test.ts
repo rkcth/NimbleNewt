@@ -122,11 +122,14 @@ for (const backend of backends) {
       assert.deepEqual(await c.admin.sandbox(c.owner), { hosts: [], warn: false, truncated: false });
       c.setHosts([{ hostId: "host:lin", os: "linux" }, { hostId: "host:mac", os: "darwin" }, { hostId: "host:win", os: "win32" }, { hostId: "host:odd" }]);
       const got = await c.admin.sandbox(c.owner);
-      assert.deepEqual(got.hosts.map((h) => [h.hostId, h.mechanism, h.boundary, h.warn]), [["host:lin", "bubblewrap", "strong", false], ["host:mac", "Seatbelt", "weaker", true], ["host:win", "Windows Sandbox", "strong", false], ["host:odd", "unknown", "unproven", true]]);
+      assert.deepEqual(got.hosts.map((h) => [h.hostId, h.mechanism, h.boundary, h.warn]), [["host:lin", "bubblewrap", "strong", false], ["host:mac", "Seatbelt", "weaker", true], ["host:win", "AppContainer and Job Object", "weaker", true], ["host:odd", "unknown", "unproven", true]]);
       assert.equal(got.warn, true);
       assert.match(got.hosts[1]!.limits.join(" "), /process-level and has weaker limits than Linux/);
       c.setHosts([{ hostId: "host:lin", os: "linux" }]);
       assert.equal((await c.admin.sandbox(c.owner)).warn, false);
+      // a Windows host alone is warned about (card A03b: process-level, unmeasured), never shown as strong
+      c.setHosts([{ hostId: "host:win", os: "win32" }]);
+      assert.equal((await c.admin.sandbox(c.owner)).warn, true);
     });
     await open(backend, async (c) => {
       const got = await c.admin.sandbox(c.owner);
