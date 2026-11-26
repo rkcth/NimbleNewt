@@ -99,6 +99,15 @@ for (const backend of backends) {
       const v = await w.api.handle(w.ownerToken, { v: 1, op: "routing.provider.add", commandId: "vllm-direct", args: { providers: [mine({ kind: "vllm" }), spare] } } as never) as unknown as { ok: boolean; result?: { warnings?: string[] } };
       assert.ok(v.ok);
       assert.doesNotMatch(JSON.stringify(v.result?.warnings ?? []), /experimental/);
+      // Strata (read from source, never run) is labelled the same way.
+      const strataText = "Register my local Strata server called mine at http://127.0.0.1:8002/v1 with the model big-local (65536 tokens), and a free cloud one called spare at https://free.example.invalid/v1 with the model free-model (32000 tokens), whose key is the secret spare-key.";
+      const st = await say(strataText, [cmd("routing.provider.add", { providers: [mine({ kind: "strata" }), spare] }, strataText)]);
+      assert.equal(st.status, "proposed", JSON.stringify(st));
+      assert.match(JSON.stringify(st), /Provider mine: Strata cache support is experimental and has not been measured/);
+      const sd = await w.api.handle(w.ownerToken, { v: 1, op: "routing.provider.add", commandId: "strata-direct", args: { providers: [mine({ kind: "strata" }), spare] } } as never) as unknown as { ok: boolean; result?: { warnings?: string[]; shown?: string[] } };
+      assert.ok(sd.ok, JSON.stringify(sd));
+      assert.match((sd.result?.warnings ?? []).join("|"), /Provider mine: Strata cache support is experimental and has not been measured/);
+      assert.doesNotMatch((sd.result?.warnings ?? []).join("|"), /Claude/);
     } finally { await w.close(); }
   });
 }

@@ -138,11 +138,14 @@ export interface EndpointConfig {
  * It stays in the code and the call path works, but it is experimental, claims no measured cache-hit guarantee, and keeps the conservative isolation rule (a project that requires isolation gets no cache settings).
  */
 export const CLAUDE_EXPERIMENTAL_NOTICE = "Claude cache support is experimental and has not been measured against the real service: it was built from the provider's documentation and simulators, so no cache-hit saving is promised, and a project that requires isolation gets no cache settings on it.";
-export type CacheMaturity = "measured" | "experimental";
+/** Strata's cache profile was read from Strata's source and documentation only; no Strata server was run for G10 (owner decision 2026-11-26 narrowed G10 to the measured backends). */
+export const STRATA_EXPERIMENTAL_NOTICE = "Strata cache support is experimental and has not been measured: it was read from Strata's source and documentation and never run here, so no cache-hit saving is promised.";
+/** `measured`: G10 measured this kind's cache on a real server (llama.cpp, vLLM, Radiance; OpenAI through its usage fields). `experimental`: built and offered, never measured (Claude, Strata). `unmeasured`: no claim is made (an OpenAI-compatible service, a generic or unknown kind). */
+export type CacheMaturity = "measured" | "experimental" | "unmeasured";
 
 export interface CacheProfile {
   readonly kind: BackendKind;
-  /** `experimental`: built from documentation or simulators and never measured here (Claude). Absent: the profile makes the claims its `basis` states. */
+  /** `experimental`: built from documentation, source or simulators and never measured here (Claude, Strata). Absent: the profile makes the claims its `basis` states. */
   readonly maturity?: "experimental";
   /** `false`: never measured against the real service (set together with `maturity: experimental`). */
   readonly measured?: false;
@@ -245,10 +248,12 @@ export function negotiate(profile: CacheProfile, wants: readonly Want[]): Negoti
   return { granted, fallbacks, unqualified };
 }
 
-/** The maturity of an endpoint kind's cache support, for the owner-visible surfaces that name a kind (provider setup, the cache report). Only Claude is experimental. */
-export function cacheMaturityOf(kind: string | undefined): CacheMaturity { return kind === "claude" ? "experimental" : "measured"; }
+/** The maturity of an endpoint kind's cache support, for the owner-visible surfaces that name a kind (provider setup, the cache report). Claude and Strata are experimental. */
+export function cacheMaturityOf(kind: string | undefined): CacheMaturity {
+  return kind === "claude" || kind === "strata" ? "experimental" : kind === "llama-cpp" || kind === "vllm" || kind === "radiance" || kind === "openai" ? "measured" : "unmeasured";
+}
 /** The owner-visible sentence for a kind, or undefined when nothing needs saying. */
-export function cacheNoticeFor(kind: string | undefined): string | undefined { return kind === "claude" ? CLAUDE_EXPERIMENTAL_NOTICE : undefined; }
+export function cacheNoticeFor(kind: string | undefined): string | undefined { return kind === "claude" ? CLAUDE_EXPERIMENTAL_NOTICE : kind === "strata" ? STRATA_EXPERIMENTAL_NOTICE : undefined; }
 /** Plain-language description of what a profile's cache support is, with its experimental notice when it has one. */
 export function describeCacheSupport(profile: CacheProfile): string {
   return `${profile.label}: ${profile.notice === undefined ? `read from ${profile.basis}` : `${profile.notice} Basis: ${profile.basis}.`}`;

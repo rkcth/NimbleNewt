@@ -124,7 +124,7 @@ export interface UsageSummary {
   /** Cache figures of the entries that reported them: all together and by backend. Entries without cache figures are not counted (unknown is not zero). */
   readonly cache: CacheTotals;
   readonly cacheByBackend: Record<string, CacheTotals>;
-  /** For a backend in `cacheByBackend` whose cache support is experimental (Claude: built from documentation and simulators, never measured against the real service), the sentence that says so. Absent when none applies. */
+  /** For a backend in `cacheByBackend` whose cache support is experimental (Claude: built from documentation and simulators, never measured against the real service; Strata: read from source, never run here), the sentence that says so. Absent when none applies. */
   readonly cacheNotes?: Record<string, string>;
   readonly entries: number;
   /** True when more entries matched than the scan limit; the figures are then a lower bound. */

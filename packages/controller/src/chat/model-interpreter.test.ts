@@ -259,7 +259,9 @@ test("the model is told that Claude cache support is experimental and unmeasured
   const m = new ModelInterpreter({ complete: async (_route, r) => { seen.push(r.system); return good; } }, () => ["a/primary"]);
   await m.interpret(input);
   assert.match(seen[0]!, /Claude cache support is experimental and has not been measured against the real service/);
-  assert.match(seen[0]!, /llama\.cpp, vLLM, Radiance and OpenAI were measured/);
+  assert.match(seen[0]!, /Strata's is experimental too and was never run here/);
+  assert.match(seen[0]!, /llama\.cpp, vLLM, Radiance and OpenAI \(its usage fields, through Hermes\) were measured/);
   assert.match(seen[0]!, /a project requiring isolation gets no cache settings on Claude/);
   assert.match(CHAT_OPS["routing.provider.add"]!.verb, /claude \(experimental: its cache support has not been measured against the real service\)/);
+  assert.match(CHAT_OPS["routing.provider.add"]!.verb, /strata \(experimental: its cache support was never run here\)/);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DomainError } from "../domain/errors.js";
-import { BACKEND_KINDS, CLAUDE_EXPERIMENTAL_NOTICE, CLAUDE_MIN_TOKENS, SlotAffinity, cacheMaturityOf, cacheNoticeFor, describeCacheSupport, deriveKey, negotiate, profileFor, type CacheContext, type EndpointConfig, type WireRequest } from "./index.js";
+import { BACKEND_KINDS, CLAUDE_EXPERIMENTAL_NOTICE, CLAUDE_MIN_TOKENS, STRATA_EXPERIMENTAL_NOTICE, SlotAffinity, cacheMaturityOf, cacheNoticeFor, describeCacheSupport, deriveKey, negotiate, profileFor, type CacheContext, type EndpointConfig, type WireRequest } from "./index.js";
 
 const scope = deriveKey("installation-secret-0123", "scope", "proj-a");
 const ctx = (extra: Partial<CacheContext> = {}): CacheContext => ({ scopeKey: scope, ...extra });
@@ -390,17 +390,38 @@ test("Claude cache support is reported as experimental and unmeasured (owner dec
   assert.match(CLAUDE_EXPERIMENTAL_NOTICE, /no cache-hit saving is promised/);
   // The wrapper for isolation keeps the fields.
   assert.equal(profileFor({ kind: "claude", model: "m" }).maturity, "experimental");
-  for (const kind of BACKEND_KINDS.filter((k) => k !== "claude")) {
+  for (const kind of BACKEND_KINDS.filter((k) => k !== "claude" && k !== "strata")) {
     const p = profileFor({ kind, model: "m" });
     assert.equal(p.maturity, undefined, kind);
     assert.equal(p.measured, undefined, kind);
     assert.equal(p.notice, undefined, kind);
     assert.doesNotMatch(describeCacheSupport(p), /experimental/i, kind);
-    assert.equal(cacheMaturityOf(kind), "measured", kind);
     assert.equal(cacheNoticeFor(kind), undefined, kind);
   }
   assert.equal(cacheMaturityOf("claude"), "experimental");
   assert.equal(cacheNoticeFor("claude"), CLAUDE_EXPERIMENTAL_NOTICE);
+});
+
+test("Strata, whose profile was read from source and never run, is labelled experimental and unmeasured the same way (owner decision 2026-11-26 narrowed G10 to the measured backends)", () => {
+  const strata = profileFor({ kind: "strata", model: "m" });
+  assert.equal(strata.maturity, "experimental");
+  assert.equal(strata.measured, false);
+  assert.equal(strata.notice, STRATA_EXPERIMENTAL_NOTICE);
+  assert.match(strata.label, /experimental, not measured/);
+  assert.equal(strata.caveats[0], STRATA_EXPERIMENTAL_NOTICE);
+  assert.match(strata.basis, /Nothing was run/);
+  assert.match(describeCacheSupport(strata), /Strata cache support is experimental and has not been measured/);
+  assert.equal(cacheNoticeFor("strata"), STRATA_EXPERIMENTAL_NOTICE);
+  assert.equal(cacheMaturityOf("strata"), "experimental");
+});
+
+test("only the kinds G10 really measured are called measured; a compatible service, the generic kind and an unknown or missing kind make no claim", () => {
+  assert.deepEqual(BACKEND_KINDS.filter((k) => cacheMaturityOf(k) === "measured").sort(), ["llama-cpp", "openai", "radiance", "vllm"]);
+  assert.deepEqual(BACKEND_KINDS.filter((k) => cacheMaturityOf(k) === "experimental").sort(), ["claude", "strata"]);
+  for (const k of ["openai-compatible", "generic", "something-else", undefined]) { assert.equal(cacheMaturityOf(k), "unmeasured", String(k)); assert.equal(cacheNoticeFor(k), undefined, String(k)); }
+  // The measured kinds' basis names the G10 measurement, not "not measured here".
+  for (const kind of ["llama-cpp", "vllm", "openai"] as const) { const b = profileFor({ kind, model: "m" }).basis; assert.match(b, /G10/, kind); assert.doesNotMatch(b, /not measured here/, kind); }
+  assert.match(profileFor({ kind: "openai", model: "m" }).basis, /only the usage fields/);
 });
 
 test("Claude's isolation is treated as unattested: a project that requires isolation gets no cache settings and is told why, while the call still works for other projects", () => {
@@ -411,6 +432,11 @@ test("Claude's isolation is treated as unattested: a project that requires isola
   assert.equal(isolated.expects, "no");
   assert.ok(isolated.skipped.some((s) => /has not been measured, so it is treated as unattested/.test(s)), isolated.skipped.join("|"));
   assert.doesNotMatch(JSON.stringify(isolated.body), /cache_control/);
+  // Markers the caller already put in the request are removed too: nothing of a cache setting goes out for such a project.
+  const marked = { ...big, system: [{ type: "text", text: text(2000), cache_control: { type: "ephemeral", ttl: "1h" } }], messages: [{ role: "user", content: [{ type: "text", text: "hello", cache_control: { type: "ephemeral" } }] }] };
+  const isolatedMarked = p.prepare(marked, ctx({ isolationRequired: true }));
+  assert.doesNotMatch(JSON.stringify(isolatedMarked.body), /cache_control/);
+  assert.deepEqual(isolatedMarked.applied, []);
   const open = p.prepare(big, ctx());
   assert.ok(open.applied.length > 0, "the call path still places markers when isolation is not required");
   assert.equal(p.capabilities.isolation, "none");
