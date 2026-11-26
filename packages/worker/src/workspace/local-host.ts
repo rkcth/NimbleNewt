@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 import { PLAN_FILE } from "@nimblenewt/contracts";
 import { WorkspaceError } from "./errors.js";
@@ -44,7 +44,40 @@ export interface LocalWorkspacesOptions {
    * command run on a fresh copy of the tree the landing would make); without it the port has no `landingChecks` and a landing that requires tests is refused by the controller as not run.
    */
   readonly checks?: Omit<LandingChecksOptions, "git" | "locate">;
+  /**
+   * Card P02: whether the task's workspace may be opened on the project's shared repository (the controller's `workspaceAdmission`: the task's pinned binding, or a binding of that folder, with write access to all of it).
+   * Asked at every `ensure`, before a checkout is made or handed out again; a refusal, or a throw, is not opened (fail closed) and its reason is the error's message. Absent: every workspace is opened (tests and
+   * hosts that hold no controller records, such as a remote host configured by its operator).
+   */
+  readonly admit?: (call: { readonly taskId: string; readonly projectId: string; readonly shared: string }) => Promise<WorkspaceAdmissionAnswer>;
 }
+
+/** What `admit` answers: the binding that admits the workspace (kept in the attempt's start record), or why not. */
+export type WorkspaceAdmissionAnswer =
+  | { readonly admitted: true; readonly binding: { readonly resourceId: string; readonly repositoryId?: string; readonly locatorEpoch: number; readonly label?: string; readonly pinned?: boolean } }
+  | { readonly admitted: false; readonly reason: string };
+
+/**
+ * The initial working state of one attempt (card P02), kept beside the task's checkout (outside the sandbox mount) as `<task>/starts/<attempt>.json`, written once when the attempt's workspace is first handed out: the base
+ * commit, HEAD, the tree of the checkout as it stood (so its content can be compared later), the files that differed from HEAD or were untracked (at most `START_STATE_LIMITS.files` named, all counted), a digest over
+ * all of that, and the binding that admitted it. A later attempt of the same task gets its own record, so a review sees what each one started from.
+ */
+export interface StartState {
+  readonly attemptId: string;
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly recordedAt: string;
+  readonly base: string;
+  readonly head: string;
+  readonly tree: string;
+  readonly files: readonly { readonly code: string; readonly path: string }[];
+  readonly fileCount: number;
+  /** sha256 over base, head, tree and every changed or untracked file with its status (sorted), so two starts compare by one value. */
+  readonly digest: string;
+  /** The binding that admitted the workspace; absent on a host that asks no admission. */
+  readonly binding?: { readonly resourceId: string; readonly repositoryId?: string; readonly locatorEpoch: number };
+}
+export const START_STATE_LIMITS = { files: 500 } as const;
 
 /** A project folder cannot take the name of one of the host's own folders. */
 const RESERVED = new Set(["journal", "quarantine", "shared-state", ".making", "restored"]);
@@ -75,7 +108,7 @@ export class LocalWorkspaces {
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     });
     const checks = options.checks === undefined ? undefined : landingChecks({ ...options.checks, git: options.git, locate: (call) => this.locate(call) });
-    this.port = { run: (call) => this.host.run(call), restack: (call) => this.host.restack(call), ...(checks === undefined ? {} : { landingChecks: checks }) };
+    this.port = { run: (call) => this.#run(call), restack: (call) => this.host.restack(call), ...(checks === undefined ? {} : { landingChecks: checks }) };
   }
 
   /** The folder of a task, when it exists exactly as named, is finished (its `complete` mark is there) and no other spelling of the name stands beside it. */
@@ -207,6 +240,13 @@ export class LocalWorkspaces {
     if (!plain(call.taskId) || !plain(call.projectId)) throw new WorkspaceError("invalid_path", "the task or project name is not a plain name");
     const shared = this.#options.shared(call.projectId);
     if (shared === undefined) throw new WorkspaceError("unavailable", "this host holds no shared repository for that project");
+    // Card P02: the workspace admits only a repository in the task's access scope. Asked every time (a binding can be narrowed or ended between attempts); a throw is a refusal.
+    let binding: StartState["binding"];
+    if (this.#options.admit !== undefined) {
+      const answer = await this.#admission({ taskId: call.taskId, projectId: call.projectId, shared });
+      if ("refused" in answer) throw new WorkspaceError("unavailable", `the workspace was not opened: ${answer.refused}`);
+      binding = answer.binding;
+    }
     const key = `${call.projectId}/${call.taskId}`;
     const earlier = this.#making.get(key) ?? Promise.resolve();
     const run = earlier.then(() => this.#ensure(call, shared), () => this.#ensure(call, shared));
@@ -214,9 +254,76 @@ export class LocalWorkspaces {
     this.#making.set(key, tail);
     try {
       const made = await run;
-      if (call.attemptId !== undefined && ATTEMPT.test(call.attemptId)) await writeAttempt(join(this.#options.root, call.projectId, call.taskId, "attempt"), call.attemptId);
+      if (call.attemptId !== undefined && ATTEMPT.test(call.attemptId)) {
+        await writeAttempt(join(this.#options.root, call.projectId, call.taskId, "attempt"), call.attemptId);
+        await this.#recordStart(call as { taskId: string; projectId: string; attemptId: string }, made, binding);
+      }
       return made;
     } finally { if (this.#making.get(key) === tail) this.#making.delete(key); }
+  }
+
+  /** The `admit` hook's answer as a binding or a plain refusal (a throw, or an answer that is not an admission, is a refusal). */
+  async #admission(call: { readonly taskId: string; readonly projectId: string; readonly shared: string }): Promise<{ readonly binding: NonNullable<StartState["binding"]> } | { readonly refused: string }> {
+    let answer: WorkspaceAdmissionAnswer;
+    try { answer = await this.#options.admit!(call); } catch (error) { return { refused: `whether the task may use this repository could not be checked (${String((error as Error)?.message ?? error).slice(0, 160)})` }; }
+    if (answer?.admitted !== true) return { refused: String((answer as { reason?: unknown } | undefined)?.reason ?? "the task's access scope does not admit this repository").slice(0, 400) };
+    const b = answer.binding;
+    return { binding: { resourceId: b.resourceId, ...(b.repositoryId === undefined ? {} : { repositoryId: b.repositoryId }), locatorEpoch: b.locatorEpoch } };
+  }
+
+  /**
+   * Card P02 review: an integration or a landing writes the project's shared repository, so with `admit` given it is asked again first, on the shared folder the request would write. A binding unbound, moved, narrowed to
+   * reading or to some paths, or a shared folder that is no longer the task's admitted repository, refuses the request with nothing written (the checkout and its work stay). The other operations write only the task's own
+   * checkout and are not asked.
+   */
+  async #run(call: HostWorkspaceCall): Promise<HostWorkspaceOutcome> {
+    if (this.#options.admit !== undefined && call !== null && typeof call === "object" && (call.operation === "integration" || call.operation === "landing")) {
+      const where = this.locate(call);
+      if (where !== undefined) {
+        const answer = await this.#admission({ taskId: call.taskId, projectId: call.projectId, shared: where.shared });
+        if ("refused" in answer) return { ok: false, reason: `nothing was written to the shared repository: ${answer.refused}`.slice(0, 500) };
+      }
+    }
+    return this.host.run(call);
+  }
+
+  /**
+   * Writes the attempt's start record once (card P02): built in a private file and linked into place, so a crash leaves either no record or a whole one, and a second hand-out of the same attempt (a resume) keeps the first.
+   * A record that cannot be written refuses the workspace: an attempt does not start without a record of what it started from.
+   */
+  async #recordStart(call: { readonly taskId: string; readonly projectId: string; readonly attemptId: string }, made: { readonly checkout: string; readonly gitDir: string }, binding: StartState["binding"]): Promise<void> {
+    const dir = join(this.#options.root, call.projectId, call.taskId, "starts");
+    const file = join(dir, startFileName(call.attemptId));
+    if (existsSync(file)) return;
+    let temporary: string | undefined;
+    try {
+      const state = await this.#options.git.startState(made);
+      const sorted = [...state.entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      const digest = createHash("sha256").update(JSON.stringify([state.base, state.head, state.tree, sorted.map((e) => [e.code, e.path])])).digest("hex");
+      const record: StartState = {
+        attemptId: call.attemptId, taskId: call.taskId, projectId: call.projectId, recordedAt: this.#options.clock?.() ?? new Date().toISOString(), base: state.base, head: state.head, tree: state.tree,
+        files: sorted.slice(0, START_STATE_LIMITS.files), fileCount: sorted.length, digest, ...(binding === undefined ? {} : { binding }),
+      };
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      temporary = join(dir, `.start.${randomBytes(6).toString("hex")}.tmp`);
+      await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600, flag: "wx" });
+      try { await link(temporary, file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    } catch (error) {
+      throw new WorkspaceError("unavailable", `the workspace was not opened: the state the attempt starts from could not be recorded (${String((error as Error)?.message ?? error).slice(0, 160)})`);
+    } finally { if (temporary !== undefined) await rm(temporary, { force: true }).catch(() => undefined); }
+  }
+
+  /** The start record of an attempt of a task (card P02), or `undefined` when there is none here or it is not a whole record. */
+  async startState(call: { readonly taskId: string; readonly projectId: string; readonly attemptId: string }): Promise<StartState | undefined> {
+    if (!ATTEMPT.test(call.attemptId)) return undefined;
+    const dir = this.#taskDir(call);
+    if (dir === undefined) return undefined;
+    try {
+      const file = join(dir, "starts", startFileName(call.attemptId));
+      if (!lstatSync(file).isFile()) return undefined;
+      const parsed = JSON.parse(await readFile(file, "utf8")) as StartState;
+      return parsed.attemptId === call.attemptId && parsed.taskId === call.taskId && typeof parsed.digest === "string" && typeof parsed.tree === "string" ? parsed : undefined;
+    } catch { return undefined; }
   }
 
   async #ensure(call: { readonly taskId: string; readonly projectId: string }, shared: string): Promise<{ readonly checkout: string; readonly gitDir: string }> {
@@ -257,6 +364,11 @@ export class LocalWorkspaces {
 }
 
 const ATTEMPT = /^[A-Za-z0-9._:-]{1,120}$/;
+/**
+ * The file name of an attempt's start record (card P02 review): the attempt ID itself when it is lower-case letters, digits, `_`, `-` and inner dots, so it means the same file on every filesystem; otherwise (a capital letter,
+ * which a case-insensitive filesystem would fold onto another attempt's record, a `:`, which Windows reads as a stream name, or an end dot, which Windows drops) a digest of the ID. The record names its attempt either way.
+ */
+const startFileName = (attemptId: string): string => (/^[a-z0-9_-](?:[a-z0-9._-]*[a-z0-9_-])?$/.test(attemptId) ? `${attemptId}.json` : `~${createHash("sha256").update(attemptId).digest("hex").slice(0, 40)}.json`);
 /** The attempt last recorded for a task (a plain file beside the checkout, written by the host); anything else, or a name that is not plain, is no attempt. */
 function readAttempt(file: string): string | undefined {
   try {

@@ -1895,7 +1895,7 @@ Arguments:
 - `projectId`: the project
 - `branch`: optional: the branch whose queue is read (default: the project's landing branch)
 
-Result: `{ branch, landingBranch, items: [{ position, seq, submissionId, taskId, base, tree, author, queuedAt, queuedBy, replaced?, reserved? }], reservations: [{ taskId, seq, since, round, cap, escalatedRound? }], front?: { taskId, since, escalated?, waitingForApproval, idleSince?, holdMs, releaseMs, deferMs }, returns: [{ taskId, count, last: { at, submissionId, paths } }], others: [{ branch, entries }], partial? }`; `returns` counts, per task, the work returned to its author because it changed files that landed after it was approved (a repair cycle each, until the task lands); `branch` and `landingBranch` are empty while the project names no landing branch and none is given; `partial` when not every queue record was read for `others`.
+Result: `{ branch, landingBranch, items: [{ position, seq, submissionId, taskId, base, tree, author, queuedAt, queuedBy, replaced?, reserved?, held? }], reservations: [{ taskId, seq, since, round, cap, escalatedRound? }], front?: { taskId, since, escalated?, waitingForApproval, idleSince?, holdMs, releaseMs, deferMs }, returns: [{ taskId, count, last: { at, submissionId, paths } }], others: [{ branch, entries }], partial? }`; `returns` counts, per task, the work returned to its author because it changed files that landed after it was approved (a repair cycle each, until the task lands); `branch` and `landingBranch` are empty while the project names no landing branch and none is given; `partial` when not every queue record was read for `others`; `held` says, for the first ten entries, why one would not land now (its approval no longer holds as queued: for example a decision the task relies on or its criteria changed after the approval, or a newer review asked for changes).
 
 #### `integrator.lease.list`
 
@@ -8289,7 +8289,7 @@ Arguments:
 - `patchId` (optional): code: the patch ID
 - `refreshRound` (optional): code: leave it out: the controller counts the refresh rounds (card H12p) and records its own count; a different number is refused
 - `subject` (optional): review, qa, signoff: the submission it is about
-- `verdict` (optional): review: `approve`, `changes` or `reject`; an approval is refused while the task relies on an owner decision that was superseded or is disputed (revalidate the work first), cited or not
+- `verdict` (optional): review: `approve`, `changes` or `reject`; an approval is refused while the task relies on an owner decision that was superseded or is disputed (revalidate the work first), cited or not; an approval given earlier stops counting when a decision the task relies on (or one it cites) is superseded or disputed, the task comes to rely on another decision, or the contract's expected result or acceptance criteria change, until it is reviewed again
 - `criteriaRevision` (optional): review: the task contract version you judged against (a different current version is refused as stale; 0 when the task has none); leave out for a review that cites nothing
 - `decisions` (optional): review, with criteriaRevision: the IDs of the owner decisions in force you judged against; an approval that cites must name every decision the task relies on
 - `unmet` (optional): review, with criteriaRevision: a rejection names the owner requirement (a criterion or a decision) that is not met; required for a rejection that cites, refused on any other verdict

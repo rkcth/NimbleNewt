@@ -109,6 +109,8 @@ export function localHostBuilder(setup) {
     let composed;
     const workspaces = new worker.LocalWorkspaces({
       root: join(base, "work"), git, shared: (projectId) => shared.get(projectId),
+      // Card P02: a task's workspace opens only on a repository its project has bound with write access to all of it (the task's pinned binding when it names a repository), asked of the controller's records each time.
+      admit: (call) => ctx.controller().services.resources.workspaceAdmission({ taskId: call.taskId, projectId: call.projectId, folder: call.shared }),
       // The attempts with a call or model call in flight on this host (before the host is built none can run here). A request is never carried out under one; a busy check that throws refuses it.
       busy: () => (local === undefined ? [] : local.busyAttempts()),
       // The owner's landing policy for the task (card H12s), read fresh at each landing: the project's own landing branch (`project.branches.set`), else `workspace.landing.branch`; the permit is required unless the owner said

@@ -170,7 +170,7 @@ for (const backend of backends) {
       // The write is ordered against a contract change, a new link or a correction: the reads come back as revision checks.
       const reads = await readReviewCite(runner, { projectId: project, taskId: task }, { criteriaRevision: 2, decisions: [dA] });
       assert.deepEqual(reads.changes.map((c) => `${c.ref.kind}/${c.ref.id}`), [`task-contract/${task}`, `decision/${dA}`]);
-      assert.deepEqual((await readApprovalReliance(runner, task, undefined)).map((c) => `${c.ref.kind}/${c.ref.id}`), [`decision-reliance/${relianceIdOf(task)}`, `decision/${dA}`]);
+      assert.deepEqual((await readApprovalReliance(runner, task, undefined)).changes.map((c) => `${c.ref.kind}/${c.ref.id}`), [`decision-reliance/${relianceIdOf(task)}`, `decision/${dA}`]);
 
       // Access rules hold as before: an agent that cannot read the task finds no such task; the author never reviews its own work; a code or qa submission carries no citation.
       await refuses("not_found", () => review(stranger, { verdict: "approve", criteriaRevision: 2 }));

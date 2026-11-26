@@ -80,7 +80,7 @@ for (const backend of backends) {
   const proposal = async (c: Ctx, gapDays: number, tool = "git-commit") => {
     for (let i = 0; i < 3; i++) { if (i > 0 && gapDays > 0) now += gapDays * DAY; await c.approve(c.ann, tool); }
     await c.load.propose(c.owner, { commandId: cid("pr") });
-    const cls = { "git-commit": "commit", "git-push": "push", "git-merge": "merge", deploy: "deploy" }[tool];
+    const cls = { "git-commit": "commit", "update-database": "mutate", "send-message": "external-send", "publish-post": "publish" }[tool];
     return (await c.load.proposals(c.owner, "open")).find((x) => x.cls === cls)!;
   };
   const accept = async (c: Ctx, p: { id: string; revision: number }, extra: Record<string, unknown> = {}) => {
@@ -107,7 +107,7 @@ for (const backend of backends) {
     assert.equal(p.spanDays, 3);
   });
 
-  suite("what the owner said wins: a stated length is used as stated up to the longest option, a one-off is the shortest, an explicit length is used exactly and must be a whole number of days up to the longest option, and a reserved class is still never offered (card A07d)", async (c) => {
+  suite("what the owner said wins: a stated length is used as stated up to the longest option, a one-off is the shortest, an explicit length is used exactly and must be a whole number of days up to the longest option, and a reserved class is still never offered (card A07d; card P02: the other classes are a mutation, a send and a publication, since a push, a merge or a deployment is never proposed)", async (c) => {
     const p1 = await proposal(c, 0);
     assert.deepEqual([p1.defaultLength!.days, p1.defaultLength!.why], [30, "there is nothing to go on yet, so the usual 30 days"], "all at one moment: the 30-day fallback");
     const stated = await accept(c, p1, { statedDays: 2 });
@@ -115,15 +115,15 @@ for (const backend of backends) {
     assert.match(stated.why, /you asked for 2 days/);
     assert.equal((await c.load.proposals(c.owner, "accepted")).find((x) => x.id === p1.id)!.chosenLength!.source, "owner", "the owner's words are recorded as the owner's");
     // Another class: a stated length longer than the longest option is cut to it and says so.
-    const p2 = await proposal(c, 0, "git-push");
+    const p2 = await proposal(c, 0, "update-database");
     const cut = await accept(c, p2, { statedDays: 400 });
     assert.equal(cut.days, 90);
     assert.match(cut.why, /you asked for 400 days; the longest a standing rule runs is 90 days/);
-    const p3 = await proposal(c, 0, "git-merge");
+    const p3 = await proposal(c, 0, "send-message");
     assert.equal((await accept(c, p3, { oneOff: true })).days, 1);
     // An explicit length is used exactly (any whole number of days up to the longest option), and cannot be combined with what to derive it from.
     now += 100 * DAY;
-    const p4 = await proposal(c, 0, "deploy");
+    const p4 = await proposal(c, 0, "publish-post");
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 120 } as never), (e) => assert.equal(e.field, "days"));
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 14, oneOff: true } as never));
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p4.id, expectedRevision: p4.revision, days: 1.5 } as never));
@@ -264,8 +264,8 @@ for (const backend of backends) {
   });
 
   suite("a reserved tool, an unclassified one and an agent's approvals never produce a proposal", async (c) => {
-    await c.review.setPolicy(c.owner, { commandId: cid("rp"), projectId: c.a, policy: { mandatoryHuman: ["git-merge"] } });
-    for (let i = 0; i < 5; i++) { await c.approve(c.ann, "git-merge"); await c.approve(c.ann, "mystery-tool"); await c.approve(c.ann, "git-commit", c.rev); }
+    await c.review.setPolicy(c.owner, { commandId: cid("rp"), projectId: c.a, policy: { mandatoryHuman: ["update-database"] } });
+    for (let i = 0; i < 5; i++) { await c.approve(c.ann, "update-database"); await c.approve(c.ann, "mystery-tool"); await c.approve(c.ann, "git-commit", c.rev); }
     assert.deepEqual((await c.load.propose(c.owner, { commandId: cid("pr") })).opened, []);
     // The reservation counts as it stands now: once the tool is no longer reserved, past approvals can count.
     await c.review.setPolicy(c.owner, { commandId: cid("rp"), projectId: c.a, expectedRevision: 1, policy: {} });
@@ -287,19 +287,19 @@ for (const backend of backends) {
     assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-commit" })).via, "grant");
     assert.equal((await c.policy.evaluate({ principalId: "agent:ben", projectId: c.a, tool: "git-commit" })).mode, "owner", "only for the requester of the run");
     assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-commit", environment: "staging" })).mode, "owner", "only for the run's environment");
-    assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-push" })).mode, "owner", "only the class");
+    assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "update-database" })).mode, "owner", "only the class");
     const settled = (await c.load.proposals(c.owner, "accepted"))[0]!;
     await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p!.id, expectedRevision: settled.revision }), (e) => assert.match(e.message, /is accepted/));
     assert.deepEqual((await c.load.proposals(c.owner, "accepted")).map((x) => x.grantId), [grantId]);
     // Dismissal: a different run.
-    for (let i = 0; i < 3; i++) await c.approve(c.ben, "git-push");
+    for (let i = 0; i < 3; i++) await c.approve(c.ben, "update-database");
     await c.load.propose(c.owner, { commandId: cid("pr") });
     const [q] = await c.load.proposals(c.owner, "open");
     await refuses("invalid_command", () => c.load.dismiss(c.owner, { commandId: cid("ds"), proposalId: q!.id, expectedRevision: q!.revision, reason: "" }));
     await c.load.dismiss(c.owner, { commandId: cid("ds"), proposalId: q!.id, expectedRevision: q!.revision, reason: "I want to see these" });
     assert.deepEqual((await c.load.propose(c.owner, { commandId: cid("pr") })).opened, []);
     minutes(1);
-    for (let i = 0; i < 3; i++) await c.approve(c.ben, "git-push");
+    for (let i = 0; i < 3; i++) await c.approve(c.ben, "update-database");
     assert.deepEqual((await c.load.propose(c.owner, { commandId: cid("pr") })).opened, [], "quiet while the dismissal holds");
     minutes(31 * 24 * 60);
     assert.equal((await c.load.propose(c.owner, { commandId: cid("pr") })).opened.length, 1, "offered again after the quiet time, with the approvals so far");
@@ -458,21 +458,21 @@ for (const backend of backends) {
   });
 
   suite("an agent cannot get round a standing grant by deriving from it: approval grants are derived only by the owner, and a derived grant keeps its parent's terms and origin", async (c) => {
-    for (let i = 0; i < 3; i++) await c.approve(c.ann, "git-push");
+    for (let i = 0; i < 3; i++) await c.approve(c.ann, "update-database");
     await c.load.propose(c.owner, { commandId: cid("pr") });
     const p = (await c.load.proposals(c.owner, "open"))[0]!;
     const { grantId } = await c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: p.revision });
-    const push = (extra: object = {}) => c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "git-push", ...extra });
-    assert.equal((await push()).via, "grant");
-    await refuses("forbidden", () => c.grants.derive(c.ann, { commandId: cid("dv"), parentId: grantId, action: "approve.class.push", project: c.a, basis: "mine now" }));
+    const mutate = (extra: object = {}) => c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool: "update-database", ...extra });
+    assert.equal((await mutate()).via, "grant");
+    await refuses("forbidden", () => c.grants.derive(c.ann, { commandId: cid("dv"), parentId: grantId, action: "approve.class.mutate", project: c.a, basis: "mine now" }));
     // The owner deriving keeps the terms and the standing origin.
-    const d = await c.grants.derive(c.owner, { commandId: cid("dv"), parentId: grantId, action: "approve.class.push", project: c.a, basis: "narrower copy" });
+    const d = await c.grants.derive(c.owner, { commandId: cid("dv"), parentId: grantId, action: "approve.class.mutate", project: c.a, basis: "narrower copy" });
     const derived = (await c.grants.getGrant(d.id))!;
     assert.deepEqual([derived.terms, derived.rootSource], [{ environments: ["development"] }, "standing"]);
-    assert.equal((await push({ branchProtected: true })).mode, "owner");
-    assert.equal((await push({ environment: "staging" })).mode, "owner");
+    assert.equal((await mutate({ irreversible: true })).mode, "owner");
+    assert.equal((await mutate({ environment: "staging" })).mode, "owner");
     // A capability derived by the agent is still no approval.
-    const cap = await c.grants.derive(c.ann, { commandId: cid("dv"), parentId: grantId, action: "approve.class.push", project: c.a, basis: "x" }).catch(() => undefined);
+    const cap = await c.grants.derive(c.ann, { commandId: cid("dv"), parentId: grantId, action: "approve.class.mutate", project: c.a, basis: "x" }).catch(() => undefined);
     assert.equal(cap, undefined);
   });
 
@@ -491,7 +491,7 @@ for (const backend of backends) {
     assert.deepEqual([done!.via, done!.grantId], ["profile", undefined]);
     assert.deepEqual(await c.load.acceptBySwitching(c.owner, { commandId: id, proposalId: p!.id, expectedRevision: p!.revision }), { switched: true }, "a repeat is answered from the record");
     // Not on a derived installation, and a grant was not made.
-    for (let i = 0; i < 3; i++) await c.approve(c.ben, "git-push");
+    for (let i = 0; i < 3; i++) await c.approve(c.ben, "update-database");
     await c.load.propose(c.owner, { commandId: cid("pr") });
     const q = (await c.load.proposals(c.owner, "open"))[0]!;
     await refuses("invalid_command", () => c.load.acceptBySwitching(c.owner, { commandId: cid("sw"), proposalId: q.id, expectedRevision: q.revision, mode: "trial" }));
@@ -506,5 +506,59 @@ for (const backend of backends) {
     const cutDefault = await limited.accept(c.owner, { commandId: cid("ac"), proposalId: p1.id, expectedRevision: p1.revision } as never);
     assert.equal(cutDefault.days, 10, "the 30-day default is cut to the maximum");
     assert.match(cutDefault.why, /cut to the 10 days the owner setting grants\.maxDays allows/);
+  });
+
+  suite("card P02: approvals of a push, a merge or a deployment never become a proposal, in development or testing, however many there are", async (c) => {
+    for (const tool of ["git-push", "git-merge", "deploy"]) for (let i = 0; i < 5; i++) await c.approve(c.ann, tool);
+    assert.deepEqual((await c.load.propose(c.owner, { commandId: cid("pr") })).opened, [], "development");
+    await c.policy.set(c.owner, { commandId: cid("pe"), scope: c.a, environment: "testing" });
+    for (const tool of ["git-push", "git-merge", "deploy"]) for (let i = 0; i < 5; i++) await c.approve(c.ben, tool);
+    assert.deepEqual((await c.load.propose(c.owner, { commandId: cid("pr") })).opened, [], "testing");
+    assert.deepEqual(await c.load.proposals(c.owner), []);
+    // The rest of the machinery is unchanged: a commit run beside them is still proposed.
+    for (let i = 0; i < 3; i++) await c.approve(c.ann, "git-commit");
+    const opened = (await c.load.propose(c.owner, { commandId: cid("pr") })).opened;
+    assert.equal(opened.length, 1);
+    assert.equal((await c.load.proposals(c.owner, "open"))[0]!.cls, "commit");
+  });
+
+  for (const [cls, tool, words] of [["push", "git-push", "pushes"], ["merge", "git-merge", "merges"], ["deploy", "deploy", "deployments"]] as const) {
+    suite(`card P02: a stored proposal for ${words} (made before the rule) is never accepted, by a grant or by switching the profile, and no grant is made; it can still be dismissed`, async (c) => {
+      for (let i = 0; i < 3; i++) await c.approve(c.ann, "git-commit");
+      await c.load.propose(c.owner, { commandId: cid("pr") });
+      const open = (await c.load.proposals(c.owner, "open"))[0]!;
+      await c.rewrite(open.id, (b) => ({ ...b, cls, suggestion: { ...(b["suggestion"] as object), action: `approve.class.${cls}` } }));
+      const p = (await c.load.proposals(c.owner, "open"))[0]!;
+      const before = (await c.grants.list(c.owner)).items.length;
+      await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: p.revision }), (e) => { assert.match(e.message, new RegExp(`is for ${words}; a standing-rule proposal never authorizes a push, a merge or a deployment`)); assert.equal(e.field, "proposalId"); });
+      await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: p.revision, days: 7 } as never));
+      await refuses("invalid_command", () => c.load.acceptBySwitching(c.owner, { commandId: cid("sw"), proposalId: p.id, expectedRevision: p.revision }), (e) => assert.match(e.message, /never authorizes a push, a merge or a deployment/));
+      assert.equal((await c.policy.effective(c.owner))!.profile, "strict", "the profile was not switched");
+      assert.equal((await c.grants.list(c.owner)).items.length, before, "no grant was made");
+      assert.equal((await c.policy.evaluate({ principalId: "agent:ann", projectId: c.a, tool })).mode, "owner", `a ${cls} still asks the owner`);
+      await c.load.dismiss(c.owner, { commandId: cid("ds"), proposalId: p.id, expectedRevision: p.revision, reason: "not this" });
+      assert.equal((await c.load.proposals(c.owner, "dismissed")).length, 1);
+    });
+  }
+
+  suite("card P02: a proposal accepted before the rule, whose grant step never ran, is not finished into a grant for a push, merge or deployment; a proposal whose grant is not its own class's approval is refused", async (c) => {
+    for (let i = 0; i < 3; i++) await c.approve(c.ann, "git-commit");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const p = (await c.load.proposals(c.owner, "open"))[0]!;
+    // Accepted, length fixed, the grant step never ran (a failure between the steps), and its class since closed to proposals.
+    await c.rewrite(p.id, (b) => ({ ...b, cls: "merge", suggestion: { ...(b["suggestion"] as object), action: "approve.class.merge" }, state: "accepted", decidedBy: "owner:rob", decidedAt: new Date(now).toISOString(), chosenLength: { days: 30, source: "default", why: "the usual length" } }));
+    const before = (await c.grants.list(c.owner)).items.length;
+    await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: p.id, expectedRevision: p.revision }), (e) => assert.match(e.message, /is for merges/));
+    assert.equal((await c.grants.list(c.owner)).items.length, before);
+    // A wider or other action than the class it was drawn from.
+    for (let i = 0; i < 3; i++) await c.approve(c.ben, "git-commit");
+    await c.load.propose(c.owner, { commandId: cid("pr") });
+    const q = (await c.load.proposals(c.owner, "open"))[0]!;
+    for (const action of ["approve.*", "approve.class.*", "approve.class.push", "approve.tool.deploy"]) {
+      await c.rewrite(q.id, (b) => ({ ...b, suggestion: { ...(b["suggestion"] as object), action } }));
+      const now2 = (await c.load.proposals(c.owner, "open"))[0]!;
+      await refuses("invalid_command", () => c.load.accept(c.owner, { commandId: cid("ac"), proposalId: now2.id, expectedRevision: now2.revision }), (e) => assert.match(e.message, /not the approval of the class it was drawn from/, action));
+    }
+    assert.equal((await c.grants.list(c.owner)).items.length, before);
   });
 }

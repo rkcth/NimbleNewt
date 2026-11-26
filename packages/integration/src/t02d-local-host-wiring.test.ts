@@ -110,6 +110,8 @@ test("an agent's catalogue tool, called in the product's own local host, runs th
     const git = (...args: string[]): void => { execFileSync("git", ["-c", "core.hooksPath=/nonexistent-hooks", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args], { cwd: shared, stdio: "ignore" }); };
     git("init", "-q", "-b", "main"); writeFileSync(join(shared, "a.txt"), "a\n"); git("add", "-A"); git("commit", "-q", "-m", "first");
     const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden", repositories: [{ id: "garden", location: shared }] } as never)).id;
+    // Card P02: the workspace opens only on a repository the project has bound with write access to all of it.
+    await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: project, kind: "repository", label: "garden", locator: shared, repositoryId: "garden", access: "write" });
     const agent = (await s.agents.create(owner, { commandId: "ag1", friendlyName: "Ann", roles: ["author"] } as never)).id;
     const principalId = `agent:${agent}`;
     const ns = personalNamespace(principalId).replace(/^a_/, "a-");

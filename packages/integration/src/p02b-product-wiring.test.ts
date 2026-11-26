@@ -96,6 +96,8 @@ test("the product host backs up a task's work in progress with the secret store'
     const owner = await s.principals.authenticate(l.ownerToken);
     const api = (op: string, args: Record<string, unknown>, id?: string) => c.api.handle(l.ownerToken, { v: 1, op, ...(id === undefined ? {} : { commandId: id }), args } as never) as Promise<any>;
     const A = (await s.projects.createProject({ commandId: "pA", actor: owner.id, name: "Garden", repositories: [{ id: "garden", location: garden }] } as never)).id;
+    // Card P02: the workspace opens only on a repository the project has bound with write access to all of it.
+    await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: A, kind: "repository", label: "garden", locator: garden, repositoryId: "garden", access: "write" });
     const agent = (await s.agents.create(owner, { commandId: "ag1", friendlyName: "Ann", roles: ["author"] } as never)).id;
     const principalId = `agent:${agent}`;
     await s.principals.setGrants(owner, { commandId: "gr1", principalId, expectedRevision: (await s.principals.get(principalId))!.revision, grants: [...workGrants(A), ...[A].flatMap((project) => [{ action: "desk.write", project }, { action: "desk.read", project }, { action: "message.receive", project }])] });
