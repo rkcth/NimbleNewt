@@ -41,7 +41,11 @@ export function environmentsRequested(flag, envValue) {
 export const hostBaseOf = (dataDir) => join(dirname(resolve(dataDir)), `${basename(resolve(dataDir))}.host`);
 
 /**
- * @param {{ root: string, load?: (pkg: string) => Promise<any> }} setup `root` is the NimbleNewt checkout (built); `load` gives a built package (default: its dist/index.js).
+ * @param {{ root: string, load?: (pkg: string) => Promise<any>, prepareCheckout?: (made: { checkout: string, taskId: string, projectId: string, attemptId: string }) => Promise<void>, bridgeFilter?: (order: any, request: { op: string, callId: string, args?: object }) => ({ ok: false, code: string, message: string } | undefined) }} setup
+ *   `root` is the NimbleNewt checkout (built); `load` gives a built package (default: its dist/index.js).
+ *   Card W09 (the bench through the real worker; both absent in the product): `prepareCheckout` is awaited after the task's checkout is made and before the attempt's process starts (the bench copies the repository's
+ *   installed dependencies in; a throw refuses the attempt's start); `bridgeFilter` is asked first for each bridge request of an attempt and a refusal it returns is the answer (the controller is not asked), so a bench variant
+ *   can run without the continuation (it refuses `turn.continue`, which the worker reads as no nudge, as from an older controller).
  * @returns {(context: any) => Promise<any>} a `LocalHostBuilder` for `launch({ localHost })`.
  */
 export function localHostBuilder(setup) {
@@ -170,6 +174,7 @@ export function localHostBuilder(setup) {
                 const home = join(base, "attempts", order.attemptId, "home");
                 const scratch = join(base, "attempts", order.attemptId, "scratch");
                 mkdirSync(home, { recursive: true, mode: 0o700 }); mkdirSync(scratch, { recursive: true, mode: 0o700 });
+                if (setup.prepareCheckout !== undefined) await setup.prepareCheckout({ checkout: made.checkout, taskId: String(order.taskId), projectId: String(order.projectId), attemptId: String(order.attemptId) });
                 return { checkout: made.checkout, gitDir: made.gitDir, home, scratch };
               },
               model: async (order) => {
@@ -180,6 +185,8 @@ export function localHostBuilder(setup) {
               },
               namespaceId: (order) => services.namespaceId(order),
               bridge: (order, call, token, request) => {
+                const refused = setup.bridgeFilter?.(order, request);
+                if (refused !== undefined) return Promise.resolve(refused);
                 if (services.bridge === undefined) throw new Error("the tool bridge is not available");
                 return services.bridge(order, call, token, request);
               },
