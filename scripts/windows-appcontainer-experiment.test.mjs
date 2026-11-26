@@ -2928,3 +2928,20 @@ test("A03b Verify-with-a-real-account: the hosted job makes a throw-away marked 
   // never on the own runner
   assert.ok(!/installer_verify_account|New-LocalUser|nnprobe/.test(own), "the own-runner job never makes a user");
 });
+
+test("A03b real Install/Verify/Uninstall step: hosted only, after the staging, never in the own-runner job, removal only by the generated exact name", () => {
+  const wf = readFileSync(join(root, ".github", "workflows", "windows-appcontainer-experiment.yml"), "utf8");
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  const at = hosted.indexOf("id: installer_real\n");
+  assert.ok(at > hosted.indexOf("id: stage") && at > hosted.indexOf("name: windows-appcontainer-launchers"), "after the staging and the launchers upload: a failure cannot stop them");
+  assert.ok(hosted.indexOf("id: installer_real_cleanup") > at && hosted.indexOf("name: windows-appcontainer-hosted") > hosted.indexOf("id: installer_real_cleanup"));
+  const step = hosted.slice(hosted.lastIndexOf("\n      - name:", at), hosted.indexOf("id: installer_real_cleanup")).replace(/^\s*#.*$/gm, "");
+  const guard = step.indexOf("$env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'");
+  assert.ok(guard > 0 && guard < step.indexOf("Run-Installer '") && guard < step.indexOf("New-Item"), "the guard comes before any change");
+  assert.ok(/\n\s+if: always\(\)\n/.test(step) && !/continue-on-error/.test(step), "a gate that always runs");
+  assert.ok(step.includes("'nnprobe' + $tag") && step.includes("-Confirm:`$false") && step.includes("Uninstall left") && step.includes("} finally {"));
+  assert.deepEqual([...step.matchAll(/Remove-LocalUser[^\n]*/g)].map((m) => m[0].replace(/[\s}]+$/, "")), ["Remove-LocalUser -Name $name"], "the user is removed only by its exact generated name");
+  assert.ok(!/installer_real|nn-real-|nnprobe/.test(own), "never in the own-runner job");
+  assert.ok(wf.includes("permissions:\n  contents: read\n"), "permissions unchanged");
+});

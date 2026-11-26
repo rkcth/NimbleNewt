@@ -615,3 +615,118 @@ test("A03b: the hosted workflow's real-account step is the only place a user is 
   assert.equal([...wf.matchAll(/^\s*permissions:/gm)].length, 1, "one permissions block");
   assert.ok(wf.includes("permissions:\n  contents: read\n"), "permissions unchanged");
 });
+
+// ------------------------------------------------------------------------------------------------ A03b: a REAL Install, Verify and Uninstall on the disposable hosted runner
+// The owner's first real runs found two faults the text tests could not reach, and the rest of Verify and ALL of Uninstall have never run anywhere. The hosted job now installs for real onto a throw-away
+// account and throw-away folders, checks the machine, uninstalls and checks that nothing is left. Linux cannot run it; these tests pin the shape of the step (and of the offline fixes made while reading the paths).
+
+test("A03b real run: Uninstall tolerates 'right not held', only a process that runs THIS launcher blocks it, and Verify reads group members with a fallback (offline fixes, text-checked)", () => {
+  assert.ok(ps.includes("s != 0xC0000060") && /public static void Remove\(string sid[^]*?0xC0000034 && s != 0xC0000060/.test(ps), "Remove tolerates the account having no such right as well as no rights record");
+  const un = fn("Invoke-Uninstall");
+  assert.ok(un.includes("$running = @(Invoke-Read { Get-Process -Name 'nn-launcher'") && un.includes("Test-SamePath $path $launcher") && un.includes("$running.Count -gt 0"), "path-aware, and a count rather than the truth of an array");
+  const g = fn("Test-GroupHasUser");
+  assert.ok(g.includes("Invoke-Read { Get-LocalGroupMember -Group $Group -ErrorAction Stop }") && g.includes("catch {") && g.includes("net.exe localgroup $Group.Name"), "a group the cmdlet cannot read is read with net localgroup, never skipped");
+  assert.ok(fn("Invoke-Verify").includes("Where-Object { Test-GroupHasUser $_ $user }"), "Verify uses the helper");
+  assert.ok(!/Get-LocalGroupMember[^\n]*SilentlyContinue/.test(code), "a failing group read is no longer silently treated as 'not a member'");
+});
+
+const REAL_FROM = "id: installer_real\n";
+function realStepParts(wf) {
+  const hosted = wf.slice(wf.indexOf("  hosted:"), wf.indexOf("  own-runner:"));
+  const own = wf.slice(wf.indexOf("  own-runner:"));
+  const a = hosted.lastIndexOf("\n      - name:", hosted.indexOf(REAL_FROM)) + 1;
+  const b = hosted.indexOf("\n      # Safety net for the step above", a);
+  const c = hosted.indexOf("\n      - uses: actions/upload-artifact", b);
+  return { hosted, own, step: hosted.slice(a, b), clean: hosted.slice(b, c), before: hosted.slice(0, a), after: hosted.slice(c) };
+}
+const noComments = (t) => t.replace(/^\s*#.*$/gm, "");
+
+/** Every way the real-run step may be wrong that a Linux test can see; an empty list is a pass. */
+function realStepProblems(wf) {
+  const problems = [];
+  const bad = (cond, what) => { if (!cond) problems.push(what); };
+  if (!wf.includes(REAL_FROM)) return ["the step is missing"];
+  const { hosted, own, step, clean, before, after } = realStepParts(wf);
+  const text = noComments(step);
+  const ctext = noComments(clean);
+  // position: after the staging and the launchers upload (so a failure cannot stop them), before the last upload
+  bad(before.includes("id: stage") && before.includes("name: windows-appcontainer-launchers") && after.includes("name: windows-appcontainer-hosted"), "ordered after staging and the launchers upload, before the last upload");
+  bad(/shell: powershell\n/.test(step) && /\n\s+if: always\(\)\n/.test(step) && /timeout-minutes: \d+/.test(step), "Windows PowerShell 5.1, always(), with a time-out");
+  bad(!/continue-on-error/.test(step + clean) && !/uses:/.test(step + clean) && !/permissions:/.test(step + clean), "a gate; pins and permissions untouched");
+  // the hosted-only guard (the same two variables as the throw-away-account step) comes before ANY change
+  const guard = text.indexOf("$env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'");
+  const firstChange = Math.min(...["New-Item", "AppendAllText", "Run-Installer '", "Copy-Item", "Remove-LocalUser"].map((s) => { const i = text.indexOf(s); return i < 0 ? Infinity : i; }));
+  bad(guard >= 0 && guard < firstChange && text.slice(guard, guard + 260).includes("exit 1"), "the hosted-only guard refuses before any change");
+  // a throw-away name and throw-away folders named NimbleNewt under RUNNER_TEMP, never the runner's own
+  bad(text.includes("'nnprobe' + $tag") && text.includes("New-Object byte[] 6") && text.includes("abcdefghijklmnopqrstuvwxyz0123456789") && text.includes("RandomNumberGenerator]::Create()"), "random nnprobe name");
+  bad(text.includes("$root = Join-Path $env:RUNNER_TEMP ('nn-real-' + $tag)") && text.includes("$d1 = Join-Path $root 'prog\\NimbleNewt'") && text.includes("$d2 = Join-Path $root 'data\\NimbleNewt'"), "folders named NimbleNewt under RUNNER_TEMP");
+  bad(!/-InstallDir\s+\$env:ProgramFiles|-DataDir\s+\$env:ProgramData/.test(text) && !/'nimblenewt-worker'/.test(text), "never the default account or the runner's own folders");
+  // every real Install and Uninstall is non-interactive and runs as a command (-Confirm:$false is not parsed as a switch value by -File)
+  const runs = [...text.matchAll(/Run-Installer '([a-z0-9-]+)' "([^"\n]*)"/g)];
+  const mutating = runs.filter((r) => /-Action (Install|Uninstall)/.test(r[2]));
+  bad(mutating.length === 4 && mutating.every((r) => r[2].includes("-Confirm:`$false")), "all four Install/Uninstall runs pass -Confirm:$false");
+  bad(text.includes("-Command $cmd") && !/-File/.test(text), "run with -Command, not -File");
+  // the sequence and its proofs
+  const order = ["Run-Installer 'install'", "Run-Installer 'verify-1'", "Run-Installer 'install-again'", "Run-Installer 'verify-2'", "Run-Installer 'uninstall-wrong-folder'", "Run-Installer 'uninstall' ", "Run-Installer 'verify-3'"].map((s) => text.indexOf(s));
+  bad(order.every((v, i) => v >= 0 && (i === 0 || v > order[i - 1])), "Install, Verify, Install again, refused Uninstall, Uninstall, Verify in that order");
+  for (const part of ["Install finished", "Uninstall finished", "RESULT: everything this script manages is as designed.", "FAIL  the account exists", "No manifest at", "PropertyNotFound", "cannot be found on this object", "$expectedFail", "Fail \"Uninstall left $p\"", "Win32_UserProfile", "Get-Rights $sid", "Uninstall left the account", "the local users differs", "Get-LocalUser | ForEach-Object", "Administrators differ", "worker.env is not exactly the four", "secret-looking", "the manifest does not name this install", "the account is a member of Administrators", "is not a member of Users", "the placed launcher differs", "AreAccessRulesProtected", "ChangePermissions, TakeOwnership"]) bad(text.includes(part) || (part === "the local users differs" && text.includes("the list of local users differs")), `asserts: ${part}`);
+  bad(text.includes("$expectedFail = @()"), "no expected failure is allowed in Verify after a real Install");
+  // the password never exists in this step
+  bad(!/New-LocalUser|SecureString|ConvertFrom-SecureString|-AsPlainText|Password/i.test(text), "no password in the step");
+  // clean-up: in finally, by the exact name and folder, no wildcard, and it fails the step when it had work to do
+  const fin = text.slice(text.indexOf("} finally {"));
+  bad(fin.includes("^nnprobe[a-z0-9]{6}$") && fin.includes("Remove-LocalUser -Name $name") && fin.includes("Wipe $root") && fin.includes("Uninstall left $($left -join '; ')"), "finally removes by the exact name and folder and reports");
+  const removals = [...(text + ctext).matchAll(/Remove-LocalUser[^\n]*/g)].map((m) => m[0]);
+  bad(removals.length === 2 && removals.every((r) => /^Remove-LocalUser -Name \$name( \})?(\s*\})?/.test(r)), "Remove-LocalUser only by the exact generated name");
+  bad(!/Remove-Item[^\n]*[*?]|rmdir[^\n]*[*?]|Get-LocalUser[^\n]*(-Name|-Filter)[^\n]*\*|nnprobe\*/.test(text + ctext), "no wildcard removal");
+  // the safety net
+  bad(/id: installer_real_cleanup\n[^]*?if: always\(\)/.test(clean) && ctext.includes("$env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted'") && ctext.includes("'^nnprobe[a-z0-9]{6}$'") && ctext.includes("Uninstall left") && clean.includes("steps.installer_real.outputs.name") && clean.includes("steps.installer_real.outputs.root"), "the follow-up step: always(), guarded, exact names, fails when something was left");
+  // never in the own-runner job; one place makes a user
+  bad(!/installer_real|nn-real-|nnprobe|-Action (Install|Uninstall)/.test(own), "not in the own-runner job");
+  void hosted;
+  return problems;
+}
+
+test("A03b real run: the hosted job's real Install, Verify, second Install, refused Uninstall and Uninstall step has the pinned shape", () => {
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  assert.deepEqual(realStepProblems(wf), []);
+  const { step } = realStepParts(wf);
+  assert.ok(wf.includes("ORDER: it is the LAST step before the final"), "the notes say where it sits and why");
+  // Verify after a real Install must name no expected failure: the installer only REPORTS the unsigned launcher and the missing worker task
+  assert.ok(step.includes("$expectedFail = @()"));
+  assert.ok(ps.includes("Worker task '$WorkerTaskName'") && ps.includes("not registered (see README.md") && ps.includes("WARNING: installing an UNSIGNED launcher") && !/Check[^\n]*(signature|UNSIGNED)/.test(code), "the two documented non-failures are printed lines, not checks");
+  assert.equal(wf.match(/^\s*permissions:/gm).length, 1);
+});
+
+test("A03b real run: the pin catches at least ten deliberate breakages, and the workflow file on disk is untouched by them", async () => {
+  const { createHash } = await import("node:crypto");
+  const file = join(root, ".github", "workflows", "windows-appcontainer-experiment.yml");
+  const sha = () => createHash("sha256").update(readFileSync(file)).digest("hex");
+  const before = sha();
+  const wf = read(".github", "workflows", "windows-appcontainer-experiment.yml");
+  const mutations = [
+    ["no hosted-only guard", (s) => s.replace("$env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { Write-Output '::error::this step installs a real", "$env:GITHUB_ACTIONS -eq 'x') { Write-Output '::error::this step installs a real")],
+    ["Uninstall without -Confirm:$false", (s) => s.replace('"-Action Uninstall $paths -Confirm:`$false"', '"-Action Uninstall $paths"')],
+    ["a prompt-able second Install", (s) => s.replace('-AllowUnsigned $paths -Confirm:`$false"\n            Assert-Run $i2', '-AllowUnsigned $paths"\n            Assert-Run $i2')],
+    ["the safety net not always()", (s) => s.replace('id: installer_real_cleanup\n        shell: powershell\n        if: always()', 'id: installer_real_cleanup\n        shell: powershell\n        if: success()')],
+    ["a wildcard account removal", (s) => s.replace("Remove-LocalUser -Name $name } }", "Remove-LocalUser -Name nnprobe* } }")],
+    ["the step is allowed to fail silently", (s) => s.replace('id: installer_real\n        shell: powershell', 'id: installer_real\n        continue-on-error: true\n        shell: powershell')],
+    ["the step also runs on the own runner", (s) => s + "\n      - run: echo installer_real\n"],
+    ["the default account", (s) => s.replace("$name = 'nnprobe' + $tag", "$name = 'nimblenewt-worker'")],
+    ["the runner's own Program Files", (s) => s.replace("$d1 = Join-Path $root 'prog\\NimbleNewt'", "$d1 = Join-Path $env:ProgramFiles 'NimbleNewt'")],
+    ["run with -File", (s) => s.replace("-Command $cmd", "-File $f")],
+    ["no check that nothing is left", (s) => s.replace('Fail "Uninstall left $p"', 'Write-Host "left $p"')],
+    ["no leftover report in finally", (s) => s.replace("Uninstall left $($left -join '; ') (removed by the cleanup)", "left something")],
+    ["a password in the step", (s) => s.replace("$script:failed = $false", "$script:failed = $false; $secure = ConvertTo-SecureString 'x' -AsPlainText -Force")],
+    ["Verify may name an expected failure", (s) => s.replace("$expectedFail = @()", "$expectedFail = @('FAIL  the account exists')")],
+    ["the step moved before the staging", (s) => { const a = s.indexOf("      # Card A03b, the owner's first real runs found two faults"); const b = s.indexOf("      # Safety net for the step above"); const c = s.indexOf("      - uses: actions/upload-artifact", b); const blk = s.slice(a, c); return s.replace(blk, "").replace("      # The programs the own-runner job runs", blk + "      # The programs the own-runner job runs"); }],
+  ];
+  let caught = 0;
+  for (const [what, mutate] of mutations) {
+    const changed = mutate(wf);
+    assert.notEqual(changed, wf, `the mutation applies: ${what}`);
+    if (realStepProblems(changed).length > 0) caught++; else assert.fail(`not caught: ${what}`);
+  }
+  assert.ok(caught >= 10);
+  assert.equal(sha(), before, "the workflow file on disk was not touched");
+});
