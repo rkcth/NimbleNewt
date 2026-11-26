@@ -1,6 +1,6 @@
 import type { CommandRunner } from "../domain/runner.js";
 import { relianceIdOf, type DisputeBody, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
-import { basisKey } from "./review-citation.js";
+import { basisKey, overriddenFor } from "./review-citation.js";
 
 /**
  * What an approval was judged against (card Q02: "changed dependency invalidates affected review", "work bound to a superseded decision fails review"), kept with the approval in the subject's verdict list:
@@ -66,6 +66,9 @@ export async function approvalOutdated(runner: Pick<CommandRunner, "get">, taskI
     const why = await gone(c.id, d);
     if (why !== undefined) return why;
     if (d!.version !== c.version) return `owner decision ${c.id} it cites is now at version ${d!.version}, not ${c.version}`;
+    // A project-wide decision it cites that the task's own decision now overrides (card C08): in force for the other tasks, not for this one.
+    const over = await overriddenFor(runner, taskId, d!);
+    if (over.by !== undefined) return `owner decision ${c.id} it cites no longer applies to this task: the owner's task-level decision ${over.by} overrides it`;
   }
   // The criteria: the version it was judged against (kept with it, or cited), else the one in force at its time.
   const now = (await runner.get("task-contract", taskId))?.body as unknown as (Record<string, unknown> & { version?: number }) | undefined;

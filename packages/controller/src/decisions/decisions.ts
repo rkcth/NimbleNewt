@@ -86,7 +86,7 @@ export interface DecisionDeps {
 const newest = (live: readonly TopicEntry[], taskId: string | undefined): TopicEntry | undefined =>
   live.filter((e) => e.taskId === undefined || e.taskId === taskId).reduce<TopicEntry | undefined>((m, e) => (m === undefined || e.version > m.version ? e : m), undefined);
 
-class NoChange extends Error { constructor(readonly decisionId: string) { super("no change"); } }
+class NoChange extends Error { constructor(readonly decisionId: string, readonly overrides: readonly TopicEntry[] = []) { super("no change"); } }
 /** A question that does not need asking: the topic is decided, disputed, or already has an open question. */
 class Settled extends Error { constructor(readonly questionId?: string) { super("settled"); } }
 
@@ -179,7 +179,11 @@ export class DecisionService implements DecisionGuard {
         return { recorded: true, id, version: d.version, superseded: [...d.supersedes], ...(ov === undefined ? {} : { overridden: ov }), ...(d.disputeId === undefined ? {} : { disputeId: d.disputeId }), propagation, replayed: true };
       }
     } catch (error) {
-      if (error instanceof NoChange) return { recorded: false, reason: "the owner already decided exactly this; it stands, and nothing needs to be asked again", decisionId: error.decisionId };
+      if (error instanceof NoChange) {
+        const o = error.overrides;
+        const still = o.length === 0 ? "" : `. For ${o.length === 1 ? `task ${o[0]!.taskId}` : `tasks ${o.map((e) => e.taskId).join(", ")}`} the owner's own task-level decision${o.length === 1 ? "" : "s"} on this topic (${o.map((e) => e.id).join(", ")}) still override${o.length === 1 ? "s" : ""} it; to have ${o.length === 1 ? "that task" : "those tasks"} follow the project-wide decision, decide again for each such task, or change the project-wide decision`;
+        return { recorded: false, reason: `the owner already decided exactly this; it stands, and nothing needs to be asked again${still}`, decisionId: error.decisionId };
+      }
       throw error;
     }
     let propagation: "none" | "done" | "pending" = "none";
@@ -202,7 +206,8 @@ export class DecisionService implements DecisionGuard {
     const top = relevant.reduce<TopicEntry | undefined>((m, e) => (m === undefined || e.version > m.version ? e : m), undefined);
     if (relevant.some((e) => e.state === "disputed")) invalid("topic", `"${a.topic}" has an unresolved conflict between the owner's instructions; the owner chooses first (resolveDispute)`);
     const sameScope = exact === undefined ? undefined : body<OwnerDecisionBody>(await this.#runner.get("decision", exact.id));
-    if (sameScope !== undefined && normalText(sameScope.statement) === normalText(a.statement) && sameScope.gate === a.gate) throw new NoChange(exact!.id);
+    // The same project-wide decision said again leaves the task-level decisions that override it in force for their tasks: the answer says so, rather than only that it stands (card C08).
+    if (sameScope !== undefined && normalText(sameScope.statement) === normalText(a.statement) && sameScope.gate === a.gate) throw new NoChange(exact!.id, a.taskId === undefined ? live.filter((e) => e.taskId !== undefined) : []);
     if (topic.entries.length >= DECISION_LIMITS.entriesPerTopic) throw new DomainError("unavailable", `the topic "${a.topic}" already has ${DECISION_LIMITS.entriesPerTopic} recorded versions`);
     const version = topic.entries.length + 1;
     const decisionRef: AggregateRef = { kind: "decision", id: a.id };
@@ -715,6 +720,13 @@ export class DecisionService implements DecisionGuard {
         const followUps = [...rel.followUps];
         const links: LinkBody[] = [];
         for (const l of rel.links) {
+          // A dispute the owner settled by keeping a project-wide decision over a task-level one that had overridden it for this task: the link that override marked counts again (the work was made on the
+          // decision chosen, as an approval judged on a decision a dispute kept counts again).
+          if (rec.reason === "resolved" && l.decisionId === rec.newId && l.state === "superseded" && l.because !== undefined && l.supersededBy !== undefined && losing.has(l.supersededBy)) {
+            const { supersededBy: _by, markedAt: _at, because: _why, ...kept } = l;
+            links.push({ ...kept, state: "current" });
+            continue;
+          }
           // A link this same decision already marked (an override marks its task's links in the recording commit) still gets its actions' follow-ups here; one marked by an earlier decision is left as it is.
           const markedHere = l.state === "superseded" && rec.newId !== undefined && l.supersededBy === rec.newId;
           if (!losing.has(l.decisionId) || (l.state === "superseded" && !markedHere)) { links.push(l); continue; }

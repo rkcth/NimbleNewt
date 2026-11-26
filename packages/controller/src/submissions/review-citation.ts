@@ -1,7 +1,7 @@
 import { DomainError } from "../domain/errors.js";
 import { text } from "../domain/model.js";
 import type { CommandRunner } from "../domain/runner.js";
-import { relianceIdOf, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
+import { relianceIdOf, topicIdOf, type OwnerDecisionBody, type RelianceBody, type TopicBody } from "../decisions/records.js";
 import { redactText } from "../security/redact.js";
 import type { Change } from "../storage/types.js";
 
@@ -33,6 +33,18 @@ export function shapeReviewCite(c: { readonly criteriaRevision?: unknown; readon
 }
 
 /**
+ * The owner's task-level decision that overrides a project-wide decision for this one task (card C08): a decision of the task on the same topic that is not superseded. The project-wide decision stays in force for
+ * the other tasks, not for this one, so a verdict or QA evidence of this task is not judged against it, and one that was stops counting. Undefined `by` for a task-level decision or when the task has none on the
+ * topic. `check` is the topic record's revision, so a write that relies on the answer is ordered against a decision recorded meanwhile.
+ */
+export async function overriddenFor(runner: Pick<CommandRunner, "get">, taskId: string, d: OwnerDecisionBody): Promise<{ readonly by?: string; readonly check?: Change }> {
+  if (d.taskId !== undefined) return {};
+  const found = await runner.get("decision-topic", topicIdOf(d.projectId, d.topic));
+  const by = ((found?.body as unknown as TopicBody | undefined)?.entries ?? []).find((e) => e.taskId === taskId && e.state !== "superseded")?.id;
+  return { ...(by === undefined ? {} : { by }), ...(found === undefined ? {} : { check: { type: "check", ref: { kind: "decision-topic", id: found.id }, expectedRevision: found.revision } satisfies Change }) };
+}
+
+/**
  * Reads what a cited verdict names, as the QA evidence record does: the task contract must still be at the cited version (else `stale_revision`: read the current criteria and judge again), and each decision must be
  * one of the task or its project and in force. Returns the version of each decision cited and the checks that keep the write from running on a contract or a decision that changed meanwhile.
  */
@@ -47,8 +59,10 @@ export async function readReviewCite(runner: Pick<CommandRunner, "get">, scope: 
     const body = got?.body as unknown as OwnerDecisionBody | undefined;
     if (got === undefined || body === undefined || body.projectId !== scope.projectId || (body.taskId !== undefined && body.taskId !== scope.taskId)) bad("decisions", `${d} is not a decision of this task or its project`);
     if (body!.state !== "active") bad("decisions", `${d} is ${body!.state}${body!.supersededBy === undefined ? "" : ` (the current one is ${body!.supersededBy})`}: a verdict is judged against the decisions in force`);
+    const over = await overriddenFor(runner, scope.taskId, body!);
+    if (over.by !== undefined) bad("decisions", `${d} is the project-wide decision, but for this task the owner's task-level decision ${over.by} overrides it: a verdict is judged against the decisions in force for the task`);
     versions[d] = body!.version;
-    changes.push({ type: "check", ref: { kind: "decision", id: d }, expectedRevision: got!.revision });
+    changes.push({ type: "check", ref: { kind: "decision", id: d }, expectedRevision: got!.revision }, ...(over.check === undefined ? [] : [over.check]));
   }
   return { versions, changes };
 }

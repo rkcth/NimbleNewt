@@ -19,7 +19,7 @@ import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../h
 import { relianceOf } from "../security/reliance.js";
 import { holdsNow, idleEnd, lapsedFromNonUse, type GrantRecordBody } from "../security/grants.js";
 import { relianceHead, relianceLines, relianceSummary } from "./reliance-words.js";
-import { quotedLine } from "../decisions/records.js";
+import { quotedLine, relianceIdOf, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
@@ -3738,6 +3738,29 @@ export class StatusService {
   // ---- one task ------------------------------------------------------------------------------------------------------------
 
   /** Everything the records say about one task, for a caller who may read it; undefined otherwise (as for a task that does not exist). */
+  /**
+   * The task's work that relies on an owner decision no longer in force for it (card C08), as the decision guard reads it: superseded, disputed, or a project-wide decision the owner overrode for this task alone.
+   * Its next action waits until the work is revalidated. At most 10 lines, then how many more.
+   */
+  async #decisionHolds(taskId: string): Promise<Line[]> {
+    const found = await this.#runner.get("decision-reliance", relianceIdOf(taskId));
+    const rel = found?.body as unknown as RelianceBody | undefined;
+    if (found === undefined || rel === undefined) return [];
+    const out: Line[] = [];
+    let more = 0;
+    for (const l of rel.links ?? []) {
+      const got = await this.#runner.get("decision", l.decisionId);
+      const d = got?.body as unknown as OwnerDecisionBody | undefined;
+      const why = d === undefined ? "cannot be read" : d.state === "disputed" ? "is disputed (two of your instructions conflict) until you choose" : d.state !== "active" ? `was superseded${d.supersededBy === undefined ? "" : ` by ${d.supersededBy}`}`
+        : l.state !== "current" ? (l.because === undefined ? `no longer applies to it${l.supersededBy === undefined ? "" : ` (superseded by ${l.supersededBy})`}` : `no longer applies to it: ${l.because}`) : undefined;
+      if (why === undefined) continue;
+      if (out.length >= 10) { more++; continue; }
+      out.push(line(`Its next action waits: its ${l.subject.kind} ${shown(l.subject.id, 80)} relies on your decision ${l.decisionId}${l.topic ? ` on ${quoted(l.topic, 80)}` : ""}, which ${why}. The way out: its agent (or you) revalidates the work onto the decision that governs the task now (decision.revalidate), and an earlier approval counts again only after a new review.`, cite("decision-reliance", found.id, found.revision), ...(got === undefined ? [] : [cite("decision", got.id, got.revision)]), cite("task", taskId)));
+    }
+    if (more > 0) out.push(line(`${more} more of its links rely on decisions no longer in force for it.`, cite("decision-reliance", found.id, found.revision), cite("task", taskId)));
+    return out;
+  }
+
   async task(by: Principal, taskId: string): Promise<TaskStatus | undefined> {
     const id = checkTaskId(taskId);
     const found = await this.#runner.get("task", id);
@@ -3800,6 +3823,7 @@ export class StatusService {
     }
     for (const b of blockers) lines.push(line(`It is held up by ${b.words}: ${b.summary} The way out: ${b.route}.`, cite("blocker", b.id, b.revision), cite("task", id)));
     for (const b of advice) lines.push(line(`Advice, not a blocker: ${b.summary} This outcome was decided by the owner, so a preference does not stop it.`, cite("blocker", b.id, b.revision), cite("task", id)));
+    lines.push(...(await this.#decisionHolds(id)));
     if (body.state === "blocked" && pending.every((p) => p.kind !== "wait") && blockers.length === 0 && advice.length === 0)
       lines.push(line("It is blocked, but no record says why. That is itself a problem to look at.", cite("task", id, found.revision)));
     for (const c of concerns.suspected) lines.push(line(`Suspected, not confirmed: ${c.detail}`, cite("stall-concern", c.id), cite("task", id)));

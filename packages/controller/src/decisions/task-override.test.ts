@@ -16,6 +16,9 @@ import { PauseService } from "../lifecycle/index.js";
 import type { Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
 import { QaEvidenceService, SubmissionService } from "../submissions/index.js";
+import { StatusService } from "../status/index.js";
+import { BlockerService } from "../domain/blockers.js";
+import { WaitService } from "../domain/waits.js";
 import { DecisionService, type DecisionDeps, type RecordDecision } from "./index.js";
 import { propagationIdOf, relianceIdOf } from "./records.js";
 
@@ -261,5 +264,94 @@ for (const backend of backends) {
     r.script[t3text] = [cmd({ category: "decision", topic: "database", taskTitle: "third task", statement: "the database will be MySQL", wording: "For the third task the database will be MySQL instead" }, "For the third task the database will be MySQL instead")];
     const t3 = (await chat.submit(r.w.ownerToken, { messageId: "m-o3", text: t3text })).outcomes[0] as Outcome;
     assert.match(JSON.stringify(t3.preview), /None of this task's work is linked to the project-wide decision, so nothing of it stops counting/);
+  });
+
+  suite("the project-wide decision said again while a task overrides it records nothing and says which task still follows its own decision; a review or QA evidence cannot cite the overridden decision, and one that cited it without a link stops counting", async (r) => {
+    const wide = await r.recorded();
+    const over = await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite", basedOn: 1 });
+    const again = await r.decide({ basedOn: 2 });
+    assert.equal(again.recorded, false);
+    assert.match((again as { reason: string }).reason, new RegExp(`it stands.*For task ${r.t1} the owner's own task-level decision on this topic \\(${over.id}\\) still overrides it; to have that task follow the project-wide decision, decide again for each such task`));
+    // With no override the answer is the plain one.
+    const plain = await r.decide({ topic: "logging", statement: "Log JSON", wording: "we log JSON" });
+    assert.equal(plain.recorded, true);
+    const plainAgain = await r.decide({ topic: "logging", statement: "Log JSON", wording: "we log JSON", basedOn: 1 });
+    assert.equal((plainAgain as { reason: string }).reason, "the owner already decided exactly this; it stands, and nothing needs to be asked again");
+
+    // A verdict or QA evidence of the overridden task is not judged against the project-wide decision; the other task's may be.
+    const qaAgent = (await r.w.agent("qa", [{ action: "task.read", project: r.a }])).principal;
+    const qa = QaEvidenceService.withEpoch(r.st, r.w.projects.epoch, { rolesOf: async (id) => (id === qaAgent.id ? ["qa"] : []), notify: async () => undefined, invalidated: async () => undefined }, options);
+    const evidence = (submissionId: string, decisions: string[]) => qa.record(qaAgent, { commandId: cid("qa"), submissionId, criteriaRevision: 0, decisions, environment: "linux", observedAt: "2026-10-22T09:30:00.000Z", checks: [{ name: "unit", result: "passed" }] });
+    const cited = (subject: string, taskId: string, decisions: string[]) => r.subs.record(r.rev, { commandId: cid("ap"), taskId, kind: "review", role: "reviewer", subject, verdict: "approve", criteriaRevision: 0, decisions } as never);
+    const c1 = await r.code(r.t1);
+    await refuses("invalid_command", () => cited(c1, r.t1, [wide.id]), new RegExp(`for this task the owner's task-level decision ${over.id} overrides it`));
+    await refuses("invalid_command", () => evidence(c1, [wide.id]), new RegExp(`for this task the owner's task-level decision ${over.id} overrides it`));
+    await cited(c1, r.t1, [over.id]);
+    assert.equal((await r.subs.approvalOf(c1))?.approved, true);
+
+    // An approval and evidence that cited the project-wide decision with no link (task three never linked): the owner then overrides it for that task, and both stop counting there only.
+    const c3 = await r.code(r.t3), c2 = await r.code(r.t2);
+    await cited(c3, r.t3, [wide.id]); await cited(c2, r.t2, [wide.id]);
+    await evidence(c3, [wide.id]); await evidence(c2, [wide.id]);
+    assert.deepEqual([(await r.subs.approvalOf(c3))?.approved, (await qa.list(r.w.owner, r.t3)).items[0]!.staleNow], [true, []]);
+    const over3 = await r.recorded({ taskId: r.t3, statement: "Task three uses MySQL", wording: "task three uses MySQL", basedOn: 1 });
+    const a3 = (await r.subs.approvalOf(c3))!;
+    assert.equal(a3.approved, false);
+    assert.match(a3.outdated!.because, new RegExp(`owner decision ${wide.id} it cites no longer applies to this task: the owner's task-level decision ${over3.id} overrides it`));
+    const stale = (await qa.list(r.w.owner, r.t3)).items[0]!.staleNow;
+    assert.ok(stale.some((x) => x.kind === "decision_superseded" && x.decisionId === wide.id && /no longer in force for this task/.test((x as { state: string }).state)), JSON.stringify(stale));
+    assert.deepEqual([(await r.subs.approvalOf(c2))?.approved, (await qa.list(r.w.owner, r.t2)).items[0]!.staleNow], [true, []], "the other task keeps both");
+  });
+
+  suite("a dispute the owner settles by keeping the project-wide decision over the override gives the task's marked links back; settling it for the override keeps them marked", async (r) => {
+    for (const keep of ["wide", "override"] as const) {
+      const topic = `cache ${keep}`;
+      const wide = await r.recorded({ topic, statement: `Use Redis for ${keep}`, wording: `we use Redis for ${keep}` });
+      const task = await r.w.task(r.a, `dispute ${keep}`);
+      await r.link(task, [wide.id]);
+      const c = await r.code(task);
+      await r.approve(c, task);
+      const over = await r.recorded({ topic, taskId: task, statement: `Dispute ${keep} uses Memcached`, wording: `the dispute ${keep} task uses Memcached`, basedOn: 1 });
+      assert.equal((await r.rel(task)).links[0]!.state, "superseded");
+      // A project-wide correction based on the version before the override: the owner's instructions conflict.
+      const late = await r.recorded({ topic, statement: `Use Valkey for ${keep}`, wording: `we use Valkey for ${keep}`, basedOn: 1 });
+      assert.ok(late.disputeId !== undefined, JSON.stringify(late));
+      await r.decisions.resolveDispute(r.w.owner, { commandId: cid("rd"), disputeId: late.disputeId!, chosen: keep === "wide" ? wide.id : over.id });
+      const l = (await r.rel(task)).links[0]!;
+      if (keep === "wide") {
+        assert.deepEqual([l.decisionId, l.state, l.stale, l.because, l.supersededBy], [wide.id, "current", false, undefined, undefined]);
+        assert.deepEqual(await r.blocked(task), []);
+        assert.equal((await r.subs.approvalOf(c))?.approved, true, "the approval was judged on the decision the owner kept");
+      } else {
+        assert.deepEqual([l.decisionId, l.state], [wide.id, "superseded"]);
+        assert.equal((await r.blocked(task)).length, 1);
+        assert.equal((await r.subs.approvalOf(c))?.approved, false);
+      }
+    }
+  });
+
+  suite("asked in free words why the task is held up, the owner's chat answers with the task view: which work relies on the overridden decision and why, and the way out", async (r) => {
+    const status = StatusService.withEpoch(r.st, r.w.projects.epoch, { assignments: r.w.assignments, waits: WaitService.withEpoch(r.st, r.w.projects.epoch, r.w.assignments, options), blockers: BlockerService.withEpoch(r.st, r.w.projects.epoch, options), contracts: r.w.contracts }, options);
+    const chat = r.w.chat({ status });
+    await chat.setFocus(r.w.ownerToken, { commandId: cid("f"), projectId: r.a });
+    const wide = await r.recorded();
+    await r.link(r.t1, [wide.id]);
+    const over = await r.recorded({ taskId: r.t1, statement: "Task one uses SQLite", wording: "task one uses SQLite", basedOn: 1 });
+    const q = "Why is the first task held up?";
+    r.script[q] = [{ kind: "status", request: { kind: "task", taskTitle: "first task" }, evidence: q, basis: "owner" }];
+    const o = (await chat.submit(r.w.ownerToken, { messageId: "m-why", text: q })).outcomes[0] as Outcome;
+    assert.equal(o.status, "answered", JSON.stringify(o));
+    const text = (o.lines ?? []).map((l) => l.text).join("\n");
+    assert.match(text, new RegExp(`Its next action waits: its contract ${r.t1} relies on your decision ${wide.id} on "database", which no longer applies to it: the owner's task-level decision ${over.id} overrode the project-wide decision ${wide.id} for this task`));
+    assert.match(text, /The way out: its agent \(or you\) revalidates the work onto the decision that governs the task now/);
+    // The other task is not held up by it; once revalidated, the line is gone.
+    await r.link(r.t2, [wide.id]);
+    const q2 = "Why is the second task held up?";
+    r.script[q2] = [{ kind: "status", request: { kind: "task", taskTitle: "second task" }, evidence: q2, basis: "owner" }];
+    assert.doesNotMatch(((await chat.submit(r.w.ownerToken, { messageId: "m-why2", text: q2 })).outcomes[0] as Outcome).lines!.map((l) => l.text).join("\n"), /next action waits/);
+    await r.revalidate(r.t1, [over.id]);
+    const q3 = "And the first task now?";
+    r.script[q3] = [{ kind: "status", request: { kind: "task", taskTitle: "first task" }, evidence: q3, basis: "owner" }];
+    assert.doesNotMatch(((await chat.submit(r.w.ownerToken, { messageId: "m-why3", text: q3 })).outcomes[0] as Outcome).lines!.map((l) => l.text).join("\n"), /next action waits/);
   });
 }
