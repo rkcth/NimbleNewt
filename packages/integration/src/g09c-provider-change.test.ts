@@ -100,6 +100,8 @@ async function installation(t: { skip(why: string): void }) {
   const owner = await s.principals.authenticate(live.ownerToken);
   const call = (op: string, args: Record<string, unknown>, id?: string) => c.api.handle(live.ownerToken, { v: 1, op, ...(id === undefined ? {} : { commandId: id }), args } as never) as Promise<{ ok: boolean; result?: any; error?: { code: string; message: string } }>;
   const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden", repositories: [{ id: "garden", location: shared }] } as never)).id;
+  // Card P02: the workspace opens only on a repository the project has bound with write access to all of it.
+  await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: project, kind: "repository", label: "garden", locator: shared, repositoryId: "garden", access: "write" });
   const agent = (await s.agents.create(owner, { commandId: "ag1", friendlyName: "Ann", roles: ["author"] } as never)).id;
   const principalId = `agent:${agent}`;
   await s.principals.setGrants(owner, { commandId: "gr1", principalId, expectedRevision: (await s.principals.get(principalId))!.revision, grants: [...workGrants(project), { action: "desk.write", project }, { action: "desk.read", project }, { action: "message.receive", project }] });

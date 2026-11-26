@@ -361,6 +361,28 @@ export class GitBridge {
   /** The commit the checkout is based on (what a refresh moves and what the agent's work is measured from). */
   async baseOf(gitDir: string): Promise<string> { return this.#base(gitDir); }
 
+  /**
+   * What a checkout holds at a moment (card P02: the initial working state an attempt starts from): its base, its HEAD, the tree of the checkout as it stands (every file git does not ignore, written through a private
+   * index, so the checkout's own index is not touched) and the files that differ from HEAD or are untracked, with their two-letter status. Reads with the same neutral attributes as `doneState` and `stage`, so a
+   * conversion attribute cannot hide a change. Ignored files are not part of it.
+   */
+  async startState(options: { gitDir: string; checkout: string }): Promise<{ base: string; head: string; tree: string; entries: { code: string; path: string }[] }> {
+    await this.#neutralAttributes(options.gitDir);
+    const base = await this.#base(options.gitDir);
+    const head = (await this.#run(["rev-parse", "--verify", "HEAD"], { gitDir: options.gitDir })).stdout.trim();
+    const status = (await this.#run(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"], { gitDir: options.gitDir, workTree: options.checkout })).stdout;
+    const entries = status.split("\0").filter(Boolean).map((e) => ({ code: e.slice(0, 2), path: e.slice(3) }));
+    const index = join(options.gitDir, `nn-index-${randomBytes(6).toString("hex")}`);
+    let tree: string;
+    try {
+      await this.#run(["read-tree", head], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } });
+      await this.#run(["add", "-A"], { gitDir: options.gitDir, workTree: options.checkout, env: { GIT_INDEX_FILE: index } });
+      tree = (await this.#run(["write-tree"], { gitDir: options.gitDir, env: { GIT_INDEX_FILE: index } })).stdout.trim();
+    } finally { await rm(index, { force: true }); }
+    if (!/^[0-9a-f]{40,64}$/.test(tree) || !/^[0-9a-f]{40,64}$/.test(head)) throw new WorkspaceError("invalid_path", "the checkout's state could not be read");
+    return { base, head, tree, entries };
+  }
+
   /** The tree of a commit of the checkout's own repository (card P10: a landing of a queued submission compares the committed work with the approved tree). */
   async treeOf(options: { gitDir: string; commit: string }): Promise<string> {
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(options.commit)) throw new WorkspaceError("invalid_path", "a commit is named by its full ID");
