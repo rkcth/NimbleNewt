@@ -74,3 +74,40 @@ for (const backend of backends) {
     } finally { await w.close(); }
   });
 }
+
+for (const backend of backends) {
+  test(`${backend.name}: choosing the claude kind in chat shows the owner, before they agree and in the answer, that Claude cache support is experimental and not measured (G10 owner decision 2026-11-26); other kinds say nothing of the sort`, async () => {
+    const script: Record<string, unknown> = {};
+    let setup: SetupProviderService | undefined;
+    const w = await openWorld(backend, script, undefined, (storage, epoch) => { setup = SetupProviderService.withEpoch(storage, epoch, { clock: () => "2026-11-11T10:00:00.000Z", pause: async () => undefined }, {}); return { setupProviders: setup }; });
+    try {
+      const chat = w.chat();
+      w.profile.value = "autonomous";
+      const say = async (text: string, plan: unknown[]): Promise<Outcome> => { script[text] = plan; const o = (await chat.submit(w.ownerToken, { messageId: cid("m"), text })).outcomes; assert.equal(o.length, 1); return o[0]!; };
+      const text = "Register Anthropic as my cloud server called mine, kind claude, at https://api.anthropic.example.invalid/v1 with the model big-local (65536 tokens), and a free cloud one called spare at https://free.example.invalid/v1 with the model free-model (32000 tokens), whose key is the secret spare-key.";
+      const proposed = await say(text, [cmd("routing.provider.add", { providers: [mine({ kind: "claude", location: "cloud", endpoint: "https://api.anthropic.example.invalid/v1" }), spare] }, text)]);
+      assert.equal(proposed.status, "proposed", JSON.stringify(proposed));
+      assert.match(JSON.stringify(proposed), /Claude cache support is experimental and has not been measured against the real service/);
+      const plainText = "Register my local vLLM server called mine at http://127.0.0.1:8002/v1 with the model big-local (65536 tokens), and a free cloud one called spare at https://free.example.invalid/v1 with the model free-model (32000 tokens), whose key is the secret spare-key.";
+      const other = await say(plainText, [cmd("routing.provider.add", { providers: [mine({ kind: "vllm" }), spare] }, plainText)]);
+      assert.equal(other.status, "proposed", JSON.stringify(other));
+      assert.doesNotMatch(JSON.stringify(other), /experimental and has not been measured/);
+      const r = await w.api.handle(w.ownerToken, { v: 1, op: "routing.provider.add", commandId: "claude-direct", args: { providers: [mine({ kind: "claude" }), spare] } } as never) as unknown as { ok: boolean; result?: { warnings?: string[]; shown?: string[] } };
+      assert.ok(r.ok, JSON.stringify(r));
+      assert.match((r.result?.warnings ?? []).join("|"), /Provider mine: Claude cache support is experimental and has not been measured against the real service/);
+      assert.deepEqual(r.result?.shown, r.result?.warnings);
+      const v = await w.api.handle(w.ownerToken, { v: 1, op: "routing.provider.add", commandId: "vllm-direct", args: { providers: [mine({ kind: "vllm" }), spare] } } as never) as unknown as { ok: boolean; result?: { warnings?: string[] } };
+      assert.ok(v.ok);
+      assert.doesNotMatch(JSON.stringify(v.result?.warnings ?? []), /experimental/);
+      // Strata (read from source, never run) is labelled the same way.
+      const strataText = "Register my local Strata server called mine at http://127.0.0.1:8002/v1 with the model big-local (65536 tokens), and a free cloud one called spare at https://free.example.invalid/v1 with the model free-model (32000 tokens), whose key is the secret spare-key.";
+      const st = await say(strataText, [cmd("routing.provider.add", { providers: [mine({ kind: "strata" }), spare] }, strataText)]);
+      assert.equal(st.status, "proposed", JSON.stringify(st));
+      assert.match(JSON.stringify(st), /Provider mine: Strata cache support is experimental and has not been measured/);
+      const sd = await w.api.handle(w.ownerToken, { v: 1, op: "routing.provider.add", commandId: "strata-direct", args: { providers: [mine({ kind: "strata" }), spare] } } as never) as unknown as { ok: boolean; result?: { warnings?: string[]; shown?: string[] } };
+      assert.ok(sd.ok, JSON.stringify(sd));
+      assert.match((sd.result?.warnings ?? []).join("|"), /Provider mine: Strata cache support is experimental and has not been measured/);
+      assert.doesNotMatch((sd.result?.warnings ?? []).join("|"), /Claude/);
+    } finally { await w.close(); }
+  });
+}

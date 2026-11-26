@@ -2330,12 +2330,30 @@
       ],
       "deliverable": "A short, fixed section of the system prompt (packages/pi-adapter/src/prompt-layout.ts) that tells the agent how to finish: keep a PLAN.md with a checkbox per step, keep steps small, commit once per step, and end with work.end, never with prose alone. The section is placed so that it does not change between context switches and keeps the cached prefix (C06b)",
       "acceptance_and_verification": "Every Pi agent's first call carries the section; the C06b prompt-cache tests still pass with the section added, and its text is the same across tasks, roles and context switches; bench variant B and C runs use it and are recorded",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "74af8222",
+          "2fa97ba2",
+          "447b4b67",
+          "a961f6b1",
+          "1040178c",
+          "df01e31d",
+          "546e04d8",
+          "3e3fadc8"
+        ],
+        "ci_runs": [
+          "45737155506"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "Every Pi agent's system prompt carries a fixed completion-rules section: COMPLETION_RULES in packages/pi-adapter/src/prompt-layout.ts, named groups (intro; PLAN.md with one checkbox per step, small steps, ticked when done and checked; you do not commit and what the W05 done check looks at, PLAN.md not counted as the change; end with work.end as the last call, blocked or partial with a report, never prose alone; W10's notes and report; W11's job rule word for word), 2,504 characters. The worker process opens every adapter with the frozen PI_AGENT_LAYOUT, which renders the rules as the section nn_completion first, before the preamble, so the cached prefix every agent shares starts with the same bytes; the worker's ready message gives the system text's size. Proof: worker/process.test (through the worker process, every model call of one agent's first turn, stopped-early readmit, wake and restart on one store and of a second agent with another role, task and namespace carries exactly the rules as its one system message), completion-rules.test (stability check, every rule present, no agent-facing text says commit, layout order and fingerprint, the exact system text on Anthropic and OpenAI-style wires), the C06b prompt-cache and c06b-cache-stability tests with the rules in the layout (restart, inquiry branch and compaction keep the head), w11-job-wake (both real worker processes in bubblewrap), w06-completion-rules (the job rule equals the controller's JOB_WAKE_RULE). Bench: variants B and C use prompts/variant-b.md with {{COMPLETION_RULES}} filled from the built pi-adapter and each run records the rules' digest; results.jsonl holds 20 variant B runs (batches of 2026-11-17 to 2026-11-19) and 58 variant C runs (2026-11-24 and 2026-11-25), Radiance route, all with digest f54b7a45ed4f9c81 and 2,504 characters, which is the text on main. Limits: the card's commit once per step became you do not commit (the agent's git directory is outside its sandbox; committed after review, H12o/W05); the B and C runs are on the Pi command line, where the rules are given in the prompt with a short note (no work.end tool, a final report that starts with its result), not through the real worker (that, and the W01 gates, are W09's); the bench runs fail both W01 gates so far, a matter for W09; the agent's PLAN.md is still staged and landed with its change (open H12o item); rules are the same for every host kind, so a Pi agent on a host where the agent commits would be told not to (none exists); fixtures with windows under 49,152 tokens were enlarged because Pi's background compaction starts at once there (pre-existing, H12f); the bench tests fail when run from a checkout under /srv/ai because their sandbox hides it, so they were run from /srv/code/worktrees-pi."
+      }
     },
     {
       "id": "W07",
