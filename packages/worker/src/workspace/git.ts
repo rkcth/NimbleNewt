@@ -125,7 +125,20 @@ export class GitBridge {
     ];
   }
 
-  async #run(args: readonly string[], options: { gitDir?: string; workTree?: string; input?: string; allowFile?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<{ stdout: string; stderr: string }> {
+  async #run(givenArgs: readonly string[], givenOptions: { gitDir?: string; workTree?: string; input?: string; allowFile?: boolean; env?: NodeJS.ProcessEnv } = {}): Promise<{ stdout: string; stderr: string }> {
+    let args = givenArgs;
+    let options = givenOptions;
+    // Card W09b review: the folder of a submodule entry (gitlink) can hold a repository the agent made in its sandbox. A git that looks into it (a status, or an add once the entry matches that repository's
+    // head) starts a git there that reads that repository's own configuration (a clean filter, for one) here on the host, outside the sandbox. So a status over a checkout never looks into a submodule, and
+    // an add leaves every gitlink path of its index out (the entry stays as it was; the bridge never carries one). The paths go on standard input, literally.
+    if (options.workTree !== undefined && args[0] === "status") args = ["status", "--ignore-submodules=all", ...args.slice(1)];
+    if (options.workTree !== undefined && args[0] === "add") {
+      if (args.some((a, i) => i > 0 && !a.startsWith("-")) || options.input !== undefined) throw new WorkspaceError("unavailable", "an add over a checkout takes no paths of its own");
+      const listed = await this.#run(["ls-files", "-s", "-z"], { ...(options.gitDir === undefined ? {} : { gitDir: options.gitDir }), ...(options.env === undefined ? {} : { env: options.env }) });
+      const links = listed.stdout.split("\0").filter((l) => l.startsWith("160000 ")).map((l) => l.slice(l.indexOf("\t") + 1));
+      args = [...args, "--pathspec-from-file=-", "--pathspec-file-nul"];
+      options = { ...options, input: [".", ...links.map((p) => `:(exclude,literal)${p}`)].map((p) => `${p}\0`).join("") };
+    }
     const locator = [...(options.gitDir === undefined ? [] : ["--git-dir", options.gitDir]), ...(options.workTree === undefined ? [] : ["--work-tree", options.workTree])];
     const flags = this.#flags().map((f) => (options.allowFile === true && f === "protocol.file.allow=never" ? "protocol.file.allow=always" : f === "protocol.allow=never" && options.allowFile === true ? "protocol.allow=user" : f));
     return new Promise((resolveRun, reject) => {

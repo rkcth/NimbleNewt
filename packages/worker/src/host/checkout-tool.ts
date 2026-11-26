@@ -34,7 +34,8 @@ function inside(rel) {
   if (typeof rel !== "string" || rel === "" || rel.includes("\\0")) throw new Error("give path as a file of your checkout, relative to it");
   const abs = path.resolve(W, rel);
   if (abs !== W && !abs.startsWith(W + "/")) throw new Error(JSON.stringify(rel).slice(0, 200) + " is not inside your checkout");
-  if (path.relative(W, abs).split("/")[0] === ".git") throw new Error(".git is not one of your checkout's files");
+  // Git's own name anywhere (a repository the host's git could look into, card W09b review), in any case.
+  if (path.relative(W, abs).split("/").some((p) => p.toLowerCase() === ".git")) throw new Error(".git is not one of your checkout's files");
   return abs;
 }
 const realW = () => fs.realpathSync(W);
@@ -56,14 +57,19 @@ function folderFor(abs, rel) {
   for (const m of missing) fs.mkdirSync(m);
   checkReal(path.dirname(abs), rel);
 }
+// Opened without blocking, so a pipe or other special file is refused instead of waiting for a writer until the call's time is up.
+const NB = fs.constants.O_NONBLOCK || 0;
+// The text handed back is cut here already (its start and its end), so a long or escape-heavy file never overflows the stream the answer goes back on.
+const HEADC = ${CHECKOUT_TOOL_LIMITS.headChars}, BODYC = ${CHECKOUT_TOOL_LIMITS.bodyChars};
+const cut = (t) => (t.length <= BODYC ? { text: t, truncated: false } : { text: t.slice(0, HEADC) + "\\n[... " + (t.length - BODYC) + " characters left out ...]\\n" + t.slice(t.length - (BODYC - HEADC)), truncated: true });
 function readNoLink(abs, rel) {
   let fd;
-  try { fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch (e) { if (e.code === "ELOOP") throw new Error(JSON.stringify(rel).slice(0, 200) + " is a link; edit the file it points to"); throw e; }
-  try { const st = fs.fstatSync(fd); if (!st.isFile()) throw new Error(JSON.stringify(rel).slice(0, 200) + " is not a file"); if (st.size > MAX) throw new Error(JSON.stringify(rel).slice(0, 200) + " is larger than " + MAX + " bytes"); return fs.readFileSync(fd, "utf8"); } finally { fs.closeSync(fd); }
+  try { fd = fs.openSync(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | NB); } catch (e) { if (e.code === "ELOOP") throw new Error(JSON.stringify(rel).slice(0, 200) + " is a link; edit the file it points to"); throw e; }
+  try { const st = fs.fstatSync(fd); if (!st.isFile()) throw new Error(JSON.stringify(rel).slice(0, 200) + " is not a file"); if (st.size > MAX) throw new Error(JSON.stringify(rel).slice(0, 200) + " is larger than " + MAX + " bytes"); const bytes = fs.readFileSync(fd); const text = bytes.toString("utf8"); return { text, utf8: Buffer.from(text, "utf8").equals(bytes) }; } finally { fs.closeSync(fd); }
 }
 function writeNoLink(abs, rel, text) {
   let fd;
-  try { fd = fs.openSync(abs, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o644); } catch (e) { if (e.code === "ELOOP") throw new Error(JSON.stringify(rel).slice(0, 200) + " is a link; write the file it points to"); throw e; }
+  try { fd = fs.openSync(abs, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW | NB, 0o644); } catch (e) { if (e.code === "ELOOP") throw new Error(JSON.stringify(rel).slice(0, 200) + " is a link; write the file it points to"); throw e; }
   try { if (!fs.fstatSync(fd).isFile()) throw new Error(JSON.stringify(rel).slice(0, 200) + " is not a file"); fs.writeFileSync(fd, text, "utf8"); } finally { fs.closeSync(fd); }
 }
 const lines = (t) => (t === "" ? 0 : t.split("\\n").length - (t.endsWith("\\n") ? 1 : 0));
@@ -73,9 +79,10 @@ function act(q) {
     if (!fs.existsSync(abs)) return no(JSON.stringify(rel).slice(0, 200) + " does not exist in your checkout");
     const real = checkReal(abs, rel);
     const st = fs.statSync(real);
-    if (st.isDirectory()) { const names = fs.readdirSync(real, { withFileTypes: true }).filter((e) => e.name !== ".git").map((e) => e.name + (e.isDirectory() ? "/" : "")).sort(); return { ok: true, body: names.join("\\n"), facts: { path: rel, entries: names.length } }; }
-    const text = readNoLink(real, rel);
-    return { ok: true, body: text, facts: { path: rel, chars: text.length, lines: lines(text) } };
+    if (st.isDirectory()) { const names = fs.readdirSync(real, { withFileTypes: true }).filter((e) => e.name.toLowerCase() !== ".git").map((e) => e.name + (e.isDirectory() ? "/" : "")).sort(); const shown = cut(names.join("\\n")); return { ok: true, body: shown.text, facts: { path: rel, entries: names.length, ...(shown.truncated ? { truncated: true } : {}) } }; }
+    const { text, utf8 } = readNoLink(real, rel);
+    const shown = cut(text);
+    return { ok: true, body: shown.text, facts: { path: rel, chars: text.length, lines: lines(text), ...(utf8 ? {} : { notText: true }), ...(shown.truncated ? { truncated: true } : {}) } };
   }
   if (abs === W && q.action !== "read") return no("give the path of a file in your checkout, such as src/index.js");
   if (q.action === "write") {
@@ -89,7 +96,9 @@ function act(q) {
     if (typeof q.old !== "string" || q.old === "" || typeof q.text !== "string") return no("edit needs old (text that occurs once in the file) and text (what replaces it)");
     if (!fs.existsSync(abs)) return no(JSON.stringify(rel).slice(0, 200) + " does not exist in your checkout");
     checkReal(path.dirname(abs), rel);
-    const before = readNoLink(abs, rel);
+    const read = readNoLink(abs, rel);
+    if (!read.utf8) return no(JSON.stringify(rel).slice(0, 200) + " is not UTF-8 text; an edit would change its other bytes (change it with run)");
+    const before = read.text;
     const at = before.indexOf(q.old);
     if (at < 0) return no("old does not occur in " + JSON.stringify(rel).slice(0, 200) + "; read the file again and copy the text exactly");
     if (before.indexOf(q.old, at + 1) >= 0) return no("old occurs more than once in " + JSON.stringify(rel).slice(0, 200) + "; give more of the text around it");
@@ -176,7 +185,8 @@ export async function runCheckoutCall(ctx: CheckoutRunContext, call: CheckoutCal
       throw new Error(why);
     }
     if (!answer.ok) return { ok: false, reason: safeText(String(answer.reason), 300) };
-    const shown = cutMiddle(typeof answer.body === "string" ? answer.body : "");
+    // The helper cut the text already (to the same bound, with its note of what was left out); this cut is only the host's own bound on what it hands on.
+    const shown = cutMiddle(typeof answer.body === "string" ? answer.body : "", CHECKOUT_TOOL_LIMITS.bodyChars + 100);
     return { ok: true, body: shown.text, facts: { ...answer.facts, ...(shown.truncated ? { truncated: true } : {}) } };
   } finally { await removeTree(directory, undefined); }
 }

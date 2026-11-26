@@ -166,4 +166,46 @@ describe("the checkout tool in a sandbox of its own (card W09b)", () => {
     await assert.rejects(call({ action: "read", path: "src/a.txt" }, {}, r.signal), (e: Error & { mayHaveActed?: boolean }) => e.mayHaveActed !== true);
     assert.equal(tracked.size, 0);
   });
+
+  // First review of card W09b.
+  ifUsable("Git's name anywhere in a path is refused in any case (a repository there is one the host's git could look into), and a folder read hides it in any case", async () => {
+    for (const path of ["sub/.git/config", "Sub/.GiT/config", ".GIT/hooks/pre-commit", "a/b/../.git"]) {
+      refused(await call({ action: "write", path, text: "[filter \"x\"]\n\tclean = touch /work/ran\n" }), /\.git is not one of your checkout's files/);
+      refused(await call({ action: "read", path }), /\.git is not one of your checkout's files/);
+    }
+    assert.equal(existsSync(join(checkout, "sub")), false, "no folder was made for a refused write");
+    mkdirSync(join(checkout, "hides", ".GIT"), { recursive: true });
+    assert.equal(okBody(await call({ action: "read", path: "hides" })), "");
+  });
+
+  ifUsable("a pipe in the checkout is refused at once instead of waiting until the call's time is up, for a read and a write", async () => {
+    assert.equal(factsOf(await call({ action: "run", command: "mkfifo /work/pipe" })).exitCode, 0);
+    const t0 = Date.now();
+    refused(await call({ action: "read", path: "pipe" }, { limits: { memoryMb: 512, wallTimeMs: 20_000 } }), /is not a file/);
+    assert.equal((await call({ action: "write", path: "pipe", text: "x" }, { limits: { memoryMb: 512, wallTimeMs: 20_000 } })).ok, false);
+    assert.ok(Date.now() - t0 < 10_000, `the pipe was waited on (${Date.now() - t0} ms)`);
+  });
+
+  ifUsable("a long file whose answer is mostly escapes still comes back, cut, and a file that is not UTF-8 is said so on a read and refused for an edit, its bytes untouched", async () => {
+    writeFileSync(join(checkout, "quotes.txt"), "\"\\\n".repeat(1_200_000));
+    const read = await call({ action: "read", path: "quotes.txt" });
+    assert.equal(read.ok, true, JSON.stringify(read).slice(0, 300));
+    assert.equal(factsOf(read).truncated, true);
+    assert.equal(factsOf(read).chars, 3_600_000);
+    assert.ok(okBody(read).length <= CHECKOUT_TOOL_LIMITS.bodyChars + 80);
+    const bytes = Buffer.from([0xff, 0xfe, 0x41, 0x00, 0x80, 0x42]);
+    writeFileSync(join(checkout, "bin.dat"), bytes);
+    assert.equal(factsOf(await call({ action: "read", path: "bin.dat" })).notText, true);
+    refused(await call({ action: "edit", path: "bin.dat", old: "A", text: "Z" }), /not UTF-8 text/);
+    assert.deepEqual(readFileSync(join(checkout, "bin.dat")), bytes);
+    assert.equal(factsOf(await call({ action: "read", path: "src/a.txt" })).notText, undefined);
+  });
+
+  ifUsable("a process a command leaves running in the background ends with the call and never acts after it", async () => {
+    const a = await call({ action: "run", command: "(sleep 2; echo late > /work/late-1) & disown; setsid sh -c 'sleep 2; echo late > /work/late-2' </dev/null >/dev/null 2>&1 & nohup sh -c 'sleep 2; echo late > /work/late-3' >/dev/null 2>&1 & echo started" });
+    assert.equal(okBody(a), "started\n");
+    assert.ok(Number(factsOf(a).ms) < 2000, "the call did not wait for its background processes");
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    for (const n of [1, 2, 3]) assert.equal(existsSync(join(checkout, `late-${n}`)), false, `background process ${n} outlived its call`);
+  });
 });
