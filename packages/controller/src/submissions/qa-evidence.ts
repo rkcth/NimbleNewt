@@ -12,6 +12,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { CONTRACT_WORK_FIELDS } from "./acceptance.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
 import { overriddenFor } from "./review-citation.js";
+import { dependencyChanges, dependencyChangesNow, dependencyChangeText, readDependencyBasis, type DependencyChange } from "./dependency-basis.js";
 
 /** The four results a QA check can have (card Q02). They are kept apart: only `passed` passes; `failed`, `blocked` (could not be run: an environment or a dependency was missing) and `not-run` each fail the gate and are counted separately. */
 export const QA_RESULTS = ["passed", "failed", "blocked", "not-run"] as const;
@@ -25,7 +26,9 @@ export type QaStaleReason =
   | { readonly kind: "criteria_changed"; readonly from: number; readonly to: number; readonly fields: readonly string[] }
   | { readonly kind: "criteria_unknown"; readonly from: number; readonly to: number }
   | { readonly kind: "decision_superseded"; readonly decisionId: string; readonly state: string }
-  | { readonly kind: "decision_not_cited"; readonly decisionId: string };
+  | { readonly kind: "decision_not_cited"; readonly decisionId: string }
+  /** Card Q02: a dependency the task recorded (card C03) changed since the evidence was recorded (`dependency-basis.ts`). */
+  | { readonly kind: "dependency_changed"; readonly change: DependencyChange };
 
 export interface QaEvidenceBody {
   readonly taskId: string;
@@ -47,6 +50,8 @@ export interface QaEvidenceBody {
   readonly checks: readonly QaCheck[];
   /** Desk records (card A10) the evidence was derived from, when the recorder says so (card Q02, original-source counting): a copy and its original are one source, whoever cites either. */
   readonly sources?: readonly string[];
+  /** The task's recorded dependencies it was judged against (card Q02: a `dependency-snapshot` ID, or `none`); absent on evidence recorded before this was kept, which is judged by its time. */
+  readonly dependencySnapshot?: string;
   readonly state: "current" | "invalidated";
   readonly invalidatedAt?: string;
   readonly invalidatedBy?: string;
@@ -293,9 +298,11 @@ export class QaEvidenceService {
     }
     for (const l of reliance?.links ?? []) {
       if (e.decisions.some((d) => d.id === l.decisionId)) continue;
-      if (reasons.some((r) => r.kind !== "criteria_changed" && r.kind !== "criteria_unknown" && r.decisionId === l.decisionId)) continue;
+      if (reasons.some((r) => (r.kind === "decision_superseded" || r.kind === "decision_not_cited") && r.decisionId === l.decisionId)) continue;
       reasons.push(l.state === "current" ? { kind: "decision_not_cited", decisionId: l.decisionId } : { kind: "decision_superseded", decisionId: l.decisionId, state: "superseded" });
     }
+    // Card Q02: a dependency the task recorded changed since (seen recorded again with another observation, or judged changed from the controller's own state).
+    for (const change of await dependencyChanges(this.#runner, e.taskId, e.dependencySnapshot, e.recordedAt)) reasons.push({ kind: "dependency_changed", change });
     return reasons;
   }
 
@@ -376,11 +383,16 @@ export class QaEvidenceService {
           if (l.state !== "current") bad("decisions", `the task relies on decision ${l.decisionId}, which was superseded: the work is revalidated against the current decision (decision.revalidate) before it is checked`);
           if (!cited.some((c) => c.id === l.decisionId)) bad("decisions", `the task relies on decision ${l.decisionId}: name it`);
         }
+        // Card Q02: the evidence keeps the task's recorded dependencies it was judged against; one already seen changed is refused, as a superseded decision is (the work is looked at again first).
+        const deps = await readDependencyBasis(this.#runner, taskId);
+        const changedNow = await dependencyChangesNow(this.#runner, taskId, 1);
+        if (changedNow.length > 0) throw new DomainError("stale_revision", `${dependencyChangeText(changedNow[0]!)}: the work is looked at again against it (the task's agent records it again) before it is checked`);
+        changes.push(...deps.changes);
         const index = await this.#index(taskId);
         if (index.body.ids.length >= QA_LIMITS.perTask) throw new DomainError("unavailable", `a task holds at most ${QA_LIMITS.perTask} QA evidence records`);
         const now = this.#runner.now();
         const source = self ? "self" : "independent";
-        const body: QaEvidenceBody = { taskId, projectId: task.projectId, submissionId: command.submissionId, tree: sub.tree, source, criteriaRevision: contract.version, decisions: cited, environment: redactText(environment), observedAt, recordedBy: by.id, recordedAt: now, checks, ...((sources as string[]).length === 0 ? {} : { sources: [...sources as string[]].sort() }), state: "current" };
+        const body: QaEvidenceBody = { taskId, projectId: task.projectId, submissionId: command.submissionId, tree: sub.tree, source, criteriaRevision: contract.version, decisions: cited, environment: redactText(environment), observedAt, recordedBy: by.id, recordedAt: now, checks, ...((sources as string[]).length === 0 ? {} : { sources: [...sources as string[]].sort() }), dependencySnapshot: deps.snapshot, state: "current" };
         // What this record and the other evidence of the same source on the submission that still holds name: a re-check is settled only when they name again every check the invalidated
         // record named (those still required, when the contract names checks), so a narrower re-check does not pass on fewer checks than were looked at before.
         const required = this.#required(contract.body);
@@ -482,6 +494,23 @@ export class QaEvidenceService {
     const index = await this.#index(taskId);
     if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
     const r = await this.#checkTask(QA_SERVICE, `qa-dec-${contract.version}-${index.revision ?? 0}-${taskId}`, taskId, { version: contract.version });
+    return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
+  }
+
+  /**
+   * Card Q02: told, best effort, when a task's recorded dependencies may have changed: after the task's agent recorded dependencies (`DependencyService` `recorded`), and by the review scheduler's round for the
+   * newest code of each unfinished task (a shared record edited, a tool version revoked or an environment moved changes no record of the task itself). The task's QA evidence is looked at as `check` would, by the
+   * QA service itself, so evidence judged against a dependency that changed is invalidated and its re-check scheduled for whoever recorded it. Same rules as `contractChanged` (a task with no evidence, or no
+   * manifest, is not read further; nothing stale writes nothing), under its own command ID prefix, which also names the manifest's revision.
+   */
+  async dependenciesChanged(taskIdValue: string): Promise<{ taskId: string; invalidated: readonly string[]; rechecks: readonly string[] }> {
+    const taskId = checkTaskId(taskIdValue);
+    const index = await this.#index(taskId);
+    if (index.body.ids.length === 0) return { taskId, invalidated: [], rechecks: [] };
+    const manifest = await this.#runner.get("dependency-manifest", derivedId("dpm", taskId));
+    if (manifest === undefined || await this.#task(taskId) === undefined) return { taskId, invalidated: [], rechecks: [] };
+    const contract = await this.#contract(taskId);
+    const r = await this.#checkTask(QA_SERVICE, `qa-dep-${contract.version}-${index.revision ?? 0}-${manifest.revision}-${taskId}`, taskId, { version: contract.version });
     return { taskId, invalidated: r.invalidated, rechecks: r.rechecks };
   }
 
@@ -995,6 +1024,7 @@ export function reasonText(r: QaStaleReason): string {
     case "criteria_unknown": return `the task contract version ${r.from} it was checked against cannot be read (now ${r.to})`;
     case "decision_superseded": return `owner decision ${r.decisionId} is ${r.state}`;
     case "decision_not_cited": return `the task now relies on owner decision ${r.decisionId}, which it was not checked against`;
+    case "dependency_changed": return dependencyChangeText(r.change);
   }
 }
 

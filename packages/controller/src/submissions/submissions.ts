@@ -10,7 +10,8 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
 import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
-import { readApprovalReliance, readReviewCite, shapeReviewCite } from "./review-citation.js";
+import { readApprovalReliance, readReviewCite, relianceBasis, shapeReviewCite } from "./review-citation.js";
+import { dependencyChangesNow, dependencyChangeText, readDependencyBasis } from "./dependency-basis.js";
 import { approvalOutdated, type ApprovalBasis } from "./approval-standing.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
@@ -58,7 +59,10 @@ export interface SubmissionBody {
   readonly decisions?: readonly string[];
   readonly decisionVersions?: Readonly<Record<string, number>>;
   readonly unmet?: string;
-  /** An approval only (card Q02, stale approvals): the contract version and the relied-on decisions it was judged against, read by the controller when it was recorded; absent on earlier approvals. */
+  /**
+   * An approval only (card Q02, stale approvals): the contract version, the relied-on decisions and the recorded dependencies it was judged against, read by the controller when it was recorded; absent on earlier
+   * approvals. Also on code recorded with `review_disabled_single_agent` (card Q02): what that code was accepted against, so the same changes take it back.
+   */
   readonly judgedAgainst?: ApprovalBasis;
   readonly decision?: "approve" | "decline";
   readonly report?: string;
@@ -224,8 +228,11 @@ export interface SubmissionOptions extends RunnerOptions {
    * and a `refreshRound` it passes that differs is refused. Absent: the number given (default 0) is recorded, as before.
    */
   readonly refreshRounds?: (taskId: string) => Promise<number>;
-  /** Whether the project's review policy requires a review of this task to cite the criteria version (card Q02, `QaReviewService.requiresCitation`). Absent: citing stays optional. */
-  readonly citationRequired?: (projectId: string, taskId: string) => Promise<boolean>;
+  /**
+   * How a review of this task cites (card Q02, `QaReviewService.citationRule`): `explicit` (every verdict names `criteriaRevision`), `rejections` (the controller's default: a rejection names its unmet owner requirement),
+   * `optional`. Absent: `optional` (a service built without the controller's policy, as unit tests are). Every verdict records the criteria version it was judged against whatever the rule.
+   */
+  readonly citationRule?: (projectId: string, taskId: string) => Promise<"explicit" | "rejections" | "optional">;
   /** Told once a submission is recorded (card U09b), so the task's activity shows it and its replay can link to the diff or the review comment. Best effort and repeatable (keyed by the submission); a failure changes nothing. */
   readonly onRecorded?: (event: { readonly submissionId: string; readonly taskId: string; readonly kind: SubmissionKind; readonly role: string; readonly submittedBy: string; readonly verdict?: string; readonly decision?: string }) => Promise<void>;
 }
@@ -314,7 +321,7 @@ export class SubmissionService {
   readonly #waitingTasks: number;
   readonly #waitingScan: { readonly pageSize: number; readonly reads: number };
   readonly #codeKept: number;
-  readonly #citationRequired: SubmissionOptions["citationRequired"];
+  readonly #citationRule: SubmissionOptions["citationRule"];
   /** Per instance, never stored: a cursor from before a restart or from another instance does not open. */
   readonly #cursorKey = randomBytes(32);
   private constructor(runner: CommandRunner, roles: RolesOf, options: SubmissionOptions) {
@@ -324,7 +331,7 @@ export class SubmissionService {
     this.#waitingTasks = options.waitingTasks ?? WAITING_TASKS;
     this.#waitingScan = options.waitingScan ?? WAITING_SCAN;
     this.#codeKept = options.codeIndexKept ?? CODE_INDEX_KEPT;
-    this.#citationRequired = options.citationRequired;
+    this.#citationRule = options.citationRule;
   }
 
   /** AES-256-GCM like the status cursors; the sealed text names the caller and the task, so a cursor cannot be used by another caller or for another task. */
@@ -441,8 +448,36 @@ export class SubmissionService {
         }
         // A review that cites is read against the task as it is now, and every approval against the decisions the task relies on (a replay above never gets here, so it keeps what the first record read).
         let citeChecks: Change[] = [];
-        // Card Q02: a project whose review policy requires citations refuses a review that cites nothing (the verdict is then judged against the criteria in force; a rejection also names the unmet requirement).
-        if (kind === "review" && asked.criteriaRevision === undefined && this.#citationRequired !== undefined && await this.#citationRequired(task.projectId, taskId)) bad("criteriaRevision", "this project's review policy requires a verdict to cite the task contract version it judged against (criteriaRevision, 0 when the task has none; a rejection also names the unmet owner requirement)");
+        const addChecks = (more: readonly Change[]): void => { for (const c of more) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c); };
+        // Card Q02: code accepted without a review (no other agent could review it) keeps what it was accepted against, as an approval does, so a later correction, criteria change or changed dependency takes it back.
+        if (kind === "code" && body.review?.required === false) {
+          if (then?.judgedAgainst !== undefined) body = { ...body, judgedAgainst: then.judgedAgainst };
+          else {
+            const contract = await this.#runner.get("task-contract", taskId);
+            const relied = await relianceBasis(this.#runner, taskId);
+            const deps = await readDependencyBasis(this.#runner, taskId);
+            addChecks([...(contract === undefined ? [] : [{ type: "check" as const, ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision }]), ...relied.changes, ...deps.changes]);
+            body = { ...body, judgedAgainst: { criteriaRevision: (contract?.body as unknown as { version?: number } | undefined)?.version ?? 0, decisions: relied.relied, dependencies: deps.snapshot } };
+          }
+        }
+        // Card Q02: how this verdict cites. A project whose review policy asks every verdict to cite refuses one that names no criteria version; by default a rejection names the owner requirement it found unmet.
+        const rule = kind === "review" && this.#citationRule !== undefined ? await this.#citationRule(task.projectId, taskId) : "optional";
+        if (kind === "review" && asked.criteriaRevision === undefined && rule === "explicit") bad("criteriaRevision", "this project's review policy requires a verdict to cite what it was judged against: add criteriaRevision (the task contract version you read its acceptance criteria at; 0 when the task has none), name in decisions every owner decision the task relies on when you approve, and add unmet (the owner requirement that is not met) when you reject");
+        if (kind === "review" && asked.verdict === "reject" && asked.unmet === undefined && rule !== "optional") bad("unmet", "a rejection names the owner requirement that is not met: add unmet (the acceptance criterion or owner decision, in your words); the task contract version in force is recorded with it unless you name one in criteriaRevision. The owner can make this optional for a project");
+        // A rejection that names its unmet requirement and no version is judged against the criteria in force: that version is cited for it (read here, after the runner looked for a repeat, so a repeat keeps the first).
+        if (kind === "review" && asked.criteriaRevision === undefined && asked.unmet !== undefined) {
+          const version = ((await this.#runner.get("task-contract", taskId))?.body as unknown as { version?: number } | undefined)?.version ?? 0;
+          const read = await readReviewCite(this.#runner, { projectId: task.projectId, taskId }, { criteriaRevision: version, decisions: [] });
+          citeChecks = [...read.changes];
+          body = { ...body, criteriaRevision: version, decisions: [], decisionVersions: read.versions };
+        }
+        // Card Q02: a request for changes, or a rejection, that cites nothing still records the criteria version and the decisions it was judged against (an approval keeps them in `judgedAgainst` below).
+        if (kind === "review" && asked.verdict !== "approve" && body.criteriaRevision === undefined) {
+          const contract = await this.#runner.get("task-contract", taskId);
+          const relied = await relianceBasis(this.#runner, taskId);
+          addChecks([...(contract === undefined ? [] : [{ type: "check" as const, ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision }]), ...relied.changes]);
+          body = { ...body, judgedAgainst: { criteriaRevision: (contract?.body as unknown as { version?: number } | undefined)?.version ?? 0, decisions: relied.relied } };
+        }
         if (kind === "review" && asked.criteriaRevision !== undefined) {
           const read = await readReviewCite(this.#runner, { projectId: task.projectId, taskId }, { criteriaRevision: asked.criteriaRevision, decisions: asked.decisions ?? [] });
           citeChecks = [...read.changes];
@@ -460,8 +495,12 @@ export class SubmissionService {
             criteriaRevision = (contract?.body as unknown as { version?: number } | undefined)?.version ?? 0;
             if (contract !== undefined) more.push({ type: "check", ref: { kind: "task-contract", id: taskId }, expectedRevision: contract.revision });
           }
-          for (const c of more) if (!citeChecks.some((k) => k.ref.kind === c.ref.kind && k.ref.id === c.ref.id)) citeChecks.push(c);
-          body = { ...body, judgedAgainst: { criteriaRevision, decisions: relied.relied } };
+          // Card Q02: and the task's recorded dependencies; one already seen changed refuses the approval, as a superseded decision does.
+          const changedNow = await dependencyChangesNow(this.#runner, taskId, 1);
+          if (changedNow.length > 0) bad("verdict", `${dependencyChangeText(changedNow[0]!)}: an approval waits until the task's agent has looked at the work against it again (and records it again); a request for changes or a rejection can be recorded now`);
+          const deps = await readDependencyBasis(this.#runner, taskId);
+          addChecks([...more, ...deps.changes]);
+          body = { ...body, judgedAgainst: { criteriaRevision, decisions: relied.relied, dependencies: deps.snapshot } };
         }
         const ref = { kind: "submission", id };
         return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
@@ -806,7 +845,13 @@ export class SubmissionService {
       if (because !== undefined) return { ...base, approved: false, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }), outdated: { reviewId: newest.id, approvedBy: newest.by, approvedAt: newest.at, because }, reason: `the approval by ${newest.by} at ${newest.at} no longer counts: ${because}; a reviewer has to review it again against the current decisions and criteria` };
     }
     if (newest !== undefined) return newest.verdict === "approve" ? { ...base, approved: true, approvedBy: newest.by, reviewId: newest.id, newest: "approve", ...(newest.cited === undefined ? {} : { cited: newest.cited }) } : { ...base, approved: false, newest: newest.verdict, ...(newest.cited === undefined ? {} : { cited: newest.cited }), reason: `its newest review (${newest.id}) says ${newest.verdict}` };
-    if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
+    if (found.review?.required === false && found.review.reason === REVIEW_DISABLED_SINGLE_AGENT) {
+      // Card Q02: code accepted without a review is held to the same rule as an approval: a decision it relied on, the criteria or a recorded dependency changed since takes it back (code recorded before this
+      // kept its basis is judged by its time).
+      const because = await approvalOutdated(this.#runner, found.taskId, { at: found.submittedAt, ...(found.judgedAgainst === undefined ? {} : { basis: found.judgedAgainst }) });
+      if (because !== undefined) return { ...base, approved: false, outdated: { reviewId: submissionId, approvedBy: REVIEW_DISABLED_SINGLE_AGENT, approvedAt: found.submittedAt, because }, reason: `it was accepted without a review at ${found.submittedAt} (no other agent of the project could review it), but that no longer counts: ${because}; it has to be submitted again (or reviewed by an agent added to the project) against the current decisions and criteria` };
+      return { ...base, approved: true, approvedBy: REVIEW_DISABLED_SINGLE_AGENT };
+    }
     return { ...base, approved: false, reason: "no reviewer has approved it yet" };
   }
 
@@ -859,7 +904,7 @@ export class SubmissionService {
       need("verdict", ["approve", "changes", "reject"].includes(c.verdict as string), "must be approve, changes or reject");
       this.#notOwn(by, s);
       const cite = shapeReviewCite(c, c.verdict);
-      return { ...bound, verdict: c.verdict as "approve" | "changes" | "reject", ...(cite === undefined ? {} : { criteriaRevision: cite.criteriaRevision, decisions: cite.decisions, ...(cite.unmet === undefined ? {} : { unmet: cite.unmet }) }) };
+      return { ...bound, verdict: c.verdict as "approve" | "changes" | "reject", ...(cite === undefined ? {} : "unmetOnly" in cite ? { unmet: cite.unmetOnly } : { criteriaRevision: cite.criteriaRevision, decisions: cite.decisions, ...(cite.unmet === undefined ? {} : { unmet: cite.unmet }) }) };
     }
     if (kind === "qa") {
       need("report", typeof c.report === "string" && c.report !== "" && c.report.length <= MAX_REPORT, `a report of at most ${MAX_REPORT} characters`);

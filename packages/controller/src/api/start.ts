@@ -1139,7 +1139,7 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const integration = IntegrationPolicyService.withEpoch(storage, epoch);
     const notes = WorkingNoteService.withEpoch(storage, epoch);
     // The agent's ending (card H12n). The submission is bound to the submission service through the optional `stage` (and the landing check to `landing`) of the start options: without them a submit is refused as unavailable and nothing is submitted.
-    const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), refreshRounds: (taskId) => workspaceOps.refreshRounds(taskId), citationRequired: async (projectId, taskId) => (await qaReview?.requiresCitation(projectId, taskId)) === true, attemptOf: attemptOfAgents(assignments), onRecorded: async (e) => {
+    const submissions = SubmissionService.withEpoch(storage, epoch, (_id, scope, by) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), { reviewersAvailableIn: (projectId, workerId) => agents.reviewersAvailableIn(projectId, workerId, new Date().toISOString()), refreshRounds: (taskId) => workspaceOps.refreshRounds(taskId), citationRule: async (projectId, taskId) => (qaReview === undefined ? "rejections" : qaReview.citationRule(projectId, taskId)), attemptOf: attemptOfAgents(assignments), onRecorded: async (e) => {
       // Card U09b: a submission is a step of its task, so a replay can link to the diff (a code submission) or the comment (a review, a QA report, a sign-off). A code submission is only proposed for landing; the others are decisions that were made.
       const words = e.kind === "code" ? "submitted code for review and landing" : e.kind === "review" ? `reviewed a submission${e.verdict === undefined ? "" : ` (${e.verdict})`}` : e.kind === "qa" ? "reported a QA result" : e.kind === "signoff" ? `${e.decision === "decline" ? "declined" : "signed off"} a submission` : "submitted a document";
       // Card P10: an approval puts the submission in its landing branch's queue, and a review that takes an approval back takes it out (both best effort; the owner, an integrator or the author can still add it).
@@ -1219,6 +1219,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         if (n.to === "owner") { await notifications.emitFromController({ commandId: n.commandId, kind: "maintenance", level: "needs-you", ref: { kind: "qa-review-request", id: n.requestId }, detail: n.text.slice(0, 200), projectId: n.projectId }); return; }
         await messages.noticeFromController({ commandId: n.commandId, taskId: n.taskId, to: n.to.startsWith("agent:") ? n.to : `agent:${n.to}`, purpose: "you are asked to review a task's code independently", text: n.text });
       },
+      // Card Q02 ("invalidation schedules revalidation"): each round asks for a re-review of code whose approval stopped counting, and looks at QA evidence against the tasks' recorded dependencies.
+      approvalOf: (submissionId) => submissions.approvalOf(submissionId),
+      dependenciesChanged: (taskId) => qaEvidence.dependenciesChanged(taskId),
     });
     // Documentation obligations (card Q03): verified against code whose QA gate passes (read as the caller), the newest independently checked code of a task found in its QA evidence; update tasks are ordinary tasks, created ready and assigned to the document's owner.
     const docObligations = DocObligationService.withEpoch(storage, epoch, {
@@ -1365,7 +1368,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     const quietHostSettings = QuietHostSettingsService.withEpoch(storage, epoch, undefined, { warn: async (d) => { await notifications.emitFromController({ commandId: `quiet-host-settings-damaged:${d.revision}`, kind: "maintenance", level: "needs-you", ref: { kind: "quiet-host-settings", id: "main" }, detail: d.detail }); } });
     // A recorded search of the task's own project is made again by the controller with its recorder's current rights (card L04d), against the project's event stream for its position.
     const searchEvents = EventService.withEpoch(storage, epoch);
-    const contextDependencies = DependencyService.withEpoch(storage, epoch, { searches: {
+    // Card Q02: a dependency recorded again looks at the task's QA evidence at once (evidence judged against the old observation is invalidated and its re-check scheduled); best effort, the scheduler's round looks again.
+    const contextDependencies = DependencyService.withEpoch(storage, epoch, { recorded: async (taskId) => { await qaEvidence.dependenciesChanged(taskId); }, searches: {
       reader: (id) => principals.current(id),
       digest: async (reader, projectId, query) => (await retrieval.searchDigest(reader, { projectId, query })).hash,
       position: async (projectId) => { const at = await searchEvents.since(`project:${projectId}`, Number.MAX_SAFE_INTEGER, 1); return { next: at.head, floor: at.floor }; },

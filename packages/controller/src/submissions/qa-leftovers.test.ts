@@ -46,7 +46,7 @@ async function world(open: () => Promise<{ storage: import("../storage/types.js"
     const found = await runner.get(kind, id);
     await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { kind, id, body: body as JsonObject }, build: async () => ({ ref: { kind, id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind, id }, body: body as JsonObject } : { type: "update" as const, ref: { kind, id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
   };
-  const submissions: SubmissionService = SubmissionService.withEpoch(w.storage, epoch, async (id) => roles.get(id) ?? [], { ...options, citationRequired: async (p, t) => review.requiresCitation(p, t) });
+  const submissions: SubmissionService = SubmissionService.withEpoch(w.storage, epoch, async (id) => roles.get(id) ?? [], { ...options, citationRule: (p, t) => review.citationRule(p, t) });
   const qa: QaEvidenceService = QaEvidenceService.withEpoch(w.storage, epoch, { rolesOf: async (id) => roles.get(id) ?? [], carriedFrom: (id) => submissions.carriedFrom(id) }, options);
   const review: QaReviewService = QaReviewService.withEpoch(w.storage, epoch, qa, { reviewers: async () => [] }, options);
   const task = async (workClass: "P" | "PC" = "P"): Promise<string> => {
@@ -108,8 +108,9 @@ for (const backend of backends) {
       const pTask = await t.task("P"), pcTask = await t.task("PC");
       const s = await t.code(ann, pTask, BASE, P1, "1");
       const spc = await t.code(ann, pcTask, BASE, P1, "2");
-      assert.equal((await review.get(owner, project)).item.requireVerdictCitations, false);
-      await t.rv(rev, pTask, s, "approve"); // no policy: citing is optional, as before
+      assert.deepEqual([(await review.get(owner, project)).item.requireVerdictCitations, (await review.get(owner, project)).item.citations], [undefined, "rejections"]);
+      await t.rv(rev, pTask, s, "approve"); // no policy: an approval need not cite (card Q02 default: only a rejection must name what is unmet)
+      await refuses("invalid_command", () => t.rv(rev, pTask, s, "reject"), /^unmet: a rejection names the owner requirement that is not met/);
       await refuses("forbidden", () => review.set(ann, { commandId: cid("s"), projectId: project, requireVerdictCitations: true } as never));
       await refuses("invalid_command", () => review.set(owner, { commandId: cid("s"), projectId: project, requireVerdictCitations: "yes" } as never));
       await review.set(owner, { commandId: cid("s"), projectId: project, requireVerdictCitations: true, workClasses: ["P"] } as never);
@@ -127,7 +128,8 @@ for (const backend of backends) {
       await t.rv(rev, pcTask, spc, "approve");
       await review.set(owner, { commandId: cid("s"), projectId: project, requireVerdictCitations: false } as never);
       await t.rv(rev, pTask, s, "approve");
-      assert.equal((await review.get(owner, project)).item.requireVerdictCitations, false);
+      assert.deepEqual([(await review.get(owner, project)).item.requireVerdictCitations, (await review.get(owner, project)).item.citations], [false, "optional"]);
+      await t.rv(rev, pTask, s, "reject"); // the owner made it optional: a rejection need not name what is unmet
     } finally { await t.w.close(); }
   });
 
@@ -200,7 +202,7 @@ for (const backend of backends) {
       const a1 = await t.code(ann, taskA, BASE, P1, "1");
       const a2 = await t.code(ann, taskA, BASE2, P1, "2");
       await t.rv(rev, taskA, a2, "approve");
-      await t.rv(rex, taskA, a1, "reject");
+      await t.rv(rex, taskA, a1, "reject", { unmet: "it does not work" });
       const a3 = await t.code(ann, taskA, BASE, P1, "3");
       const got = await submissions.approvalOf(a3);
       assert.deepEqual([got?.approved, got?.newest, got?.carriedFrom], [false, "reject", a1]);

@@ -2848,7 +2848,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.review.requests`
 
-The open review requests the project's policy scheduled (card Q02), oldest first, 20 at a time (`after` is how many were already shown): which task and code submission, why it started (`submission`, `periodic`, `incident`, or `gate`: independent review gates completion and the code has no independent evidence yet), who it was assigned to, and when. The owner sees all of them; an agent that may read the project's tasks sees the ones assigned to it.
+The open review requests the project's policy scheduled (card Q02), oldest first, 20 at a time (`after` is how many were already shown): which task and code submission, why it started (`submission`, `periodic`, `incident`, `gate`: independent review gates completion and the code has no independent evidence yet, or `reapproval`: the code's approval no longer counts because a decision, the criteria or a recorded dependency changed after it; asked in every project, with a policy or not, with `approval` and `reason`), who it was assigned to, and when. The owner sees all of them; an agent that may read the project's tasks sees the ones assigned to it.
 
 Arguments:
 
@@ -4669,7 +4669,7 @@ Result: `{ id, seq, status, replayed }`: `status` is complete or incomplete.
 
 #### `resume.dependencies.record`
 
-The agent working a task (or the owner) records what the work relied on: files, directories, searches, records, decisions, tool versions, environments, external and MCP resources, and negative lookups, each with what was seen (a hash, an ETag, the members). The same dependency again replaces it. A resumed attempt is checked against them, and each change is reviewed. What the controller can judge itself is recorded only as it really is.
+The agent working a task (or the owner) records what the work relied on: files, directories, searches, records, decisions, tool versions, environments, external and MCP resources, and negative lookups, each with what was seen (a hash, an ETag, the members). The same dependency again replaces it. A resumed attempt is checked against them, and each change is reviewed. What the controller can judge itself is recorded only as it really is. QA evidence and approvals keep the dependencies they were judged against (card Q02): one recorded again with another observation, or changed in the controller's own state, invalidates that evidence (a re-check for its recorder) and takes those approvals back until the code is reviewed again.
 
 Arguments:
 
@@ -8140,7 +8140,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.review.policy.set`
 
-The owner sets the project's review policy (owner only; fields left out stay as they were). `workClasses` (`P`, `PC`) and `taskIds` say which tasks are covered (empty lists: all); `onSubmission` starts a review of each new code submission made after it was switched on, `periodicMinutes` (15 to 43200, null to stop) reviews the newest code of every unfinished task in scope each period, `onIncident` starts a review of the newest code of tasks in scope when an incident is opened in the project; `requiredChecks` are check names the QA gate requires besides the task contract's; `gatesCompletion` makes a landing of a task in scope need the `qa` and `review` checks whatever the landing settings say, and asks for a review of the newest code of each unfinished task in scope that has no independent evidence yet (the owner is told when nobody can review it); a request whose task left the scope, or whose trigger was switched off while review does not gate completion, is closed; `independentSources` (1 to 5) is how many independent original sources (a copy and its original are one; one agent is one) each required check needs; `requireVerdictCitations` makes every review of a task in scope cite the task contract version it judged against (a rejection then also names the unmet owner requirement). A scheduled review goes to a reviewer agent that did not work on the task and never pauses, messages or takes work from the agents working on it. The chat shows it first.
+The owner sets the project's review policy (owner only; fields left out stay as they were). `workClasses` (`P`, `PC`) and `taskIds` say which tasks are covered (empty lists: all); `onSubmission` starts a review of each new code submission made after it was switched on, `periodicMinutes` (15 to 43200, null to stop) reviews the newest code of every unfinished task in scope each period, `onIncident` starts a review of the newest code of tasks in scope when an incident is opened in the project; `requiredChecks` are check names the QA gate requires besides the task contract's; `gatesCompletion` makes a landing of a task in scope need the `qa` and `review` checks whatever the landing settings say, and asks for a review of the newest code of each unfinished task in scope that has no independent evidence yet (the owner is told when nobody can review it); a request whose task left the scope, or whose trigger was switched off while review does not gate completion, is closed; `independentSources` (1 to 5) is how many independent original sources (a copy and its original are one; one agent is one) each required check needs; `requireVerdictCitations` true makes every review of a task in scope cite the task contract version it judged against (a rejection then also names the unmet owner requirement); false makes citing optional there, so a rejection need not name what is unmet; left unset, the default holds: a rejection names the unmet requirement. A scheduled review goes to a reviewer agent that did not work on the task and never pauses, messages or takes work from the agents working on it. The chat shows it first.
 
 Arguments:
 
@@ -8162,7 +8162,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `qa.review.sweep`
 
-Runs the review scheduler now (owner only; the controller also runs it in its regular rounds): creates the reviews the policies' triggers name, assigns the ones waiting for a reviewer, and settles those that were done or replaced. It never pauses, messages or takes work from the agents working on a task.
+Runs the review scheduler now (owner only; the controller also runs it in its regular rounds): creates the reviews the policies' triggers name and, in every project, a re-review of the newest code whose approval no longer counts (once per such approval), looks at QA evidence against the tasks' recorded dependencies, assigns the ones waiting for a reviewer, and settles those that were done or replaced. It never pauses, messages or takes work from the agents working on a task.
 
 Arguments:
 
@@ -8290,9 +8290,9 @@ Arguments:
 - `refreshRound` (optional): code: leave it out: the controller counts the refresh rounds (card H12p) and records its own count; a different number is refused
 - `subject` (optional): review, qa, signoff: the submission it is about
 - `verdict` (optional): review: `approve`, `changes` or `reject`; an approval is refused while the task relies on an owner decision that was superseded or is disputed (revalidate the work first), cited or not; an approval given earlier stops counting when a decision the task relies on (or one it cites) is superseded or disputed, the task comes to rely on another decision, or the contract's expected result or acceptance criteria change, until it is reviewed again
-- `criteriaRevision` (optional): review: the task contract version you judged against (a different current version is refused as stale; 0 when the task has none); leave out for a review that cites nothing
+- `criteriaRevision` (optional): review: the task contract version you judged against (a different current version is refused as stale; 0 when the task has none); leave out for a review that cites nothing (required by a policy with requireVerdictCitations; every verdict records the version in force it was judged against)
 - `decisions` (optional): review, with criteriaRevision: the IDs of the owner decisions in force you judged against; an approval that cites must name every decision the task relies on
-- `unmet` (optional): review, with criteriaRevision: a rejection names the owner requirement (a criterion or a decision) that is not met; required for a rejection that cites, refused on any other verdict
+- `unmet` (optional): review: a rejection names the owner requirement (a criterion or a decision) that is not met; required for a rejection unless the owner made citing optional for the project (the contract version in force is cited with it when criteriaRevision is left out); refused on any other verdict
 - `decision` (optional): signoff: `approve` or `decline`
 - `report` (optional): qa or document: the report
 - `artifactDigest` (optional): document: `sha256:` and the digest

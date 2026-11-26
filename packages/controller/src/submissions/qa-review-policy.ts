@@ -29,15 +29,23 @@ export interface QaReviewPolicyBody {
   readonly gatesCompletion: boolean;
   /** How many independent original sources (a copy and its original are one; one recorder is one) each required check needs a pass from. */
   readonly independentSources: number;
-  /** Whether a reviewer's verdict (on a task in scope) must cite the task contract version it judged against; a rejection that cites also names the unmet owner requirement. Absent in older records: off. */
+  /**
+   * How reviewers' verdicts on tasks in scope cite what they judged against (card Q02, `citationRuleOf`): `true`: every verdict names the task contract version (`criteriaRevision`), an approval every decision the task
+   * relies on, a rejection the unmet owner requirement. `false`, when the owner chose it (`citationsSetAt`): citing is optional, a rejection need not name the unmet requirement. Otherwise (no policy, the field absent,
+   * or a `false` stored before 2026-11-26, when it was only the default): the default, a rejection must name the unmet requirement, and every verdict records the criteria version it was judged against.
+   */
   readonly requireVerdictCitations?: boolean;
+  /** When the owner last set `requireVerdictCitations` (card Q02); absent: never chosen. */
+  readonly citationsSetAt?: string;
+  /** Read only (`get`): the citation rule in force for tasks in scope, as `citationRuleOf` reads the two fields above. */
+  readonly citations?: CitationRule;
   /** When each trigger was last switched on: work before it is not reviewed backwards (a new policy does not start by reviewing the backlog). */
   readonly since: { readonly submission?: string; readonly periodic?: string; readonly incident?: string; readonly gate?: string };
   readonly updatedBy: string;
   readonly updatedAt: string;
 }
 
-export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 100, incidentPageSize: 500, page: 20, sweepEveryMs: 60_000 } as const;
+export const QA_REVIEW_LIMITS = { taskIds: 50, requiredChecks: 20, checkName: 200, minPeriodMinutes: 15, maxPeriodMinutes: 43_200, sources: 5, policies: 200, projects: 500, openPerProject: 100, perSweep: 25, tasksPerIncident: 25, incidents: 10, incidentPages: 100, incidentPageSize: 500, page: 20, sweepEveryMs: 60_000 } as const;
 
 const KIND = "qa-review-policy";
 const REQUEST = "qa-review-request";
@@ -47,7 +55,15 @@ const hex = (...parts: string[]): string => createHash("sha256").update(parts.jo
 const bad = (field: string, message: string): never => { throw new DomainError("invalid_command", `${field}: ${message}`, { field }); };
 const json = (v: object): JsonObject => JSON.parse(JSON.stringify(v)) as JsonObject;
 /** What a project without a policy is: nothing reviews by itself, nothing is added, independent review does not gate completion. */
-export const NO_POLICY = (projectId: string): Omit<QaReviewPolicyBody, "updatedBy" | "updatedAt"> => ({ projectId, scope: { workClasses: [], taskIds: [] }, triggers: { onSubmission: false, periodicMinutes: null, onIncident: false }, requiredChecks: [], gatesCompletion: false, independentSources: 1, requireVerdictCitations: false, since: {} });
+export const NO_POLICY = (projectId: string): Omit<QaReviewPolicyBody, "updatedBy" | "updatedAt"> => ({ projectId, scope: { workClasses: [], taskIds: [] }, triggers: { onSubmission: false, periodicMinutes: null, onIncident: false }, requiredChecks: [], gatesCompletion: false, independentSources: 1, since: {} });
+
+/**
+ * How verdicts cite (card Q02): `explicit` (every verdict names the criteria version it judged against), `rejections` (the default: a rejection names the unmet owner requirement; the criteria version in force is recorded
+ * for any verdict that names none), `optional` (the owner made it optional: a rejection need not name the unmet requirement).
+ */
+export type CitationRule = "explicit" | "rejections" | "optional";
+/** The rule a policy sets (for the tasks in its scope). A `false` the owner never chose (stored before 2026-11-26, when it was the default) is the default. Pure. */
+export const citationRuleOf = (p: Pick<QaReviewPolicyBody, "requireVerdictCitations" | "citationsSetAt"> | undefined): CitationRule => (p?.requireVerdictCitations === true ? "explicit" : p?.requireVerdictCitations === false && p.citationsSetAt !== undefined ? "optional" : "rejections");
 
 /** A review (or QA re-check) the scheduler owes: one independent look at one code submission, assigned to an agent that did not work on it. */
 export interface QaReviewRequestBody {
@@ -58,10 +74,15 @@ export interface QaReviewRequestBody {
   /**
    * `submission`: a new code submission; `periodic`: the interval ran out; `incident`: an incident was opened in the project; `gate`: independent review gates completion and the task's newest code has no
    * independent evidence from someone who did not work on it (card Q02 review: without it the landing is refused, so the review is asked for and the owner told when nobody can do it).
+   * `reapproval` (card Q02, "invalidation schedules revalidation"): the code's approval no longer counts (a decision it relied on, its criteria or a recorded dependency changed since); asked of every project, policy or not.
    */
-  readonly trigger: "submission" | "periodic" | "incident" | "gate";
-  /** The submission (for `submission`; for `gate` the submission and when gating was switched on), the period (`p<n>`) or the incident that started it. */
+  readonly trigger: "submission" | "periodic" | "incident" | "gate" | "reapproval";
+  /** The submission (for `submission`; for `gate` the submission and when gating was switched on), the period (`p<n>`), the incident that started it, or the approval that stopped counting (`reapproval`: its review ID and a digest of why, so each time it stops counting is asked once). */
   readonly cause: string;
+  /** `reapproval` only: the review (or the code accepted without one) that stopped counting, why, in plain words, and who gave it. */
+  readonly approval?: string;
+  readonly reason?: string;
+  readonly approvedBy?: string;
   /** Absent while no eligible agent exists (the owner is told once; each sweep looks again). */
   readonly assignee?: string;
   readonly state: "open" | "done" | "superseded";
@@ -73,7 +94,7 @@ export interface QaReviewRequestBody {
   readonly noticeAt?: string;
   readonly ownerNoticeAt?: string;
   readonly settledAt?: string;
-  /** The independent QA evidence that settled it, the newer code submission that replaced it, or `cancelled` when its task was cancelled. */
+  /** The independent QA evidence that settled it (for `reapproval`: the newer review, or `restored` when the approval counts again), the newer code submission that replaced it, or `cancelled` when its task was cancelled. */
   readonly settledBy?: string;
 }
 interface IndexBody { readonly open: readonly string[] }
@@ -83,6 +104,13 @@ export interface QaReviewPorts {
   readonly reviewers: (projectId: string, workerId: string) => Promise<readonly string[]>;
   /** Tells the assignee (a principal ID) or the owner (`owner`) about a request. Best effort and repeated until it succeeds; `commandId` is stable for one request and recipient. A contributor is never told. */
   readonly notice?: (n: { readonly commandId: string; readonly to: string; readonly projectId: string; readonly taskId: string; readonly requestId: string; readonly text: string }) => Promise<void>;
+  /**
+   * Card Q02: whether a code submission's approval stands (`SubmissionService.approvalOf`). With it, each round asks for a re-review of the newest code of every unfinished task of every active project whose approval no
+   * longer counts (`outdated`), once per such approval, and settles that request when a newer review is recorded or the approval counts again. Absent: no re-review is asked for.
+   */
+  readonly approvalOf?: (submissionId: string) => Promise<{ readonly approved: boolean; readonly reviewId?: string; readonly outdated?: { readonly reviewId: string; readonly approvedBy: string; readonly because: string } } | undefined>;
+  /** Card Q02: looks at a task's QA evidence against its recorded dependencies (`QaEvidenceService.dependenciesChanged`), for the newest code of each unfinished task each round. Best effort; absent: not looked at here. */
+  readonly dependenciesChanged?: (taskId: string) => Promise<unknown>;
 }
 
 export interface QaReviewSweepResult { readonly projects: number; readonly created: number; readonly assigned: number; readonly settled: number; readonly superseded: number; readonly unassigned: number; readonly errors: number }
@@ -167,10 +195,18 @@ export class QaReviewService {
     return p.requiredChecks.length === 0 && p.independentSources === 1 ? undefined : { requiredChecks: p.requiredChecks, independentSources: p.independentSources };
   }
 
-  /** Whether a verdict on this task must cite the criteria version (card Q02): the policy asks for it and the task is in its scope. A project with no policy, or a task outside it, is not asked. */
+  /** Whether a verdict on this task must name the criteria version itself (card Q02): the policy asks for it and the task is in its scope. */
   async requiresCitation(projectId: string, taskId: string): Promise<boolean> {
+    return (await this.citationRule(projectId, taskId)) === "explicit";
+  }
+
+  /**
+   * The citation rule for a verdict on this task (card Q02): the policy's (`citationRuleOf`) for a task in its scope, else the default (`rejections`). A policy that cannot be read throws, so the review is refused rather
+   * than recorded under a looser rule.
+   */
+  async citationRule(projectId: string, taskId: string): Promise<CitationRule> {
     const p = await this.policyOf(projectId);
-    return p?.requireVerdictCitations === true && (await this.#covers(p, taskId));
+    return p === undefined || !(await this.#covers(p, taskId)) ? "rejections" : citationRuleOf(p);
   }
 
   /** The landing checks the policy adds for one task: `qa` and `review`, when it gates completion and the task is in scope. */
@@ -202,8 +238,10 @@ export class QaReviewService {
     const projectId = checkProjectId(projectIdValue);
     if ((await this.#runner.get("project", projectId)) === undefined || !this.#mayRead(by, projectId)) throw new DomainError("not_found", "no such project");
     const found = await this.#runner.get(KIND, projectId);
-    if (found === undefined) return { revision: 0, item: NO_POLICY(projectId), isDefault: true };
-    const item = found.body as unknown as QaReviewPolicyBody;
+    if (found === undefined) return { revision: 0, item: { ...NO_POLICY(projectId), citations: "rejections" }, isDefault: true };
+    const stored = found.body as unknown as QaReviewPolicyBody;
+    // The rule in force is shown with it (a `false` the owner never chose is the default).
+    const item: QaReviewPolicyBody = { ...stored, citations: citationRuleOf(stored) };
     // A named task the reader may not read (a restriction on that task) is not shown: the scope lists only the tasks the reader can see.
     const taskIds = by.kind === "owner" ? item.scope.taskIds : item.scope.taskIds.filter((t) => this.#mayReadTask(by, projectId, t));
     return { revision: found.revision, item: taskIds.length === item.scope.taskIds.length ? item : { ...item, scope: { ...item.scope, taskIds } }, isDefault: false };
@@ -238,7 +276,10 @@ export class QaReviewService {
         if (gates) since.gate = before.gatesCompletion && before.since.gate !== undefined ? before.since.gate : now;
         const next: QaReviewPolicyBody = {
           projectId, scope: { workClasses: change.workClasses ?? before.scope.workClasses, taskIds: change.taskIds ?? before.scope.taskIds }, triggers,
-          requiredChecks: change.requiredChecks ?? before.requiredChecks, gatesCompletion: change.gatesCompletion ?? before.gatesCompletion, independentSources: change.independentSources ?? before.independentSources, requireVerdictCitations: change.requireVerdictCitations ?? before.requireVerdictCitations ?? false, since, updatedBy: owner.id, updatedAt: now,
+          requiredChecks: change.requiredChecks ?? before.requiredChecks, gatesCompletion: change.gatesCompletion ?? before.gatesCompletion, independentSources: change.independentSources ?? before.independentSources,
+          // Card Q02: when the owner names it, the choice is recorded with its time (`citationsSetAt`); otherwise what was stored is kept as it was (an old `false` that was only the default stays the default).
+          ...(change.requireVerdictCitations ?? before.requireVerdictCitations) === undefined ? {} : { requireVerdictCitations: (change.requireVerdictCitations ?? before.requireVerdictCitations)! },
+          ...(change.requireVerdictCitations !== undefined ? { citationsSetAt: now } : before.citationsSetAt === undefined ? {} : { citationsSetAt: before.citationsSetAt }), since, updatedBy: owner.id, updatedAt: now,
         };
         const ref = { kind: KIND, id: projectId };
         const c: Change = current === undefined ? { type: "create", ref, body: json(next) } : { type: "update", ref, expectedRevision: current.revision, body: json(next) };
@@ -300,12 +341,24 @@ export class QaReviewService {
     }
     // A policy with no trigger on and no open request has nothing to do; the others share one scan of the submissions and, when any has the incident trigger on, one of the incidents.
     const active: { policy: QaReviewPolicyBody; open: string[]; revision?: number }[] = [];
+    // Card Q02: approvals that stopped counting and changed dependencies are looked at in every active project, with a policy or without one (a project without one has nothing else switched on).
+    const everyProject = this.#ports.approvalOf !== undefined || this.#ports.dependenciesChanged !== undefined;
     for (const policy of policies) {
       total.projects++;
       try {
         const index = await this.#index(policy.projectId);
         const t = policy.triggers;
-        if (index.open.length > 0 || t.onSubmission || t.periodicMinutes !== null || t.onIncident || policy.gatesCompletion) active.push({ policy, ...index });
+        if (everyProject || index.open.length > 0 || t.onSubmission || t.periodicMinutes !== null || t.onIncident || policy.gatesCompletion) active.push({ policy, ...index });
+      } catch { total.errors++; }
+    }
+    if (everyProject) {
+      const withPolicy = new Set(policies.map((p) => p.projectId));
+      try {
+        for (const projectId of await this.#activeProjects()) {
+          if (withPolicy.has(projectId)) continue;
+          total.projects++;
+          active.push({ policy: { ...NO_POLICY(projectId), updatedBy: "", updatedAt: "" }, ...(await this.#index(projectId)) });
+        }
       } catch { total.errors++; }
     }
     if (active.length === 0) return total;
@@ -322,6 +375,18 @@ export class QaReviewService {
       } catch { total.errors++; }
     }
     return total;
+  }
+
+  /** The IDs of the active projects (card Q02: the re-review of stale approvals is asked in every one), bounded to `QA_REVIEW_LIMITS.projects`. */
+  async #activeProjects(): Promise<string[]> {
+    const out: string[] = [];
+    let after: string | undefined;
+    for (let read = 0; read < 100 && out.length < QA_REVIEW_LIMITS.projects; read++) {
+      const chunk = await this.#runner.list("project", { ...(after === undefined ? {} : { afterId: after }), limit: 100 });
+      for (const row of chunk) { after = row.id; if ((row.body as { state?: string }).state === "active" && out.length < QA_REVIEW_LIMITS.projects) out.push(row.id); }
+      if (chunk.length < 100) break;
+    }
+    return out;
   }
 
   async #project(policy: QaReviewPolicyBody, index: { readonly open: readonly string[] }, tasks: NewestCode["tasks"], incidents: readonly { id: string; at: string }[]): Promise<{ created: number; assigned: number; settled: number; superseded: number; unassigned: number }> {
@@ -356,25 +421,43 @@ export class QaReviewService {
       // A cancelled task needs no review any more: the request is closed as superseded by the cancellation (nothing is asked of anyone).
       if (((await this.#runner.get("task", r.taskId))?.body as unknown as TaskBody | undefined)?.state === "cancelled") { await this.#settle(r, "superseded", "cancelled"); open.delete(r.id); out.superseded++; continue; }
       const info = newest.get(r.taskId);
-      const done = await this.#independentEvidence(r, info);
-      if (done !== undefined) { await this.#settle(r, "done", done); open.delete(r.id); out.settled++; continue; }
-      // The policy changed since the request was made (card Q02 review): a task no longer in scope, or a trigger switched off while independent review does not gate the task's completion, needs no review any more.
-      // The request is closed as superseded by the policy; nothing is asked of anyone. One kept by gating stays open (the landing needs it).
-      const covered = await this.#covers(policy, r.taskId);
-      const triggerOn = r.trigger === "submission" ? t.onSubmission : r.trigger === "periodic" ? t.periodicMinutes !== null : r.trigger === "incident" ? t.onIncident : false;
-      if (!covered || !(triggerOn || policy.gatesCompletion)) { await this.#settle(r, "superseded", "policy"); open.delete(r.id); out.superseded++; continue; }
+      // Card Q02: a re-review of an approval that stopped counting is done when a newer review is recorded, or when the approval counts again (a dispute settled by keeping the decision); the policy plays no part.
+      if (r.trigger === "reapproval") {
+        if (this.#ports.approvalOf === undefined) continue;
+        const a = await this.#ports.approvalOf(r.submissionId);
+        if (a === undefined) { await this.#settle(r, "superseded", "gone"); open.delete(r.id); out.superseded++; continue; }
+        if (a.outdated?.reviewId !== r.approval) { await this.#settle(r, "done", a.approved ? (a.reviewId ?? "restored") : "reviewed"); open.delete(r.id); out.settled++; continue; }
+      } else {
+        const done = await this.#independentEvidence(r, info);
+        if (done !== undefined) { await this.#settle(r, "done", done); open.delete(r.id); out.settled++; continue; }
+        // The policy changed since the request was made (card Q02 review): a task no longer in scope, or a trigger switched off while independent review does not gate the task's completion, needs no review any more.
+        // The request is closed as superseded by the policy; nothing is asked of anyone. One kept by gating stays open (the landing needs it).
+        const covered = await this.#covers(policy, r.taskId);
+        const triggerOn = r.trigger === "submission" ? t.onSubmission : r.trigger === "periodic" ? t.periodicMinutes !== null : r.trigger === "incident" ? t.onIncident : false;
+        if (!covered || !(triggerOn || policy.gatesCompletion)) { await this.#settle(r, "superseded", "policy"); open.delete(r.id); out.superseded++; continue; }
+      }
       if (info === undefined) continue;
       let current = r;
       if (r.assignee === undefined || !(await this.#stillEligible(r, info, reviewers))) {
-        const pick = await this.#pick(r.taskId, info, load, reviewers);
+        const pick = await this.#pick(r.taskId, info, load, reviewers, r.approvedBy);
         // An assignee that cannot review any more (it holds the task now, or left the reviewers) is replaced by the next eligible one, or leaves the request waiting with the owner told.
         if (pick !== r.assignee) { current = await this.#assign(r, pick, now); if (pick !== undefined) { load.set(pick, (load.get(pick) ?? 0) + 1); out.assigned++; } open.set(r.id, current); }
       }
       if (current.assignee === undefined) { out.unassigned++; await this.#tell(current, "owner"); } else await this.#tell(current, current.assignee);
     }
     // 2. Create what the triggers name.
-    if (!t.onSubmission && t.periodicMinutes === null && !t.onIncident && !policy.gatesCompletion) return out;
-    const wanted: { taskId: string; trigger: QaReviewRequestBody["trigger"]; cause: string }[] = [];
+    const wanted: { taskId: string; trigger: QaReviewRequestBody["trigger"]; cause: string; approval?: string; reason?: string; approvedBy?: string }[] = [];
+    // Card Q02 ("invalidation schedules revalidation"): the newest code of each unfinished task whose approval stopped counting is asked to be reviewed again, once per such approval (the cause is its review ID), in
+    // every project; and its QA evidence is looked at against the task's recorded dependencies (a re-check goes to whoever recorded evidence that no longer holds).
+    for (const x of scan.tasks) {
+      const task = (await this.#runner.get("task", x.taskId))?.body as unknown as TaskBody | undefined;
+      if (task === undefined || task.projectId !== projectId || task.state === "cancelled" || task.state === "done") continue;
+      if (this.#ports.dependenciesChanged !== undefined) await this.#ports.dependenciesChanged(x.taskId).catch(() => undefined);
+      if (this.#ports.approvalOf === undefined) continue;
+      const a = await this.#ports.approvalOf(x.submissionId).catch(() => undefined);
+      if (a?.outdated !== undefined) wanted.push({ taskId: x.taskId, trigger: "reapproval", cause: `${a.outdated.reviewId}@${hex(a.outdated.because).slice(0, 12)}`, approval: a.outdated.reviewId, reason: redactText(a.outdated.because).slice(0, 300), approvedBy: a.outdated.approvedBy });
+    }
+    if (!t.onSubmission && t.periodicMinutes === null && !t.onIncident && !policy.gatesCompletion && wanted.length === 0) return out;
     const eligible: typeof scan.tasks[number][] = [];
     for (const x of scan.tasks) {
       const task = (await this.#runner.get("task", x.taskId))?.body as unknown as TaskBody | undefined;
@@ -413,8 +496,8 @@ export class QaReviewService {
       const id = `qrr-${hex(projectId, w.taskId, info.submissionId, w.trigger, w.cause)}`;
       if ((await this.#runner.get(REQUEST, id)) !== undefined) continue;
       if (w.trigger === "gate" && (await this.#independentEvidence({ projectId, taskId: w.taskId, submissionId: info.submissionId, createdAt: "" }, info)) !== undefined) continue;
-      const assignee = await this.#pick(w.taskId, info, load, reviewers);
-      const body: QaReviewRequestBody = { projectId, taskId: w.taskId, submissionId: info.submissionId, tree: info.tree, trigger: w.trigger, cause: w.cause, ...(assignee === undefined ? {} : { assignee, assignedAt: now }), state: "open", createdAt: now };
+      const assignee = await this.#pick(w.taskId, info, load, reviewers, w.approvedBy);
+      const body: QaReviewRequestBody = { projectId, taskId: w.taskId, submissionId: info.submissionId, tree: info.tree, trigger: w.trigger, cause: w.cause, ...(w.approval === undefined ? {} : { approval: w.approval }), ...(w.reason === undefined ? {} : { reason: w.reason }), ...(w.approvedBy === undefined ? {} : { approvedBy: w.approvedBy }), ...(assignee === undefined ? {} : { assignee, assignedAt: now }), state: "open", createdAt: now };
       if (!(await this.#create(id, body))) continue;
       made++; out.created++; owed.add(info.submissionId);
       if (assignee !== undefined) { load.set(assignee, (load.get(assignee) ?? 0) + 1); await this.#tell({ ...body, id }, assignee); } else { out.unassigned++; await this.#tell({ ...body, id }, "owner"); }
@@ -444,13 +527,13 @@ export class QaReviewService {
     return found;
   }
 
-  /** Eligible reviewers for a task, least loaded first: never the submitters of its code, never the agent that holds it now. */
-  async #pick(taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>, reviewers: (worker: string) => Promise<readonly string[]>): Promise<string | undefined> {
+  /** Eligible reviewers for a task, least loaded first (`prefer`, the reviewer whose approval stopped counting, first when still eligible): never the submitters of its code, never the agent that holds it now. */
+  async #pick(taskId: string, info: { submittedBy: string; contributors: readonly string[] }, load: ReadonlyMap<string, number>, reviewers: (worker: string) => Promise<readonly string[]>, prefer?: string): Promise<string | undefined> {
     const assignment = (await this.#runner.get("assignment", assignmentIdOf(taskId)))?.body as { owner?: { id?: string } } | undefined;
     const excluded = new Set([...info.contributors, info.submittedBy, ...(assignment?.owner?.id === undefined ? [] : [principalOf(assignment.owner.id)])].map(principalOf));
     const pool = (await reviewers(info.submittedBy)).filter((r) => !excluded.has(principalOf(r)));
     pool.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
-    return pool[0];
+    return prefer !== undefined && pool.includes(prefer) ? prefer : pool[0];
   }
 
   async #stillEligible(r: QaReviewRequestBody, info: { submittedBy: string; contributors: readonly string[] }, reviewers: (worker: string) => Promise<readonly string[]>): Promise<boolean> {
@@ -550,7 +633,11 @@ export class QaReviewService {
     if (this.#ports.notice === undefined) return;
     const field = to === "owner" ? "ownerNoticeAt" : "noticeAt";
     if (r[field] !== undefined) return;
-    const words = to === "owner"
+    const words = r.trigger === "reapproval"
+      ? (to === "owner"
+        ? `Task ${r.taskId}'s code ${r.submissionId} needs a review again: its approval no longer counts (${r.reason ?? "what it was judged against changed"}). No reviewer agent of the project that did not work on the task can do it: add a reviewer agent to the project, or have the work submitted again.`
+        : `Please review task ${r.taskId}'s code ${r.submissionId} again: its approval${r.approvedBy === undefined || r.approvedBy === "review_disabled_single_agent" ? "" : ` by ${r.approvedBy}`} no longer counts (${r.reason ?? "what it was judged against changed"}). Record a review (submission.record kind review) judged against the current criteria and decisions; it cites criteriaRevision.`)
+      : to === "owner"
       ? `Nobody can review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review): every reviewer agent of the project worked on the task or holds it now. Add a reviewer agent to the project or review it yourself.`
       : `You are asked to review task ${r.taskId}'s code ${r.submissionId} independently (${r.trigger} review of tree ${r.tree.slice(0, 12)}): record QA evidence on it (qa.evidence.record).`;
     // One notice per stretch of the assignment: an agent assigned again after someone else had it (or the owner after the request waited again) is told again; within one stretch the IDs are stable, so a retry is one notice.

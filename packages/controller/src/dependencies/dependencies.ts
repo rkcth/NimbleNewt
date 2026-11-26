@@ -85,6 +85,45 @@ export type NewDependency = Omit<DependencyEntry, "id" | "observedAt">;
 export const dependencyEntryId = (kind: string, key: string, projectId?: string): string => derivedId("dpm", `${kind}|${projectId ?? ""}|${key}`);
 
 /**
+ * How an entry stands judged from the controller's own state, for the kinds the controller judges itself (card C03): a shared record or decision (its content hash, and whether it was superseded), a tool version
+ * (its digest, and whether it was revoked), an environment (the active revision's digest) and a negative lookup of a desk record or catalog entry. `undefined` for every other kind, which needs a worker's observation.
+ * One rule, used by `check` and by the QA evidence and approvals that a changed dependency takes back (card Q02).
+ */
+export async function judgeFromState(get: (kind: string, id: string) => Promise<{ readonly body: unknown } | undefined>, e: Pick<DependencyEntry, "kind" | "key" | "hash">): Promise<[DependencyStatus, string] | undefined> {
+  const bare = (h: string | undefined): string => (h ?? "").replace(/^sha256:/, "");
+  switch (e.kind) {
+    case "record": case "decision": {
+      const found = await get("desk-record", e.key);
+      if (found === undefined) return ["deleted", "the record no longer exists"];
+      const record = found.body as { body: string; status: string };
+      return sha(record.body) === bare(e.hash) && record.status !== "superseded" ? ["unchanged", "the record is as it was seen"] : ["changed", record.status === "superseded" ? "the record was superseded" : "the record's content differs"];
+    }
+    case "tool-version": {
+      const version = await get("catalog-version", e.key);
+      if (version === undefined) return ["deleted", "the version is not in the catalog"];
+      const body = version.body as { digest: string; name: string; version: string };
+      const entry = (await get("catalog-entry", derivedId("cat", body.name)))?.body as { revoked?: readonly string[] } | undefined;
+      if (entry?.revoked?.includes(body.version) === true) return ["changed", "the version was revoked"];
+      return body.digest === bare(e.hash) ? ["unchanged", "the version is as it was seen"] : ["changed", "the version's digest differs"];
+    }
+    case "environment": {
+      const env = (await get("environment", derivedId("env", e.key)))?.body as { active?: number } | undefined;
+      if (env?.active === undefined) return ["deleted", "the agent has no active environment revision"];
+      const rev = (await get("environment-revision", derivedId("evr", `${e.key}|${env.active}`)))?.body as { digest?: string } | undefined;
+      if (rev?.digest === undefined) return ["unknown", `the active environment revision ${env.active} cannot be read`];
+      return bare(rev.digest) === bare(e.hash) ? ["unchanged", "the active environment revision is the one seen"] : ["changed", `the active environment moved to revision ${env.active}`];
+    }
+    case "negative": {
+      const i = e.key.indexOf(":");
+      const [kind, id] = i > 0 ? [e.key.slice(0, i), e.key.slice(i + 1)] : ["", e.key];
+      if (kind === "desk-record" || kind === "catalog-entry") return (await get(kind, id)) === undefined ? ["unchanged", "there is still no such record"] : ["changed", "a record that was absent now exists"];
+      return undefined;
+    }
+    default: return undefined;
+  }
+}
+
+/**
  * Dependency manifests (card C03): what a task read, wrote, searched and relied on, with enough to tell later whether it still holds. A file, a directory (and which names it held), a search (its scope and
  * the position in the event stream it was made at), a shared record or decision, a tool version, an environment revision, an external resource or an MCP resource read (server, URI, hash or ETag, when), and
  * a negative lookup ("there was no such record"). `check` says for each entry whether it is unchanged, changed, deleted, has new directory members, or cannot be told: records, tool versions, environments
@@ -94,13 +133,18 @@ export const dependencyEntryId = (kind: string, key: string, projectId?: string)
 export class DependencyService {
   readonly #runner: CommandRunner;
   readonly #searches: SearchJudge | undefined;
+  readonly #recorded: ((taskId: string) => Promise<void>) | undefined;
 
-  private constructor(runner: CommandRunner, searches: SearchJudge | undefined) { this.#runner = runner; this.#searches = searches; }
+  private constructor(runner: CommandRunner, searches: SearchJudge | undefined, recorded: ((taskId: string) => Promise<void>) | undefined) { this.#runner = runner; this.#searches = searches; this.#recorded = recorded; }
 
-  /** `searches`: the controller makes recorded searches of a task's own project again itself (card L04d); without it a search is judged only from a worker's observation, as before. */
-  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { searches?: SearchJudge } = {}): DependencyService {
-    const { searches, ...runner } = options;
-    return new DependencyService(new CommandRunner(storage, epoch, runner), searches);
+  /**
+   * `searches`: the controller makes recorded searches of a task's own project again itself (card L04d); without it a search is judged only from a worker's observation, as before.
+   * `recorded`: told the task after its dependencies were recorded (also for a repeat), so evidence and reviews bound to an observation that was just replaced are looked at again (card Q02). Best effort: a failure
+   * never fails the recording.
+   */
+  static withEpoch(storage: ControllerStorage, epoch: number, options: RunnerOptions & { searches?: SearchJudge; recorded?: (taskId: string) => Promise<void> } = {}): DependencyService {
+    const { searches, recorded, ...runner } = options;
+    return new DependencyService(new CommandRunner(storage, epoch, runner), searches, recorded);
   }
 
   /**
@@ -162,6 +206,7 @@ export class DependencyService {
       },
     }));
     void r;
+    if (this.#recorded !== undefined) { try { await this.#recorded(taskId); } catch { /* best effort: the QA gate and approvals judge the manifest when they are read */ } }
     return { recorded: fresh.length };
   }
 
@@ -361,30 +406,11 @@ export class DependencyService {
   async #judge(e: DependencyEntry, o: Observation | undefined): Promise<[DependencyStatus, string]> {
     const weak = (t: string): string => t.replace(/^W\//, "");
     const same = (hash?: string, etag?: string): boolean => (e.etag !== undefined && etag !== undefined ? weak(e.etag) === weak(etag) : e.hash !== undefined && hash !== undefined && e.hash.replace(/^sha256:/, "") === hash.replace(/^sha256:/, ""));
+    const own = await judgeFromState((kind, id) => this.#runner.get(kind, id), e);
+    if (own !== undefined) return own;
     switch (e.kind) {
-      case "record": case "decision": {
-        const found = await this.#runner.get("desk-record", e.key);
-        if (found === undefined) return ["deleted", "the record no longer exists"];
-        const record = found.body as unknown as { body: string; status: string };
-        return sha(record.body) === e.hash!.replace(/^sha256:/, "") && record.status !== "superseded" ? ["unchanged", "the record is as it was seen"] : ["changed", record.status === "superseded" ? "the record was superseded" : "the record's content differs"];
-      }
-      case "tool-version": {
-        const version = await this.#runner.get("catalog-version", e.key);
-        if (version === undefined) return ["deleted", "the version is not in the catalog"];
-        const body = version.body as unknown as { digest: string; name: string; version: string };
-        const entry = (await this.#runner.get("catalog-entry", derivedId("cat", body.name)))?.body as unknown as { revoked: readonly string[] } | undefined;
-        if (entry?.revoked.includes(body.version) === true) return ["changed", "the version was revoked"];
-        return body.digest === e.hash!.replace(/^sha256:/, "") ? ["unchanged", "the version is as it was seen"] : ["changed", "the version's digest differs"];
-      }
-      case "environment": {
-        const env = (await this.#runner.get("environment", derivedId("env", e.key)))?.body as unknown as { active?: number } | undefined;
-        if (env?.active === undefined) return ["deleted", "the agent has no active environment revision"];
-        const rev = (await this.#runner.get("environment-revision", derivedId("evr", `${e.key}|${env.active}`)))?.body as unknown as { digest: string };
-        return rev.digest.replace(/^sha256:/, "") === e.hash!.replace(/^sha256:/, "") ? ["unchanged", "the active environment revision is the one seen"] : ["changed", `the active environment moved to revision ${env.active}`];
-      }
+      case "record": case "decision": case "tool-version": case "environment": return ["unknown", "it could not be judged"];
       case "negative": {
-        const [kind, id] = e.key.includes(":") ? [e.key.slice(0, e.key.indexOf(":")), e.key.slice(e.key.indexOf(":") + 1)] : ["", e.key];
-        if (kind === "desk-record" || kind === "catalog-entry") return (await this.#runner.get(kind, id)) === undefined ? ["unchanged", "there is still no such record"] : ["changed", "a record that was absent now exists"];
         if (o?.exists === undefined) return ["unknown", "whether it exists now was not observed"];
         return o.exists ? ["changed", "something that was absent now exists"] : ["unchanged", "it is still absent"];
       }
