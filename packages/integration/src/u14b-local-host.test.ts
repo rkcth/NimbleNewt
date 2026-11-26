@@ -109,6 +109,8 @@ test("on a clean machine the owner turns the worker host on by chat; after the n
 
     // The work: a project in the local repository, an agent with the rights to work in it, a task assigned (the strict approval profile and no difficulty profile of the owner's: the launcher made the one it needs).
     const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden", repositories: [{ id: "garden", location: shared }] } as never)).id;
+    // Card P02: the workspace opens only on a repository the project has bound with write access to all of it.
+    await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: project, kind: "repository", label: "garden", locator: shared, repositoryId: "garden", access: "write" });
     const agent = (await s.agents.create(owner, { commandId: "ag1", friendlyName: "Ann", roles: ["author"] } as never)).id;
     const principalId = `agent:${agent}`;
     const rev = (await s.principals.get(principalId))!.revision;
@@ -128,6 +130,25 @@ test("on a clean machine the owner turns the worker host on by chat; after the n
     assert.ok(agentCalls.every((x) => x.url.startsWith("http://127.0.0.1:9201/v1/")), agentCalls.map((x) => x.url).join(", "));
     assert.ok(agentCalls.every((x) => x.auth === "Bearer sk-primary-secret-value"), "the key came from the secret store by name");
     assert.ok(agentCalls.every((x) => !x.text.includes("sk-primary-secret-value")), "the agent never sees the key");
+
+    // Card P02: the host asks the controller's records before it opens a workspace. With the project's access narrowed to reading, the next task's workspace is not opened, and the reason says why.
+    const bindingId = (await s.resources.list(owner, project))![0]!.id;
+    await s.resources.setScope(owner, { commandId: "narrow", resourceId: bindingId, expectedRevision: (await s.resources.get(owner, bindingId))!.revision, access: "read" });
+    const calls = agentCalls.length;
+    const t2 = (await s.projects.createTask({ commandId: "t2", actor: owner.id, projectId: project, title: "Say hello again" })).id;
+    await s.projects.transitionTask({ commandId: "r2", actor: owner.id, taskId: t2, expectedRevision: 1, to: "ready" });
+    await s.assignments.assignTask({ commandId: "as2", actor: owner.id, taskId: t2, owner: { kind: "agent", id: agent } });
+    const a2 = (await s.assignments.getAssignment(t2))!;
+    const attempt2 = (await s.assignments.admitAttempt({ commandId: "ad2", actor: "inbox", taskId: t2, expectedRevision: a2.revision, generation: a2.generation, owner: { kind: "agent", id: agent }, harness: "pi" })).id;
+    const tick2 = await c.dispatch!.dispatcher.tick();
+    await c.dispatch!.dispatcher.idle();
+    const said = /the workspace was not opened: the project has read access only to repository "garden", and an agent's workspace is written in/;
+    assert.match(tick2.skipped.find((x) => x.attemptId === attempt2)?.reason ?? "", said, JSON.stringify(tick2.skipped));
+    const refusedAttempt = (await c.dispatch!.dispatcher.get(c.dispatch!.principal, attempt2))! as unknown as { outcome?: { status: string; summary: string } };
+    assert.equal(refusedAttempt.outcome?.status, "failed");
+    assert.match(refusedAttempt.outcome?.summary ?? "", said, "the attempt's record carries the plain reason");
+    assert.equal(agentCalls.length, calls, "no agent ran");
+    assert.equal(existsFolder(join(hostBaseOf(dir), "work", project, t2)), false, "no checkout was made for it");
     await l.close();
     second = undefined;
     for (const f of filesUnder(parent)) for (const key of ["sk-primary-secret-value", "sk-backup-secret-value"]) assert.ok(!readFileSync(f).includes(Buffer.from(key)), `${f} must not hold a provider key`);

@@ -36,11 +36,11 @@ for (const backend of backends) {
       };
       const open = async () => (await w.api.handle(w.ownerToken, { v: 1, op: "approval.proposals", args: { state: "open" } }) as any).result.items as { id: string; revision: number; cls: string }[];
       for (let i = 0; i < 3; i++) await approve("git-commit");
-      for (let i = 0; i < 3; i++) await approve("git-push");
+      for (let i = 0; i < 3; i++) await approve("update-database"); // card P02: a push is never proposed, so the second class is a mutation
       await w.api.handle(w.ownerToken, { v: 1, op: "approval.proposals.check", commandId: cid("chk"), args: {} });
       const proposals = await open();
       assert.equal(proposals.length, 2);
-      const commit = proposals.find((p) => p.cls === "commit")!, push = proposals.find((p) => p.cls === "push")!;
+      const commit = proposals.find((p) => p.cls === "commit")!, other = proposals.find((p) => p.cls === "mutate")!;
 
       // Accept: the same confirmation the chat shows (what would be granted), nothing granted yet, and the assistant was not asked.
       const acc = approvalIntent(commit.id, "accept", { days: 7 });
@@ -59,16 +59,16 @@ for (const backend of backends) {
       assert.equal((await grantsApi.list(w.owner, {} as never)).items.length, 1);
 
       // The suggested length (no days) works too, and a length the proposal does not offer is refused by the door's builder.
-      assert.throws(() => approvalIntent(push.id, "accept", { days: 3 }), /days must be/);
-      assert.throws(() => approvalIntent(push.id, "accept", { statedDays: 3 }), /not accepted/);
-      assert.throws(() => approvalIntent(push.id, "dismiss", { reason: "free text" }), /not accepted/);
+      assert.throws(() => approvalIntent(other.id, "accept", { days: 3 }), /days must be/);
+      assert.throws(() => approvalIntent(other.id, "accept", { statedDays: 3 }), /not accepted/);
+      assert.throws(() => approvalIntent(other.id, "dismiss", { reason: "free text" }), /not accepted/);
 
       // Dismiss: done at once with the page's fixed reason.
-      const dis = approvalIntent(push.id, "dismiss", {});
+      const dis = approvalIntent(other.id, "dismiss", {});
       const done = await chat.submit(w.ownerToken, { messageId: "btn-2", text: dis.text }, { fixedIntents: [dis.intent] });
       assert.equal(done.outcomes[0]!.status, "applied", JSON.stringify(done.outcomes));
       const gone = (await w.api.handle(w.ownerToken, { v: 1, op: "approval.proposals", args: { state: "dismissed" } }) as any).result.items[0];
-      assert.deepEqual([gone.id, gone.reason], [push.id, "turned down from the web page"]);
+      assert.deepEqual([gone.id, gone.reason], [other.id, "turned down from the web page"]);
 
       // A proposal that does not exist is not found; an intent that is not a valid one is refused before anything runs.
       const none = approvalIntent("spr-zzzzzzzzzzzzzzzzzzzz", "dismiss", {});

@@ -104,11 +104,12 @@ for (const backend of backends) {
       assert.equal((await grantsApi.list(w.owner, {} as never)).items.length, 1);
 
       // Dismissing needs no consent but keeps the owner's own reason; a second class is dismissed through the chat.
-      for (let i = 0; i < 3; i++) await approve("git-push");
+      // Card P02: a push is never proposed, so the second class is a mutation.
+      for (let i = 0; i < 3; i++) await approve("update-database");
       await send("approval.proposals.check", {});
       const second = (await ask("approval.proposals", { state: "open" })).result.items[0] as { id: string; cls: string };
-      assert.equal(second.cls, "push");
-      const why = "I do not want pushes to run without me";
+      assert.equal(second.cls, "mutate");
+      const why = "I do not want database updates to run without me";
       const dismissed = await turn("m4", why, cmd("approval.proposal.dismiss", { proposalId: second.id, reason: why }, why));
       assert.equal(dismissed[0].status, "applied", JSON.stringify(dismissed));
       const gone = (await ask("approval.proposals", { state: "dismissed" })).result.items[0];

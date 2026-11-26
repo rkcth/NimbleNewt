@@ -68,6 +68,11 @@ export interface Checkout {
   readonly pinned: boolean;
 }
 
+/** A worker host's question "may this task's workspace be opened on this folder?" answered (card P02, `ProjectResourceService.workspaceAdmission`). */
+export type WorkspaceAdmission =
+  | { readonly admitted: true; readonly binding: { readonly resourceId: string; readonly repositoryId?: string; readonly locatorEpoch: number; readonly label: string; /** The task holds a checkout pin (it names a repository). */ readonly pinned: boolean } }
+  | { readonly admitted: false; readonly reason: string };
+
 export const RESOURCE = "project-resource";
 export const CLAIM = "resource-claim";
 export const CHECKOUT = "task-checkout";
@@ -506,6 +511,48 @@ export class ProjectResourceService {
     if (task === undefined || task.repositoryId === undefined) return undefined;
     const bound = (await this.#resourcesOf(task.projectId, true)).find((r) => r.body.repositoryId === task.repositoryId && r.body.state === "bound");
     return bound === undefined ? undefined : { root: bound.body.locator, paths: bound.body.scope.paths };
+  }
+
+  /**
+   * Whether a worker host may open a task's workspace on `folder` (card P02: the workspace admits only repositories in the task's access scope). For code that builds the services (the host on this computer); takes no
+   * caller's rights, reads only and never pins. `folder` is compared with the binding's location exactly as written (the location is opaque here and never read from disk).
+   *
+   * - A task that names a repository (or holds a pin): the workspace opens only on the binding the dispatcher pinned it to, at the location version it was pinned at, and `folder` must be that binding's location.
+   * - A task that names none: `folder` must be the location of a repository bound to the task's project.
+   * - Either way the binding must give write access to the whole repository: an agent's workspace is a writable copy of all of it, and its work lands there.
+   *
+   * A refusal carries a plain reason the owner can be told as it is.
+   */
+  async workspaceAdmission(call: { readonly taskId: string; readonly projectId: string; readonly folder: string }): Promise<WorkspaceAdmission> {
+    const refuse = (reason: string): WorkspaceAdmission => ({ admitted: false, reason: reason.slice(0, 400) });
+    if (typeof call?.taskId !== "string" || typeof call.projectId !== "string" || typeof call.folder !== "string" || call.folder === "") return refuse("the request does not name a task, a project and a folder");
+    try {
+      const found = await this.#runner.get("task", checkTaskId(call.taskId));
+      const task = found?.body as unknown as TaskBody | undefined;
+      if (task === undefined || task.projectId !== call.projectId) return refuse(`task ${call.taskId} is not a task of that project`);
+      const stored = (await this.#runner.get(CHECKOUT, call.taskId))?.body as unknown as CheckoutBody | undefined;
+      const pin = stored?.released === undefined ? stored : undefined;
+      let chosen: { resourceId: string; repositoryId?: string; label: string; scope: AccessScope; locatorEpoch: number };
+      if (task.repositoryId !== undefined || pin !== undefined) {
+        if (pin === undefined) return refuse(`task ${call.taskId} names repository ${task.repositoryId} but its checkout is not pinned yet; its work starts only once the dispatcher has pinned it`);
+        // Throws `checkout_changed` for a binding that moved, was unbound or is not the one the task was pinned to.
+        const resolved = await this.#resolve(call.taskId, task);
+        if (resolved.locator !== call.folder) return refuse(`the folder this host would use for the project is not where repository ${resolved.repositoryId} (bound as "${resolved.label}") is, and the task was dispatched against that one`);
+        chosen = { resourceId: resolved.resourceId, repositoryId: resolved.repositoryId, label: resolved.label, scope: resolved.scope, locatorEpoch: pin.locatorEpoch };
+      } else {
+        const here = (await this.#resourcesOf(task.projectId, true)).filter((r) => r.body.kind === "repository" && r.body.state === "bound" && r.body.locator === call.folder);
+        if (here.length === 0) return refuse("the repository folder this host would use is not bound to the project; bind it to the project with write access first (resource.bind)");
+        const r = here.find((b) => scopeAllows(b.body.scope, { mode: "write" })) ?? here[0]!;
+        chosen = { resourceId: r.id, ...(r.body.repositoryId === undefined ? {} : { repositoryId: r.body.repositoryId }), label: r.body.label, scope: r.body.scope, locatorEpoch: r.body.locatorEpoch };
+      }
+      if (chosen.scope.mode !== "write") return refuse(`the project has read access only to repository "${chosen.label}", and an agent's workspace is written in; give the project write access to it first`);
+      if (chosen.scope.paths.length > 0) return refuse(`the project may use only some paths of repository "${chosen.label}" (${chosen.scope.paths.slice(0, 3).join(", ")}${chosen.scope.paths.length > 3 ? ", ..." : ""}), and a workspace holds all of it`);
+      return { admitted: true, binding: { resourceId: chosen.resourceId, ...(chosen.repositoryId === undefined ? {} : { repositoryId: chosen.repositoryId }), locatorEpoch: chosen.locatorEpoch, label: chosen.label, pinned: pin !== undefined } };
+    } catch (error) {
+      // A moved, unbound or re-pointed checkout, a malformed ID, or too many records to look through safely: refused with what was found, never opened on a guess.
+      if (isDomainError(error, "checkout_changed") || isDomainError(error, "invalid_command") || isDomainError(error, "unavailable")) return refuse(error.message);
+      throw error;
+    }
   }
 
   /**

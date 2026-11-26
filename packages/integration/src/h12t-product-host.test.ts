@@ -127,7 +127,11 @@ test("the launcher's product worker host runs an attempt in a checkout its works
 
     // Two projects, each with its own local repository; an agent that may work in both.
     const A = (await s.projects.createProject({ commandId: "pA", actor: owner.id, name: "Garden", repositories: [{ id: "garden", location: garden }] } as never)).id;
+    // Card P02: the workspace opens only on a repository the project has bound with write access to all of it.
+    await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: A, kind: "repository", label: "garden", locator: garden, repositoryId: "garden", access: "write" });
     const B = (await s.projects.createProject({ commandId: "pB", actor: owner.id, name: "Orchard", repositories: [{ id: "orchard", location: orchard }] } as never)).id;
+    // Card P02: the workspace opens only on a repository the project has bound with write access to all of it.
+    await s.resources.bindResource(owner, { commandId: "bind-orchard", projectId: B, kind: "repository", label: "orchard", locator: orchard, repositoryId: "orchard", access: "write" });
     // This test is about the landing itself, not its gate: the project requires no check (card P09's gate has tests of its own).
     for (const projectId of [A, B]) assert.equal((await api("integration.set", { project: projectId, requiredChecks: [] }, `no-checks-${projectId}`)).ok, true);
     const agent = (await s.agents.create(owner, { commandId: "ag1", friendlyName: "Ann", roles: ["author"] } as never)).id;

@@ -99,8 +99,21 @@ export function chooseStandingLength(input: LengthInputs): { days: number; why: 
 }
 
 const COUNTER_SHARDS = 8;
-/** Classes whose approvals never turn into a standing rule: they stay decisions or run code. */
-const NEVER_PROPOSED = new Set<ActionClass>(["access-change", "spend", "install-executable"]);
+/**
+ * Classes whose approvals never turn into a standing rule: they stay decisions or run code, and (card P02) a push, a merge or a deployment is never authorized by an accepted proposal, which is a suggestion and not an
+ * instruction. The owner still allows those directly (a grant the owner makes, a task's own instruction, or the profile).
+ */
+export const NEVER_PROPOSED: ReadonlySet<ActionClass> = new Set<ActionClass>(["access-change", "spend", "install-executable", "push", "merge", "deploy"]);
+const CLASS_WORDS: Partial<Record<ActionClass, string>> = { "access-change": "changes of access", spend: "spending", "install-executable": "installing programs", push: "pushes", merge: "merges", deploy: "deployments" };
+/**
+ * Why a stored proposal cannot be accepted (card P02), or `undefined`: a proposal for a class that is never proposed (one stored before the class was added), or one whose grant would not be exactly the class approval it
+ * names, is refused rather than turned into a grant.
+ */
+function unacceptable(id: string, body: ProposalBody): string | undefined {
+  if (NEVER_PROPOSED.has(body.cls)) return `proposal ${id} is for ${CLASS_WORDS[body.cls] ?? body.cls}; a standing-rule proposal never authorizes ${body.cls === "push" || body.cls === "merge" || body.cls === "deploy" ? "a push, a merge or a deployment" : "that"}. Allow it yourself instead (a grant you make, or the task's instruction), or dismiss the proposal`;
+  if (body.suggestion?.action !== `approve.class.${body.cls}`) return `proposal ${id} would grant ${String(body.suggestion?.action).slice(0, 60)}, not the approval of the class it was drawn from, so it is not accepted; dismiss it`;
+  return undefined;
+}
 const PROPOSABLE_ENVIRONMENTS = new Set<Environment>(["development", "testing"]);
 const ACTION_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const PROPOSAL_ID = /^spr-[a-z2-7]{20}$/;
@@ -264,6 +277,8 @@ export class ApprovalLoadService {
         const current = await this.#runner.existing("standing-proposal", command.proposalId, command.expectedRevision);
         const body = current.body as unknown as ProposalBody;
         if (body.state !== "open") throw new DomainError("invalid_command", `proposal ${current.id} is ${body.state}`, { field: "proposalId" });
+        const refused = unacceptable(current.id, body);
+        if (refused !== undefined) throw new DomainError("invalid_command", refused, { field: "proposalId" });
         const ref: AggregateRef = { kind: "standing-proposal", id: current.id };
         const at = this.#runner.now();
         // The length is fixed in the same step that accepts, so a retry makes the same grant. The owner's own length is used exactly; their words are used as stated; with nothing said it is the length that was shown.
@@ -286,6 +301,9 @@ export class ApprovalLoadService {
     const p = found.body as unknown as ProposalBody;
     // A replay long after the proposal was offered again finds an open body: it was answered once, and that answer is not repeated.
     if (p.state !== "accepted" || p.decidedAt === undefined) throw new DomainError("invalid_command", `proposal ${found.id} was offered again after this acceptance`, { field: "proposalId" });
+    // A proposal accepted before its class was closed to proposals (its grant step never ran) is not finished into a grant either.
+    const late = unacceptable(found.id, p);
+    if (late !== undefined) throw new DomainError("invalid_command", late, { field: "proposalId" });
     const grant = await this.#grants.grant(owner, {
       commandId: scopedCommandId(owner.id, `accept-grant-${found.id}-${done.revision}`), grantee: p.requester, action: p.suggestion.action, project: p.suggestion.project, source: "standing",
       basis: `accepted from standing-rule proposal ${found.id}: approved ${p.count} times; ${dayWord(p.suggestion.days)}: ${p.chosenLength?.why ?? "the usual length"}`.slice(0, 500), idleDays: p.suggestion.days, terms: { environments: p.suggestion.environments },
@@ -318,6 +336,8 @@ export class ApprovalLoadService {
         const current = await this.#runner.existing("standing-proposal", command.proposalId, command.expectedRevision);
         const body = current.body as unknown as ProposalBody;
         if (body.state !== "open") throw new DomainError("invalid_command", `proposal ${current.id} is ${body.state}`, { field: "proposalId" });
+        const refused = unacceptable(current.id, body);
+        if (refused !== undefined) throw new DomainError("invalid_command", refused, { field: "proposalId" });
         if (!(await this.#profile!.isStrict(owner))) throw new DomainError("invalid_command", "only a strict installation can be switched to the derived profile", { field: "proposalId" });
         const ref: AggregateRef = { kind: "standing-proposal", id: current.id };
         const next: ProposalBody = { ...body, state: "accepted", via: "profile", decidedBy: owner.id, decidedAt: this.#runner.now() };
