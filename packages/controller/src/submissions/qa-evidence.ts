@@ -11,6 +11,7 @@ import { redactText } from "../security/redact.js";
 import type { Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { CONTRACT_WORK_FIELDS } from "./acceptance.js";
 import type { RolesOf, SubmissionBody } from "./submissions.js";
+import { overriddenFor } from "./review-citation.js";
 
 /** The four results a QA check can have (card Q02). They are kept apart: only `passed` passes; `failed`, `blocked` (could not be run: an environment or a dependency was missing) and `not-run` each fail the gate and are counted separately. */
 export const QA_RESULTS = ["passed", "failed", "blocked", "not-run"] as const;
@@ -283,7 +284,12 @@ export class QaEvidenceService {
       const record = await this.#runner.get("decision", d.id);
       if (record !== undefined) reads?.push({ kind: "decision", id: d.id, revision: record.revision });
       const found = record?.body as unknown as OwnerDecisionBody | undefined;
-      if (found === undefined || found.state !== "active" || found.version !== d.version) reasons.push({ kind: "decision_superseded", decisionId: d.id, state: found?.state ?? "missing" });
+      // A link the task's own override marked: the decision is in force for other tasks, but this evidence was made against guidance that no longer applies to this task.
+      // So is evidence that named a project-wide decision the task's own decision now overrides, linked or not.
+      const over = found?.state === "active" ? await overriddenFor(this.#runner, e.taskId, found) : {};
+      if (over.check !== undefined && over.check.type === "check") reads?.push({ kind: over.check.ref.kind, id: over.check.ref.id, revision: over.check.expectedRevision });
+      const unlinked = found?.state === "active" && (over.by !== undefined || (reliance?.links ?? []).some((l) => l.decisionId === d.id && l.state !== "current"));
+      if (found === undefined || found.state !== "active" || found.version !== d.version || unlinked) reasons.push({ kind: "decision_superseded", decisionId: d.id, state: unlinked ? "no longer in force for this task (a task-level decision of the owner overrides it)" : found?.state ?? "missing" });
     }
     for (const l of reliance?.links ?? []) {
       if (e.decisions.some((d) => d.id === l.decisionId)) continue;
@@ -360,8 +366,10 @@ export class QaEvidenceService {
           const body = found?.body as unknown as OwnerDecisionBody | undefined;
           if (found === undefined || body === undefined || body.projectId !== task.projectId || (body.taskId !== undefined && body.taskId !== taskId)) bad("decisions", `${d} is not a decision of this task or its project`);
           if (body!.state !== "active") bad("decisions", `${d} is ${body!.state}${body!.supersededBy === undefined ? "" : ` (the current one is ${body!.supersededBy})`}: evidence is judged against the decisions in force`);
+          const over = await overriddenFor(this.#runner, taskId, body!);
+          if (over.by !== undefined) bad("decisions", `${d} is the project-wide decision, but for this task the owner's task-level decision ${over.by} overrides it: evidence is judged against the decisions in force for the task`);
           cited.push({ id: d, version: body!.version, topic: body!.topic });
-          changes.push({ type: "check", ref: { kind: "decision", id: d }, expectedRevision: found!.revision });
+          changes.push({ type: "check", ref: { kind: "decision", id: d }, expectedRevision: found!.revision }, ...(over.check === undefined ? [] : [over.check]));
         }
         const reliance = await this.#reliance(taskId);
         for (const l of reliance?.links ?? []) {

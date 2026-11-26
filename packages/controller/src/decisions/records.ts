@@ -113,6 +113,11 @@ export interface LinkBody {
   readonly state: "current" | "superseded";
   readonly supersededBy?: string;
   readonly markedAt?: string;
+  /**
+   * Why the link stopped counting, in plain words, when its decision itself stays in force: a task-level decision of the owner's overrode the project-wide one for this task only (the other tasks keep it). A link
+   * marked superseded is stale whatever its decision's own state, until the task revalidates onto the decision that governs it now.
+   */
+  readonly because?: string;
   readonly linkedBy: string;
   readonly linkedAt: string;
 }
@@ -124,6 +129,9 @@ export interface RelianceBody {
   readonly lastRevalidation?: { readonly by: string; readonly at: string; readonly note: string; readonly links: readonly string[] };
   readonly followUps: readonly string[];
 }
+/** The plain reason a task's link to a project-wide decision stops counting when the owner overrides that decision for this task only. */
+export const overrideReason = (overriddenId: string, byId: string, at: string): string =>
+  `the owner's task-level decision ${byId} overrode the project-wide decision ${overriddenId} for this task at ${at} (other tasks keep the project-wide one)`;
 export interface DependentsBody { readonly decisionId: string; readonly taskIds: readonly string[] }
 
 export interface FollowUpBody {
@@ -155,6 +163,11 @@ export interface PropagationBody {
   readonly decisionIds: readonly string[];
   /** The decision that now governs (the one that superseded, or the one chosen). */
   readonly newId?: string;
+  /**
+   * A task-level decision that overrides project-wide ones for one task only: that task's links to them were marked superseded in the recording commit; the pass then reaches that task alone (follow-ups of its
+   * actions, its running generation, its event, its QA evidence), never the other tasks that rely on the project-wide decisions.
+   */
+  readonly override?: { readonly taskId: string; readonly decisionIds: readonly string[] };
   readonly state: "pending" | "done";
   readonly steps: Readonly<Record<string, PropagationStep>>;
   readonly createdAt: string;

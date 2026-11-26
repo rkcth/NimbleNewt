@@ -17,7 +17,7 @@ import { redactText } from "../security/redact.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import {
   DECISION_CATEGORIES, DECISION_ID, DECISION_LIMITS, GATE_KINDS, GATE_TOPIC, SESSION, STANCES, SUBJECT_KINDS, TOPIC,
-  canReadDecision, decisionText, notADecisionIn, dependentsIdOf, followUpIdOf, linkIdOf, normalText, normalTopic, notADecision, propagationIdOf, relianceIdOf, topicIdOf,
+  canReadDecision, decisionText, notADecisionIn, dependentsIdOf, followUpIdOf, linkIdOf, normalText, normalTopic, notADecision, overrideReason, propagationIdOf, relianceIdOf, topicIdOf,
   type ContextRecordBody, type OwnerDecisionBody, type DecisionCategory, type DecisionContext, type DecisionGuard, type DecisionOrigin, type DecisionSource, type DependentsBody, type DisputeBody, type FollowUpBody, type GateKind,
   type LinkBody, type PropagationBody, type PropagationReason, type PropagationStep, type QuestionBody, type RelianceBody, type Stance, type SubjectKind, type TopicBody, type TopicEntry,
 } from "./records.js";
@@ -57,7 +57,7 @@ export interface RecordDecision extends NoActor {
 }
 
 export type RecordResult =
-  | { readonly recorded: true; readonly id: string; readonly version: number; readonly superseded: readonly string[]; readonly disputeId?: string; readonly propagation: "none" | "done" | "pending"; readonly replayed: boolean }
+  | { readonly recorded: true; readonly id: string; readonly version: number; readonly superseded: readonly string[]; readonly overridden?: { readonly taskId: string; readonly decisionIds: readonly string[] }; readonly disputeId?: string; readonly propagation: "none" | "done" | "pending"; readonly replayed: boolean }
   | { readonly recorded: false; readonly reason: string; readonly decisionId?: string };
 
 export interface PropagationResult { readonly done: boolean; readonly pendingTasks: readonly string[]; readonly failures: readonly { readonly taskId: string; readonly step: string; readonly code: string; readonly message: string }[] }
@@ -86,7 +86,7 @@ export interface DecisionDeps {
 const newest = (live: readonly TopicEntry[], taskId: string | undefined): TopicEntry | undefined =>
   live.filter((e) => e.taskId === undefined || e.taskId === taskId).reduce<TopicEntry | undefined>((m, e) => (m === undefined || e.version > m.version ? e : m), undefined);
 
-class NoChange extends Error { constructor(readonly decisionId: string) { super("no change"); } }
+class NoChange extends Error { constructor(readonly decisionId: string, readonly overrides: readonly TopicEntry[] = []) { super("no change"); } }
 /** A question that does not need asking: the topic is decided, disputed, or already has an open question. */
 class Settled extends Error { constructor(readonly questionId?: string) { super("settled"); } }
 
@@ -163,7 +163,7 @@ export class DecisionService implements DecisionGuard {
     const scoped = scopedCommandId(by.id, command.commandId);
     const id = derivedId("dec", scoped);
     const origin: DecisionOrigin = { principalId: by.id, ...(by.credentialId === undefined ? {} : { credentialId: by.credentialId }), ...(session === undefined ? {} : { session }), ...(link === undefined ? {} : { meetingDecisionId: link.meetingDecisionId }) };
-    let outcome: { version: number; superseded: string[]; disputeId?: string; propId?: string } = { version: 0, superseded: [] };
+    let outcome: { version: number; superseded: string[]; overridden?: string[]; disputeId?: string; propId?: string } = { version: 0, superseded: [] };
     try {
       const result = await this.#retrying(() => this.#runner.command("decision.record", { commandId: scoped, actor: by.id }, async () => ({
         payload: json({ projectId, ...(taskId === undefined ? {} : { taskId }), category, topic, statement, wording, ...(gate === undefined ? {} : { gate }), source: source as unknown as JsonObject, basedOn: command.basedOn, ...(session === undefined ? {} : { session }), ...(link === undefined ? {} : { meetingDecisionId: link.meetingDecisionId }) }),
@@ -175,18 +175,23 @@ export class DecisionService implements DecisionGuard {
         const propId = propagationIdOf(id);
         const prop = await this.#runner.get("decision-propagation", propId);
         const propagation = prop === undefined ? "none" : body<PropagationBody>(prop)!.state === "done" ? "done" : await this.#propagateSafely(by, propId);
-        return { recorded: true, id, version: d.version, superseded: [...d.supersedes], ...(d.disputeId === undefined ? {} : { disputeId: d.disputeId }), propagation, replayed: true };
+        const ov = body<PropagationBody>(prop)?.override;
+        return { recorded: true, id, version: d.version, superseded: [...d.supersedes], ...(ov === undefined ? {} : { overridden: ov }), ...(d.disputeId === undefined ? {} : { disputeId: d.disputeId }), propagation, replayed: true };
       }
     } catch (error) {
-      if (error instanceof NoChange) return { recorded: false, reason: "the owner already decided exactly this; it stands, and nothing needs to be asked again", decisionId: error.decisionId };
+      if (error instanceof NoChange) {
+        const o = error.overrides;
+        const still = o.length === 0 ? "" : `. For ${o.length === 1 ? `task ${o[0]!.taskId}` : `tasks ${o.map((e) => e.taskId).join(", ")}`} the owner's own task-level decision${o.length === 1 ? "" : "s"} on this topic (${o.map((e) => e.id).join(", ")}) still override${o.length === 1 ? "s" : ""} it; to have ${o.length === 1 ? "that task" : "those tasks"} follow the project-wide decision, decide again for each such task, or change the project-wide decision`;
+        return { recorded: false, reason: `the owner already decided exactly this; it stands, and nothing needs to be asked again${still}`, decisionId: error.decisionId };
+      }
       throw error;
     }
     let propagation: "none" | "done" | "pending" = "none";
     if (outcome.propId !== undefined) propagation = await this.#propagateSafely(by, outcome.propId);
-    return { recorded: true, id, version: outcome.version, superseded: outcome.superseded, ...(outcome.disputeId === undefined ? {} : { disputeId: outcome.disputeId }), propagation, replayed: false };
+    return { recorded: true, id, version: outcome.version, superseded: outcome.superseded, ...(outcome.overridden === undefined || taskId === undefined ? {} : { overridden: { taskId, decisionIds: outcome.overridden } }), ...(outcome.disputeId === undefined ? {} : { disputeId: outcome.disputeId }), propagation, replayed: false };
   }
 
-  async #buildRecord(a: { id: string; by: Principal; projectId: string; taskId: string | undefined; category: DecisionCategory; topic: string; statement: string; wording: string; gate: GateKind | undefined; source: DecisionSource; basedOn: number; origin: DecisionOrigin }, done: (o: { version: number; superseded: string[]; disputeId?: string; propId?: string }) => void) {
+  async #buildRecord(a: { id: string; by: Principal; projectId: string; taskId: string | undefined; category: DecisionCategory; topic: string; statement: string; wording: string; gate: GateKind | undefined; source: DecisionSource; basedOn: number; origin: DecisionOrigin }, done: (o: { version: number; superseded: string[]; overridden?: string[]; disputeId?: string; propId?: string }) => void) {
     const topicRef: AggregateRef = { kind: "decision-topic", id: topicIdOf(a.projectId, a.topic) };
     const topicFound = await this.#runner.get(topicRef.kind, topicRef.id);
     const topic: TopicBody = body<TopicBody>(topicFound) ?? { projectId: a.projectId, topic: a.topic, entries: [], questions: [] };
@@ -201,7 +206,8 @@ export class DecisionService implements DecisionGuard {
     const top = relevant.reduce<TopicEntry | undefined>((m, e) => (m === undefined || e.version > m.version ? e : m), undefined);
     if (relevant.some((e) => e.state === "disputed")) invalid("topic", `"${a.topic}" has an unresolved conflict between the owner's instructions; the owner chooses first (resolveDispute)`);
     const sameScope = exact === undefined ? undefined : body<OwnerDecisionBody>(await this.#runner.get("decision", exact.id));
-    if (sameScope !== undefined && normalText(sameScope.statement) === normalText(a.statement) && sameScope.gate === a.gate) throw new NoChange(exact!.id);
+    // The same project-wide decision said again leaves the task-level decisions that override it in force for their tasks: the answer says so, rather than only that it stands (card C08).
+    if (sameScope !== undefined && normalText(sameScope.statement) === normalText(a.statement) && sameScope.gate === a.gate) throw new NoChange(exact!.id, a.taskId === undefined ? live.filter((e) => e.taskId !== undefined) : []);
     if (topic.entries.length >= DECISION_LIMITS.entriesPerTopic) throw new DomainError("unavailable", `the topic "${a.topic}" already has ${DECISION_LIMITS.entriesPerTopic} recorded versions`);
     const version = topic.entries.length + 1;
     const decisionRef: AggregateRef = { kind: "decision", id: a.id };
@@ -251,16 +257,41 @@ export class DecisionService implements DecisionGuard {
       const qa = await this.#runner.get("decision-question", q.id);
       if (qa !== undefined) changes.push({ type: "update", ref: { kind: "decision-question", id: q.id }, expectedRevision: qa.revision, body: json({ ...body<QuestionBody>(qa)!, state: "answered", answeredBy: a.id, closedAt: now }) });
     }
-    const propId = replaced.length > 0 ? propagationIdOf(a.id) : undefined;
+    // A task-level decision overrides the project-wide one for this task only: the project-wide decision stays in force for every other task, but this task's links to it stop counting in this same commit,
+    // so its next effect is blocked, its earlier approvals stop counting and it must revalidate onto the override. Its reliance record is always written (created empty when it has none), so a link or a
+    // revalidation racing this decision lands strictly before or after it.
+    const override = a.taskId === undefined ? undefined : await this.#overrideLinks(a.taskId, a.projectId, a.id, live.filter((e) => e.taskId === undefined && e.state === "active").map((e) => e.id), now);
+    if (override !== undefined) changes.push(override.change);
+    const overridden = override?.marked ?? [];
+    const propId = replaced.length > 0 || overridden.length > 0 ? propagationIdOf(a.id) : undefined;
     changes.unshift({ type: "create", ref: decisionRef, body: json({ ...common, state: "active", supersedes: replaced.map((r) => r.id) } satisfies OwnerDecisionBody) });
     changes.push(
       upsert(topicRef, topicFound?.revision ?? 0, { ...topic, category: a.category, entries: [...topic.entries.map((e) => (replaced.some((r) => r.id === e.id) ? { ...e, state: "superseded" as const } : e)), { id: a.id, ...(a.taskId === undefined ? {} : { taskId: a.taskId }), version, state: "active" as const }], questions: topic.questions.filter((q) => !answered.includes(q)) }),
       upsert(ctxRef, ctx.revision, { ...ctx.body, version: ctx.body.version + 1, active, questions: ctx.body.questions.filter((q) => !answered.some((x) => x.id === q)), pending: propId === undefined ? ctx.body.pending : [...ctx.body.pending, propId] }),
     );
-    if (propId !== undefined) changes.push({ type: "create", ref: { kind: "decision-propagation", id: propId }, body: json({ projectId: a.projectId, reason: "superseded", decisionIds: replaced.map((r) => r.id), newId: a.id, state: "pending", steps: {}, createdAt: now } satisfies PropagationBody) });
+    if (propId !== undefined) changes.push({ type: "create", ref: { kind: "decision-propagation", id: propId }, body: json({ projectId: a.projectId, reason: "superseded", decisionIds: replaced.map((r) => r.id), newId: a.id, ...(overridden.length === 0 ? {} : { override: { taskId: a.taskId!, decisionIds: overridden } }), state: "pending", steps: {}, createdAt: now } satisfies PropagationBody) });
     changes.push(...(await this.#firstGate(a.projectId, ctx.revision, topicRef.id)));
-    done({ version, superseded: replaced.map((r) => r.id), ...(propId === undefined ? {} : { propId }) });
-    return { ref: decisionRef, creates: true, changes: mergeChanges(changes), detail: { decisionId: a.id, topic: a.topic, version, superseded: replaced.map((r) => r.id) } };
+    done({ version, superseded: replaced.map((r) => r.id), ...(overridden.length === 0 ? {} : { overridden }), ...(propId === undefined ? {} : { propId }) });
+    return { ref: decisionRef, creates: true, changes: mergeChanges(changes), detail: { decisionId: a.id, topic: a.topic, version, superseded: replaced.map((r) => r.id), ...(overridden.length === 0 ? {} : { overridden, overriddenFor: a.taskId! }) } };
+  }
+
+  /**
+   * The change to a task's reliance record when a task-level decision overrides project-wide decisions for it: each current link to one of them is marked superseded, naming the override and saying why in
+   * plain words. Undefined when nothing project-wide is in force on the topic. Otherwise the record is written even when nothing is marked (an update, or an empty record created), so the recording commit is
+   * ordered against any link or revalidation of the task. `marked` lists the overridden decisions the task's work actually relied on.
+   */
+  async #overrideLinks(taskId: string, projectId: string, byId: string, projectWide: readonly string[], now: string): Promise<{ change: Change; marked: string[] } | undefined> {
+    if (projectWide.length === 0) return undefined;
+    const ref: AggregateRef = { kind: "decision-reliance", id: relianceIdOf(taskId) };
+    const found = await this.#runner.get(ref.kind, ref.id);
+    const rel: RelianceBody = body<RelianceBody>(found) ?? { taskId, projectId, links: [], revalidations: 0, followUps: [] };
+    const marked = new Set<string>();
+    const links = rel.links.map((l): LinkBody => {
+      if (l.state !== "current" || !projectWide.includes(l.decisionId)) return l;
+      marked.add(l.decisionId);
+      return { ...l, state: "superseded", supersededBy: byId, markedAt: now, because: overrideReason(l.decisionId, byId, now) };
+    });
+    return { change: this.#upsert(ref, found?.revision ?? 0, { ...rel, links }), marked: projectWide.filter((d) => marked.has(d)) };
   }
 
   /** Where the words came from. For a chat turn: the owner's own turn, and the wording is in the owner's own text, which never includes quoted material. */
@@ -478,7 +509,7 @@ export class DecisionService implements DecisionGuard {
           given.set(id, { revision: found!.revision, body: d! });
         }
         const stale: LinkBody[] = [];
-        for (const l of rel!.links) if (body<OwnerDecisionBody>(await this.#runner.get("decision", l.decisionId))?.state !== "active") stale.push(l);
+        for (const l of rel!.links) if (l.state !== "current" || body<OwnerDecisionBody>(await this.#runner.get("decision", l.decisionId))?.state !== "active") stale.push(l);
         if (stale.length === 0) invalid("taskId", "has nothing to revalidate");
         const covered = (l: LinkBody): boolean => wanted === undefined || wanted.some((w) => w.kind === l.subject.kind && w.id === l.subject.id);
         for (const w of wanted ?? []) if (!stale.some((l) => l.subject.kind === w.kind && l.subject.id === w.id)) invalid("subjects", `${w.kind} ${w.id} has no stale link`);
@@ -610,6 +641,8 @@ export class DecisionService implements DecisionGuard {
     if (rec.state === "done") return { done: true, pendingTasks: [], failures: [] };
     const tasks = new Set<string>();
     for (const id of rec.decisionIds) for (const t of body<DependentsBody>(await this.#runner.get("decision-dependents", dependentsIdOf(id)))?.taskIds ?? []) tasks.add(t);
+    // An override reaches its own task only (the project-wide decision it overrides still governs the others).
+    if (rec.override !== undefined) tasks.add(rec.override.taskId);
     const steps: Record<string, PropagationStep> = { ...rec.steps };
     const failures: PropagationResult["failures"][number][] = [];
     const pendingTasks: string[] = [];
@@ -674,7 +707,7 @@ export class DecisionService implements DecisionGuard {
 
   /** Marks a task's links to the replaced decisions superseded, and records each already-started or finished action that relied on one. */
   async #markLinks(by: Principal, propId: string, taskId: string, rec: PropagationBody): Promise<void> {
-    const losing = new Set(rec.decisionIds.filter((d) => d !== rec.newId));
+    const losing = new Set([...rec.decisionIds, ...(rec.override?.taskId === taskId ? rec.override.decisionIds : [])].filter((d) => d !== rec.newId));
     await this.#retrying(() => this.#runner.command("decision.mark", { commandId: `${propId}-m-${taskId}`, actor: by.id }, async () => ({
       payload: { propagationId: propId, taskId },
       build: async () => {
@@ -687,8 +720,19 @@ export class DecisionService implements DecisionGuard {
         const followUps = [...rel.followUps];
         const links: LinkBody[] = [];
         for (const l of rel.links) {
-          if (!losing.has(l.decisionId) || l.state === "superseded") { links.push(l); continue; }
-          links.push({ ...l, state: "superseded", ...(rec.newId === undefined ? {} : { supersededBy: rec.newId }), markedAt: now });
+          // A dispute the owner settled by keeping a project-wide decision over a task-level one that had overridden it for this task: the link that override marked counts again (the work was made on the
+          // decision chosen, as an approval judged on a decision a dispute kept counts again).
+          // Only while the kept decision still governs this task: a task-level decision the owner recorded for it after the settlement, before this pass reached it, keeps the link marked (that decision
+          // writes this reliance record, so this mark is ordered against it).
+          if (rec.reason === "resolved" && l.decisionId === rec.newId && l.state === "superseded" && l.because !== undefined && l.supersededBy !== undefined && losing.has(l.supersededBy) && (await this.#governs(rel.projectId, taskId, l))) {
+            const { supersededBy: _by, markedAt: _at, because: _why, ...kept } = l;
+            links.push({ ...kept, state: "current" });
+            continue;
+          }
+          // A link this same decision already marked (an override marks its task's links in the recording commit) still gets its actions' follow-ups here; one marked by an earlier decision is left as it is.
+          const markedHere = l.state === "superseded" && rec.newId !== undefined && l.supersededBy === rec.newId;
+          if (!losing.has(l.decisionId) || (l.state === "superseded" && !markedHere)) { links.push(l); continue; }
+          links.push(markedHere ? l : { ...l, state: "superseded", ...(rec.newId === undefined ? {} : { supersededBy: rec.newId }), markedAt: now });
           if (l.subject.kind === "action" && this.#deps.effects !== undefined) {
             const effect = await this.#deps.effects.get(l.subject.id);
             const status = effect === undefined ? undefined : effect.status === "confirmed" ? "confirmed" : effect.status === "uncertain" ? "uncertain" : effect.status === "intended" && effect.started ? "in-flight" : undefined;
@@ -710,6 +754,12 @@ export class DecisionService implements DecisionGuard {
         return { ref: relRef, creates: false, changes: mergeChanges(changes), detail: { propagationId: propId, taskId, marked: links.filter((l) => l.state === "superseded").length } };
       },
     })));
+  }
+
+  /** Whether the link's decision is the one that governs the task on its topic now. */
+  async #governs(projectId: string, taskId: string, l: LinkBody): Promise<boolean> {
+    const now = await this.#authority(projectId, taskId, l.topic);
+    return now.status === "decided" && now.decision.id === l.decisionId;
   }
 
   /** A running generation of the task is interrupted (L05 `correct`), so what it was producing cannot be applied. A task that never generated, or is finished, needs nothing. */
@@ -761,6 +811,8 @@ export class DecisionService implements DecisionGuard {
         const d = body<OwnerDecisionBody>(found);
         if (found !== undefined && !seen.has(found.id)) { seen.add(found.id); changes.push({ type: "check", ref: { kind: "decision", id: found.id }, expectedRevision: found.revision }); }
         if (d !== undefined && d.state !== "active") blockedBy.push(`${l.subject.kind} ${l.subject.id} relies on ${l.topic ? `"${l.topic}" ` : ""}decision ${l.decisionId}, which is ${d.state === "superseded" ? `superseded${d.supersededBy === undefined ? "" : ` by ${d.supersededBy}`}` : "disputed"}; revalidate it first`);
+        // The decision is still in force elsewhere, but no longer for this task (a task-level override): the link itself says so.
+        else if (d !== undefined && l.state !== "current") blockedBy.push(`${l.subject.kind} ${l.subject.id} relies on ${l.topic ? `"${l.topic}" ` : ""}decision ${l.decisionId}, which no longer applies to this task: ${l.because ?? `it was superseded${l.supersededBy === undefined ? "" : ` by ${l.supersededBy}`}`}; revalidate it first`);
       }
     }
     return { blockedBy, changes };
@@ -856,11 +908,18 @@ export class DecisionService implements DecisionGuard {
     const ctx = await this.#context(projectId);
     const relevant = (t: string | undefined): boolean => taskId === undefined || t === undefined || t === taskId;
     const decisions: View<OwnerDecisionBody>[] = [], goals: View<OwnerDecisionBody>[] = [], permissions: View<OwnerDecisionBody>[] = [], gates: View<OwnerDecisionBody>[] = [];
+    const found: Aggregate[] = [];
     for (const id of ctx.body.active) {
-      const found = await this.#runner.get("decision", id);
-      const d = body<OwnerDecisionBody>(found);
-      if (found === undefined || d === undefined || d.state !== "active" || !relevant(d.taskId)) continue;
-      (d.category === "goal" ? goals : d.category === "permission" ? permissions : d.category === "gate" ? gates : decisions).push(view<OwnerDecisionBody>(found));
+      const a = await this.#runner.get("decision", id);
+      const d = body<OwnerDecisionBody>(a);
+      if (a !== undefined && d !== undefined && d.state === "active" && relevant(d.taskId)) found.push(a);
+    }
+    // A task sees what governs it: a project-wide decision its own task-level decision overrides on the same topic is left out of the task's record (it still governs the other tasks).
+    const own = new Set(found.map((a) => body<OwnerDecisionBody>(a)!).filter((d) => taskId !== undefined && d.taskId === taskId).map((d) => d.topic));
+    for (const a of found) {
+      const d = body<OwnerDecisionBody>(a)!;
+      if (d.taskId === undefined && own.has(d.topic)) continue;
+      (d.category === "goal" ? goals : d.category === "permission" ? permissions : d.category === "gate" ? gates : decisions).push(view<OwnerDecisionBody>(a));
     }
     const disputes: View<DisputeBody>[] = [];
     for (const id of ctx.body.disputes) { const f = await this.#runner.get("decision-dispute", id); const d = body<DisputeBody>(f); if (f !== undefined && d !== undefined && relevant(d.taskId)) disputes.push(view<DisputeBody>(f)); }
@@ -877,7 +936,7 @@ export class DecisionService implements DecisionGuard {
     const rel = body<RelianceBody>(await this.#runner.get("decision-reliance", relianceIdOf(id)));
     if (rel === undefined) return { links: [], followUps: [], revalidations: 0 };
     const links: (LinkBody & { decisionState: string; stale: boolean })[] = [];
-    for (const l of rel.links) { const s = body<OwnerDecisionBody>(await this.#runner.get("decision", l.decisionId))?.state ?? "missing"; links.push({ ...l, decisionState: s, stale: s !== "active" }); }
+    for (const l of rel.links) { const s = body<OwnerDecisionBody>(await this.#runner.get("decision", l.decisionId))?.state ?? "missing"; links.push({ ...l, decisionState: s, stale: s !== "active" || l.state !== "current" }); }
     const followUps: View<FollowUpBody>[] = [];
     for (const f of rel.followUps) { const a = await this.#runner.get("decision-followup", f); if (a !== undefined) followUps.push(view<FollowUpBody>(a)); }
     return { links, followUps, revalidations: rel.revalidations };

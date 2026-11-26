@@ -19,7 +19,7 @@ import { DEFAULT_HOST_STALE_AFTER_MS, hostFreshness, type Freshness } from "../h
 import { relianceOf } from "../security/reliance.js";
 import { holdsNow, idleEnd, lapsedFromNonUse, type GrantRecordBody } from "../security/grants.js";
 import { relianceHead, relianceLines, relianceSummary } from "./reliance-words.js";
-import { quotedLine } from "../decisions/records.js";
+import { quotedLine, relianceIdOf, type OwnerDecisionBody, type RelianceBody } from "../decisions/records.js";
 import type { TaskHandoffBody } from "../lifecycle/handoff.js";
 import { safeSlice } from "../lifecycle/handoff-cut.js";
 import type { PauseService, PauseStatus } from "../lifecycle/pause.js";
@@ -294,7 +294,7 @@ export const STATUS_KINDS: Readonly<Record<string, { readonly keys: readonly str
   landing_queue: { keys: ["projectId", "branch"], about: "the landing queue of a project (card P10): the approved work waiting to land on its landing branch, oldest first (the first lands next), with each task, submission and author (and why one of the first ten would not land now); and the project's other branches whose queues still hold work, such as the branch that was the landing branch before the owner named another (nothing there lands now; give branch to read one of them); a first reserved place with no approved submission is shown with since when and when the controller ends it by itself (checked on the controller's regular rounds and when a landing is asked for behind it, only while approved work waits behind it; approved work coming back stops the count); an approved first place that has held the branch for twenty-four hours while newer approved work waits behind it is shown with when the controller moves it to the back (nothing is removed)" },
   landing_checks: { keys: ["taskId|taskTitle", "projectId", "after"], about: "owner only: each required check's result at the newest landing attempts of a task or project (after: how many shown), the tree judged, what the last re-read changed" },
   landing_settings: { keys: ["projectId"], about: "owner only: how a project's finished work lands (card P09/P10): where it lands (an integration branch, main by itself, or waiting for a person), who integrates (an agent or a person), the checks the project requires before work lands (tests, review, QA, documents, a director's sign-off, no unfinished defects; an empty list says none are required), how many times an author refreshes work onto a moved landing branch before its place in the queue is reserved, whether the setting is the project's own or the installation default or the approval profile's, and whether the installation's lock holds main-automatic back" },
-  submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, or approved it before a decision of yours or the criteria changed so the approval no longer counts (what changed, when; a new review restores it), and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
+  submissions: { keys: ["taskId|taskTitle"], about: "what was submitted on a task and where each piece stands (card Q01b): its code submissions newest first (who submitted, which tree and refresh round, whether a reviewer approved it, asked for changes or has not looked yet, or approved it before a decision of yours (also one for that task alone overriding a project-wide one) or the criteria changed so the approval no longer counts (what changed, when; a new review restores it), and what the newest director sign-off says: approved, declined or none), then the newest reviews, QA reports, document changes and director sign-offs with who gave them and about which submission. Only submissions the caller may read; the owner and the author are also told, for approved code, whether the platform has committed it in the task's checkout (the commit, permit or plain) or not yet (with what the release that a reviewer's approval asked for by itself answered, when it was refused or failed); a task with no code submitted says so. Sign-offs are given by director agents, not by the owner here" },
   submissions_project: { keys: ["projectId"], about: "the code waiting across a project (card Q01b): for each task not done or cancelled, its newest code submission and where review and the director's sign-off stand: waiting for a reviewer, changes asked for (it waits for its author), approved but the director declined, approved with no director sign-off yet, or approved and signed off; the ones needing a reviewer first. The owner sees every task; an agent sees only the code it submitted itself. Ask the submissions view with a task for everything submitted on it" },
   defect_risks: { keys: ["projectId"], about: "the unfinished defects of a project, its team-wide defect risks (card Q04): how many are escalated to the owner (they wait for the owner's decision), repaired and waiting for a check, or open and waiting for a repair, then each defect, escalated first and then by severity, with its ID, severity, state, the repair and review cycles used against the limit, the task and deliverable it is in, and the finding; finished defects (resolved, accepted as is or withdrawn as mistaken) are not listed. Ask the defects view with a task for what was checked in it; qa_project for what waits for QA" },
   qa_policy: { keys: ["projectId", "after"], about: "the project's review policy and its open scheduled reviews (after: how many were shown)" },
@@ -3754,6 +3754,29 @@ export class StatusService {
 
   // ---- one task ------------------------------------------------------------------------------------------------------------
 
+  /**
+   * The task's work that relies on an owner decision no longer in force for it (card C08), as the decision guard reads it: superseded, disputed, or a project-wide decision the owner overrode for this task alone.
+   * Its next action waits until the work is revalidated. At most 10 lines, then how many more.
+   */
+  async #decisionHolds(taskId: string, viewerIsOwner: boolean): Promise<Line[]> {
+    const found = await this.#runner.get("decision-reliance", relianceIdOf(taskId));
+    const rel = found?.body as unknown as RelianceBody | undefined;
+    if (found === undefined || rel === undefined) return [];
+    const out: Line[] = [];
+    let more = 0;
+    for (const l of rel.links ?? []) {
+      const got = await this.#runner.get("decision", l.decisionId);
+      const d = got?.body as unknown as OwnerDecisionBody | undefined;
+      const why = d === undefined ? "cannot be read" : d.state === "disputed" ? (viewerIsOwner ? "is disputed (two of your instructions conflict) until you choose" : "is disputed (two of the owner's instructions conflict) until the owner chooses") : d.state !== "active" ? `was superseded${d.supersededBy === undefined ? "" : ` by ${d.supersededBy}`}`
+        : l.state !== "current" ? (l.because === undefined ? `no longer applies to it${l.supersededBy === undefined ? "" : ` (superseded by ${l.supersededBy})`}` : `no longer applies to it: ${l.because}`) : undefined;
+      if (why === undefined) continue;
+      if (out.length >= 10) { more++; continue; }
+      out.push(line(`Its next action waits: its ${l.subject.kind} ${shown(l.subject.id, 80)} relies on ${viewerIsOwner ? "your" : "the owner's"} decision ${l.decisionId}${l.topic ? ` on ${quoted(l.topic, 80)}` : ""}, which ${why}. The way out: its agent (or ${viewerIsOwner ? "you" : "the owner"}) revalidates the work onto the decision that governs the task now (decision.revalidate), and an earlier approval counts again only after a new review.`, cite("decision-reliance", found.id, found.revision), ...(got === undefined ? [] : [cite("decision", got.id, got.revision)]), cite("task", taskId)));
+    }
+    if (more > 0) out.push(line(`${more} more of its links rely on decisions no longer in force for it.`, cite("decision-reliance", found.id, found.revision), cite("task", taskId)));
+    return out;
+  }
+
   /** Everything the records say about one task, for a caller who may read it; undefined otherwise (as for a task that does not exist). */
   async task(by: Principal, taskId: string): Promise<TaskStatus | undefined> {
     const id = checkTaskId(taskId);
@@ -3817,6 +3840,7 @@ export class StatusService {
     }
     for (const b of blockers) lines.push(line(`It is held up by ${b.words}: ${b.summary} The way out: ${b.route}.`, cite("blocker", b.id, b.revision), cite("task", id)));
     for (const b of advice) lines.push(line(`Advice, not a blocker: ${b.summary} This outcome was decided by the owner, so a preference does not stop it.`, cite("blocker", b.id, b.revision), cite("task", id)));
+    lines.push(...(await this.#decisionHolds(id, viewerIsOwner)));
     if (body.state === "blocked" && pending.every((p) => p.kind !== "wait") && blockers.length === 0 && advice.length === 0)
       lines.push(line("It is blocked, but no record says why. That is itself a problem to look at.", cite("task", id, found.revision)));
     for (const c of concerns.suspected) lines.push(line(`Suspected, not confirmed: ${c.detail}`, cite("stall-concern", c.id), cite("task", id)));
