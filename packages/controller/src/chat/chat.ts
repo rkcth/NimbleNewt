@@ -1591,6 +1591,34 @@ export class ChatService {
       if (matches.length > 1) return { ok: false, kind: "ask", question: `More than one task is called ${quotedText(title, 80)}. Which one?`, options: matches.slice(0, CHAT_LIMITS.options).map((m) => `${m.id} (${m.state})`), field: idKey, choices: matches.slice(0, CHAT_LIMITS.options).map((m) => m.id) };
       args[idKey] = (matches[0] as { id: string }).id;
     }
+    // Rating a capability by chat (card Q03): the proposal says what it changes from and what follows for the documents that claim or named it, so the owner sees the consequence before it applies.
+    if (intent.op === "doc.capability.set" && typeof args["capabilityId"] === "string" && typeof args["projectId"] === "string") {
+      const reg = await this.#deps.api.handle(token, { v: API_VERSION, op: "doc.capability.list", args: { projectId: args["projectId"] } });
+      if (!reg.ok) return refuse(reg.error.code, reg.error.message);
+      const items = (reg.result["items"] ?? []) as { id: string; name: string; names?: string[]; maturity: string; source: string; documents: number }[];
+      // Named loosely (card Q03, no magic phrases): the owner says "Claude caching" or "the offline mode", not an ID. An exact ID first, then one entry whose ID, name or scanned names match the words.
+      let e = items.find((x) => x.id === args["capabilityId"]);
+      if (e === undefined) {
+        const norm = (v: unknown): string => String(v).normalize("NFKC").toLowerCase().replace(/^(?:the|a|an)\s+/u, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+        const want = norm(args["capabilityId"]);
+        const exact = items.filter((x) => [x.id, x.name, ...(x.names ?? [])].some((n) => norm(n) === want));
+        const hits = exact.length > 0 || want.length < 3 ? exact : items.filter((x) => [x.id, x.name, ...(x.names ?? [])].some((n) => norm(n).includes(want)));
+        if (hits.length > 1) return { ok: false, kind: "ask", question: `More than one capability matches ${quotedText(String(args["capabilityId"]), 60)}. Which one?`, options: hits.slice(0, CHAT_LIMITS.options).map((x) => `${x.name} (${x.id}, ${x.maturity})`), field: "capabilityId", choices: hits.slice(0, CHAT_LIMITS.options).map((x) => x.id) };
+        if (hits.length === 1) { e = hits[0]!; args["capabilityId"] = e.id; }
+        else if (!/^[a-z][a-z0-9-]{1,59}$/.test(String(args["capabilityId"])) && want.length >= 2 && args["name"] !== undefined) {
+          // A new capability named in words (its name, in the owner's words, given too): its ID is made from them.
+          args["capabilityId"] = (/^[a-z]/.test(want) ? want : `c-${want}`).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+        }
+      }
+      const rank = (m: unknown): number => (m === "supported" ? 2 : m === "experimental" ? 1 : m === "unsupported" ? 0 : -1);
+      const to = args["maturity"];
+      if (rank(to) < 0) return refuse("invalid_command", "A capability is rated supported, experimental or unsupported.");
+      if (e === undefined && args["name"] === undefined) return refuse("invalid_command", `${quotedText(String(args["capabilityId"]), 60)} is not in this project's capability register yet: what is it called? A new capability needs its name in your words.`);
+      const what = e === undefined ? `Adds capability ${quotedText(String(args["name"]), 60)} (${String(args["capabilityId"])}) as ${String(to)}` : `Rates ${quotedText(e.name, 60)} (${e.id}) ${String(to)}; it is now ${e.maturity}${e.source === "built-in" ? " (the controller's own label, which this replaces for the project)" : ""}`;
+      const n = e?.documents ?? 0;
+      const then = e === undefined || rank(to) === rank(e.maturity) ? "" : rank(to) < rank(e.maturity) ? ` Those verified while it was rated higher go stale, each with an update task for its keeper; ${to === "unsupported" ? "a document may then name it only to say it is not supported" : "a document may then name it only with an experimental label"}.` : ` Documents may then claim it${to === "supported" ? " without an experimental label" : " with an experimental label"}; one refused for it can be verified again.`;
+      fillNotes.push(`${what}. ${n} kept document(s) claim or name it.${then}`);
+    }
     // A release commits approved code (card D01, release by words). The owner names the task, not the submission: the CHAT finds the task's approved code that is not committed yet, never the model. A release that names no
     // submission would commit the whole folder as a plain commit, so one is never proposed without it, nor one for no task. An ID the model supplied counts only when it is one of the found submissions. With no ID,
     // only the task's NEWEST code is filled in when it is approved and not committed, or else the newest approved, uncommitted submission with exactly the same base and tree (the same code submitted again and not

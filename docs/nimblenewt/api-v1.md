@@ -2860,6 +2860,16 @@ Result: `{ projectId, total, items, next? }`.
 
 Completion: finished when accepted (`completed: true`).
 
+#### `doc.capability.list`
+
+The capability register of a project (card Q03): the controller's own labels and the project's entries (which replace them), each with its maturity, names, note, who set it and when, and how many kept documents claim or name it (a claim, a verification, or a refusal for it). Anyone who may read the project's tasks.
+
+Arguments:
+
+- `projectId`: the project
+
+Result: `{ projectId, items: [{ id, name, names, maturity, note?, source, setBy?, setAt?, documents }] }`.
+
 #### `doc.obligation.list`
 
 The documentation obligations of a project in the order recorded (card Q03), each with its audience, owner, version, implementing tasks, claims, state (`unverified`, `verified` or `stale`; `flagged` is true unless verified), what it was verified against (document submission, artifact digest, and per task the code submission and tree), why it is stale and its update tasks. Anyone who may read the project's tasks.
@@ -8164,7 +8174,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.record`
 
-Records a documentation obligation (card Q03): a document (`audience` `user`, `developer`, `support` or `promotional`), where it lives, its owner (the agent that keeps it current and gets its update tasks), the product version it applies to, the tasks whose behaviour it describes (`implementationRefs`) and any capability it claims, each claim naming one of those tasks (a claim with no implementing task is an unsupported claim and refused). The owner must be an active agent that may read the project's tasks. It starts `unverified`. With `obligationId` and `expectedRevision` it replaces one: a change of the tasks, claims or version makes it `unverified` again. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID records once.
+Records a documentation obligation (card Q03): a document (`audience` `user`, `developer`, `support` or `promotional`), where it lives, its owner (the agent that keeps it current and gets its update tasks), the product version it applies to, the tasks whose behaviour it describes (`implementationRefs`) and any capability it claims, each claim naming one of those tasks (a claim with no implementing task is an unsupported claim and refused) and the capability it claims by its ID in the project's capability register (`doc.capability.list`; an ID the register does not know is refused). `kind` says what is kept: `document` (the default), `support_guidance` (audience `support`) or `promotional_asset` (audience `promotional`); the last two name the `channel` they are published on, and a promotional asset its `mediaType` (`text`, the default, or `image`, `video`, `audio`, `other`). The owner must be an active agent that may read the project's tasks. It starts `unverified`. With `obligationId` and `expectedRevision` it replaces one: a change of the tasks, claims, version, kind or media type makes it `unverified` again. The owner, or an agent that may read the project's tasks and holds the docs or director role there. Repeating the same command ID records once.
 
 Arguments:
 
@@ -8175,10 +8185,13 @@ Arguments:
 - `title`: the document's name
 - `location`: where it lives (a path, an address or an artifact ID)
 - `audience`: `user`, `developer`, `support` or `promotional`
+- `kind` (optional): `document` (default), `support_guidance` or `promotional_asset`
+- `channel` (optional): support guidance and promotional assets: where it is published
+- `mediaType` (optional): promotional assets: `text` (default), `image`, `video`, `audio` or `other`
 - `owner`: the agent keeping it (`agent:<id>`)
 - `applicableVersion`: the version it applies to
 - `implementationRefs`: the task IDs whose behaviour it describes (1 to 20)
-- `claims` (optional): [{ text, taskId }]: capabilities it claims, each with the implementing task (at most 20)
+- `claims` (optional): [{ text, taskId, capabilityId }]: capabilities it claims, each with the implementing task and the capability's register ID (at most 20)
 
 Result: `{ id, revision, replayed, state }`.
 
@@ -8186,7 +8199,7 @@ Completion: finished when accepted (`completed: true`).
 
 #### `doc.obligation.verify`
 
-Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged (`submission.documents` with `since` set to its `flaggedAt` lists them, and the `docs` status view shows them), and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. The QA records each gate was read from are checked in the same write: QA evidence recorded or invalidated, a task contract changed or an owner decision superseded meanwhile answers `stale_revision` (verify again). A release flag must be answered with the release version (`applicableVersion`). Open update tasks of the document are settled. The owner or the document's own owner.
+Binds a document change to tested work (card Q03): `documentSubmissionId` is a `document` submission (made in the docs role) of a task of the same project, and `evidence` names, for every task the document describes, a code submission of that task whose QA gate (`qa.evidence.gate`) passes now; for a task the document was flagged for by `doc.impact.check`, the code of the newest flagged tree; a flagged document needs a document submission made since it was flagged (`submission.documents` with `since` set to its `flaggedAt` lists them, and the `docs` status view shows them), and re-recording it keeps its flags. If a task's gate does not pass, the claims on it would be unsupported and nothing is verified. The QA records each gate was read from are checked in the same write: QA evidence recorded or invalidated, a task contract changed or an owner decision superseded meanwhile answers `stale_revision` (verify again). A release flag must be answered with the release version (`applicableVersion`). Then its claims are checked (card Q03): every claim names a capability of the register, not one marked `unsupported`, and an `experimental` one only with an experimental label in the claim's words; and the document change's text (the text files of its artifact, when it names one and this controller keeps artifacts) is scanned sentence by sentence for the names of experimental or unsupported capabilities: a sentence naming one without a label (an experimental label, or a negation such as "not supported") is flagged. A promotional text asset is verified only once its text was read. Any flag refuses the verification without an error: `verified` is false, the flags (rule, capability, where, the sentence cleaned and quoted) are returned and kept on the record (`claimCheck`) for the `docs` view, its state is unchanged and nothing is settled. Otherwise open update tasks of the document are settled, and the verification keeps the maturity of every capability it claimed or named. The owner or the document's own owner.
 
 Arguments:
 
@@ -8197,7 +8210,7 @@ Arguments:
 - `evidence`: the code submission IDs, one per described task
 - `applicableVersion` (optional): the version it now applies to
 
-Result: `{ id, revision, replayed, settled (update tasks settled) }`.
+Result: `{ id, revision, replayed, settled (update tasks settled), verified, scanned (text read), flags: [{ rule, capabilityId?, source, where, quote }] (at most 20), total (all flags) }`.
 
 Completion: finished when accepted (`completed: true`).
 
@@ -8240,7 +8253,25 @@ Arguments:
 - `projectId`: the project
 - `version`: the version being released
 
-Result: `{ projectId, version, flagged, byAudience, tasks: [{ obligationId, taskId, assigned }], replayed }`.
+Result: `{ projectId, version, flagged, byAudience, byKind, tasks: [{ obligationId, taskId, assigned }], replayed }`.
+
+Completion: finished when accepted (`completed: true`).
+
+#### `doc.capability.set`
+
+Rates one capability in the project's capability register (card Q03), which every documentation claim is checked against: `supported`, `experimental` (a document may name it only with an experimental label) or `unsupported` (a document may name it only to say it is not supported). The register starts with the controller's own labels (Claude and Strata prompt caching experimental, as the cache profiles state; an unattended Windows worker unsupported, by the owner's decision), and a project entry with the same ID replaces one (only the owner rates one of these higher than the controller's label; the controller's names stay scanned for). `names` are what the text scan looks for (the name is always one). A capability rated lower than when a document was verified flags that document `stale` with an update task for its keeper. The owner, or an agent holding the director role in the project (not the docs role). Repeating the same command ID sets it once and finishes the flagging.
+
+Arguments:
+
+- `commandId`: required
+- `projectId`: the project
+- `capabilityId`: lower-case letters, digits and hyphens
+- `maturity`: `supported`, `experimental` or `unsupported`
+- `name` (optional): its name (required for a new one)
+- `names` (optional): 1 to 10 names the text scan looks for (3 to 80 characters each)
+- `note` (optional): why, in a few words
+
+Result: `{ projectId, capabilityId, maturity, from?, replayed, flagged (obligation IDs), tasks: [{ obligationId, taskId, assigned }] }`.
 
 Completion: finished when accepted (`completed: true`).
 
