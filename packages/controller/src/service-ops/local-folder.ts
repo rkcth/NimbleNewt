@@ -19,6 +19,10 @@ const NAME = /^[a-z][a-z0-9._-]{0,63}$/;
 const refKey = (r: ServiceRef): string => `${r.service}/${r.resource}`;
 const isObject = (v: unknown): v is JsonObject => typeof v === "object" && v !== null && !Array.isArray(v);
 const code = (e: unknown): string | undefined => (e as { code?: string } | null)?.code;
+// A reason that reaches the agent or the owner never carries a path on this computer: a system error (whose message names the absolute path) is told by its code only (second review).
+const plain = (e: unknown): string => (code(e) !== undefined ? `a system error (${code(e)})` : e instanceof Error ? e.message : String(e));
+/** The name of a new text staged beside a file (and of a key record being written): random, so it cannot be guessed, and never a service or resource name (it starts with a dot). */
+const STAGED = /^\.nn-[0-9a-f]{16}\.tmp$/;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 // A file is opened for reading without waiting: a pipe or device swapped in after the look at it then opens at once and is refused by the check that follows, instead of blocking the read.
 const NONBLOCK = constants.O_NONBLOCK ?? 0;
@@ -58,7 +62,27 @@ export class LocalFolderServices implements ServiceTarget {
     if (seen === undefined || !seen.isDirectory() || seen.isSymbolicLink()) throw new Error(`the service folder ${folder} is not a folder (a link to one is not accepted)`);
     const root = await realpath(folder);
     const id = await lstat(root);
+    await LocalFolderServices.#sweep(root);
     return new LocalFolderServices(root, { dev: id.dev, ino: id.ino }, options.clock ?? (() => new Date().toISOString()), options.onStep);
+  }
+
+  /**
+   * Removes the staged files a stopped controller left behind (second review): only plain files named as this connector names them (`.nn-<16 hex>.tmp`), in the keys folder and directly in each
+   * service folder that is a real folder. Nothing else is touched, and nothing is followed. One controller binds a folder, so none of them belongs to a change in progress.
+   */
+  static async #sweep(root: string): Promise<void> {
+    const dirs = [join(root, LOCAL_FOLDER_KEYS)];
+    for (const n of await readdir(root).catch(() => [] as string[])) if (NAME.test(n)) dirs.push(join(root, n));
+    for (const dir of dirs) {
+      const d = await lstat(dir).catch(() => undefined);
+      if (d === undefined || d.isSymbolicLink() || !d.isDirectory()) continue;
+      for (const n of await readdir(dir).catch(() => [] as string[])) {
+        if (!STAGED.test(n)) continue;
+        const f = join(dir, n);
+        const s = await lstat(f).catch(() => undefined);
+        if (s !== undefined && s.isFile() && !s.isSymbolicLink()) await rm(f, { force: true }).catch(() => undefined);
+      }
+    }
   }
 
   #names(ref: ServiceRef): { dir: string; file: string } {
@@ -106,7 +130,13 @@ export class LocalFolderServices implements ServiceTarget {
       h = await open(file, constants.O_RDONLY | NOFOLLOW | NONBLOCK);
       const st = await h.stat();
       if (st.ino !== s.ino || !st.isFile()) return { kind: "unreadable", reason: "the file changed while it was being read" };
-      const buf = await h.readFile();
+      // Never more than the size it had when it was looked at (second review): a file that grows in between (or a large sparse one put there) is not read to its end.
+      if (st.size !== s.size) return { kind: "unreadable", reason: "the file changed while it was being read" };
+      const room = Buffer.alloc(s.size + 1);
+      let got = 0;
+      for (let n = -1; n !== 0 && got < room.length; got += n) n = (await h.read(room, got, room.length - got, got)).bytesRead;
+      if (got !== s.size) return { kind: "unreadable", reason: "the file changed while it was being read" };
+      const buf = room.subarray(0, got);
       const digest = createHash("sha256").update(buf).digest("hex").slice(0, 32);
       const text = buf.length <= LOCAL_FOLDER_LIMITS.fileBytes ? new TextDecoder("utf-8", { fatal: true }).decode(buf) : undefined;
       return { kind: "file", bytes: buf.length, digest, ...(text === undefined ? {} : { text }), stamp, mode: s.mode & 0o777, folder };
@@ -206,6 +236,8 @@ export class LocalFolderServices implements ServiceTarget {
     if (action.type === "write") {
       const text = action.params?.["text"];
       if (typeof text !== "string") return refuse("write needs params.text, the file's whole new text");
+      // Text that is not valid Unicode (a lone surrogate) would be written changed and then never read back as given (second review): refused before anything is written.
+      if (/\p{Cs}/u.test(text)) return refuse("params.text is not valid Unicode text");
       content = text;
     } else if (action.type === "set") {
       const fields = action.params?.["fields"];
@@ -236,7 +268,7 @@ export class LocalFolderServices implements ServiceTarget {
       if (staged !== undefined) await rm(staged.path, { force: true }).catch(() => undefined);
       if (stagedKey !== undefined) await rm(stagedKey.path, { force: true }).catch(() => undefined);
       if (e instanceof EffectRejected) throw e;
-      return refuse(`the change could not be prepared: ${(e as Error).message}`);
+      return refuse(`the change could not be prepared: ${plain(e)}`);
     }
     // From here the key says applied: a failure is a lost answer, settled by reading the file back (never by writing again). A check that fails here leaves the old file in place (the read-back then
     // shows it: uncertain) and removes the staged one.
@@ -247,7 +279,7 @@ export class LocalFolderServices implements ServiceTarget {
       await rename(staged.path, file);
     } catch (e) {
       await rm(staged.path, { force: true }).catch(() => undefined);
-      throw e;
+      throw new Error(plain(e));
     }
     const d = await open(dir, constants.O_RDONLY).catch(() => undefined);
     if (d !== undefined) { await d.sync().catch(() => undefined); await d.close().catch(() => undefined); }

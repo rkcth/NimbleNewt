@@ -106,6 +106,11 @@ for (const store of stores) {
       const invented = await turn("w0", "Let Ann fix the billing settings in Garden, she needs it to tune the replicas.", [owner({ op: "grant.create", args: { agentName: "Ann", action: "effect.perform", resource: "billing/db", projectName: "Garden", basis: "she needs it to tune the replicas" } }, "Let Ann fix the billing settings in Garden, she needs it to tune the replicas.")]);
       assert.equal(invented[0]!.status, "refused", JSON.stringify(invented));
       assert.match(invented[0]!.message ?? "", /not in your message as written.*\?$/);
+      // Second review: a service resource goes only with the right to change it; another right named on it (even in the owner's words) is not drawn up, since its line would say it may change it.
+      const otherRight = "Give Ann task.read on billing/settings.json in Garden.";
+      const wrongAction = await turn("w0b", otherRight, [owner({ op: "grant.create", args: { agentName: "Ann", action: "task.read", resource: "billing/settings.json", projectName: "Garden", basis: "Give Ann task.read" } }, otherRight)]);
+      assert.equal(wrongAction[0]!.status, "refused", JSON.stringify(wrongAction));
+      assert.match(wrongAction[0]!.message ?? "", /can only be the right to change that resource/);
       const yes = await turn("w2", `yes, go ahead ${shown[0]!.proposalId}`, [{ kind: "apply_proposal", proposalId: shown[0]!.proposalId, evidence: `go ahead ${shown[0]!.proposalId}`, basis: "owner" }]);
       assert.equal(yes[0]!.status, "applied", JSON.stringify(yes));
       const rights = await activeRights();

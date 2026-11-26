@@ -21,6 +21,15 @@ test("taking back a right on one service resource counts only as an order in the
     "Never mind, I won't revoke grt-abc.",
     "Not yet: revoke grt-abc tomorrow.",
     "Hold off on removing grt-abc, then revoke it later.",
+    // Second review: an order that waits on something, is put off or only weighed is shown first too.
+    "Before you revoke grt-abc, show me what relies on it.",
+    "If Block touches billing again, revoke grt-abc.",
+    "No need to revoke grt-abc.",
+    "I'd rather not take back grt-abc.",
+    "Maybe revoke grt-abc.",
+    "Revoke grt-abc unless Block is in the middle of a task.",
+    "Should we revoke grt-abc.",
+    "Wait, then remove grt-abc.",
   ]) assert.equal(says(text), false, text);
   // What it decides: a service right taken back in the owner's words applies at once; any other wording shows it first.
   const reason = (said: boolean) => proposalReason("grant.revoke", { grantId: "grt-abc" }, false, { profile: "derived", quoted: false, said, serviceRight: true });

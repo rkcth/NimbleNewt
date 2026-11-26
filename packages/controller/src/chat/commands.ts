@@ -887,8 +887,9 @@ export function ownerSaysMove(op: string, args: Readonly<Record<string, unknown>
   // A pause applies at once (second review): the verb must stand outside the target's name, so an agent called Parker or Holden is not paused by a sentence that only names it. The same for taking
   // back a right on one service resource (card P03b review), which also applies at once: a resource called stop-list or end.json, or an agent called Block, does not order it by being named.
   const outside = (s: string): string => (key === "lifecycle.pause" || key === "grant.revoke" ? named.reduce((t, r) => t.replace(new RegExp(r.source, "gi"), "$1 $2"), s) : s);
-  // Taking a right back at once (card P03b review): a sentence that says not to ("don't take back ...", "never mind revoking ...", "not yet") is not an order; it is shown first instead.
-  const negated = (s: string): boolean => key === "grant.revoke" && /\b(?:don'?t|don\u2019t|do not|never|won'?t|won\u2019t|will not|not yet|hold off)\b/i.test(s);
+  // Taking a right back at once (card P03b review): a sentence that says not to ("don't take back ...", "never mind revoking ...", "not yet") is not an order; it is shown first instead. Nor one that
+  // makes it wait on something, puts it off or only weighs it ("before you revoke ...", "if ... revoke ...", "no need to ...", "maybe ...", "should we ..."; second review).
+  const negated = (s: string): boolean => key === "grant.revoke" && /\b(?:don'?t|don\u2019t|do not|never|won'?t|won\u2019t|will not|not yet|hold off|no need|need(?:n'?t|n\u2019t| not)|rather not|not (?:to )?(?:revoke|remove|withdraw|take|end|stop|narrow|restrict|forbid|block)|forget|wait|before|until|unless|if|whether|what if|without|later|maybe|perhaps|should (?:i|we))\b/i.test(s);
   return sentences.some((s) => !negated(outside(s)) && verb.test(outside(s)) && named.some((r) => r.test(s)));
 }
 

@@ -325,3 +325,69 @@ test("a folder or file swapped in while a change is being made is never written 
     assert.deepEqual(readdirSync(f.root), ["billing"], "no keys folder was made in the new one");
   } finally { rmSync(f.base, { recursive: true, force: true }); }
 });
+
+test("a refusal or a lost answer never names a path on this computer, text that is not valid Unicode is refused before anything is written, and staged files a stopped controller left are removed when the folder is bound (card P03b second review)", { skip: posixOnly || (process.getuid?.() === 0 ? "root writes into a folder whatever its mode" : false) }, async () => {
+  const f = folders();
+  try {
+    const ref = { service: "billing", resource: "motd.txt" };
+    let lock = false;
+    const t = await LocalFolderServices.open(f.root, { onStep: (step) => { if (step === "recorded" && lock) chmodSync(f.billing, 0o555); } });
+    // The service folder cannot be written: refused before the key, nothing changed, and the reason gives the system error's code only.
+    chmodSync(f.billing, 0o555);
+    await assert.rejects(t.apply("ro", ref, { type: "write", params: { text: "x\n" } }), (e: unknown) => e instanceof EffectRejected && /nothing was changed/.test(e.message) && /EACCES/.test(e.message) && !e.message.includes(f.base));
+    chmodSync(f.billing, 0o755);
+    assert.equal(await t.applied("ro"), false);
+    // It stops being writable after the key was recorded: a lost answer (settled by reading back), again without a path.
+    lock = true;
+    await assert.rejects(t.apply("ro-late", ref, { type: "write", params: { text: "x\n" } }), (e: unknown) => !(e instanceof EffectRejected) && /EACCES/.test((e as Error).message) && !(e as Error).message.includes(f.base));
+    lock = false;
+    chmodSync(f.billing, 0o755);
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "Back soon.\n");
+    // A lone surrogate would be written as a replacement character and never read back as given: refused first, nothing written, no key.
+    await assert.rejects(t.apply("bad-text", ref, { type: "write", params: { text: "a\ud800b" } }), (e: unknown) => e instanceof EffectRejected && /not valid Unicode/.test(e.message));
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "Back soon.\n");
+    assert.equal(await t.applied("bad-text"), false);
+    // A stopped controller's leftovers: its staged files (in a service folder and in the keys folder) go when the folder is bound again; anything else named with a dot, a link with a staged name
+    // and the files themselves stay.
+    const leftover = readdirSync(f.billing).filter((n) => n.startsWith(".nn-"));
+    assert.equal(leftover.length, 1, "the staged file that could not be removed while the folder was locked is still there");
+    const keys = join(f.root, LOCAL_FOLDER_KEYS);
+    writeFileSync(join(keys, ".nn-0123456789abcdef.tmp"), "{}");
+    writeFileSync(join(f.billing, ".keep"), "mine\n");
+    symlinkSync(join(f.outside, "secret.txt"), join(f.billing, ".nn-fedcba9876543210.tmp"));
+    const outside = tree(f.outside);
+    await LocalFolderServices.open(f.root);
+    assert.deepEqual(readdirSync(f.billing).filter((n) => n.startsWith(".")).sort(), [".keep", ".nn-fedcba9876543210.tmp"]);
+    assert.deepEqual(readdirSync(keys).filter((n) => n.startsWith(".")), []);
+    assert.notEqual(await t.applied("ro-late"), false, "a key record is kept");
+    assert.equal(tree(f.outside), outside);
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "Back soon.\n");
+  } finally { chmodSync(f.billing, 0o755); rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test("a file someone else rewrites while a change is being prepared is not overwritten, a set is judged on every field it sets, and a key record is private to the controller (card P03b second review)", { skip: posixOnly }, async () => {
+  const f = folders();
+  try {
+    const ref = { service: "billing", resource: "motd.txt" };
+    let rewrite = false;
+    const t = await LocalFolderServices.open(f.root, { onStep: (step) => { if (step === "staged" && rewrite) { rewrite = false; writeFileSync(join(f.billing, "motd.txt"), "someone else's words, longer\n"); } } });
+    rewrite = true;
+    await assert.rejects(t.apply("raced", ref, { type: "write", params: { text: "mine\n" } }), (e: unknown) => e instanceof EffectRejected && /changed while the change was being prepared/.test(e.message) && /nothing was changed/.test(e.message));
+    assert.equal(readFileSync(join(f.billing, "motd.txt"), "utf8"), "someone else's words, longer\n", "the other writer's text is kept");
+    assert.equal(await t.applied("raced"), false);
+    assert.deepEqual(readdirSync(f.billing).filter((n) => n.startsWith(".")), []);
+    // Every field set is compared with the read-back, not only the first.
+    const settings = { service: "billing", resource: "settings.json" };
+    const set = { type: "set", params: { fields: { replicas: 3, mode: "fast" } } };
+    await t.apply("two-fields", settings, set);
+    const ok = await t.observe(settings);
+    assert.equal(t.verify(settings, set, ok!, ok!), undefined);
+    writeFileSync(join(f.billing, "settings.json"), `${JSON.stringify({ replicas: 3, mode: "slow" })}\n`);
+    const off = await t.observe(settings);
+    assert.match(String(t.verify(settings, set, off!, off!)), /mode reads "slow"/);
+    // The key records and their folder are readable by the controller's user only.
+    const keys = join(f.root, LOCAL_FOLDER_KEYS);
+    assert.equal(lstatSync(keys).mode & 0o077, 0);
+    for (const n of readdirSync(keys)) assert.equal(lstatSync(join(keys, n)).mode & 0o077, 0, n);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});

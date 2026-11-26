@@ -1475,6 +1475,8 @@ export class ChatService {
         const id = typeof given === "string" ? given.trim().toLowerCase() : given !== null && typeof given === "object" && (given as { kind?: unknown }).kind === "service" && typeof (given as { id?: unknown }).id === "string" ? String((given as { id: string }).id) : undefined;
         const parts = id === undefined ? null : /^([a-z][a-z0-9._-]{0,63})\/([a-z][a-z0-9._-]{0,63})$/.exec(id);
         if (parts === null) return refuse("invalid_command", "resource must be one resource of one service, written as the service and the resource with a slash between them");
+        // A service resource narrows only the right to change it (the grant would match nothing else, and its line says it may change that resource): any other right on it is not drawn up (second review).
+        if (args["action"] !== "effect.perform") return refuse("invalid_command", "A right on one service resource can only be the right to change that resource, so nothing was drawn up. Did you mean to let the agent change it?");
         if (!wholeWord(words, parts[1]!) || !wholeWord(words, parts[2]!)) return refuse("unsupported_value", `The service resource ${quotedText(id!, 80)} is not in your message as written, so nothing was drawn up — the chat will not invent one. Which service and which of its resources did you mean?`);
         args["resource"] = { kind: "service", id: id! };
         serviceResource = id;
