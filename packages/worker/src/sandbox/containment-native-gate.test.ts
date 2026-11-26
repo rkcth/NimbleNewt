@@ -355,6 +355,33 @@ describe("A03b native Windows evidence: what the evidence run collects from disk
     const noExe = collectNativeEvidence(l.src, join);
     assert.ok("error" in noExe && /launcher file/.test(noExe.error));
   });
+  test("a record whose time cannot be read is kept and judged; a record that cannot be read makes the read-back not measured (second review)", (t) => {
+    const l = layout(t);
+    writeFileSync(join(l.control, "records", "r1.json"), cleanRun(1));
+    for (const timeless of [cleanRun(2).replace('"startedAt":"2026-11-26T19:10:50.000Z",', ""), cleanRun(2).replace("2026-11-26T19:10:50.000Z", "not a time")]) {
+      writeFileSync(join(l.control, "records", "r2.json"), timeless.replace('"readBack":"clean"', '"readBack":"left"'));
+      const kept = collectNativeEvidence(l.src, join);
+      assert.ok(!("error" in kept) && kept.runRecordsRaw?.length === 2 && grantsReadBackOf(kept.runRecordsRaw).state === "left", JSON.stringify(kept));
+    }
+    rmSync(join(l.control, "records", "r2.json"));
+    mkdirSync(join(l.control, "records", "r3.json"));
+    const unreadable = collectNativeEvidence(l.src, join);
+    assert.ok(!("error" in unreadable) && unreadable.runRecordsRaw === undefined, "a record that cannot be read is never skipped");
+  });
+});
+
+describe("A03b native Windows evidence: the info line as the launcher writes it (second review)", () => {
+  test("the LAST launcher info line counts, and the throw-away profile is created only when info says created", () => {
+    const earlier = ROB_INFO.trim().replace('"elevated":false', '"elevated":true');
+    const lastWins = nativeWindowsEvidence(fullInput({ infoRaw: `${ROB_INFO.trim()}\n${earlier}\n` }));
+    assert.ok("evidence" in lastWins && lastWins.evidence.elevated === true, "the last line, not the first");
+    refused(withEvidence(robReport(), fullInput({ infoRaw: `${ROB_INFO.trim()}\n${earlier}\n` })), /was elevated/);
+    for (const profile of ['"profile":"failed"', '"profile":"existing"', '"profile":true']) {
+      const m = nativeWindowsEvidence(fullInput({ infoRaw: ROB_INFO.replace('"profile":"created"', profile) }));
+      assert.ok("evidence" in m && m.evidence.profiles.created === false, profile);
+      refused(withEvidence(robReport(), fullInput({ infoRaw: ROB_INFO.replace('"profile":"created"', profile) })), /did not create its throw-away container profile/);
+    }
+  });
 });
 
 describe("A03b Windows release gate: every single-field change of the owner's real-shape report (table-driven)", () => {

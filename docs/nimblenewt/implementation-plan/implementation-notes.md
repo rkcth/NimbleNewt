@@ -19884,3 +19884,54 @@ Residual risks:
 - Run records are taken as this run's by `startedAt >= since` on the PC's clock. A clock change mid-run can drop or add records. The mutex in run-g05.ps1 keeps a second run out.
 - The gate does not check that the number of run records matches the number of confined launches.
 - run-g05.ps1 has still never run. The new lines were read for Windows PowerShell 5.1.
+
+### A03b gate: second review (2026-11-26, Claude agent, Opus 5.5, clean context; branch `card-a03b-gate` on 9a2683b1; not pushed; no workflow run; nothing run on Windows or PowerShell)
+
+Read the diff 1cb61b6a..9a2683b1 first, then the two sections above. The gate, the case judge, the assembler, the scripts and run-g05.ps1 (read as Windows PowerShell 5.1) hold up. No problem was found that lets a junction leak, a host witness or another problem come out with the accepted "file link not planted" wording. One fix and test additions:
+
+1. **Medium: Y02 hid what the G05 gate accepted.** `scripts/y02-checkpoint.mjs` showed win32 containment as `ok` and dropped `GateResult.accepted`, so the release-readiness verdict never said that two cases and the working-directory check were accepted, not passed. The verdict now carries `accepted` (each item prefixed `containment `), which is empty when anything blocks, and `gate` prints `accepted (not a pass): ...`. No other reader parses the verdict file. New test in `y02-checkpoint.test.mjs`.
+2. **Tests added (no behaviour change).** These are for the mutations below that no test caught. Around an unplanted file link: a planted file link of the same case (`link-rel-key`) must be shown refused; a confined run that left an attempt out; a case with no junction attempt in either run; and a witness that fails before a missing junction effect. In the collector: a record whose time cannot be read is kept and judged, and a record that cannot be read makes the read-back not measured. In the assembler: the last info line counts, and a profile is created only when info says `created`.
+
+Checked and found sound:
+- Producer keys equal the stricter parser's keys: cases are always {id, category, verdict, detail}, and trustedHost has exactly its four fields. `redactReport` copies `nativeWindows` unchanged and scrubs case details only. The owner-shaped report built by the real assembler, then redacted and parsed, passes (an existing test).
+- Hosted reports from `windows-appcontainer-experiment.yml` and `exhaustive.yml` call `run` without `--native-info`. They still parse, and the gate blocks them for the missing block, as intended.
+- Only run-g05.ps1 passes `--native-info`, `--account-kind` and `--symlink-right`. `own-hardware.yml` passes `--windows-summary` only, which can never meet `--native-info`.
+- Only `mode: "native"` run records are written (windows-native-job.ts). Trusted-host recipes never reach the container, so the unconfined runs cannot make the read-back not measured.
+- Linux, macOS and hosted Windows, where links plant: with no unplanted file link, the judge's path is the same as before. Only freeProof's detail text changed, when both write effects were missing (still inconclusive).
+- run-g05.ps1 5.1: `Invoke-Captured` quotes every argument (ConvertTo-WinArg), so a profile path with spaces is fine. `$LASTEXITCODE` is read only after whoami ran. A failed whoami gives `$null`, so no flag is passed and the gate refuses.
+- environment/sandbox.ts: every claim matches the real report (build 10.0.26200 is Windows 11, 8 pass, 2 link cases inconclusive, no profile left, sign-out and restart not measured, no service mode).
+
+Deliberate breakages (24, of my own, each in the compiled or script file, restored byte-identical by sha256): 21 caught after the test additions (13 before). The judge-ordering ones:
+- witness checked after the unconfined proof;
+- the last not-through attempt named.
+
+The accepted-leak ones:
+- an inconclusive link case without a recorded right pushed to `accepted`;
+- the accepted wording matched by prefix, or on any verdict;
+- Y02 dropping `accepted`.
+
+Others:
+- junction error or missing read as refused;
+- every file link of a case treated as unplanted;
+- the same-attempts check dropped;
+- no junction attempt, yet the accepted wording;
+- an unknown window-object mode;
+- one leftover profile;
+- the old `windows` block;
+- a non-native backend;
+- extra profile keys;
+- a revoke failure ignored;
+- timeless records dropped;
+- unreadable records skipped;
+- the first info line read;
+- `created` from any value;
+- `--symlink-right yes` inverted.
+
+Three survive, none of them able to make a case pass or be accepted:
+- (a) and (b): any `skipped` code, or `missing`, treated as unplanted. These only send more cases through the stricter path (witness and leak checked first). The detail then carries the real outcome or code, so it can never equal the gate's exact wording.
+- (c): the `run` command's printed "N/M cases hold" counting accepted cases as holding. It is print only, and no Linux test reaches a Windows report.
+
+Residual risks (beyond those listed above):
+- the accepted wording is matched in report text, so a hand-written report can claim it (the known "a report is a file" limit);
+- a console user name that equals a word of the wording ("link", "planted") would be scrubbed by `--redact`, and the case would then be refused (fail closed);
+- run-g05.ps1 has still never run on Windows.

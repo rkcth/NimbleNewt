@@ -90,6 +90,35 @@ test("a complete, valid set of evidence is accepted, and the verdict is byte-for
   assert.equal(renderVerdict(a), renderVerdict(judge(files)));
   assert.ok(a.notVerified.length >= 4, "what the gate cannot prove is always listed");
   assert.equal(a.evaluatedAt, NOW.toISOString());
+  assert.deepEqual(a.accepted, [], "every case passed and the packaged check passed: nothing accepted");
+});
+
+test("card A03b: what the G05 gate accepted without a pass is carried into the verdict, never hidden behind containment ok", async () => {
+  const raws = goodSet();
+  const w = JSON.parse(raws[evidenceNames("win32").containment]);
+  const c = w.cases.find((x) => x.id === "deny-symlink-write");
+  c.verdict = "inconclusive"; c.detail = "without the sandbox the same attempt did not get through (link-write: skipped not-planted), so a refusal would prove nothing";
+  w.nativeWindows.packagedControllerWorkingDirectory = { packaged: false, passed: false };
+  raws[evidenceNames("win32").containment] = JSON.stringify(w);
+  const v = judge(withSignoff(raws));
+  assert.deepEqual(v.blockers, []);
+  assert.equal(v.platforms.win32.containment, "ok");
+  assert.equal(v.accepted.length, 2, v.accepted.join(" | "));
+  assert.match(v.accepted[0], /^containment win32: case deny-symlink-write inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege/);
+  assert.match(v.accepted[1], /^containment win32: the packaged controller working-directory check: not a pass: not yet measurable/);
+  // and the command line prints them
+  const d = dir();
+  for (const [n, raw] of Object.entries(raws)) writeFileSync(join(d, n), raw);
+  const read = readEvidenceDir(d);
+  writeFileSync(join(d, "y02-signoff.json"), JSON.stringify({ schema: SIGNOFF_SCHEMA, commit: COMMIT, entries: PLATFORMS.map((p) => ({ platform: p, kind: "signed", by: "owner", at: T, hardware: `test machine for ${p}`, evidenceDigest: evidenceDigest(read.files, p) })) }));
+  const lines = [];
+  assert.equal(await main(["gate", "--dir", d, "--commit", COMMIT, "--now", NOW.toISOString()], { out: (s) => lines.push(s), err: (s) => lines.push(s) }), 0, lines.join("\n"));
+  assert.equal(lines.filter((l) => l.startsWith("accepted (not a pass): containment win32: ")).length, 2, lines.join("\n"));
+  rmSync(d, { recursive: true, force: true });
+  // a refusal anywhere: nothing is listed as accepted (the gate returns none while it blocks)
+  w.dirty = true; raws[evidenceNames("win32").containment] = JSON.stringify(w);
+  assert.deepEqual(judge(withSignoff(raws)).accepted, []);
+  assert.deepEqual(judge({}, { dirError: "unreadable" }).accepted, []);
 });
 
 test("nothing at all is not a pass: an empty directory blocks every kind of evidence on every platform", () => {

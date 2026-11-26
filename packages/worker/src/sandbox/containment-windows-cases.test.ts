@@ -149,6 +149,33 @@ describe("A03b slice 2: the verdict of one Windows case (pure)", () => {
     assert.match(other.detail, /link-write: skipped not-planted/);
   });
 
+  test("around a FILE link not planted (second review): the planted file link is judged too, a left-out attempt or no junction is never the accepted wording, and a witness fails first", () => {
+    const np = (name: string) => att(name, "skipped", { code: "not-planted" });
+    const accepted = (link: string) => `without the sandbox the same attempt did not get through (${link}: skipped not-planted), so a refusal would prove nothing`;
+    const read = kind("deny-symlink-read");
+    // Only link-abs-file could not be planted; link-rel-key was planted and got through unconfined, so it must be shown refused confined.
+    const freeOne: FreeRun = { result: res(read.id, np("link-abs-file"), att("link-abs-dir", "allowed"), att("link-rel-key", "allowed")), proofMissing: undefined };
+    assert.deepEqual(judgeWindowsCase(read, res(read.id, np("link-abs-file"), att("link-abs-dir", "denied"), att("link-rel-key", "denied")), freeOne, undefined), { verdict: "inconclusive", detail: accepted("link-abs-file") });
+    for (const o of ["error", "missing", "skipped"] as const) {
+      const v = judgeWindowsCase(read, res(read.id, np("link-abs-file"), att("link-abs-dir", "denied"), att("link-rel-key", o)), freeOne, undefined);
+      assert.equal(v.verdict, "inconclusive", o);
+      assert.notEqual(v.detail, accepted("link-abs-file"), o);
+    }
+    // The confined run left the planted file link out (the junction refused): the pairing does not cover it.
+    const leftOut = judgeWindowsCase(read, res(read.id, np("link-abs-file"), att("link-abs-dir", "denied")), freeOne, undefined);
+    assert.equal(leftOut.verdict, "inconclusive");
+    assert.match(leftOut.detail, /same attempts/);
+    // No junction attempt in either run: nothing besides the unplanted links was judged, never the accepted wording.
+    const onlyLinks = res(read.id, np("link-abs-file"), np("link-rel-key"));
+    const none = judgeWindowsCase(read, onlyLinks, { result: onlyLinks, proofMissing: undefined }, undefined);
+    assert.equal(none.verdict, "inconclusive");
+    assert.notEqual(none.detail, accepted("link-abs-file"));
+    // A host witness fails the case even when the junction's effect was also missing unconfined.
+    const write = kind("deny-symlink-write");
+    const v = judgeWindowsCase(write, res(write.id, np("link-write"), att("link-dir", "denied")), { result: res(write.id, np("link-write"), att("link-dir", "allowed")), proofMissing: "the write through the directory link" }, "a write through a link changed a host path outside the workspace");
+    assert.equal(v.verdict, "fail");
+  });
+
   test("the host reads the result file only when it is one plain file within the bound", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "nn-a03b2f-")));
     try {

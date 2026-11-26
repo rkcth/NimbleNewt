@@ -605,11 +605,14 @@ export function assessCheckpoint({ files, unexpected = [], dirError }, { commit,
   const complete = automated && hardware && sorted.length === 0;
   return {
     schema: VERDICT_SCHEMA, commit, evaluatedAt: new Date(nowMs).toISOString(), scenarioMapDigest: mapDigest, platforms: verdictPlatforms,
-    automatedPart: automated ? "complete" : "incomplete", hardwarePart: hardware ? "complete" : "incomplete", complete, blockers: sorted, notVerified: NOT_VERIFIED,
+    automatedPart: automated ? "complete" : "incomplete", hardwarePart: hardware ? "complete" : "incomplete", complete, blockers: sorted,
+    // Card A03b: what the G05 gate accepted although it is not a pass (a file-link case inconclusive for want of the link right; the packaged working-directory check while none exists), so a
+    // containment "ok" is never read as every case held.
+    accepted: (Array.isArray(g05.accepted) ? g05.accepted : []).map((a) => `containment ${show(a, 300)}`), notVerified: NOT_VERIFIED,
   };
 
   function invalid(why) {
-    return { schema: VERDICT_SCHEMA, commit: typeof commit === "string" && COMMIT.test(commit) ? commit : "invalid", evaluatedAt: Number.isFinite(nowMs) ? new Date(nowMs).toISOString() : "invalid", scenarioMapDigest: mapDigest ?? "invalid", platforms: {}, automatedPart: "incomplete", hardwarePart: "incomplete", complete: false, blockers: [why], notVerified: NOT_VERIFIED };
+    return { schema: VERDICT_SCHEMA, commit: typeof commit === "string" && COMMIT.test(commit) ? commit : "invalid", evaluatedAt: Number.isFinite(nowMs) ? new Date(nowMs).toISOString() : "invalid", scenarioMapDigest: mapDigest ?? "invalid", platforms: {}, automatedPart: "incomplete", hardwarePart: "incomplete", complete: false, blockers: [why], accepted: [], notVerified: NOT_VERIFIED };
   }
 }
 
@@ -708,6 +711,7 @@ export async function main(argv, io = { out: (s) => console.log(s), err: (s) => 
   const worker = await import(pathToFileURL(join(root, "packages", "worker", "dist", "index.js")).href);
   const verdict = assessCheckpoint({ ...dirContents, dirError: dirContents.error }, { commit, now, map: parsedMap.map, mapDigest: parsedMap.digest, deps: { parseReport: worker.parseReport, assessRelease: worker.assessRelease } });
   for (const b of verdict.blockers) io.out(`blocked: ${show(b, 400)}`);
+  for (const a of verdict.accepted) io.out(`accepted (not a pass): ${show(a, 400)}`);
   io.out(verdict.complete ? "Y02 checkpoint evidence complete for this commit" : `Y02 checkpoint incomplete: automated part ${verdict.automatedPart}, hardware part ${verdict.hardwarePart}`);
   if (flags.has("--out")) { try { writeFileAtomic(flags.get("--out"), renderVerdict(verdict)); } catch (e) { io.err(`the verdict file could not be written: ${show(e.message, 200)}`); return 2; } }
   return verdict.complete ? 0 : 1;
