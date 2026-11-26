@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **302 of 364 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **303 of 364 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -120,7 +120,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
 | Tools and skills | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 19 of 19 |
-| Projects, repositories and workspaces | `▓▓▓▓▓░░░░░░░` 44% | 8 of 18 |
+| Projects, repositories and workspaces | `▓▓▓▓▓▓░░░░░░` 50% | 9 of 18 |
 | Quality: deliverables, QA and defects | `░░░░░░░░░░░░` 0% | 0 of 5 |
 | Balancing delivery and improvement | `░░░░░░░░░░░░` 0% | 0 of 1 |
 | Learning and improvement | `░░░░░░░░░░░░` 0% | 0 of 5 |
@@ -546,13 +546,13 @@ The immutable tool and skill catalogue, review and promotion, MCP connections, t
 </details>
 
 <details>
-<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓░░░░░░░ 8 of 18</summary>
+<summary><strong>Projects, repositories and workspaces</strong> — ▓▓▓▓▓▓░░░░░░ 9 of 18</summary>
 
 Repository-independent projects, isolated coding workspaces, non-code and sandbox operations, ongoing responsibilities and external contribution.
 
 - [x] **P01** · P29 · Implement repository-independent projects and responsibilities _(needs U03, S01)_
 - [x] **P01b** · P30 · Mend the checkout pin edge cases _(needs P01)_
-- [ ] **P03** · P30 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, H12)_
+- [x] **P03** · P30 · Implement non-code and sandbox operations adapters _(needs P01, T01, S05, H12)_
 - [x] **P01c** · P31 · Scan the pin and overlap checks per project _(needs P01b)_
 - [ ] **P03b** · P31 · Give agents the non-code and service-operation tools and connect real services _(needs P03)_
 - [ ] **P07** · P31 · Implement simulation mode _(needs P03, R02, T03)_
