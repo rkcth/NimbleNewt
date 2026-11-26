@@ -235,7 +235,8 @@ export function freeProof(id: string, cfg: WindowsCaseConfig, originals: Origina
     case "deny-write-host-path":
       return !outsideChanged ? "the outside file was not changed" : hostTargets(cfg).find((t) => !probe.exists(t));
     case "deny-symlink-write":
-      return !outsideChanged ? "the write through the file link" : viaLink(cfg).find((t) => !probe.exists(t)) === undefined ? undefined : "the write through the directory link";
+      // The directory link first: when the host could not plant the file link, the file link's missing effect is expected, the directory link's never is.
+      return viaLink(cfg).some((t) => !probe.exists(t)) ? "the write through the directory link" : !outsideChanged ? FILE_LINK_WRITE_UNPROVEN : undefined;
     case "deny-write-protected-name":
       // the last step of the case deletes the whole folder (and with it the hook), so the effect the host shows is a folder that is gone
       return probe.exists(cfg.protectedName.dir) ? "the protected folder was not deleted" : undefined;
@@ -283,6 +284,32 @@ const required = (kind: CaseKind, a: readonly RunnerAttempt[]): RunnerAttempt[] 
 });
 
 /**
+ * The FILE symbolic links each link case plants (`plant` below), the only links an account without SeCreateSymbolicLinkPrivilege cannot make. Directory junctions need no right and are not here.
+ * The release gate (containment.ts) accepts a case inconclusive for one of these only, by this table.
+ */
+export const FILE_LINKS_BY_CASE: Readonly<Record<string, readonly string[]>> = Object.freeze({ "deny-symlink-read": Object.freeze(["link-abs-file", "link-rel-key"]), "deny-symlink-write": Object.freeze(["link-write"]) });
+/** freeProof's reason when the write through the file link left no change (expected when that link was not planted). */
+export const FILE_LINK_WRITE_UNPROVEN = "the write through the file link";
+const isUnplantedFileLink = (caseId: string, a: RunnerAttempt): boolean => a.outcome === "skipped" && a.code === "not-planted" && (FILE_LINKS_BY_CASE[caseId]?.includes(a.name) ?? false);
+
+/** judgeWindowsCase when only unplanted file links did not get through unconfined: the rest of the case is judged; `detail` (the not-planted wording) only when all of it held. */
+function judgeAroundUnplanted(kind: CaseKind, confined: RunnerCaseResult | undefined, free: FreeRun, witness: string | undefined, confinedNote: string, unplanted: ReadonlySet<string>, detail: string): { verdict: CaseVerdict; detail: string } {
+  if (witness !== undefined) return { verdict: "fail", detail: witness };
+  const leaked = confined?.attempts.find((a) => a.outcome === "allowed");
+  if (leaked !== undefined) return { verdict: "fail", detail: `an attempt got through in the sandbox (${leaked.name})` };
+  if (free.proofMissing !== undefined && free.proofMissing !== FILE_LINK_WRITE_UNPROVEN) return { verdict: "inconclusive", detail: `without the sandbox the same attempt did not get through (${free.proofMissing}), so a refusal would prove nothing` };
+  if (confined === undefined) return { verdict: "inconclusive", detail: confinedNote };
+  const freeAttempts = typeof free.result === "object" ? free.result.attempts : [];
+  const names = (a: readonly RunnerAttempt[]): string => [...new Set(a.map((x) => x.name))].sort().join(",");
+  if (names(confined.attempts) !== names(freeAttempts)) return { verdict: "inconclusive", detail: "the confined run did not make the same attempts as the unconfined run, so the pairing does not cover it" };
+  const judged = required(kind, confined.attempts).filter((a) => !unplanted.has(a.name));
+  if (judged.length === 0) return { verdict: "inconclusive", detail: "the case made no attempt besides the links that were not planted" };
+  const other = judged.find((a) => a.outcome !== "denied");
+  if (other !== undefined) return { verdict: "inconclusive", detail: `the attempt could not be made (${other.name}: ${other.outcome}${other.code === undefined ? "" : ` ${other.code}`}), so it shows no refusal` };
+  return { verdict: "inconclusive", detail };
+}
+
+/**
  * The verdict of one case from the confined and unconfined results and the host's witness. Pure. `inconclusive` is returned for everything that cannot be read as the boundary holding or not holding.
  */
 export function judgeWindowsCase(kind: CaseKind, confined: RunnerCaseResult | undefined, free: FreeRun, witness: string | undefined, confinedNote = "the attempt did not finish"): { verdict: CaseVerdict; detail: string } {
@@ -298,9 +325,17 @@ export function judgeWindowsCase(kind: CaseKind, confined: RunnerCaseResult | un
   let paired = "";
   if (kind.paired && typeof free.result === "object") {
     // The unconfined run ran and shows the probe itself does not work: nothing the confined run shows can be read (the host's witness points at the same broken probe), inconclusive.
-    const notThrough = required(kind, free.result.attempts).find((a) => a.outcome !== "allowed");
+    // A FILE link the host could not plant (an account without the symbolic-link right) is named only when nothing else failed unconfined, so its wording never stands for another problem.
+    const notThroughAll = required(kind, free.result.attempts).filter((a) => a.outcome !== "allowed");
+    const notThrough = notThroughAll.find((a) => !isUnplantedFileLink(kind.id, a)) ?? notThroughAll[0];
     if (free.result.attempts.length === 0) return inconclusive("without the sandbox the case made no attempt, so a refusal would prove nothing");
-    if (notThrough !== undefined) return inconclusive(`without the sandbox the same attempt did not get through (${notThrough.name}: ${notThrough.outcome}${notThrough.code === undefined ? "" : ` ${notThrough.code}`}), so a refusal would prove nothing`);
+    if (notThrough !== undefined) {
+      const detail = `without the sandbox the same attempt did not get through (${notThrough.name}: ${notThrough.outcome}${notThrough.code === undefined ? "" : ` ${notThrough.code}`}), so a refusal would prove nothing`;
+      if (!isUnplantedFileLink(kind.id, notThrough)) return inconclusive(detail);
+      // Every attempt that did not get through unconfined is a file link that was not planted (card A03b: the release gate may accept this case as inconclusive). The case's other attempts
+      // (its directory junctions, which need no right) were planted and are judged in full: a leak fails, and each must be shown refused, else the wording above is not used.
+      return judgeAroundUnplanted(kind, confined, free, witness, confinedNote, new Set(notThroughAll.map((a) => a.name)), detail);
+    }
     if (free.proofMissing !== undefined) return inconclusive(`without the sandbox the same attempt did not get through (${free.proofMissing}), so a refusal would prove nothing`);
     paired = "; the same attempt got through without the sandbox";
   }

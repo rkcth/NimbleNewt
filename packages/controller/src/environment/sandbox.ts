@@ -25,14 +25,17 @@ const MACOS: SandboxFacts = {
   ],
 };
 // Windows (card A03b, owner decision 2026-11-26: AppContainer, no Windows Sandbox): the worker's native launcher runs each agent in a per-run AppContainer inside a Job Object. Its own report
-// calls the boundary "process-level, weaker than Linux" (worker windows-native.ts, auditDetails.strength), and the ten containment cases (card G05) have not yet run on an owner's PC.
+// calls the boundary "process-level, weaker than Linux" (worker windows-native.ts, auditDetails.strength). The ten containment cases (card G05) were measured once on the owner's Windows 11 PC
+// (own-hardware run 45881452017, commit 276883c4, build 10.0.26200, signed-in user, home-desktop window objects): 8 held, the 2 symbolic-link cases could not be judged (that account has no
+// right to create symbolic links), no container profile was left. Not measured: sign-out and restart behaviour. Unattended service mode is not supported in the first release.
+// The text is fixed here, not read from a report; change it when a later run is reviewed.
 const WINDOWS: SandboxFacts = {
   os: "win32", mechanism: "AppContainer and Job Object", boundary: "weaker", warn: true,
   limits: [
-    "Each run is a process in its own AppContainer inside a Job Object: process-level, with weaker limits than Linux's bubblewrap.",
-    "There is no private view of the filesystem: the agent sees host paths, and files outside its recipe are blocked by access lists rather than hidden.",
+    "Each run is a process in its own AppContainer inside a Job Object: process-level, with weaker limits than Linux's bubblewrap; files outside its recipe are blocked by access lists, not hidden.",
     "The container has no network capability, so a task with a network route is refused.",
-    "Its containment cases have not yet been measured on a real Windows PC.",
+    "Measured on one real Windows 11 PC as its signed-in user: 8 of the 10 containment cases held; the 2 symbolic-link cases could not be judged because that account may not create file links.",
+    "Not measured: what happens when the user signs out or the PC restarts. Running unattended as a service is not supported in this release.",
   ],
 };
 

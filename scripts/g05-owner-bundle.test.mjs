@@ -114,6 +114,13 @@ test("--prebuilt: a missing or malformed COMMIT exits 2 before anything runs; wi
     const r = evidence(b, "run", "--prebuilt");
     assert.equal(r.status, 2); assert.match(r.stderr, /^usage: run --out DIR \[--prebuilt\]/m, "past the COMMIT check: the missing --out is what stops it");
   }
+  // Card A03b: the native-evidence flags are checked before anything runs (a bad value, a fact without --native-info, --native-info with the Windows Sandbox summary, a flag without its value)
+  for (const extra of [["--native-info", "f", "--account-kind", "admin"], ["--native-info", "f", "--symlink-right", "maybe"], ["--account-kind", "standard"], ["--symlink-right", "no"], ["--native-info", "f", "--windows-summary", "s"], ["--native-info"]]) {
+    const r = evidence(b, "run", "--prebuilt", "--out", join(b, "results"), ...extra);
+    assert.equal(r.status, 2, `${extra.join(" ")}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /^usage: run --out DIR .*--native-info FILE \[--account-kind standard\|administrator-filtered\] \[--symlink-right yes\|no\]/m);
+    assert.ok(!existsSync(join(b, "results")), "nothing written");
+  }
   // the same bundle without --prebuilt: tsc is not in the bundle, so the build step fails (exit 1): the flag is what skips it
   const plain = evidence(b, "run", "--out", join(b, "results"));
   assert.equal(plain.status, 1);
@@ -170,12 +177,33 @@ test("run-g05.ps1 checks every line of SHA256SUMS and every file of the folder b
   assert.match(code, /System\.Security\.Cryptography\.SHA256\]::Create\(\)/);
 });
 
+test("run-g05.ps1 (card A03b) hands the evidence run the account kind and the link right it measured, and nothing when whoami could not be read", () => {
+  const fn = code.slice(at("function Get-WhoamiText"), at("$linkRight = $null"));
+  assert.ok(fn.includes("if ($LASTEXITCODE -ne 0) { $t = $null }") && fn.includes("catch { $t = $null }") && fn.includes("$t.Trim() -eq ''"), "a failed or empty whoami is $null");
+  const sec = code.slice(at("$linkRight = $null"), at("$launcher = Join-Path $b 'bin\\nn-launcher.exe'"));
+  // link right: yes only when the privilege is named, no when whoami answered without it, nothing when it did not answer
+  assert.match(sec, /if \(\$null -eq \$privText\) \{[^}]*not recorded[^}]*\} elseif \(\$privText -match 'SeCreateSymbolicLinkPrivilege'\) \{\s*\$linkRight = 'yes'[\s\S]*?\} else \{\s*\$linkRight = 'no'/);
+  // account kind: the Administrators SID (language-independent, quoted CSV column) in a token already shown not elevated = an administrator in a filtered window; absent = standard
+  assert.ok(sec.includes("$groupsText = Get-WhoamiText @('/groups', '/fo', 'csv', '/nh')"));
+  assert.match(sec, /if \(\$null -eq \$groupsText\) \{[^}]*not recorded[^}]*\} elseif \(\$groupsText -match '"S-1-5-32-544"'\) \{\s*\$accountKind = 'administrator-filtered'[\s\S]*?\} else \{\s*\$accountKind = 'standard'/);
+  assert.ok(at("$accountKind = $null") > at("$principal.IsInRole("), "the kind is read only after the elevation refusal");
+  // only measured values are passed, as the two flags containment-evidence.mjs accepts
+  const run = code.slice(at("$evidenceArgs = @("), at("$evidenceCode = Invoke-Captured"));
+  assert.ok(run.includes("if ($null -ne $accountKind) { $evidenceArgs += @('--account-kind', $accountKind) }") && run.includes("if ($null -ne $linkRight) { $evidenceArgs += @('--symlink-right', $linkRight) }"));
+  const flags = readFileSync(join(root, "scripts", "containment-evidence.mjs"), "utf8");
+  assert.ok(flags.includes('accountKind !== "standard" && accountKind !== "administrator-filtered"') && flags.includes('symlinkRight !== "yes" && symlinkRight !== "no"'), "the script's words are the ones the evidence run accepts");
+  // and the evidence run turns them into the block's inputs as they are (yes = holds the right); the collection itself is tested in containment-native-gate.test.ts
+  assert.ok(flags.includes('...(accountKind === undefined ? {} : { accountKind }), ...(symlinkRight === undefined ? {} : { symlinkRight: symlinkRight === "yes" })'));
+  assert.ok(flags.includes('report.platform !== "win32" || report.backend !== "windows-native"') && flags.includes('infoFile: resolve(nativeInfo), launcher: env["NIMBLENEWT_WIN_LAUNCHER"], controlDir: env["NIMBLENEWT_WIN_CONTROL_DIR"], packagesDir: join(env["LOCALAPPDATA"], "Packages"), since'));
+});
+
 test("run-g05.ps1 runs the launcher's info and the ten cases exactly as the brief says, with output only in control\\raw and redacted copies in results", () => {
-  assert.ok(code.includes("whoami.exe\" /priv") && code.includes("SeCreateSymbolicLinkPrivilege") && /may be reported inconclusive\. That is expected and fine\./.test(code));
+  assert.ok(code.includes("(& \"$env:SystemRoot\\System32\\whoami.exe\" @whoamiArgs)") && code.includes("$privText = Get-WhoamiText @('/priv')") && code.includes("SeCreateSymbolicLinkPrivilege") && /may be reported inconclusive\. That is expected and fine\./.test(code));
   assert.ok(code.includes('$env:NIMBLENEWT_WIN_LAUNCHER = "$b\\bin\\nn-launcher.exe"') && code.includes('$env:NIMBLENEWT_WIN_CONTROL_DIR = "$b\\control"'));
   assert.ok(code.includes("'NimbleNewtRun-' + (($rb | ForEach-Object { $_.ToString('x2') }) -join '')") && code.includes("New-Object byte[] 8") && code.includes("RNGCryptoServiceProvider"), "16 random lower-case hex digits");
   assert.ok(code.includes("Invoke-Captured $launcher @('info', '--name', $infoName, '--profile-record', $infoRecord)") && code.includes("$infoRecord = Join-Path $infoDir \"$infoName.sid\"") && code.includes("$infoDir = Join-Path $control 'info'"));
-  assert.ok(code.includes("Invoke-Captured $node @('--import', './scripts/offline-guard.mjs', 'scripts\\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact')"));
+  assert.ok(code.includes("$evidenceArgs = @('--import', './scripts/offline-guard.mjs', 'scripts\\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact', '--native-info', (Join-Path $raw 'info.stdout.txt'))"));
+  assert.ok(code.includes("$evidenceCode = Invoke-Captured $node $evidenceArgs (Join-Path $raw 'evidence.stdout.txt') (Join-Path $raw 'evidence.stderr.txt') $null 25"));
   assert.ok(code.includes("$raw = Join-Path $control 'raw'"));
   assert.ok(/Invoke-Captured \$node @\('scripts\\redact-log\.mjs'\) \(Join-Path \$results \$name\) \(Join-Path \$raw "redact-\$name"\) \$src/.test(code), "results get the redacted copy");
   // the captured output never reaches the console

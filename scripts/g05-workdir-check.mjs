@@ -3,8 +3,8 @@
 // It generates the real service unit for this platform (packages/controller/src/release/service-units.ts: on Windows the scheduled task), reads the working directory the unit gives the
 // launcher, starts the real release launcher (scripts/nimblenewt-launcher.mjs) from that directory against a disposable release root holding one installed release, and checks the working
 // directory the controller of that release really has: the release's own folder (never the checkout, never the system folder a scheduled task starts in by default).
-// The release's controller entry is a stand-in that records its working directory and process id, not the packaged controller: a packaged controller release is built by the release
-// pipeline (card K03), which this check does not have. So the result says `packaged: false`, and the release gate keeps asking for the check on a packaged controller.
+// The release's controller entry is a stand-in that records its working directory and process id, not the packaged controller: a packaged controller release is built by a release
+// pipeline, which no card has built yet (K03 is migration recovery), and which this check does not have. So the result says `packaged: false`, and the release gate keeps asking for the check on a packaged controller.
 // The output holds booleans and fixed problem texts only (no paths: the repository is public). Exit 0 when the check passed, 1 when it did not, 2 on bad usage. Needs `npx tsc --build` first.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";

@@ -30,8 +30,12 @@ function containment(p) {
   };
   if (p === "darwin") r.macosVersion = "15.1";
   if (p === "win32") {
-    const phase = { launch: true, exec: true, results: true, teardown: true };
-    r.windows = { serviceIdentity: { account: "svc", session: "service" }, afterLogout: phase, afterReboot: phase, mappedOutputAcl: { positive: true, negative: true }, packagedControllerWorkingDirectory: { packaged: true, passed: true }, supervisorAclCheck: "strict" };
+    // Card A03b: the native AppContainer evidence (no Windows Sandbox).
+    r.backend = "windows-native";
+    r.nativeWindows = {
+      launcher: { recordCommit: COMMIT, recordSha256: "e".repeat(64), fileSha256: "e".repeat(64) }, elevated: false, accountKind: "standard", sessionId: 1, windowStation: "home-desktop", windowStationOk: true,
+      profiles: { created: true, deleted: true, gone: true, leftover: 0 }, grantsReadBack: "clean", symlinkRight: false, packagedControllerWorkingDirectory: { packaged: true, passed: true },
+    };
   }
   return r;
 }
@@ -86,6 +90,42 @@ test("a complete, valid set of evidence is accepted, and the verdict is byte-for
   assert.equal(renderVerdict(a), renderVerdict(judge(files)));
   assert.ok(a.notVerified.length >= 4, "what the gate cannot prove is always listed");
   assert.equal(a.evaluatedAt, NOW.toISOString());
+  assert.deepEqual(a.accepted, [], "every case passed and the packaged check passed: nothing accepted");
+});
+
+test("card A03b: what the G05 gate accepted without a pass is carried into the verdict, never hidden behind containment ok", async () => {
+  const raws = goodSet();
+  const w = JSON.parse(raws[evidenceNames("win32").containment]);
+  const c = w.cases.find((x) => x.id === "deny-symlink-write");
+  c.verdict = "inconclusive"; c.detail = "without the sandbox the same attempt did not get through (link-write: skipped not-planted), so a refusal would prove nothing";
+  w.nativeWindows.packagedControllerWorkingDirectory = { packaged: false, passed: false };
+  raws[evidenceNames("win32").containment] = JSON.stringify(w);
+  const v = judge(withSignoff(raws));
+  assert.deepEqual(v.blockers, []);
+  assert.equal(v.platforms.win32.containment, "ok");
+  assert.equal(v.accepted.length, 2, v.accepted.join(" | "));
+  assert.match(v.accepted[0], /^containment win32: case deny-symlink-write inconclusive, accepted: the account lacks SeCreateSymbolicLinkPrivilege/);
+  assert.match(v.accepted[1], /^containment win32: the packaged controller working-directory check: not a pass: not yet measurable/);
+  // and the command line prints them
+  const d = dir();
+  for (const [n, raw] of Object.entries(raws)) writeFileSync(join(d, n), raw);
+  const read = readEvidenceDir(d);
+  writeFileSync(join(d, "y02-signoff.json"), JSON.stringify({ schema: SIGNOFF_SCHEMA, commit: COMMIT, entries: PLATFORMS.map((p) => ({ platform: p, kind: "signed", by: "owner", at: T, hardware: `test machine for ${p}`, evidenceDigest: evidenceDigest(read.files, p) })) }));
+  const lines = [];
+  assert.equal(await main(["gate", "--dir", d, "--commit", COMMIT, "--now", NOW.toISOString()], { out: (s) => lines.push(s), err: (s) => lines.push(s) }), 0, lines.join("\n"));
+  assert.equal(lines.filter((l) => l.startsWith("accepted (not a pass): containment win32: ")).length, 2, lines.join("\n"));
+  rmSync(d, { recursive: true, force: true });
+  // a blocker outside containment (no sign-off; a missing QA record): the gate still accepts, yet the verdict lists nothing as accepted
+  const noSignoff = judge(Object.fromEntries(Object.entries(raws).map(([k, v]) => [k, { raw: v }])));
+  assert.ok(noSignoff.blockers.length > 0 && noSignoff.platforms.win32.containment === "ok", noSignoff.blockers.join(" | "));
+  assert.deepEqual(noSignoff.accepted, []);
+  const noQa = judge(withSignoff({ ...raws, [evidenceNames("linux").qa]: undefined }));
+  assert.ok(noQa.blockers.length > 0 && noQa.platforms.win32.containment === "ok");
+  assert.deepEqual(noQa.accepted, []);
+  // a refusal anywhere: nothing is listed as accepted (the gate returns none while it blocks)
+  w.dirty = true; raws[evidenceNames("win32").containment] = JSON.stringify(w);
+  assert.deepEqual(judge(withSignoff(raws)).accepted, []);
+  assert.deepEqual(judge({}, { dirError: "unreadable" }).accepted, []);
 });
 
 test("nothing at all is not a pass: an empty directory blocks every kind of evidence on every platform", () => {
@@ -226,8 +266,9 @@ test("containment evidence is judged by the G05 gate: a report for another commi
   blocked(judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "fail"; })), /containment linux: case /);
   blocked(judgeAltered(edit("linux", (r) => { r.cases[0].verdict = "inconclusive"; })), /containment linux: case .*inconclusive/);
   blocked(judgeAltered(edit("linux", (r) => { r.cases = []; })), /containment linux: case .* is missing/);
-  blocked(judgeAltered(edit("win32", (r) => { r.windows.supervisorAclCheck = "report-only"; })), /containment win32: .*strict/);
-  blocked(judgeAltered(edit("win32", (r) => { delete r.windows; })), /containment win32: the Windows host evidence is missing/);
+  blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.packagedControllerWorkingDirectory = { packaged: true, passed: false }; })), /containment win32: the packaged controller working-directory check failed/);
+  blocked(judgeAltered(edit("win32", (r) => { delete r.nativeWindows; })), /containment win32: the native Windows host evidence is missing/);
+  blocked(judgeAltered(edit("win32", (r) => { r.nativeWindows.elevated = true; })), /containment win32: the Windows run was elevated/);
   blocked(judgeAltered(edit("darwin", (r) => { r.weakerThanLinux = false; })), /containment darwin: .*weaker/);
   blocked(judgeAltered(edit("win32", (r) => { r.weakerThanLinux = false; })), /containment win32: .*weaker/);
   blocked(judgeAltered(edit("linux", (r) => { r.platform = "darwin"; })), /containment-linux\.json is a report for darwin/);
