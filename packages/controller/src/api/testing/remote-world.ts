@@ -23,7 +23,7 @@ export async function world(d: string, policy: { dataHosts?: string[]; platforms
       timer, manual: true, clock: () => new Date(now).toISOString(),
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "local-only", paidAuthorized: false } }),
       remote: {
-        blobDirectory: join(d, "blobs"), ...(options.monitorProgressMs === undefined ? {} : { monitorProgressMs: options.monitorProgressMs }), relocationPolicy: async () => policy, placementPolicy: async () => ({ dataHosts: ["host:r1", "host:r2"] }),
+        workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), ...(options.monitorProgressMs === undefined ? {} : { monitorProgressMs: options.monitorProgressMs }), relocationPolicy: async () => policy, placementPolicy: async () => ({ dataHosts: ["host:r1", "host:r2"] }),
         hosts: ["r1", "r2"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: options.checkpointWaitMs ?? 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements })),
       },
     },

@@ -119,6 +119,9 @@ export async function startRemoteWorker(setup, config) {
   // A security sign from the workspace host goes to the controller over the host channel (card U11d); it carries a kind, a key and a project ID, never a path or a secret. A failure to send it is logged and never stops the work.
   const security = (event) => { void client.reportSecurity(event).catch((error) => log(`a security report could not be sent (${describe(error)})`)); };
   const shared = new Map(Object.entries(config.projects ?? {}).filter(([, folder]) => isFolder(folder)));
+  // Card P02 (remote hosts): the controller opens a workspace here only on a repository bound to the task's project with write access, so this host says which folder it uses for each project (as a digest of the folder as
+  // written in `projects`, never the path itself). The capabilities' list holds at most 20 names: a project past that is not declared, and the controller then sends it no workspace work here.
+  const declared = workspaceDeclarations(controller, shared, log);
   let local;
   // The landing policy (cards H12t, H12a): the branch named for the project in this host's configuration (`landing`) is a pin; the owner's policy, carried in the landing request, must agree with it and can only add protected
   // paths (see `remoteLandingPolicy`). A project with no branch named here is not landed on this host (refused, never guessed).
@@ -171,7 +174,7 @@ export async function startRemoteWorker(setup, config) {
     progress: (scope) => workspaces.progress(scope),
     // The check of a done (cards W05, H12a): the state of the checkout this host's port made, and the contract's checks run in the attempt's sandbox here. The controller asks for it over the workspace channel (the responder's `verify`).
     verify: verifyDone,
-    capabilities: () => capabilitiesOf(piAdapter, interpreters),
+    capabilities: () => capabilitiesOf(piAdapter, interpreters, declared),
   });
   const onTrouble = (attemptId, what, error) => log(`attempt ${attemptId}: ${what} did not go through (${describe(error)})`);
   runner = new controller.RemoteOfferRunner({ client, host: local, abilities, onTrouble, scripts: new controller.RemoteScriptRuns({ ...(scriptProblem === undefined && scripts !== undefined ? { runner: scripts.runner } : {}), onTrouble }) });
@@ -188,7 +191,7 @@ export async function startRemoteWorker(setup, config) {
 
   const abort = new AbortController();
   const poller = new controller.HostPoller({
-    client, capabilities: capabilitiesOf(piAdapter, interpreters),
+    client, capabilities: capabilitiesOf(piAdapter, interpreters, declared),
     ...pollerSettings(config.poller),
     // One offer at a time per attempt: a repeat of an offer already being run is the controller offering again, not a second run.
     onOffers: async (offers) => {
@@ -224,8 +227,20 @@ function pollerSettings(settings) {
   return Object.fromEntries(["waitMs", "heartbeatMs", "spreadMs", "minGapMs", "baseBackoffMs", "maxBackoffMs"].filter((k) => Number.isSafeInteger(settings[k]) && settings[k] >= 0).map((k) => [k, settings[k]]));
 }
 
-function capabilitiesOf(piAdapter, interpreters = []) {
-  return { os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", harnesses: [{ name: "pi", version: piAdapter.PINNED_PI_DURABLE_VERSION }], isolation: ["bubblewrap"], tools: [...interpreters], workspaces: [] };
+function capabilitiesOf(piAdapter, interpreters = [], workspaces = []) {
+  return { os: "linux", arch: process.arch === "arm64" ? "arm64" : "x64", harnesses: [{ name: "pi", version: piAdapter.PINNED_PI_DURABLE_VERSION }], isolation: ["bubblewrap"], tools: [...interpreters], workspaces: [...workspaces] };
+}
+
+/** The workspace declarations this host announces (card P02, remote hosts): one per project folder it holds, at most 20; a project ID that is not one, or one past the limit, is left out and logged. */
+export function workspaceDeclarations(controller, shared, log = () => undefined) {
+  const out = [];
+  for (const [projectId, folder] of shared) {
+    const entry = typeof controller.workspaceDeclaration === "function" ? controller.workspaceDeclaration(projectId, folder) : undefined;
+    if (entry === undefined) { log(`the folder of ${String(projectId).slice(0, 40)} is not declared to the controller (not a project ID), so no workspace work of it comes here`); continue; }
+    if (out.length >= 20) { log(`the folder of ${projectId} is not declared to the controller (a host declares at most 20 projects), so no workspace work of it comes here`); continue; }
+    out.push(entry);
+  }
+  return out;
 }
 
 /** The endpoint of a route from the configuration; the provider key is read from the environment variable the configuration names, at each call, and is in no log. */

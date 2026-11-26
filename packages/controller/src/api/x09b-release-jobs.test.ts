@@ -34,7 +34,7 @@ test("a release test is delivered to the host, picked up and reported over the w
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [] },
+      remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [] },
     },
   } as never);
   try {

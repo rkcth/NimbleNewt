@@ -43,7 +43,7 @@ for (const store of stores) {
       dispatch: {
         timer: new ManualTimer(), manual: true,
         route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-        remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 4096, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
+        remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 4096, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
       },
     });
     try {

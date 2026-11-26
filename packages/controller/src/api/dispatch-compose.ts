@@ -13,7 +13,7 @@ import type { AttemptRelay, ModelRelay, RelayMonitor } from "../dispatch/relay.j
 import { AdmissionService } from "../admission/index.js";
 import { BudgetService, ChargeRetryService, holderNotice, type NotifyAggregate } from "../budgets/index.js";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
-import { QuietHostService, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
+import { QuietHostService, hostWorkspaceAdmission, type QuietHostOptions, RemoteWorkerHost, RemoteWorkerService, WorkerTransport, type QuietHostSettingsService, type RemoteDeps, type RemoteOptions, type RemoteWorkerHostOptions, type WorkerTransportOptions } from "../remote/index.js";
 import { DecisionService, compactionKeep, ownerRuleItems, startupItems, type DecisionDeps } from "../decisions/index.js";
 import { ANCHOR_DEFAULT_CHARS, anchorBudget, findAnchors } from "../context/anchor.js";
 import { RecallReader } from "../context/recall-source.js";
@@ -105,6 +105,11 @@ export interface RemoteStartOptions {
   readonly relocationPolicy?: RemoteDeps["relocationPolicy"];
   /** Which hosts may hold local-only data, see the repository or be given the task credential (card H07). Default: local-only data is never placed on a remote host. */
   readonly placementPolicy?: RemoteDeps["placementPolicy"];
+  /**
+   * Card P02 (remote hosts): whether a task's workspace may be opened on the folder a remote host declares for its project. Default: the project's access scope (`ProjectResourceService.workspaceAdmissionByDigest`), so a host whose
+   * folder is not a repository bound to the project with write access, or a host that declares none (an older host), is given no workspace work. Given here only by code that judges it another way (a test that is not about it passes `async () => []`).
+   */
+  readonly workspaceAdmission?: RemoteDeps["workspaceAdmission"];
   /** Whether a reconnected worker may take its attempt up again by itself (card H09b). Default: the owner decides. */
   readonly reaccept?: RemoteDeps["reaccept"];
   /** How long an attempt that waits for the owner keeps its lease (card H09b); the controller supplies the owner's setting when absent. */
@@ -837,6 +842,7 @@ export async function composeDispatch(i: ComposeInput): Promise<DispatchHandle> 
         ...(i.workerPolicy === undefined ? {} : { recordLaunch: async (r: Parameters<NonNullable<RemoteDeps["recordLaunch"]>>[0]) => { await recordLaunch(r as never); } }),
         ...(i.options.remote.relocationPolicy === undefined ? {} : { relocationPolicy: i.options.remote.relocationPolicy }),
         ...(i.options.remote.placementPolicy === undefined ? {} : { placementPolicy: i.options.remote.placementPolicy }),
+        workspaceAdmission: i.options.remote.workspaceAdmission ?? hostWorkspaceAdmission((call) => ProjectResourceService.withEpoch(storage, epoch, ro).workspaceAdmissionByDigest(call)),
         ...(i.restoreWaits === undefined ? {} : { restoreWaits: i.restoreWaits }),
         ...(i.options.remote.reaccept === undefined ? {} : { reaccept: i.options.remote.reaccept }),
         ...(i.options.remote.patienceMs === undefined ? {} : { patienceMs: i.options.remote.patienceMs }),

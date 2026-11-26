@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mergeChanges } from "../domain/changes.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
@@ -522,8 +523,11 @@ export class ProjectResourceService {
    * - Either way the binding must give write access to the whole repository: an agent's workspace is a writable copy of all of it, and its work lands there.
    *
    * A refusal carries a plain reason the owner can be told as it is.
+   *
+   * `beforePin` (card P02, remote hosts) is the dispatcher's look before it chooses a host, which comes before the pin is written: a task that names a repository and is not pinned yet is then judged on the binding the pin
+   * would take now (the named repository's current binding). The look never pins; the placement after the pin is judged without it.
    */
-  async workspaceAdmission(call: { readonly taskId: string; readonly projectId: string; readonly folder: string }): Promise<WorkspaceAdmission> {
+  async workspaceAdmission(call: { readonly taskId: string; readonly projectId: string; readonly folder: string; readonly beforePin?: boolean }): Promise<WorkspaceAdmission> {
     const refuse = (reason: string): WorkspaceAdmission => ({ admitted: false, reason: reason.slice(0, 400) });
     if (typeof call?.taskId !== "string" || typeof call.projectId !== "string" || typeof call.folder !== "string" || call.folder === "") return refuse("the request does not name a task, a project and a folder");
     try {
@@ -534,11 +538,12 @@ export class ProjectResourceService {
       const pin = stored?.released === undefined ? stored : undefined;
       let chosen: { resourceId: string; repositoryId?: string; label: string; scope: AccessScope; locatorEpoch: number };
       if (task.repositoryId !== undefined || pin !== undefined) {
-        if (pin === undefined) return refuse(`task ${call.taskId} names repository ${task.repositoryId} but its checkout is not pinned yet; its work starts only once the dispatcher has pinned it`);
-        // Throws `checkout_changed` for a binding that moved, was unbound or is not the one the task was pinned to.
+        if (pin === undefined && call.beforePin !== true) return refuse(`task ${call.taskId} names repository ${task.repositoryId} but its checkout is not pinned yet; its work starts only once the dispatcher has pinned it`);
+        // Throws `checkout_changed` for a binding that moved, was unbound or is not the one the task was pinned to (and `invalid_command` before the pin for a repository that is not bound).
         const resolved = await this.#resolve(call.taskId, task);
-        if (resolved.locator !== call.folder) return refuse(`the folder this host would use for the project is not where repository ${resolved.repositoryId} (bound as "${resolved.label}") is, and the task was dispatched against that one`);
-        chosen = { resourceId: resolved.resourceId, repositoryId: resolved.repositoryId, label: resolved.label, scope: resolved.scope, locatorEpoch: pin.locatorEpoch };
+        if (resolved.locator !== call.folder) return refuse(`the folder this host would use for the project is not where repository ${resolved.repositoryId} (bound as "${resolved.label}") is, and the task ${pin === undefined ? "names" : "was dispatched against"} that one`);
+        const epoch = pin?.locatorEpoch ?? ((await this.#runner.get(RESOURCE, resolved.resourceId))?.body as unknown as ResourceBody | undefined)?.locatorEpoch ?? 0;
+        chosen = { resourceId: resolved.resourceId, repositoryId: resolved.repositoryId, label: resolved.label, scope: resolved.scope, locatorEpoch: epoch };
       } else {
         const here = (await this.#resourcesOf(task.projectId, true)).filter((r) => r.body.kind === "repository" && r.body.state === "bound" && r.body.locator === call.folder);
         if (here.length === 0) return refuse("the repository folder this host would use is not bound to the project; bind it to the project with write access first (resource.bind)");
@@ -553,6 +558,28 @@ export class ProjectResourceService {
       if (isDomainError(error, "checkout_changed") || isDomainError(error, "invalid_command") || isDomainError(error, "unavailable")) return refuse(error.message);
       throw error;
     }
+  }
+
+  /**
+   * The remote form of `workspaceAdmission` (card P02, remote hosts): a remote worker host declares the folder it uses for the project only as a digest (sha256 of the folder as written in its configuration, see
+   * `remote/workspace-declaration.ts`). The digest is matched against the locations of the repositories bound to the task's project (a location is compared as written, as `workspaceAdmission` does), and the matching
+   * location is then judged by `workspaceAdmission` itself: the pin, the location version and write access to the whole repository. A digest that matches no bound repository is refused with the owner's fix.
+   */
+  async workspaceAdmissionByDigest(call: { readonly taskId: string; readonly projectId: string; readonly folderDigest: string; readonly beforePin?: boolean }): Promise<WorkspaceAdmission> {
+    const refuse = (reason: string): WorkspaceAdmission => ({ admitted: false, reason: reason.slice(0, 400) });
+    if (typeof call?.taskId !== "string" || typeof call.projectId !== "string" || typeof call.folderDigest !== "string" || !/^[0-9a-f]{64}$/.test(call.folderDigest)) return refuse("the request does not name a task, a project and a folder");
+    let locator: string | undefined;
+    try {
+      checkProjectId(call.projectId);
+      for (const r of await this.#resourcesOf(call.projectId, true)) {
+        if (r.body.kind === "repository" && r.body.state === "bound" && createHash("sha256").update(r.body.locator, "utf8").digest("hex") === call.folderDigest) { locator = r.body.locator; break; }
+      }
+    } catch (error) {
+      if (isDomainError(error, "invalid_command") || isDomainError(error, "unavailable")) return refuse(error.message);
+      throw error;
+    }
+    if (locator === undefined) return refuse("the folder that host uses for the project is not a repository bound to the project; bind that folder, written exactly as in the host's configuration, to the project with write access first (resource.bind)");
+    return this.workspaceAdmission({ taskId: call.taskId, projectId: call.projectId, folder: locator, ...(call.beforePin === true ? { beforePin: true } : {}) });
   }
 
   /**

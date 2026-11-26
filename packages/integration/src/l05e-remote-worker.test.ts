@@ -99,6 +99,11 @@ test("a remote worker program in a real process takes an offer over the protocol
     const exited = new Promise<number | null>((r) => child!.once("exit", (code) => r(code)));
     void exited.then((code) => { if (code !== null && code !== 0) out.push(`[exited ${code}]`); });
 
+    // Card P02 (remote hosts): the program declares the folder its configuration names for the project. Until that folder is bound to the project with write access the dispatcher sends it nothing and says why.
+    let refusal = "";
+    await until(async () => { const tick = await c.dispatch!.dispatcher.tick(); assert.deepEqual(tick.started, [], "nothing starts on an unbound folder"); refusal = tick.skipped.find((x) => x.attemptId === attemptId)?.reason ?? ""; return /host:r1 may not open this task's workspace: the folder that host uses for the project is not a repository bound to the project/.test(refusal); }, () => `the host was not refused for its unbound folder: ${refusal} ${out.join("")}`);
+    assert.equal(await c.dispatch!.remote!.placement(c.dispatch!.principal, attemptId), undefined, "nothing was offered to the program");
+    await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: project, kind: "repository", label: "garden", locator: shared, repositoryId: "garden", access: "write" });
     // The host connects by itself; the dispatcher places the attempt on it when it can.
     let started = false;
     await until(async () => { if (!started) started = (await c.dispatch!.dispatcher.tick()).started.includes(attemptId); return started; }, () => `the attempt was never started on the remote host: ${out.join("")}`);

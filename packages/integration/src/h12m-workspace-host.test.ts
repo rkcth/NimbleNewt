@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AdmissionService, HostService, LocalWorker, RemoteWorkerClient, WorkspaceResponder, startController, type WorkerHost, type WorkspaceCall } from "@nimblenewt/controller";
+import { AdmissionService, HostService, LocalWorker, RemoteWorkerClient, WorkspaceResponder, startController, workspaceDeclaration, type WorkerHost, type WorkspaceCall } from "@nimblenewt/controller";
 import { PI, workGrants } from "@nimblenewt/controller/testing";
 import { GitBridge, LocalWorkspaces, WorkspaceHost, type CheckoutLocation } from "@nimblenewt/worker";
 
@@ -237,7 +237,9 @@ test("remote host: the same requests cross the authenticated transport to a work
     const token = (await c.services.principals.issueCredential(owner, "host:pc")).token;
     await AdmissionService.withEpoch(c.storage, c.epoch).setCapacity({ commandId: "cap-pc", actor: owner.id, host: "host:pc", capacity: { cpus: 8, memoryMb: 16_384 } });
     const client = new RemoteWorkerClient({ url: c.dispatch.workerUrl!, token, workerVersion: "worker-9.1.0" });
-    await client.connect(CAPS as never);
+    // Card P02 (remote hosts): the machine says which folder it uses for the project, and that folder is bound to the project with write access, so its integrations and landings are sent.
+    await c.services.resources.bindResource(owner, { commandId: "bind-garden", projectId: project, kind: "repository", label: "garden", locator: m.shared, repositoryId: "garden", access: "write" });
+    await client.connect({ ...CAPS, workspaces: [workspaceDeclaration(project, m.shared)!] } as never);
     await client.heartbeat(1);
     // The worker's side of answering is the real responder over a client whose first answer for a request is dropped once (the network lost it).
     const dropped = new Set<string>();

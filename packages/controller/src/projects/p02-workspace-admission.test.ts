@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { after, test } from "node:test";
 import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
@@ -12,6 +13,7 @@ let n = 0;
 const cid = (label: string): string => `${label}-${n++}`;
 const GARDEN = "/srv/repos/garden";
 const SHED = "/srv/repos/shed";
+const digest = (folder: string): string => createHash("sha256").update(folder, "utf8").digest("hex");
 const refused = (a: WorkspaceAdmission, pattern: RegExp): void => { assert.equal(a.admitted, false, JSON.stringify(a)); assert.match((a as { reason: string }).reason, pattern); };
 
 for (const backend of backends) {
@@ -108,4 +110,36 @@ for (const backend of backends) {
     refused(await resources.workspaceAdmission({ taskId: task, projectId: project, folder: SHED }), /was dispatched against another checkout than the one it now names/);
     refused(await resources.workspaceAdmission({ taskId: task, projectId: project, folder: GARDEN }), /another checkout/);
   });
+  suite("remote hosts: a folder declared as a digest is matched to the bound location as written and judged by the same rules; the dispatcher's look before the pin judges the binding the pin would take", async ({ owner, projects, resources, project, other }) => {
+    const plain = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Dig" })).id;
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(GARDEN) }), /is not a repository bound to the project; bind that folder, written exactly as in the host's configuration, to the project with write access first/);
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: "not-a-digest" }), /does not name a task, a project and a folder/);
+    const bound = await resources.bindResource(owner, { commandId: cid("b"), projectId: project, kind: "repository", label: "garden", locator: GARDEN, repositoryId: "garden", access: "write" });
+    assert.deepEqual(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(GARDEN) }), { admitted: true, binding: { resourceId: bound.id, repositoryId: "garden", locatorEpoch: 1, label: "garden", pinned: false } });
+    // The location is compared as written: a trailing slash is another folder.
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(`${GARDEN}/`) }), /not a repository bound to the project/);
+    // Another project's binding of a folder does not admit this project's task.
+    await resources.bindResource(owner, { commandId: cid("b"), projectId: other, kind: "repository", label: "shed", locator: SHED, repositoryId: "shed", access: "write" });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest(SHED) }), /not a repository bound to the project/);
+    // Read access only, and a path-limited scope, are refused as the local host's are.
+    const orchard = await resources.bindResource(owner, { commandId: cid("b"), projectId: project, kind: "repository", label: "orchard", locator: "/srv/repos/orchard", repositoryId: "orchard", access: "read" });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest("/srv/repos/orchard") }), /read access only to repository "orchard"/);
+    await resources.setScope(owner, { commandId: cid("s"), resourceId: orchard.id, expectedRevision: (await resources.get(owner, orchard.id))!.revision, access: "write", paths: ["src"] });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: plain, projectId: project, folderDigest: digest("/srv/repos/orchard") }), /may use only some paths of repository "orchard" \(src\)/);
+    // A task that names a repository: before its pin the dispatcher's look judges the binding the pin would take; the placement after the pin judges the pin.
+    const named = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Water", repositoryId: "garden" })).id;
+    refused(await resources.workspaceAdmissionByDigest({ taskId: named, projectId: project, folderDigest: digest(GARDEN) }), /not pinned yet/);
+    assert.deepEqual(await resources.workspaceAdmissionByDigest({ taskId: named, projectId: project, folderDigest: digest(GARDEN), beforePin: true }), { admitted: true, binding: { resourceId: bound.id, repositoryId: "garden", locatorEpoch: 1, label: "garden", pinned: false } });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: named, projectId: project, folderDigest: digest("/srv/repos/orchard"), beforePin: true }), /is not where repository garden \(bound as "garden"\) is, and the task names that one/);
+    assert.equal((await resources.dispatchCheckout({ commandId: cid("pin"), taskId: named, actor: "dispatcher", pin: true })).kind, "ok");
+    assert.equal((await resources.workspaceAdmissionByDigest({ taskId: named, projectId: project, folderDigest: digest(GARDEN) })).admitted, true);
+    // Narrowed to reading after the pin: refused.
+    const g = (await resources.get(owner, bound.id))!;
+    await resources.setScope(owner, { commandId: cid("s"), resourceId: bound.id, expectedRevision: g.revision, access: "read" });
+    refused(await resources.workspaceAdmissionByDigest({ taskId: named, projectId: project, folderDigest: digest(GARDEN) }), /read access only to repository "garden"/);
+    // A task that names a repository that is not bound: the look before the pin refuses it with the reason.
+    const loose = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "Prune", repositoryId: "hedge" }).catch(() => undefined))?.id;
+    if (loose !== undefined) refused(await resources.workspaceAdmissionByDigest({ taskId: loose, projectId: project, folderDigest: digest(GARDEN), beforePin: true }), /not bound to the project|is not where repository/);
+  });
+
 }

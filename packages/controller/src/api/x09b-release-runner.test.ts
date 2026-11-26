@@ -30,7 +30,7 @@ async function rig() {
   const c = await startController({
     storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     chat: { interpreter: new ScriptedInterpreter(() => []) },
-    dispatch: { timer: new ManualTimer(), manual: true, route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }), remote: { blobDirectory: join(d, "blobs"), hosts: [] } },
+    dispatch: { timer: new ManualTimer(), manual: true, route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }), remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [] } },
   } as never);
   assert.ok(c.dispatch?.workerUrl !== undefined, c.dispatchProblem);
   const boot = await c.services.principals.bootstrapOwner({ name: "rob" });

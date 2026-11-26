@@ -21,7 +21,7 @@ test("the composed controller places an attempt on a remote host over its own tr
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
+      remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi" }) }] },
     },
   });
   try {
@@ -71,7 +71,7 @@ test("a step that fails after the local host was built closes that host again, w
     const local = { acceptUnenforcedLimits: true, window: () => 8192, close: async () => { closed++; }, build: () => ({ hostId: "host:w1", resources: { cpus: 1, memoryMb: 1024 } }) as never };
     const c = await startController({
       storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-      dispatch: { timer: new ManualTimer(), manual: true, local, remote: { blobDirectory: join(d, "afile", "blobs"), hosts: [] } },
+      dispatch: { timer: new ManualTimer(), manual: true, local, remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "afile", "blobs"), hosts: [] } },
     });
     try {
       assert.equal(c.dispatch, undefined);
@@ -87,7 +87,7 @@ test("a step that fails after the local host was built closes that host again, w
     try {
       const c2 = await startController({
         storage: { kind: "sqlite", path: join(d, "c2.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
-        dispatch: { timer: new ManualTimer(), manual: true, local, remote: { blobDirectory: join(d, "blobs2"), hosts: [], transport: { port } as never } },
+        dispatch: { timer: new ManualTimer(), manual: true, local, remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs2"), hosts: [], transport: { port } as never } },
       });
       try { assert.equal(c2.dispatch, undefined); assert.equal(closed, 2); } finally { await c2.close(); }
     } finally { await new Promise<void>((ok) => taken.close(() => ok())); }
@@ -102,7 +102,7 @@ test("a host that cannot meet the attempt's requirements is not given it: the re
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi", isolation: ["firecracker"] }) }] },
+      remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:r1", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "cloud-allowed", harness: "pi", isolation: ["firecracker"] }) }] },
     },
   });
   try {
@@ -157,7 +157,7 @@ test("a failure after the listener opened (while the driver is built) leaves not
       probePort = port;
       openAt.length = 0;
       const timer = new ManualTimer();
-      const dispatch: Record<string, unknown> = { timer, local, remote: { blobDirectory: join(d, `blobs-${n}`), hosts: [], transport: { port } } };
+      const dispatch: Record<string, unknown> = { timer, local, remote: { workspaceAdmission: async () => [], blobDirectory: join(d, `blobs-${n}`), hosts: [], transport: { port } } };
       inject(dispatch);
       const c = await startController({ storage: { kind: "sqlite", path: join(d, `${n}.sqlite`) }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], dispatch: dispatch as never });
       try {

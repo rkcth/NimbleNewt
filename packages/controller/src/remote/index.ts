@@ -19,3 +19,4 @@ export { RemoteScriptRuns, orderProblem, type HostScriptLaunch, type HostScriptR
 export { ScriptOrders, orderDigest, runIdOf, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";
 export { OBSERVE_ON_HOST, observationOf, observeOnHost, type ObserveAsker } from "./observe.js";
 export { entriesObserver, observeEntries } from "../dependencies/observe.js";
+export { declaredFolders, folderDigest, hostWorkspaceAdmission, workspaceDeclaration, type FolderAdmission, type HostWorkspaceAdmission } from "./workspace-declaration.js";

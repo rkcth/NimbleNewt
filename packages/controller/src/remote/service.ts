@@ -22,6 +22,7 @@ import { redactText } from "../security/redact.js";
 import { cleanProcessRef } from "./process-ref.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { WORKSPACE_OPERATIONS, type CarriedLanding, type WorkspaceCall } from "../workspace-ops/workspace-ops.js";
+import type { HostWorkspaceAdmission } from "./workspace-declaration.js";
 import { restartDigest } from "./contract-wire.js";
 import { checkContract, CONTRACT_LIMIT_NAMES, type ContractEnforcement, type ContractLimitName } from "./contract.js";
 import { ScriptOrders, type ScriptOrderInput, type ScriptResult } from "./script-orders.js";
@@ -371,6 +372,12 @@ export interface RemoteDeps {
   /** Where an attempt may be placed in the first place (data location, repository access, who may hold the credential). Absent: only what a host can do decides. */
   readonly placementPolicy?: PlacementPolicyFor;
   /**
+   * Card P02 (remote hosts): whether the task's access scope admits the folder a host declared for the project (`ProjectResourceService.workspaceAdmissionByDigest` in the composed controller). Every remote attempt opens a
+   * workspace on its host, so it is judged with the placement (refusals, place, candidates, delivery, relocation), and again before an integration or a landing is sent, since those write the shared repository. A host that
+   * declares no folder for the project (an older host) is refused that work; its other work (scripts, conversation stores, looks, checks) is not judged. Absent: not judged (the composed controller always gives it).
+   */
+  readonly workspaceAdmission?: HostWorkspaceAdmission;
+  /**
    * Whether a restore left this attempt's conversation store for this host and it has not been delivered yet (card K01i review). While it waits the host is not offered the attempt (a reason that passes): the agent would
    * otherwise run on the conversation that was there before the restore, and the delivery between two turns would then take its newest turns away. Absent: not judged.
    */
@@ -648,7 +655,16 @@ export class RemoteWorkerService {
    */
   async askWorkspace(by: Principal, hostId: string, call: WorkspaceCall, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
     this.#staff(by);
-    return this.#ask(hostIdOf(hostId), checkAsk(call), options);
+    const host = hostIdOf(hostId);
+    const wire = checkAsk(call);
+    // Card P02 (remote hosts): an integration or a landing writes the project's shared repository on that host, so the task's access scope is asked again now, on the folder the host declares (a binding unbound, moved or
+    // narrowed since the attempt was placed, or a host whose folder changed, refuses it). A check that cannot be read refuses too. Nothing is sent either way. A repeat of a request already sent joins it as before.
+    if ((wire.operation === "integration" || wire.operation === "landing") && !this.#asks.has(wire.requestId)) {
+      let reasons: string[];
+      try { reasons = await this.#admissionReasons(host, wire); } catch (error) { this.#reportError(error); reasons = [`whether ${host} may write this task's repository could not be checked (${String((error as Error)?.message ?? error).slice(0, 160)})`]; }
+      if (reasons.length > 0) return { ok: false, reason: `nothing was sent to ${host}, so nothing was written to the shared repository: ${reasons.join("; ")}`.slice(0, 600) };
+    }
+    return this.#ask(host, wire, options);
   }
 
   /**
@@ -727,6 +743,18 @@ export class RemoteWorkerService {
       afterId = page.at(-1)!.id;
     }
     return { ask, unreachable };
+  }
+
+  /**
+   * Card P02 (remote hosts): why the host may not open (or write) this task's workspace, from the folder it declared for the project and the project's access scope, read now. Empty when it may, when no admission is
+   * configured, or when the host has not announced anything yet (that is already a reason of its own). Throws when the admission cannot be read. `beforePin` for the dispatcher's looks before it pins the checkout.
+   */
+  async #admissionReasons(hostId: string, scope: { readonly taskId: string; readonly projectId: string }, status?: HostStatus, beforePin = false): Promise<string[]> {
+    const admit = this.#deps.workspaceAdmission;
+    if (admit === undefined) return [];
+    const caps = (status ?? await this.#deps.hosts.status(this.#deps.principal, hostId))?.capabilities;
+    if (caps === undefined) return [];
+    return [...await admit({ hostId, taskId: scope.taskId, projectId: scope.projectId, workspaces: caps.workspaces, ...(beforePin ? { beforePin: true } : {}) })];
   }
 
   async #ask(host: string, wire: WorkspaceAsk, options: { readonly waitMs: number }): Promise<RemoteWorkspaceAnswer> {
@@ -904,6 +932,8 @@ export class RemoteWorkerService {
     const reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
     if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
     reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: query.taskId, projectId: query.projectId, agentId: query.agentId, requirements })));
+    // The dispatcher asks this before it writes the task's checkout pin: a task that names a repository is judged on the binding its pin would take now (`place`, after the pin, judges the pin itself).
+    reasons.push(...await this.#admissionReasons(hostId, query, undefined, true));
     // Judged here, where the dispatcher passes the host over and the attempt waits (never at `place`, whose refusal can end an attempt that has no other host).
     if (await this.#restoreWaits(hostId, attemptId)) reasons.push(RESTORE_WAIT(hostId, attemptId));
     // A host that is not connected, not heard from lately or has not announced yet may be fine in a moment; anything else (policy, what the host can do) lasts until someone changes it.
@@ -942,6 +972,7 @@ export class RemoteWorkerService {
     const reasons = capabilityReasons(hostId, status, requirements);
     if (session === undefined) reasons.push(`${hostId} has not connected to the controller`);
     reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: order.taskId, projectId: order.projectId, agentId: order.agentId, requirements })));
+    reasons.push(...await this.#admissionReasons(hostId, order, status));
     // A typed refusal (card H07b): nothing was offered, so the dispatcher may try the attempt on another host.
     if (reasons.length > 0) throw new StartRefused(hostId, attemptId, reasons, lastingReasons(reasons));
     for (const id of inputs) await this.#deps.artifacts.assertResumable([id]);
@@ -1016,6 +1047,7 @@ export class RemoteWorkerService {
       if (status?.identity === "revoked") this.#unindex(hostId);
       if ((await this.#connected(hostId)) === undefined) reasons.push(`${hostId} has not connected to the controller`);
       reasons.push(...policyReasons(hostId, requirements, policy));
+      reasons.push(...await this.#admissionReasons(hostId, query, status, true));
       if (reasons.length === 0) eligible.push(hostId); else refused.push({ hostId, reasons });
     }
     eligible.sort((a, b) => (load.get(a) ?? 0) - (load.get(b) ?? 0) || (a < b ? -1 : 1));
@@ -1301,6 +1333,7 @@ export class RemoteWorkerService {
       const requirements = checkRequirements(b.requirements);
       reasons = capabilityReasons(hostId, await this.#deps.hosts.status(this.#deps.principal, hostId), requirements);
       reasons.push(...policyReasons(hostId, requirements, this.#deps.placementPolicy === undefined ? {} : await this.#deps.placementPolicy({ attemptId, taskId: b.taskId, projectId: b.projectId, agentId: b.agentId, requirements })));
+      reasons.push(...await this.#admissionReasons(hostId, b));
     } catch (error) { this.#reportError(error); return "held"; }
     if (reasons.length === 0 || !lastingReasons(reasons)) return "deliver";
     const why = `withdrawn before it was ${stage}, ${hostId} would now refuse it: ${reasons.join("; ")}`.slice(0, 300);
@@ -2372,6 +2405,7 @@ export class RemoteWorkerService {
     if (policy.platforms !== undefined && caps !== undefined && !policy.platforms.some((p) => p.os === caps.os && p.arch === caps.arch)) reasons.push(`the platform policy does not allow ${caps.os}/${caps.arch}`);
     if (policy.credentialHosts !== undefined && policy.credentialHosts.length > 0 && !policy.credentialHosts.includes(to)) reasons.push(`the credential policy does not allow ${to} to hold this attempt's task credential`);
     if (b.requirements.data === "local-only" && !(policy.dataHosts ?? []).includes(to)) reasons.push(`the attempt's data is local-only and the data-location policy does not list ${to}`);
+    reasons.push(...await this.#admissionReasons(to, b, status));
     return reasons;
   }
 

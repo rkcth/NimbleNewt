@@ -30,7 +30,7 @@ async function fixture(storage: "sqlite" | { pg: TestServer }, extra: Record<str
   const c = await startController({ storage: choice, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI], chat: { interpreter: new ScriptedInterpreter((input) => say[input.text] ?? []) }, ...extra,
     dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock: () => new Date(now).toISOString(), invitations: { invite: async () => undefined },
       route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:pc", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] } } } as never);
+      remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [{ hostId: "host:pc", window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 256 }, requirements: () => ({ data: "cloud-allowed" as const, harness: "pi" }) }] } } } as never);
   try {
     const s = c.services;
     const boot = await s.principals.bootstrapOwner({ name: "rob" });

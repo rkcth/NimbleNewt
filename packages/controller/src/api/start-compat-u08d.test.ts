@@ -100,7 +100,7 @@ test("a remote host whose worker speaks an older protocol names the agents whose
     dispatch: {
       timer: new ManualTimer(), manual: true,
       route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }),
-      remote: { blobDirectory: join(d, "blobs"), hosts: [remoteHost("host:r1"), remoteHost("host:r2")] },
+      remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [remoteHost("host:r1"), remoteHost("host:r2")] },
     },
   });
   try {

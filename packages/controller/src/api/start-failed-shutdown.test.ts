@@ -263,7 +263,7 @@ test("the remote hosts' restore delivery (its first try after one second and the
   const options = (n: string, extra: Record<string, unknown> = {}): never => { mkdirSync(join(d, n), { recursive: true }); return {
     storage: { kind: "sqlite", path: join(d, n, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
     backup: { directory: join(d, n, "backups"), restore: { remotePiEveryMs: 3_600_000 } },
-    dispatch: { timer: new ManualTimer(), manual: true, remote: { blobDirectory: join(d, n, "blobs"), hosts: [] } }, ...extra,
+    dispatch: { timer: new ManualTimer(), manual: true, remote: { workspaceAdmission: async () => [], blobDirectory: join(d, n, "blobs"), hosts: [] } }, ...extra,
   } as never; };
   const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 1_600));
   const holder = await listenAnywhere();

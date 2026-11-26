@@ -36,7 +36,7 @@ async function rig(clock: () => string, dir?: string) {
     chat: { interpreter: new ScriptedInterpreter(() => []) },
     // The notification service reads the same fake clock as the dispatcher: left on the real clock it closed any notice older than its seven-day retention by the real date, so these tests passed only while the fake date was within a week of the real one.
     notifications: { clock },
-    dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock, route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }), remote: { blobDirectory: join(d, "blobs"), hosts: [] } },
+    dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock, route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: false } }), remote: { workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), hosts: [] } },
   } as never);
   assert.ok(c.dispatch?.workerUrl !== undefined, c.dispatchProblem);
   // A second start on the same data folder (a restart) signs in with the owner credential the first one made.

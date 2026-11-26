@@ -82,6 +82,8 @@ test("a task on a real remote worker: its Pi turn is captured as a complete cont
     const ownerToken = (await s.principals.issueCredential(owner, owner.id)).token;
     const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(ownerToken, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
     const project = (await s.projects.createProject({ commandId: "p1", actor: owner.id, name: "Garden" })).id;
+    // Card P02 (remote hosts): the host declares the folder its configuration names for the project, and is sent the work only when that folder is bound to the project with write access.
+    await s.resources.bindResource(owner, { commandId: "bind-garden", projectId: project, kind: "repository", label: "garden", locator: shared, repositoryId: "garden", access: "write" });
     await s.principals.enroll(owner, { commandId: "e-ann", kind: "agent", name: AGENT, grants: workGrants(project) as never });
     await s.principals.enroll(owner, { commandId: "e-r1", kind: "host", name: "r1", grants: [] });
     const hostToken = (await s.principals.issueCredential(owner, "host:r1")).token;

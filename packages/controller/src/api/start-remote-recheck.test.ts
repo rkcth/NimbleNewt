@@ -22,7 +22,7 @@ const open = (d: string) => startController({
     timer: new ManualTimer(), manual: true,
     route: async () => ({ route: "localp/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "local-only", paidAuthorized: false } }),
     remote: {
-      blobDirectory: join(d, "blobs"), placementPolicy: async () => policy,
+      workspaceAdmission: async () => [], blobDirectory: join(d, "blobs"), placementPolicy: async () => policy,
       hosts: ["r1", "r2"].map((n) => ({ hostId: `host:${n}`, window: () => 131_072, checkpointWaitMs: 300, pollMs: 20, resources: { cpus: 1, memoryMb: 1024 }, requirements: () => ({ data: "local-only" as const, harness: "pi" }) })),
     },
   },

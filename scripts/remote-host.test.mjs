@@ -3,7 +3,8 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { checkRemoteConfig, readRemoteConfig, remoteLandingPolicy, startRemoteWorker } from "./remote-host.mjs";
+import { createHash } from "node:crypto";
+import { checkRemoteConfig, readRemoteConfig, remoteLandingPolicy, startRemoteWorker, workspaceDeclarations } from "./remote-host.mjs";
 
 // Card L05e: what the remote worker host wires together, with stand-ins for the packages (the real composition is shown by the integration test with a real process).
 const config = (extra = {}) => ({ url: "https://controller.example:8443", token: "host-credential-0123", base: "/tmp/nn-l05e-base", routes: { "localp/small": { url: "http://127.0.0.1:1/v1", keyEnv: "L05E_STUB_KEY" } }, ...extra });
@@ -26,7 +27,9 @@ function packages(scriptsOptions = {}) {
   class PiStateHost { constructor(options) { seen.piStateOptions = options; } async answer() { return { ok: true, summary: "x" }; } }
   // Card L04e: the look at a task's recorded files, here a stand-in that records what it was asked and where it was told to look.
   const entriesObserver = (options) => { (seen.observerOptions ??= []).push(options); return async (scope, entries, locate) => { (seen.observed ??= []).push({ where: await locate(scope.taskId, scope.projectId), scope, entries }); return {}; }; };
-  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost, entriesObserver };
+  // Card P02 (remote hosts): the controller package's declaration of a project folder (the real one is tested in the controller); a stand-in of the same shape.
+  const workspaceDeclaration = (projectId, folder) => (/^proj-[a-z2-7]{20}$/.test(projectId) ? `repo:${projectId}:sha256:${createHash("sha256").update(folder, "utf8").digest("hex")}` : undefined);
+  const controller = { RemoteWorkerClient, ModelRelay, LocalWorker, RemoteOfferRunner, RemoteScriptRuns, WorkspaceResponder, HostPoller, PiStateHost, entriesObserver, ...(scriptsOptions.noDeclaration ? {} : { workspaceDeclaration }) };
   class LocalConversationStores { constructor(options) { seen.storesOptions = options; this.source = { list: async () => [] }; this.final = () => undefined; } }
   class LocalWorkspaces { constructor(options) { seen.workspaceOptions = options; this.port = { run: async () => ({ ok: true }) }; } locate(call) { return call.taskId === "task-none" ? undefined : { checkout: `/host/work/${call.projectId}/${call.taskId}/checkout` }; } progress() {} async ensure() { return { checkout: "/c", gitDir: "/g" }; } }
   const worker = {
@@ -275,4 +278,30 @@ test("catalogue scripts (card T02d): the host's script sandbox is the host's own
       assert.equal(lines.some((l) => /catalogue scripts are not offered on this host/.test(l)), !offered);
     } finally { seen.stopPoller(); await host.stop(); }
   }
+});
+
+test("the host says which folder it uses for each project, as a digest of the folder as configured, in what it announces to the poller and the worker; a key that is not a project ID and projects past 20 are left out and logged; a controller package without the declaration announces none (card P02)", { skip: LINUX_ONLY }, async () => {
+  const shared = mkdtempSync(join(tmpdir(), "nn-p02r-shared-"));
+  const A = "proj-aaaaaaaaaaaaaaaaaaaa", B = "proj-bbbbbbbbbbbbbbbbbbbb";
+  const digest = (f) => createHash("sha256").update(f, "utf8").digest("hex");
+  try {
+    const lines = [];
+    const { seen, load } = packages();
+    const host = await startRemoteWorker({ root: "/srv/nimblenewt", load }, config({ projects: { [A]: shared, [B]: join(shared, "missing"), "garden": shared }, log: (l) => lines.push(l) }));
+    try {
+      // B's folder does not exist, so the host holds no repository for it and says nothing of it; "garden" is not a project ID.
+      assert.deepEqual(seen.poller.capabilities.workspaces, [`repo:${A}:sha256:${digest(shared)}`]);
+      assert.deepEqual(seen.localOptions.capabilities().workspaces, seen.poller.capabilities.workspaces, "the same list on reconnect");
+      assert.ok(lines.some((l) => /the folder of garden is not declared to the controller \(not a project ID\)/.test(l)), lines.join("\n"));
+      assert.ok(seen.poller.capabilities.workspaces.every((w) => !w.includes(shared)), "no path is announced");
+    } finally { seen.stopPoller?.(); await host.stop?.().catch(() => undefined); }
+    const old = packages({ noDeclaration: true });
+    const host2 = await startRemoteWorker({ root: "/srv/nimblenewt", load: old.load }, config({ projects: { [A]: shared } }));
+    try { assert.deepEqual(old.seen.poller.capabilities.workspaces, [], "nothing to declare with: the controller sends it no workspace work"); } finally { old.seen.stopPoller?.(); await host2.stop?.().catch(() => undefined); }
+  } finally { rmSync(shared, { recursive: true, force: true }); }
+  const many = new Map(Array.from({ length: 22 }, (_, i) => [`proj-${"abcdefghijklmnopqrstuvwxyz234567"[i].repeat(20)}`, `/srv/f${i}`]));
+  const logged = [];
+  const out = workspaceDeclarations({ workspaceDeclaration: (p, f) => `repo:${p}:sha256:${digest(f)}` }, many, (l) => logged.push(l));
+  assert.equal(out.length, 20, "a host announces at most 20 names");
+  assert.equal(logged.filter((l) => /a host declares at most 20 projects/.test(l)).length, 2);
 });
