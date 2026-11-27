@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -38,6 +38,7 @@ async function world() {
 }
 const hand = (ws: LocalWorkspaces, attemptId?: string) => ws.ensure({ ...scope, ...(attemptId === undefined ? {} : { attemptId }) });
 /** What a submission staged now would report: the staging needs a change, so one is written first if the checkout holds none. */
+const gitBridge = (dir: string) => GitBridge.create({ scratch: join(dir, "scratch") });
 async function leftBy(ws: LocalWorkspaces, checkout: string) {
   await writeFile(join(checkout, "submit-marker.txt"), `${Math.random()}\n`);
   return (await ws.stageWork(scope)).leftBy;
@@ -121,12 +122,80 @@ test("the plan file every agent is told to keep at the top of its checkout is no
     await writeFile(join(a.checkout, "PLAN.md", "x.ts"), "export const x = 1;\n");
     await hand(w.ws, "att-g");
     assert.deepEqual(w.handover().left.sort(), ["att-a", "att-e", "att-f"], "a folder named like the plan holds code");
+    // a symbolic link named like the plan is a change too (it is not the plan file the agent keeps)
+    if (process.platform !== "win32") {
+      await rm(join(a.checkout, "PLAN.md"), { recursive: true });
+      await symlink(join("src", "a.ts"), join(a.checkout, "PLAN.md"));
+      await hand(w.ws, "att-h");
+      assert.deepEqual(w.handover().left.sort(), ["att-a", "att-e", "att-f", "att-g"], "a link named like the plan is a change");
+    }
     // the plan file still goes into the submission as before (only the comparison leaves it out)
     await rm(join(a.checkout, "PLAN.md"), { recursive: true });
     await writeFile(join(a.checkout, "PLAN.md"), "- [x] done\n");
     const staged = await w.ws.stageWork(scope);
     assert.ok(staged.files.includes("PLAN.md"), JSON.stringify(staged.files));
   } finally { await w.done(); }
+});
+
+test("a task folder from before the record: the plan file is left out of the previous attempt's start record too, so an attempt that only kept its plan is not charged (card Q04, second review re-check)", { skip }, async () => {
+  const w = await world();
+  try {
+    const z = await hand(w.ws, "att-0");
+    await writeFile(join(z.checkout, "PLAN.md"), "- [ ] start\n");
+    // A is handed a checkout that holds a plan file: its start record's tree holds it
+    await hand(w.ws, "att-a");
+    await writeFile(join(z.checkout, "PLAN.md"), "- [x] start\n- [ ] review\n");
+    // as an older host left it: no handover record, the attempt file names A
+    await rm(join(w.task, "handover.json"));
+    await hand(w.ws, "att-b");
+    assert.deepEqual(w.handover().left, [], "compared with A's start record, the plan file left out: A only kept its plan");
+    await rm(join(w.task, "handover.json"));
+    await writeFile(join(w.task, "attempt"), "att-a\n");
+    await writeFile(join(z.checkout, "src", "a.ts"), "export const a = 6;\n");
+    await hand(w.ws, "att-c");
+    assert.deepEqual(w.handover().left, ["att-a"], "a change beside the plan file still counts");
+  } finally { await w.done(); }
+});
+
+test("GitBridge.withoutPlan leaves out exactly the top plan file in any case as a plain or executable file, keeps every other entry byte for byte (names with tabs, new lines, quotes, spaces, other scripts), and refuses inputs it cannot read (card Q04, second review re-check)", { skip }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-q04p-"));
+  try {
+    const gitDir = join(dir, "repo.git");
+    sh(dir, "init", "-q", "--bare", gitDir);
+    const g = (input: string, ...args: string[]): string => execFileSync("git", ["--git-dir", gitDir, ...args], { input, encoding: "utf8" }).trim();
+    const blob = (text: string): string => g(text, "hash-object", "-w", "--stdin");
+    const mk = (entries: readonly string[], ...flags: string[]): string => g(entries.map((e) => `${e}\0`).join(""), "mktree", "-z", ...flags);
+    const listed = (tree: string): string[] => g("", "ls-tree", "-z", tree).split("\0").filter(Boolean).sort();
+    const sub = mk([`100644 blob ${blob("inner plan\n")}\tPLAN.md`]);
+    const plans = [`100644 blob ${blob("plan\n")}\tPLAN.md`, `100755 blob ${blob("other plan\n")}\tplan.md`];
+    const others = [
+      `120000 blob ${blob("src/a.ts")}\tPlan.Md`,
+      `040000 tree ${sub}\tpLaN.md`,
+      `100644 blob ${blob("x\n")}\tPLAN.md.txt`,
+      `100644 blob ${blob("x\n")}\tXPLAN.md`,
+      `100644 blob ${blob("tab\n")}\ta\tb`,
+      `100644 blob ${blob("nl\n")}\tline\nPLAN.md`,
+      `100644 blob ${blob("q\n")}\t"q" \\ x`,
+      `100644 blob ${blob("sp\n")}\t PLAN.md `,
+      `100755 blob ${blob("u\n")}\t\u00fcn\u00ef PLAN.md`,
+    ];
+    const both = mk([...plans, ...others]);
+    const kept = await gitBridge(dir).then((b) => b.withoutPlan({ gitDir, tree: both }));
+    assert.deepEqual(listed(kept), listed(mk(others)), "only the two plan files are left out");
+    assert.equal(kept, mk(others));
+    // no plan file: the same tree; only the plan file: the empty tree; the empty tree stays empty
+    const b = await gitBridge(dir);
+    const none = mk(others);
+    assert.equal(await b.withoutPlan({ gitDir, tree: none }), none);
+    const empty = mk([]);
+    assert.equal(await b.withoutPlan({ gitDir, tree: mk([plans[0]!]) }), empty);
+    assert.equal(await b.withoutPlan({ gitDir, tree: empty }), empty);
+    // inputs that should be refused: a name that is not a full ID, an ID git does not hold, a tree whose other entries name objects git does not hold
+    await assert.rejects(b.withoutPlan({ gitDir, tree: "HEAD" }));
+    await assert.rejects(b.withoutPlan({ gitDir, tree: "0".repeat(40) }));
+    const missing = mk([plans[0]!, `100644 blob ${"1".repeat(40)}\tsrc.ts`], "--missing");
+    await assert.rejects(b.withoutPlan({ gitDir, tree: missing }));
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("what the platform's own requests change is not charged: a refresh onto a moved landing branch, and an author's re-apply over a clean checkout; an attempt's change made before a re-apply still is (card Q04)", { skip }, async () => {
