@@ -19,6 +19,7 @@ import type { NoActor, Principal } from "../security/principals.js";
 import { canonicalJson, sha256 } from "../storage/json.js";
 import type { Aggregate, AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { outcomeText, type ImprovementBody } from "./improvements.js";
+import { lessonOutcomeText, type LessonBody } from "../lessons/lessons.js";
 import { clean, cut, invalid, plain, whole, type Cite, type OutcomeSink } from "./shared.js";
 
 // ---- records --------------------------------------------------------------------------------------------------------------------
@@ -152,6 +153,8 @@ export interface StandupOptions extends RunnerOptions {
   readonly outcomes?: OutcomeSink;
   /** Told when a brief that carries a decision on an improvement proposal has been stored, so the proposal can be marked told (it was told in the brief, having no task to file a notice on). Best effort. */
   readonly onBriefed?: (by: Principal, itemId: string, revision: number) => Promise<unknown>;
+  /** Told when a brief that carries a lesson's evaluated outcome (card B03) has been stored for its proposer, so the lesson can be marked told at that revision (`LessonService.markTold`). Best effort. */
+  readonly onLessonBriefed?: (by: Principal, lessonId: string, revision: number) => Promise<unknown>;
   /** How many messages wait for an agent at the stand-up boundary (`AgentMessageService.waitingAtStandup`): the brief says so, and the agent reads them at the stand-up. Best effort: a failure leaves the line out. */
   readonly waitingMessages?: (by: Principal, agent: string) => Promise<number>;
   /** The configured P/PC allocation (floor, target, ceiling in percent), for the balance review (see `allocationFrom`). */
@@ -169,7 +172,7 @@ export interface StandupOptions extends RunnerOptions {
   readonly scanPages?: number;
 }
 
-export const STANDUP_LIMITS = { section: 25, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5, activeScan: 2000, perProject: 200 } as const;
+export const STANDUP_LIMITS = { section: 25, outcomeShare: 20, statements: 10, statement: 500, coverageMax: 168, coverageDefault: 24, prepareDefault: 60, durationDefault: 30, retries: 8, page: 100, priorities: 5, agendaPage: 50, ownerLines: 25, ownerAnswers: 5, activeScan: 2000, perProject: 200 } as const;
 
 /**
  * One stand-up of a project, as the stand-ups status answer tells it (card M03h): the schedule as it stands, and the two meetings the owner asks about — the one coming up next and the last one this stand-up made. Everything on these lines
@@ -229,6 +232,8 @@ interface Facts {
   readonly artifacts: Aggregate[];
   /** The project's improvement proposals (the briefs tell proposers of decisions they have not been told yet). */
   readonly improvements: Aggregate[];
+  /** The project's lessons whose evaluated outcome waits to be told to the proposer (card B03), from the project's current list of lessons. */
+  readonly lessons: Aggregate[];
   /** The project's cancelled tasks (not in `tasks`): an attempt of one may have held a slot in the period, so the usage review still looks at them. */
   readonly cancelled: string[];
   partial: boolean;
@@ -596,7 +601,8 @@ export class StandupService {
       // The briefs, from records.
       const briefs: { agent: string; briefId: string; change: "created" | "updated" | "unchanged" }[] = [];
       const briefed = new Map<string, { revision: number; agents: Set<string> }>();
-      for (const p of occurrence.participants) { const made = await this.#brief(by, id, occurrence, p.id, coversFrom, nowIso, facts); briefs.push({ agent: made.agent, briefId: made.briefId, change: made.change }); for (const [item, revision] of made.briefed) { const e = briefed.get(item) ?? { revision, agents: new Set<string>() }; e.agents.add(p.id); briefed.set(item, e); } }
+      const briefedLessons: [string, number][] = [];
+      for (const p of occurrence.participants) { const made = await this.#brief(by, id, occurrence, p.id, coversFrom, nowIso, facts); briefs.push({ agent: made.agent, briefId: made.briefId, change: made.change }); for (const [item, revision] of made.briefed) { const e = briefed.get(item) ?? { revision, agents: new Set<string>() }; e.agents.add(p.id); briefed.set(item, e); } for (const l of made.lessons) briefedLessons.push(l); }
       // A decision counts as told once every proposer it concerns has it in a stored brief; one that could not be written (the meeting has started) is told next time.
       if (this.#options.onBriefed !== undefined) for (const [item, e] of briefed) {
         const body = facts.improvements.find((x) => x.id === item)?.body as unknown as ImprovementBody | undefined;
@@ -604,6 +610,10 @@ export class StandupService {
         // A cut-off scan or a duplicate whose record was not read could hide a proposer, so nothing is marked on it.
         if (facts.partial || proposers.length === 0 || !proposers.every((a) => a !== undefined && e.agents.has(a))) continue;
         try { await this.#options.onBriefed(by, item, e.revision); } catch { /* told again next time */ }
+      }
+      // A lesson has one proposer: its outcome is told once the proposer's own brief carrying it is stored (each brief carries only its own agent's lessons).
+      if (this.#options.onLessonBriefed !== undefined) for (const [lesson, revision] of briefedLessons) {
+        try { await this.#options.onLessonBriefed(by, lesson, revision); } catch { /* told again next time */ }
       }
 
       const review = await this.#review(occurrence.projectId, coversFrom, nowIso, facts);
@@ -872,7 +882,7 @@ export class StandupService {
 
   /** The records a brief and the review rest on, read once for the whole occurrence. Each scan is bounded; a cut scan marks everything built from it `partial`. */
   async #facts(projectId: string, since: string, until: string): Promise<Facts> {
-    const facts: Facts = { tasks: [], blockers: [], waits: [], inquiries: [], artifacts: [], improvements: [], cancelled: [], partial: false };
+    const facts: Facts = { tasks: [], blockers: [], waits: [], inquiries: [], artifacts: [], improvements: [], lessons: [], cancelled: [], partial: false };
     await this.#scan("task", facts, async (a) => {
       const body = a.body as unknown as TaskBody;
       if (body.projectId === projectId && body.state === "cancelled") facts.cancelled.push(a.id);
@@ -890,6 +900,14 @@ export class StandupService {
     await this.#scan("inquiry", facts, (a) => { const q = a.body as unknown as InquiryBody; if (q.projectId === projectId && q.state === "open") facts.inquiries.push(a); });
     await this.#scan("artifact", facts, (a) => { const art = a.body as unknown as ArtifactBody; if (art.projectId === projectId && art.taskId !== undefined && inProject.has(art.taskId) && a.createdAt > since && a.createdAt <= until) facts.artifacts.push(a); });
     await this.#scan("improvement-item", facts, (a) => { const b = a.body as unknown as ImprovementBody; if (b.projectId === projectId) facts.improvements.push(a); });
+    // Lessons (card B03): only the project's current list is read (at most 1000 entries), and only outcomes still waiting to be told are kept.
+    const lessonIds = ((await this.#runner.get("lesson-index", projectId))?.body as unknown as { ids?: unknown } | undefined)?.ids;
+    for (const x of Array.isArray(lessonIds) ? lessonIds.slice(0, 1000) : []) {
+      if (typeof x !== "string") continue;
+      const l = await this.#runner.get("lesson", x);
+      const b = l?.body as unknown as LessonBody | undefined;
+      if (l !== undefined && b !== undefined && b.projectId === projectId && b.outcomePending === true && typeof b.proposedBy === "string") facts.lessons.push(l);
+    }
     return facts;
   }
 
@@ -971,7 +989,7 @@ export class StandupService {
   }
 
   /** Makes, refreshes or leaves a participant's brief. The agent is only looked at (its availability is recorded), never asked or started. */
-  async #brief(by: Principal, occurrenceId: string, occurrence: OccurrenceBody, agent: string, since: string, until: string, facts: Facts): Promise<{ agent: string; briefId: string; change: "created" | "updated" | "unchanged"; briefed: [string, number][] }> {
+  async #brief(by: Principal, occurrenceId: string, occurrence: OccurrenceBody, agent: string, since: string, until: string, facts: Facts): Promise<{ agent: string; briefId: string; change: "created" | "updated" | "unchanged"; briefed: [string, number][]; lessons: [string, number][] }> {
     const briefId = derivedId("sbr", `standup-brief:${occurrenceId}:${agent}`);
     const mine = facts.tasks.filter((t) => t.owner === agent);
     const sections: Record<BriefSection, BriefEntry[]> = { accomplishments: [], unfinished: [], blockers: [], advice: [], priorities: [] };
@@ -1009,6 +1027,23 @@ export class StandupService {
       if (proposers.includes(agent)) briefedItems.push([u.id, u.revision]);
       if (proposers.includes(agent)) sections.advice.push({ text: cut(outcomeText(body), 400), cites: [{ kind: "improvement-item", id: u.id, revision: u.revision }] });
     }
+    // An evaluated outcome of the agent's own lesson that it has not been told yet (card B03; a lesson with no task has nowhere else to be told, and one whose notice could not be filed waits too): told here.
+    const briefedLessons: [string, number][] = [];
+    for (const l of facts.lessons) {
+      const body = l.body as unknown as LessonBody;
+      if (body.proposedBy !== agent) continue;
+      briefedLessons.push([l.id, l.revision]);
+      sections.advice.push({ text: cut(lessonOutcomeText(body), 400), cites: [{ kind: "lesson", id: l.id, revision: l.revision }] });
+    }
+    // An outcome this brief already carried stays in it when the brief is assembled again for the same meeting (B03 second slice): it was marked told because the brief carried it, so dropping it then would
+    // leave the agent never told. A newer outcome of the same record that waits replaces it. Before, a second preparation before the meeting removed the line it had just told.
+    const existing = await this.#runner.get("standup-brief", briefId);
+    const old = existing?.body as unknown as BriefBody | undefined;
+    const toldLines = new Set<BriefEntry>();
+    for (const e of old?.advice ?? []) {
+      const only = e.cites.length === 1 ? e.cites[0]! : undefined;
+      if (only !== undefined && (only.kind === "lesson" || only.kind === "improvement-item") && !sections.advice.some((x) => x.cites.some((y) => y.kind === only.kind && y.id === only.id))) { sections.advice.push(e); toldLines.add(e); }
+    }
     // Messages are delivered at the boundary by the agent itself (it reads and confirms them); the brief only tells it they are there.
     if (this.#options.waitingMessages !== undefined) {
       const waiting = await this.#options.waitingMessages(by, agent).catch(() => 0);
@@ -1017,15 +1052,30 @@ export class StandupService {
     const next = open.filter((t) => t.body.state !== "blocked").sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : 1)).slice(0, STANDUP_LIMITS.priorities);
     for (const t of next) sections.priorities.push({ text: `${cut(t.body.title, 120)} (priority ${t.priority}, ${STATE_WORDS[t.body.state]}).`, cites: [tcite(t)] });
     const more: Partial<Record<BriefSection, number>> = {};
-    for (const s of BRIEF_SECTIONS) if (sections[s].length > STANDUP_LIMITS.section) { more[s] = sections[s].length - STANDUP_LIMITS.section; sections[s] = sections[s].slice(0, STANDUP_LIMITS.section); }
+    // A kept told line is never the one cut (it came from a stored brief, so there are at most as many as the limit): other advice lines that grew since give way, in order, and wait for the next brief.
+    // Then an outcome waiting to be told (B03 second slice, second review): open questions the agent asked (up to ten per task) come first in the section and stay open, so with them first in the cut an
+    // agent with many open questions was never told an outcome in any brief. Outcomes are kept oldest first; the lines keep their order in the brief.
+    // Re-check: outcomes (told lines included) take at most STANDUP_LIMITS.outcomeShare places while other advice waits, so a backlog of outcomes (up to 1000 lessons) does not cut every open question and the
+    // waiting-messages line for many meetings in turn; room the other lines leave is still used by outcomes.
+    const isOutcome = (e: BriefEntry): boolean => e.cites.length === 1 && (e.cites[0]!.kind === "lesson" || e.cites[0]!.kind === "improvement-item");
+    for (const s of BRIEF_SECTIONS) if (sections[s].length > STANDUP_LIMITS.section) {
+      more[s] = sections[s].length - STANDUP_LIMITS.section;
+      const keep = new Set<BriefEntry>();
+      const outcomes = sections[s].filter((e) => !toldLines.has(e) && isOutcome(e));
+      const first = Math.max(0, STANDUP_LIMITS.outcomeShare - toldLines.size);
+      const ranked = s === "advice" ? [...sections[s].filter((e) => toldLines.has(e)), ...outcomes.slice(0, first), ...sections[s].filter((e) => !toldLines.has(e) && !isOutcome(e)), ...outcomes.slice(first)] : sections[s];
+      for (const e of ranked) { if (keep.size >= STANDUP_LIMITS.section) break; keep.add(e); }
+      sections[s] = sections[s].filter((e) => keep.has(e));
+    }
+    // Only an outcome whose line is still in the brief after the section limit counts as told; one cut off is told next time (B03 second slice; before, a cut-off improvement decision was marked told too).
+    const kept = (kind: string) => ([id, revision]: [string, number]): boolean => sections.advice.some((e) => e.cites.some((c) => c.kind === kind && c.id === id && c.revision === revision));
+    const told = { briefed: briefedItems.filter(kept("improvement-item")), lessons: briefedLessons.filter(kept("lesson")) };
     const agentState = await this.#reach(agent);
     const content = { accomplishments: sections.accomplishments, unfinished: sections.unfinished, blockers: sections.blockers, advice: sections.advice, priorities: sections.priorities, more, partial: facts.partial, agentState, coversFrom: since };
     const digest = sha256(canonicalJson(content as unknown as JsonObject));
-    const existing = await this.#runner.get("standup-brief", briefId);
-    const old = existing?.body as unknown as BriefBody | undefined;
-    if (old !== undefined && old.digest === digest) return { agent, briefId, change: "unchanged", briefed: briefedItems };
+    if (old !== undefined && old.digest === digest) return { agent, briefId, change: "unchanged", ...told };
     // A brief is not rewritten once the meeting has started: it stays what the meeting saw.
-    if (old !== undefined && occurrence.mode === "live" && Date.parse(until) >= Date.parse(occurrence.startsAt)) return { agent, briefId, change: "unchanged", briefed: [] };
+    if (old !== undefined && occurrence.mode === "live" && Date.parse(until) >= Date.parse(occurrence.startsAt)) return { agent, briefId, change: "unchanged", briefed: [], lessons: [] };
     const body: BriefBody = { occurrenceId, projectId: occurrence.projectId, agent, coversFrom: since, coversTo: until, agentState, ...sections, more, statements: old?.statements ?? [], partial: facts.partial, digest, assembledAt: until };
     await this.#runner.command("standup.brief.assemble", { commandId: `sba:${briefId}:${existing?.revision ?? 0}:${digest.slice(0, 16)}`, actor: by.id }, async () => ({
       payload: { briefId, revision: existing?.revision ?? 0, digest },
@@ -1034,7 +1084,7 @@ export class StandupService {
         return { ref, creates: existing === undefined, changes: [existing === undefined ? { type: "create", ref, body: clean(body) } : { type: "update", ref, expectedRevision: existing.revision, body: clean(body) }], detail: { projectId: occurrence.projectId, occurrenceId } };
       },
     }));
-    return { agent, briefId, change: existing === undefined ? "created" : "updated", briefed: briefedItems };
+    return { agent, briefId, change: existing === undefined ? "created" : "updated", ...told };
   }
 
   /** The short P/PC balance review: delivered and pending production, capacity work attempted and evaluated, the allocation against actual use, deferred PC work and the next protected improvement window. */

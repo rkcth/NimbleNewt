@@ -97,3 +97,70 @@ test("lessons through the running controller's API: evidence from an observation
     assert.deepEqual(asked, ["bad", project]);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
+
+// Card B03, second slice, in the composed controller: a lesson with no task cannot be told by a notice, so its outcome goes into its proposer's next stand-up brief (set up through the state API and prepared by
+// the dispatcher's own tick) and is marked told once that brief is stored; another proposer, who attends no stand-up, is not told, and after a week the owner is shown that outcome once.
+test("a lesson outcome with no task reaches its proposer in the stand-up brief the dispatcher prepares, and one still untold after a week is shown to the owner once (card B03 second slice)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-lsn2-"));
+  let skew = 0;
+  const clock = (): string => new Date(Date.now() + skew).toISOString();
+  const c = await startController({ storage: { kind: "sqlite", path: join(d, "c.sqlite") }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [PI],
+    dispatch: { timer: new ManualTimer(), manual: true, clock, route: async () => ({ route: "cloud/small", harness: "pi", role: "worker", request: { contextTokens: 1000, needs: [], data: "cloud-allowed", paidAuthorized: true } }) },
+    notifications: { clock } });
+  try {
+    assert.ok(c.dispatch !== undefined, c.dispatchProblem);
+    const s = c.services;
+    const boot = await s.principals.bootstrapOwner({ name: "rob" });
+    const rob = await s.principals.authenticate(boot.token);
+    const call = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => (await c.api.handle(token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    const ok = async (token: string, op: string, args: Record<string, unknown>, commandId?: string) => { const r = await call(token, op, args, commandId); assert.ok(r.ok, `${op}: ${JSON.stringify(r)}`); return r.result; };
+    const project = (await s.projects.createProject({ commandId: "p1", actor: rob.id, name: "Garden" })).id;
+    const hire = async (n: string) => {
+      const made = await s.agents.create(rob, { commandId: `mk-${n}`, friendlyName: n });
+      const id = `agent:${made.id}`;
+      for (const action of ["task.read", "meeting.agenda", "meeting.attend"]) await s.grants.grant(rob, { commandId: `g-${n}-${action}`, grantee: id, action, project, source: "direct", basis: "test" } as never);
+      return { id, token: (await s.principals.issueCredential(rob, id)).token };
+    };
+    const ann = await hire("Ann");
+    const zed = await hire("Zed");
+    // Each proposes a lesson whose only evidence is its own improvement proposal, which names no task: no notice can be filed for either outcome.
+    const lessonOf = async (who: { id: string; token: string }, key: string, title: string): Promise<string> => {
+      const imp = (await ok(who.token, "improvement.propose", { projectId: project, title: `Friction ${key}`, observation: "Builds wait on a lock." }, `i-${key}`)).id as string;
+      const id = (await ok(who.token, "lesson.propose", { projectId: project, title, statement: `${title}.`, applicability: "builds", evidence: [{ kind: "improvement-item", id: imp }] }, `l-${key}`)).id as string;
+      await ok(boot.token, "lesson.decide", { lessonId: id, expectedRevision: 1, to: "rejected", finding: "the lock was not the cause" }, `d-${key}`);
+      return id;
+    };
+    const annLesson = await lessonOf(ann, "a", "Shorter locks speed builds");
+    const zedLesson = await lessonOf(zed, "z", "Fewer locks speed builds");
+    // First review: a second untold lesson of Zed's, so the owner's notices must be one per lesson (a key shared by the project would show only one).
+    const zedLesson2 = await lessonOf(zed, "z2", "Lock-free builds");
+    const pending = async (id: string): Promise<boolean> => (await ok(boot.token, "lesson.get", { lessonId: id })).item.outcomePending as boolean;
+    const tick = async (): Promise<readonly { name: string; ok: boolean }[]> => { const t = await c.dispatch!.dispatcher.tick(); await c.dispatch!.dispatcher.idle(); return t.loops; };
+    const loops = await tick();
+    assert.ok(loops.some((l) => l.name === "lessons.outcomes" && l.ok) && loops.some((l) => l.name === "lessons.untold" && l.ok), JSON.stringify(loops.filter((l) => l.name.startsWith("lessons") || !l.ok)));
+    assert.deepEqual([await pending(annLesson), await pending(zedLesson)], [true, true], "with no task the notice route tells neither");
+
+    // A daily stand-up with Ann on the roster; half an hour before it, the dispatcher's tick plants and prepares it.
+    const tomorrow = new Date(Date.now() + skew + 86_400_000).toISOString().slice(0, 10);
+    await ok(boot.token, "standup.configure", { projectId: project, title: "Morning", roster: [ann.id], time: "09:00", windowFrom: "08:00", windowTo: "10:00", timeZone: "UTC", recurrence: { kind: "daily" }, startDate: tomorrow, prepareMinutes: 60 }, "su1");
+    skew = Date.parse(`${tomorrow}T08:30:00.000Z`) - Date.now();
+    for (let i = 0; i < 3; i++) await tick();
+    const briefs = (await c.storage.listAggregates("standup-brief", { limit: 50 } as never)).map((a) => a.body as any);
+    const annBrief = briefs.find((b) => b.agent === ann.id);
+    assert.ok(annBrief !== undefined, JSON.stringify(briefs.map((b) => b.agent)));
+    const carried = (annBrief.advice as { text: string; cites: { kind: string; id: string }[] }[]).filter((e) => e.cites.some((x) => x.kind === "lesson"));
+    assert.deepEqual(carried.map((e) => [e.text, e.cites[0]!.id]), [[`Your lesson "Shorter locks speed builds" (version 1) was rejected: the lock was not the cause`, annLesson]]);
+    assert.equal(await pending(annLesson), false, "told in the stored brief, so marked told");
+    assert.equal(await pending(zedLesson), true, "Zed is at no stand-up and stays untold");
+    assert.ok(!(await ok(boot.token, "lesson.list", { projectId: project })).item.items.some((l: { id: string }) => l.id === annLesson), "a told rejected lesson leaves the current list");
+
+    // A week after the decisions, the owner is shown Zed's untold outcome, once, however often the loop runs; Ann's (told) is not shown.
+    const shown = async () => (await c.storage.listAggregates("notification-item", { limit: 200 } as never)).map((a) => a.body as any).filter((b) => b.ref?.kind === "lesson");
+    assert.deepEqual(await shown(), []);
+    skew = 8 * 86_400_000;
+    for (let i = 0; i < 3; i++) { const l = await tick(); assert.ok(l.some((x) => x.name === "lessons.untold" && x.ok), JSON.stringify(l.filter((x) => x.name === "lessons.untold"))); }
+    const items = await shown();
+    assert.deepEqual(items.map((b) => [b.ref.id, b.projectId, b.kind, b.level, b.count]).sort((x, y) => (x[0] < y[0] ? -1 : 1)), [[zedLesson, project, "maintenance", "notice", 1], [zedLesson2, project, "maintenance", "notice", 1]].sort((x, y) => (x[0]! < y[0]! ? -1 : 1)));
+    assert.match(items.find((b) => b.ref.id === zedLesson)!.detail, /^The outcome of the lesson "Fewer locks speed builds" \(rejected, decided \d{4}-\d\d-\d\d\) has not reached its proposer for 7 days or more\.$/);
+  } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
+});

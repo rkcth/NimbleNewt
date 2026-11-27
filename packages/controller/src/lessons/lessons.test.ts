@@ -418,6 +418,99 @@ for (const backend of backends) {
     }
   });
 
+  suite("second slice: an outcome told another way is marked told at the revision told only; one untold for days is listed for the owner once per revision, from when it was decided, by the injected clock", async (c) => {
+    const week = 7 * 86_400_000;
+    // An agent's lesson with no task: its evidence is its own improvement proposal (no task), so no notice can be filed for it.
+    const propose = async (title: string) => (await c.lessons.propose(c.dev, { commandId: cid("l"), projectId: c.a, title, statement: `${title}.`, applicability: "any change", evidence: [{ kind: "improvement-item", id: await c.improvement(c.a) }] })).id;
+    const l = await propose("Small patches pass review");
+    assert.equal((await c.lessons.get(c.owner, l))!.taskId, undefined);
+    now += 60_000;
+    const decidedAt = new Date(now).toISOString();
+    await c.decide(l, "rejected", "size made no difference");
+    const filed: string[] = [];
+    const withSink = c.make({ outcomes: lessonOutcomeSink({ noticeFromController: async (x) => { filed.push(x.commandId); } }) });
+    assert.deepEqual(await withSink.deliverOutcomes(c.host, c.a), { delivered: [], waiting: [l] }, "with no task the notice route cannot tell it");
+    assert.deepEqual(filed, []);
+
+    // Not listed before the period has passed (measured from the decision, not the proposal), listed at the instant it has, for this project only.
+    now += week - 1;
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, week), []);
+    now += 1;
+    const rev = (await c.lessons.get(c.owner, l))!.revision;
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, week), [{ id: l, revision: rev, title: "Small patches pass review", status: "rejected", proposedBy: c.dev.id, decidedAt }]);
+    assert.deepEqual(await c.lessons.untold(c.owner, c.b, week), []);
+    assert.equal((await c.lessons.untold(c.owner, c.a, 0)).length, 1);
+    // First review: another project's list that names this lesson does not list it for that project.
+    await new CommandRunner(c.storage, c.epoch, options).command("test.put", { commandId: cid("put"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson-index", id: c.b }, creates: true, changes: [{ type: "create" as const, ref: { kind: "lesson-index", id: c.b }, body: { ids: [l] } as never }], detail: {} }) }));
+    assert.deepEqual(await c.lessons.untold(c.owner, c.b, week), []);
+    // A host or service acting for a task (a task credential) may neither list nor mark them.
+    const scoped = { ...c.host, taskScope: { taskId: c.taskA, projectId: c.a } } as Principal;
+    await refuses("forbidden", () => c.lessons.untold(scoped, c.a, week), /may not list untold lesson outcomes/);
+    await refuses("forbidden", () => c.lessons.markTold(scoped, l, rev), /may not mark lesson outcomes told/);
+    // Only the owner, a host or a service may list them; bad arguments are refused.
+    for (const who of [c.dev, c.mgr, c.reader, c.eve]) await refuses("forbidden", () => c.lessons.untold(who, c.a, week), /may not list untold lesson outcomes/);
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, "1" as never]) await refuses("invalid_command", () => c.lessons.untold(c.host, c.a, bad), /olderThanMs/);
+    for (const bad of [0, 101, 1.5]) await refuses("invalid_command", () => c.lessons.untold(c.host, c.a, week, bad), /limit/);
+    await refuses("invalid_command", () => c.lessons.untold(c.host, "../x", week));
+
+    // markTold: the owner, a host or a service only; a malformed ID is refused; a missing lesson or another revision marks nothing.
+    for (const who of [c.dev, c.mgr, c.reader]) await refuses("forbidden", () => c.lessons.markTold(who, l, rev), /may not mark lesson outcomes told/);
+    for (const bad of ["lsn-x", "../lsn", "", 7 as never]) await refuses("invalid_command", () => c.lessons.markTold(c.host, bad, rev), /lesson ID/);
+    for (const bad of [0, -1, 1.5]) await refuses("invalid_command", () => c.lessons.markTold(c.host, l, bad));
+    assert.equal(await c.lessons.markTold(c.host, derivedId("lsn", "nothing"), 1), false);
+    assert.equal(await c.lessons.markTold(c.host, l, rev - 1), false);
+    assert.equal(await c.lessons.markTold(c.host, l, rev + 1), false);
+    assert.equal((await c.lessons.get(c.owner, l))!.outcomePending, true);
+    assert.equal(await c.lessons.markTold(c.host, l, rev), true);
+    const after = (await c.lessons.get(c.dev, l))!;
+    assert.deepEqual([after.outcomePending, after.outcomeToldAt], [false, new Date(now).toISOString()]);
+    assert.ok(!(await c.lessons.current(c.owner, c.a))!.items.some((x) => x.id === l), "a told final lesson leaves the current list");
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, 0), []);
+    assert.equal(await c.lessons.markTold(c.owner, l, after.revision), false, "told once");
+    assert.equal((await c.lessons.get(c.owner, l))!.revision, after.revision);
+
+    // An accepted outcome later taken up for review stays pending; it is listed from when it was accepted, not from the review.
+    const acc = await propose("Review early");
+    now += 60_000;
+    const acceptedAt = new Date(now).toISOString();
+    await c.decide(acc, "accepted", "held three times");
+    now += 6 * 86_400_000;
+    await c.decide(acc, "needs-review", "check again");
+    now += 86_400_000;
+    const listed = await c.lessons.untold(c.host, c.a, week);
+    assert.deepEqual(listed.map((x) => [x.id, x.status, x.decidedAt]), [[acc, "needs-review", acceptedAt]]);
+    // A newer decision is a new revision: marking the revision listed earlier does nothing once the lesson moved on.
+    await c.decide(acc, "accepted", "still holds");
+    assert.equal(await c.lessons.markTold(c.host, acc, listed[0]!.revision), false);
+    assert.equal((await c.lessons.get(c.owner, acc))!.outcomePending, true);
+    // Told at its current revision, an accepted lesson stays on the current list but is no longer untold.
+    now += week;
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week)).map((x) => x.id), [acc]);
+    assert.equal(await c.lessons.markTold(c.host, acc, (await c.lessons.get(c.owner, acc))!.revision), true);
+    assert.ok((await c.lessons.current(c.owner, c.a))!.items.some((x) => x.id === acc));
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, 0), []);
+
+    // At most `limit`, oldest first; the owner's own lessons never wait.
+    const more = [await propose("One"), await propose("Two"), await propose("Three")];
+    for (const x of more) await c.decide(x, "inconclusive", "too few cases");
+    const own = await c.lesson("The owner's lesson");
+    await c.decide(own, "rejected", "no");
+    now += week;
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week, 2)).map((x) => x.id), more.slice(0, 2));
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week)).map((x) => x.id), more);
+    // Paged after an entry (first review): the next page starts after it, the last gives none, and an ID that is not on the list gives none rather than starting over.
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week, 1, more[0]!)).map((x) => x.id), [more[1]]);
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week, 2, more[1]!)).map((x) => x.id), [more[2]]);
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, week, 100, more[2]!), []);
+    assert.deepEqual(await c.lessons.untold(c.host, c.a, week, 100, "lsn-aaaaaaaaaaaaaaaaaaaa"), []);
+    for (const bad of ["", "../x", 7 as never]) await refuses("invalid_command", () => c.lessons.untold(c.host, c.a, week, 100, bad), /afterId/);
+    // Second review: a pending outcome whose history holds no time at all (a damaged record) has no decision time to measure from, so it is not listed (and never gives a notice without a date).
+    const r = new CommandRunner(c.storage, c.epoch, options);
+    const cur = (await r.get("lesson", more[2]!))!;
+    await r.command("test.nohistory", { commandId: cid("nh"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson", id: more[2]! }, creates: false, changes: [{ type: "update" as const, ref: { kind: "lesson", id: more[2]! }, expectedRevision: cur.revision, body: { ...(cur.body as object), history: [] } as never }], detail: {} }) }));
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week)).map((x) => x.id), more.slice(0, 2));
+  });
+
   if (backend.name === backends[0]!.name) {
     suite("finished lessons waiting to be told do not count against the open-lesson limit, so a project cannot be locked by them", async (c) => {
       // An agent's lessons with no task have nowhere to be told; rejected, they stay listed (waiting) but are no longer open.
