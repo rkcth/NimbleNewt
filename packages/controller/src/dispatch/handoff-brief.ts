@@ -61,7 +61,7 @@ export function handoffBrief(facts: HandoffBriefFacts): string {
     const by = facts.note.source === "controller" ? "written by the controller when that attempt ended" : "written by that attempt before it ended";
     fixed.push(`The attempt before yours (${ref(facts.note.attemptId)}) left a hand-off note ${id}, ${by}. Read it with the operation context.handoff.read (noteId ${JSON.stringify(id)}).`);
   }
-  if (facts.submission !== undefined) fixed.push(`Your newest code submission of this task is ${ref(facts.submission.id)}. A code deliverable names it in submissionIds; nimblenewt__submission-list lists them all with where review stands.`);
+  if (facts.submission !== undefined) fixed.push(`Your newest code submission of this task is ${ref(facts.submission.id)}; draft its code deliverable with nimblenewt__deliverable-draft naming it (type code, submissionIds).`);
   const blockers = facts.blockers ?? [];
   if (blockers.length === 0) return fixed.length === 1 ? "" : `\n\n[${fixed.join("\n")}]`;
 

@@ -11,7 +11,7 @@ import type { CheckoutToolReport, CheckoutToolRequest, ToolGateway, ToolResult }
 import type { AdmissionService } from "../admission/index.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import { DomainError, isDomainError } from "../domain/errors.js";
-import { KIND_ROLES, type SubmissionApproval, type SubmissionKind } from "../submissions/submissions.js";
+import { KIND_ROLES, type SubmissionKind } from "../submissions/submissions.js";
 import { EffectRejected, type EffectBridge } from "../domain/effects.js";
 import { derivedId } from "../domain/ids.js";
 import { onlyKnown } from "../domain/model.js";
@@ -41,7 +41,7 @@ import type { RunningCallRecords } from "./running-store.js";
  * are the dispatcher's, not repeated here.
  */
 
-export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "submission.list", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "work.checkout", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose", "toolbox.pins", "toolbox.optin", "toolbox.proposal", "toolbox.revoke"] as const;
+export const BRIDGE_OPERATIONS = ["desk.read", "desk.write", "task.get", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "service.observe", "service.operate", "tool.register", "tool.discover", "tool.describe", "tool.invoke", "job.start", "job.status", "job.output", "job.cancel", "work.end", "work.refresh", "work.note", "work.answer", "work.checkout", "maintenance.request", "maintenance.status", "turn.continue", "task.recall", "dependency.record", "toolbox.source", "toolbox.copy", "toolbox.copies", "toolbox.notices", "toolbox.propose", "toolbox.pins", "toolbox.optin", "toolbox.proposal", "toolbox.revoke"] as const;
 export type BridgeOperation = (typeof BRIDGE_OPERATIONS)[number];
 
 /** What the extension sends: the operation, its arguments, and the model's call ID (so asking again after a restart is the same request). Nothing about who is asking. */
@@ -137,14 +137,6 @@ export interface ToolExecutionDeps {
   /** The owner who revoked, by principal ID, for the `pause` choice applied after a revocation that another process took. Absent or `undefined` answer: the calls are stopped and the owner is told the tasks could not be paused. */
   readonly revocationOwner?: (principalId: string) => Principal | undefined | Promise<Principal | undefined>;
   /**
-   * Card bridge-submissions: what `submission.list` needs beyond the API's own listing. `rolesOf` answers the roles the agent holds in the attempt's project (only the roles that draft deliverables, author, docs and qa, may list);
-   * `approvalOf` says where review stands on one code submission (`SubmissionService.approvalOf`), asked only for a submission the API listed to the agent itself. Absent: the operation answers as unavailable.
-   */
-  readonly submissionViews?: {
-    rolesOf(by: Principal, scope: { readonly projectId: string; readonly taskId: string }): Promise<readonly string[]>;
-    approvalOf(submissionId: string): Promise<Pick<SubmissionApproval, "approved" | "newest" | "outdated" | "director"> | undefined>;
-  };
-  /**
    * Card Q01b (bridge): an artifact as the controller recorded it and whether its files still match (`ArtifactService.get` and `verify`), so a document change submitted through the bridge names the digest the controller
    * recorded for an artifact of the attempt's own task, never one the agent writes. `intact` reads the files; it is called only for an artifact of the attempt's own task. Absent: a document change through the bridge is refused as unavailable.
    */
@@ -225,22 +217,6 @@ export type BoundGateway = Pick<ToolGateway, "attemptId" | "call">;
 
 /** The kinds an agent records through the bridge (card Q01b); code is left out: it is submitted with `work.end`. Each is recorded in its one role of `KIND_ROLES`. */
 const BRIDGE_SUBMISSION_KINDS: ReadonlySet<unknown> = new Set(["review", "qa", "signoff", "document"]);
-/** Card bridge-submissions: how much `submission.list` reads (pages of the API's listing) and answers (the newest code submissions). */
-export const SUBMISSION_LIST_LIMITS = { newest: 20, pages: 10, pageSize: 100 } as const;
-/** The roles that draft deliverables (`AcceptanceService.draft`); only they list their task's code submissions. */
-const LISTING_ROLES = ["author", "docs", "qa"] as const;
-const SUBMISSION_ID = /^sbm-[a-z2-7]{20}$/;
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/;
-const OBJECT_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-const PRINCIPAL_ID = /^[a-z]+:[A-Za-z0-9._-]{1,80}$/;
-const RECORD_ID = /^[a-z]{2,12}-[a-z0-9]{1,60}$/;
-/**
- * Where review stands on a code submission: `needs_review` (no review yet, or its approval no longer counts), `changes_asked` (the newest review asks for changes or rejects), `approved` (approved, or no review is required),
- * then `signed_off` or `signoff_declined` once a director has signed off either way. The words of the project's waiting view (`SubmissionService.waiting`), except that an approval with no sign-off is `approved`: whether a sign-off is
- * needed at all is the project's landing check, which the agent does not read.
- */
-const reviewState = (a: Pick<SubmissionApproval, "approved" | "newest" | "outdated" | "director">): string =>
-  !a.approved ? (a.newest === undefined || a.outdated !== undefined ? "needs_review" : "changes_asked") : a.director?.newest === "decline" ? "signoff_declined" : a.director?.newest === "approve" ? "signed_off" : "approved";
 /** What a pause refuses: everything the agent writes, and starting a tool (a paused task runs nothing new). */
 const WRITES: ReadonlySet<BridgeOperation> = new Set(["desk.write", "task.update", "task.transition", "message.send", "artifact.publish", "deliverable.draft", "deliverable.submit", "submission.record", "service.operate", "tool.register", "tool.invoke", "job.start", "maintenance.request", "turn.continue", "work.note", "work.answer", "work.refresh", "dependency.record", "toolbox.copy", "toolbox.propose", "toolbox.optin", "toolbox.revoke"]);
 /** The bridge operations a recorded call is admitted as an effect for (card L05d): what the agent writes through the bridge, less the worker's own turn continuation, which no model wrote. `work.end` is left out as well: it must stay possible while a task is paused. */
@@ -571,7 +547,6 @@ export class ToolExecutionService {
               case "artifact.publish": return await this.#artifact(token, context, args);
               case "deliverable.draft": case "deliverable.submit": return await this.#deliverable(token, context, request.op as "deliverable.draft" | "deliverable.submit", args);
               case "submission.record": return await this.#submission(token, context, args);
-              case "submission.list": return await this.#submissionList(token, context, args);
               case "service.observe": case "service.operate": return await this.#service(token, context, request.op as "service.observe" | "service.operate", args);
               case "tool.register": return await this.#register(context, args);
               case "tool.discover": return await this.#discover(context, args);
@@ -887,47 +862,6 @@ export class ToolExecutionService {
       return refusal("stale_revision", `the task contract changed after this attempt began (it was version ${String(body["contractVersion"])}); this attempt cannot submit. Say so when you end your work: the next attempt works against the new contract`);
     }
     return refusal(response.error.code, response.error.message);
-  }
-
-  /**
-   * Card bridge-submissions: the code submissions of the attempt's own task that the agent may see, newest first, so a later attempt can name the one its earlier `work.end { submit: true }` opened in a deliverable
-   * (`deliverable.draft` `submissionIds`). Read only. The task is the attempt's, never the request's; the listing goes through the same door every client uses (`submission.list` with the worker's task credential), so the
-   * API's own visibility rule holds (an agent sees the ones it made and the ones it was asked to review), and only code of this task is kept even if the API answered more. Only the deliverable writers' roles may list.
-   * Bounded: at most `SUBMISSION_LIST_LIMITS.pages` pages are read, and the newest `newest` are answered with IDs, times, a short tree and where review stands; never a patch, a report or evidence.
-   */
-  async #submissionList(token: unknown, c: Context, args: JsonObject): Promise<BridgeResponse> {
-    const views = this.#deps.submissionViews;
-    if (this.#deps.state === undefined || views === undefined) return refusal("unavailable", "this controller cannot list the task's submissions here");
-    onlyKnown(args, []);
-    const roles = await views.rolesOf(c.scoped, { projectId: c.projectId, taskId: c.taskId });
-    if (!LISTING_ROLES.some((r) => roles.includes(r))) return refusal("forbidden", `only an agent holding the ${LISTING_ROLES.join(", ")} role lists its task's code submissions (the roles that draft deliverables)`);
-    const found = new Map<string, { id: string; at: string; tree: string; by: string; attemptId?: string }>();
-    let after: string | undefined;
-    let complete = false;
-    for (let page = 0; page < SUBMISSION_LIST_LIMITS.pages; page++) {
-      const response = await this.#deps.state.handle(token, { v: 1, op: "submission.list", args: { taskId: c.taskId, kind: "code", limit: SUBMISSION_LIST_LIMITS.pageSize, ...(after === undefined ? {} : { after }) } });
-      if (!response.ok) return refusal(response.error.code, response.error.message.slice(0, 300));
-      const r = response.result as { items?: unknown; next?: unknown };
-      for (const item of Array.isArray(r.items) ? (r.items as Record<string, unknown>[]) : []) {
-        // Only what the controller writes, in the shape it writes it: a code submission of this very task. Anything else is left out, never shown.
-        if (item === null || typeof item !== "object" || item["kind"] !== "code" || item["taskId"] !== c.taskId) continue;
-        const id = item["id"], at = item["submittedAt"], tree = item["tree"], by = item["submittedBy"], attemptId = item["attemptId"];
-        if (typeof id !== "string" || !SUBMISSION_ID.test(id) || typeof at !== "string" || !ISO_TIME.test(at) || typeof tree !== "string" || !OBJECT_ID.test(tree)) continue;
-        found.set(id, { id, at, tree: tree.slice(0, 12), by: typeof by === "string" && PRINCIPAL_ID.test(by) ? by : "unknown", ...(typeof attemptId === "string" && RECORD_ID.test(attemptId) ? { attemptId } : {}) });
-      }
-      if (typeof r.next !== "string") { complete = true; break; }
-      after = r.next;
-    }
-    const oldestFirst = [...found.values()].sort((x, y) => (x.at === y.at ? (x.id < y.id ? -1 : 1) : x.at < y.at ? -1 : 1));
-    const newest = oldestFirst.map((s, i) => ({ ...s, sequence: i + 1 })).reverse().slice(0, SUBMISSION_LIST_LIMITS.newest);
-    const submissions: JsonObject[] = [];
-    for (const s of newest) {
-      let state = "unknown";
-      try { const a = await views.approvalOf(s.id); if (a !== undefined) state = reviewState(a); } catch { /* where review stands is left unknown, never guessed */ }
-      submissions.push({ id: s.id, sequence: s.sequence, tree: s.tree, createdAt: s.at, submittedBy: s.by, ...(s.attemptId === undefined ? {} : { attemptId: s.attemptId }), state });
-    }
-    return ok({ taskId: c.taskId, submissions, shown: submissions.length, total: oldestFirst.length, complete,
-      ...(complete ? {} : { note: `more code submissions than one listing reads; these are the newest of the first ${oldestFirst.length} read` }) });
   }
 
   /**

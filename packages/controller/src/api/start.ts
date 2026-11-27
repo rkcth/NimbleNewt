@@ -1945,8 +1945,6 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         // Card Q01b (bridge): a document change names an artifact of the attempt's task; the digest is the one recorded at publication, taken only while the files still match it. Without an artifact directory there is none.
         // The files are read (`intact`) only when the bridge asks, after it has found the artifact to be of the attempt's own task: another task's artifact is never read for an agent.
         ...(checked === undefined ? {} : { artifactOf: async (id: string) => { const a = await checked.get(id); return a === undefined ? undefined : { ...(a.taskId === undefined ? {} : { taskId: a.taskId }), manifestDigest: a.manifestDigest, intact: async () => (await checked.verify(id)).ok }; } }),
-        // Card bridge-submissions: the agent lists its own task's code submissions (the API's listing, with its task credential); only the deliverable writers' roles may, and where review stands is read for the ones listed.
-        submissionViews: { rolesOf: (by, scope) => agents.rolesOfPrincipalIn(by, scope.projectId, new Date().toISOString()), approvalOf: (id) => submissions.approvalOf(id) },
         revocationOwner: async (id) => { const p = await principals.get(id); return p === undefined || p.kind !== "owner" || p.state !== "active" ? undefined : { id: p.id, kind: p.kind, name: p.name, grants: p.grants }; },
       });
     }
