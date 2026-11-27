@@ -209,6 +209,13 @@ for (const backend of backends) {
     // The shape is judged before anything is stored or any right is looked up: a malformed reference from someone who may not report runs is refused for its shape.
     for (const agentId of [7, "x".repeat(61), ["agent:dev"]]) await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { agentId })), c.dev2), /environment\.agentId/);
     await refuses("forbidden", () => c.run(id, {}, c.dev2));
+    // Rights come before any revision is looked up: someone who may not report runs is refused as forbidden whatever well-formed revision it names (another agent's, or one that does not exist).
+    for (const env of [envOf("agent:dev"), envOf("agent:dev", { revision: 9 }), envOf("agent:dev2", { revision: 9 }), envOf("agent:dev2", { observed: {} })]) await refuses("forbidden", () => c.run(id, withEnv(env), c.dev2));
+    // A08's own bounds: revision 500 and 20 observed extensions are shapes it accepts, then judged as usual.
+    await refuses("not_found", () => c.run(id, withEnv(envOf("agent:dev", { revision: 500 }))), /revision 500 of agent:dev/);
+    await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: Object.fromEntries([["nimblenewt.guard", GUARD], ...Array.from({ length: 19 }, (_, i) => [`nimblenewt.e${i}`, GUARD])]) }))), /nimblenewt.e18 is loaded but the manifest does not name it/);
+    // Only the owner (or the maintenance service) and the agent itself may name an agent's revisions: a service, a host or a client principal may not.
+    for (const kind of ["service", "host", "client"]) await refuses("not_found", () => c.env.verify({ id: `${kind}:x`, kind, name: "x", grants: [] } as unknown as Principal, { agentId: "agent:dev", revision: 1, observed: { "nimblenewt.guard": GUARD } }), /may not name/);
     await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { revision: 501 }))), /revision/);
     await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": "sha256:short" } }))), /digest/);
     await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { observed: JSON.parse(`{"__proto__":"${GUARD}"}`) }))), /observed/);
@@ -231,6 +238,7 @@ for (const backend of backends) {
     await refuses("not_found", () => c.run(id, withEnv(envOf("agent:dev")), c.mgr), /may not name/);
     // A08's integrity check: the extension missing, another one on disk, one loaded that the manifest does not name, the catalog's digest moved, a skill revoked, the manifest changed in storage.
     await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: {} }))), /nimblenewt.guard was not found where the worker loads it/);
+    await assert.rejects(() => c.run(id, withEnv(envOf("agent:dev", { observed: {} }))), (e: unknown) => { assert.equal((e as DomainError).field, "environment"); return true; });
     await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": `sha256:${hex("8")}` } }))), /on disk is not the one the manifest names/);
     await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": GUARD, constructor: GUARD } }))), /constructor is loaded but the manifest does not name it/);
     c.reserved.set("nimblenewt.guard", `sha256:${hex("7")}`);
@@ -263,6 +271,8 @@ for (const backend of backends) {
     assert.deepEqual([await c.rev(id), (await c.body(id)).runs.length, (await c.body(pinned2)).runs.length], [before, 0, 0]);
     // Without the environment records no run is recorded at all.
     await refuses("unavailable", () => c.make({ environments: undefined } as never).recordRun(c.dev, { commandId: cid("r"), experimentId: id, ...runArgs() } as never), /environment records are not available/);
+    // That refusal comes before any right or state is read, so it is the same for someone who may not report runs.
+    await refuses("unavailable", () => c.make({ environments: undefined } as never).recordRun(c.dev2, { commandId: cid("r"), experimentId: id, ...runArgs({}, "agent:dev2") } as never), /environment records are not available/);
     // A run that passes keeps the revision as the controller found it; the owner may name any agent's revision.
     const digest = (await c.env.get(c.owner, "agent:dev", 1))!.revision!.digest;
     const cmd = { commandId: "run-env", experimentId: id, ...runArgs() } as never;

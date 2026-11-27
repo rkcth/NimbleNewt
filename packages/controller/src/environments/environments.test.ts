@@ -117,7 +117,7 @@ for (const backend of backends) {
     assert.equal((await c.env.get(c.owner, "agent:ann"))!.active!.revision, 1);
     // A later revision that fails keeps revision 1 active.
     await c.env.change(c.owner, { commandId: cid("c"), agentId: "agent:ann", manifest: manifest({ packages: [] }), reason: "second", expectedRevision: 1 });
-    await refuses("integrity", () => c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 2, observed: {} }));
+    await refuses("integrity", () => c.env.activate(c.owner, { commandId: cid("a"), agentId: "agent:ann", revision: 2, observed: {} }), (e) => assert.equal(e.field, "observed"));
     assert.equal((await c.env.get(c.owner, "agent:ann"))!.active!.revision, 1);
   });
 

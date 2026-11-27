@@ -94,6 +94,8 @@ for (const backend of backends) {
     const got = (await experiments.get(w.owner, id))!;
     assert.deepEqual([got.status, got.result!.verdict, got.result!.finding, got.runs.length], ["concluded", "worse", "it was slower", 1]);
     const said = lines(await say("did the checklist help?", [ask({ kind: "experiments" }, "did the checklist help")]));
+    // The owner reported that run in dev's environment: the view names the environment's agent, not the reporter.
+    assert.match(said, new RegExp(`"Checklist prompt"[^\\n]* Last run in ${dev.principal.id}'s environment revision 1, checked\\.`), said);
     assert.match(said, /concluded: "Checklist prompt"[\s\S]* Verdict: worse \(reworkCount 25% worse, timeToAcceptedSeconds 30% worse\)\. Finding: it was slower/);
 
     // An agent proposes through the API, reports its own runs, and cannot judge itself; a reader without meeting rights sees no list.
