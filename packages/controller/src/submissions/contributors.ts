@@ -50,13 +50,16 @@ export async function taskContributors(runner: Reader, projectId: string, taskId
   const record = contributorsOf(await runner.get(CONTRIBUTORS, taskId));
   for (const id of record?.ids ?? []) out.add(principalOf(id));
   if (record === undefined || !record.complete) for (const id of await indexed(runner, projectId, taskId)) out.add(principalOf(id));
-  const holder = ((await runner.get("assignment", assignmentIdOf(taskId)))?.body as { owner?: { id?: unknown } } | undefined)?.owner?.id;
-  if (typeof holder === "string" && holder !== "") out.add(principalOf(holder));
+  // Only an agent owner holds the task as an agent (`isAgentOwner`): a person, role or team owner with the same name is someone else. An owner whose kind cannot be read is taken as an agent (fail closed).
+  const held = ((await runner.get("assignment", assignmentIdOf(taskId)))?.body as { owner?: { kind?: unknown; id?: unknown } } | undefined)?.owner;
+  if (typeof held?.id === "string" && held.id !== "" && (typeof held.kind !== "string" || held.kind === "agent")) out.add(principalOf(held.id));
   return out;
 }
 
 /** The plain reason given when a contributor's approval or evidence does not count (the owner may read it). */
 export const CONTRIBUTOR_APPROVAL_TEXT = "this agent already contributed code to this task, so it cannot approve it; another reviewer has to";
+/** The same, for a director's sign-off approving the task's code. */
+export const CONTRIBUTOR_SIGNOFF_TEXT = "this agent already contributed code to this task, so it cannot sign it off; another director has to";
 
 /**
  * The change that adds a code submission's submitter to its task's record, for the same write as the submission (`SubmissionService.record`). `seed` reads the submitters of code recorded before the record existed

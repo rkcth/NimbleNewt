@@ -8,8 +8,8 @@ import { ProjectService } from "../domain/service.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Principal } from "../security/index.js";
 import type { JsonObject } from "../storage/types.js";
-import { CONTRIBUTORS, taskContributors } from "./contributors.js";
-import { QaEvidenceService, SubmissionService, type SubmissionBody } from "./index.js";
+import { CONTRIBUTORS, CONTRIBUTORS_KEPT, contributorChange, taskContributors } from "./contributors.js";
+import { QaEvidenceService, SubmissionService, landingDirectorGate, type SubmissionBody } from "./index.js";
 
 // Card Q04, clause 4: "a QA agent that commits a fix becomes a contributor and cannot approve it". A contributor of a task is every agent that submitted code on it (any version, whatever became of it) and the
 // agent that holds it now (`contributors.ts`, the review policy's own definition). Its QA evidence is a self-check, never counted, and its approval of the task's code is refused (and, read later, does not count).
@@ -86,6 +86,7 @@ for (const backend of backends) {
       const g1 = await qa.gate(owner, v1);
       assert.equal(g1.verdict, "failed", "read at gate time: Ann is a contributor now");
       assert.deepEqual(g1.byContributors, [early.id], "and the gate says which evidence it left out");
+      assert.deepEqual(g1.reasons, ["no_evidence", "check_missing"], "a contributor's pass is not evidence, and the check it named is still owed");
       const a1 = await subs.approvalOf(v1);
       assert.equal(a1?.approved, false);
       assert.match(a1?.reason ?? "", CONTRIBUTED);
@@ -179,6 +180,120 @@ for (const backend of backends) {
       // Submitters the caller already knows (the subject's own, a scan's) are always added, even for a task with no record and no index entry.
       const t3 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T3" })).id;
       assert.deepEqual([...(await taskContributors(runner, project, t3, ["cy"]))], [cy.id], "named by bare ID or principal ID alike");
+      // A project whose code index is first written over older code (here: no index, old code planted) is not marked as having every code's record: a new task of it is still seeded by a scan.
+      const p2 = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P2" })).id;
+      const p2task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: p2, title: "Old" })).id;
+      const old2 = derivedId("sbm", cid("old"));
+      await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { old2 }, build: async () => ({ ref: { kind: "submission", id: old2 }, creates: true, changes: [{ type: "create" as const, ref: { kind: "submission", id: old2 }, body: { ...body, projectId: p2, taskId: p2task } as unknown as JsonObject }], detail: {} }) }));
+      const p2new = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: p2, title: "New" })).id;
+      await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: "eve", grants: [{ action: "task.read", project: p2 }] });
+      const eve = await principals.authenticate((await principals.issueCredential(owner, "agent:eve")).token);
+      roles.set(eve.id, ["author"]);
+      await subs.record(eve, { commandId: cid("code"), taskId: p2new, kind: "code", role: "author", base: BASE, tree: tree(10), patchId: patch(10) });
+      assert.equal(((await runner.get("code-submission-index", p2))?.body as { contributorsRecorded?: boolean }).contributorsRecorded, undefined, "seeded over older code: not marked");
+    } finally { await world.close(); }
+  });
+
+  test(`${backend.name}: a later contributor's earlier failure still fails the gate, only an agent holder counts, a director that contributed cannot sign off, and a project with its index from the start does not scan (card Q04 review)`, async () => {
+    const world = await backend.open();
+    try {
+      const projects = await ProjectService.open(world.storage, { holder: "c1", ...options });
+      const principals = PrincipalService.withEpoch(world.storage, projects.epoch, options);
+      const owner = await principals.authenticate((await principals.bootstrapOwner({ name: "rob" })).token);
+      const project = (await projects.createProject({ commandId: cid("p"), actor: owner.id, name: "P" })).id;
+      const task = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T" })).id;
+      const roles = new Map<string, string[]>();
+      const agent = async (nm: string, held: string[]): Promise<Principal> => {
+        await principals.enroll(owner, { commandId: cid("e"), kind: "agent", name: nm, grants: [{ action: "task.read", project }] });
+        const p = await principals.authenticate((await principals.issueCredential(owner, `agent:${nm}`)).token);
+        roles.set(p.id, held);
+        return p;
+      };
+      const rolesOf = async (id: string): Promise<readonly string[]> => roles.get(id) ?? [];
+      // A one-page, one-read scan and a code index of two entries: a scan would not reach the end, and the index soon stops covering the project.
+      const subs = SubmissionService.withEpoch(world.storage, projects.epoch, rolesOf, { ...options, waitingScan: { pageSize: 1, reads: 1 }, codeIndexKept: 2 });
+      const qa = QaEvidenceService.withEpoch(world.storage, projects.epoch, { rolesOf }, options);
+      const runner = new CommandRunner(world.storage, projects.epoch, options);
+      const bob = await agent("bob", ["author"]);
+      const cal = await agent("cal", ["author", "qa", "reviewer", "director"]);
+      const dan = await agent("dan", ["qa", "reviewer", "director"]);
+      const code = async (by: Principal, t: string, k: number): Promise<string> => (await subs.record(by, { commandId: cid("code"), taskId: t, kind: "code", role: "author", base: BASE, tree: tree(k), patchId: patch(k) })).id;
+      const evidence = (by: Principal, submissionId: string, result: "passed" | "failed") => qa.record(by, { commandId: cid("qae"), submissionId, criteriaRevision: 0, environment: "linux", observedAt: "2026-11-26T09:00:00.000Z", checks: [{ name: "unit", result }] });
+      const signoff = (by: Principal, subject: string, decision: "approve" | "decline") => subs.record(by, { commandId: cid("so"), taskId: task, kind: "signoff", role: "director", subject, decision });
+
+      // 1. Dan passes "unit" on Bob's v1, then Cal (independent then) finds it failing: the gate fails. Cal also signs v1 off as director.
+      const v1 = await code(bob, task, 1);
+      assert.equal(((await runner.get("code-submission-index", project))?.body as { contributorsRecorded?: boolean }).contributorsRecorded, true, "the project's first code writes the index with the mark");
+      await evidence(dan, v1, "passed");
+      const failing = await evidence(cal, v1, "failed");
+      assert.equal(failing.source, "independent");
+      assert.equal((await qa.gate(owner, v1)).verdict, "failed");
+      await signoff(cal, v1, "approve");
+      assert.equal((await subs.approvalOf(v1))?.director?.by, cal.id);
+
+      // 2. Cal then submits code on the task. His pass would not count any more, but the failure he found still does: the gate of v1 stays failed (it does not fall back to Dan's older pass).
+      await code(cal, task, 2);
+      const g1 = await qa.gate(owner, v1);
+      assert.equal(g1.verdict, "failed", "a later contributor's failure is not dropped");
+      assert.ok(g1.reasons.includes("check_failed"), g1.reasons.join(","));
+      assert.deepEqual(g1.byContributors, [failing.id]);
+      // 3. His sign-off of v1, given before he contributed, does not count now (plain words), and a new approving sign-off is refused; a decline is still taken.
+      const a1 = await subs.approvalOf(v1);
+      assert.equal(a1?.director, undefined);
+      assert.match(a1?.directorNotCounted?.reason ?? "", /already contributed code to this task, so it cannot sign it off/);
+      const view = await landingDirectorGate(subs)(v1);
+      assert.equal(view?.signoff, undefined);
+      assert.match(view?.notCounted ?? "", /cannot sign it off; another director has to/, "the landing gate's reader is told why");
+      await refuses("forbidden", () => signoff(cal, v1, "approve"), /already contributed code to this task, so it cannot sign it off; another director has to/);
+      await signoff(cal, v1, "decline");
+      await signoff(dan, v1, "approve");
+      assert.equal((await subs.approvalOf(v1))?.director?.by, dan.id, "a director that never contributed signs off as before");
+
+      // 4. The index no longer covers the project (two entries kept), yet a new task's first code needs no scan: every code of the project wrote its task's record, so the record is complete.
+      assert.equal(((await runner.get("code-submission-index", project))?.body as { complete?: boolean }).complete, true);
+      const t2 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T2" })).id;
+      const t3 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T3" })).id;
+      await code(bob, t2, 3);
+      await code(bob, t3, 4);
+      const index = (await runner.get("code-submission-index", project))?.body as { complete?: boolean; contributorsRecorded?: boolean };
+      assert.deepEqual([index.complete, index.contributorsRecorded], [false, true], "past its limit the index is incomplete but keeps the mark");
+      const t4 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T4" })).id;
+      await code(bob, t4, 5);
+      assert.deepEqual((await runner.get(CONTRIBUTORS, t4))?.body, { taskId: t4, ids: [bob.id], complete: true }, "no scan, and nothing missed");
+
+      // 5. Only an agent owner holds the task as an agent: a person or role owner with Dan's name is someone else; an agent owner (bare or principal ID) is Dan.
+      const plant = async (body: object): Promise<void> => {
+        const id = assignmentIdOf(t2);
+        const found = await runner.get("assignment", id);
+        await runner.command("test.plant", { commandId: cid("plant"), actor: owner.id }, async () => ({ payload: { id, n: cid("x") }, build: async () => ({ ref: { kind: "assignment", id }, creates: found === undefined, changes: [found === undefined ? { type: "create" as const, ref: { kind: "assignment", id }, body: body as JsonObject } : { type: "update" as const, ref: { kind: "assignment", id }, expectedRevision: found.revision, body: body as JsonObject }], detail: {} }) }));
+      };
+      for (const kind of ["person", "role", "team"]) {
+        await plant({ taskId: t2, owner: { kind, id: "dan" } });
+        assert.equal((await taskContributors(runner, project, t2)).has(dan.id), false, `a ${kind} owner named dan is not the agent dan`);
+      }
+      for (const id of ["dan", dan.id]) {
+        await plant({ taskId: t2, owner: { kind: "agent", id } });
+        assert.equal((await taskContributors(runner, project, t2)).has(dan.id), true, `an agent owner ${id}`);
+      }
+
+      // 6. Two agents submit code on one new task at the same moment: the write that lost is built again, so neither is lost from the task's record.
+      const t5 = (await projects.createTask({ commandId: cid("t"), actor: owner.id, projectId: project, title: "T5" })).id;
+      await Promise.all([code(bob, t5, 6), code(cal, t5, 7)]);
+      assert.deepEqual(((await runner.get(CONTRIBUTORS, t5))?.body as { ids?: string[] }).ids, [bob.id, cal.id].sort());
     } finally { await world.close(); }
   });
 }
+
+test("a task's record keeps at most CONTRIBUTORS_KEPT submitters: one more marks it incomplete (readers then add the code index), and an incomplete full record is left as it is (card Q04 review)", async () => {
+  const ids = Array.from({ length: CONTRIBUTORS_KEPT }, (_, i) => `agent:a${String(i).padStart(3, "0")}`);
+  const reader = (body: object | undefined) => ({ get: async () => (body === undefined ? undefined : { body, revision: 7 }) });
+  const noSeed = async () => assert.fail("a stored record is never seeded again");
+  const full = await contributorChange(reader({ taskId: "t", ids, complete: true }), "t", "agent:zed", noSeed);
+  assert.equal(full.length, 1);
+  const change = full[0] as unknown as { type: string; expectedRevision?: number; body: { ids: string[]; complete: boolean } };
+  assert.deepEqual([change.type, change.expectedRevision, change.body.ids.length, change.body.ids.includes("agent:zed"), change.body.complete], ["update", 7, CONTRIBUTORS_KEPT, false, false]);
+  assert.deepEqual(await contributorChange(reader({ taskId: "t", ids, complete: false }), "t", "agent:zed", noSeed), [], "already incomplete: nothing to write");
+  assert.deepEqual(await contributorChange(reader({ taskId: "t", ids, complete: true }), "t", ids[3]!, noSeed), [], "a known submitter changes nothing");
+  const seeded = await contributorChange(reader(undefined), "t", "zed", async () => ({ ids: ["agent:amy", "bo"], complete: true }));
+  assert.deepEqual((seeded[0] as unknown as { type: string; body: object }).body, { taskId: "t", ids: ["agent:amy", "agent:bo", "agent:zed"], complete: true }, "a seed is stored as principal IDs");
+});

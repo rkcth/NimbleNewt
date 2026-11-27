@@ -88,11 +88,11 @@ export interface ContractTests {
   readonly onlyAuthors?: boolean;
 }
 /** The QA gate of a code submission as the landing gate needs it (`QaEvidenceService.gate`). */
-export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; /** Earlier same-patch submissions whose evidence counted (card Q02). */ readonly carriedFrom?: readonly string[]; /** Evidence left out because an agent that contributed code to the task recorded it (card Q04). */ readonly byContributors?: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
+export interface QaGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly verdict: "passed" | "failed"; readonly reasons: readonly string[]; /** Earlier same-patch submissions whose evidence counted (card Q02). */ readonly carriedFrom?: readonly string[]; /** Evidence whose passes did not count because an agent that contributed code to the task recorded it (card Q04). */ readonly byContributors?: readonly string[]; readonly counts?: { readonly passed: number; readonly failed: number; readonly blocked: number; readonly notRun: number; readonly missing: number } }
 /** The documents gate of a code submission as the landing gate needs it (`DocObligationService.landing`): the documents describing the task that are not verified against that code. */
 export interface DocsGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly checked: number; readonly pending: readonly { readonly obligationId: string; readonly title: string; readonly reason: string }[] }
 /** The director sign-off of a code submission as the landing gate needs it (`landingDirectorGate`): the newest sign-off on that submission, when there is one. */
-export interface DirectorGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string } }
+export interface DirectorGateView { readonly taskId: string; readonly submissionId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string }; /** Card Q04: why the newest sign-off does not count (an approval by an agent that contributed code to the task); `signoff` is then absent. */ readonly notCounted?: string }
 /** The defects reported against a task's deliverables as the landing gate needs them (`landingDefectsGate`): how many in all, how many are not finished, and the first few of those. */
 export interface DefectsGateView { readonly taskId: string; readonly checked: number; readonly unresolved: number; readonly items: readonly { readonly id: string; readonly severity: string; readonly state: string; readonly finding: string; readonly deliverableTitle: string }[] }
 export interface ReviewedSubmission { readonly taskId: string; readonly base: string; readonly tree: string; readonly submittedBy?: string; readonly patchId?: string; readonly approved: boolean; readonly approvedBy?: string; /** The check evidence the author recorded on the submission (Q01b), each bound to a tree. */ readonly evidence?: readonly { readonly check: string; readonly result: string; readonly boundTo: string }[]; readonly newest?: "approve" | "changes" | "reject"; readonly reason?: string; /** The earlier same-patch submission whose verdict this answer carries (card Q02). */ readonly carriedFrom?: string }
@@ -280,8 +280,8 @@ export class LandingGate {
       const reasons = g.reasons.join(", ") || "no reason given";
       // No independent evidence at all is not run; the contract's required checks are then each `missing` too (`check_missing`), which says the same. Anything else failed.
       const none = g.reasons.includes("no_evidence") && g.reasons.every((r) => r === "no_evidence" || r === "check_missing");
-      // Card Q04: evidence the gate left out because its recorder contributed code to the task is said in plain words, so the author is not told only "no evidence" while evidence exists.
-      const left = Array.isArray(g.byContributors) && g.byContributors.length > 0 ? `; evidence from an agent that contributed code to this task does not count (another QA agent has to check it)` : "";
+      // Card Q04: evidence whose passes the gate did not count because its recorder contributed code to the task is said in plain words, so the author is not told only "no evidence" while evidence exists.
+      const left = Array.isArray(g.byContributors) && g.byContributors.length > 0 ? `; a pass recorded by an agent that contributed code to this task does not count (another QA agent has to check it)` : "";
       return no(none ? "not_run" : "fail",`the QA gate of ${call.submissionId} (tree ${g.tree.slice(0, 12)}) did not pass: ${reasons}${left}`);
     }
     // Evidence is bound to the submission's tree; it counts for the integrated tree only while the patch is the one the host computes from that base and tree.
@@ -306,6 +306,7 @@ export class LandingGate {
     try { a = await this.#deps.approvalOf(call.submissionId); g = await this.#deps.directorGate(call.submissionId); } catch (error) { return no("not_run", `the director sign-off could not be read: ${errorText(error)}`); }
     if (a === undefined || a.taskId !== call.taskId || before === undefined) return no("not_run", `${call.submissionId} is not a code submission of this task`);
     if (g === undefined || g.submissionId !== call.submissionId || g.taskId !== call.taskId || g.tree !== a.tree) return no("not_run", `the director sign-off of ${call.submissionId} could not be read for the tree it names`);
+    if (g.signoff === undefined && typeof g.notCounted === "string") return no("not_run", `no director sign-off of ${call.submissionId} counts yet: ${g.notCounted}`);
     if (g.signoff === undefined) return no("not_run", `no director has signed off on ${call.submissionId} yet`);
     if (g.signoff.newest !== "approve") return no("fail", `the newest director sign-off of ${call.submissionId} (by ${String(g.signoff.by)}) declines it`);
     const computed = typeof report.reviewedPatchId === "string" && PATCH.test(report.reviewedPatchId) && a.base === before.base && a.tree === before.tree ? report.reviewedPatchId : undefined;

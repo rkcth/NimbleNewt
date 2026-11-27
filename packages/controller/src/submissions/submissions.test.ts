@@ -122,8 +122,11 @@ for (const backend of backends) {
     const theirs = await c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T1, patchId: PATCH });
     const mine = await c.svc.record(dee, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH });
     await refuses("forbidden", () => c.svc.record(dee, { commandId: cid("s"), taskId: c.task, kind: "signoff", role: "director", subject: mine.id, decision: "approve" }), /own work/);
-    const ok = await c.svc.record(dee, { commandId: cid("s"), taskId: c.task, kind: "signoff", role: "director", subject: theirs.id, decision: "approve", evidence: pass(T1) });
-    assert.equal((await c.svc.get(dee, ok.id))?.decision, "approve");
+    // Card Q04: having submitted code on the task, Dee is a contributor of it and cannot sign off another agent's version either; a director that never contributed can.
+    await refuses("forbidden", () => c.svc.record(dee, { commandId: cid("s"), taskId: c.task, kind: "signoff", role: "director", subject: theirs.id, decision: "approve", evidence: pass(T1) }), /already contributed code to this task, so it cannot sign it off/);
+    const eli = await c.agent("eli", ["director"]);
+    const ok = await c.svc.record(eli, { commandId: cid("s"), taskId: c.task, kind: "signoff", role: "director", subject: theirs.id, decision: "approve", evidence: pass(T1) });
+    assert.equal((await c.svc.get(eli, ok.id))?.decision, "approve");
     await refuses("forbidden", () => c.svc.record(ann, { commandId: cid("s"), taskId: c.task, kind: "signoff", role: "director", subject: theirs.id, decision: "approve" }));
   });
 

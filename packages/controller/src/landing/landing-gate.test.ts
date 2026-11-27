@@ -192,7 +192,7 @@ test("qa: a passed gate passes; a gate for another tree or task, a missing gate 
   // Card Q04: evidence the gate left out because a contributor of the task recorded it is said in plain words.
   const byContributor = (await qaRun({ verdict: "failed", reasons: ["no_evidence"], byContributors: ["qae-aaaaaaaaaaaaaaaaaaaa"] })).results[0]!;
   assert.equal(byContributor.result, "not_run");
-  assert.match(byContributor.summary, /evidence from an agent that contributed code to this task does not count \(another QA agent has to check it\)/);
+  assert.match(byContributor.summary, /a pass recorded by an agent that contributed code to this task does not count \(another QA agent has to check it\)/);
   assert.doesNotMatch((await qaRun({ verdict: "failed", reasons: ["no_evidence"] })).results[0]!.summary, /contributed/);
   assert.equal((await qaRun({ verdict: "failed", reasons: ["no_evidence", "check_missing"] })).results[0]!.result, "not_run", "no evidence against required checks is not run too");
   assert.equal((await qaRun({ verdict: "failed", reasons: ["decision_superseded", "no_evidence", "check_missing"] })).results[0]!.result, "fail");

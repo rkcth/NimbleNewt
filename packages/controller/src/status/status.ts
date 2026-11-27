@@ -2971,7 +2971,7 @@ export class StatusService {
       // A verdict that cites what it judged against (card Q02, sixth slice) says so; one that cites nothing reads as before.
       if (a?.cited !== undefined) review += ` (it cites criteria version ${a.cited.criteriaRevision}${a.cited.decisions.length === 0 ? "" : ` and decision${a.cited.decisions.length === 1 ? "" : "s"} ${a.cited.decisions.map((d) => `${d.id} v${d.version}`).join(", ")}`}${a.cited.unmet === undefined ? "" : `; unmet requirement: ${quoted(a.cited.unmet, 200)}`})`;
       const d = a?.director;
-      const director = d === undefined ? "none" : d.newest === "approve" ? `approved by ${shown(d.by, 80)}` : `declined by ${shown(d.by, 80)} (a project that requires the director check does not land it)`;
+      const director = d === undefined ? (a?.directorNotCounted === undefined ? "none" : `${shown(a.directorNotCounted.reason, 300)}`) : d.newest === "approve" ? `approved by ${shown(d.by, 80)}` : `declined by ${shown(d.by, 80)} (a project that requires the director check does not land it)`;
       const ev = c.evidence.length === 0 ? "" : ` Its author's own check evidence: ${c.evidence.filter((e) => e.result === "pass").length} pass, ${c.evidence.filter((e) => e.result === "fail").length} fail, ${c.evidence.filter((e) => e.result === "not_run").length} not run.`;
       // The landing gate counts an approval or a sign-off only for the patch it was given on (a landing whose change differs needs a new one), so an approval is not shown as more than that.
       const bound = a !== undefined && (a.approved || d?.newest === "approve") ? " An approval counts at landing only while the change's patch stays the one approved." : "";

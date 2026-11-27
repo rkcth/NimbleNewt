@@ -116,8 +116,8 @@ export interface QaGate {
   readonly sourcesNeeded?: number;
   readonly shortfalls?: readonly { readonly check: string; readonly sources: number }[];
   /**
-   * Card Q04: evidence on this submission recorded as independent by an agent that contributed code to the task (submitted any version of it, or holds it now), read at the time of the gate. It is not counted:
-   * a contributor cannot pass its own fix. Absent when there is none.
+   * Card Q04: evidence on this submission recorded as independent by an agent that contributed code to the task (submitted any version of it, or holds it now), read at the time of the gate. Its passes are not
+   * counted (a contributor cannot pass its own fix); what it found failed, blocked or not run still counts. Absent when there is none.
    */
   readonly byContributors?: readonly string[];
 }
@@ -950,6 +950,7 @@ export class QaEvidenceService {
     // Card Q04: who contributed to the task, read now (`contributors.ts`): independent evidence recorded by one of them (before the rule existed, or by an agent that contributed after it recorded) is not counted.
     const contributors = await taskContributors(this.#runner, task.projectId, taskId, [sub.submittedBy]);
     const byContributors: string[] = [];
+    const contributed = new Set<string>();
     const usable: (QaEvidenceBody & { id: string })[] = [];
     const stale: { id: string; reasons: QaStaleReason[] }[] = [];
     for (const id of index.body.ids) {
@@ -958,13 +959,16 @@ export class QaEvidenceService {
       if (found === undefined || e === undefined || (e.submissionId !== submissionId && !carriedSubs.has(e.submissionId)) || e.source !== "independent") continue;
       // Evidence carried from an earlier copy that this submission's own submitter recorded is a self-check of this submission (card Q02 review): it never counts here.
       if (e.submissionId !== submissionId && e.recordedBy === sub.submittedBy) continue;
-      // Card Q04: evidence by a contributor of the task is its own check, whatever it was recorded as: never counted, and its staleness is not this gate's (it is listed apart, for the reader).
-      if (contributors.has(principalOf(e.recordedBy))) { if (e.submissionId === submissionId) byContributors.push(id); continue; }
+      // Card Q04: evidence recorded as independent by an agent that is a contributor of the task now: its passes never count (a contributor cannot pass its own fix), but what it found not passing still does, as
+      // it did when it was recorded (failed, blocked, not run; and a check it named that no longer holds is still owed). Leaving the whole record out could uncover an older pass of a check it failed, so a gate
+      // that failed would pass because its checker later contributed: the rule may only take a pass away, never add one.
+      const fromContributor = contributors.has(principalOf(e.recordedBy));
+      if (fromContributor) { contributed.add(id); if (e.submissionId === submissionId) byContributors.push(id); }
       reads.push({ kind: "qa-evidence", id, revision: found.revision });
       const own = e.submissionId === submissionId;
       if (e.state !== "current") { if (own) stale.push({ id, reasons: [...(e.reasons ?? [])] }); continue; }
       const reasons = await this.#staleness(e, contract, reliance, reads, memo);
-      if (reasons.length > 0) { if (own) stale.push({ id, reasons }); } else { usable.push({ ...e, id }); if (!own) carriedUsed.add(e.submissionId); }
+      if (reasons.length > 0) { if (own) stale.push({ id, reasons }); } else { usable.push({ ...e, id }); if (!own && !fromContributor) carriedUsed.add(e.submissionId); }
     }
     const pending: string[] = [];
     // Check names of independent evidence on this submission that no longer holds and whose re-check is not done by evidence (pending, or settled only by a newer tree): with no required
@@ -999,12 +1003,12 @@ export class QaEvidenceService {
     const checks: QaGateCheck[] = names.map((name) => {
       for (const e of newestFirst) {
         const c = e.checks.find((x) => x.name === name);
-        if (c === undefined) continue;
+        if (c === undefined || (c.result === "passed" && contributed.has(e.id))) continue;
         // A pass counts only as many times as there are independent original sources behind it: a copy and its original, and records of one recorder, are one source. Only the passes newer than the newest
         // record that did not pass the check count (card Q02 review): a pass that a later failure contradicted does not add a source to a newer pass.
         if (c.result === "passed" && sourceOf !== undefined) {
           const run: (QaEvidenceBody & { id: string })[] = [];
-          for (const x of newestFirst) { const y = x.checks.find((z) => z.name === name); if (y === undefined) continue; if (y.result !== "passed") break; run.push(x); }
+          for (const x of newestFirst) { const y = x.checks.find((z) => z.name === name); if (y === undefined) continue; if (y.result !== "passed") break; if (!contributed.has(x.id)) run.push(x); }
           const have = sourceOf(run);
           if (have < needed) { shortfalls.push({ check: name, sources: have }); return { name, result: "missing" as const, evidenceId: e.id }; }
         }
@@ -1014,7 +1018,7 @@ export class QaEvidenceService {
     });
     const count = (r: QaGateCheck["result"]): number => checks.filter((c) => c.result === r).length;
     const counts = { passed: count("passed"), failed: count("failed"), blocked: count("blocked"), notRun: count("not-run"), missing: count("missing") };
-    if (usable.length === 0) reasons.add(stale.length > 0 ? "stale_evidence" : "no_evidence");
+    if (usable.every((e) => contributed.has(e.id))) reasons.add(stale.length > 0 ? "stale_evidence" : "no_evidence");
     if (counts.failed > 0) reasons.add("check_failed");
     if (counts.blocked > 0) reasons.add("check_blocked");
     if (counts.notRun > 0) reasons.add("check_not_run");

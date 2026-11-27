@@ -13,7 +13,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { readApprovalReliance, readReviewCite, relianceBasis, shapeReviewCite } from "./review-citation.js";
 import { dependencyChangesNow, dependencyChangeText, readDependencyBasis } from "./dependency-basis.js";
 import { approvalOutdated, type ApprovalBasis } from "./approval-standing.js";
-import { CONTRIBUTOR_APPROVAL_TEXT, CONTRIBUTORS, contributorChange, principalOf, taskContributors } from "./contributors.js";
+import { CONTRIBUTOR_APPROVAL_TEXT, CONTRIBUTOR_SIGNOFF_TEXT, CONTRIBUTORS, contributorChange, principalOf, taskContributors } from "./contributors.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -107,6 +107,10 @@ export interface SubmissionApproval {
   readonly evidence?: readonly Evidence[];
   /** What the newest director sign-off of it says (card P09 sixth slice, the `director` required check); present only when a director has signed off on it (either way). */
   readonly director?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string };
+  /**
+   * Card Q04: set, instead of `director`, when the newest director sign-off is an approval by an agent that contributed code to the task (read now, `contributors.ts`): it does not count, and `reason` says so in plain words.
+   */
+  readonly directorNotCounted?: { readonly by: string; readonly signoffId: string; readonly reason: string };
 }
 /** The reviews recorded about one submission, oldest first (record kind `submission-verdicts`, keyed by the subject's ID). */
 interface VerdictsBody { readonly reviews: readonly { readonly id: string; readonly verdict: "approve" | "changes" | "reject"; readonly by: string; readonly at: string; readonly cited?: ReviewCited; readonly basis?: ApprovalBasis }[] }
@@ -137,7 +141,15 @@ export const DOC_INDEX_KEPT = 100;
  * an index first written for a project that already has code is seeded by one bounded scan of the table (`complete` only when that scan reached the end), and `complete` turns false when more than `CODE_INDEX_KEPT`
  * entries would be kept (the oldest drop off). Only IDs, tasks, authors and times are kept; every read takes the submission itself. An absent or unreadable index is never trusted: the waiting view then scans.
  */
-interface CodeIndexBody { readonly complete: boolean; readonly entries: readonly { readonly taskId: string; readonly id: string; readonly at: string; readonly by: string }[] }
+interface CodeIndexBody {
+  readonly complete: boolean; readonly entries: readonly { readonly taskId: string; readonly id: string; readonly at: string; readonly by: string }[];
+  /**
+   * Card Q04: `true` when the index was first written by the code submission that was the project's first code at all (its seed scan reached the end of the table and found none), so every code submission of the
+   * project was written together with its task's contributor record (`contributors.ts`): a task without that record has no code, and its first code submission needs no seed scan. Kept by every later write; never
+   * set on an index that existed before, or was seeded with older code.
+   */
+  readonly contributorsRecorded?: true;
+}
 const CODE_INDEX = "code-submission-index";
 export const CODE_INDEX_KEPT = 500;
 /** A stored code index as the service reads it: `undefined` when absent or not readable as an index (then it is not trusted). */
@@ -486,9 +498,10 @@ export class SubmissionService {
         }
         // Card Q04: an agent that contributed code to the task (any version of it, or holds it now) cannot approve it, as the author of the version cannot. Checked here, after the runner looked for a repeat, so a
         // repeat of an approval recorded before still answers with that record. The task's contributor record is checked by the write, so a code submission of the reviewer at the same moment builds this again.
+        // The same holds for a director's sign-off approving code (the director's own landing approval): a decline only holds the work back and is still taken.
         let contributorCheck: Change[] = [];
-        if (kind === "review" && asked.verdict === "approve" && subject?.kind === "code") {
-          if ((await taskContributors(this.#runner, task.projectId, taskId, [subject.submittedBy])).has(principalOf(by.id))) throw new DomainError("forbidden", CONTRIBUTOR_APPROVAL_TEXT);
+        if (((kind === "review" && asked.verdict === "approve") || (kind === "signoff" && asked.decision === "approve")) && subject?.kind === "code") {
+          if ((await taskContributors(this.#runner, task.projectId, taskId, [subject.submittedBy])).has(principalOf(by.id))) throw new DomainError("forbidden", kind === "signoff" ? CONTRIBUTOR_SIGNOFF_TEXT : CONTRIBUTOR_APPROVAL_TEXT);
           const record = await this.#runner.get(CONTRIBUTORS, taskId);
           if (record !== undefined) contributorCheck = [{ type: "check", ref: { kind: CONTRIBUTORS, id: taskId }, expectedRevision: record.revision }];
         }
@@ -659,12 +672,15 @@ export class SubmissionService {
 
   /**
    * A code submission adds its submitter to its task's contributor record in the same write (card Q04, `contributors.ts`). A task with code from before the record existed is seeded first: from the project's code index
-   * when it covers every code submission of the project, otherwise from one bounded scan of the submission table (the same bound as the code index's own seed), complete only when that scan reached the end.
+   * when it covers every code submission of the project, otherwise from one bounded scan of the submission table (the same bound as the code index's own seed), complete only when that scan reached the end. A project
+   * whose code index was written from its first code on (`contributorsRecorded`) needs neither: a task with no record has no earlier code (so a project past `CODE_INDEX_KEPT` entries does not scan for every new task).
    */
   async #contributorChange(body: SubmissionBody): Promise<Change[]> {
     if (body.kind !== "code" || body.tree === undefined) return [];
     return contributorChange(this.#runner, body.taskId, body.submittedBy, async () => {
       const index = await this.#readCodeIndex(body.projectId);
+      // Every code submission of this project wrote its task's record (see `CodeIndexBody.contributorsRecorded`): a task without one has no earlier code, so nothing is scanned.
+      if (index?.body.contributorsRecorded === true) return { ids: [], complete: true };
       if (index?.body.complete === true) return { ids: index.body.entries.filter((e) => e.taskId === body.taskId).map((e) => e.by), complete: true };
       const ids = new Set(index?.body.entries.filter((e) => e.taskId === body.taskId).map((e) => e.by) ?? []);
       let after: string | undefined;
@@ -709,6 +725,7 @@ export class SubmissionService {
     if (found !== undefined && had === undefined) return [];
     let entries: { taskId: string; id: string; at: string; by: string }[] = [...(had?.body.entries ?? [])];
     let complete = had?.body.complete ?? false;
+    let contributorsRecorded = had?.body.contributorsRecorded === true;
     if (had === undefined) {
       const seen = new Map<string, { taskId: string; id: string; at: string; by: string }>();
       let after: string | undefined;
@@ -727,6 +744,7 @@ export class SubmissionService {
       }
       entries = [...seen.values()];
       complete = reachedEnd;
+      contributorsRecorded = reachedEnd && entries.length === 0;
     }
     if (entries.some((e) => e.id === id)) return [];
     // One entry per task and agent, the newest: of two at the same instant the greater ID, as the view reads it.
@@ -737,7 +755,7 @@ export class SubmissionService {
     }
     entries.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : x.id < y.id ? -1 : 1));
     if (entries.length > this.#codeKept) { entries = entries.slice(-this.#codeKept); complete = false; }
-    const next: CodeIndexBody = { complete, entries };
+    const next: CodeIndexBody = { complete, entries, ...(contributorsRecorded ? { contributorsRecorded: true as const } : {}) };
     return [found === undefined ? { type: "create", ref, body: next as unknown as JsonObject } : { type: "update", ref, expectedRevision: found.revision, body: next as unknown as JsonObject }];
   }
 
@@ -871,11 +889,15 @@ export class SubmissionService {
     const newest = reviews[reviews.length - 1];
     const signoffs = ((await this.#runner.get(SIGNOFFS, submissionId))?.body as unknown as SignoffsBody | undefined)?.signoffs ?? [];
     const lastSignoff = signoffs[signoffs.length - 1];
-    const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
+    // Card Q04: the task's contributors, read now and at most once (only when an approval or an approving sign-off has to be judged).
+    let known: ReadonlySet<string> | undefined;
+    const contributes = async (who: string): Promise<boolean> => (known ??= await taskContributors(this.#runner, found.projectId, found.taskId, [found.submittedBy])).has(principalOf(who));
+    const signoffNotCounted = lastSignoff !== undefined && lastSignoff.decision === "approve" && await contributes(lastSignoff.by);
+    const base = { submissionId, ...(carriedFrom === undefined ? {} : { carriedFrom }), taskId: found.taskId, projectId: found.projectId, base: found.base, tree: found.tree, ...(found.patchId === undefined ? {} : { patchId: found.patchId }), submittedBy: found.submittedBy, submittedAt: found.submittedAt, ...(Array.isArray(found.evidence) && found.evidence.length > 0 ? { evidence: found.evidence } : {}), ...(lastSignoff === undefined ? {} : signoffNotCounted ? { directorNotCounted: { by: lastSignoff.by, signoffId: lastSignoff.id, reason: `the sign-off by ${lastSignoff.by} does not count: ${CONTRIBUTOR_SIGNOFF_TEXT}` } } : { director: { newest: lastSignoff.decision, by: lastSignoff.by, signoffId: lastSignoff.id } }) };
     if (newest !== undefined && ownCarried && newest.verdict === "approve") return { ...base, approved: false, reason: `the approval that would carry over from ${carriedFrom} was given by this submission's own submitter; another reviewer has to approve it` };
     // Card Q04: an approval by an agent that contributed code to the task (any version, or holds it now) does not count, read now from the task's current contributors (so an approval recorded before this rule, or
     // by an agent that contributed after it approved, does not count either). It reads as waiting for review: another reviewer has to approve it.
-    if (newest !== undefined && newest.verdict === "approve" && (await taskContributors(this.#runner, found.projectId, found.taskId, [found.submittedBy])).has(principalOf(newest.by))) {
+    if (newest !== undefined && newest.verdict === "approve" && await contributes(newest.by)) {
       return { ...base, approved: false, reason: `the approval by ${newest.by} does not count: ${CONTRIBUTOR_APPROVAL_TEXT}` };
     }
     // Card Q02: an approval given before a decision the task relies on, or the task's criteria, changed no longer counts (read here, so every reader of approvals sees it); a new review restores it.
@@ -961,10 +983,10 @@ export class SubmissionService {
  * The director sign-off of a code submission as the landing gate reads it (card P09 sixth slice, the `director` required check): the newest sign-off of a director other than the submitter (the service refuses a sign-off
  * on the signer's own work and by anyone not holding the director role) on that very submission. One function, used by `start.ts` and by the tests, so the controller's composition is the one tested.
  */
-export interface DirectorSignoffView { readonly submissionId: string; readonly taskId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string } }
+export interface DirectorSignoffView { readonly submissionId: string; readonly taskId: string; readonly tree: string; readonly signoff?: { readonly newest: "approve" | "decline"; readonly by: string; readonly signoffId: string }; /** Card Q04: why the newest sign-off does not count (an approval by a contributor of the task). */ readonly notCounted?: string }
 export function landingDirectorGate(service: SubmissionService): (submissionId: string) => Promise<DirectorSignoffView | undefined> {
   return async (submissionId) => {
     const a = await service.approvalOf(submissionId);
-    return a === undefined ? undefined : { submissionId: a.submissionId, taskId: a.taskId, tree: a.tree, ...(a.director === undefined ? {} : { signoff: a.director }) };
+    return a === undefined ? undefined : { submissionId: a.submissionId, taskId: a.taskId, tree: a.tree, ...(a.director === undefined ? {} : { signoff: a.director }), ...(a.directorNotCounted === undefined ? {} : { notCounted: a.directorNotCounted.reason }) };
   };
 }

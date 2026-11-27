@@ -39,6 +39,10 @@ test("no sign-off is not run, a decline is a failure, no submission or no reader
   const none = await rig({ director: bare }).run();
   assert.deepEqual([none.passed, ...only(none)], [false, "director", "not_run"]);
   assert.match(none.results[0]!.summary, /no director has signed off/);
+  // Card Q04: a sign-off that does not count (an approval by an agent that contributed code to the task) is not run either, with the reason in plain words.
+  const notCounted = await rig({ director: { ...bare, notCounted: "the sign-off by agent:dee does not count: this agent already contributed code to this task, so it cannot sign it off; another director has to" } }).run();
+  assert.deepEqual([notCounted.passed, ...only(notCounted)], [false, "director", "not_run"]);
+  assert.match(notCounted.results[0]!.summary, /no director sign-off of sbm-a+ counts yet: the sign-off by agent:dee does not count: this agent already contributed code to this task/);
   const declined = await rig({ director: { ...signed, signoff: { ...signed.signoff!, newest: "decline" } } }).run();
   assert.deepEqual([declined.passed, ...only(declined)], [false, "director", "fail"]);
   assert.match(declined.results[0]!.summary, /declines it/);
