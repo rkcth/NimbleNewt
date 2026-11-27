@@ -306,6 +306,12 @@ for (const backend of backends) {
     await c.approve(id4);
     await c.make().withdraw(c.dev, { commandId: cid("w"), adoptionId: id4, expectedRevision: await c.rev(id4), reason: "mine" });
     assert.equal((await c.body(id4)).status, "withdrawn");
+    // A manager who proposed the experiment is not its adoption's reviewer, so it does not decline one it did not ask for (another manager does).
+    const byMgr = await c.experiment(GOOD, {}, c.mgr2);
+    const asked = await c.ask(byMgr, PRACTICE, c.reader);
+    await refuses("forbidden", () => c.make().decline(c.mgr2, { commandId: cid("d"), adoptionId: asked, expectedRevision: 1, reason: "no" }), /may not decline/);
+    await c.make().decline(c.mgr, { commandId: cid("d"), adoptionId: asked, expectedRevision: 1, reason: "not yet" });
+    assert.equal((await c.body(asked)).status, "declined");
   });
 
   suite("reads, pages and races: readers and the asker read, others see nothing; two reviewers or two askers at once give one result", async (c) => {
@@ -332,6 +338,24 @@ for (const backend of backends) {
     const asks = await Promise.allSettled([c.ask(exp2, PRACTICE, c.dev), c.ask(exp2, PRACTICE, c.mgr)]);
     assert.equal(asks.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(asks));
     assert.equal(Object.keys(((await new CommandRunner(c.storage, c.epoch, options).get("adoption-index", c.a))!.body as { open: object }).open).filter((k) => k === targetKey(exp2, { kind: "practice" })).length, 1);
+  });
+
+  suite("a report within the baseline and a regression at once: the regression withdraws it whichever is written first, each report names its reporter, and a later good report does not put it back", async (c) => {
+    const exp = await c.experiment();
+    const id = await c.ask(exp);
+    await c.approve(id);
+    const both = await Promise.allSettled([c.monitor(id, GOOD, c.dev), c.monitor(id, { timeToAcceptedSeconds: 90, reworkCount: 5, adoptionCount: 6 }, c.mgr)]);
+    assert.equal(both[1]!.status, "fulfilled", JSON.stringify(both));
+    const got = await c.body(id);
+    assert.deepEqual([got.status, got.withdrawnWhy, got.withdrawnBy], ["withdrawn", "regression", c.mgr.id]);
+    const regressed = got.reports.filter((r) => r.regressed.length > 0);
+    assert.deepEqual(regressed.map((r) => [r.by, r.regressed]), [[c.mgr.id, ["reworkCount"]]]);
+    if (both[0]!.status === "rejected") assert.match(String((both[0] as PromiseRejectedResult).reason), /withdrawn/);
+    else assert.deepEqual(got.reports.map((r) => r.by), [c.dev.id, c.mgr.id], "the good report was written first");
+    // The withdrawal is final: a good report afterwards (from the owner too) is refused, and nothing is in force.
+    for (const p of [c.dev, c.owner]) await refuses("invalid_command", () => c.monitor(id, GOOD, p), /withdrawn/);
+    assert.equal(await c.make().inForce(c.owner, { projectId: c.a, experimentId: exp, target: PRACTICE }), undefined);
+    assert.equal((await c.body(id)).reportCount, got.reportCount);
   });
 
   suite("a task credential of another project acts for nobody here; criteria re-sealed after the request, a registrant or an executable's author as reviewer, and the project bound are refused", async (c) => {
