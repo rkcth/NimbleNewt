@@ -21707,3 +21707,20 @@ Deliberate breakages of my own (24, each applied alone to the built `dist`, `NIM
 
 Runs: tsc --build --force; api:docs:write no diff; check:deps, licenses:check, roadmap:check; plan.test 6/6. Node 22 and 24: 605 of 605 each (same file set as the slice: landing, start-p10*, api, chat-gaps, start-status, gaps1, prompt-room, retirement, guide-commands, status-landing-*). No chat or prompt text changed. Card not flipped.
 
+
+### P10b second slice, second review (clean-context Claude agent, Opus 5.5, 2026-11-27 EST; tests and notes only)
+
+Judged with fresh eyes:
+- The candidate pre-filter is a true superset of the integrators. `PrincipalService.current` builds grants from three sources only (`effectiveOf`). These are the agent's own record, the derived `tool.a-<id>.*` grant, and the grant records whose `grantee` is exactly the agent's ID, each keeping its own `action`. Roles add no grants. `servesProject` uses `allowsExactly`, which needs `g.action === "integration.lease"` literally; only the project may be `*`. So a grant of `*` or `integration.*` never makes an integrator, and the pool and the lease door judge the same way ("a wildcard grant is not enough"). Every grant that can serve names the exact action in one of the two places the pre-filter reads. Restrictions, expiry and archived-project fences only narrow.
+- Owner only: the line needs `by.kind === "owner"` without a task scope, and the reader is not asked otherwise.
+- `lands` is the predicate the door uses: `#named` (renew and release) and the landing check both use `#allowed`, which is the same expression as `servesProject`. A holder that lost the right cannot release its own lease either, so the wording (wait for expiry, or the owner's `integrator.lease.release` by project and branch) is complete. "Held by another" is the pool's own test: live, and the holder an active agent.
+- `unknown` is never free: partial leases, and any `DomainError` from the reads, give `unknown`. A partial agent walk can still say `free`, but only of agents actually judged free.
+- Hostile data: holder and expiry go through `shown`; everything else is controller-written or numeric.
+
+Problems: none in product code. One test gap: no test had an agent whose only right was a wildcard grant passing through `integratorCandidateIds`, so widening the pre-filter to `*` went uncaught (an equal count, but an unpinned rule). Added: a wildcard test on each backend. It covers `integration.lease` for every project in the own record and in a grant record (candidates and integrators), and `*` on a project, `integration.*` for every project and a `*`/`*` grant record (neither). The counts are the same as judging every agent, the pool takes nothing for the wildcard-action agents, and a hold taken under a grant for every project is `held` with `lands` true and busy for another branch.
+
+Limit restated: when the grant walk stops early (more than 25,000 grant records), every active agent (at most 500) is judged, each with `effectiveOf`'s full walk of grants and restrictions. Owner-only and as before the first review. A bounded or shared grant snapshot would be a follow-up, not a fix here.
+
+Deliberate breakages of my own (24, each applied alone to `src`, rebuilt with `tsc --build`, run against the slice's three test files, restored and checked by sha256; script `/tmp/claude-1000/p10b2-r2/breakages.py`): 23 caught before the added test, 24 after (the one missed before: the pre-filter also matching `*`).
+
+Card not flipped.

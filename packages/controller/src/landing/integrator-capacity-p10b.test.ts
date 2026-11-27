@@ -200,6 +200,37 @@ for (const backend of backends) {
     } finally { await r.close(); }
   });
 
+  test(`${backend.name}: wildcard grants: a grant of integration.lease for every project (own record or grant record) is a candidate and an integrator; a grant of every action (* or integration.*) is neither, as for the pool (card P10b)`, async () => {
+    const r = await rig();
+    try {
+      const a = await r.project("Apple");
+      await r.queued(a);
+      // Own record: integration.lease on every project (an integrator of a); every action on a, and integration.* on every project (not integrators: the right is exact).
+      await r.person("ada", [{ action: "integration.lease", project: "*" }]);
+      const star = await r.person("bea", [{ action: "*", project: a }]);
+      const pre = await r.person("cleo", [{ action: "integration.*", project: "*" }]);
+      // Grant records: integration.lease on every project (an integrator of a); every action on every project (not one).
+      await r.person("dot", []);
+      await r.w.grants.grant(r.w.owner, { commandId: "g-dot", grantee: "agent:dot", action: "integration.lease", project: "*", source: "direct", basis: "test" } as never);
+      await r.person("fay", []);
+      await r.w.grants.grant(r.w.owner, { commandId: "g-fay", grantee: "agent:fay", action: "*", project: "*", source: "direct", basis: "test" } as never);
+      assert.deepEqual(await integratorCandidateIds(r.w.storage), { ids: ["agent:ada", "agent:dot"], partial: false });
+      const cap = new IntegratorCapacity(r.leases, { agents: () => integratorCandidateIds(r.w.storage), principal: (id) => r.w.principals.current(id) });
+      const every = new IntegratorCapacity(r.leases, { agents: () => activeAgentIds(r.w.storage), principal: (id) => r.w.principals.current(id) });
+      assert.deepEqual(await cap.of(a, "main"), { state: "free", free: 2, busy: 0, partial: false });
+      assert.deepEqual(await every.of(a, "main"), await cap.of(a, "main"), "judging every active agent counts the same: the wildcard-action agents are not integrators");
+      // The pool agrees: an agent with every action takes nothing (it does not serve a), and the queue stays free for ada and dot.
+      for (const [who, p] of [["bea", star], ["cleo", pre]] as const) assert.equal((await r.pool.next(p, { commandId: `w-${who}`, ttlMs: 10 * MIN })).outcome, "none", who);
+      assert.deepEqual(await cap.of(a, "main"), { state: "free", free: 2, busy: 0, partial: false });
+      // dot takes a through the pool: held by dot, who lands it under a grant for every project.
+      const dot = await r.w.principals.authenticate((await r.w.principals.issueCredential(r.w.owner, "agent:dot")).token);
+      const took = await r.pool.next(dot, { commandId: "w-dot", ttlMs: 10 * MIN });
+      assert.equal(took.outcome, "taken");
+      assert.deepEqual(await cap.of(a, "main"), { state: "held", holder: "dot", expiresAt: took.outcome === "taken" ? took.lease.expiresAt : "", lands: true });
+      assert.deepEqual(await cap.of(a, "other"), { state: "free", free: 1, busy: 1, partial: false }, "dot is busy (a hold under a grant for every project), ada is free");
+    } finally { await r.close(); }
+  });
+
   test(`${backend.name}: liveLeases reads every live lease once, of every holder and project, and stops at its page bound (card P10b)`, async () => {
     const r = await rig();
     try {
