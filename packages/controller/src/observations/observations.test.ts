@@ -8,6 +8,7 @@ import { backends, stopServer } from "../domain/testing/backends.js";
 import { PrincipalService, type Grant, type Principal } from "../security/index.js";
 import type { ControllerStorage } from "../storage/types.js";
 import { ObservationService, type ObservationOptions, type RecordOutcome } from "./index.js";
+import { STALL_KINDS } from "../health/assess.js";
 
 after(stopServer);
 
@@ -365,6 +366,14 @@ for (const backend of backends) {
     const there = idOf(await c.obs.record(c.host, { commandId: cid("x"), kind: "failure", summary: "elsewhere", sources: [{ kind: "stall-concern", id: foreign, event: "confirmed.0" }] }));
     assert.equal(await c.obs.get(c.mgr, there), undefined);
     assert.equal((await c.obs.open(c.mgr, c.a))!.items.some((x) => x.id === there), false);
+    // Every kind the stall detector makes can be cited (the controller's telling is best effort, so a refused kind would be lost without a trace).
+    for (const kind of STALL_KINDS) {
+      const id = await c.concern(c.a, c.taskA, 2, kind.replace("_", "-"));
+      assert.equal((await c.obs.record(c.host, { commandId: cid("k"), kind: "failure", summary: `a ${kind} stall`, sources: [{ kind: "stall-concern", id, event: "confirmed.0" }] })).outcome, "created", kind);
+    }
+    // Two events of one concern named together are two sources, not one.
+    const both = await c.obs.record(c.host, { commandId: cid("x"), kind: "recovery", summary: "both", sources: [...src("confirmed.3"), ...src("recovered.3")] });
+    assert.deepEqual((await c.obs.get(c.owner, idOf(both)))!.sources.map((s) => s.event), ["confirmed.3", "recovered.3"]);
 
     // The decider's words are the detail: credential-shaped text and control characters are made safe, length is cut.
     const secret = `ghp_${"a1B2c3D4e5".repeat(4)}`;

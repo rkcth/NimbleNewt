@@ -5,6 +5,7 @@ import { onlyKnown, projectId as checkProjectId, revision as checkRevision, type
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { canRead as deskCanRead, type DeskRecordBody } from "../context/desks.js";
 import type { ArtifactBody } from "../artifacts/service.js";
+import { STALL_KINDS } from "../health/assess.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
@@ -100,8 +101,8 @@ export type RecordOutcome = { readonly outcome: "created" | "joined"; readonly i
 
 const OBSERVATION_ID = /^obs-[a-z2-7]{20}$/;
 const SOURCE_ID = /^[a-z]{3,4}-[a-z2-7]{20}$/;
-/** The stall service's concern IDs: the task's part, the generation (ten digits) and the kind. */
-const CONCERN_ID = /^stl-[a-z2-7]{20}-[0-9]{10}-(?:loop|repeated-errors|silent|stuck-request|budget)$/;
+/** The stall service's concern IDs: the task's part, the generation (ten digits) and the kind (each of the detector's kinds, written as `concernId` in `health/stall.ts` writes it). */
+const CONCERN_ID = new RegExp(`^stl-[a-z2-7]{20}-[0-9]{10}-(?:${STALL_KINDS.map((k) => k.replace("_", "-")).join("|")})$`);
 /** A concern's event: the stage and the episode (its `reopened` count, at most nine digits, no leading zero). */
 const CONCERN_EVENT = /^(?:confirmed|recovered)\.(?:0|[1-9][0-9]{0,8})$/;
 const sourceKey = (s: SourceRef): string => `${s.kind}:${s.id}${s.event === undefined ? "" : `#${s.event}`}`;

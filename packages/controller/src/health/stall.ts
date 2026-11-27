@@ -634,8 +634,10 @@ export class StallService {
       },
     }));
     // Told from the stored record, so a repeat (answered as recorded) tells the same facts again, and an observation keyed on them is made once.
-    if (command.decision === "confirm") {
-      const stored = await this.#concern(found.id);
+    if (command.decision === "confirm" && this.#onConcern !== undefined) {
+      // The decision is recorded: a failure to read it back for the telling goes to the log, not to the decider (who would otherwise see an error for a decision that stands).
+      let stored: (ConcernBody & { id: string }) | undefined;
+      try { stored = await this.#concern(found.id); } catch (error) { this.#onNote?.(`the confirmed concern ${found.id} could not be read back to be told on (${error instanceof Error ? error.message : String(error)}); the decision itself is recorded`); }
       if (stored !== undefined && stored.decidedBy === by.id && (stored.state === "confirmed" || stored.state === "cleared")) await this.#tellConcern("confirmed", stored, stored.decidedBy, stored.decision ?? reason);
     }
     return decided;

@@ -1750,6 +1750,39 @@ for (const backend of backends) {
     await svc.scan(c.owner);
     assert.equal((await svc.get(c.owner, k8.id))!.clearedBecause, "the signals recovered");
     assert.equal(told.length, 0, "a passed step is not a recovery step");
+    // A step taken and a step passed, then the signals recover: only the step taken is named.
+    const t11 = await c.work();
+    await loop(t11); await svc.scan(c.owner);
+    const k11 = await concernOf(t11);
+    await svc.recover(c.owner, { commandId: cid("rc"), concernId: k11.id, expectedRevision: k11.revision, action: "nudge", text: "please report" });
+    const k11b = (await svc.get(c.owner, k11.id))!;
+    assert.equal((await svc.recover(c.owner, { commandId: cid("rc"), concernId: k11.id, expectedRevision: k11b.revision, action: "rebrief", text: "read it again" })).step?.skipped, true);
+    await c.send(h, t11, { type: "evidence", item: "tests green" });
+    await svc.scan(c.owner);
+    assert.deepEqual(told.map((e) => [e.stage, e.concernId, e.steps]), [["recovered", k11.id, ["nudge"]]]);
+    told.length = 0;
+    // A step taken, then the task released: the concern clears, but nothing recovered.
+    const t10 = await c.work();
+    await loop(t10); await svc.scan(c.owner);
+    const k10 = await concernOf(t10);
+    await svc.recover(c.owner, { commandId: cid("rc"), concernId: k10.id, expectedRevision: k10.revision, action: "nudge", text: "please report" });
+    await c.assignments.releaseTask({ commandId: cid("rel"), actor: c.owner.id, taskId: t10, expectedRevision: (await c.assignments.getAssignment(t10))!.revision });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k10.id))!.clearedBecause, "the task has a new owner or is no longer assigned");
+    assert.equal(told.length, 0, "a released task did not recover");
+    // A confirmed failure whose task moved to another owner did not recover; the decision repeated after the archiving tells the same confirmation again (its observation is then a replay).
+    const t9 = await c.work();
+    await loop(t9); await svc.scan(c.owner);
+    const k9 = await concernOf(t9);
+    await confirm(k9.id, k9.revision, "conf-9");
+    told.length = 0;
+    await c.assignments.transferTask({ commandId: cid("tr"), actor: c.owner.id, taskId: t9, expectedRevision: (await c.assignments.getAssignment(t9))!.revision, to: { kind: "agent", id: "bob" } });
+    await svc.scan(c.owner);
+    assert.equal((await svc.get(c.owner, k9.id))!.clearedBecause, "archived: the task has a new owner");
+    assert.equal(told.length, 0, "a reassigned task did not recover");
+    assert.equal((await confirm(k9.id, k9.revision, "conf-9")).replayed, true);
+    assert.deepEqual(told.map((e) => [e.stage, e.concernId, e.episode, e.by]), [["confirmed", k9.id, 0, c.owner.id]]);
+    told.length = 0;
 
     // The hook failing: the decision stands, the failure is noted, nothing is thrown at the decider.
     fail = true;

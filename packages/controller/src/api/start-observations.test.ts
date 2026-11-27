@@ -149,5 +149,31 @@ test("a stall confirmed as a failure and its recovery are observed by the runnin
     const again = (await c.api.handle(boot.token, { v: 1, op: "observation.list", args: { projectId: project } } as never) as any).result.item;
     assert.deepEqual(again.items.map((x: { id: string; reports: number }) => [x.id, x.reports]), second.items.map((x: { id: string; reports: number }) => [x.id, x.reports]));
     assert.equal(again.rate.created, 2);
+
+    // Another task's concern over two episodes: a nudge taken and the signals recovered (a recovery naming the step), then the loop back and confirmed again (the failure of episode 1, its own observation).
+    const s2 = c.services;
+    // A nudge is a message to the agent, which must be able to read the task.
+    await s2.grants.grant(rob, { commandId: "g-ann-read", grantee: `agent:${made.id}`, action: "task.read", project, source: "direct", basis: "test" } as never);
+    const task2 = (await s2.projects.createTask({ commandId: "t2", actor: rob.id, projectId: project, title: "Write the logout" })).id;
+    await s2.projects.transitionTask({ commandId: "r2", actor: rob.id, taskId: task2, expectedRevision: 1, to: "ready" });
+    await s2.assignments.assignTask({ commandId: "as2", actor: rob.id, taskId: task2, owner: ann } as never);
+    const a2 = (await s2.assignments.getAssignment(task2))!;
+    await s2.assignments.admitAttempt({ commandId: "adm2", actor: rob.id, taskId: task2, expectedRevision: a2.revision, generation: a2.generation, owner: ann, harness: "pi" } as never);
+    await s2.projects.transitionTask({ commandId: "ip2", actor: rob.id, taskId: task2, expectedRevision: (await s2.projects.getTask(task2))!.revision, to: "in_progress" });
+    const loop2 = async (p: string) => { for (let i = 0; i < 6; i++) await s2.stall.report(rob, { commandId: `${p}-${i}`, taskId: task2, generation: a2.generation, event: { type: "step", label: "run tests", actionKey: "tests" } }); };
+    await loop2("l2a"); await s2.stall.scan(rob);
+    const k2 = (await call(boot.token, "stall.concerns", { taskId: task2 })).result.items[0];
+    const nudged = await call(boot.token, "recovery.step", { concernId: k2.id, expectedRevision: k2.revision, action: "nudge", text: "How is it going?" }, "n2");
+    assert.ok(nudged.ok, JSON.stringify(nudged));
+    await s2.stall.report(rob, { commandId: "ev2", taskId: task2, generation: a2.generation, event: { type: "evidence", item: "tests green" } });
+    await s2.stall.scan(rob);
+    await loop2("l2b"); await s2.stall.scan(rob);
+    const k2b = (await call(boot.token, "stall.concern.get", { concernId: k2.id })).result.item;
+    assert.deepEqual([k2b.state, k2b.reopened], ["suspected", 1], JSON.stringify(k2b));
+    const dc2 = await call(boot.token, "stall.decide", { concernId: k2.id, expectedRevision: k2b.revision, decision: "confirm", reason: "the loop is back" }, "dc2");
+    assert.ok(dc2.ok, JSON.stringify(dc2));
+    const third = (await call(boot.token, "observation.list", { projectId: project })).result.item.items.filter((x: { sources: { id: string }[] }) => x.sources[0]!.id === k2.id);
+    assert.deepEqual(third.map((x: { kind: string; sources: { event: string }[]; detail: string }) => [x.kind, x.sources[0]!.event, x.detail]), [["recovery", "recovered.0", "the signals recovered"], ["failure", "confirmed.1", "the loop is back"]], JSON.stringify(third));
+    assert.match(third[0].summary, /after 1 recovery step\(s\) \(nudge\)\.$/);
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
