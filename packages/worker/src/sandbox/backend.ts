@@ -47,6 +47,11 @@ export interface SandboxBackend {
    */
   readonly privateNetwork?: boolean;
   /**
+   * The plain-words refusal the task and the owner see when a recipe with a route reaches this backend and `privateNetwork` is not true (the native Windows and the macOS Seatbelt backends give agents no route in this release, and
+   * say that such a task waits for a Linux host). It only words the refusal: the launcher refuses the route whenever `privateNetwork` is not true, whatever this says. Absent (or not a non-empty string): the launcher's own generic reason.
+   */
+  readonly routeRefusal?: string;
+  /**
    * False when the confined program cannot carry a streamed run (`stream`: a long-lived program that talks to its caller over standard input and output): the request is then refused with a typed reason instead of
    * hanging. Absent or true: it can. The native Windows backend (card A03b, slice 4) is true although a container cannot make pipes: its supervisor relays the lines through two files (see windows-native-channel.ts).
    */

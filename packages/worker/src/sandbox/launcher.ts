@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { safeText } from "@nimblenewt/contracts";
 import type { GuestView, SandboxBackend, SpawnPlan } from "./backend.js";
 import { bubblewrapBackend } from "./linux.js";
 import { seatbeltBackend } from "./seatbelt.js";
@@ -148,6 +149,23 @@ const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_STDIN_BYTES = 1024 * 1024;
 
+/** The longest wording of a route refusal a backend may give (card H12i); the native Windows and the Seatbelt wordings are under 300 characters. */
+export const ROUTE_REFUSAL_MAX = 400;
+
+/**
+ * The words a refused route is told in (card H12i). The refusal itself never depends on them: the caller refuses whenever the backend's `privateNetwork` is not true. A backend's own `routeRefusal` is used only when it is a single line of
+ * printable text of at most `ROUTE_REFUSAL_MAX` characters that the shared credential scanner leaves exactly as it is; anything else (not text, blank, too long, a line break or another control or format character, a credential shape, or a
+ * property that throws when read) gets the launcher's generic reason, so a backend cannot put more than one bounded plain line into the task's and the owner's messages.
+ */
+export function routeRefusalFor(backend: SandboxBackend): string {
+  const generic = `route: the ${safeText(backend.name, 64).replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ")} backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused`;
+  let wording: unknown;
+  try { wording = backend.routeRefusal; } catch { return generic; }
+  if (typeof wording !== "string" || wording.trim() === "" || wording.length > ROUTE_REFUSAL_MAX) return generic;
+  if (/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(wording)) return generic;
+  return safeText(wording, ROUTE_REFUSAL_MAX) === wording ? wording : generic;
+}
+
 function defaultBackend(platform: NodeJS.Platform): SandboxBackend | undefined {
   // Windows: the native launcher (card A03b); Windows Sandbox is no longer selected. Without the administrator's install step it has no capacity and says why; nothing runs unconfined instead.
   return platform === "linux" ? bubblewrapBackend() : platform === "darwin" ? seatbeltBackend() : platform === "win32" ? windowsDefaultBackend(process.env, platform) : undefined;
@@ -245,7 +263,9 @@ export class SandboxLauncher {
       backendName = this.#backend.name;
       const backend = this.#backend;
       if (request.stream !== undefined && backend.interactiveInput === false) throw new SandboxError("unavailable", `stream: the ${backend.name} backend cannot give a confined program the controller's pipes (a pipe made for a program inside the container hangs), so a program that talks over standard input and output is refused; use a request without \`stream\` (standard handles are files)`);
-      if (recipe.route !== undefined && backend.privateNetwork !== true) throw new SandboxError("invalid_recipe", `route: the ${backend.name} backend does not give the sandbox a network of its own, so a route (a proxy on the loopback) would be open to other processes on this machine; it is refused`);
+      // A backend that has its own words for the refusal (native Windows, macOS Seatbelt: a task that needs a route waits for a Linux host) is the one the task and the owner hear, when they are one plain bounded line; the generic reason
+      // is for a backend that has none. The refusal is decided by `privateNetwork` alone.
+      if (recipe.route !== undefined && backend.privateNetwork !== true) throw new SandboxError("invalid_recipe", routeRefusalFor(backend));
       makePlan = () => backend.plan(recipe, command, runId, { interactive: request.stream !== undefined });
     }
 
