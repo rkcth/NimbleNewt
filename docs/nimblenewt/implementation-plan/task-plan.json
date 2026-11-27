@@ -9511,12 +9511,31 @@
       ],
       "deliverable": "User/developer documentation obligations and traceability",
       "acceptance_and_verification": "Behavior change links required doc updates to tested artifact; no unsupported marketing capability claims; doc obligations record owner, applicable version, implementation references and validation status and stale or unverified docs are flagged; the impact check creates assigned update tasks; a release change flags linked docs, support guidance and promotional assets; amended 2026-10-28: the docs role submits a document change (Q01b)",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "ada377aa",
+          "f10bba33",
+          "791d81a2",
+          "3abf7a10",
+          "ec37aac5",
+          "bf18535b",
+          "1aa9a500",
+          "07626ec3",
+          "0dc8ebbd"
+        ],
+        "ci_runs": [
+          "45912941971"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A documentation obligation records its kind (document, support guidance, promotional asset), audience, owner (an agent that may read the project's tasks), applicable version, implementing tasks and validation state (unverified, verified, stale, with reasons); unverified and stale documents are flagged in the docs and task_docs views and by chat, and the P09 landing gate refuses a task whose documents are not verified against its code. Verification binds a docs-role document change (Q01b) to, per implementing task, a code submission and tree whose QA gate passes. A behaviour change (QA evidence recorded or invalidated, or a manual impact check) and a release (a release candidate naming its project and version, or a manual release check) flag the linked documents of every kind and open one update task per subject, ready and assigned to the document's owner; repeats and crashes between the steps open nothing twice, and the owner is told when verified documents go stale. Claims must name a capability of the project's register (the controller's own labels plus owner or director ratings); verification reads the document change's stored text and refuses an unlabelled mention of an experimental or unsupported capability, and a lower rating flags documents verified under the higher one. Limits: the text scan matches the register's names only (no synonyms or paraphrase, simple word-window negation), reads plain text, Markdown and HTML only (images, video, audio, PDF and Office files are checked on their declared claims), and runs only at verification; a version is exact text; unverified documents do not gate a release or a task's done (only a landing); no bridge tools for the docs agent (it uses the state API); the D01 guide's documentation step is D01's."
+      }
     },
     {
       "id": "Q04",

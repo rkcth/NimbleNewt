@@ -16,7 +16,9 @@ test("a schedule made through the state API is held once per slot by the compose
   const file = join(d, "c.sqlite");
   // The API's own services read the real clock (the schedule's start is real now); the dispatcher's clock is moved from there.
   const day = 86_400_000;
-  const at = (offsetDays: number, hhmm: string): number => Date.parse(`${new Date(Date.now() + offsetDays * day).toISOString().slice(0, 10)}T${hhmm}:00.000Z`);
+  // The days are counted from one reading of the clock: read again at each use, a run that crossed 00:00 UTC put the schedule's replay and the dispatcher's times on a day later.
+  const base = Date.now();
+  const at = (offsetDays: number, hhmm: string): number => Date.parse(`${new Date(base + offsetDays * day).toISOString().slice(0, 10)}T${hhmm}:00.000Z`);
   let now = Date.now();
   const clock = (): string => new Date(now).toISOString();
   const open = () => startController({ storage: { kind: "sqlite", path: file }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000, clock } });

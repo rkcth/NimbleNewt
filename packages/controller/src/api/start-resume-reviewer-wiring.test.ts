@@ -29,6 +29,9 @@ const capture = {
   nonCheckpointableTools: [], scratchRecords: [], credentialRefs: [],
 };
 
+// The daily cap counts tokens per UTC day on the system clock, so the metered test holds Date at one mid-day instant: on the real clock a run that crossed 00:00 UTC
+// counted its calls on two days and set the cap against a new day's empty count (as start-work-report.test.ts did in CI run 45912941971).
+const MIDDAY = Date.parse("2026-11-26T12:00:00.000Z");
 let server: Promise<TestServer> | undefined;
 after(async () => { if (server !== undefined) await (await server).stop(); });
 interface Store { readonly name: string; open(): Promise<{ storage: StartOptions["storage"]; close(): Promise<void> }> }
@@ -43,7 +46,8 @@ const stores: Store[] = [
 ];
 
 for (const store of stores) {
-  test(`${store.name}: the resume reviewer is asked only on the route the owner set in chat; when it cannot run the check says not run and the owner decides; nothing is ever passed off as reviewed (card L04d wiring)`, async () => {
+  test(`${store.name}: the resume reviewer is asked only on the route the owner set in chat; when it cannot run the check says not run and the owner decides; nothing is ever passed off as reviewed (card L04d wiring)`, async (ctx) => {
+    ctx.mock.timers.enable({ apis: ["Date"], now: MIDDAY });
     const db = await store.open();
     const root = mkdtempSync(join(tmpdir(), "nn-rrcheckout-"));
     const dir = join(root, "checkout");

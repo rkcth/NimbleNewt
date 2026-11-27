@@ -31,6 +31,9 @@ const verdictModel = (verdict: { relevant: boolean; rationale: string }, asked: 
 });
 
 // The stores a controller can be started on. The typical tier (NIMBLENEWT_TIER=typical) runs SQLite only.
+// The daily cap counts tokens per UTC day on the system clock, so the metered test holds Date at one mid-day instant: on the real clock a run that crossed 00:00 UTC
+// counted its calls on two days and set the cap against a new day's empty count (as start-work-report.test.ts did in CI run 45912941971).
+const MIDDAY = Date.parse("2026-11-26T12:00:00.000Z");
 let server: Promise<TestServer> | undefined;
 after(async () => { if (server !== undefined) await (await server).stop(); });
 interface Store { readonly name: string; open(): Promise<{ storage: StartOptions["storage"]; close(): Promise<void> }> }
@@ -224,7 +227,8 @@ for (const store of stores) {
     } finally { await w.close(); }
   });
 
-  test(`${store.name}: the reviewer's model is behind the controller's routed client: its routes come from the routing table, a rate-limited route is cooled down and skipped, its tokens are counted, and at the daily cap no call is made (card L04d)`, async () => {
+  test(`${store.name}: the reviewer's model is behind the controller's routed client: its routes come from the routing table, a rate-limited route is cooled down and skipped, its tokens are counted, and at the daily cap no call is made (card L04d)`, async (ctx) => {
+    ctx.mock.timers.enable({ apis: ["Date"], now: MIDDAY });
     const asked: string[] = [];
     let first = true;
     const answer = (user: string): string => JSON.stringify(Object.fromEntries((user.match(/these ids: ([^\n]*)/)?.[1] ?? "").split(", ").filter((x) => x !== "").map((id) => [id, { relevant: false, rationale: "the task only reads the soil report" }])));
