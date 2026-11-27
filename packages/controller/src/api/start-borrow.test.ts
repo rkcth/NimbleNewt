@@ -102,6 +102,7 @@ test("the owner borrows the improvement reserve in chat, admission lends the pla
     const after = await ask();
     assert.match(after, /^Last emergency borrow brw-[a-z2-7]{20} \(your reason: "the customer demo is at five"\) lent 1 place\(s\) from \S+ to \S+ \(you ended it early\) and let in 1 attempt\(s\), 1 still running; review it by \S+\. The floor may be lent again from \S+\.$/m);
     assert.ok(!/^Emergency borrow brw-/m.test(after), "no borrow is in force now");
+    assert.ok(!after.includes(`to ${until} (you ended it early)`), "the line says when it really ended, not its planned expiry");
     await admission.release({ commandId: "rel-urgent", actor: "dispatcher", requestId: urgent.id, reason: "done" });
     assert.equal((await admission.where(pc.id)).state, "running", "the borrowed place went back to improvement work when its attempt ended");
     void p;

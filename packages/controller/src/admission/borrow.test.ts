@@ -142,6 +142,9 @@ for (const backend of backends) {
     // Improvement work still gets the next place that frees: a borrow lends, it does not shut improvement work out.
     await release(p[1]!.id);
     assert.equal((await admission.where(pc.id)).state, "running");
+    // The owner lowers the floor while the borrow is in force: the view says it lends no more than the floor now keeps.
+    await c.allocate({ "workClass.pcFloor": 0, "workClass.pcCeiling": 50 });
+    assert.deepEqual([(await admission.balance(owner)).borrow?.places, (await admission.balance(owner)).borrow?.lends], [1, 0]);
     assert.equal(clock.now, T0);
   });
 
@@ -233,6 +236,13 @@ for (const backend of backends) {
     await refuses("invalid_command", () => L({ places: 2 }), /^places: the floor keeps 1 place\(s\) for improvement work; borrow at most that many, or lower workClass\.pcFloor/);
     await refuses("invalid_command", () => L({ until: "2026-11-28" }), /^until: must be a date and time with its time zone/);
     await refuses("invalid_command", () => L({ until: "2026-11-28T10:00:00" }), /^until: must be a date and time with its time zone/);
+    // Inputs that should be refused, never read as some other time: a day the calendar does not have (Date.parse reads 30 November + 1 as 1 December), hour 24, a leap second, month 13, a
+    // lowercase z, spaces or a line end around it, a five-digit year, an offset out of range, a number or a non-string.
+    for (const odd of ["2026-11-31T10:00:00Z", "2026-11-28T24:00:00Z", "2026-11-28T23:59:60Z", "2026-13-01T00:00:00Z", "2026-11-28T10:00:00z", " 2026-11-28T10:00:00Z", "2026-11-28T10:00:00Z\n", "+02026-11-28T10:00:00Z", "2026-11-28T10:00:00+24:00", "2026-11-28T10:00:00+05:60", Date.parse(at(T0, 6)), { toString: () => at(T0, 6) }]) {
+      await refuses("invalid_command", () => L({ until: odd }), /^until: must be a date and time with its time zone/);
+      await refuses("invalid_command", () => L({ reviewBy: odd }), /^reviewBy: must be a date and time with its time zone/);
+    }
+    assert.equal((await c.admission.snapshot()).borrows, undefined, "nothing was recorded");
     await refuses("invalid_command", () => L({ until: T0 }), /^until: must be after now/);
     await refuses("invalid_command", () => L({ until: at(T0, BORROW_MAX_HOURS + 0.01), reviewBy: at(T0, 100) }), new RegExp(`^until: a borrow lasts at most ${BORROW_MAX_HOURS} hours \\(until ${at(T0, BORROW_MAX_HOURS)} at the latest\\)`));
     await refuses("invalid_command", () => L({ reviewBy: at(T0, 5) }), /^reviewBy: must be on or after until/);
@@ -245,8 +255,10 @@ for (const backend of backends) {
     await refuses("forbidden", () => c.admission.borrow(agent, { commandId: cid("b"), reason: "r", places: 1, until: at(T0, 1), reviewBy: at(T0, 2) }));
     await refuses("forbidden", () => c.admission.borrow({ ...owner, taskScope: { taskId: "task-x", projectId: c.garden } }, { commandId: cid("b"), reason: "r", places: 1, until: at(T0, 1), reviewBy: at(T0, 2) }));
     // A time with an offset is the same instant in UTC.
-    const ok = await L({ until: "2026-11-27T12:00:00-05:00", reviewBy: "2026-11-30T09:00:00-05:00" });
+    const ok = await L({ reason: "the release is due tonight; key sk-abcdefghijklmnopqrstuvwx", until: "2026-11-27T12:00:00-05:00", reviewBy: "2026-11-30T09:00:00-05:00" });
     assert.deepEqual([ok.until, ok.reviewBy], ["2026-11-27T17:00:00.000Z", "2026-11-30T14:00:00.000Z"]);
+    // A credential pasted into the reason is never kept.
+    assert.equal((await c.admission.snapshot()).borrows?.[0]?.reason, "the release is due tonight; key [redacted]");
     assert.equal(clock.now, T0);
   });
 
@@ -264,6 +276,9 @@ for (const backend of backends) {
     const settled = await Promise.allSettled([c.lend({}, admission, "race-a"), c.lend({}, reopen(), "race-b")]);
     // The first borrow lasted no time at all (ended at T0), so the rest is over at once; exactly one of the two racing borrows starts.
     assert.equal(settled.filter((s) => s.status === "fulfilled").length, 1, JSON.stringify(settled.map((s) => s.status === "rejected" ? String(s.reason) : "ok")));
+    // Repeated again after later borrows: still the borrow that command started, not the newest.
+    const late = await c.lend({ until: at(T0, 6), reviewBy: at(T0, 30) }, reopen(), "same");
+    assert.deepEqual([late.borrowId, late.replayed, late.againFrom], [first.borrowId, true, undefined]);
   });
 
   suite("damaged stored borrows admit nothing new and are never read as no borrow; release still frees the place; the view and the wait reason say so", async (c) => {
@@ -281,6 +296,17 @@ for (const backend of backends) {
     assert.match(view.borrowProblem ?? "", /cannot be read, so nothing new is admitted until they are repaired/);
     await release(running.id);
     assert.equal((await admission.snapshot()).running.length, 0, "release still works");
+    // Other shapes `borrow` never writes are damage too: a review date before the expiry, and borrows out of order.
+    const b = stored.borrows![0]!;
+    const shapes: Record<string, unknown[]> = {
+      "review-before-expiry": [{ ...b, reviewBy: b.from }],
+      "out-of-order": [{ ...b, id: "brw-aaaaaaaaaaaaaaaaaaaa", from: at(b.from, 1) }, b],
+    };
+    for (const [tag, borrows] of Object.entries(shapes)) {
+      const { revision: _rv, ...now } = await admission.snapshot(); void _rv;
+      await damage(c.storage, c.epoch, c.clock.now, { ...now, borrows }, tag);
+      await refuses("integrity", () => c.ask("P"), /emergency borrows stored in the admission record are damaged/);
+    }
   });
 }
 

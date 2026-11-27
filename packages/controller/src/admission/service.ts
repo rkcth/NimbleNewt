@@ -44,10 +44,16 @@ export const BORROW_REVIEW_DAYS = 30;
 const HOUR_MS = 3_600_000;
 const BORROW_ID = /^brw-[a-z2-7]{20}$/;
 /** A full ISO time (date, time and Z or an offset), as an emergency borrow's times must be given: a bare date would be read as a UTC day, which is not the owner's day. */
-const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const instant = (v: unknown, field: string): string => {
-  if (typeof v !== "string" || !INSTANT.test(v) || !Number.isFinite(Date.parse(v))) return invalid(field, "must be a date and time with its time zone, such as 2026-11-28T18:00:00-05:00");
-  return new Date(Date.parse(v)).toISOString();
+  const m = typeof v === "string" ? INSTANT.exec(v) : null;
+  // A day the calendar does not have (2026-02-30, which Date.parse reads as 2 March) and hour 24 are refused, never moved to another day.
+  const [y, mo, d, h, mi, s, oh, om] = (m ?? []).slice(1).map((x) => (x === undefined ? 0 : Number(x)));
+  const day = new Date(Date.UTC(y ?? 0, (mo ?? 1) - 1, d ?? 1));
+  if (m === null || mo! < 1 || mo! > 12 || day.getUTCMonth() !== mo! - 1 || day.getUTCDate() !== d || h! > 23 || mi! > 59 || s! > 59 || oh! > 23 || om! > 59 || !Number.isFinite(Date.parse(v as string))) {
+    return invalid(field, "must be a date and time with its time zone, such as 2026-11-28T18:00:00-05:00");
+  }
+  return new Date(Date.parse(v as string)).toISOString();
 };
 
 /** One emergency borrow as the owner reviews it: what was directed and what it did (`taken`: production attempts it let in that would otherwise have been held for waiting improvement work). */
