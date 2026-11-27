@@ -47,6 +47,12 @@ const meetingWithInvestigation = async (w: FloorWorld): Promise<string> => {
   await run(w, rec);
   return rec;
 };
+/** Deletes a record the way retention does (the storage keeps a tombstone of another kind). */
+const removeAggregate = async (w: FloorWorld, kind: string, id: string): Promise<void> => {
+  const found = (await w.storage.getAggregate({ kind, id }))!;
+  const ref = { kind, id };
+  await w.storage.applyOperation({ operationId: cid("del"), epoch: await w.storage.currentEpoch(), actor: "service:test", correlationId: cid("del"), at: "2026-11-14T08:00:00.000Z", changes: [{ type: "delete", ref, expectedRevision: found.revision }], audit: [{ type: "test.delete", subject: ref, detail: {} }], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+};
 const tasksTitled = async (w: FloorWorld, prefix: string): Promise<string[]> => (await w.projects.listTasks({ projectId: w.project, limit: 200 })).items.filter((t) => t.title.startsWith(prefix)).map((t) => t.id);
 
 floorSuite(test, "a cited source's revision is read only for a project-visible record of the meeting's own project; anything else is not checked", async (w) => {
@@ -69,9 +75,19 @@ floorSuite(test, "a cited source's revision is read only for a project-visible r
   assert.equal((stored?.body as { projectId?: unknown } | undefined)?.projectId, w.project, "the desk record is in the meeting's project");
   assert.equal(await src({ kind: "desk-record", id: desk.id }, ctx), undefined, "a desk record of the meeting's own project is not checked");
   assert.equal(await src({ kind: "task", id: "tsk-does-not-exist" }, ctx), undefined, "a missing record is not checked");
-  for (const bad of [{ kind: "task", id: "../etc/passwd" }, { kind: "task", id: "x".repeat(500) }, { kind: "task", id: "" }, { kind: "Task", id: t.id }, { kind: "", id: t.id }, { kind: 7, id: t.id }, { kind: "task", id: null }]) {
+  const gone = await w.task("Removed later");
+  await removeAggregate(w, "task", gone.id);
+  assert.equal(await w.storage.getAggregate({ kind: "task", id: gone.id }), undefined, "the task is deleted");
+  assert.equal(await src({ kind: "task", id: gone.id }, ctx), undefined, "a deleted record of the meeting's own project is not checked");
+  let reads = 0;
+  const counted = floorSourceRevision({ getAggregate: async (ref) => { reads += 1; return w.storage.getAggregate(ref); } });
+  for (const bad of [{ kind: "task", id: "../etc/passwd" }, { kind: "task", id: "x".repeat(500) }, { kind: "task", id: "x".repeat(121) }, { kind: "task", id: "tsk-été" }, { kind: "task", id: "" }, { kind: "Task", id: t.id }, { kind: "", id: t.id }, { kind: 7, id: t.id }, { kind: "task", id: null }]) {
     assert.equal(await src(bad as never, ctx), undefined, `hostile cite refused: ${JSON.stringify(bad).slice(0, 60)}`);
+    assert.equal(await counted(bad as never, ctx), undefined);
   }
+  assert.equal(reads, 0, "a malformed or oversized cite is refused before any read");
+  assert.equal(await counted({ kind: "task", id: "x".repeat(120) }, ctx), undefined);
+  assert.equal(reads, 1, "an ID of 120 characters is still looked up");
   const failing = floorSourceRevision({ getAggregate: async () => { throw new Error("read failed at /var/lib/secret"); } });
   assert.equal(await failing({ kind: "task", id: t.id }, ctx), undefined, "a failed read is not checked, and the error is not passed on");
 });
@@ -106,19 +122,24 @@ floorSuite(test, "an answer to the owner marks a changed source stale and lists 
   const same = await w.task("Build host");
   const other = await otherProjectTask(w);
   for (let i = 0; i < 3; i += 1) await w.projects.updateTask({ commandId: cid("uo"), actor: w.owner.id, taskId: other.task, expectedRevision: i + 1, title: `Elsewhere ${i}` });
+  const desk = (await w.desks.write(w.asA, { commandId: cid("dw"), projectId: w.project, kind: "note", title: "draft", body: "A's draft", visibility: "private", status: "draft" } as never)) as unknown as { id: string };
+  const gone = await w.task("Removed later");
+  await removeAggregate(w, "task", gone.id);
   const { rec } = await w.meet();
   await start(w, rec);
-  const sources = [`task:${changed.id}@1`, `task:${same.id}@1`, `agent:${bare(w.pA)}@1`, `task:${other.task}@1`, "task:tsk-missing@1", `task:${changed.id}`];
+  const hidden = [`agent:${bare(w.pA)}@1`, `task:${other.task}@1`, "task:tsk-missing@1", `desk-record:${desk.id}@1`, `task:${gone.id}@1`];
+  const sources = [`task:${changed.id}@1`, `task:${same.id}@1`, ...hidden.slice(0, 3), `task:${changed.id}`, ...hidden.slice(3)];
   w.script.on((r) => (r.kind === "owner-answer" ? reply(`ANSWER: The warmer runs at midnight.\nSOURCES: ${sources.join(", ")}\nCOMPLETED: checked the schedule\nPROPOSED: move it to 01:00\nINVESTIGATE: none`) : undefined));
   await w.floor.ask(w.owner, { commandId: cid("ask"), recordId: rec, agent: w.pB, question: "When does the warmer run?" });
   await run(w, rec);
   const answer = (await floorOf(w, rec)).ownerAnswers.at(-1)!;
   assert.deepEqual(answer.stale, [`task:${changed.id}@1 (now at revision 2)`]);
-  assert.deepEqual(answer.unchecked, [`agent:${bare(w.pA)}@1`, `task:${other.task}@1`, "task:tsk-missing@1"], "private, another project's and missing sources are not checked");
+  // the same words for every source that was not checked, whatever the reason: a private kind, another project's record, a missing one, a desk record of this project, a deleted one
+  assert.deepEqual(answer.unchecked, hidden, "private, another project's, missing, desk and deleted sources are not checked, each listed as cited");
   assert.deepEqual([answer.completed, answer.proposed], [["checked the schedule"], ["move it to 01:00"]], "done and proposed stay apart");
   const said = (await transcript(w, rec)).find((e) => e.text.startsWith("(to the owner)"))!.text;
   assert.match(said, /Stale sources \(changed since the agent looked\): task:\S+@1 \(now at revision 2\)/);
-  assert.match(said, /Sources not checked \(could not be confirmed current\): /);
+  assert.ok(said.split("\n").includes(`Sources not checked (could not be confirmed current): ${hidden.join("; ")}`), said);
   assert.ok(!said.includes("revision 4"), "another project's revision is never told");
   assert.ok(!said.includes(`${same.id}@1 (now`), "a current source is not marked");
 });
@@ -133,7 +154,9 @@ floorSuite(test, "at most ten cited revisions are looked up for one answer; the 
   const many = Array.from({ length: 15 }, () => `task:${t.id}@1`).join(", ");
   w.script.on((r) => (r.kind === "owner-answer" ? reply(`ANSWER: See the task.\nSOURCES: ${many}\nCOMPLETED: none\nPROPOSED: none\nINVESTIGATE: none`) : undefined));
   await w.floor.ask(w.owner, { commandId: cid("ask"), recordId: rec, agent: w.pA, question: "Where is it written?" });
-  await run(w, rec);
+  // drive takes the command ID the API passes and still refuses a field it does not know, itself (not only through the API's argument list)
+  await assert.rejects(w.floor.drive(w.service, { recordId: rec, maxUnits: 1, commandId: cid("dr"), extra: true } as never), (e: unknown) => e instanceof DomainError && e.code === "invalid_command");
+  await w.floor.drive(w.service, { recordId: rec, maxUnits: 200, commandId: cid("dr") });
   assert.equal(reads, 10, "ten reads");
   assert.deepEqual((await floorOf(w, rec)).ownerAnswers.at(-1)!.unchecked, ["5 more"]);
 });
