@@ -148,6 +148,31 @@ test("composed: a recipient that may not see leases or workspace requests is tol
       assert.match(gap.result.item.package.sections.locks, /a workspace operation \(refresh\) is in progress/);
       assert.ok((await call("handoff.cancel", { handoffId: gap.result.item.id }, "hc-gap")).ok);
     } finally { (c.services.integratorLeases as { forTask: unknown }).forTask = forTask; }
+    // Second review: the recipient's rights failing to read give no details (fail closed) and keep every line; the resource-claims read failing is its own gap line and keeps the lines before it.
+    const get = c.services.principals.get.bind(c.services.principals);
+    let recipientReads = 0;
+    (c.services.principals as { get: unknown }).get = async (id: string) => { if (id === `agent:${leasesOnly}` && recipientReads++ > 0) throw new Error("storage down"); return get(id); };
+    try {
+      const closed = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h-rights");
+      assert.ok(closed.ok, JSON.stringify(closed));
+      const l = closed.result.item.package.sections.locks as string;
+      assert.ok(recipientReads >= 2, "the locks source read the recipient after the eligibility check");
+      assert.match(l, /^integrator leases: 1 held by the sender for this task;/m, l);
+      assert.match(l, /a workspace operation \(refresh\) is in progress/, l);
+      assert.ok(!l.includes("branch integration") && !l.includes(`fence ${lease.fence}`), l);
+      assert.ok((await call("handoff.cancel", { handoffId: closed.result.item.id }, "hc-rights")).ok);
+    } finally { (c.services.principals as { get: unknown }).get = get; }
+    const list = c.services.responsibilities.list;
+    (c.services.responsibilities as { list: unknown }).list = async () => { throw new Error("storage down"); };
+    try {
+      const claims = await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h-claims");
+      assert.ok(claims.ok, JSON.stringify(claims));
+      const l = claims.result.item.package.sections.locks as string;
+      assert.match(l, /^resource claims: could not be read just now, .*not absent$/m, l);
+      assert.match(l, /^integrator lease on branch integration: held by /m, l);
+      assert.match(l, /a workspace operation \(refresh\) is in progress/, l);
+      assert.ok((await call("handoff.cancel", { handoffId: claims.result.item.id }, "hc-claims")).ok);
+    } finally { (c.services.responsibilities as { list: unknown }).list = list; }
     const half = (await call("handoff.prepare", { taskId: task, to: { kind: "agent", id: leasesOnly }, reason: "A moves on" }, "h2")).result.item;
     assert.match(half.package.sections.locks, new RegExp(`integrator lease on branch integration: held by ${a} \\(the sender, fence ${lease.fence}`));
     assert.ok(!half.package.sections.locks.includes("owner:rob") && !half.package.sections.locks.includes("wsr-"), half.package.sections.locks);

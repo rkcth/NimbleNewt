@@ -110,3 +110,15 @@ test("format characters in a stored value are dropped, so it cannot reorder or h
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut), JSON.stringify(cut));
   assert.equal(cut, "ab...");
 });
+
+test("a credential in a stored value is redacted before the cut: a cut through it would leave a head the section's redaction no longer knows (card L03j second review)", () => {
+  // Synthetic credential shapes (not real keys), each placed so the 200-character branch cut falls inside it.
+  for (const secret of ["ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8", "sk-ant-api03-" + "Zx9Q".repeat(24)]) {
+    for (let pad = 150; pad <= 196; pad += 2) {
+      const [line] = holdLines(facts({ leases: [{ branch: `${"x".repeat(pad)}/${secret}`, fence: 1, expiresAt: "t" }], frozen: undefined, open: undefined }), ALL);
+      assert.ok(!line!.includes(secret.slice(0, 6)), `pad ${pad}: ${line!.slice(150, 260)}`);
+    }
+    assert.ok(!oneLine(`release/${secret}`).includes(secret.slice(0, 6)), "uncut, redacted too");
+  }
+  assert.equal(oneLine("release/2026-11"), "release/2026-11", "an ordinary branch is left as it is");
+});

@@ -1,5 +1,6 @@
 import { allowsExactly, inTaskScope } from "../security/access.js";
 import type { Principal } from "../security/principals.js";
+import { redactText } from "../security/redact.js";
 import { safeSlice } from "./handoff-cut.js";
 
 /**
@@ -37,10 +38,11 @@ export const NAMED_LEASES = 8;
 
 /**
  * One line of at most `max` characters: control characters and line breaks become spaces, so a stored value cannot start a line of its own; invisible format characters (bidi controls, zero-width
- * characters) are dropped, so a stored value cannot reorder or hide the controller's words around it. The cut never ends between the two halves of a surrogate pair.
+ * characters) are dropped, so a stored value cannot reorder or hide the controller's words around it. The cut never ends between the two halves of a surrogate pair. A credential is redacted before the cut:
+ * cut first, its shortened head would no longer read as one to the redaction of the whole section.
  */
 export function oneLine(value: unknown, max = 120): string {
-  const s = (typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "?").replace(/\p{Cf}+/gu, "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+  const s = redactText((typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "?").replace(/\p{Cf}+/gu, "").replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")).trim();
   return s.length === 0 ? "?" : s.length > max ? `${safeSlice(s, max - 3)}...` : s;
 }
 

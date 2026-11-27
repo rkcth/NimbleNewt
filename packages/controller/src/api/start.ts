@@ -1342,8 +1342,9 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
         const out: string[] = [];
         const rightsOf = async (x: { id: string; kind: never; name: string; grants: never }) => grants.effective(x as never, new Date().toISOString());
         // What the recipient may see in detail (card L03j): its rights are read once for every kind of hold below. A recipient that is not an enrolled, active agent sees no details (a disabled principal cannot pass the doors either).
-        const tp = await principals.get(`agent:${to.id}`);
-        const teff = tp === undefined || tp.kind !== "agent" || tp.state !== "active" ? undefined : await rightsOf(tp as never);
+        // Rights that could not be read give no details (fail closed), and do not take the lines below with them.
+        let teff: Awaited<ReturnType<typeof rightsOf>> | undefined;
+        try { const tp = await principals.get(`agent:${to.id}`); teff = tp === undefined || tp.kind !== "agent" || tp.state !== "active" ? undefined : await rightsOf(tp as never); } catch { teff = undefined; }
         // The sender's integrator leases for this task, a freeze left by an ended workspace request, and the operation open on the checkout (whoever started it). Each failing read is a gap, said so.
         // Only the request itself (through the recovery loop) lifts a freeze, and the operation ends itself: the hand-off names them and never ends, lifts or takes over either.
         const read = async <T,>(run: () => Promise<T>): Promise<T | typeof UNREADABLE> => { try { return await run(); } catch { return UNREADABLE; } };
@@ -1353,30 +1354,32 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
           frozen: await read(() => workspaceOps.heldFor(taskId)),
           open: await read(() => workspaceOps.openFor(taskId)),
         }, recipientSees(teff as never, projectId, taskId)));
-        // Resource claims held by the responsibilities the sender answers for: the claim belongs to the responsibility, so it stays with the sender until that is reassigned.
-        const eff = await rightsOf(p as never);
-        const mine = await responsibilities.list(eff as never, projectId, { state: "active" });
-        // The sender being unable to read responsibilities is a gap in what is known, not the absence of claims: say so rather than show only the checkout line as if complete.
-        if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return out; }
-        const claims: { resourceId: string; responsibilityId: string }[] = [];
-        let unchecked = 0;
-        for (const r of mine) {
-          if (r.ownerId !== p.id) continue;
-          for (const resourceId of r.managed) { try { const c = await resources.heldClaim(resourceId); if (c !== undefined && c.responsibilityId === r.id) claims.push({ resourceId, responsibilityId: r.id }); } catch { unchecked++; } }
-        }
-        if (unchecked > 0) out.push(`resource claims: ${unchecked} managed ${unchecked === 1 ? "entry" : "entries"} of the sender's responsibilities could not be checked and ${unchecked === 1 ? "is" : "are"} missing from this section`);
-        // Only what the recipient may see by name: it needs resource.read and to be able to read the responsibility; the rest is given as a count and kinds.
-        const seeResources = teff !== undefined && allows(teff as never, "resource.read", projectId);
-        const theirs = teff === undefined ? undefined : await responsibilities.list(teff as never, projectId, { state: "active" });
-        const seeable = new Set((theirs ?? []).map((r) => r.id));
-        const kinds = new Map<string, number>(); let hidden = 0;
-        for (const c of claims) {
-          if (seeResources && seeable.has(c.responsibilityId)) { out.push(`resource ${c.resourceId}: claimed by responsibility ${c.responsibilityId}; the claim stays with ${c.responsibilityId} until it is reassigned`); continue; }
-          hidden++;
-          const kind = (await resources.kindOf(c.resourceId).catch(() => undefined)) ?? "unknown";
-          kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
-        }
-        if (hidden > 0) out.push(`resource claims: ${hidden} held by the sender's responsibilities (${[...kinds].map(([k, n]) => `${k} x${n}`).join(", ")}); details withheld, the recipient may not read them`);
+        // Resource claims held by the responsibilities the sender answers for: the claim belongs to the responsibility, so it stays with the sender until that is reassigned. A failing read here is its own gap line and keeps the lines above.
+        try {
+          const eff = await rightsOf(p as never);
+          const mine = await responsibilities.list(eff as never, projectId, { state: "active" });
+          // The sender being unable to read responsibilities is a gap in what is known, not the absence of claims: say so rather than show only the checkout line as if complete.
+          if (mine === undefined) { out.push("resource claims: not known; the sender may not read the project's responsibilities, so claims it holds are missing from this section, not absent"); return out; }
+          const claims: { resourceId: string; responsibilityId: string }[] = [];
+          let unchecked = 0;
+          for (const r of mine) {
+            if (r.ownerId !== p.id) continue;
+            for (const resourceId of r.managed) { try { const c = await resources.heldClaim(resourceId); if (c !== undefined && c.responsibilityId === r.id) claims.push({ resourceId, responsibilityId: r.id }); } catch { unchecked++; } }
+          }
+          if (unchecked > 0) out.push(`resource claims: ${unchecked} managed ${unchecked === 1 ? "entry" : "entries"} of the sender's responsibilities could not be checked and ${unchecked === 1 ? "is" : "are"} missing from this section`);
+          // Only what the recipient may see by name: it needs resource.read and to be able to read the responsibility; the rest is given as a count and kinds.
+          const seeResources = teff !== undefined && allows(teff as never, "resource.read", projectId);
+          const theirs = teff === undefined ? undefined : await responsibilities.list(teff as never, projectId, { state: "active" });
+          const seeable = new Set((theirs ?? []).map((r) => r.id));
+          const kinds = new Map<string, number>(); let hidden = 0;
+          for (const c of claims) {
+            if (seeResources && seeable.has(c.responsibilityId)) { out.push(`resource ${c.resourceId}: claimed by responsibility ${c.responsibilityId}; the claim stays with ${c.responsibilityId} until it is reassigned`); continue; }
+            hidden++;
+            const kind = (await resources.kindOf(c.resourceId).catch(() => undefined)) ?? "unknown";
+            kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+          }
+          if (hidden > 0) out.push(`resource claims: ${hidden} held by the sender's responsibilities (${[...kinds].map(([k, n]) => `${k} x${n}`).join(", ")}); details withheld, the recipient may not read them`);
+        } catch { out.push("resource claims: could not be read just now, so any the sender's responsibilities hold are missing from this section, not absent"); return out; }
         // Every kind of hold was read: none is a known answer, not a gap.
         return out.length === 0 ? [LOCKS_NONE] : out;
       },
