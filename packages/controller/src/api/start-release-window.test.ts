@@ -134,6 +134,10 @@ test("a maintenance window set by chat activates its release in the dispatcher's
     assert.deepEqual([quiet.prior, quiet.paused, quiet.running], ["active", true, 0]);
     assert.equal((JSON.parse(readFileSync(join(root, "current.json"), "utf8")) as { release: string }).release, id);
     assert.equal((await owner("release.window.cancel", { windowId }, "cx")).error?.code, "invalid_transition", "an activated window is rolled back, not cancelled");
+    // K07 bound slice: the real wiring says which release runs here (none: not started from a release), so the window is bounded by its close and the owner's notice says by when.
+    await sweep();
+    const held = (await NotificationService.withEpoch(c.storage, c.epoch, {}).inbox(rob)).items.filter((i) => i.ref.kind === "release-window");
+    assert.ok(held.some((i) => /Restart by \d{4}-\d\d-\d\d \d\d:\d\d UTC or it is undone\./.test(JSON.stringify(i))), JSON.stringify(held));
     assert.ok((await owner("release.confirm", { releaseId: id }, "cf")).ok);
     await sweep();
     await sweep();
