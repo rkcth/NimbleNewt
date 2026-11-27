@@ -411,6 +411,36 @@ describe("A03b native launcher: the backend's plan and its refusals", () => {
       assert.match(records[0]!.backendDetails?.["strength"] ?? "", /weaker than Linux/);
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
+
+  test("H12i: on a real launch, a routed recipe is refused in the native backend's own plain words (tasks wait for a Linux host), before any plan, job file or launch record", async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "nn-native-")));
+    try {
+      const d = (n: string): string => { const p = join(base, n); mkdirSync(p); return p; };
+      const r = { mode: "sandboxed" as const, workdir: d("w"), home: d("h"), scratch: d("s"), readOnly: [], network: "none" as const, env: {}, protectedSubpaths: [], route: { proxyPort: 3128 } };
+      const host = new SimHost();
+      const native = windowsNativeBackend(options(host));
+      assert.equal(native.routeRefusal, REFUSED_ROUTE);
+      assert.notEqual(native.privateNetwork, true);
+      // The real native backend (its own plan, its own refusal text) with only its health replaced, so a launcher on this non-Windows host has capacity, as the other launcher tests in this file do.
+      const stand: SandboxBackend = { ...native, health: async (): Promise<BackendHealth> => ({ healthy: true, backend: native.name }) };
+      const records: LaunchRecord[] = [];
+      const launcher = await SandboxLauncher.create({ backend: stand, protectedPaths: [], audit: (rec) => { records.push(rec); } });
+      assert.equal(launcher.capacity.available, true);
+      let refused: unknown;
+      await assert.rejects(launcher.launch({ recipe: r, command: ["/x"], timeoutMs: 5000, maxOutputBytes: 100 }), (e: unknown) => { refused = e; return e instanceof SandboxError && e.code === "invalid_recipe"; });
+      // Exactly the backend's words, which name the wait for a Linux host; never the launcher's generic reason about other processes on this machine.
+      assert.equal((refused as Error).message, REFUSED_ROUTE);
+      assert.match(REFUSED_ROUTE, /waits for a Linux host$/);
+      assert.doesNotMatch((refused as Error).message, /other processes on this machine/);
+      assert.equal(records.length, 0, "a refused launch writes no record");
+      assert.equal(host.listDir(`${CONTROL}\\jobs`).length, 0, "and makes no job file");
+      // The same backend without its own words falls back to the launcher's generic refusal: the refusal itself never depends on the wording.
+      const { routeRefusal: _unused, ...wordless } = stand; void _unused;
+      const generic = await SandboxLauncher.create({ backend: wordless, protectedPaths: [], audit: (rec) => { records.push(rec); } });
+      await assert.rejects(generic.launch({ recipe: r, command: ["/x"], timeoutMs: 5000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && /does not give the sandbox a network of its own/.test(e.message));
+      assert.equal(records.length, 0);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
 });
 
 const jobFor = (host: SimHost, extra: Partial<NativeJob> = {}, grants?: NativeGrant[]): { job: NativeJob; jobDir: string; backend: SandboxBackend; plan: SpawnPlan } => {

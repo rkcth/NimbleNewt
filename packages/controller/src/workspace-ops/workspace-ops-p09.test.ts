@@ -17,7 +17,7 @@ after(stopServer);
 // Card P09: a landing is gated on the project's required checks, judged on the exact tree it would make. The controller's side through the real policy, contract and gate services: the host is asked to land only after every
 // required check passed, and then only for the tree the checks ran on; a refusal is recorded with the results bound to that tree and goes back to the author; not run counts as failed; the review carries over by patch ID.
 const options = { clock: () => "2026-11-18T10:00:00.000Z", pause: async () => undefined };
-const BASE = "b".repeat(40), HEAD = "c".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), NEW_PATCH = "f".repeat(40);
+const BASE = "b".repeat(40), OLD_BASE = "9".repeat(40), HEAD = "c".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), NEW_PATCH = "f".repeat(40);
 const S1 = "sbm-aaaaaaaaaaaaaaaaaaaa", S2 = "sbm-bbbbbbbbbbbbbbbbbbbb";
 const refuses = async (code: string, run: () => Promise<unknown>, match?: RegExp) => assert.rejects(run, (e: unknown) => { assert.ok(e instanceof DomainError, String(e)); assert.equal(e.code, code, e.message); if (match !== undefined) assert.match(e.message, match); return true; });
 
@@ -48,7 +48,7 @@ for (const backend of backends) {
       ...(host.landingChecks ? { landingChecks: async (call: Parameters<NonNullable<WorkspacePort["landingChecks"]>>[0]) => {
         calls.checks.push(call);
         if (host.throws) throw new Error("the host went away");
-        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit.get(c.name) ?? "passed", exitCode: host.exit.get(c.name) === "failed" ? 1 : 0, ...(host.exit.get(c.name) === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
+        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch, reviewedReplays: true }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit.get(c.name) ?? "passed", exitCode: host.exit.get(c.name) === "failed" ? 1 : 0, ...(host.exit.get(c.name) === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
       } } : {}),
     });
     const told: { commandId: string; taskId: string; to: string; text: string }[] = [];
@@ -160,11 +160,34 @@ for (const backend of backends) {
     const r = await rig();
     try {
       await r.setChecks(r.owner, [{ name: "unit", run: ["npm", "test"] }]);
-      // Reviewed on an older tree, refreshed onto a newer base: same patch, so the approval carries over.
-      r.approvals.set(S1, { ...r.approvals.get(S1)!, tree: OLD_TREE });
-      const carried = await r.land(r.service(), "r1", S1);
+      // Reviewed as another tree on the SAME base, with the same patch ID (the same edit at another place of a file): no refresh happened, so the tree itself is compared and the landing is refused (card P08 landing
+      // re-check). The owner is told once per request; the approval and the submission are left as they are.
+      const reviewedAs = r.approvals.get(S1)!;
+      r.approvals.set(S1, { ...reviewedAs, tree: OLD_TREE });
+      const owner: { commandId: string; taskId: string; text: string }[] = [];
+      const notifying = r.service({ notify: async (n) => { owner.push(n); } });
+      const placed = await r.land(notifying, "r0", S1);
+      assert.equal(placed.state, "refused", placed.summary);
+      assert.equal(placed.checks!.results[1]!.result, "fail");
+      assert.equal(placed.checks!.results[1]!.treeMismatch, true);
+      assert.match(placed.checks!.results[1]!.summary, /approved for tree d{12}, but the landing carries tree e{12} on the same base b{12}; .*a new submission and review are needed/);
+      assert.equal(r.calls.runs.length, 0, "the host is never asked to land");
+      assert.equal(owner.length, 1);
+      assert.match(owner[0]!.text, /^Task \S+ was not landed \(wsr-[a-z2-7]{20}\): its tree is not exactly what its review judged, only the same patch ID\. A new submission must be judged\.$/);
+      assert.ok(owner[0]!.text.length <= 200);
+      assert.equal((await r.land(notifying, "r0", S1)).state, "refused", "a repeat answers the recorded outcome");
+      assert.equal(owner.length, 1, "the owner is not told again for the same request");
+      assert.equal((await r.land(notifying, "r0b", S1)).state, "refused", "another request for the same tree is refused too");
+      assert.equal(owner.length, 2, "the owner is told once per request, not once per task");
+      assert.notEqual(owner[1]!.commandId, owner[0]!.commandId);
+      assert.deepEqual(r.approvals.get(S1), { ...reviewedAs, tree: OLD_TREE }, "the submission's approval is not touched");
+      // Reviewed on an older tree of an older base, refreshed onto a newer base: same patch, so the approval carries over.
+      r.approvals.set(S1, { ...reviewedAs, base: OLD_BASE, tree: OLD_TREE });
+      const carried = await r.land(notifying, "r1", S1);
       assert.equal(carried.state, "done", carried.summary);
       assert.match(carried.checks!.results[1]!.summary, /carried over to this tree because the patch is unchanged/);
+      assert.equal(carried.checks!.results[1]!.treeMismatch, undefined);
+      assert.equal(owner.length, 2, "a landing that passed tells the owner nothing of this");
       // The work changed after the review (a new patch): refused, a new review is needed.
       r.host.change = { base: BASE, head: HEAD, tree: TREE, patchId: NEW_PATCH };
       const changed = await r.land(r.service(), "r2", S1);

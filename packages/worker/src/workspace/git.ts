@@ -960,6 +960,31 @@ export class GitBridge {
     return x.length > 0 && x.length === y.length && x.every((e, i) => e.path === y[i]!.path && e.line === y[i]!.line);
   }
 
+  /**
+   * Card P08 landing re-check (first review): whether `landed` is exactly the `judged` change carried onto `landed.base`. Git's patch ID leaves out line numbers, so the same edit placed in another of two identical
+   * blocks of a file keeps the ID on any base; a judgement given on one tree is shown to hold for another only by this. On the same base the trees must be equal. On another base, `judged.base` must be an ancestor of
+   * `landed.base`, and a three-way re-apply of `judged.base..judged.tree` onto `landed.base` (`merge-tree`, no rename detection, as the author's refresh and the integrator's re-apply work: file by file) must succeed with no
+   * conflict and give exactly `landed.tree`. A conflict, a different tree or a base that is not a later commit answer false; a git that cannot do the re-apply (before 2.40) throws, which the caller counts as not shown.
+   * The re-apply writes only objects (a commit for the judged tree, the merged trees and blobs) into the checkout's own repository; no reference and no file of the checkout changes.
+   */
+  async replays(options: { gitDir: string; judged: { base: string; tree: string }; landed: { base: string; tree: string } }): Promise<boolean> {
+    const { judged, landed } = options;
+    for (const v of [judged.base, judged.tree, landed.base, landed.tree]) if (!OBJECT.test(v)) throw new WorkspaceError("invalid_path", "a change is named by full object IDs");
+    if (judged.base === landed.base) return judged.tree === landed.tree;
+    if (!(await this.isAncestor({ gitDir: options.gitDir, older: judged.base, newer: landed.base }))) return false;
+    const commit = (await this.#run(["commit-tree", judged.tree, "-p", judged.base, "-m", "nimblenewt landing re-check"], { gitDir: options.gitDir })).stdout.trim();
+    if (!OBJECT.test(commit)) throw new WorkspaceError("unavailable", "git commit-tree gave no commit");
+    let out: string;
+    try {
+      out = (await this.#run(["-c", "merge.renames=false", "-c", "merge.directoryRenames=false", "-c", "merge.renormalize=false", "merge-tree", "--write-tree", "--no-messages", "--name-only", `--merge-base=${judged.base}`, landed.base, commit], { gitDir: options.gitDir })).stdout;
+    } catch (error) {
+      // Exit status 1 is merge-tree's own answer: the re-apply has conflicts. Anything else is a failure to answer.
+      if ((error as { cause?: { code?: unknown } }).cause?.code === 1) return false;
+      throw error;
+    }
+    return out.split("\n")[0]!.trim() === landed.tree;
+  }
+
   /** Whether commit `older` is `newer` or one of its ancestors, in the checkout's repository. */
   async isAncestor(options: { gitDir: string; older: string; newer: string }): Promise<boolean> {
     if (!OBJECT.test(options.older) || !OBJECT.test(options.newer)) throw new WorkspaceError("invalid_path", "commits are named by full IDs");
