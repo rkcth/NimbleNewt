@@ -454,7 +454,7 @@ export class WorkspaceOpService {
     if (this.#deps.approvalOf === undefined) throw new DomainError("unavailable", "submissions are not known to this controller, so an approved submission cannot be committed now");
     const a = await this.#deps.approvalOf(value);
     if (a === undefined || a.taskId !== taskId) throw new DomainError("not_found", `submission ${value} is not a code submission of task ${taskId}`);
-    if (!a.approved || a.approvedBy === undefined) throw new DomainError("review_invalid", `submission ${value} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); it is committed only once a reviewer approves it`, { field: "submissionId" });
+    if (!a.approved || a.approvedBy === undefined) throw new DomainError("review_invalid", `submission ${value} is not approved (${redactText(a.reason ?? "no approval").slice(0, 300)}); it is committed only once a reviewer approves it`, { field: "submissionId" });
     // The submission service refuses a review of one's own submission when it is recorded (card Q01b); an approval that still names the author is not an approval (card H12o, permit slice: it would open the review gate).
     if (a.submittedBy !== undefined && a.approvedBy === a.submittedBy) throw new DomainError("review_invalid", `submission ${value} is approved only by its own author; it is committed only once another reviewer approves it`, { field: "submissionId" });
     // An approval carried over from an earlier submission of the same claimed patch (card Q02) is checked only by the landing gate, where the host computes both patches; a release computes none, so it is not a

@@ -129,7 +129,7 @@ for (const backend of backends) {
       const after9 = await subs.approvalOf(u1);
       assert.equal(after9?.approved, false, "once the holder submits code, its earlier approval stops counting");
       assert.match(after9?.reason ?? "", CONTRIBUTED);
-      assert.match(after9?.reason ?? "", /with none left, the owner adds a reviewer agent or drops review from the required checks/, "the owner is told its way out");
+      assert.match(after9?.reason ?? "", /with none left, the owner adds a reviewer agent or drops the review check\)$/, "the owner is told its way out");
     } finally { await world.close(); }
   });
 
@@ -261,7 +261,7 @@ for (const backend of backends) {
       const a1 = await subs.approvalOf(v1);
       assert.equal(a1?.director, undefined);
       assert.match(a1?.directorNotCounted?.reason ?? "", /already contributed code to this task, so it cannot sign it off/);
-      assert.match(a1?.directorNotCounted?.reason ?? "", /with none left, the owner adds one or drops the director check from the required checks/, "the owner is told its way out");
+      assert.match(a1?.directorNotCounted?.reason ?? "", /with none left, the owner adds one or drops the director check\)$/, "the owner is told its way out");
       const view = await landingDirectorGate(subs)(v1);
       assert.equal(view?.signoff, undefined);
       assert.match(view?.notCounted ?? "", /cannot sign it off; another director has to/, "the landing gate's reader is told why");

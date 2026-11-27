@@ -8,6 +8,7 @@ import { scopedCommandId } from "../security/credentials.js";
 import type { Principal } from "../security/principals.js";
 import { WorkspaceOpService, type WorkspaceCall, type WorkspaceOutcome } from "../workspace-ops/index.js";
 import { IntegratorLeaseOps, IntegratorLeaseService, LandingQueueOps, LandingQueueService, type QueueApproval } from "./index.js";
+import { CONTRIBUTOR_APPROVAL_TEXT } from "../submissions/contributors.js";
 
 after(stopServer);
 
@@ -78,6 +79,11 @@ for (const backend of backends) {
       // Not approved, no landing branch, malformed.
       const s4 = r.approve(4, t1, "agent:ann", false);
       await refuses("review_invalid", () => r.ops.add(ann, { commandId: "a3", submissionId: s4 }), /not approved \(its newest review says changes\)/);
+      // Card Q04 re-check: a not-counted approval's reason is kept whole, the owner's way out included, for an agent named with the full 40 characters.
+      const asAnswered = r.approvals.get(s4)!;
+      r.approvals.set(s4, { ...asAnswered, reason: `the approval by agent:${"a".repeat(40)} does not count: ${CONTRIBUTOR_APPROVAL_TEXT}` });
+      await refuses("review_invalid", () => r.ops.add(ann, { commandId: "a3q", submissionId: s4 }), /the owner adds a reviewer agent or drops the review check\)\); only approved work is queued to land$/);
+      r.approvals.set(s4, asAnswered);
       await refuses("invalid_command", () => r.ops.add(ann, { commandId: "a4", submissionId: "sbm-../x" }));
       r.setBranch(undefined);
       const s5 = r.approve(5, t1);

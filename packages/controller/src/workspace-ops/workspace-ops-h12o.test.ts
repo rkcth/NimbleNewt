@@ -7,6 +7,7 @@ import { ProjectService } from "../domain/service.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { PrincipalService } from "../security/index.js";
 import { WorkspaceOpService, type WorkspaceCall, type WorkspaceDeps, type WorkspaceOutcome } from "./index.js";
+import { CONTRIBUTOR_APPROVAL_TEXT } from "../submissions/contributors.js";
 
 after(stopServer);
 
@@ -60,6 +61,11 @@ for (const backend of backends) {
       await refuses("not_found", () => release("a3", "sbm-cccccccccccccccccccc"), /is not a code submission of task/);
       await refuses("not_found", () => release("a4", S2), /is not a code submission of task/);
       await refuses("review_invalid", () => release("a5", S1), /is not approved \(no reviewer has approved it yet\)/);
+      // Card Q04 re-check: a not-counted approval's reason is kept whole, the owner's way out included, for an agent named with the full 40 characters.
+      const asAnswered = r.approvals.get(S1)!;
+      r.approvals.set(S1, { ...asAnswered, reason: `the approval by agent:${"a".repeat(40)} does not count: ${CONTRIBUTOR_APPROVAL_TEXT}` });
+      await refuses("review_invalid", () => release("a5q", S1), /the owner adds a reviewer agent or drops the review check\)\); it is committed only once a reviewer approves it$/);
+      r.approvals.set(S1, asAnswered);
       await refuses("unavailable", () => r.service({ approvalOf: undefined } as never).request(r.owner, { commandId: "a6", operation: "release", taskId: r.task, reason: "x", submissionId: S1 }), /submissions are not known/);
       // A task credential (even one carrying the owner's grants) never asks for a release, so it cannot have its own task's submission committed; the approval is not even looked up.
       r.approvals.set(S1, { ...r.approvals.get(S1)!, approved: true, approvedBy: "agent:rev" });

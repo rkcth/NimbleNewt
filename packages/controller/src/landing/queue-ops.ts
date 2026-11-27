@@ -177,7 +177,7 @@ export class LandingQueueOps {
     const a = await this.#approvalOf(command.submissionId);
     if (a === undefined) throw refused(`submission ${command.submissionId}`);
     if (!this.#integrator(by, a.projectId) && !(await this.#ownAgent(by, a.taskId))(a.submittedBy)) throw refused(`submission ${command.submissionId}`);
-    if (!a.approved) throw new DomainError("review_invalid", `submission ${command.submissionId} is not approved (${redactText(a.reason ?? "no approval").slice(0, 200)}); only approved work is queued to land`, { field: "submissionId" });
+    if (!a.approved) throw new DomainError("review_invalid", `submission ${command.submissionId} is not approved (${redactText(a.reason ?? "no approval").slice(0, 300)}); only approved work is queued to land`, { field: "submissionId" });
     const branch = await this.#branch(a.taskId, a.projectId);
     const r = await this.#queue.enqueue({ commandId: scopedCommandId(by.id, command.commandId), actor: by.id, projectId: a.projectId, branch, submissionId: command.submissionId, taskId: a.taskId, base: a.base, tree: a.tree, author: a.submittedBy, ...(a.submittedAt === undefined ? {} : { submittedAt: a.submittedAt }) });
     return { ...r, branch };

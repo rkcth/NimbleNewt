@@ -64,10 +64,11 @@ export async function taskContributors(runner: Reader, projectId: string, taskId
 /**
  * The plain reason given when a contributor's approval does not count (the owner reads it in the status and the landing gate). It says the owner's way out too (second review: when every reviewer agent of the
  * project contributed, no agent can approve and the owner does not record reviews): add a reviewer agent, or take review out of the project's required landing checks (`integration.set`, by chat as well).
+ * Short enough that the landing gate's review and director summaries (300 characters) and the queue and commit refusals keep the whole of it for an agent name of the full 40 characters.
  */
-export const CONTRIBUTOR_APPROVAL_TEXT = "this agent already contributed code to this task, so it cannot approve it; another reviewer has to (with none left, the owner adds a reviewer agent or drops review from the required checks)";
+export const CONTRIBUTOR_APPROVAL_TEXT = "this agent already contributed code to this task, so it cannot approve it; another reviewer has to (with none left, the owner adds a reviewer agent or drops the review check)";
 /** The same, for a director's sign-off approving the task's code. */
-export const CONTRIBUTOR_SIGNOFF_TEXT = "this agent already contributed code to this task, so it cannot sign it off; another director has to (with none left, the owner adds one or drops the director check from the required checks)";
+export const CONTRIBUTOR_SIGNOFF_TEXT = "this agent already contributed code to this task, so it cannot sign it off; another director has to (with none left, the owner adds one or drops the director check)";
 
 /**
  * The change that adds a code submission's submitter to its task's record, for the same write as the submission (`SubmissionService.record`). `seed` reads the submitters of code recorded before the record existed

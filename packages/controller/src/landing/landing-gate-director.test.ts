@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { LandingGate, type DirectorGateView, type LandingCheckHost, type LandingCheckHostReport, type ReviewedSubmission } from "./landing-gate.js";
-import { CONTRIBUTOR_SIGNOFF_TEXT } from "../submissions/contributors.js";
+import { CONTRIBUTOR_APPROVAL_TEXT, CONTRIBUTOR_SIGNOFF_TEXT } from "../submissions/contributors.js";
 
 // Card P09 (sixth slice): the `director` check. "The director approved this change" is the newest director sign-off recorded on the landed code submission saying approve, bound to the landed patch like `qa`.
 const BASE = "b".repeat(40), TREE = "e".repeat(40), OLD_TREE = "d".repeat(40), PATCH = "a".repeat(40), OTHER = "c".repeat(40);
@@ -44,9 +44,14 @@ test("no sign-off is not run, a decline is a failure, no submission or no reader
   const notCounted = await rig({ director: { ...bare, notCounted: `the sign-off by agent:dee does not count: ${CONTRIBUTOR_SIGNOFF_TEXT}` } }).run();
   assert.deepEqual([notCounted.passed, ...only(notCounted)], [false, "director", "not_run"]);
   assert.match(notCounted.results[0]!.summary, /no director sign-off counts yet: the sign-off by agent:dee does not count: this agent already contributed code to this task/);
-  // Second review: the owner's way out is the end of the words and is not cut off, also for a full-length agent ID.
-  const longId = await rig({ director: { ...bare, notCounted: `the sign-off by agent:agt-${"a".repeat(20)} does not count: ${CONTRIBUTOR_SIGNOFF_TEXT}` } }).run();
-  assert.match(longId.results[0]!.summary, /the owner adds one or drops the director check from the required checks\)$/);
+  // Second review: the owner's way out is the end of the words and is not cut off, also for an agent named with the full 40 characters (and a generated agent ID).
+  for (const name of [`agt-${"a".repeat(20)}`, "a".repeat(40)]) {
+    const longId = await rig({ director: { ...bare, notCounted: `the sign-off by agent:${name} does not count: ${CONTRIBUTOR_SIGNOFF_TEXT}` } }).run();
+    assert.match(longId.results[0]!.summary, /the owner adds one or drops the director check\)$/);
+    const review = await rig({ required: ["review"], approval: { ...(({ approvedBy: _a, ...rest }) => rest)(approved), approved: false, reason: `the approval by agent:${name} does not count: ${CONTRIBUTOR_APPROVAL_TEXT}` } }).run();
+    assert.equal(review.results[0]!.check, "review");
+    assert.match(review.results[0]!.summary, /the owner adds a reviewer agent or drops the review check\)\)$/, "the review check keeps the way out too");
+  }
   const declined = await rig({ director: { ...signed, signoff: { ...signed.signoff!, newest: "decline" } } }).run();
   assert.deepEqual([declined.passed, ...only(declined)], [false, "director", "fail"]);
   assert.match(declined.results[0]!.summary, /declines it/);
