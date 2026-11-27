@@ -87,6 +87,11 @@ export interface RunRecord {
   readonly windowStation?: WindowStationMode;
   /** A streamed run: how much went through the channel (counts only, never content), and anything the relay noted. */
   readonly channel?: ChannelStats & { readonly note?: string };
+  /**
+   * Set only by the leftover sweep (`recordInterrupted`): the run's runner ended without writing this record (it was killed, the owner signed out, the machine restarted), and the sweep, not the run,
+   * revoked its entries and deleted its profile. Such a run never counts as a success: `failure.kind` is `interrupted` and the exit code is unknown.
+   */
+  readonly interrupted?: true;
 }
 
 export const RECORDS_KEPT = 200;
@@ -155,6 +160,21 @@ export function readRecord(host: NativeHost, settings: NativeSettings, runId: st
   const text = host.readText(`${recordsDir(settings)}\\${runId}.json`);
   if (text === undefined) return undefined;
   try { return JSON.parse(text) as RunRecord; } catch { return undefined; }
+}
+
+const RUN_ID = /^[A-Za-z0-9-]{8,64}$/;
+/**
+ * The record of a run that never wrote its own (card A03b, sign-out / restart): written by the sweep once it has retired the run's leftovers, and only when no record of that run exists (a runner that
+ * got as far as its own record said what happened itself). `readBack` is the sweep's: it is called only after a clean read-back and a profile shown gone (or never made). Never throws.
+ */
+function recordInterrupted(host: NativeHost, settings: NativeSettings, runId: string | undefined, startedAt: string | undefined, profile: { readonly name: string; readonly sid?: string } | undefined): void {
+  if (runId === undefined || !RUN_ID.test(runId) || readRecord(host, settings, runId) !== undefined || host.exists(`${recordsDir(settings)}\\${runId}.json`)) return;
+  writeRecord(host, settings, {
+    runId, mode: "native", container: settings.container, startedAt: typeof startedAt === "string" ? startedAt : "", childStarted: false, exitCode: null, timedOut: false,
+    failure: { kind: "interrupted", message: "the run did not finish: its runner ended without recording it (killed, the owner signed out, or the machine restarted); the leftover sweep revoked its entries and deleted its container profile" },
+    grants: [], softRefused: [], entriesLeft: [], readBack: "clean", interrupted: true,
+    ...(profile === undefined ? {} : { profile: { name: profile.name, ...(profile.sid === undefined ? {} : { sid: profile.sid }), deleted: profile.sid !== undefined, gone: true } }),
+  });
 }
 
 /** The runs going on in THIS process (the health probe runs in the controller's own process, so its lock and status file carry the controller's process number). */
@@ -557,11 +577,20 @@ export async function sweepLeftovers(host: NativeHost, settings: NativeSettings,
     const record = readProfileRecord(host, settings, name);
     // Both records gone while the status file is still there: the run was retired (the backend's record is written before the status file and removed only after the read-back was clean and the
     // profile was shown gone, or the launcher never made one), and the runner stopped before it removed its status file. Nothing is left to revoke or delete; the folder goes.
-    if (record === undefined && isRunProfileName(name) && !host.exists(profileJson(settings, name)) && !host.exists(runProfileFor(settings, name).record)) { host.remove(dir); released++; continue; }
+    if (record === undefined && isRunProfileName(name) && !host.exists(profileJson(settings, name)) && !host.exists(runProfileFor(settings, name).record)) {
+      // A runner stopped between the clean-up and its own record (the record comes after the profile records go): the run is recorded as interrupted, never left without a record.
+      recordInterrupted(host, settings, typeof status.runId === "string" ? status.runId : undefined, status.startedAt, { name });
+      host.remove(dir); released++; continue;
+    }
     // The profile record is the proof of what this run made: without it nothing is revoked or deleted by guess.
     if (record === undefined) { problems.push(`${dir}: the run's profile record (${name || "no profile name in the job file"}) is missing or unreadable, so nothing is revoked or deleted for it`); continue; }
     handled.add(name);
-    if (await retire(record, dir)) { host.remove(dir); released++; }
+    const sid = launcherSid(host, settings, name);
+    if (await retire(record, dir)) {
+      // The run's runner is gone and its entries and profile are now shown gone: when it left no record of its own (it was killed, the owner signed out, the machine restarted), say so.
+      recordInterrupted(host, settings, typeof status.runId === "string" ? status.runId : record.runId, status.startedAt ?? record.at, { name, ...(sid === undefined ? {} : { sid }) });
+      host.remove(dir); released++;
+    }
   }
   // Records whose job folder is gone or not listed: a crash between the record and the job folder's status, or a probe's profile.
   if (only === undefined) {
