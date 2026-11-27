@@ -504,6 +504,11 @@ for (const backend of backends) {
     assert.deepEqual(await c.lessons.untold(c.host, c.a, week, 100, more[2]!), []);
     assert.deepEqual(await c.lessons.untold(c.host, c.a, week, 100, "lsn-aaaaaaaaaaaaaaaaaaaa"), []);
     for (const bad of ["", "../x", 7 as never]) await refuses("invalid_command", () => c.lessons.untold(c.host, c.a, week, 100, bad), /afterId/);
+    // Second review: a pending outcome whose history holds no time at all (a damaged record) has no decision time to measure from, so it is not listed (and never gives a notice without a date).
+    const r = new CommandRunner(c.storage, c.epoch, options);
+    const cur = (await r.get("lesson", more[2]!))!;
+    await r.command("test.nohistory", { commandId: cid("nh"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson", id: more[2]! }, creates: false, changes: [{ type: "update" as const, ref: { kind: "lesson", id: more[2]! }, expectedRevision: cur.revision, body: { ...(cur.body as object), history: [] } as never }], detail: {} }) }));
+    assert.deepEqual((await c.lessons.untold(c.host, c.a, week)).map((x) => x.id), more.slice(0, 2));
   });
 
   if (backend.name === backends[0]!.name) {

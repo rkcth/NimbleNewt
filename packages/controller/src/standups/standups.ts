@@ -1053,10 +1053,15 @@ export class StandupService {
     for (const t of next) sections.priorities.push({ text: `${cut(t.body.title, 120)} (priority ${t.priority}, ${STATE_WORDS[t.body.state]}).`, cites: [tcite(t)] });
     const more: Partial<Record<BriefSection, number>> = {};
     // A kept told line is never the one cut (it came from a stored brief, so there are at most as many as the limit): other advice lines that grew since give way, in order, and wait for the next brief.
+    // Then an outcome waiting to be told (B03 second slice, second review): open questions the agent asked (up to ten per task) come first in the section and stay open, so with them first in the cut an
+    // agent with many open questions was never told an outcome in any brief. Outcomes are kept oldest first; the lines keep their order in the brief.
+    const outcomeLine = (e: BriefEntry): boolean => e.cites.length === 1 && (e.cites[0]!.kind === "lesson" || e.cites[0]!.kind === "improvement-item");
     for (const s of BRIEF_SECTIONS) if (sections[s].length > STANDUP_LIMITS.section) {
       more[s] = sections[s].length - STANDUP_LIMITS.section;
-      let room = STANDUP_LIMITS.section - (s === "advice" ? toldLines.size : 0);
-      sections[s] = sections[s].filter((e) => (s === "advice" && toldLines.has(e)) || room-- > 0).slice(0, STANDUP_LIMITS.section);
+      const keep = new Set<BriefEntry>();
+      const ranked = s === "advice" ? [...sections[s].filter((e) => toldLines.has(e)), ...sections[s].filter((e) => !toldLines.has(e) && outcomeLine(e)), ...sections[s].filter((e) => !toldLines.has(e) && !outcomeLine(e))] : sections[s];
+      for (const e of ranked) { if (keep.size >= STANDUP_LIMITS.section) break; keep.add(e); }
+      sections[s] = sections[s].filter((e) => keep.has(e));
     }
     // Only an outcome whose line is still in the brief after the section limit counts as told; one cut off is told next time (B03 second slice; before, a cut-off improvement decision was marked told too).
     const kept = (kind: string) => ([id, revision]: [string, number]): boolean => sections.advice.some((e) => e.cites.some((c) => c.kind === kind && c.id === id && c.revision === revision));

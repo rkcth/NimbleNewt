@@ -348,6 +348,12 @@ test("the owner is shown a lesson outcome that has not reached its proposer for 
   const kept: string[] = [];
   await untoldLessonLoops({ untold: async () => [{ id: "lsn-4", revision: 1, title: fits, status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { kept.push(n.text); })[0]!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.ok(kept[0]!.includes(`"${"a".repeat(57)}\u{1F600}…"`), kept[0]);
+  // Second review: a title of exactly 60 units is shown whole, for both reminders; one of 61 is cut.
+  const whole60: string[] = [];
+  await untoldLessonLoops({ untold: async () => [{ id: "lsn-5", revision: 1, title: "c".repeat(60), status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }, { id: "lsn-6", revision: 1, title: "d".repeat(61), status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { whole60.push(n.text); })[0]!.run({ id: "service:dispatcher", kind: "service" } as never);
+  await untoldImprovementLoops({ untold: async () => [{ id: "imp-5", revision: 1, title: "c".repeat(60), disposition: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { whole60.push(n.text); })[0]!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.ok(whole60[0]!.includes(`"${"c".repeat(60)}"`) && whole60[2]!.includes(`"${"c".repeat(60)}"`), whole60.join(" | "));
+  assert.ok(whole60[1]!.includes(`"${"d".repeat(59)}…"`), whole60[1]);
   // One lesson's notice that cannot be shown does not hold back the project's other lessons; the project is named as failed.
   const served: string[] = [];
   const [one] = untoldLessonLoops({ untold: async () => ["lsn-x", "lsn-y", "lsn-z"].map((id) => ({ id, revision: 1, title: "t", status: "rejected", decidedAt: "2026-11-01T00:00:00.000Z" })) }, async () => ["p1"], async (n) => { if (n.lessonId === "lsn-x") throw new Error("refused"); served.push(n.lessonId); });
