@@ -129,6 +129,13 @@ test("usage across the two replies of a call: never negative, never past the saf
   }
   const r = await client(limits, [() => reply("", "length", { prompt_tokens: 100, completion_tokens: 8192 }), () => reply("ok", "stop", {})]).completeDetailed("radiance/q", { system: "s", user: "u" });
   assert.deepEqual(r.usage, { inputTokens: 100, outputTokens: 8192 }, "the cut reply's count stands when the answer has none");
+  // Late-change re-check: when no reply of the call has a count, the call reports no usage (not a count of 0), answered or failed.
+  const none = await client(limits, [() => reply("", "length", {}), () => reply("ok", "stop", null)]).completeDetailed("radiance/q", { system: "s", user: "u" });
+  assert.equal(none.usage, undefined);
+  let uncounted: unknown;
+  await client(limits, [() => reply("", "length", {}), () => reply("", "length", { prompt_tokens: "9", completion_tokens: 1 })]).complete("radiance/q", { system: "s", user: "u" }).catch((e: unknown) => { uncounted = e; });
+  assert.match(String(uncounted), /^Error: reply-cut: /);
+  assert.equal(failedUsage(uncounted), undefined);
   // A thrown non-error, or an error with a forged usage of the wrong shape, reads as no usage.
   for (const forged of [null, undefined, "x", { usage: { inputTokens: -1, outputTokens: 5 } }, { usage: { inputTokens: "1", outputTokens: 5 } }, { usage: { inputTokens: 1.5, outputTokens: 5 } }]) assert.equal(failedUsage(forged), undefined);
 });

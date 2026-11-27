@@ -242,6 +242,9 @@ for (const backend of backends) {
     await spend.record(100, "edge-base");
     for (const [i, bad] of [-5, Number.NaN, "50" as unknown as number, -Infinity].entries()) await spend.record(bad, `edge-bad-${i}`);
     assert.deepEqual(await spend.used(), 100, "nothing added, nothing taken away");
+    // Late-change re-check: a fraction counts its whole tokens only, so the day's total stays a whole number.
+    await spend.record(2.7, "edge-fraction");
+    assert.equal(await spend.used(), 102);
     await spend.record(Number.MAX_SAFE_INTEGER * 4, "edge-huge");
     assert.equal(await spend.used(), Number.MAX_SAFE_INTEGER, "saturated, not dropped and not past the safe range");
     await spend.record(Infinity, "edge-inf");

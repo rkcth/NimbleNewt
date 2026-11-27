@@ -86,7 +86,7 @@ export class HttpModelCall implements ModelCall {
       try { parsed = JSON.parse(text) as typeof parsed; } catch { return fail(undefined, "the reply was not JSON"); }
       const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined);
       const inputTokens = count(parsed?.usage?.prompt_tokens), outputTokens = count(parsed?.usage?.completion_tokens);
-      // A reply whose count is missing or not a whole number adds nothing (it can never lower the count); a count is kept to a safe integer however large the server says it is, so the cap's arithmetic stays exact and is reached.
+      // A reply whose count is missing, negative or not a safe whole number (1e300 included) adds nothing, so no figure lowers the count; the sums across a call's replies are kept at the largest safe integer, so the cap's arithmetic stays exact and is reached.
       if (inputTokens !== undefined && outputTokens !== undefined) { counted = true; input = Math.min(Number.MAX_SAFE_INTEGER, input + inputTokens); output = Math.min(Number.MAX_SAFE_INTEGER, output + outputTokens); }
       const choice = parsed?.choices?.[0];
       const content = choice?.message?.content;
