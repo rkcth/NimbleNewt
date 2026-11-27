@@ -21908,3 +21908,28 @@ Runs: `floor*`, `procedure`, `start-meeting-floor*`, `chat/meeting-controls*`, `
 Deliberate breakages of my own (22, each applied alone to the built `dist/meetings/floor.js`, run against `floor-inquiries.test` on the reference store, restored and checked by SHA-256; script `/tmp/claude-1000/m05b-r1/breakages.py`): 19 caught before the last two tests, 21 after. Not caught, and equivalent: storing a rebuilt list of more than 200 (it is distrusted on read and rebuilt, so only the cost differs).
 
 Card not flipped.
+
+### M05 slice: second review (Claude agent, Opus 5.5, 2026-11-27 EST; clean context; double-check; card NOT flipped; not pushed)
+
+Checked:
+- Every change to a floor's inquiry goes through `#update`: open, end, the owner's `end`, `#closeOut`, and the activity updates that keep an inquiry open. Nothing else writes or removes `meeting-floor` records. The list change rides in the same operation, so it is all or nothing on all four backends. A lost race on the list (create or update) comes back as `stale_revision` on the floor, and `#update` retries.
+- The first-read check cannot take a just-opened inquiry off the list. The list is read before the walk, and the write is guarded by the list's revision. A change committed before the list read is seen by the walk, which reads after it. A change during the walk moves the list's revision, so the check's write loses and the next read checks again. Several controllers, each with its own flag, write only when their walk differs from the shared list. They read the same storage, so they cannot alternate writes. Cost: one bounded walk per start per controller.
+- Vote hold and resume IDs: a crash after the hold is covered by `heldAt` (no second hold). Identical concurrent requests share one ID. The resume after a refused write runs once, and only when the floor has no inquiry.
+- `tick` swallows a reminder failure. The only expected failure is `unavailable` (no list, too many floors). It still shows: the Needs-you list and the status view refuse the same way.
+- The refusal at 201 comes before the owner note and the vote hold. Its text is plain. The order change is harmless.
+
+Problem found and fixed (product code changed):
+- LOW, "ending is never refused" did not hold with no list and more floors than the bounded walk reads. Ending an inquiry, the owner's `end` and `#closeOut` all asked for a list change and were refused `unavailable`. Now an end with no list to trust changes no list. An open is still refused.
+
+Recorded, not changed:
+- LOW. A crash between the vote hold and the inquiry write, followed by a retry refused at the 200 limit, leaves the vote held with no inquiry until the owner retries once a place is free. Resume is service-only. The same state exists after a crash with no retry.
+- LOW. A refused open's resume can race an identical request that succeeds between the reload and the resume. That needs the limit freeing in that window.
+- LOW. During a rolling deploy, a controller on the earlier release could open an inquiry after this release's check, and it would stay off the list until the next start.
+
+Tests added to `meetings/floor-inquiries.test.ts` (16 scenarios, 64 tests on four backends): another controller opens an inquiry while the first-read check walks the floors (the inquiry stays listed, the next read stores both); with no list and an endless floor walk, ending an inquiry and ending a meeting are not refused and no partial list is written. The stale-list test now reads once before planting, so it reaches the open that adds an already-listed floor.
+
+Deliberate breakages (21 of my own, script `/tmp/claude-1000/m05b-r2/breakages.py`, each applied alone to the built `dist/meetings/floor.js` against `floor-inquiries.test` on four backends, restored and checked by SHA-256): 20 of 21 caught at first, 21 of 21 after the stale-list test change.
+
+Runs: `floor*`, `procedure*`, `start-meeting-floor*`, `chat/meeting-controls*` (four backends), `chat/prompt-room` and `status/*`: 769 of 769 on Node 22.23.0 and on Node 24.21.0. `tsc --build --force`, `api:docs:write` (no diff), `check:deps`, `licenses:check`, `roadmap:check` and `plan.test` 6/6 pass.
+
+Card not flipped.

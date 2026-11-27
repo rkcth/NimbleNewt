@@ -159,7 +159,8 @@ export class MeetingFloorService {
       const commandId = `flr-${hash(recordId, String(f.agg.revision), tag, JSON.stringify(body))}`;
       try {
         // An inquiry that opens or ends changes the list of open inquiries in the same write, so the list is never out of step with the floors.
-        const index = (f.body.inquiry !== undefined) === (body.inquiry !== undefined) ? [] : [await this.#inquiryChange(recordId, body.inquiry !== undefined)];
+        const change = (f.body.inquiry !== undefined) === (body.inquiry !== undefined) ? undefined : await this.#inquiryChange(recordId, body.inquiry !== undefined);
+        const index = change === undefined ? [] : [change];
         await this.#runner.command("meeting.floor.update", { commandId, actor: by.id }, async () => ({
           payload: { recordId, tag, revision: f.agg.revision },
           build: async () => ({ ref: { kind: KIND, id: f.agg.id }, creates: false, changes: [{ type: "update" as const, ref: { kind: KIND, id: f.agg.id }, expectedRevision: f.agg.revision, body: json(body) }, ...index], detail: { projectId: body.projectId, tag } }),
@@ -202,10 +203,14 @@ export class MeetingFloorService {
     return [...new Set(open.map((o) => o.id))];
   }
 
-  /** The change to the list of open inquiries when this floor's inquiry opens (`add`) or ends. At most `FLOOR_LIMITS.openInquiries` are open at once: one more is refused, and ending one is never refused. */
-  async #inquiryChange(recordId: string, add: boolean): Promise<Change> {
+  /**
+   * The change to the list of open inquiries when this floor's inquiry opens (`add`) or ends. At most `FLOOR_LIMITS.openInquiries` are open at once: one more is refused, and ending one is never refused. With no list to trust and
+   * too many floors to build one, an end changes no list (there is none to take it off; a read builds it from the floors) and an open is refused.
+   */
+  async #inquiryChange(recordId: string, add: boolean): Promise<Change | undefined> {
     const index = await this.#inquiryIndex();
-    const ids = index.ids ?? (await this.#scanInquiries()) ?? tooManyFloors();
+    const ids = index.ids ?? (await this.#scanInquiries()) ?? (add ? tooManyFloors() : undefined);
+    if (ids === undefined) return undefined;
     if (add && !ids.includes(recordId) && ids.length >= FLOOR_LIMITS.openInquiries) throw new DomainError("invalid_command", `at most ${FLOOR_LIMITS.openInquiries} owner inquiries can be open at once; end one first`, { field: "recordId" });
     const next = add ? (ids.includes(recordId) ? [...ids] : [...ids, recordId]) : ids.filter((x) => x !== recordId);
     return this.#indexWrite(index.revision, next);

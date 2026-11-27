@@ -242,6 +242,7 @@ floorSuite(test, "two inquiries opened at the same moment for the last place: ex
 floorSuite(test, "an inquiry opened for a floor a stale list already names is listed once", async (w) => {
   const a = (await w.meet()).rec;
   await start(w, a);
+  await w.floor.ownerPending(w.owner); // checked once after the start, so the planted list below is believed
   await plant(w, { ids: [a] });
   await open(w, a);
   assert.deepEqual(await listed(w), [a]);
@@ -361,5 +362,57 @@ floorSuite(test, "too many floor records to walk: with no list the reads are ref
     await g.ownerPending(w.owner);
     await g.openInquiries(w.owner, 10);
     assert.equal(pages, 0, "and not walked again until the next start");
+  } finally { s.listAggregates = real; }
+});
+
+floorSuite(test, "the first-read check never takes off the list an inquiry another controller opened while the floors were walked: its write loses, and the next read stores both", async (w) => {
+  const a = (await w.meet()).rec, b = (await w.meet()).rec;
+  await start(w, a);
+  await start(w, b);
+  await open(w, a);
+  w.clock.tick(1);
+  const other = w.reopen();
+  await other.ownerPending(w.owner); // this controller has checked the list already, so its open below reads the list and walks no floor
+  await plant(w, { ids: [] }); // a stale but well-formed list (it leaves out a)
+  const g = w.reopen();
+  const s = w.storage as unknown as { listAggregates: (kind: string, page: unknown) => Promise<unknown> };
+  const real = s.listAggregates;
+  let raced = false;
+  // the walk reads its page of floors, and only then does the other controller open b: the page shows b without an inquiry
+  s.listAggregates = async (kind, page) => {
+    const out = await real.call(w.storage, kind, page);
+    if (kind === "meeting-floor" && !raced) { raced = true; await other.openInquiry(w.owner, { commandId: cid("iq-race"), recordId: b }); }
+    return out;
+  };
+  try { await g.ownerPending(w.owner); } finally { s.listAggregates = real; }
+  assert.equal(raced, true);
+  assert.ok((await listed(w))!.includes(b), "the inquiry opened during the walk stays on the list");
+  assert.deepEqual((await g.ownerPending(w.owner)).items.map((i) => i.recordId), [a, b], "the next read checks again");
+  assert.deepEqual(await listed(w), [a, b]);
+});
+
+floorSuite(test, "with no list and too many floor records to build one, ending an inquiry and ending a meeting are not refused", async (w) => {
+  const a = (await w.meet()).rec, b = (await w.meet()).rec;
+  await start(w, a);
+  await start(w, b);
+  await open(w, a);
+  await open(w, b);
+  const s = w.storage as unknown as { listAggregates: (kind: string, page: { afterId?: string; limit: number }) => Promise<unknown[]> };
+  const real = s.listAggregates;
+  let pages = 0;
+  s.listAggregates = async (kind, page) => {
+    if (kind !== "meeting-floor") return real.call(w.storage, kind, page);
+    pages += 1;
+    return Array.from({ length: page.limit }, (_, i) => ({ kind, id: `mfl-${String(pages).padStart(8, "0")}-${String(i).padStart(4, "0")}`, revision: 1, body: {}, createdAt: w.iso(), updatedAt: w.iso() }));
+  };
+  try {
+    await unplant(w);
+    const f = w.reopen();
+    await f.endInquiry(w.owner, { commandId: cid("ie"), recordId: a });
+    assert.equal((await floorOf(w, a)).inquiry, undefined, "the inquiry ended");
+    await f.end(w.owner, { commandId: cid("end"), recordId: b });
+    assert.equal((await floorOf(w, b)).inquiry, undefined, "the meeting ended with its inquiry");
+    assert.equal(await stored(w), undefined, "no list is written from part of the floors");
+    await refuses("unavailable", () => f.openInquiry(w.owner, { commandId: cid("iq"), recordId: a }));
   } finally { s.listAggregates = real; }
 });
