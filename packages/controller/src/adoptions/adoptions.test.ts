@@ -333,4 +333,56 @@ for (const backend of backends) {
     assert.equal(asks.filter((r) => r.status === "fulfilled").length, 1, JSON.stringify(asks));
     assert.equal(Object.keys(((await new CommandRunner(c.storage, c.epoch, options).get("adoption-index", c.a))!.body as { open: object }).open).filter((k) => k === targetKey(exp2, { kind: "practice" })).length, 1);
   });
+
+  suite("a task credential of another project acts for nobody here; criteria re-sealed after the request, a registrant or an executable's author as reviewer, and the project bound are refused", async (c) => {
+    const exp = await c.experiment();
+    // The asker (and proposer) authenticated with a task credential of project B: its own adoption in A is not its to read, take back, report on or withdraw, and it cannot ask again.
+    const inB = (p: Principal): Principal => ({ ...p, taskScope: { taskId: `task-${"b".repeat(20)}`, projectId: c.b } });
+    const id = await c.ask(exp);
+    assert.equal(await c.make().get(inB(c.dev), id), undefined);
+    await refuses("forbidden", () => c.make().decline(inB(c.dev), { commandId: cid("d"), adoptionId: id, expectedRevision: 1, reason: "mine" }));
+    await refuses("forbidden", () => c.make().request(inB(c.dev), { commandId: cid("q"), experimentId: exp, target: tool("toolbox.x"), reason: "r" }));
+    await c.approve(id);
+    await refuses("forbidden", () => c.monitor(id, GOOD, inB(c.dev)));
+    await refuses("forbidden", async () => c.make().withdraw(inB(c.dev), { commandId: cid("w"), adoptionId: id, expectedRevision: await c.rev(id), reason: "mine" }));
+    assert.equal((await c.body(id)).status, "active");
+    // An asker that no longer holds meeting.read or meeting.agenda in the project does not report (a manager still does).
+    const byReader = await c.ask(await c.experiment(), PRACTICE, c.reader);
+    await c.approve(byReader);
+    await refuses("forbidden", () => c.monitor(byReader, GOOD, { ...c.reader, grants: [] }));
+    assert.equal((await c.monitor(byReader, GOOD, c.reader)).status, "active");
+    // Criteria rewritten and sealed again in storage after the adoption was asked (or approved): not the criteria it was asked on, so not approved and not monitored.
+    const reseal = async (e: string, seal = true) => {
+      const runner = new CommandRunner(c.storage, c.epoch, options);
+      const found = (await runner.get("experiment", e))!;
+      const changed = { ...((found.body as { criteria: object }).criteria), maxRegressionPct: 100 };
+      const { sealOf } = await import("../experiments/experiments.js");
+      await runner.command("test.reseal", { commandId: cid("t"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "experiment", id: e }, creates: false, changes: [{ type: "update" as const, ref: { kind: "experiment", id: e }, expectedRevision: found.revision, body: { ...(found.body as object), criteria: changed, ...(seal ? { criteriaDigest: sealOf(changed as never) } : {}) } as never }], detail: {} }) }));
+    };
+    const exp2 = await c.experiment();
+    const asked = await c.ask(exp2);
+    await reseal(exp2);
+    await refuses("integrity", () => c.approve(asked, c.owner), /not the ones it was asked on/);
+    // In force: criteria changed under the same seal, then sealed again; each is refused.
+    await reseal(exp, false);
+    await refuses("integrity", () => c.monitor(id, GOOD, c.owner), /no longer match/);
+    await reseal(exp);
+    await refuses("integrity", () => c.monitor(id, GOOD, c.owner), /no longer match/);
+    // A reviewer who registered the version, or wrote its executable, is not independent (the owner always is).
+    const real = (await c.cat.get(c.owner, "toolbox.fetch", "1.0.0"))!;
+    const t = await c.ask(await c.experiment(), tool());
+    const as = (over: Record<string, unknown>) => c.make({ tools: { get: async () => ({ ...real, ...over }) as never } });
+    await refuses("forbidden", async () => as({ registeredBy: c.maint.id }).approve(c.maint, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" }), /not independent/);
+    await refuses("forbidden", async () => as({ executable: { ...real.instructional, author: c.maint.id } }).approve(c.maint, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" }), /not independent/);
+    assert.equal((await c.body(t)).status, "requested");
+    await as({ registeredBy: c.owner.id }).approve(c.owner, { commandId: cid("ap"), adoptionId: t, expectedRevision: await c.rev(t), review: "r" });
+    // At most 300 adoptions are kept in a project: the next request is refused and stores nothing.
+    const runner = new CommandRunner(c.storage, c.epoch, options);
+    const index = (await runner.get("adoption-index", c.a))!;
+    const ids = (index.body as { ids: string[] }).ids;
+    const full = [...ids, ...Array.from({ length: 300 - ids.length }, (_, i) => `adp-${String.fromCharCode(97 + (i % 26)).repeat(19)}${String.fromCharCode(97 + Math.floor(i / 26))}`)];
+    await runner.command("test.fill", { commandId: cid("t"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "adoption-index", id: c.a }, creates: false, changes: [{ type: "update" as const, ref: { kind: "adoption-index", id: c.a }, expectedRevision: index.revision, body: { ...(index.body as object), ids: full } as never }], detail: {} }) }));
+    await refuses("unavailable", async () => c.ask(await c.experiment()), /300 adoptions/);
+    assert.equal(((await runner.get("adoption-index", c.a))!.body as { ids: string[] }).ids.length, 300);
+  });
 }
