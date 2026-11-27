@@ -83,7 +83,7 @@ test("a failing test command fails the gate with its output, redacted and cut; a
 
 test("a reviewer's approval carries over to another tree only while the patch ID is unchanged; an unreviewed, rejected or foreign submission does not pass (card P09)", async () => {
   // The host computes the reviewed patch ID from the submission's base and tree: by default what the submission names.
-  const review = async (approval: ReviewedSubmission | undefined, submissionId: string | null = SUB, computed: { reviewedPatchId?: string | undefined; reviewedProblem?: string } = { reviewedPatchId: approval?.patchId }) => (await gate({ required: ["review"], approval }).g.evaluate({ taskId: TASK, projectId: "proj-x", ...(submissionId === null ? {} : { submissionId }), host: host(computed).h })).results[0]!;
+  const review = async (approval: ReviewedSubmission | undefined, submissionId: string | null = SUB, computed: { reviewedPatchId?: string | undefined; reviewedProblem?: string; reviewedReplays?: boolean | null } = { reviewedPatchId: approval?.patchId, reviewedReplays: true }) => (await gate({ required: ["review"], approval }).g.evaluate({ taskId: TASK, projectId: "proj-x", ...(submissionId === null ? {} : { submissionId }), host: host(computed).h })).results[0]!;
   const same = await review(approved);
   assert.deepEqual([same.result, same.boundTo], ["pass", TREE]);
   assert.match(same.summary, /approved by agent:rev for this tree/);
@@ -96,6 +96,10 @@ test("a reviewer's approval carries over to another tree only while the patch ID
   const carried = await review({ ...approved, base: "9".repeat(40), tree: OLD_TREE });
   assert.equal(carried.result, "pass");
   assert.match(carried.summary, /for tree d{12}; carried over to this tree because the patch is unchanged/);
+  // The same, but the host does not show the landed tree is exactly the reviewed change carried onto the new base (the same patch ID can hold an edit placed elsewhere): refused (card P08 landing re-check, first review).
+  const notShown = await review({ ...approved, base: "9".repeat(40), tree: OLD_TREE }, SUB, { reviewedPatchId: PATCH, reviewedReplays: false });
+  assert.deepEqual([notShown.result, notShown.treeMismatch], ["fail", true]);
+  assert.match(notShown.summary, /was not shown to be exactly that change carried onto it/);
   // Another patch (the work changed since the review): a new review is needed.
   const changed = await review({ ...approved, tree: OLD_TREE, patchId: OTHER_PATCH });
   assert.equal(changed.result, "fail");

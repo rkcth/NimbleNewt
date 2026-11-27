@@ -780,10 +780,11 @@ export class WorkspaceOpService {
         const text = gated.testsNeedOwner === "authors-only" ? `Task ${body.taskId} cannot land: its test commands were set only by its own agents, which a landing does not run. Set or accept them (contract.set checks).` : `Task ${body.taskId} cannot land: its project requires tests but the task has no test commands. Set them (contract.set checks) or change the required checks.`;
         try { await this.#deps.notify({ commandId: `lgo-${body.taskId}-v${gated.contractVersion ?? 0}-${gated.testsNeedOwner}`, taskId: body.taskId, text: text.slice(0, 200) }); toldOwner = true; } catch { /* recorded as not told */ }
       }
-      // Card P08 landing re-check: a judgement was about to count, by patch ID alone, for a different tree on the same base. The owner gets a needs-you notice, once per request; the submission is left as it is.
+      // Card P08 landing re-check: a judgement was about to count, by patch ID alone, for a tree nobody judged (another tree on the same base, or on another base a tree not shown to be the judged change carried onto
+      // it). The owner gets a needs-you notice, once per request; the submission is left as it is.
       const mismatched = gateRefused && gated !== undefined ? gated.results.filter((e) => e.treeMismatch === true).map((e) => e.check) : [];
       if (mismatched.length > 0 && this.#deps.notify !== undefined) {
-        const text = `Task ${body.taskId} was not landed (${id}): the tree it carries is not the one its ${mismatched.join(", ")} judged on the same base. A new submission must be judged.`;
+        const text = `Task ${body.taskId} was not landed (${id}): its tree is not exactly what its ${mismatched.join(", ")} judged, only the same patch ID. A new submission must be judged.`;
         try { await this.#deps.notify({ commandId: `lgt-${id}`, taskId: body.taskId, text: text.slice(0, 200) }); toldOwner = true; } catch { /* recorded as not told */ }
       }
       // Overlapping work goes back to its author (card P10): out of the queue, counted as a repair cycle, the task's holder told (best effort; the record says what was done).

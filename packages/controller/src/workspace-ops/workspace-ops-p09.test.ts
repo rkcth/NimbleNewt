@@ -48,7 +48,7 @@ for (const backend of backends) {
       ...(host.landingChecks ? { landingChecks: async (call: Parameters<NonNullable<WorkspacePort["landingChecks"]>>[0]) => {
         calls.checks.push(call);
         if (host.throws) throw new Error("the host went away");
-        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit.get(c.name) ?? "passed", exitCode: host.exit.get(c.name) === "failed" ? 1 : 0, ...(host.exit.get(c.name) === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
+        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch, reviewedReplays: true }), checks: call.checks.map((c) => ({ name: c.name, state: host.exit.get(c.name) ?? "passed", exitCode: host.exit.get(c.name) === "failed" ? 1 : 0, ...(host.exit.get(c.name) === "failed" ? { output: `${c.name}: 1 test failed` } : {}) })) };
       } } : {}),
     });
     const told: { commandId: string; taskId: string; to: string; text: string }[] = [];
@@ -173,7 +173,7 @@ for (const backend of backends) {
       assert.match(placed.checks!.results[1]!.summary, /approved for tree d{12}, but the landing carries tree e{12} on the same base b{12}; .*a new submission and review are needed/);
       assert.equal(r.calls.runs.length, 0, "the host is never asked to land");
       assert.equal(owner.length, 1);
-      assert.match(owner[0]!.text, /^Task \S+ was not landed \(wsr-[a-z2-7]{20}\): the tree it carries is not the one its review judged on the same base\./);
+      assert.match(owner[0]!.text, /^Task \S+ was not landed \(wsr-[a-z2-7]{20}\): its tree is not exactly what its review judged, only the same patch ID\. A new submission must be judged\.$/);
       assert.ok(owner[0]!.text.length <= 200);
       assert.equal((await r.land(notifying, "r0", S1)).state, "refused", "a repeat answers the recorded outcome");
       assert.equal(owner.length, 1, "the owner is not told again for the same request");

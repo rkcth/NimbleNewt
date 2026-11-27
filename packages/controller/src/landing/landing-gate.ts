@@ -10,9 +10,10 @@ import { redactText } from "../security/redact.js";
  * - `review`: the landing names the reviewed code submission (`submissionId`). Its newest review must approve it, and the patch ID of its base and tree (computed by the host, and equal to the one the submission names) must
  *   equal the patch ID of the change being landed: an approval carries over to a different tree (a refresh onto a newer base) only while the patch is unchanged; any other change needs a new review. The submitter of that
  *   submission counts as an author too (its own contract versions are not used).
- *   Card P08 landing re-check: the patch ID carries a judgement only across a refresh or re-apply onto another base. Where the judged submission (or the earlier one a verdict or evidence was carried from, card Q02) and the
- *   landed change are on the same base, the landed tree must be exactly the judged tree: git's patch ID leaves out line numbers, so the same edit placed elsewhere in a file has the same ID on the same base. This holds for
- *   `review`, `qa`, `docs` and `director`; such a failure is marked `treeMismatch` and the owner is told.
+ *   Card P08 landing re-check: git's patch ID leaves out line numbers, so the same edit placed in another of two identical blocks of a file has the same ID, on the same base or any other. A judgement given on one tree
+ *   (the judged submission's, or the earlier one a verdict or evidence was carried from, card Q02) therefore counts for the landed tree only when the trees are equal on the same base, or, on another base, when the host
+ *   shows the landed tree is exactly the judged change carried onto it (`reviewedReplays`, `carriedReplays`: the judged base is an ancestor of the landed one and a conflict-free three-way re-apply gives exactly the landed
+ *   tree, as the author's refresh and the integrator's re-apply make it). The patch ID is still compared first. This holds for `review`, `qa`, `docs` and `director`; such a failure is marked `treeMismatch` and the owner is told.
  * - `qa` (P09 third slice): the landing names the code submission (`submissionId`); its QA gate (Q02, independent evidence bound to that submission's tree, criteria and decisions) must pass, read again after the host's run,
  *   and the evidence carries over to the integrated tree only while the patch is unchanged (the same host-computed patch ID rule as `review`). A gate that failed fails the check with its reasons; a gate with no independent
  *   evidence at all is `not_run`. Both count as failed.
@@ -47,8 +48,9 @@ export interface LandingCheckEntry {
   /** `tests` only: each command as it ran. */
   readonly runs?: readonly LandingCheckRunShown[];
   /**
-   * Card P08 landing re-check: the check failed because what was judged (reviewed, checked by QA, documented or signed off) and what the landing carries are different trees on the same base commit, although their patch
-   * IDs match. The owner is told (a needs-you notice): the patch ID alone was about to carry a judgement to a tree nobody judged.
+   * Card P08 landing re-check: the check failed because what was judged (reviewed, checked by QA, documented or signed off) and what the landing carries are different trees on the same base commit, or the landing is on
+   * another base and its tree was not shown to be exactly the judged change carried onto it, although their patch IDs match. The owner is told (a needs-you notice): the patch ID alone was about to carry a judgement to a
+   * tree nobody judged.
    */
   readonly treeMismatch?: true;
 }
@@ -84,6 +86,13 @@ export interface LandingCheckHostReport {
   readonly reviewedProblem?: string;
   /** When `carried` was asked: the patch ID the host computed for each earlier submission's base and tree, in the order asked (`null`: could not be computed). */
   readonly carriedPatchIds?: readonly (string | null)[];
+  /**
+   * Card P08 landing re-check (first review): when `reviewed` was asked, whether the landed tree is exactly the reviewed change carried onto the landed base (the same tree on the same base; on another base, a later commit
+   * of the reviewed base's history and a conflict-free three-way re-apply that gives exactly the landed tree). Anything but `true` means not shown.
+   */
+  readonly reviewedReplays?: boolean | null;
+  /** The same for each earlier submission asked in `carried`, in that order, against the landed tree. */
+  readonly carriedReplays?: readonly (boolean | null)[];
 }
 export interface LandingCheckHost {
   landingChecks?(call: { readonly taskId: string; readonly projectId: string; readonly checks: readonly { readonly name: string; readonly run: readonly string[]; readonly timeoutMs: number }[]; readonly maxOutputBytes: number; /** The reviewed code submission's base commit and tree: the host computes their patch ID from its own objects. */ readonly reviewed?: { readonly base: string; readonly tree: string }; /** Earlier submissions of the same claimed patch (card Q02 carry-over): the host computes the patch ID of each (`carriedPatchIds`). */ readonly carried?: readonly { readonly base: string; readonly tree: string }[]; /** Aborted when the gate stops waiting for the answer: the host then stops the checks' processes and starts no more. */ readonly signal?: AbortSignal }): Promise<LandingCheckHostReport>;
@@ -140,7 +149,7 @@ const errorText = (error: unknown): string => { try { return String((error as Er
 const wholeCut = (text: string, max: number): string => { if (text.length <= max) return text; let end = Math.max(0, max); const c = text.charCodeAt(end - 1); if (end > 0 && c >= 0xd800 && c <= 0xdbff) end -= 1; return text.slice(0, end); };
 
 /** An earlier submission of the same claimed patch (card Q02 carry-over): the patch ID the host computed from its own base and tree, and that base and tree. */
-interface CarriedSource { readonly patchId: string; readonly base: string; readonly tree: string }
+interface CarriedSource { readonly patchId: string; readonly base: string; readonly tree: string; /** The host showed the landed tree is exactly this one's change carried onto the landed base. */ readonly replays: boolean }
 /**
  * Card P08 landing re-check: whether a judgement given on `seen` may count for `later` only by patch ID. Git's patch ID leaves out line numbers, so on the SAME base two different trees can share it (the same edit placed
  * in either of two identical blocks of a file). A patch ID shows the same change only across a refresh or re-apply onto another base (where the tree legitimately differs); on the same base the tree itself is compared.
@@ -149,6 +158,14 @@ interface CarriedSource { readonly patchId: string; readonly base: string; reado
 const otherTreeOnSameBase = (seen: { readonly base: string; readonly tree: string }, later: { readonly base: string; readonly tree: string }): boolean => seen.base === later.base && seen.tree !== later.tree;
 const sameBaseText = (what: string, seen: { readonly base: string; readonly tree: string }, later: { readonly tree: string }, needed: string, laterIs = "the landing carries"): string =>
   `${what} tree ${seen.tree.slice(0, 12)}, but ${laterIs} tree ${later.tree.slice(0, 12)} on the same base ${seen.base.slice(0, 12)}; on one base only the same tree counts, not the same patch ID, so ${needed}`;
+/**
+ * Card P08 landing re-check (first review): on ANOTHER base the patch ID does not show where an edit is either, so a judgement counts for the landed tree only when the host showed it is exactly the judged change carried
+ * onto the landed base (`replays`). True when the landing may NOT take the judgement: another base (or another tree) without that proof. The same base with the same tree needs no proof.
+ */
+const notShownOnAnotherBase = (seen: { readonly base: string; readonly tree: string }, landed: { readonly base: string; readonly tree: string }, replays: boolean | null | undefined): boolean =>
+  seen.base !== landed.base && replays !== true;
+const otherBaseText = (what: string, seen: { readonly base: string; readonly tree: string }, landed: { readonly base: string; readonly tree: string }, needed: string): string =>
+  `${what} tree ${seen.tree.slice(0, 12)} on base ${seen.base.slice(0, 12)}; the landing's tree ${landed.tree.slice(0, 12)} on base ${landed.base.slice(0, 12)} was not shown to be exactly that change carried onto it, so ${needed}`;
 
 /** What `recheck` needs of a judged landing: the host's one report and what was read before it (never stored; the record is what is kept). */
 interface JudgedContext { readonly call: { readonly taskId: string; readonly projectId: string; readonly submissionId?: string }; readonly tree: string; readonly base: string; readonly patchId: string; readonly reviewed: ReviewedSubmission | undefined; readonly reviewProblem: string | undefined; readonly report: LandingCheckHostReport; readonly carried: ReadonlyMap<string, CarriedSource> }
@@ -204,8 +221,9 @@ export class LandingGate {
     const tree = change.tree;
     const bound = { boundTo: tree };
     const got = Array.isArray(report.carriedPatchIds) ? report.carriedPatchIds : [];
+    const shown = Array.isArray(report.carriedReplays) ? report.carriedReplays : [];
     const carried = new Map<string, CarriedSource>();
-    sources.forEach((s, i) => { const id = got[i]; if (typeof id === "string" && PATCH.test(id)) carried.set(s.submissionId, { patchId: id, base: s.base, tree: s.tree }); });
+    sources.forEach((s, i) => { const id = got[i]; if (typeof id === "string" && PATCH.test(id)) carried.set(s.submissionId, { patchId: id, base: s.base, tree: s.tree, replays: shown[i] === true }); });
     const results: LandingCheckEntry[] = [];
     for (const check of required) {
       if (patchId === undefined) { results.push({ check, result: "not_run", ...bound, summary: "the checkout holds no committed change against its base, so there is nothing to land" }); continue; }
@@ -310,6 +328,7 @@ export class LandingGate {
     if (computed !== patchId) return no("fail", `the change differs from what QA checked: the evidence is for patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; new QA evidence is needed`);
     const landed = { base: landedBase, tree };
     if (otherTreeOnSameBase(a, landed)) return { ...no("fail", sameBaseText(`the QA evidence of ${call.submissionId} is for`, a, landed, "new QA evidence is needed")), treeMismatch: true };
+    if (notShownOnAnotherBase(a, landed, report.reviewedReplays)) return { ...no("fail", otherBaseText(`the QA evidence of ${call.submissionId} is for`, a, landed, "new QA evidence is needed")), treeMismatch: true };
     // Evidence carried from an earlier submission (card Q02) was checked against that submission's own base and tree: it counts only when the host computes this same patch from them.
     const unproven = (Array.isArray(g.carriedFrom) ? g.carriedFrom : []).filter((s) => carried.get(s)?.patchId !== computed);
     if (unproven.length > 0) return no("fail", `QA evidence of ${call.submissionId} was carried over from ${unproven.slice(0, 3).join(", ")}, whose own base and tree ${unproven.some((s) => carried.has(s)) ? "make a different patch" : "could not be checked for the same patch"}; new QA evidence on this submission is needed`);
@@ -318,6 +337,7 @@ export class LandingGate {
       const from = carried.get(s)!;
       const placed = otherTreeOnSameBase(from, a) ? a : otherTreeOnSameBase(from, landed) ? landed : undefined;
       if (placed !== undefined) return { ...no("fail", sameBaseText(`QA evidence of ${call.submissionId} came from ${s},`, from, placed, "new QA evidence on this submission is needed", placed === a ? "this one is" : undefined)), treeMismatch: true };
+      if (notShownOnAnotherBase(from, landed, from.replays)) return { ...no("fail", otherBaseText(`QA evidence of ${call.submissionId} came from ${s}, for`, from, landed, "new QA evidence on this submission is needed")), treeMismatch: true };
     }
     return no("pass", a.tree !== tree ? `independent QA evidence passed for tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : "independent QA evidence passed for this tree");
   }
@@ -342,6 +362,7 @@ export class LandingGate {
     if (computed !== patchId) return no("fail", `the change differs from what the director signed off: that is patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; a new director sign-off is needed`);
     const landed = { base: landedBase, tree };
     if (otherTreeOnSameBase(a, landed)) return { ...no("fail", sameBaseText(`the director signed off ${call.submissionId} for`, a, landed, "a new director sign-off is needed")), treeMismatch: true };
+    if (notShownOnAnotherBase(a, landed, report.reviewedReplays)) return { ...no("fail", otherBaseText(`the director signed off ${call.submissionId} for`, a, landed, "a new director sign-off is needed")), treeMismatch: true };
     return no("pass", `signed off by ${String(g.signoff.by)} for ${a.tree !== tree ? `tree ${a.tree.slice(0, 12)}; carried over to this tree because the patch is unchanged` : "this tree"}`);
   }
 
@@ -411,6 +432,7 @@ export class LandingGate {
     if (computed !== patchId) return no("fail", `the change differs from the code the documents were checked against: that is patch ${computed.slice(0, 12)}, the landing carries patch ${patchId.slice(0, 12)}; the documents must be verified against the new code`);
     const landed = { base: landedBase, tree };
     if (otherTreeOnSameBase(a, landed)) return { ...no("fail", sameBaseText(`the documents were verified against ${call.submissionId},`, a, landed, "the documents must be verified against the landed code")), treeMismatch: true };
+    if (notShownOnAnotherBase(a, landed, report.reviewedReplays)) return { ...no("fail", otherBaseText(`the documents were verified against ${call.submissionId},`, a, landed, "the documents must be verified against the landed code")), treeMismatch: true };
     return no("pass", g.checked === 0 ? "no documentation obligation describes this task" : `all ${g.checked} document(s) describing this task are verified against ${a.tree !== tree ? `tree ${a.tree.slice(0, 12)} (carried over to this tree because the patch is unchanged)` : "this tree"}`);
   }
 
@@ -430,6 +452,7 @@ export class LandingGate {
     // Card P08 landing re-check: on the base it was submitted on, the landed tree must be the submission's own tree; the patch ID carries the approval only across a refresh or re-apply.
     const landed = { base: landedBase, tree };
     if (otherTreeOnSameBase(a, landed)) return { check: "review", result: "fail", ...bound, treeMismatch: true, summary: clip(sameBaseText(`${call.submissionId} was approved for`, a, landed, "a new submission and review are needed"), LANDING_GATE_LIMITS.summary) };
+    if (notShownOnAnotherBase(a, landed, report.reviewedReplays)) return { check: "review", result: "fail", ...bound, treeMismatch: true, summary: clip(otherBaseText(`${call.submissionId} was approved for`, a, landed, "a new submission and review are needed"), LANDING_GATE_LIMITS.summary) };
     // An approval carried from an earlier submission (card Q02) was given on that submission's own base and tree: it counts only when the host computes this same patch from them (the claimed patch ID is the submitter's word).
     if (a.carriedFrom !== undefined) {
       const theirs = carried.get(a.carriedFrom);
@@ -437,6 +460,7 @@ export class LandingGate {
       // Card P08 landing re-check: the reviewed submission and this one (or the landed tree) on the same base must be the same tree; only a different base lets the patch ID carry the approval.
       const placed = otherTreeOnSameBase(theirs, a) ? a : otherTreeOnSameBase(theirs, landed) ? landed : undefined;
       if (placed !== undefined) return { check: "review", result: "fail", ...bound, treeMismatch: true, summary: clip(sameBaseText(`${call.submissionId} has no review of its own; the approval of ${a.carriedFrom} was given for`, theirs, placed, "a review of this submission is needed", placed === a ? "this one is" : undefined), LANDING_GATE_LIMITS.summary) };
+      if (notShownOnAnotherBase(theirs, landed, theirs.replays)) return { check: "review", result: "fail", ...bound, treeMismatch: true, summary: clip(otherBaseText(`${call.submissionId} has no review of its own; the approval of ${a.carriedFrom} was given for`, theirs, landed, "a review of this submission is needed"), LANDING_GATE_LIMITS.summary) };
       return { check: "review", result: "pass", ...bound, summary: clip(`approved by ${a.approvedBy ?? "a reviewer"} on ${a.carriedFrom}, carried over because the host found the same patch ${computed.slice(0, 12)}`, LANDING_GATE_LIMITS.summary) };
     }
     const moved = a.tree !== tree;

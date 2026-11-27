@@ -12,8 +12,12 @@ type Side = { base: string; tree: string };
 
 const own = (s: Side): ReviewedSubmission => ({ taskId: TASK, base: s.base, tree: s.tree, patchId: PATCH, approved: true, approvedBy: "agent:rev", newest: "approve", submittedBy: "agent:sam" });
 
-/** One landing judged: the landed change is `landed`; the submission is `sub`; an optional earlier submission `early` the verdict or the QA evidence came from. Every patch ID the host computes is PATCH. */
-const run = async (o: { required: Check[]; landed: Side; sub: Side; early?: Side; carryReview?: boolean; carryQa?: boolean }) => {
+/**
+ * One landing judged: the landed change is `landed`; the submission is `sub`; an optional earlier submission `early` the verdict or the QA evidence came from. Every patch ID the host computes is PATCH. The host's replay
+ * proof (first review) is the tree compared on the same base; on another base it is `shown` (for `sub`) and `earlyShown` (for `early`), both true unless said, as for a real refresh; `null` models a git that failed.
+ */
+const run = async (o: { required: Check[]; landed: Side; sub: Side; early?: Side; carryReview?: boolean; carryQa?: boolean; shown?: boolean | null; earlyShown?: boolean | null }) => {
+  const proof = (s: Side, shown: boolean | null | undefined): boolean | null => (s.base === o.landed.base ? s.tree === o.landed.tree : shown === undefined ? true : shown);
   const approval: ReviewedSubmission = { ...own(o.sub), ...(o.carryReview === true ? { carriedFrom: EARLY } : {}) };
   const qa: QaGateView = { taskId: TASK, submissionId: SUB, tree: o.sub.tree, verdict: "passed", reasons: [], ...(o.carryQa === true ? { carriedFrom: [EARLY] } : {}) };
   const docs: DocsGateView = { taskId: TASK, submissionId: SUB, tree: o.sub.tree, checked: 1, pending: [] };
@@ -31,7 +35,7 @@ const run = async (o: { required: Check[]; landed: Side; sub: Side; early?: Side
   const calls: Call[] = [];
   const h: LandingCheckHost = { landingChecks: async (call) => {
     calls.push(call);
-    return { checkout: true, change: { base: o.landed.base, head: "f".repeat(40), tree: o.landed.tree, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH }), ...(call.carried === undefined ? {} : { carriedPatchIds: call.carried.map(() => PATCH) }) } as LandingCheckHostReport;
+    return { checkout: true, change: { base: o.landed.base, head: "f".repeat(40), tree: o.landed.tree, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH, reviewedReplays: proof(call.reviewed, o.shown) }), ...(call.carried === undefined ? {} : { carriedPatchIds: call.carried.map(() => PATCH), carriedReplays: call.carried.map((c) => proof(c, o.earlyShown)) }) } as LandingCheckHostReport;
   } };
   const record = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: h });
   return { g, record, calls };
@@ -97,4 +101,46 @@ test("read again right before the write, a refused tree stays refused and a pass
   assert.deepEqual([again.changed.length, again.record.passed, ok.calls.length], [0, true, 1]);
   const placed = await run({ required: ["review", "qa", "docs", "director"], landed: { base: BASE, tree: TREE }, sub: { base: BASE, tree: OTHER_TREE } });
   assert.deepEqual(placed.record.results.map((r) => r.treeMismatch), [true, true, true, true]);
+});
+
+test("on another base the patch ID alone carries nothing: each judged check passes only when the host shows the landed tree is exactly the judged change carried onto that base (card P08 landing re-check, first review)", async () => {
+  const needed: Record<string, RegExp> = {
+    review: /^sbm-a+ was approved for tree d{12} on base 1{12}; the landing's tree e{12} on base b{12} was not shown to be exactly that change carried onto it, so a new submission and review are needed$/,
+    qa: /^the QA evidence of sbm-a+ is for tree d{12} on base 1{12};.* so new QA evidence is needed$/,
+    docs: /^the documents were verified against sbm-a+, tree d{12} on base 1{12};.* so the documents must be verified against the landed code$/,
+    director: /^the director signed off sbm-a+ for tree d{12} on base 1{12};.* so a new director sign-off is needed$/,
+  };
+  for (const check of ["review", "qa", "docs", "director"] as const) {
+    for (const shown of [false, null]) {
+      const moved = await run({ required: [check], landed: { base: BASE, tree: TREE }, sub: { base: OLD_BASE, tree: OTHER_TREE }, shown });
+      const e = moved.record.results[0]!;
+      assert.deepEqual([moved.record.passed, e.result, e.treeMismatch], [false, "fail", true], `${check} ${String(shown)}`);
+      assert.match(e.summary, needed[check]!, check);
+      assert.ok(e.summary.length <= 300, check);
+    }
+    // The host was asked about the submission's own base and tree, and it said yes: the judgement carries.
+    const shown = await run({ required: [check], landed: { base: BASE, tree: TREE }, sub: { base: OLD_BASE, tree: OTHER_TREE }, shown: true });
+    assert.equal(shown.record.passed, true, check);
+    assert.deepEqual(shown.calls[0]!.reviewed, { base: OLD_BASE, tree: OTHER_TREE }, check);
+  }
+  // A host that does not report the proof at all (an older host) shows nothing: refused, as not shown.
+  const g = new LandingGate({ requiredChecks: async () => ["review"], tests: async () => undefined, approvalOf: async () => own({ base: OLD_BASE, tree: OTHER_TREE }), now: () => "2026-11-26T10:00:00.000Z" });
+  const old = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: { landingChecks: async () => ({ checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [], reviewedPatchId: PATCH }) } });
+  assert.deepEqual([old.passed, old.results[0]!.treeMismatch], [false, true]);
+});
+
+test("a verdict or QA evidence carried from an earlier submission on another base counts only when the host shows the landed tree is exactly that submission's change carried onto the landed base (card P08 landing re-check, first review)", async () => {
+  // The approved earlier submission on base 1, this one on base b (the author refreshed and placed the same edit elsewhere: the same patch ID). The host shows this submission is what lands, but not the earlier one's change.
+  const review = await run({ required: ["review"], landed: { base: BASE, tree: TREE }, sub: { base: BASE, tree: TREE }, early: { base: OLD_BASE, tree: OTHER_TREE }, carryReview: true, earlyShown: false });
+  assert.deepEqual([review.record.results[0]!.result, review.record.results[0]!.treeMismatch], ["fail", true]);
+  assert.match(review.record.results[0]!.summary, /^sbm-a+ has no review of its own; the approval of sbm-b+ was given for tree d{12} on base 1{12}; the landing's tree e{12} on base b{12} was not shown .* a review of this submission is needed$/);
+  const qa = await run({ required: ["qa"], landed: { base: BASE, tree: TREE }, sub: { base: BASE, tree: TREE }, early: { base: OLD_BASE, tree: OTHER_TREE }, carryQa: true, earlyShown: null });
+  assert.deepEqual([qa.record.results[0]!.result, qa.record.results[0]!.treeMismatch], ["fail", true]);
+  assert.match(qa.record.results[0]!.summary, /^QA evidence of sbm-a+ came from sbm-b+, for tree d{12} on base 1{12};.* new QA evidence on this submission is needed$/);
+  // Read again before the write, the refusal stands and nothing on the host is asked again.
+  const passing = await run({ required: ["review", "qa"], landed: { base: BASE, tree: TREE }, sub: { base: BASE, tree: TREE }, early: { base: OLD_BASE, tree: OTHER_TREE }, carryReview: true, carryQa: true });
+  assert.equal(passing.record.passed, true, JSON.stringify(passing.record.results));
+  assert.deepEqual(passing.calls[0]!.carried, [{ base: OLD_BASE, tree: OTHER_TREE }]);
+  const again = await passing.g.recheck(passing.record);
+  assert.deepEqual([again.changed.length, passing.calls.length], [0, 1]);
 });
