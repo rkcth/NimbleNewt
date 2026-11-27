@@ -11,10 +11,9 @@ import { SandboxLauncher } from "@nimblenewt/worker";
 import { sse } from "./h12-worker-support.js";
 
 // Card bridge-submissions, through the PRODUCT composition (the rig of h12n-launcher-submit: the launcher's worker host on this computer, scripts/local-host.mjs, a real bubblewrap sandbox, a real git checkout and a
-// scripted model behind an injected fetch; nothing leaves the machine). An agent that works ONLY through its tool bridge drafts the code deliverable for the submission its own work.end opened: (1) the first attempt edits
-// its checkout and ends with work.end { submit: true }, which opens a code submission; (2) the next attempt of the same task is told that submission's ID in its first call, lists its task's code submissions with
-// nimblenewt__submission-list, drafts a code deliverable naming the listed ID with nimblenewt__deliverable-draft and submits it with nimblenewt__deliverable-submit. Nobody but the agent names the submission.
-// Skipped without bubblewrap unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI), where it fails instead.
+// scripted model behind an injected fetch; nothing leaves the machine). What the hand-off brief adds to P02's end-to-end test (p02-deliverable.test.ts, which drafts through the state API and covers review and acceptance):
+// an agent that works ONLY through its tool bridge learns the code submission its earlier work.end opened from the first call of its next attempt, and drafts and submits the code deliverable for it with
+// nimblenewt__deliverable-draft and nimblenewt__deliverable-submit. Nobody but the agent names the submission. Skipped without bubblewrap unless NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI), where it fails instead.
 const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
 const nodeRoot = dirname(dirname(realpathSync(process.execPath)));
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -36,7 +35,7 @@ const say = (text: string): Response => reply(`${sse({ role: "assistant", conten
 const toolCall = (name: string, args: Record<string, unknown>, id: string): Response => reply(sse({ role: "assistant", content: "" }, null) + sse({ tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, null) + sse({}, "tool_calls", usage));
 const workEnd = (args: Record<string, unknown>, id: string): Response => reply(sse({ role: "assistant", content: "" }, null) + sse({ tool_calls: [{ index: 0, id, type: "function", function: { name: "nimblenewt__work-end", arguments: JSON.stringify(args) } }] }, null) + sse({}, "tool_calls", usage));
 
-test("an agent working only through its tool bridge lists the code submission its work.end opened and drafts and submits the code deliverable for it in its next attempt (card bridge-submissions, product launcher)", { skip: hasGit ? false : "git is not installed" }, async (t) => {
+test("the next attempt is told the code submission its work.end opened, and an agent working only through its tool bridge drafts and submits the code deliverable for it (card bridge-submissions, product launcher)", { skip: hasGit ? false : "git is not installed" }, async (t) => {
   const probe = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
   const usable = probe.capacity.available && probe.capacity.backend === "bubblewrap" && !["/usr", "/bin", "/lib"].includes(nodeRoot);
   const why = probe.capacity.reason;
@@ -121,16 +120,14 @@ test("an agent working only through its tool bridge lists the code submission it
     const tree = (await api("submission.get", { submissionId: sid })).result.item.tree as string;
     assert.deepEqual((await api("deliverable.record.list", { taskId })).result.items, [], "work.end drafts no deliverable");
 
-    // ---- (2) the next attempt is told the submission, lists it through the bridge and drafts and submits the deliverable naming it ----
+    // ---- (2) the next attempt is told the submission in its first call and drafts and submits the deliverable naming it, through the bridge only ----
     const firstOfTwo = seen.length;
-    const listed: string[] = [];
     steps = [
       ...Array.from({ length: firstOfTwo }, () => () => say("unused")),
-      () => toolCall("nimblenewt__submission-list", {}, "call_l"),
       (text) => {
-        listed.push(text);
-        const ids = [...text.matchAll(/sbm-[a-z2-7]{20}/g)].map((m) => m[0]);
-        return toolCall("nimblenewt__deliverable-draft", { type: "code", title: "Bean patch", submissionIds: [ids[ids.length - 1]!] }, "call_d");
+        const named = /Your newest code submission of this task is (sbm-[a-z2-7]{20});/.exec(text)?.[1];
+        assert.ok(named !== undefined, `the first call names the submission: ${text.slice(-1200)}`);
+        return toolCall("nimblenewt__deliverable-draft", { type: "code", title: "Bean patch", submissionIds: [named] }, "call_d");
       },
       (text) => {
         const m = [...text.matchAll(/\\"id\\":\\"(dlv-[a-z2-7]{20})\\",\\"revision\\":(\d+)/g)].pop();
@@ -143,20 +140,13 @@ test("an agent working only through its tool bridge lists the code submission it
     const two = await runAttempt(2);
     assert.equal(two.attempt.outcome?.status, "succeeded", JSON.stringify(two.attempt.outcome));
     const opening = seen[firstOfTwo]!;
-    assert.ok(opening.includes(`Your newest code submission of this task is ${sid}.`), `the next attempt is told its submission in its first call: ${opening.slice(-1200)}`);
-    // What the listing answered (the tool result the model read): this one submission, its short tree and where review stands; no patch.
-    const answer = listed[0]!;
-    assert.ok(answer.includes(sid));
-    assert.ok(answer.includes(tree.slice(0, 12)) && !answer.includes(tree), "a short tree, not the whole one");
-    // One agent in the project: no other agent could review, so no review is required and the submission counts as approved (`review_disabled_single_agent`).
-    assert.match(answer, /\\"state\\":\\"approved\\"/);
-    assert.match(answer, /\\"total\\":1,/);
-    assert.doesNotMatch(answer, /patchId/);
+    assert.ok(opening.includes(`Your newest code submission of this task is ${sid}; draft its code deliverable with nimblenewt__deliverable-draft naming it`), `the next attempt is told its submission in its first call: ${opening.slice(-1200)}`);
+    assert.doesNotMatch(opening, /submission-list/);
     const items = (await api("deliverable.record.list", { taskId })).result.items as { id: string }[];
     assert.equal(items.length, 1, JSON.stringify(items));
     const v1 = (await api("deliverable.record.get", { id: items[0]!.id })).result.item;
     assert.deepEqual([v1.type, v1.responsibleAgent, v1.state, v1.version.submittedBy], ["code", principalId, "submitted", principalId], JSON.stringify(v1));
-    assert.deepEqual(v1.version.content.submissions, [{ id: sid, kind: "code", submittedBy: principalId, tree }], "the deliverable binds the submission the agent listed");
+    assert.deepEqual(v1.version.content.submissions, [{ id: sid, kind: "code", submittedBy: principalId, tree }], "the deliverable binds the submission the brief named");
     await l.close();
     second = undefined;
   } finally {

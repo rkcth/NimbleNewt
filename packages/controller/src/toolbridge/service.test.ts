@@ -12,6 +12,7 @@ import type { JsonObject } from "../storage/types.js";
 import { JobService } from "../jobs/index.js";
 import { RecallService } from "../context/recall-service.js";
 import { SubmissionService } from "../submissions/index.js";
+import { CommandRunner } from "../domain/runner.js";
 import { bridgeCommandId, launchOf, ToolExecutionService, type BoundGateway, type BuiltinTool, type BridgeResponse, type ScriptLaunch, type ScriptRunner } from "./service.js";
 import { checkValue, schemaProblems } from "./schema.js";
 import { RUNNING_CALL_KIND, RunningCallStore } from "./running-store.js";
@@ -1830,6 +1831,13 @@ for (const backend of backends) {
     assert.ok(content.includes(`Your newest code submission of this task is ${newest}; draft its code deliverable with nimblenewt__deliverable-draft naming it`), content.slice(-1500));
     assert.ok(!content.includes(first) && !content.includes(bens) && !content.includes(other) && !content.includes(far), "only the agent's newest of this task");
     assert.deepEqual(drafted, [{ type: "code", title: "patch", submissionIds: [newest], taskId }]);
+    // An index entry is only a pointer: one that names another task's submission, or a submission of another agent or another time, names nothing.
+    const runner = new CommandRunner(c.storage, c.epoch, c.options);
+    const at = async (id: string): Promise<string> => ((await runner.get("submission", id))!.body as { submittedAt: string }).submittedAt;
+    const index = (await runner.get("code-submission-index", c.project))!;
+    const planted = { ...(index.body as Record<string, unknown>), entries: [{ taskId, id: other, at: await at(other), by: ann.id }, { taskId, id: newest, at: await at(newest), by: "agent:zed" }, { taskId, id: bens, at: "2000-01-01T00:00:00.000Z", by: ben.id }] };
+    await runner.command("test.plant", { commandId: uid("plant"), actor: c.owner.id }, async () => ({ payload: { n: uid("i") }, build: async () => ({ ref: { kind: "code-submission-index", id: c.project }, creates: false, changes: [{ type: "update" as const, ref: { kind: "code-submission-index", id: c.project }, expectedRevision: index.revision, body: planted as unknown as JsonObject }], detail: {} }) }));
+    assert.deepEqual([await subs.newestCodeOf(c.project, taskId, ann.id), await subs.newestCodeOf(c.project, taskId, "agent:zed"), await subs.newestCodeOf(c.project, taskId, ben.id)], [undefined, undefined, undefined], "another task's submission, another agent's, and another time are not named");
   });
 
   suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {
