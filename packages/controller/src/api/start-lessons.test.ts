@@ -43,6 +43,11 @@ test("lessons through the running controller's API: evidence from an observation
     const sbm = (await call(ann.token, "submission.record", { taskId: task, kind: "code", role: "author", base: "a".repeat(40), tree: "b".repeat(40), patchId: "c".repeat(40) }, "s1")).result.id as string;
     const reviewed = await call(rev.token, "submission.record", { taskId: task, kind: "review", role: "reviewer", subject: sbm, verdict: "changes" }, "rv1");
     assert.ok(reviewed.ok, JSON.stringify(reviewed));
+    // Card U09b: the submissions' steps, read back from the owner's replay. A code submission is a proposal (its review decides), so it is proposed; a review that was recorded is confirmed.
+    {
+      const shown = ((await call(boot.token, "activity.replay.open", { taskId: task, limit: 50 })).result.entries as { kind?: string; summary?: string; outcome?: string }[]).filter((e) => e.kind === "submission");
+      assert.deepEqual(shown.map((e) => [/\(author\)/.test(e.summary ?? "") ? "code" : /\(reviewer\)/.test(e.summary ?? "") ? "review" : e.summary, e.outcome]), [["code", "proposed"], ["review", "confirmed"]], JSON.stringify(shown));
+    }
     // The failed review is an observation (B02); the author retells it, so it is a reporter and may cite it.
     const told = await call(ann.token, "observation.submit", { projectId: project, summary: "sent back for the error path", sources: [{ kind: "submission", id: reviewed.result.id }] }, "f1");
     const obs = told.result.id as string;

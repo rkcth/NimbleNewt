@@ -160,6 +160,15 @@ test("an agent starts a job through the bridge and keeps a durable handle; statu
       refused(await send("job.start", { tool: toolName, version: "1.0.0", input: { target: "other" } }, "start-1"), "invalid_command");
     });
     assert.equal(launcher.procs.length, 1, "one process for one job");
+    // Card U09b: the bridge's own steps, read back from the owner's replay. An ordinary write that was made (the desk records, the registration) is confirmed; a job that was started is running, not
+    // finished, so its step is dispatched; the same call asked again records nothing more.
+    {
+      const bridgeSteps = ((await api(boot.token, "activity.replay.open", { taskId: build, limit: 50 })).result!.entries as { summary?: string; outcome?: string }[]).filter((e) => / through the bridge\./.test(e.summary ?? ""));
+      const outcomeOf = (pattern: RegExp) => bridgeSteps.filter((e) => pattern.test(e.summary!)).map((e) => e.outcome);
+      assert.deepEqual(outcomeOf(/wrote desk record/), ["confirmed", "confirmed"], JSON.stringify(bridgeSteps));
+      assert.deepEqual(outcomeOf(/registered tool/), ["confirmed"], JSON.stringify(bridgeSteps));
+      assert.deepEqual(outcomeOf(/started job/), ["dispatched"], JSON.stringify(bridgeSteps));
+    }
     const proc = launcher.procs[0]!;
     // The launch is the catalogue's: argv the entry point only, the input as data on standard input, an empty environment, the manifest's limits.
     assert.deepEqual([proc.launch.argv, JSON.parse(proc.launch.stdin), proc.launch.env, proc.launch.limits.seconds], [["bin/build.js"], { target: "site" }, {}, 600]);

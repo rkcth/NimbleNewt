@@ -156,12 +156,13 @@ async function story(storage: Storage): Promise<void> {
     const compressed = one("the compressed history", (x) => x.kind === "compression");
     assert.ok(byController(compressed) && compressed.outcome === "confirmed");
     const side = steps.filter((x) => x.kind === "branch");
-    assert.ok(side.length >= 1 && side.every((x) => x.lane === lane && x.laneStatus === "controller" && byController(x)), JSON.stringify(side));
+    assert.ok(side.length >= 1 && side.every((x) => x.lane === lane && x.laneStatus === "controller" && byController(x) && x.outcome === "confirmed"), JSON.stringify(side));
     const moved = one("the provider switch", (x) => x.kind === "model-selected" && /moved from route strata\/qwen to route gpu2\/qwen/.test(x.summary));
     assert.ok(byController(moved) && moved.outcome === "confirmed" && moved.lane === "main");
     assert.ok(moved.seq > failedCall.seq, "the switch comes after the failure it followed");
     const routes = steps.filter((x) => x.kind === "model-selected" && /runs on route/.test(x.summary)).map((x) => x.summary.replace(/^.* on route (\S+)\.$/, "$1"));
     assert.deepEqual(routes, ["strata/qwen", "gpu2/qwen"], "each attempt's route, as the dispatcher chose it");
+    assert.ok(steps.filter((x) => x.kind === "model-selected" || x.kind === "harness-selected").every((x) => x.outcome === "confirmed"), "the dispatcher's own choices are confirmed");
     const answer = one("the agent's answer", (x) => x.kind === "agent-message");
     assert.ok(byController(answer) && answer.outcome === "dispatched" && answer.seq > moved.seq);
     const correction = one("the owner's correction", (x) => x.kind === "instruction");

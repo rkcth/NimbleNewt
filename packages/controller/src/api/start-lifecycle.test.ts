@@ -34,6 +34,8 @@ test("suspend and stop through the state API: whoever may pause may ask, nothing
     assert.equal((await call(ann, "lifecycle.get", { intentId: suspended.result.intentId })).error.code, "not_found", "another principal reads it like a missing one");
     const steps = await call(boot.token, "activity.steps", { taskId: task });
     assert.ok(steps.result.steps.some((x: { kind: string; summary: string }) => x.kind === "lifecycle" && /Suspension suspended/.test(x.summary)), JSON.stringify(steps.result));
+    // Card U09b: a suspension that ended gracefully with nothing left unresolved is confirmed in the owner's replay.
+    assert.deepEqual(((await call(boot.token, "activity.replay.open", { taskId: task, limit: 50 })).result.entries as { kind?: string; summary?: string; outcome?: string }[]).filter((e) => e.kind === "lifecycle" && /Suspension suspended/.test(e.summary ?? "")).map((e) => e.outcome), ["confirmed"]);
     // A replay is the same request.
     assert.equal((await call(boot.token, "lifecycle.stop", { scope, mode: "suspend", reason: "maintenance" }, "s1")).result.replayed, true);
     // Stop after suspend ends execution; the task is not cancelled.

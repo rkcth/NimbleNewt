@@ -20471,3 +20471,13 @@ Missed, as expected: the link reader treating a resolver's silence as trusted. E
 - The page itself (`packages/ui` replay view) is tested by its unit tests and through its routes. No browser drives it against the composed controller (there is no browser test pattern in the repo).
 - Live thinking from a real model, the Pi-side copy of K06c's deletion and real hardware cannot be checked offline (unchanged).
 - The composed scenario runs on SQLite and PostgreSQL only, which are the two stores `startController` takes.
+
+**Outcome pins after the flip audit (2026-11-27).** Every branching outcome of the producers is now asserted from the replay or activity read-back:
+- the bridge's `job.start` is dispatched, `maintenance.request` is proposed, an ordinary write is confirmed, and `service.operate` follows the service: confirmed, failed, pending as dispatched, anything else uncertain;
+- a meeting decision that was applied is confirmed, and one that could not change its task is failed;
+- the dispatcher's call, begin and report paths and its route and harness steps keep their outcomes;
+- code submissions are proposed and reviews confirmed (outside the six producers), as is a graceful stop.
+
+The tests are start-jobs, start-maintenance-bridge, start-p03b-bridge, toolbridge/service (a new suite on four backends), start-meeting-record, dispatcher-suite (four backends), start-replay-producers, start-lessons and start-lifecycle. Test only, no product code changed.
+
+Open, not pinned: the stop step's `uncertain` branch (an ungraceful stop, outside the six producers). Finding left to the coordinator: a `maintenance.request` approved at once by a standing permission is still recorded as `proposed`, which understates it (its application has started) but never shows it as done.

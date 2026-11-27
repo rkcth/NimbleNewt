@@ -2926,6 +2926,36 @@ for (const backend of backendsNamed(backendName)) {
       assert.equal(calls.length, 1, `${attemptId}: one step for the call, at the report`);
       assert.match(calls[0]!.summary, /confirmed/);
       assert.equal(calls[0]!.refs[0]!.kind, "tool-operation");
+      assert.equal((calls[0] as { outcome?: string }).outcome, "confirmed", "card U09b: a reported success is confirmed");
+    } finally { await store.close(); }
+  });
+}
+
+// Card U09b: the outcome of a split-form call is the controller's reading of what came back: a reported failure is failed, and a call decided at its start without running (refused) is failed, never confirmed.
+for (const backend of backendsNamed(backendName)) {
+  test(`${backend.name}: a split-form call reported as failed, and one refused at its start, are failed steps (card U09b)`, async () => {
+    const store = await backend.open();
+    try {
+      const steps: { kind: string; summary: string; outcome?: string }[] = [];
+      const c = await buildWorld(store.storage);
+      const ann = await c.agent("ann", workGrants(c.project, ["read-file"]));
+      await c.task("Order seeds", ann);
+      await c.policy.set(c.owner, { scope: "installation", commandId: "pol", profile: "autonomous" });
+      const states: string[] = [];
+      c.worker.script = async ({ gateway }) => {
+        try {
+          const begun = await gateway.begin({ callId: "r2", tool: { name: "read-file", version: "1" }, args: { path: "MISSING.md" } });
+          if (begun.run) states.push((await gateway.report(begun.operationId, { state: "failed", error: "no such file" })).state);
+          const refused = await gateway.begin({ callId: "w2", tool: { name: "write-file", version: "1" }, args: { path: "a.txt" } });
+          states.push(refused.run ? "ran" : refused.result.state);
+        } catch (error) { states.push(`threw: ${String(error)}`); }
+        return { status: "completed", text: "done" };
+      };
+      c.dispatcher = c.restart({ activity: async (x) => { steps.push(x); } });
+      await c.dispatcher.tick(); await c.dispatcher.idle();
+      assert.deepEqual(states, ["failed", "refused"]);
+      const calls = steps.filter((x) => x.kind === "tool-call");
+      assert.deepEqual(calls.map((x) => [/read-file|write-file/.exec(x.summary)?.[0] ?? (/^Tool call/.test(x.summary) ? "reported" : x.summary), x.outcome]), [["reported", "failed"], ["write-file", "failed"]], JSON.stringify(calls));
     } finally { await store.close(); }
   });
 }

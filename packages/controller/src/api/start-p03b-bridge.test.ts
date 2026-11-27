@@ -161,6 +161,7 @@ test("a worker repairs a service, publishes its findings and drafts and submits 
     const of = (effectId: string) => steps.filter((x) => x.manifest.refs.some((ref) => ref.kind === "effect" && ref.id === effectId)).map((x) => x.outcome);
     assert.deepEqual([of(seen["op"]["effectId"]), of(seen["refusedOp"]["effectId"]), of(seen["unsure"]["effectId"])], [["confirmed"], ["failed"], ["uncertain"]], JSON.stringify(steps));
     assert.equal(steps.filter((x) => /drafted deliverable/.test(x.summary)).length, 3, "three drafts through the bridge");
+    assert.deepEqual([...new Set(steps.filter((x) => /(drafted|submitted) deliverable/.test(x.summary)).map((x) => x.outcome))], ["confirmed"], "an ordinary write that was made is confirmed (card U09b)");
     assert.equal(steps.filter((x) => /submitted deliverable/.test(x.summary)).length, 2, "two submissions; the refused ones are no step");
     assert.ok(!steps.some((x) => /observe/.test(x.summary)), "a read is no step");
   } finally {

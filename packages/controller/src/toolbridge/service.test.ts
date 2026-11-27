@@ -1508,6 +1508,26 @@ for (const backend of backends) {
     assert.equal(new Set(steps.map((s) => s.commandId)).size, 3);
   });
 
+  // Card U09b: the step of a service operation made through the bridge stands where the service left it: only a verified operation is confirmed, a refused one is failed, one the ledger keeps for
+  // another try (pending) is dispatched, and anything else, including a status nobody has named, is uncertain (never confirmed).
+  suite("U09b: a service operation's step carries the service's own standing: confirmed, failed, pending as dispatched, anything else uncertain", async (c) => {
+    const ann = await c.agentFor("ann");
+    const { taskId } = await c.task("t", ann);
+    const steps: { taskId: string; summary: string; outcome?: string }[] = [];
+    const svc = new ToolExecutionService({
+      principal: c.dispatcherPrincipal, credentials: c.credentials, dispatch: c.dispatcher, assignments: c.assignments, catalog: c.catalog, hosts: c.hosts, admission: c.admission, pauses: c.pauses, runner: { run: async () => ({ text: "{}" }) }, desks: c.desks, isLocalHost: () => true,
+      state: { handle: async (_token: unknown, raw: unknown) => { const r = raw as { op: string; args: { resource: string } }; return { v: 1, op: r.op, ok: true, result: { effectId: `eff-${r.args.resource}`, status: r.args.resource } } as never; } },
+      activity: async (step) => { steps.push(step as never); } });
+    const statuses = ["confirmed", "failed", "pending", "uncertain", "something-new"];
+    c.worker.script = async ({ order, gateway }) => {
+      for (const [i, status] of statuses.entries()) good(await svc.handle(order.credential, gateway, { op: "service.operate", callId: `so-${i}`, args: { service: "billing", resource: status, action: { type: "restart" } } }));
+      return { status: "completed", text: "x" };
+    };
+    try { await c.tick(); } finally { svc.dispose(); }
+    const of = (status: string) => steps.filter((x) => x.summary.includes(`effect eff-${status} is`)).map((x) => [x.taskId, x.outcome]);
+    assert.deepEqual(statuses.map(of), [[[taskId, "confirmed"]], [[taskId, "failed"]], [[taskId, "dispatched"]], [[taskId, "uncertain"]], [[taskId, "uncertain"]]], JSON.stringify(steps));
+  });
+
   suite("restart recovery: a call asked again after a controller restart keeps its version; a manifest that approves a restart runs it again, one that does not leaves it uncertain and never runs it twice; the worker cannot claim the flag", async (c) => {
     const ann = await c.agentFor("ann");
     const { attemptId } = await c.task("t", ann);

@@ -45,7 +45,8 @@ test("a worker asks for an environment change through the bridge and has the mai
   try {
     assert.ok(c.dispatch !== undefined, c.dispatchProblem);
     const s = c.services;
-    const owner = await s.principals.authenticate((await s.principals.bootstrapOwner({ name: "rob" })).token);
+    const ownerToken = (await s.principals.bootstrapOwner({ name: "rob" })).token;
+    const owner = await s.principals.authenticate(ownerToken);
     await s.routing.setTable(owner, { commandId: "rt", expectedRevision: 0, table: { ...ROUTING_TABLE, roles: { coordinator: "r-cloud", "safety-supervisor": "r-cloud" } } } as never);
     await DifficultyService.withEpoch(c.storage, c.epoch, s.routing, s.contracts).setProfiles(owner, { commandId: "sp", expectedRevision: 0, profiles: EXEC_PROFILES } as never);
     await s.principals.enroll(owner, { commandId: "e-host", kind: "host", name: "w1", grants: [] });
@@ -113,5 +114,11 @@ test("a worker asks for an environment change through the bridge and has the mai
     assert.equal(applier.calls.filter((x) => x.op === "apply" && x.id === id).length, 1);
     // The package was never applied: it waits for the owner.
     assert.equal(applier.calls.some((x) => x.id === (seen["package"] as Reply)["maintenanceId"]), false);
+    // Card U09b: the bridge's step for each request, read back from the owner's replay. The request that waits for a decider is proposed; none is shown as done (confirmed) by the request itself,
+    // and the same call asked again recorded nothing more.
+    const replayed = ((await c.api.handle(ownerToken, { v: 1, op: "activity.replay.open", args: { taskId, limit: 50 } } as never)) as unknown as { result: { entries: { summary?: string; outcome?: string }[] } }).result.entries.filter((e) => /asked for an environment change/.test(e.summary ?? ""));
+    const stepOf = (mid: string) => replayed.filter((e) => e.summary!.includes(mid)).map((e) => e.outcome);
+    assert.deepEqual(stepOf((seen["package"] as Reply)["maintenanceId"] as string), ["proposed"], JSON.stringify(replayed));
+    assert.deepEqual(stepOf(id), ["proposed"], "the request's step says it was asked for, not that it was applied");
   } finally { release(); await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });

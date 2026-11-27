@@ -89,6 +89,19 @@ test("a decision of a meeting that names a change to a task is applied once by t
     await call(boot.token, "meeting.record.apply", { decisionId: closed.result.decisionId }, "ap2");
     assert.equal((await call(boot.token, "task.get", { taskId: task.id })).result.item.revision, after.result.item.revision);
     assert.equal(((await call(boot.token, "activity.steps", { taskId: task.id })).result.steps as { kind: string }[]).filter((x) => x.kind === "meeting-decision").length, 1, "the step is recorded once");
+    // Card U09b: the step's outcome, as the owner's replay reads it back. A change that was carried out is confirmed; a decision whose change could not be made (it names the task's revision from before the
+    // first change, so the project service refuses it) is failed, never confirmed, and leaves the task as it was.
+    const stale = await call(ann, "meeting.record.move", { recordId: rec, text: "Retitle the task again.", topic: "unrelated topic", changes: [{ kind: "task.update", agent: "agent:ann", target: { kind: "task", id: task.id }, expectedRevision: task.revision, patch: { title: "Cover beds next week" }, summary: "retitle the task again" }] }, "mv2");
+    assert.ok(stale.ok, JSON.stringify(stale));
+    assert.ok((await call(boot.token, "meeting.record.open-vote", { motionId: stale.result.id, expectedVersion: 1 }, "ov2")).ok);
+    for (const [t, id] of [[ann, "b3"], [bob, "b4"]] as const) assert.ok((await call(t, "meeting.record.cast-ballot", { motionId: stale.result.id, version: 1, value: "yes", reason: "agreed" }, id)).ok, id);
+    const closed2 = await call(boot.token, "meeting.record.close-vote", { motionId: stale.result.id }, "cv2");
+    assert.equal(closed2.result.state, "adopted", JSON.stringify(closed2));
+    const refused = await call(boot.token, "meeting.record.apply", { decisionId: closed2.result.decisionId }, "ap3");
+    assert.equal(refused.result.applied, 0, JSON.stringify(refused));
+    assert.equal((await call(boot.token, "task.get", { taskId: task.id })).result.item.title, "Cover beds tonight", "the refused change was not made");
+    const replayed = ((await call(boot.token, "activity.replay.open", { taskId: task.id, limit: 50 })).result.entries as { kind?: string; summary?: string; outcome?: string }[]).filter((e) => e.kind === "meeting-decision");
+    assert.deepEqual(replayed.map((e) => [/could not change/.test(e.summary ?? "") ? "could not change" : "changed", e.outcome]), [["changed", "confirmed"], ["could not change", "failed"]], JSON.stringify(replayed));
   } finally { await c.close(); rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); }
 });
 
