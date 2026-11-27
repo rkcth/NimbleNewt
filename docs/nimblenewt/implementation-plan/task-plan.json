@@ -10881,14 +10881,23 @@
           "d77127ec",
           "460a3e52",
           "5a4649a2",
-          "1a6c90c9"
+          "1a6c90c9",
+          "a297b36f",
+          "ef5e5bef",
+          "91849c9c",
+          "22f985b2",
+          "393990ce",
+          "06f68f3a",
+          "57e7909b",
+          "0c10cfb5",
+          "b43d7594"
         ],
         "ci_runs": [
-          "45803960092"
+          "45912941971"
         ],
         "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
         "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
-        "note": "The agent tool work.end {submit, result, note, message} is checked at once, writes one durable ending intent and freezes the attempt; the controller completes the ending once (settle through the dispatcher, hung calls cut with a reason, stage on the host that holds the checkout, open a code submission, tell, finish), resumed once after a restart and joined when repeated. An owner stop wins and an emergency stop drops the intent with nothing staged; a killed write call turns submit into a plain end with a typed release_failed runtime_hold blocker; a submit on a stale base whose changed files overlap the landing branch is refused with the head commit and the files (checked at request, after the settle and again after staging); a plain end is never refused. Limits: a remote host does not answer submitView or stage (no wire protocol yet), so a submit from a remote host fails closed as submit_unavailable with a blocker, and only a composer's or the local host's stage submits; no product code composes LocalWorker (H12t); the staged tree still carries PLAN.md (H12o); P08/P09 recompute tree and patch at landing. Follow-ups, not clauses here."
+        "note": "The agent tool work.end {submit, result, note, message} is checked at once, writes one durable ending intent and freezes the attempt; the controller completes the ending once (settle through the dispatcher, hung calls cut with a reason, stage on the host that holds the checkout, open a code submission, tell, finish), resumed once after a restart and joined when repeated. An owner stop wins and an emergency stop drops the intent with nothing staged; a killed write call turns submit into a plain end with a typed release_failed runtime_hold blocker; a submit on a stale base whose changed files overlap the landing branch is refused with the head commit and the files (checked at request, after the settle and again after staging); a plain end is never refused. The product launcher's local worker host (scripts/local-host.mjs) answers the submit's view and staging, asking the P02 admission again, so a submit there opens a code submission. Limits: a remote host does not answer submitView or stage (no wire protocol yet), so a submit from a remote host fails closed as unavailable; the staged tree still carries PLAN.md (the open W05/H12o decision); the tree and patch ID are not re-checked at landing time (a landing-side follow-up, not a clause of this card or of P08's text); a checkout's turn has no time limit of its own. Follow-ups, not clauses here."
       }
     },
     {
