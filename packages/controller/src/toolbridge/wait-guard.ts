@@ -57,7 +57,8 @@ export function leadingSleepSeconds(command: string): number | undefined {
     if (s === undefined || ++args > WAIT_GUARD.args) return undefined;
     total += s;
   }
-  return args === 0 ? undefined : total;
+  // Second review: the sum is rounded to a microsecond, so decimal arguments that add up to 60 s exactly are read as 60 s (0.1 + 52.2 + 7.7 was 60.00000000000001 and refused as a wait of 61 s).
+  return args === 0 ? undefined : Math.round(total * 1e6) / 1e6;
 }
 
 /** The refusal of a command that only waits, or undefined when it may run. */

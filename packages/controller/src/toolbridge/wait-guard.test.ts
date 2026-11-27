@@ -55,3 +55,22 @@ test("W09 third slice: hostile commands are read in linear time and never throw"
   assert.equal(leadingSleepSeconds("sleep 2\u0664\u0660"), undefined);
   assert.equal(leadingSleepSeconds("sleep\u0000240"), undefined);
 });
+
+test("W09 third slice, second review: the forms the first review listed, as a table: what runs and what is refused; decimal arguments that add up to 60 s exactly are not refused", () => {
+  const runs = [
+    "sleep 1", "sleep 0.5", "sleep 60", "sleep 60.0", "sleep 60s", "sleep 1m", "sleep 2 && npm test", "sleepy-tool", "./bin/sleep 300", "/opt/sleep 300", "sleep 1e3", "sleep 0x10", "sleep -- 100", "sleep 1h30m", "SLEEP 300",
+    "FOO=1 sleep 300", "time sleep 300", "exec sleep 300", "sleep 61 >/dev/null", "sleep 61 2>&1", "sleep 61 & wait", "sleep 61|true", "sleep 1234567890123", "sleep 00000000000061", "sleep -61", "sleep +61", "sleep 1m1",
+    "sleep 61\\\nx", "sleep 0.1 52.2 7.7", "sleep 20.1 20.1 19.8", "sleep 0.7 0.7 58.6",
+  ];
+  for (const command of runs) assert.equal(waitRefusal(command), undefined, JSON.stringify(command));
+  const refused: [string, string][] = [
+    ["sleep 61", "61 s"], ["sleep 60.5", "61 s"], ["sleep 1.01m", "61 s"], ["sleep 0.02h", "72 s"], ["sleep 61s", "61 s"], ["sleep 000000000061", "61 s"], ["sleep 61 ;", "61 s"], ["sleep 61 #x", "61 s"], ["sleep 61\t&& x", "61 s"],
+    ["sleep 8 8 8 8 8 8 8 8", "64 s"], ["\r\nsleep 61", "61 s"], ["sleep 61\r", "61 s"], ["sleep 0.1 52.2 7.8", "61 s"], ["sleep 1.1m 0.06m", "70 s"],
+  ];
+  for (const [command, named] of refused) assert.ok(waitRefusal(command)?.startsWith(`a command that waits ${named} `), JSON.stringify(command));
+  // Every split of 60.0 s into three arguments of tenths runs (one of them is enough to pin the rounding; this sweeps a slice).
+  for (let a = 0; a <= 600; a += 7) for (let b = 0; a + b <= 600; b += 3) {
+    const command = `sleep ${(a / 10).toFixed(1)} ${(b / 10).toFixed(1)} ${((600 - a - b) / 10).toFixed(1)}`;
+    assert.equal(waitRefusal(command), undefined, command);
+  }
+});

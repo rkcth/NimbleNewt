@@ -44,7 +44,7 @@ import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/ta
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
 import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type LaunchLimitsRecord, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
-import { withClauseRule } from "./clause-questions.js";
+import { CLAUSE_QUESTION_LIMITS, withClauseRule } from "./clause-questions.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
 import { sealContract } from "../remote/contract.js";
 import { boundContextUpdates } from "./context-updates.js";
@@ -3005,10 +3005,12 @@ export class DispatcherService {
   async #doneNote(b: DispatchBody): Promise<string> {
     try {
       const c = await this.#doneContract(b);
-      if (c === undefined || (c.requiredEvidence.length === 0 && c.checks.length === 0)) return "";
+      if (c === undefined) return "";
+      const report = reportClauseNote(c.acceptanceCriteria ?? []);
+      if (c.requiredEvidence.length === 0 && c.checks.length === 0) return report === "" ? "" : `\n\n${report.trimStart()}`;
       const evidence = c.requiredEvidence.length === 0 ? "" : ` Name each evidence item the task requires in work.end evidence as { item, path }, with the file of your checkout that holds it: ${c.requiredEvidence.slice(0, 10).map((e) => quoted(e, 120)).join(", ")}${c.requiredEvidence.length > 10 ? ` and ${c.requiredEvidence.length - 10} more` : ""}.`;
       const checks = c.checks.length === 0 ? "" : ` The host then runs these checks in your sandbox, and each must pass: ${c.checks.map((x) => quoted(x.name, 80)).join(", ")}.`;
-      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks}${clauseNote(c)} A done that does not pass is refused with the list of what failed.`;
+      return `\n\nWhen you end with work.end done, the controller checks your work before it is taken: your checkout must hold your change against the task's base (your PLAN.md does not count; you do not commit it; what the checkout holds is what is checked, and it is committed after review).${evidence}${checks}${clauseNote(c)} A done that does not pass is refused with the list of what failed.${report}`;
     } catch { return ""; }
   }
 
@@ -3973,6 +3975,16 @@ function clauseNote(c: { readonly checks: readonly { readonly name: string; read
   if (criteria.length === 0) return runs;
   const listed = criteria.slice(0, 50).map((x, i) => `C${i + 1} ${quoted(x, 100)}`).join("; ");
   return `${runs} The contract has ${criteria.length} clause(s), in this order: ${listed}. Your PLAN.md must hold, for each, a ticked step that starts with its number and names a test file of your change and one of its tests by name, in quotes, as in that file: - [x] C1: ... path/to/x.test.ts "its test name".`;
+}
+
+/**
+ * W09 third slice, second review: the form of a report line that shows a clause tested (`clause-questions.ts` reads it), told at the start so the first report can hold it. Before, only the second agent's questions and the
+ * refusal showed it, so a task of 7 or more clauses whose first report had no such lines always cost a go-on (two rounds ask about 6 at most). Empty without clauses.
+ */
+export function reportClauseNote(criteria: readonly string[]): string {
+  const n = Math.min(criteria.length, CLAUSE_QUESTION_LIMITS.clauses);
+  if (n === 0) return "";
+  return ` Your work.end report must show each of the contract's clauses (${n === 1 ? "C1" : `C1 to C${n}`}, in the contract's order) tested, one line each naming the clause, its test and its passing result: C1: path/to/x.test.ts "its test name" passed. A clause it does not show is asked about before the done is taken.`;
 }
 
 /** The default time of a contract check, in seconds (`CONTRACT_LIMITS.checkSeconds`). */

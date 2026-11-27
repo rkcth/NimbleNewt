@@ -15,19 +15,54 @@ export const CLAUSE_QUESTION_LIMITS = { clauses: 50, lines: 400, line: 1_000, qu
 const CLAUSE_NAME = /(?<![A-Za-z0-9_])[Cc](\d{1,3})(?![A-Za-z0-9_])/g;
 /** Quoted text that can be a test name: straight double, typographic double or back quotes (single quotes are left out: an apostrophe cannot be told from a quote). Each style is read on its own; each body excludes its closing quote. */
 const QUOTES: readonly RegExp[] = [/"([^"\r\n]{1,200})"/g, /\u201c([^\u201d\r\n]{1,200})\u201d/g, /`([^`\r\n]{1,200})`/g];
-/** A passing run result outside the quotes: `ok`, `pass`, `passed`, `passes`, `passing` as whole words, or a check mark (node's spec reporter prints `✔`). */
-const PASSING = /(?<![A-Za-z])(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])|[\u2713\u2714\u2705]/i;
+/** A passing run result outside the quotes: `ok`, `pass`, `passed`, `passes`, `passing` as whole words (not `pass-through`), or a check mark (node's spec reporter prints `✔`). */
+const PASSING = /(?<![A-Za-z])(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z_-])|[\u2713\u2714\u2705]/i;
+/** A count of 0, not part of a longer number (`10`, `1.0`, `1,0`) and not followed by more digits (`05`, `0.5`). */
+const ZERO = String.raw`(?<![0-9.,])0(?![0-9]|[.,][0-9])`;
 /**
- * A failing one: `not ok`, a cross mark (`✖`, `✗`), or `fail` (failed, fails, failing, failure) with no count of 0 or negation next to it: `fail 0`, `failed: 0`, `0 failed`, `4 pass / 0 fail`, `no failures`, `none failed` and
- * `nothing failed` are not failures (first review: the common "3 passed, 0 failed" and "no failures" were read as failing and the clause asked about again).
+ * A failing one (each pattern bounded, so the reading stays linear in the line):
+ * - `not ok`, or a cross mark (`✖`, `✗`, `✘`, `❌`, jest's `✕`, vitest's `×`, `⨯`);
+ * - `fail` (failed, fails, failing, failure) with no count of 0 or negation next to it: `fail 0`, `failed: 0`, `0 failed`, `4 pass / 0 fail`, `no failures`, `none failed`, `nothing failed`, `0 tests failed` and `no tests
+ *   failed` are not failures (first review: the common "3 passed, 0 failed" and "no failures" were read as failing and the clause asked about again);
+ * - second review, results that are not a pass although a passing word is on the line: none passed (`0 passed`, `pass 0`, `passed: 0`, `ran 0 tests`, `tests 0`, but not `passed: 0 failed`); a pass that is denied or only expected (`not`, `never`,
+ *   `cannot`, `did not`, `can't`, `won't`, `should`, `would`, `will`, `to` before it); a test not run (`not run`, `not tested`, `untested`, `timed out`, a TAP `# SKIP` or `# TODO`); and a count above 0 of skipped,
+ *   cancelled or errored tests (`1 error`, `skipped 2`, `cancelled 1`).
  */
-const FAILING = /(?<![A-Za-z])not[ \t]+ok(?![A-Za-z])|[\u2716\u2717\u2718\u274c]|(?<!(?:(?<![0-9.])0|(?<![A-Za-z])(?:no|zero|none|nothing))[ \t]{1,3})(?<![A-Za-z])fail(?:ed|s|ing|ures?)?(?![A-Za-z])(?![ \t]{0,3}[:=]?[ \t]{0,3}0(?![0-9]))/i;
-/**
- * A file name outside the quotes (`src/fail-safe.test.ts`, `c2.test.mjs`, `lib\ok.js`): a word with a path separator or an extension. It is set aside before the result and the clause names are read, so a file named `fail-safe`
- * is not a failing result and `src/c2.test.ts` does not name C2 (first review). A word of clause names only (`C1/C2`) is kept.
- */
-const FILE_NAME = /[A-Za-z0-9_.\\/-]*(?:[\\/][A-Za-z0-9_.\\/-]*|\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9]))/g;
+const FAILING: readonly RegExp[] = [
+  /(?<![A-Za-z])not[ \t]{1,8}ok(?![A-Za-z])|[\u2716\u2717\u2718\u274c\u2715\u00d7\u2a2f]/i,
+  new RegExp(String.raw`(?<!(?:${ZERO}|(?<![A-Za-z])(?:no|zero|none|nothing))(?:[ \t]{1,3}tests?)?[ \t]{1,3})(?<![A-Za-z])fail(?:ed|s|ing|ures?)?(?![A-Za-z])(?![ \t]{0,3}[:=]?[ \t]{0,3}${ZERO})`, "i"),
+  new RegExp(String.raw`${ZERO}[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])|(?<![A-Za-z])(?:pass(?:ed|es|ing)?|ran|tests?)[ \t]{0,3}[:=]?[ \t]{0,3}${ZERO}(?![A-Za-z])(?![ \t]{1,3}(?:tests?[ \t]{1,3})?fail)`, "i"),
+  /(?:(?<![A-Za-z])(?:not|never|cannot|should|would|will|to)|n['\u2019]t)(?:[ \t]{1,3}(?:yet|all|be|been))?[ \t]{1,3}(?:ok|pass(?:ed|es|ing)?|run|ran|tested|executed)(?![A-Za-z])/i,
+  /(?<![A-Za-z])(?:untested|unverified|timed[ \t]{1,3}out)(?![A-Za-z])|#[ \t]{0,3}(?:skip|todo)(?![A-Za-z])/i,
+  /(?<![0-9.,])[1-9][0-9]{0,8}[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:skipped|cancell?ed|errors?|errored)(?![A-Za-z])|(?<![A-Za-z])(?:skipped|cancell?ed|errors?)[ \t]{0,3}[:=]?[ \t]{0,3}[1-9]/i,
+];
+/** A count of passes out of a total (`2/5 passed`, `2 of 5 passing`): failing unless all passed (`0/0 passed` is already read as none passed). */
+const PASS_FRACTION = /(?<![0-9.,])([0-9]{1,9})(?:[ \t]{0,3}[\\/][ \t]{0,3}|[ \t]{1,3}of[ \t]{1,3})([0-9]{1,9})(?![0-9.,])[ \t]{1,3}(?:tests?[ \t]{1,3})?(?:ok|pass(?:ed|es|ing)?)(?![A-Za-z])/gi;
+const failing = (line: string): boolean => FAILING.some((f) => f.test(line)) || [...line.matchAll(PASS_FRACTION)].some((m) => Number(m[1]) < Number(m[2]));
+/** A run of characters a file name may hold, matched in one pass (each run is maximal, so the scan is linear). */
+const NAME_RUN = /[A-Za-z0-9_.\\/-]+/g;
+/** A file extension in a run: a dot, a letter and at most 7 more letters or digits, not followed by a letter or digit. */
+const EXTENSION = /\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9])/g;
 const CLAUSES_ONLY = /^(?:[Cc]\d{1,3}[\\/-]?)+$/;
+const FRACTION = /^[0-9]+(?:[\\/][0-9]+)+$/;
+
+/**
+ * File names outside the quotes (`src/fail-safe.test.ts`, `c2.test.mjs`, `lib\ok.js`) set aside: in a run of name characters, the part up to the end of the run when its last path separator comes after its last extension, or
+ * else up to the end of its last extension. They are set aside before the result and the clause names are read, so a file named `fail-safe` is not a failing result and `src/c2.test.ts` does not name C2 (first review). A
+ * part of clause names only (`C1/C2`) or a count such as `2/5` is kept. Second review: this was one regular expression whose leading `[...]*` was retried from every character of a long run (quadratic: about 2 ms for 1,000
+ * characters, 15 s for 100 KB); it is now one pass over each run, setting aside the same parts (a test compares the two).
+ */
+export function setAsideFileNames(text: string): string {
+  return text.replace(NAME_RUN, (run) => {
+    const slash = Math.max(run.lastIndexOf("/"), run.lastIndexOf("\\"));
+    let extStart = -1, extEnd = -1;
+    for (const m of run.matchAll(EXTENSION)) { extStart = m.index; extEnd = m.index + m[0].length; }
+    const end = extStart > slash ? extEnd : slash >= 0 ? run.length : -1;
+    if (end < 0) return run;
+    const name = run.slice(0, end);
+    return (CLAUSES_ONLY.test(name) || FRACTION.test(name) ? name : " ") + run.slice(end);
+  });
+}
 
 /** The words of a text as compared: lower case, white space folded, at most `match` characters. */
 const words = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").trim().slice(0, CLAUSE_QUESTION_LIMITS.match);
@@ -41,8 +76,8 @@ function testedOn(raw: string, count: number): number[] {
     let taken = 0;
     rest = rest.replace(style, () => { if (taken >= CLAUSE_QUESTION_LIMITS.quotesPerLine) return " "; taken++; names++; return " "; });
   }
-  rest = rest.replace(FILE_NAME, (w) => (CLAUSES_ONLY.test(w) ? w : " "));
-  if (names === 0 || !PASSING.test(rest) || FAILING.test(rest)) return [];
+  rest = setAsideFileNames(rest);
+  if (names === 0 || !PASSING.test(rest) || failing(rest)) return [];
   const out: number[] = [];
   for (const m of rest.matchAll(CLAUSE_NAME)) {
     const n = Number.parseInt(m[1]!, 10);
@@ -100,20 +135,32 @@ type Answer = { readonly verdict: "supported"; readonly route: string } | { read
 
 /**
  * The second agent's answer after the clause rule. Unsupported stands. With no clause left, the answer stands. Otherwise, on a round that may still ask (`round <= maxRounds`): a `supported` becomes the controller's questions
- * about the clauses left (as many as a round holds), and a round of the second agent's own questions gets them added in the room it leaves. On a round that may not ask, a `supported` becomes unsupported, naming the clauses.
+ * about the clauses left (as many as a round holds), and a round of the second agent's own questions gets them added in the room it leaves, except that the clause questions the later rounds could not hold come before its
+ * questions that ask about no clause left (second review). On a round that may not ask, a `supported` becomes unsupported, naming the clauses.
  */
 export function withClauseRule(answer: Answer, input: { readonly criteria: readonly string[]; readonly report: string; readonly rounds: readonly { readonly questions: readonly string[]; readonly answers?: readonly string[] }[]; readonly round: number; readonly maxRounds: number }): Answer {
   // Unsupported stands, and so does anything that is not a verdict (the dispatcher reads that as unsupported).
   if (answer.verdict !== "supported" && answer.verdict !== "questions") return answer;
   const left = clausesLeft(input.criteria, input.report, input.rounds);
   if (left.length === 0) return answer;
-  const own = answer.verdict === "questions" ? answer.questions.slice(0, WORK_REPORT_LIMITS.questions) : [];
-  // The second agent's own questions may already ask about some of the clauses left.
-  const asking = new Set(own.flatMap((q) => askedIn(q, input.criteria)));
-  const ask = left.filter((n) => !asking.has(n));
+  const room = WORK_REPORT_LIMITS.questions;
+  // A blank question of the second agent's own takes no room (the dispatcher drops it).
+  const own = answer.verdict === "questions" ? answer.questions.filter((q) => String(q).trim() !== "").slice(0, room) : [];
   if (input.round <= input.maxRounds) {
-    const added = ask.slice(0, Math.max(0, WORK_REPORT_LIMITS.questions - own.length)).map((n) => clauseQuestion(n, input.criteria[n - 1] ?? ""));
-    if (answer.verdict === "questions" || added.length > 0) return { verdict: "questions", questions: [...own, ...added], route: answer.route };
+    // Second review: who gets the room. An own question that already asks about a clause left keeps its place (it serves both). The clause questions that the rounds after this one could not hold come next, then the
+    // second agent's other questions, then the rest of the clause questions. Before, its own questions always came first, so three of them on the last round that may ask left a clause for the round that may not, which
+    // turned a supported into an unsupported (a go-on).
+    const leftSet = new Set(left);
+    const asks = own.map((q) => askedIn(q, input.criteria).filter((n) => leftSet.has(n)));
+    const keep = new Set<number>(own.flatMap((_, i) => (asks[i]!.length > 0 ? [i] : [])));
+    const asking = new Set([...keep].flatMap((i) => asks[i]!));
+    const ask = left.filter((n) => !asking.has(n));
+    const later = Math.max(0, input.maxRounds - input.round) * room;
+    const first = Math.min(room - keep.size, Math.max(0, ask.length - later));
+    own.forEach((_, i) => { if (!keep.has(i) && keep.size + first < room) keep.add(i); });
+    const kept = own.filter((_, i) => keep.has(i));
+    const added = ask.slice(0, room - kept.length).map((n) => clauseQuestion(n, input.criteria[n - 1] ?? ""));
+    if (answer.verdict === "questions" || added.length > 0) return { verdict: "questions", questions: [...kept, ...added], route: answer.route };
     return answer;
   }
   if (answer.verdict === "questions") return answer;

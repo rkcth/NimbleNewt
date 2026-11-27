@@ -21236,3 +21236,46 @@ This slice is offline and model-free, and needs no live server. W09 stays planne
 - Runs: one at a time through the test slot, with the sandbox required, the offline guard and TMPDIR /tmp/claude-1000/w09s3-r1/. 183 files: the implementer's set plus the reviewer-wiring and start-work-end tests.
   - Node 22.23.0 and Node 24.21.0: 3,605 tests each, 3,603 passing, 0 failing, 2 Windows-only skips. plan.test is among them.
   - `npm ci --ignore-scripts --offline`, `tsc --build --force`, api:docs:write (no change), check:deps, licenses:check and roadmap:check are clean.
+
+### W09 third slice, second review (Claude agent, Opus 5.5, 2026-11-27 EST; clean-context review that also fixes; card W09 NOT flipped; task-plan files unchanged; not pushed; no workflow; no model or network call)
+
+Merged origin/main (96554abf, the Y02 and Y03 sign-off checklists, docs only) first. It merged without conflicts.
+
+**What was found and fixed.**
+- (medium) **The shown-tested reading accepted lines that do not show a passing run.** A confusion table of 72 realistic report lines (27 that should count, 45 that should not) found 28 false accepts before this review.
+  - The worst: a jest or vitest failure mark next to a pass mark on one line (`C1 "x" ✓, C2 "y" ×`, `✓ ... ✕`) counted both clauses.
+  - Also accepted: none passed (`0 passed`, `pass 0`, `passed: 0`, `Ran 0 tests`, `tests 0`); only part passed (`2/5 passed`, `2 of 5 passed`, `0/0 passed`); a pass that is denied or only expected (`did not pass`, `never passed`, `can't pass`, `won't pass`, `cannot pass`, `should pass once the fix lands`); a test not run (`not run yet, ok?`, `not tested`, `untested`, `timed out`, TAP `ok ... # SKIP` or `# TODO`); a count above 0 of errors, skips or cancellations (`3 passed, 1 error`, `skipped 2`, `cancelled 1`); `1,0 failed`; and `pass-through` read as a pass.
+  - Each of these counts a clause as tested when the run did not show it passing. The second agent and the W09 second slice's done check still stood behind it.
+  - Fixed in `dispatch/clause-questions.ts`. `FAILING` is now a list of bounded patterns, plus a check of pass fractions (failing unless all passed). Jest's `✕`, vitest's `×` and `⨯` are cross marks. A pass word must not be followed by `-` or `_`. A count of 0 is not part of `1,0`, `05` or `0.5`. `0 tests failed` and `no tests failed` now count as not failing (2 false rejects removed), and `passed: 0 failed` still counts as a pass.
+  - After the fix, the table has 0 false accepts and 0 false rejects. It is pinned whole as a test.
+- (low) **The file-name reading was quadratic.** The first review's `FILE_NAME` expression retried its leading `[...]*` from every character of a long run. Measured on Node 22 and 24: about 2 ms for 1,000 characters, but 10 to 16 s for 100 KB.
+  - In production a report is cut to 4,000 characters and a line to 1,000, so the real worst case was a few milliseconds. Even so, nothing else stood between it and untrusted text.
+  - It is now `setAsideFileNames`: one linear pass over each maximal run of name characters. It sets aside the same parts as the old expression, except that a count such as `2/5` is now kept so it can be read.
+  - A test checks it against the old expression on 20,000 random strings and 12 hand-picked ones. It also times hostile 100 KB lines and 400 full lines: each case is under 1.5 s in the test, measured in milliseconds.
+  - The other expressions use only bounded quantifiers, except `not[ \t]{1,8}ok` (now bounded too), so they stay linear.
+- (medium, the first review's design gap a) **The second agent's own questions could crowd the clause questions out.** If it asked 3 questions of its own in round 2 (the last round that may ask), a clause left over made round 3's supported an unsupported, which costs a go-on.
+  - `withClauseRule` now orders the room. First, an own question that already asks about a clause left keeps its place. Next come the clause questions the later rounds could not hold: in round 1 those beyond 3, in round 2 all of them. Then the second agent's other questions. Then the rest of the clause questions.
+  - Round 1 with 3 clauses or fewer is unchanged. So are the seven-clause sequence (C1 to C3, C4 to C6, unsupported naming C7) and every earlier test.
+  - Blank own questions no longer take room (before, three blank ones were read as asking nothing and so as unsupported).
+- (medium, design gap b) **The first prompt never showed the report line form.** The done note (`dispatcher.ts #doneNote`, the start text, not the fixed system prompt and not the interpreter prompt) now ends with `reportClauseNote`: "Your work.end report must show each of the contract's clauses (C1 to Cn, in the contract's order) tested, one line each naming the clause, its test and its passing result: C1: path/to/x.test.ts "its test name" passed. A clause it does not show is asked about before the done is taken."
+  - It is added for every contract with clauses, including one with no evidence or checks: that contract got no done note before, but the second agent still asked about its clauses.
+  - The example line is itself read as showing C1 tested. Contracts without clauses get exactly the text they got before.
+  - The fixed part (2,631 of 2,648) and the interpreter prompt (156,553 of 156,560) are unchanged.
+  - With 7 or more clauses, a first report in this form now avoids the go-on. Without it, the go-on still happens, as the ASSUMPTION above says.
+- (low) **The wait guard misread decimal sums.** Arguments that add up to exactly 60 s could come out as 60.00000000000001 in floating point and be refused as "waits 61 s" (`sleep 0.1 52.2 7.7`; 9,640 of the 1,830,000 three-argument splits of 60.0 into tenths). The sum is now rounded to a microsecond.
+- Checked, no change needed:
+  - Every run and refuse claim of the first review's wait-guard list holds. They are now a table test, with 31 commands that run and 14 that are refused, each with the wait it names.
+  - Liveness: a questioning has at most two question rounds and a verdict on round 3, an unsupported counts against `STOPPED_EARLY_READMITS` (2), and once those are used up the attempt ends blocked with the report recorded. The room rule changes which questions fill a round, not how many rounds there are.
+  - A task without clauses is unchanged, pinned on four backends: the verdict, the second agent's prompt and now the first prompt.
+- Still false rejects (each costs one question round, not a go-on below 7 clauses): TDD-style "failed before the fix, passes after", `(fail-closed)` in prose outside a file name, "not failing" and "never failed". Each is in the table as not counted.
+
+**Proof.**
+- New tests:
+  - `clause-questions.test.ts`: the confusion table; the file-name pass against the old expression and at 100 KB; the room rule in rounds 1 and 2 with 3 and 5 clauses, a covering own question and blank questions.
+  - `clause-questions-done.test.ts` (four backends): three own questions in both rounds, then supported on round 3 with no go-on; the first prompt's line form; a report in that form taken after one question to the second agent; no line and no done note without clauses.
+  - `wait-guard.test.ts`: the table of the first review's forms and a sweep of three-argument splits of 60 s.
+- Deliberate breakages: 26 that compile, none of them among the earlier 50, each restored by sha256 (`/tmp/claude-1000/w09s3-r2/breaks.py`). 25 were caught: the comma and decimal rules for 0; jest's cross; vitest's times sign; `no tests failed`; `0 passed`; the `passed: 0 failed` guard; `n't`; hedged passes; TAP skip and todo; error counts; the fraction compare; fractions kept; slash against extension order; the rest of a run kept; `pass-through`; the room rule's clause-first count; the covering own question; blank questions; later rounds off by one; the start note's line, its criteria-only path and its C1-to-Cn numbering; the float rounding; `untested` and `timed out`.
+  - 1 was neutral: `0/0 passed` as its own fraction case is also read as `0 passed`, so that branch was redundant. It was removed.
+- Runs: one at a time through the test slot, with the sandbox required, the offline guard and TMPDIR /tmp/claude-1000/w09s3-r2/tmp. The first review's 183 files, which include plan.test.
+  - Node 22.23.0 and Node 24.21.0: 3,613 tests each, 3,611 passing, 0 failing, 2 Windows-only skips.
+  - `npm ci --ignore-scripts --offline`, `tsc --build --force`, api:docs:write (no change), check:deps, licenses:check and roadmap:check are clean.

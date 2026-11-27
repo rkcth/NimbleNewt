@@ -152,3 +152,65 @@ for (const backend of backends) {
     } finally { for (const o of opened) await o.close(); await store.close(); }
   });
 }
+
+/** A second agent whose answers follow a script, one per round (the last repeats). */
+class Scripted implements ReportInterrogatorPort {
+  readonly inputs: InterrogationInput[] = [];
+  constructor(private readonly answers: readonly ({ verdict: "supported" } | { verdict: "questions"; questions: string[] })[]) {}
+  async ask(input: InterrogationInput): Promise<InterrogatorAnswer> { this.inputs.push(input); return { ...this.answers[Math.min(this.inputs.length, this.answers.length) - 1]!, route: "local/judge" } as InterrogatorAnswer; }
+}
+
+for (const backend of backends) {
+  test(`${backend.name}: second review: a second agent that asks three questions of its own in both rounds no longer crowds the clauses out (the last round that may ask asks them first, so the supported after it is taken and no go-on is counted); the first prompt shows the report line form, and only with clauses`, async () => {
+    const store = await backend.open();
+    const opened: { close(): Promise<void> }[] = [];
+    try {
+      const judge = new Scripted([{ verdict: "questions", questions: ["q1?", "q2?", "q3?"] }, { verdict: "questions", questions: ["q4?", "q5?", "q6?"] }, { verdict: "supported" }]);
+      const { w, taskId } = await world(store.storage, CRITERIA, judge);
+      const P = w.dispatcherPrincipal;
+      const v: ReportVerdict[] = [];
+      let content = "";
+      w.worker.script = async ({ order }) => {
+        content = order.content;
+        const id = order.attemptId;
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k1", report: "Done.", verified: "passed" }));
+        await w.dispatcher.answerQuestions(P, id, { key: "a1", answers: ["a", "b", "c"] });
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k2", report: "Done.", verified: "passed" }));
+        await w.dispatcher.answerQuestions(P, id, { key: "a2", answers: ["d", "e", "f"] });
+        v.push(await w.dispatcher.interrogateDone(P, id, { key: "k3", report: "Done.", verified: "passed" }));
+        return { status: "completed", text: "turn over", endKind: "normal" };
+      };
+      await w.heartbeatHost();
+      await w.dispatcher.tick();
+      await w.dispatcher.idle();
+      assert.equal(v.length, 3);
+      assert.match((v[0] as { message: string }).message, /1\. "q1\?"\n2\. "q2\?"\n3\. "q3\?"/, "round 1: round 2 can still hold both clauses, so the second agent's questions stand");
+      assert.match((v[1] as { message: string }).message, /1\. "q4\?"\n2\. "C1 [^\n]*\n3\. "C2 /, "round 2: the clauses take the room first");
+      assert.equal(v[2]!.state, "supported");
+      assert.equal(await countOf(w, taskId), 0, "no go-on");
+      // The first prompt names the clauses and the line form; the form is one the controller reads as shown tested.
+      assert.ok(content.includes(`Your work.end report must show each of the contract's clauses (C1 to C2, in the contract's order) tested, one line each naming the clause, its test and its passing result: C1: path/to/x.test.ts "its test name" passed.`), content);
+
+      // A report in that form is taken at once (the second agent is asked once and no question is added).
+      const extra = await backend.open();
+      opened.push(extra);
+      const once = new Always();
+      const second = await world(extra.storage, CRITERIA, once);
+      const u: ReportVerdict[] = [];
+      await turn(second.w, async (id) => { u.push(await second.w.dispatcher.interrogateDone(second.w.dispatcherPrincipal, id, { key: "k1", report: 'C1: src/quote.test.ts "cuts between whole characters" passed\nC2: src/quote.test.ts "empty input" passed', verified: "passed" })); });
+      assert.equal(u[0]!.state, "supported");
+      assert.equal(once.inputs.length, 1);
+
+      // Without clauses, the first prompt has no such line (and no done note at all for a contract with no evidence or checks).
+      const third = await backend.open();
+      opened.push(third);
+      const none = await world(third.storage, undefined, new Always());
+      let plain = "";
+      none.w.worker.script = async ({ order }) => { plain = order.content; return { status: "completed", text: "turn over", endKind: "normal" }; };
+      await none.w.heartbeatHost();
+      await none.w.dispatcher.tick();
+      await none.w.dispatcher.idle();
+      assert.ok(plain.length > 0 && !plain.includes("work.end report must show") && !plain.includes("When you end with work.end done"), plain);
+    } finally { for (const o of opened) await o.close(); await store.close(); }
+  });
+}

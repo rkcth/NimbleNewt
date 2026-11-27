@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CLAUSE_QUESTION_LIMITS, askedIn, clauseNames, clauseQuestion, clausesLeft, shownTested, withClauseRule } from "./clause-questions.js";
+import { CLAUSE_QUESTION_LIMITS, askedIn, clauseNames, clauseQuestion, clausesLeft, setAsideFileNames, shownTested, withClauseRule } from "./clause-questions.js";
 import { WORK_REPORT_LIMITS } from "./model.js";
 
 // Card W09 third slice: for a task with contract clauses, a supported is taken only once every clause is shown tested in the report or was asked about.
@@ -134,4 +134,80 @@ test("W09 third slice: seven clauses over the rounds: three, three, then unsuppo
   const many = `${"filler\n".repeat(CLAUSE_QUESTION_LIMITS.lines)}C1 "a" ok`;
   assert.deepEqual([...shownTested(many, 1)], []);
   assert.deepEqual([...shownTested(`${"filler\n".repeat(CLAUSE_QUESTION_LIMITS.lines - 1)}C1 "a" ok`, 1)], [1]);
+});
+
+test("W09 third slice, second review: a confusion table of report lines as test runners and agents write them: a pass is read only where nothing on the line says a test failed, did not run, or did not all pass", () => {
+  const T = true, F = false;
+  const rows: [string, boolean][] = [
+  ['C1: src/a.test.ts "rejects empty" ok', T], ['C1 "rejects empty" passed', T], ['C1: "x" - 3 passed, 0 failed', T], ['C1 "x" ✔ (no failures)', T],
+  ['C1: tests/a.test.mjs "x": pass 4, fail 0', T], ['C1 "x" ok 1 - x', T], ['C1 `x` passes', T], ['C1 “x” passing', T], ['C1: "x" passed (none failed)', T],
+  ['C1: src/fail-safe.test.ts "x" ok', T], ['C1 "x" ✓ 12 tests passed, 0 failures', T], ['C1: "x" - # pass 1 # fail 0', T], ['C1 "x" PASS', T],
+  ['C1: "x" passed: 0 failed, 0 skipped', T], ['C1: "x" ok; failed: 0', T], ['C1 "x" passed in 0.3s', T], ['C1 "x" passed (2 of 2)', T], ['C1 "x" 5/5 passed', T],
+  ['C1 "x" ok (0 tests failed)', T], ['C1 "x" passed, no errors', T], ['C1 "x" passed, 0 errors', T], ['C1 "x" ok (3.1ms)', T], ['C1: "x" passed; skipped 0, cancelled 0, todo 0', T],
+  ['C1 "x" passed, fail 0.', T], ['C1 (rejects 0 bytes): "x" passed', T], ['C1 "x" ok, no tests failed', T], ['C1 "x" 3 of 3 passed', T], ['C1 "x" passed: 0.4 s', T], ['C1 "x" ok, not  ok', F],
+  ['C1: x.test.ts "name" ok, but 2 failed', F], ['C1 "x" 0 passed 5 failed', F], ['C1 "x" not ok', F], ['C1 "x" ok (flaky: fail 3)', F], ['C1 "x" ✖ 1 failing', F],
+  ['C1 "x" ✓ but "y" ✕', F], ['C1 "x" × 1 test', F], ['C1 "x" ✓, C2 "y" ×', F], ['C1 "x" 0 passed', F], ['C1 "x" pass 0', F], ['C1 "x" passed: 0', F],
+  ['C1 "x" 2/5 passed', F], ['C1 "x" 2 of 5 passed', F], ['C1 "x" 0/0 passed', F], ['C1 "x" not run yet, ok?', F], ['C1 "x" should pass once the fix lands', F],
+  ['C1 "x" ok # SKIP', F], ['C1 "x" ok # TODO not implemented', F], ['C1 "x": 3 passed, 1 error', F], ['C1 "x" passed: 0; failed: 1', F], ['C1 "x" did not pass', F],
+  ['C1 "x" never passed', F], ['C1 "x" written, not tested (pass-through)', F], ['C1 "x" ok, 10 failed', F], ['C1 "x" ok; cancelled 1', F], ['C1 "x" timed out, setup ok', F],
+  ['C1 "x" untested, looks ok', F], ["C1 \"x\" can't pass on CI", F], ['C1 "x" won’t pass', F], ['C1 "x" ok - no, it failed', F], ['C1 "x" ok, Ran 0 tests', F],
+  ['C1 "x" ok; tests 0', F], ['C1 "x" pass-through only', F], ['C1 "x" passed, src/b.test.ts failed', F], ['C1 "x" FAILED', F], ['C1 "x" ❌', F],
+  ['C1 "x" ok (skipped 2)', F], ['C1 "x" ok, 1,0 failed', F], ['C1 "x" passes, fails 1', F], ['C1 "x" ok, failed: 05', F], ['C1 "x" ok, 2 errors', F], ['C1 "x" passed, cannot pass on Windows', F],
+  ['C1 "x" failed before the fix, passes after', F], ['C1 (fail-closed): "x" ok', F], ['C1 "x" ok, not failing', F],
+];
+  assert.ok(rows.length >= 70 && rows.filter((r) => r[1]).length >= 25 && rows.filter((r) => !r[1]).length >= 40);
+  const wrong = rows.filter(([line, want]) => shownTested(line, 3).has(1) !== want).map(([line, want]) => `${want ? "refused" : "accepted"}: ${line}`);
+  assert.deepEqual(wrong, []);
+});
+
+test("W09 third slice, second review: file names are set aside in one pass over each run, with the same parts set aside as the first review's expression (a count such as 2/5 now kept), and the reading stays linear on 100 KB", () => {
+  // The first review's expression, for comparison on short text (it is quadratic in a long run), with the one change made on purpose: a count such as 2/5 is kept.
+  const OLD = /[A-Za-z0-9_.\\/-]*(?:[\\/][A-Za-z0-9_.\\/-]*|\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9]))/g;
+  const CLAUSES = /^(?:[Cc]\d{1,3}[\\/-]?)+$/;
+  const FRACTION = /^[0-9]+(?:[\\/][0-9]+)+$/;
+  const old = (t: string): string => t.replace(OLD, (w) => (CLAUSES.test(w) || FRACTION.test(w) ? w : " "));
+  const alphabet = ["a", "Z", "C", "c", "1", "0", ".", "/", "\\", "-", "_", " ", "ts", "x", "\"", "!", "\u00e9"];
+  let seed = 7;
+  const rand = (n: number): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  for (let i = 0; i < 20_000; i++) {
+    const t = Array.from({ length: 1 + rand(24) }, () => alphabet[rand(alphabet.length)]).join("");
+    assert.equal(setAsideFileNames(t), old(t), JSON.stringify(t));
+  }
+  for (const t of ["src/a.test.ts ok", "a/b.c_d", "x.ts-failed", "C1/C3", "2/5 passed", "lib\\ok.js", "a.b.c.d", "fail-safe", ".hidden", "v1.2.3", "C1.", "path/to/"]) assert.equal(setAsideFileNames(t), old(t), t);
+  for (const unit of ["a", ".", "a.", "a.1", "_", "1", "C1C", "a/", "a.bbbbbbbbbb", "fail", "0 ", "no   ", "not   ", "C1 \"x\" ok "]) {
+    const big = unit.repeat(Math.ceil(100_000 / unit.length));
+    const started = performance.now();
+    setAsideFileNames(big);
+    shownTested(big, 50);
+    shownTested(Array.from({ length: CLAUSE_QUESTION_LIMITS.lines }, () => big.slice(0, CLAUSE_QUESTION_LIMITS.line)).join("\n"), 50);
+    assert.ok(performance.now() - started < 1500, `${JSON.stringify(unit)}: ${performance.now() - started} ms`);
+  }
+});
+
+test("W09 third slice, second review: the clause questions the later rounds could not hold take the room before the second agent's questions that ask about no clause left; one that asks about a clause keeps its place", () => {
+  const at = (round: number, report = "", rounds: { questions: string[]; answers?: string[] }[] = [], criteria = CRITERIA) => ({ criteria, report, rounds, round, maxRounds: WORK_REPORT_LIMITS.rounds });
+  const qs = (a: unknown): string[] => (a as { readonly questions: readonly string[] }).questions.map((q) => q.split(" ")[0]!);
+  const own = (...questions: string[]) => ({ verdict: "questions" as const, questions, route: "r" });
+  // Round 1, three clauses left: round 2 can hold them, so the second agent's three questions stand (the old behaviour).
+  assert.deepEqual(qs(withClauseRule(own("q1", "q2", "q3"), at(1))), ["q1", "q2", "q3"]);
+  // Round 2, the last that may ask: the clauses left come first and the second agent's questions keep the rest (before: q1, q2, q3, then an unsupported on round 3).
+  const r1 = [{ questions: ["q1", "q2", "q3"], answers: ["a", "b", "c"] }];
+  assert.deepEqual(qs(withClauseRule(own("q4", "q5", "q6"), at(2, 'C2 "b" ok', r1))), ["q4", "C1", "C3"]);
+  assert.deepEqual(qs(withClauseRule(own("q4", "q5", "q6"), at(2, 'C1 "a" ok\nC2 "b" ok', r1))), ["q4", "q5", "C3"]);
+  assert.deepEqual(qs(withClauseRule(own("q4", "q5", "q6"), at(2, "", r1))), ["C1", "C2", "C3"]);
+  // An own question that asks about a clause left keeps its place and that clause is not asked again.
+  assert.deepEqual(qs(withClauseRule(own("q4", "Is C3 tested?", "q6"), at(2, "", r1))), ["Is", "C1", "C2"]);
+  // Round 1, five clauses: round 2 holds three, so two are asked now, before the second agent's other questions.
+  const five = ["one rule here", "two rule here", "three rule here", "four rule here", "five rule here"];
+  const a = withClauseRule(own("q1", "q2", "q3"), at(1, "", [], five));
+  assert.deepEqual(qs(a), ["q1", "C1", "C2"]);
+  const b = withClauseRule(own("q4", "q5", "q6"), at(2, "", [{ questions: [...(a as unknown as { questions: string[] }).questions], answers: ["x", "y", "z"] }], five));
+  assert.deepEqual(qs(b), ["C3", "C4", "C5"]);
+  assert.deepEqual(withClauseRule({ verdict: "supported", route: "r" }, at(3, "", [{ questions: [...(a as unknown as { questions: string[] }).questions], answers: ["x", "y", "z"] }, { questions: [...(b as unknown as { questions: string[] }).questions], answers: ["x", "y", "z"] }], five)), { verdict: "supported", route: "r" });
+  // Blank questions of the second agent's own take no room.
+  assert.deepEqual(qs(withClauseRule(own("", "  ", "q"), at(1))), ["q", "C1", "C2"]);
+  // Without clauses, or with every clause shown, its questions are passed on as they are.
+  const plain = own("q1", "q2", "q3");
+  assert.equal(withClauseRule(plain, at(2, "", r1, [])), plain);
+  assert.equal(withClauseRule(plain, at(2, 'C1 "a" ok\nC2 "b" ok\nC3 "c" ok', r1)), plain);
 });
