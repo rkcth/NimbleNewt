@@ -72,7 +72,7 @@ for (const backend of backends) {
         const runner = new CommandRunner(world.storage, epoch, options);
         const reserved = new Map<string, string>([["nimblenewt.guard", GUARD]]);
         const usable = new Set<string>();
-        const env = EnvironmentService.withEpoch(world.storage, epoch, { ...options, reservedDigest: async (name) => reserved.get(name), skillUsable: async (_by, v) => usable.has(v) });
+        const env = EnvironmentService.withEpoch(world.storage, epoch, { ...options, reservedDigest: async (name) => reserved.get(name), skillUsable: async (by, v) => usable.has(v) || usable.has(`${by.id}|${v}`) });
         const make = (o: ExperimentOptions = {}) => ExperimentService.withEpoch(world.storage, epoch, { ...options, environments: env, ...o });
         const svc = make();
         const mgr = await enroll("mgr", [{ action: "meeting.manage", project: a }]);
@@ -212,6 +212,19 @@ for (const backend of backends) {
     await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { revision: 501 }))), /revision/);
     await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { observed: { "nimblenewt.guard": "sha256:short" } }))), /digest/);
     await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { observed: JSON.parse(`{"__proto__":"${GUARD}"}`) }))), /observed/);
+    // More shapes: disposable must be the value true; revisions that are not whole numbers from 1; agent names with control, format or capital characters; digests in another case or form; deep
+    // nesting; a very large map. Each is refused for its own field, and from someone who may not report runs too (the shape comes before any right).
+    for (const disposable of ["true", 1, {}]) await refuses("invalid_command", () => c.run(id, withEnv(envOf("agent:dev", { disposable }))), /disposable/);
+    const deep = JSON.parse(`${"{\"a\":".repeat(2000)}1${"}".repeat(2000)}`);
+    const shapes: [Record<string, unknown>, RegExp][] = [
+      ...[Number.NaN, -1, Infinity, 1e300, 2 ** 53].map((revision): [Record<string, unknown>, RegExp] => [{ revision }, /environment\.revision/]),
+      ...["agent:dev\u0000", "agent:​dev", "agent:Dev", " agent:dev", "agent:dev\n", `agent:${"d".repeat(41)}`].map((agentId): [Record<string, unknown>, RegExp] => [{ agentId }, /environment\.agentId/]),
+      ...[`sha256:${"A".repeat(64)}`, `SHA256:${hex("9")}`, ` ${GUARD}`, `${GUARD}\u0000`, `sha256:${hex("9")}0`, { deep }].map((digest): [Record<string, unknown>, RegExp] => [{ observed: { "nimblenewt.guard": digest } }, /environment\.observed/]),
+      [{ observed: { "nimblenewt.‮guard": GUARD } }, /environment\.observed/], [{ observed: deep }, /environment\.observed/],
+      [{ observed: Object.fromEntries(Array.from({ length: 50_000 }, (_, i) => [`nimblenewt.e${i}`, GUARD])) }, /environment\.observed/],
+    ];
+    for (const [over, match] of shapes) for (const by of [c.dev, c.dev2]) await refuses("invalid_command", () => c.svc.recordRun(by, { commandId: cid("r"), experimentId: id, ...runArgs(), environment: envOf("agent:dev", over) } as never), match);
+    for (const by of [c.dev2, c.eve]) await refuses("invalid_command", () => c.svc.recordRun(by, { commandId: cid("r"), experimentId: id, ...runArgs(), environment: envOf("agent:dev", { revision: 501 }) } as never), /environment\.revision/);
     // A revision that does not exist, and another agent's revision, answer alike.
     await refuses("not_found", () => c.run(id, withEnv(envOf("agent:dev", { revision: 9 }))), /may not name environment revision 9 of agent:dev, or it does not exist/);
     await refuses("not_found", () => c.run(id, withEnv(envOf("agent:mgr"))), /may not name environment revision 1 of agent:mgr, or it does not exist/);
@@ -224,12 +237,22 @@ for (const backend of backends) {
     await refuses("integrity", () => c.run(id), /the manifest's digest is not the catalog's/);
     c.reserved.delete("nimblenewt.guard");
     await refuses("integrity", () => c.run(id), /not a live system version/);
+    // A refusal names every problem, not only the first.
+    await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { observed: {} }))), /not a live system version in the catalog; nimblenewt.guard was not found where the worker loads it/);
     c.reserved.set("nimblenewt.guard", GUARD);
     const skill = "cav-aaaaaaaaaaaaaaaaaaaa";
     c.usable.add(skill);
     assert.deepEqual(await c.env.change(c.owner, { commandId: cid("env"), agentId: "agent:dev", manifest: { ...MANIFEST, skills: [skill] }, reason: "a skill", expectedRevision: 1 }), { revision: 2 });
     c.usable.delete(skill);
     await refuses("integrity", () => c.run(id, withEnv(envOf("agent:dev", { revision: 2 }))), /skill library is missing or was revoked/);
+    // Skills are judged as usable by the reporter: one the owner may use but the reporter may not still refuses the reporter; once the reporter may use it, the revision passes.
+    const rev2 = { agentId: "agent:dev", revision: 2, observed: { "nimblenewt.guard": GUARD } };
+    c.usable.add(`${c.owner.id}|${skill}`);
+    assert.equal((await c.env.verify(c.owner, rev2)).revision, 2);
+    await refuses("integrity", () => c.env.verify(c.dev, rev2), /skill library/);
+    c.usable.add(`agent:dev|${skill}`);
+    assert.equal((await c.env.verify(c.dev, rev2)).revision, 2);
+    c.usable.delete(`${c.owner.id}|${skill}`); c.usable.delete(`agent:dev|${skill}`);
     const runner = new CommandRunner(c.storage, c.epoch, options);
     const revRef = { kind: "environment-revision", id: derivedId("evr", "agent:dev2|1") };
     const stored = (await runner.get(revRef.kind, revRef.id))!;
@@ -255,6 +278,16 @@ for (const backend of backends) {
     c.reserved.set("nimblenewt.guard", GUARD);
     await refuses("command_conflict", () => c.svc.recordRun(c.dev, { commandId: "run-env", experimentId: id, ...runArgs({}, "agent:dev"), environment: envOf("agent:dev", { revision: 2 }) } as never));
     assert.equal((await c.body(id)).runs.length, 2);
+    // The payload is canonical: the same observed digests in another key order are the same command (a replay), and other digests under the same command ID are a conflict.
+    const AUDIT = `sha256:${hex("5")}`;
+    c.reserved.set("nimblenewt.audit", AUDIT);
+    assert.deepEqual(await c.env.change(c.owner, { commandId: cid("env"), agentId: "agent:dev", manifest: { ...MANIFEST, protectedExtensions: [{ name: "nimblenewt.guard", digest: GUARD }, { name: "nimblenewt.audit", digest: AUDIT }] }, reason: "two", expectedRevision: 2 }), { revision: 3 });
+    const two = (observed: Record<string, string>) => ({ commandId: "run-two", experimentId: id, ...runArgs(), environment: envOf("agent:dev", { revision: 3, observed }) }) as never;
+    assert.deepEqual(await c.svc.recordRun(c.dev, two({ "nimblenewt.guard": GUARD, "nimblenewt.audit": AUDIT })), { run: 3, status: "running" });
+    assert.deepEqual(await c.make().recordRun(c.dev, two({ "nimblenewt.audit": AUDIT, "nimblenewt.guard": GUARD })), { run: 3, status: "running" });
+    await refuses("command_conflict", () => c.svc.recordRun(c.dev, two({ "nimblenewt.audit": AUDIT, "nimblenewt.guard": `sha256:${hex("4")}` })));
+    const kept = await c.body(id);
+    assert.deepEqual([kept.runs.length, kept.runs[2]!.environmentRevision?.revision, Object.keys(kept.runs[2]!).includes("observed")], [3, 3, false], "a run keeps the revision and its digest, never the observed list");
   });
 
   suite("the verdict is the controller's: improved, no-change, worse (a metric or a case the baseline passed) or inconclusive, and every result is kept", async (c) => {
@@ -444,6 +477,8 @@ for (const backend of backends) {
     assert.equal(await c.rev(id), before, "nothing refused changed it");
     // In its own project the same agent acts as usual.
     assert.deepEqual(await c.run(id, {}, here(c.dev)), { run: 1, status: "running" });
+    // A task credential is its agent: it names its own revision, and another agent's answers as one that does not exist.
+    await refuses("not_found", () => c.svc.recordRun(here(c.dev), { commandId: cid("r"), experimentId: id, ...runArgs({}, "agent:mgr") } as never), /may not name environment revision 1 of agent:mgr/);
     assert.ok(await c.svc.get(here(c.dev), id));
   });
 }

@@ -106,6 +106,23 @@ export function checkEnvironmentManifest(value: unknown, capacity?: HostCapacity
   };
 }
 
+/**
+ * The shape of a reference to the revision a disposable environment was built from (card B04): an agent principal, a revision number from 1 to the most an agent may have, and at most as many observed
+ * extensions as a manifest may protect, each a name with a `sha256:<hex>` digest. It judges the shape only (fields `environment.*`), so a caller can refuse a malformed reference before it looks up any
+ * right or stores anything; `verify` judges the rest.
+ */
+export function checkEnvironmentRef(ref: { readonly agentId?: unknown; readonly revision?: unknown; readonly observed?: unknown }): { agentId: string; revision: number; observed: Readonly<Record<string, string>> } {
+  const agentId = typeof ref.agentId === "string" && AGENT.test(ref.agentId) ? ref.agentId : invalid("environment.agentId", "is not an agent principal");
+  const revision = typeof ref.revision === "number" && Number.isSafeInteger(ref.revision) && ref.revision >= 1 && ref.revision <= ENV_LIMITS.revisions ? ref.revision : invalid("environment.revision", `must be an environment revision number from 1 to ${ENV_LIMITS.revisions}`);
+  const o = ref.observed;
+  if (typeof o !== "object" || o === null || Array.isArray(o)) return invalid("environment.observed", "maps each protected extension to the digest the host found where the worker loads it (an empty object when there are none)");
+  const entries = Object.entries(o as Record<string, unknown>);
+  if (entries.length > ENV_LIMITS.protectedExtensions) invalid("environment.observed", `names at most ${ENV_LIMITS.protectedExtensions} extensions`);
+  for (const [name, digest] of entries) if (!NAME.test(name) || typeof digest !== "string" || !DIGEST.test(digest)) invalid("environment.observed", "maps extension names to sha256:<hex> digests");
+  // A fresh object holding only the entries read (an own `__proto__` key never reaches here: it is not a name).
+  return { agentId, revision, observed: Object.fromEntries(entries) as Record<string, string> };
+}
+
 const checkRevisionOrZero = (v: unknown): number => (v === 0 ? 0 : checkRevision(v as number));
 const AGENT_FIELDS = ["packages", "skills"] as const;
 const eq = (a: unknown, b: unknown): boolean => canonicalJson(a as JsonObject) === canonicalJson(b as JsonObject);
@@ -205,16 +222,10 @@ export class EnvironmentService {
    * the agent's revisions; a revision that does not exist and one `by` may not name answer alike. Answers the revision's identity, or refuses naming every problem.
    */
   async verify(by: Principal, ref: { readonly agentId: unknown; readonly revision: unknown; readonly observed: unknown }): Promise<{ readonly agentId: string; readonly revision: number; readonly digest: string }> {
-    const agentId = typeof ref.agentId === "string" && AGENT.test(ref.agentId) ? ref.agentId : invalid("environment.agentId", "is not an agent principal");
-    const n = typeof ref.revision === "number" && Number.isSafeInteger(ref.revision) && ref.revision >= 1 && ref.revision <= ENV_LIMITS.revisions ? ref.revision : invalid("environment.revision", `must be an environment revision number from 1 to ${ENV_LIMITS.revisions}`);
-    const observed = ref.observed;
-    if (typeof observed !== "object" || observed === null || Array.isArray(observed)) return invalid("environment.observed", "maps each protected extension to the digest the host found where the worker loads it");
-    const entries = Object.entries(observed as Record<string, unknown>);
-    if (entries.length > ENV_LIMITS.protectedExtensions) invalid("environment.observed", `names at most ${ENV_LIMITS.protectedExtensions} extensions`);
-    for (const [name, digest] of entries) if (!NAME.test(name) || typeof digest !== "string" || !DIGEST.test(digest)) invalid("environment.observed", "maps extension names to sha256:<hex> digests");
+    const { agentId, revision: n, observed } = checkEnvironmentRef(ref);
     const rev = mayManage(by) || by.id === agentId ? (await this.#runner.get("environment-revision", derivedId("evr", `${agentId}|${n}`)))?.body as unknown as RevisionBody | undefined : undefined;
     if (rev === undefined || rev.agentId !== agentId || rev.revision !== n) throw new DomainError("not_found", `${by.id} may not name environment revision ${n} of ${agentId}, or it does not exist`);
-    const problems = await this.#problems(by, rev, observed as Readonly<Record<string, string>>);
+    const problems = await this.#problems(by, rev, observed);
     if (`sha256:${sha(canonicalJson(rev.manifest as unknown as JsonObject))}` !== rev.digest) problems.unshift("the revision's manifest no longer matches its digest");
     if (problems.length > 0) throw new DomainError("integrity", `environment revision ${n} of ${agentId} did not pass its check: ${problems.join("; ")}`, { field: "environment" });
     return { agentId, revision: n, digest: rev.digest };

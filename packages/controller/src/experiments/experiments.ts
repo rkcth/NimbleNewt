@@ -6,7 +6,7 @@ import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows, inTaskScope } from "../security/access.js";
 import { scopedCommandId } from "../security/credentials.js";
 import type { NoActor, Principal } from "../security/principals.js";
-import type { EnvironmentService } from "../environments/environments.js";
+import { checkEnvironmentRef, type EnvironmentService } from "../environments/environments.js";
 import type { AggregateRef, Change, ControllerStorage, JsonObject } from "../storage/types.js";
 import { clean, invalid, plain, whole } from "../standups/shared.js";
 
@@ -221,7 +221,8 @@ export class ExperimentService {
     if (command.environment === null || typeof command.environment !== "object" || Array.isArray(command.environment)) invalid("environment", "must name the disposable environment the run used: agentId, revision, observed and disposable");
     onlyKnown(command.environment, ["agentId", "revision", "observed", "disposable"]);
     if (command.environment.disposable !== true) invalid("environment", "a candidate runs only in a disposable environment (disposable must be true)");
-    const env = this.#environmentRef(command.environment);
+    // The whole shape (A08's own), judged before anything is stored or any right is looked up.
+    const env = checkEnvironmentRef(command.environment);
     const environments = this.#environments ?? (() => { throw new DomainError("unavailable", "the environment records are not available here, so no run can be checked or recorded"); })();
     const environment = `${env.agentId} revision ${env.revision}`;
     const cost = this.#number(command.cost, "cost", EXPERIMENT_LIMITS.cost);
@@ -426,17 +427,6 @@ export class ExperimentService {
       minImprovementPct: c["minImprovementPct"] === undefined ? 0 : this.#number(c["minImprovementPct"], "minImprovementPct", 1000),
       maxRegressionPct: c["maxRegressionPct"] === undefined ? 0 : this.#number(c["maxRegressionPct"], "maxRegressionPct", 100),
     };
-  }
-
-  /** The shape of a run's environment reference, bounded before it is stored as the command's payload; A08's `verify` judges the rest. */
-  #environmentRef(raw: { agentId?: unknown; revision?: unknown; observed?: unknown }): { agentId: string; revision: number; observed: Record<string, string> } {
-    if (typeof raw.agentId !== "string" || raw.agentId.length > 60) return invalid("environment.agentId", "must name the agent whose environment revision the disposable environment was built from");
-    if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision) || raw.revision < 1) return invalid("environment.revision", "must be the environment revision number");
-    const o = raw.observed;
-    if (o === null || typeof o !== "object" || Array.isArray(o)) return invalid("environment.observed", "maps each protected extension to the digest the host found (an empty object when there are none)");
-    const entries = Object.entries(o as Record<string, unknown>);
-    if (entries.length > 20 || entries.some(([k, v]) => k.length > 80 || typeof v !== "string" || v.length > 80)) return invalid("environment.observed", "names at most 20 extensions, each with a sha256:<hex> digest");
-    return { agentId: raw.agentId, revision: raw.revision, observed: Object.fromEntries(entries) as Record<string, string> };
   }
 
   #metrics(raw: unknown, field: string): Partial<Record<Metric, number>> {

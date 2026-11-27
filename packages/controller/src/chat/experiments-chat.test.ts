@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { OPERATIONS } from "../api/operations.js";
 import { BlockerService } from "../domain/blockers.js";
+import { CommandRunner } from "../domain/runner.js";
 import { WaitService } from "../domain/waits.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
 import { EnvironmentService } from "../environments/index.js";
-import { ExperimentService } from "../experiments/index.js";
+import { ExperimentService, type ExperimentBody } from "../experiments/index.js";
 import { StatusService, STATUS_KINDS } from "../status/index.js";
 import { CHAT_OPS } from "./commands.js";
 import { ModelInterpreter, promptAbout } from "./model-interpreter.js";
@@ -111,5 +112,21 @@ for (const backend of backends) {
     assert.deepEqual([mine.ok, mine.result?.item.status], [true, "paused"], "one run used its budget of one");
     const other = await w.api.handle(dev.token, { v: 1, op: "experiment.get", args: { experimentId: id } } as never) as { ok: boolean; error?: { code: string } };
     assert.deepEqual([other.ok, other.error?.code], [false, "not_found"], "an agent reads only its own experiment");
+
+    // A run recorded before the environment check (slice 1's free words, no revision) still reads beside a checked one, the view says it was not checked, and the experiment can still be concluded; nothing rewrote it.
+    const runner = new CommandRunner(w.world.storage, w.projects.epoch, options);
+    const found = (await runner.get("experiment", mineId))!;
+    const stored = found.body as unknown as ExperimentBody;
+    const { environmentRevision: checked, ...older } = stored.runs[0]!;
+    assert.equal(checked?.agentId, dev.principal.id);
+    await runner.command("test.older", { commandId: cid("t"), actor: w.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "experiment", id: mineId }, creates: false, changes: [{ type: "update" as const, ref: { kind: "experiment", id: mineId }, expectedRevision: found.revision, body: { ...stored, runs: [stored.runs[0]!, { ...older, n: 2, environment: "env-scratch-1" }] } as never }], detail: {} }) }));
+    const read = (await experiments.get(w.owner, mineId))!;
+    // The checked run comes first and the older one last, so the view must speak of the last run.
+    assert.deepEqual([read.status, read.runs.length, read.runs[1]!.environment, read.runs[1]!.environmentRevision, read.runs[0]!.environmentRevision?.revision], ["paused", 2, "env-scratch-1", undefined, 1]);
+    const view = lines(await say("how are the trials going?", [ask({ kind: "experiments" }, "how are the trials going")]));
+    assert.match(view, /"Own idea"[^\n]* Last run's environment: "env-scratch-1", not checked \(recorded before the environment check\)\./, view);
+    assert.doesNotMatch(view, /"Own idea"[^\n]*environment revision/, view);
+    const ended = await experiments.conclude(w.owner, { commandId: cid("c"), experimentId: mineId, expectedRevision: read.revision, finding: "an older run" });
+    assert.equal((await experiments.get(w.owner, mineId))!.result?.verdict, ended.verdict);
   });
 }
