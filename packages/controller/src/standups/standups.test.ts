@@ -803,6 +803,104 @@ for (const backend of backends) {
     assert.deepEqual(told, [[id, 1]]);
   });
 
+  suite("card B03 second slice: a lesson outcome the proposer has not been told is in its own next brief only, from the project's current list; it is marked told at the revision the stored brief carried; a line cut by the section limit is not marked (nor an improvement's)", async (c) => {
+    const w = await world(c);
+    const lesson = (id: string, extra: Record<string, unknown>) => ({ projectId: c.a, title: "Small patches pass review", statement: "s", applicability: "a", lineage: id, version: 2, dependsOn: [], supersedes: [], contradicts: [], dependents: [], contradictedBy: [], evidence: [], independentEvidence: 0, proposedBy: c.pA, status: "rejected", finding: "Size made no difference", stalePremises: [], outcomePending: true, history: [{ at: "2026-10-20T18:00:00.000Z", by: "owner:rob", to: "rejected" }], ...extra });
+    const mineL = "lsn-aaaaaaaaaaaaaaaaaaaa";
+    const toldL = "lsn-bbbbbbbbbbbbbbbbbbbb";
+    const foreign = "lsn-cccccccccccccccccccc";
+    const offList = "lsn-dddddddddddddddddddd";
+    const ofB = "lsn-eeeeeeeeeeeeeeeeeeee";
+    await c.put("lesson", mineL, lesson(mineL, {}));
+    await c.put("lesson", toldL, lesson(toldL, { proposedBy: c.pB, outcomePending: false, title: "Already told" }));
+    // Another project's lesson named on this project's list, and a pending lesson that is not on the list: neither is carried.
+    await c.put("lesson", foreign, lesson(foreign, { projectId: c.b, title: "Secret plan lesson" }));
+    await c.put("lesson", offList, lesson(offList, { title: "Not listed" }));
+    await c.put("lesson", ofB, lesson(ofB, { proposedBy: c.pB, status: "accepted", finding: "Held in three reviews", title: "Review early" }));
+    await c.put("lesson-index", c.a, { ids: [mineL, toldL, foreign, ofB, 7, "lsn-ffffffffffffffffffff"] });
+    const told: [string, number][] = [];
+    const tracking = c.make({ onLessonBriefed: async (_by: unknown, id: string, revision: number) => { told.push([id, revision]); } });
+    await tracking.prepare(c.host, w.occ);
+    const byAgent = Object.fromEntries((await c.standups.briefs(c.owner, w.occ)).map((b) => [b.agent, b])) as Record<string, unknown> as Record<string, BriefBody>;
+    const lines = (agent: string) => byAgent[agent]!.advice.filter((e) => e.cites.some((x) => x.kind === "lesson"));
+    assert.deepEqual(lines(c.pA).map((e) => [e.text, e.cites]), [[`Your lesson "Small patches pass review" (version 2) was rejected: Size made no difference`, [{ kind: "lesson", id: mineL, revision: 1 }]]]);
+    assert.deepEqual(lines(c.pB).map((e) => e.cites[0]!.id), [ofB], "each brief carries its own agent's outcomes only, and a told one is not carried");
+    assert.match(lines(c.pB)[0]!.text, /\(version 2\) was accepted\. Finding: Held in three reviews/);
+    assert.deepEqual(lines(c.pC), []);
+    assert.deepEqual(told.sort(), [[mineL, 1], [ofB, 1]]);
+
+    // The real lesson service marks it told at that revision: a told rejected lesson leaves the project's list; a lesson changed after the brief (a newer revision) stays pending.
+    const { LessonService } = await import("../lessons/index.js");
+    const lessons = LessonService.withEpoch(c.storage, c.epoch, options);
+    assert.equal(await lessons.markTold(c.host, mineL, 1), true);
+    assert.deepEqual([(await lessons.get(c.owner, mineL))!.outcomePending, typeof (await lessons.get(c.owner, mineL))!.outcomeToldAt], [false, "string"]);
+    const listed = async (): Promise<unknown[]> => ((await new CommandRunner(c.storage, c.epoch, options).get("lesson-index", c.a))!.body as { ids: unknown[] }).ids;
+    assert.ok(!(await listed()).includes(mineL), "a told final lesson leaves the project's list");
+    assert.equal(await lessons.markTold(c.host, ofB, 2), false, "a revision the brief did not carry is not marked");
+    assert.equal((await lessons.get(c.owner, ofB))!.outcomePending, true);
+    // Wired as the composed controller wires it: the next preparation marks it (the brief is unchanged and carries it at revision 1).
+    const wired = c.make({ onLessonBriefed: (by: Principal, id: string, revision: number) => lessons.markTold(by, id, revision) });
+    await wired.prepare(c.host, w.occ);
+    assert.equal((await lessons.get(c.owner, ofB))!.outcomePending, false);
+    // Assembled again before the meeting (the outcomes are no longer pending), each brief still carries the outcome it told; nothing new is marked.
+    told.length = 0;
+    at("2026-10-21T05:30:00.000Z");
+    await tracking.prepare(c.host, w.occ);
+    const again = Object.fromEntries((await c.standups.briefs(c.owner, w.occ)).map((b) => [b.agent, b])) as Record<string, unknown> as Record<string, BriefBody>;
+    assert.deepEqual(again[c.pA]!.advice.filter((e) => e.cites.some((x) => x.kind === "lesson")).map((e) => e.cites), [[{ kind: "lesson", id: mineL, revision: 1 }]]);
+    assert.deepEqual(again[c.pB]!.advice.filter((e) => e.cites.some((x) => x.kind === "lesson")).map((e) => e.cites[0]!.id), [ofB]);
+    assert.deepEqual(told, []);
+    // A newer outcome of the same lesson (decided again after a review) replaces the line it told before; it is not shown beside it.
+    const r = new CommandRunner(c.storage, c.epoch, options);
+    const cur = (await r.get("lesson", ofB))!;
+    await r.command("test.redecide", { commandId: cid("rd"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson", id: ofB }, creates: false, changes: [{ type: "update" as const, ref: { kind: "lesson", id: ofB }, expectedRevision: cur.revision, body: { ...(cur.body as object), outcomePending: true, finding: "Held in five reviews" } as never }], detail: {} }) }));
+    at("2026-10-21T05:40:00.000Z");
+    await tracking.prepare(c.host, w.occ);
+    const third = (await c.standups.briefs(c.owner, w.occ)).find((b) => b.agent === c.pB) as unknown as BriefBody;
+    const bLines = third.advice.filter((e) => e.cites.some((x) => x.kind === "lesson"));
+    assert.deepEqual(bLines.map((e) => e.cites), [[{ kind: "lesson", id: ofB, revision: cur.revision + 1 }]]);
+    assert.match(bLines[0]!.text, /Held in five reviews/);
+    assert.deepEqual(told, [[ofB, cur.revision + 1]]);
+    assert.equal(await lessons.markTold(c.host, ofB, cur.revision + 1), true);
+    // A lesson brief that cannot be stored because the meeting has started tells nobody.
+    await c.put("lesson", "lsn-gggggggggggggggggggg", lesson("lsn-gggggggggggggggggggg", { title: "Late" }));
+    const idx = (await new CommandRunner(c.storage, c.epoch, options).get("lesson-index", c.a))!;
+    await new CommandRunner(c.storage, c.epoch, options).command("test.idx", { commandId: cid("ix"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "lesson-index", id: c.a }, creates: false, changes: [{ type: "update" as const, ref: { kind: "lesson-index", id: c.a }, expectedRevision: idx.revision, body: { ids: [...((idx.body as { ids: string[] }).ids), "lsn-gggggggggggggggggggg"] } as never }], detail: {} }) }));
+    const started: [string, number][] = [];
+    at("2026-10-21T07:01:00.000Z");
+    await c.make({ onLessonBriefed: async (_by: unknown, id: string, revision: number) => { started.push([id, revision]); } }).prepare(c.host, w.occ);
+    assert.deepEqual(started, [], "the late outcome is not in a stored brief, so it is not marked");
+    assert.equal((await lessons.get(c.owner, "lsn-gggggggggggggggggggg"))!.outcomePending, true);
+  });
+
+  suite("card B03 second slice: an outcome line cut off by the brief's section limit is not marked told, for a lesson and for an improvement; it is told once there is room", async (c) => {
+    const w = await world(c);
+    const L = "lsn-aaaaaaaaaaaaaaaaaaaa";
+    const I = "imp-aaaaaaaaaaaaaaaaaaaa";
+    await c.put("lesson", L, { projectId: c.a, title: "Cut lesson", statement: "s", applicability: "a", lineage: L, version: 1, dependsOn: [], supersedes: [], contradicts: [], dependents: [], contradictedBy: [], evidence: [], independentEvidence: 0, proposedBy: c.pA, status: "inconclusive", finding: "Too few cases", stalePremises: [], outcomePending: true, history: [] });
+    await c.put("lesson-index", c.a, { ids: [L] });
+    await c.put("improvement-item", I, { projectId: c.a, title: "Cut improvement", observation: "o", proposedBy: c.pA, owner: c.pA, disposition: "rejected", reason: "No", timeboxMinutes: 10, brought: 0, returnPending: true, history: [] });
+    // 25 questions the agent asked fill the advice section (the limit) before the outcomes.
+    const asked: string[] = [];
+    for (let i = 0; i < 25; i++) { const q = `inq-${String.fromCharCode(97 + (i % 26))}${"q".repeat(18)}${String.fromCharCode(97 + Math.floor(i / 26))}`; asked.push(q); await c.put("inquiry", q, { taskId: w.work, projectId: c.a, asker: c.pA, to: c.pB, question: `q${i}`, scopeId: "s", correlationId: q, contextRefs: [], state: "open", askedAt: "2026-10-20T17:30:00.000Z" }); }
+    const told: string[] = [];
+    const make = () => c.make({ onBriefed: async (_by: unknown, id: string) => { told.push(id); }, onLessonBriefed: async (_by: unknown, id: string) => { told.push(id); } });
+    await make().prepare(c.host, w.occ);
+    const A = (await c.standups.briefs(c.owner, w.occ)).find((b) => b.agent === c.pA) as unknown as BriefBody;
+    assert.equal(A.advice.length, 25);
+    assert.ok((A.more.advice ?? 0) >= 3, JSON.stringify(A.more));
+    assert.ok(!A.advice.some((e) => e.cites.some((x) => x.id === L || x.id === I)));
+    assert.deepEqual(told, [], "neither cut-off outcome is marked told");
+    // With room again (the questions answered), both are carried and told.
+    for (const q of asked.slice(0, 5)) {
+      const r = new CommandRunner(c.storage, c.epoch, options);
+      const cur = (await r.get("inquiry", q))!;
+      await r.command("test.close", { commandId: cid("cl"), actor: c.owner.id }, async () => ({ payload: {}, build: async () => ({ ref: { kind: "inquiry", id: q }, creates: false, changes: [{ type: "update" as const, ref: { kind: "inquiry", id: q }, expectedRevision: cur.revision, body: { ...(cur.body as object), state: "answered" } as never }], detail: {} }) }));
+    }
+    await make().prepare(c.host, w.occ);
+    assert.deepEqual(told.sort(), [I, L]);
+  });
+
   suite("a full list of waiting outcomes never blocks a state change: the outcome goes on an overflow list, is listed again when there is room, is mentioned on the next agenda, and one that fits nowhere is marked", async (c) => {
     const small = c.meetingsWith({ returnsListed: 2, returnsMore: 1 });
     const quiet = c.make({ meetings: small });

@@ -23,7 +23,8 @@ import { clean, cut, invalid, plain, whole, type OutcomeSink } from "../standups
  * - **Every candidate can finish.** A candidate, one under evaluation and one under review may be accepted, rejected or found inconclusive, each with the finding in words; rejected and inconclusive are final
  *   and leave the current list once the proposer has been told.
  * - **The proposer is told.** An evaluated outcome (accepted, rejected, inconclusive) of an agent's lesson waits (`outcomePending`) until `deliverOutcomes` has handed it to the sink, which files a notice on
- *   the lesson's task; one that cannot be filed stays pending and is tried again. The proposer can always read its own lesson.
+ *   the lesson's task; one that cannot be filed stays pending and is tried again. A pending outcome is also carried in the proposer's next stand-up brief, and is marked told once that brief is stored
+ *   (`markTold`, second slice); one still untold after some days is shown to the owner (`untold`). The proposer can always read its own lesson.
  * - **Scope.** Every link and every piece of evidence must be of the lesson's project; an agent may cite only records it can read now. Reads: the owner and holders of `meeting.read` or `meeting.manage`, and the
  *   proposer (its own lesson, without who else decided it or what rests on it). Anyone else gets what a missing record gives.
  */
@@ -357,6 +358,43 @@ export class LessonService {
       if (await this.#markTold(by, project, id, found.revision)) delivered.push(id); else waiting.push(id);
     }
     return { delivered, waiting };
+  }
+
+  /**
+   * The proposer has been given the outcome another way (card B03, second slice: in its stand-up brief, for a lesson with no task to file a notice on): marks it told at the revision the brief carried. A lesson
+   * changed since (a newer revision) stays pending, so a later decision is told again. Owner, host or service only.
+   */
+  async markTold(by: Principal, lessonId: string, revision: number): Promise<boolean> {
+    if ((by.kind !== "owner" && by.kind !== "host" && by.kind !== "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not mark lesson outcomes told`);
+    const id = this.#id(lessonId, "lessonId");
+    const rev = checkRevision(revision);
+    const got = await this.#lesson(id);
+    if (got === undefined) return false;
+    return this.#markTold(by, got.body.projectId, id, rev);
+  }
+
+  /**
+   * Outcomes that have waited longer than `olderThanMs` since they were decided without reaching their proposer (owner, host or service only), so the owner can be shown them and an outcome is never lost
+   * quietly. Each carries the revision it waits at, so the owner is shown it once per revision. Reads the project's current list only (at most 1000), oldest first; at most `limit` (default 50, 1 to 100).
+   */
+  async untold(by: Principal, projectId: string, olderThanMs: number, limit = 50): Promise<{ id: string; revision: number; title: string; status: LessonStatus; proposedBy: string; decidedAt: string }[]> {
+    if ((by.kind !== "owner" && by.kind !== "host" && by.kind !== "service") || by.taskScope !== undefined) throw new DomainError("forbidden", `${by.id} may not list untold lesson outcomes`);
+    if (typeof olderThanMs !== "number" || !Number.isFinite(olderThanMs) || olderThanMs < 0) invalid("olderThanMs", "must be zero or more");
+    const most = whole(limit, "limit", 1, LESSON_LIMITS.page);
+    const project = checkProjectId(projectId);
+    const cutoff = Date.parse(this.#runner.now()) - olderThanMs;
+    const out: { id: string; revision: number; title: string; status: LessonStatus; proposedBy: string; decidedAt: string }[] = [];
+    for (const id of (await this.#index(project)).ids) {
+      if (out.length >= most) break;
+      const got = await this.#lesson(id);
+      if (got === undefined || got.body.projectId !== project || !got.body.outcomePending) continue;
+      // When it was decided: the latest evaluated outcome in its history (a later move to review keeps the outcome pending and is not a new decision); the history is bounded, so the last entry otherwise.
+      const h = got.body.history;
+      const decidedAt = [...h].reverse().find((x) => EVALUATED.includes(x.to))?.at ?? h[h.length - 1]?.at;
+      const at = decidedAt === undefined ? Number.NaN : Date.parse(decidedAt);
+      if (decidedAt !== undefined && Number.isFinite(at) && at <= cutoff) out.push({ id, revision: got.found.revision, title: got.body.title, status: got.body.status, proposedBy: got.body.proposedBy, decidedAt });
+    }
+    return out;
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------

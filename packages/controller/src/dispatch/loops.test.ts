@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DomainError } from "../domain/errors.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
-import { activeAgents, assignedTaskIn, attendanceLoops, coverageLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
+import { activeAgents, assignedTaskIn, attendanceLoops, coverageLoops, budgetNoticeLoops, decisionLoops, eventLoops, meetingLoops, messageLoops, projectIds, recordLoops, responsibilityLoops, archiveLoops, untoldImprovementLoops, untoldLessonLoops, attemptWaker, wakeLoops, recoveryLoops, standupLoops, sourceLoops } from "./loops.js";
 import { buildWorld, workGrants } from "./testing/world.js";
 
 after(stopServer);
@@ -293,6 +293,35 @@ test("the owner is told of a decision that has gone untold, once per decision an
   const [cut] = untoldImprovementLoops({ untold: async () => [{ id: "imp-2", revision: 1, title: "t".repeat(200), disposition: "investigating", decidedAt: "2026-10-01T00:00:00.000Z" }] }, async () => ["p1"], async (n) => { long.push(n.text); });
   await cut!.run({ id: "service:dispatcher", kind: "service" } as never);
   assert.ok(long[0]!.length <= 200, String(long[0]!.length));
+});
+
+test("the owner is shown a lesson outcome that has not reached its proposer for some days, once per lesson and revision, project by project, and a failing project is named after the rest (card B03 second slice)", async () => {
+  const told: string[] = [];
+  const asked: string[] = [];
+  const [loop] = untoldLessonLoops(
+    { untold: async (_by, projectId, olderThanMs) => { asked.push(`${projectId}:${olderThanMs}`); if (projectId === "bad") throw new Error("storage hiccup"); return [{ id: "lsn-1", revision: 4, title: "Small patches", status: "rejected", decidedAt: "2026-11-01T09:00:00.000Z" }]; } },
+    async () => ["p1", "bad", "p2"],
+    async (n) => { told.push(`${n.key}|${n.projectId}|${n.lessonId}|${n.text}`); },
+  );
+  assert.equal(loop!.name, "lessons.untold");
+  await assert.rejects(loop!.run({ id: "service:dispatcher", kind: "service" } as never), /untold lesson outcomes could not be shown for 1 project\(s\): bad: storage hiccup/);
+  assert.deepEqual(asked, ["p1:604800000", "bad:604800000", "p2:604800000"]);
+  const text = `The outcome of the lesson "Small patches" (rejected, decided 2026-11-01) has not reached its proposer for 7 days or more.`;
+  assert.deepEqual(told, [`lsu:lsn-1:4|p1|lsn-1|${text}`, `lsu:lsn-1:4|p2|lsn-1|${text}`]);
+  for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) assert.throws(() => untoldLessonLoops({ untold: async () => [] }, async () => [], async () => undefined, bad), /days must be above zero/);
+  // Another period is passed through and named; a long title is cut so the owner's notification stays within its 200 characters.
+  const long: string[] = [];
+  const seen: number[] = [];
+  const [cut] = untoldLessonLoops({ untold: async (_by, _p, ms) => { seen.push(ms); return [{ id: "lsn-2", revision: 1, title: "t".repeat(200), status: "inconclusive", decidedAt: "2026-11-01T00:00:00.000Z" }]; } }, async () => ["p1"], async (n) => { long.push(n.text); }, 30);
+  await cut!.run({ id: "service:dispatcher", kind: "service" } as never);
+  assert.deepEqual(seen, [30 * 86_400_000]);
+  assert.ok(long[0]!.length <= 200, String(long[0]!.length));
+  assert.match(long[0]!, /^The outcome of the lesson "t{59}…" \(inconclusive, decided 2026-11-01\) has not reached its proposer for 30 days or more\.$/);
+  // A failing notice is a failure of that project, and the other projects are still served.
+  const order: string[] = [];
+  const [fails] = untoldLessonLoops({ untold: async (_by, p) => [{ id: `lsn-${p}`, revision: 1, title: "x", status: "accepted", decidedAt: "2026-11-01T00:00:00.000Z" }] }, async () => ["p1", "p2"], async (n) => { order.push(n.projectId); if (n.projectId === "p1") throw new Error("inbox full"); });
+  await assert.rejects(fails!.run({ id: "service:dispatcher", kind: "service" } as never), /1 project\(s\): p1: inbox full/);
+  assert.deepEqual(order, ["p1", "p2"]);
 });
 
 test("archive loop: one project's failure does not skip the others and is raised afterwards (card K06)", async () => {

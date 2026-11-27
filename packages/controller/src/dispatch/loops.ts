@@ -144,6 +144,23 @@ export function untoldImprovementLoops(improvements: { untold(by: Principal, pro
   } }];
 }
 
+/**
+ * Card B03 (second slice): an evaluated lesson outcome that has not reached its proposer for some days (no task to file it on and the proposer not at a stand-up, or its notice cannot be filed) is shown to the
+ * owner, once per lesson and revision (the key), project by project. One project's failure does not stop the others.
+ */
+export function untoldLessonLoops(lessons: { untold(by: Principal, projectId: string, olderThanMs: number): Promise<readonly { id: string; revision: number; title: string; status: string; decidedAt: string }[]> }, projects: () => Promise<readonly string[]>, tell: (notice: { readonly key: string; readonly projectId: string; readonly lessonId: string; readonly text: string }) => Promise<unknown>, days = 7): DispatcherLoop[] {
+  if (!Number.isFinite(days) || days <= 0) throw new Error("days must be above zero");
+  return [{ name: "lessons.untold", run: async (by) => {
+    const failed: string[] = [];
+    for (const projectId of await projects()) {
+      try {
+        for (const l of await lessons.untold(by, projectId, days * 86_400_000)) await tell({ key: `lsu:${l.id}:${l.revision}`, projectId, lessonId: l.id, text: `The outcome of the lesson "${l.title.length > 60 ? `${l.title.slice(0, 59)}…` : l.title}" (${l.status}, decided ${l.decidedAt.slice(0, 10)}) has not reached its proposer for ${days} days or more.` });
+      } catch (error) { failed.push(`${projectId}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    if (failed.length > 0) throw new Error(`untold lesson outcomes could not be shown for ${failed.length} project(s): ${failed.slice(0, 3).join("; ")}`);
+  } }];
+}
+
 /** M03: for each project, the preparation of every planned occurrence (briefs, notices) and the delivery of agenda outcomes to the conversations they came from. */
 export function standupLoops(standups: Pick<StandupService, "prepare" | "deliverOutcomes">, meetings: Pick<MeetingService, "planned">, projects: () => Promise<readonly string[]>, outcomeProjects: () => Promise<readonly string[]> = projects): DispatcherLoop[] {
   return [
