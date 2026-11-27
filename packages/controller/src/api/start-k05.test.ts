@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash, createHmac } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +11,9 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { promoteController } from "../recovery/index.js";
 import { SqliteStorage } from "../storage/index.js";
+import { readSqliteEpoch } from "../storage/sqlite/index.js";
+import { KEY_FILE, PENDING_FILE, applyPendingRestore } from "../backup/staged-restore.js";
+import { canonicalJson } from "../storage/json.js";
 import { sqliteTarget } from "../transfer/index.js";
 import { startController } from "./index.js";
 
@@ -131,11 +136,36 @@ test("a restore the old controller staged BEFORE the fence is not swapped in at 
     const applied = await call(a, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1");
     assert.ok(applied.ok, JSON.stringify(applied));
     await a.close();
+    // K05 re-check: the recorded epoch is covered by the marker's HMAC and checked for shape
+    const markerPath = join(d, PENDING_FILE), original = readFileSync(markerPath, "utf8");
+    const key = Buffer.from(readFileSync(join(d, KEY_FILE), "utf8").trim(), "hex");
+    const { mac, ...rest } = JSON.parse(original) as Record<string, unknown>;
+    const sign = (body: Record<string, unknown>): string => createHmac("sha256", key).update(canonicalJson(body as never)).digest("hex");
+    assert.equal(sign(rest), mac, "the test signs as the controller does");
+    assert.equal(typeof rest["epoch"], "number", "the marker records the epoch it was prepared at");
+    try {
+      writeFileSync(markerPath, JSON.stringify({ ...rest, epoch: (rest["epoch"] as number) + 1, mac }));
+      await assert.rejects(applyPendingRestore(d, dbPath), /not authentic/, "an epoch changed without the key");
+      for (const bad of [-1, 1.5, "1", null]) {
+        const body = { ...rest, epoch: bad };
+        writeFileSync(markerPath, JSON.stringify({ ...body, mac: sign(body) }));
+        await assert.rejects(applyPendingRestore(d, dbPath), /not valid \(shape\)/, JSON.stringify(bad));
+      }
+    } finally { writeFileSync(markerPath, original); }
     // the promotion, after the restore was staged and the old controller stopped
     const other = await SqliteStorage.open({ path: dbPath });
     try { await promoteController({ storage: other, manifestDirectory: manifests, blobs: await FileBlobStore.open({ directory: join(d, "blobs-b") }), successor: "controller-b", promotionId: "k05r", now: () => new Date("2026-11-27T12:05:00.000Z") }); } finally { await other.close(); }
     const state = async (): Promise<Record<string, unknown> | undefined> => { const s = await SqliteStorage.open({ path: dbPath }); try { const snap = await s.snapshot(); try { return (await snap.read("state", { limit: 1 }))[0]; } finally { await snap.close(); } } finally { await s.close(); } };
     const fenced = await state();
+    // K05 re-check: another program holding the database locked past the epoch read's timeout refuses the start; nothing is moved and the restore is not recorded as failed (it was not decided)
+    const pendingBefore = readFileSync(join(d, PENDING_FILE), "utf8");
+    const holderDb = new DatabaseSync(dbPath);
+    try {
+      holderDb.exec("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE");
+      await assert.rejects(startController(base as never), /in use by another program/);
+    } finally { holderDb.exec("ROLLBACK"); holderDb.close(); }
+    assert.equal(readFileSync(join(d, PENDING_FILE), "utf8"), pendingBefore, "the marker is as it was");
+    assert.deepEqual(await state(), fenced, "nothing was moved while the database was held");
     // the old controller's restart: the restore is not swapped in and the start check refuses it
     await assert.rejects(startController(base as never), /the controller promotion k05r named controller-b/);
     assert.ok(lines.some((l) => /The restore of .* was not applied: the database was taken by another controller or a controller promotion/.test(l)), lines.join("\n"));
@@ -148,4 +178,59 @@ test("a restore the old controller staged BEFORE the fence is not swapped in at 
     assert.ok(lines.some((l) => /was tried and could not be applied/.test(l)), lines.join("\n"));
     assert.equal((await call(b, "backup.restore.cancel", {}, "rc")).result.cancelled, true);
   } finally { await a.close().catch(() => undefined); await b?.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("the live SQLite epoch is read without leaving anything behind: a real controller file gives its epoch and keeps its bytes, no -wal or -shm; a file that is not a controller database gives undefined; a held database refuses (K05 re-check)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k05e-"));
+  try {
+    const p = join(d, "c.sqlite");
+    const s = await SqliteStorage.open({ path: p });
+    let epoch: number;
+    try { await s.acquireEpoch({ holder: "ctl-a", at: "2026-11-27T12:00:00.000Z", expectedEpoch: await s.currentEpoch() }); epoch = await s.currentEpoch(); } finally { await s.close(); }
+    const sha = (): string => createHash("sha256").update(readFileSync(p)).digest("hex");
+    const before = sha();
+    assert.equal(readSqliteEpoch(p), epoch);
+    assert.ok(epoch > 0);
+    assert.equal(existsSync(`${p}-wal`), false, "no -wal left");
+    assert.equal(existsSync(`${p}-shm`), false, "no -shm left");
+    assert.equal(sha(), before, "the file's bytes are unchanged");
+    const junk = join(d, "junk.sqlite");
+    writeFileSync(junk, "not a database at all, just some bytes that are long enough to be read".repeat(20));
+    assert.equal(readSqliteEpoch(junk), undefined, "not a database");
+    const other = join(d, "other.sqlite");
+    const o = new DatabaseSync(other); o.exec("CREATE TABLE t (x)"); o.close();
+    assert.equal(readSqliteEpoch(other), undefined, "a database without the state table");
+    const h = new DatabaseSync(p);
+    try {
+      h.exec("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE");
+      assert.throws(() => readSqliteEpoch(p), /in use by another program/);
+    } finally { h.exec("ROLLBACK"); h.close(); }
+    assert.equal(readSqliteEpoch(p), epoch, "readable again once let go");
+  } finally { rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("a restore whose live SQLite database is damaged or gone is still applied (nothing can be read about who holds it; a restore is what it is for), and a missing file is not created by the epoch read (K05 re-check)", async () => {
+  for (const damage of ["junk", "missing"] as const) {
+    const d = mkdtempSync(join(tmpdir(), "nn-k05d-"));
+    const dbPath = join(d, "c.sqlite");
+    const base = { storage: { kind: "sqlite", path: dbPath }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), manual: true },
+      recovery: { manifestDirectory: join(d, "recovery"), everyMs: 60_000, now: () => new Date("2026-11-27T12:00:00.000Z") }, backup: { directory: join(d, "backups") } };
+    const a = await startController(base as never);
+    try {
+      const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+      const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await a.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+      await a.dispatch!.driver.runOnce();
+      const name = (await call("backup.now", {}, "b1")).result.item.name as string;
+      const preview = await call("backup.restore.preview", { name });
+      assert.ok((await call("backup.restore.apply", { name, confirm: preview.result.item.token }, "r1")).ok);
+      await a.close();
+      assert.equal(typeof JSON.parse(readFileSync(join(d, PENDING_FILE), "utf8")).epoch, "number");
+      for (const x of ["", "-wal", "-shm"]) rmSync(`${dbPath}${x}`, { force: true });
+      if (damage === "junk") writeFileSync(dbPath, "damaged ".repeat(600));
+      assert.equal(await applyPendingRestore(d, dbPath), name, damage);
+      assert.equal(existsSync(join(d, PENDING_FILE)), false, damage);
+      const aside = readdirSync(d).filter((f) => f.startsWith("c.sqlite.before-restore-"));
+      assert.deepEqual(aside.length > 0, damage === "junk", `${damage}: ${aside.join(",")}`);
+    } finally { await a.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+  }
 });

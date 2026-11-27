@@ -215,7 +215,7 @@ export interface PostgresLive { readonly postgres: { readonly url: string; reado
 interface Live { readonly id: string; readonly dbDir?: string; readonly pg?: { readonly url: string; readonly schema: string; readonly port: PostgresRestorePort; readonly openStaged?: (schema: string) => Promise<ControllerStorage> } }
 /**
  * The live database's epoch, read before a staged restore is swapped in (card K05, second review). SQLite: a file that is not there, or that cannot be read as a controller database, gives undefined (a
- * damaged database is what a restore is for, and nothing can be said about who holds it). PostgreSQL: a schema without the state table gives undefined; a server that does not answer fails the start, as
+ * damaged database is what a restore is for, and nothing can be said about who holds it); one that stays busy or locked (another program holds it) fails the start, nothing moved. PostgreSQL: a schema without the state table gives undefined; a server that does not answer fails the start, as
  * the swap itself would.
  */
 async function liveEpochOf(live: Live): Promise<number | undefined> {

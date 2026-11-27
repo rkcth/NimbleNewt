@@ -1,8 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import { isBusy } from "./errors.js";
 
 /**
  * The epoch in a SQLite controller database's state row, read without opening it as a storage (no migration, no write of its own; card K05, second review: a staged restore prepared at another epoch is not swapped
- * in). Undefined when the file cannot be read as a controller database (a damaged database is what a restore is for). The caller checks that the file exists: opening a missing path would create it.
+ * in). Undefined when the file cannot be read as a controller database (a damaged database is what a restore is for). Throws when it stays busy or locked past the timeout. The caller checks that the file exists: opening a missing path would create it.
  */
 export function readSqliteEpoch(path: string): number | undefined {
   try {
@@ -14,5 +15,10 @@ export function readSqliteEpoch(path: string): number | undefined {
       const epoch = Number(row?.epoch);
       return row === undefined || !Number.isSafeInteger(epoch) ? undefined : epoch;
     } finally { db.close(); }
-  } catch { return undefined; }
+  } catch (error) {
+    // Busy or locked past the timeout (another program holds the file): nothing can be said about its epoch, and a restore swapped in under it could take back a store a promotion took. The start is refused;
+    // the restore stays recorded and is tried again at the next start.
+    if (isBusy(error)) throw new Error("the database is in use by another program (it stayed locked for 2 seconds), so its epoch could not be checked; the restore was not applied and nothing was moved. Close the other program and start again.", { cause: error });
+    return undefined;
+  }
 }
