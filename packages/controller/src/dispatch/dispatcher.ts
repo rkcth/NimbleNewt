@@ -42,7 +42,7 @@ import { changedTestsOf, clausePlanProblem } from "./clause-plan.js";
 import type { Principal } from "../security/principals.js";
 import { DISPATCHER_PRINCIPAL, type TaskCredentialService } from "../security/task-credentials.js";
 import type { AggregateRef, Change, JsonObject } from "../storage/types.js";
-import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type LaunchLimitsRecord, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
+import { ANCHOR_RECORD_KEEP, type AnchorRecord, DISPATCHER_ACTOR, DISPATCH_KIND, DISPATCH_LIVE, DISPATCH_LIMITS, DONE_VERIFY_LIMITS, STOPPED_EARLY_KIND, STOPPED_EARLY_READMITS, TASK_ATTEMPTS_KIND, TASK_ATTEMPTS_LIMIT, WORK_REPORT_KIND, WORK_REPORT_LIMITS, type AttemptReport, type DispatchBody, type LaunchLimitsRecord, type DoneVerification, type Interrogation, type InterrogationRound, type PlanCount, type TaskAttemptsBody, type WorkNote, type WorkNoteKind, type WorkReportTaskBody, type DispatchRevisions, type Frozen, type ToolIdentity, type ToolOperationBody, withSlotSpans } from "./model.js";
 import { ToolPath, type Loaded } from "./tools.js";
 import { CLAUSE_QUESTION_LIMITS, withClauseRule } from "./clause-questions.js";
 import { askingMessage, earlierReportNote, isNoteKind, keptText, qaOf, unansweredMessage, unsupportedMessage, type InterrogationInput, type InterrogatorAnswer, type ReportInterrogatorPort, type ReportVerdict } from "./report.js";
@@ -55,7 +55,7 @@ import { routeCostWords, UNREADABLE } from "./route-cost.js";
 import { JOB_WAKE_KIND, JOB_WAKE_LIMITS, JOB_WAKE_NOTE_KIND, JOB_WAKES_INDEX, dueRemoved, stateWords, wakeNote, type JobWakeBody, type JobWakesIndex } from "../jobs/wakes.js";
 
 /** The record of live dispatches: the attempts that have a claim and have not finished. Ticks read it instead of scanning every dispatch ever made. */
-const LIVE: AggregateRef = { kind: "dispatch-live", id: "live" };
+const LIVE: AggregateRef = DISPATCH_LIVE;
 const LIVE_MAX = 600;
 /** Finished attempts whose worker was not confirmed stopped (card L02e): a later Stop of their scope still asks their host what their sandboxes hold. Bounded: past the cap the oldest are forgotten. */
 const UNCONFIRMED: AggregateRef = { kind: "dispatch-unconfirmed", id: "unconfirmed" };
@@ -166,6 +166,11 @@ export interface DispatcherDeps {
    * every start, so an attempt admitted earlier (waiting, parked, moved or carried over a restart) does not start after the owner withdrew the approval or switched the feature off. Absent: nothing is held.
    */
   readonly startGate?: (taskId: string) => Promise<string | undefined>;
+  /**
+   * Why a running attempt that another controller started may not be taken over now, or undefined (card K05: after a controller promotion a result the worker sent under the fenced controller is not taken while
+   * the workers are held). Asked before every takeover; a failure to ask holds the takeover back. The attempt stays as it is: its lease still ends it. Absent: nothing is held back.
+   */
+  readonly adoptGate?: (attempt: { readonly attemptId: string; readonly hostId: string; readonly primaryEpoch?: number }) => Promise<string | undefined>;
   readonly decisions?: DecisionGuard;
   /**
    * Whether an operation on the task's checkout (integration, landing, refresh, quarantine) is running or left open (card H12m): an attempt of such a task is not started until it ends, and waits instead. A failure to
@@ -372,6 +377,8 @@ export interface TickReport {
   readonly readmitted: readonly string[];
   /** Running attempts another primary started that this dispatcher took over in this tick (card H09b); one it could not take over because its host no longer runs it is in `lost`. */
   readonly adopted?: readonly string[];
+  /** Running attempts of another controller that were not taken over in this tick, each with why (card K05: the workers are held after a controller promotion); their lease still ends them. */
+  readonly heldBack?: readonly { readonly attemptId: string; readonly reason: string }[];
   readonly reprioritized: number;
   readonly approvals: readonly { readonly attemptId: string; readonly operationId: string; readonly verdict: "approved" | "denied" | "expired" }[];
   readonly loops: readonly { readonly name: string; readonly ok: boolean; readonly error?: string }[];
@@ -611,11 +618,16 @@ export class DispatcherService {
     // 0. Running attempts another primary started (card H09b): taken over with a handle on the host's run, or ended when the host no longer runs them. One taken over now is not judged by its lease in this tick:
     // the takeover gave it a fresh one, and a result its worker already sent is being taken.
     const adopted: string[] = [];
+    const heldBack: { attemptId: string; reason: string }[] = [];
     for (const id of live) {
       if (this.#live.has(id)) continue;
       try {
         const d = await this.#load(id);
         if (d === undefined || d.body.state !== "running" || d.body.primaryEpoch === this.#runner.epoch) continue;
+        if (this.#deps.adoptGate !== undefined) {
+          const why = await this.#deps.adoptGate({ attemptId: id, hostId: d.body.hostId, ...(d.body.primaryEpoch === undefined ? {} : { primaryEpoch: d.body.primaryEpoch }) }).catch((error: unknown) => `whether it may be taken over could not be read (${errorText(error).slice(0, 120)})`);
+          if (why !== undefined) { heldBack.push({ attemptId: id, reason: why.slice(0, 300) }); continue; }
+        }
         const taken = await this.#adopt(id);
         if (taken.outcome === "adopted") adopted.push(id);
         else if (taken.outcome === "ended") { lost.push(id); if (taken.readmitted !== undefined) readmitted.push(taken.readmitted); }
@@ -718,7 +730,7 @@ export class DispatcherService {
         loops.push({ name: loop.name, ok: false, error: error instanceof Error ? redactText(error.message).slice(0, 200) : "failed" });
       }
     }
-    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, adopted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete, ...(woken.length === 0 ? {} : { woken }) };
+    return { at, started, waiting, capacityWaits, skipped, blocked, lost, readmitted, adopted, reprioritized, approvals, loops, failures, scanned: scan.scanned, complete: scan.complete, ...(woken.length === 0 ? {} : { woken }), ...(heldBack.length === 0 ? {} : { heldBack }) };
   }
 
   /**
@@ -733,7 +745,9 @@ export class DispatcherService {
     const by = this.#deps.principal;
     for (const id of await this.#liveIds()) {
       const d = await this.#load(id);
-      if (d === undefined || d.body.state !== "running") continue;
+      // Only what runs HERE (card K05 review of H12c with H09b): an attempt another controller started that this one has not taken over is left as it is (its worker was never told by this controller and is not
+      // stopped by it); its lease, or the next controller's takeover, decides it. Before, it was put back to waiting while its remote placement stayed accepted.
+      if (d === undefined || d.body.state !== "running" || d.body.primaryEpoch !== this.#runner.epoch) continue;
       try {
         await this.settle(by, id, { cancel: true }).catch(() => undefined);
         const checkpoint = await this.#checkpoint(id, "the controller shut down", "shutdown").catch(() => undefined);
