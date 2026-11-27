@@ -87,8 +87,13 @@ test("a reviewer's approval carries over to another tree only while the patch ID
   const same = await review(approved);
   assert.deepEqual([same.result, same.boundTo], ["pass", TREE]);
   assert.match(same.summary, /approved by agent:rev for this tree/);
+  // Another tree on the SAME base with the same patch ID (the same edit at another place of a file): no refresh happened, so the tree itself is compared (card P08 landing re-check).
+  const placed = await review({ ...approved, tree: OLD_TREE });
+  assert.deepEqual([placed.result, placed.treeMismatch], ["fail", true]);
+  assert.match(placed.summary, /approved for tree d{12}, but the landing carries tree e{12} on the same base b{12}/);
+  assert.equal(same.treeMismatch, undefined);
   // Refreshed onto a newer base: another tree, the same patch: the approval carries over.
-  const carried = await review({ ...approved, tree: OLD_TREE });
+  const carried = await review({ ...approved, base: "9".repeat(40), tree: OLD_TREE });
   assert.equal(carried.result, "pass");
   assert.match(carried.summary, /for tree d{12}; carried over to this tree because the patch is unchanged/);
   // Another patch (the work changed since the review): a new review is needed.
