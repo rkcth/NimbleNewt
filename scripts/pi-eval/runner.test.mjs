@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { COMPLETION_RULES_PLACEHOLDER, loadCompletionRules, loadTaskset, renderPrompt } from "./lib/taskset.mjs";
 import { createHash } from "node:crypto";
 import { sandboxUsable } from "./lib/isolation.mjs";
+import { withoutOfflineGuard } from "./test-agents/agent-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "pi-eval-test-"));
@@ -56,7 +57,7 @@ const NO_SANDBOX = { bwrap: false, allowVisibleHome: true };
 const ctx = (mode, extra = {}) => ({
   set, repo, referenceDirs: [repo], depsFrom: repo, workRoot: join(root, "work"), resultsDir: join(root, "results"),
   agent: ["node", join(here, "stub-agent.mjs")], agentLabel: "stub", batchId: "t", benchCommit: "test",
-  agentEnv: { STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, ...extra,
+  agentEnv: { STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, sourceEnv: withoutOfflineGuard(), ...extra,
 });
 
 test("the agent's checkout holds the base only: no hidden test file and no way to reach the solution commit", async () => {
@@ -387,7 +388,7 @@ test("acceptance tests that do not type-check against the agent's code score a d
 test("a control run: one repeat per task with another agent (--agent, --label) is recorded beside the first and compared per task", async () => {
   const s = accept();
   const results = join(root, "control-results");
-  const runCli = (label, mode) => execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", s.file, "--repo", repo, "--variants", "A", "--repeats", "1", "--agent", join(here, "stub-agent.mjs"), "--label", label, "--results", results, "--work-root", join(root, "control-work"), "--no-report", ...(sandboxUsable() ? [] : ["--allow-visible-home"])], { env: { ...process.env, STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, stdio: "pipe" });
+  const runCli = (label, mode) => execFileSync(process.execPath, [join(here, "run.mjs"), "--taskset", s.file, "--repo", repo, "--variants", "A", "--repeats", "1", "--agent", join(here, "stub-agent.mjs"), "--label", label, "--results", results, "--work-root", join(root, "control-work"), "--no-report", ...(sandboxUsable() ? [] : ["--allow-visible-home"])], { env: { ...withoutOfflineGuard(), STUB_AGENT_MODE: mode, STUB_AGENT_SOLUTION_DIR: join(root, "answer") }, stdio: "pipe" });
   runCli("pi-stand-in", "first-turn");
   runCli("control-stand-in", "solve");
   const recs = readFileSync(join(results, "results.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));

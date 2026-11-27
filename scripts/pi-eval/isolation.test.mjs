@@ -18,6 +18,7 @@ import { strictJson } from "./lib/arg-clean.mjs";
 import { piBinOf, runOne } from "./lib/runner.mjs";
 import { commandLineConfig } from "./continuation-extension.mjs";
 import { loadTaskset } from "./lib/taskset.mjs";
+import { withoutOfflineGuard } from "./test-agents/agent-env.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const required = process.env.NIMBLENEWT_REQUIRE_SANDBOX === "1";
@@ -158,7 +159,7 @@ after(() => {
 
 // The operator's environment as a batch might see it: credentials of every kind the agent must not inherit.
 const sourceEnv = () => ({
-  ...process.env, SSH_AUTH_SOCK: "/run/user/1000/openssh_agent", GH_TOKEN: MARKERS.env, GITHUB_TOKEN: MARKERS.env, NPM_TOKEN: MARKERS.env,
+  ...withoutOfflineGuard(), SSH_AUTH_SOCK: "/run/user/1000/openssh_agent", GH_TOKEN: MARKERS.env, GITHUB_TOKEN: MARKERS.env, NPM_TOKEN: MARKERS.env,
   AWS_SECRET_ACCESS_KEY: MARKERS.env, AWS_PROFILE: "owner", GIT_SSH_COMMAND: `ssh -i ${decoy}/.ssh/id_ed25519`, GIT_CONFIG_GLOBAL: join(decoy, ".gitconfig"),
   NIMBLENEWT_FAKE_TOKEN: MARKERS.env, OPENAI_API_KEY: MARKERS.env, XDG_RUNTIME_DIR: "/run/user/1000", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
 });
@@ -332,6 +333,8 @@ test("the run's git settings: ssh off, GitHub rewritten to a refused loopback ad
     assert.ok(text.includes(process.platform === "win32" ? line.replace("/bin/false", "false") : line), line);
   }
   assert.match(text, /\[url "http:\/\/127\.0\.0\.1:9\//);
+  // The helper is set empty (no helper), not merely named: "helper = store" also contains "helper =".
+  assert.match(text, /^\[credential\]\r?\n\thelper =\r?$/m);
 });
 
 test("the git guard: what is refused and what is let through", () => {
