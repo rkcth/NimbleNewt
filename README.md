@@ -93,7 +93,7 @@ Suspend must settle or explicitly track in-flight operations before declaring re
 
 ## Roadmap
 
-NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **319 of 365 tasks implemented**.
+NimbleNewt is built in 22 major parts. Open a part to see its cards, what each needs and how far each is. Within a part, cards are listed in dependency order, and each shows its phase ("P7" is the seventh step of the longest dependency chain): a card needs only cards from earlier phases, so cards in one phase can proceed in parallel. Card IDs match the [executable task plan](docs/nimblenewt/implementation-plan/task-plan.md). Progress: **319 of 367 tasks implemented**.
 
 > Implementation began on the owner's instruction of 2026-10-19 to begin working on the project, on the Pi-first path; N00's formal scope and budget record is still an open owner item.
 
@@ -115,7 +115,7 @@ Legend: `[x]` implemented, reviewed by a separate AI session, CI green (not a hu
 | State API and MCP state | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 3 of 3 |
 | Model routing, fallback and cost | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 13 of 13 |
 | Owner chat and web UI | `▓▓▓▓▓▓▓▓▓▓▓░` 95% | 19 of 20 |
-| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓▓░` 96% | 48 of 50 |
+| Workers, dispatch and teams | `▓▓▓▓▓▓▓▓▓▓▓░` 92% | 48 of 52 |
 | Agent messaging | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 9 of 9 |
 | Health and recovery | `▓▓▓▓▓▓▓▓▓▓▓▓` 100% | 6 of 6 |
 | Meetings | `▓▓▓▓▓▓▓▓▓▓░░` 87% | 28 of 32 |
@@ -391,7 +391,7 @@ Talking to your agents: the chat interpreter, policy editing, status and blocker
 </details>
 
 <details>
-<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 48 of 50</summary>
+<summary><strong>Workers, dispatch and teams</strong> — ▓▓▓▓▓▓▓▓▓▓▓░ 48 of 52</summary>
 
 Enrolled hosts, remote workers, priority admission, the local worker runtime and dispatcher, agents, teams and roles, reviews and wait-cycle handling.
 
@@ -432,6 +432,8 @@ Enrolled hosts, remote workers, priority admission, the local worker runtime and
 - [x] **H07d** · P31 · Limit connections per address only before login _(needs H07)_
 - [x] **H12f** · P31 · Wire context enforcement, pause observation and message boundaries into the runtime _(needs H12, C07b, L01, U12)_
 - [x] **H12q** · P31 · Finish the quiesce: the landing path and the production workspace port _(needs H12d)_
+- [ ] **H12v** · P31 · Design and build an agent network route on macOS (optional, after the first release) _(needs H12i, H12r)_
+- [ ] **H12w** · P31 · Give native Windows tasks a network route through a named-pipe relay (optional, after the first release) _(needs H12i, A03b, H12r)_
 - [x] **H02d** · P32 · Finish the composed-controller proofs of remote stop, checkpoint fencing and relocation refusals _(needs H02c)_
 - [x] **H07c** · P32 · Decide local-only placement by profile and let chat override it _(needs H07, C08c)_
 - [x] **H12k** · P32 · Compose the local worker host in the controller _(needs H12b, H12c, H12d, H12f, H12g)_
@@ -667,7 +669,7 @@ Installation, documentation, QA on real machines, the release decision and closi
 - [ ] **D03** · P47 · Approve release readiness and publication decision _(needs X08, D01, D02, F04h, T06b, U03b, U03e, C07d, L01b, V01b, F04k, T07b, H06c, R05b, R05c, R05d, H12a, H12b, H12c, H12d, H12e, H12f, H12g, H12h, H12i, H12j, H12k, H12l, H12m, X11, U05b, R05e, C08b, P01b, M01b, M01c, C08c, C08d, M01d, H02b, P01c, H02c, R05f, R05g, H02d, V01c, C07e, H07e, T09b, H07, H07b, H02e, T09, A07d, A07e, H07c, H07d, H11b, Q01b, A07f, P08, P08b, H12n, H12p, H12o, P09, P10, P10b, P10c, T09c, T09d)_
 - [ ] **D04** · P48 · Run detailed real-world QA on macOS, Linux and Windows _(needs D03)_
 - [ ] **D04b** · P49 · Measure code-navigation aids on real coding tasks (optional, after the first release) _(needs D04)_
-- [ ] **D05** · P50 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, A07h, W11, W12, W13, W01b, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, L04g, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09)_
+- [ ] **D05** · P50 · Close the plan: every optional item built or deferred by the owner _(needs T05b, D04, D04b, U03c, K06b, K01d, P02b, A08c, C07f, C07g, C07h, C07i, C07j, C07k, C07l, C07m, C07n, C07o, C07p, C07q, A07h, W11, W12, W13, W01b, L02b, H08b, U06b, P08c, A07g, R04b, R04c, L03b, L03c, L04b, L04c, L04d, L04g, C09b, C09c, U04b, U04c, M02b, M03b, M04b, H13b, U12b, M02c, M03c, M04c, H13c, U12c, L02c, U04d, L03d, C09d, M02d, M03d, M04d, H13d, L03e, C09e, K01e, U12d, K01f, C09f, L02d, C09g, K01g, H13e, M04e, M03e, M02e, M02f, K01h, M04f, M03f, L03f, U12e, H13f, C09h, L03g, H09b, V02b, L06b, T02b, X09b, L03h, V02c, H12q, H12r, H12s, H12t, H12v, H12w, L05c, L05d, U14, M02g, M02h, M03g, M03h, M04g, M04h, L03i, L03j, T02c, T02d, U11c, U11d, K06c, K06d, P03b, K01i, F04l, F04m, F04n, L02e, W09)_
 
 </details>
 

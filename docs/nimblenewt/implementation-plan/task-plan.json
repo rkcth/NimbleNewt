@@ -5507,6 +5507,43 @@
       "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
     },
     {
+      "id": "H12v",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Design and build an agent network route on macOS (optional, after the first release)",
+      "depends_on": [
+        "H12i",
+        "H12r"
+      ],
+      "deliverable": "Follow-up promised by H12i's narrowed clause (2026-11-26: \"a macOS route design is a later card, not this one\"); not launch scope: the first release refuses a routed task on macOS in plain words (SEATBELT_REFUSED_ROUTE) and such tasks wait for a Linux host. The Seatbelt sandbox shares the host's loopback, so a loopback proxy there would be open to other processes on the Mac; this card designs and builds a route that only the Seatbelt-confined program can reach (for example a Unix-socket relay in the agent's own run directory, allowed by name in the sandbox profile, with a client-side shim that gives programs in the sandbox the same proxy endpoint), served by the same H12i relay and grant checks, or records a decision (by the owner, or by the coordinator as an ASSUMPTION the owner can overrule) that macOS keeps no route, with the reason",
+      "acceptance_and_verification": "Either a written design that names the mechanism, why no other process on the Mac can reach it, and what the sandbox profile allows, or a recorded decision to keep macOS without a route, stated in the plan and the user documentation; if built: on a real Mac (CI macOS cell or own hardware) a client in the Seatbelt sandbox reaches a granted destination through the route and is refused an ungranted one with the H12i refusal and log record, using the same grant and relay code as Linux; another process on the same Mac, running as the same user outside the sandbox, cannot connect to the route (tested), and the route is gone when the run ends; the launcher accepts a routed recipe on macOS only when this route is in place and still refuses it, in plain words, when it is not; until this card is accepted the H12i refusal stays as it is",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
+      "id": "H12w",
+      "parent": "N10",
+      "existing_issue": "AII-260",
+      "title": "Give native Windows tasks a network route through a named-pipe relay (optional, after the first release)",
+      "depends_on": [
+        "H12i",
+        "A03b",
+        "H12r"
+      ],
+      "deliverable": "Follow-up promised by H12i's Windows clause (decision 3 of 2026-11-25: \"a Windows route through a pipe relay is a later card, not this one\"); not launch scope: in the first release the A03b launcher refuses a recipe that carries a route (REFUSED_ROUTE) and such tasks wait for a Linux host. The AppContainer has no network capability and loopback is never exempted, so this card gives it a route through a relay the container can reach without a network capability: a named pipe (or the channel A03b proved across the container boundary, if pipes from the controller do not work; named) whose access list grants only that run's container SID, with a forwarder inside giving programs the same proxy endpoint, served by the same H12i relay and grant checks",
+      "acceptance_and_verification": "On a real Windows PC in the supported configuration (the signed-in non-elevated user, home-desktop mode), a client in the AppContainer reaches a granted destination through the pipe relay and is refused an ungranted one with the H12i refusal and log record, using the same grant and relay code as Linux; another process of the same user outside that container, and another run's container, cannot open the pipe (tested), and the pipe is closed when the run ends or is stopped; the container still has no network capability and no loopback exemption (checked in the launch record); the launcher accepts a routed recipe on Windows only when the relay is in place and still refuses it with REFUSED_ROUTE when it is not, or the card records a decision (owner, or coordinator ASSUMPTION the owner can overrule) to keep Windows without a route, with the reason",
+      "status": "planned",
+      "research_evidence": null,
+      "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
+      "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
+      "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+    },
+    {
       "id": "H12j",
       "parent": "N10",
       "existing_issue": "AII-260",
@@ -11566,6 +11603,8 @@
         "H12r",
         "H12s",
         "H12t",
+        "H12v",
+        "H12w",
         "L05c",
         "L05d",
         "U14",

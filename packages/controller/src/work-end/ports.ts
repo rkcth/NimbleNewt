@@ -60,6 +60,8 @@ export interface StagedWork {
   readonly tree: string;
   readonly patchId: string;
   readonly files: readonly string[];
+  /** Card Q04: the earlier attempts the host says left changes in the checkout (`HostStagedWork.leftBy`); absent when the host does not say, which the submission treats as not known (fail closed). */
+  readonly leftBy?: { readonly attempts: readonly string[]; readonly complete: boolean };
 }
 
 /** This agent's own code submission of this task recorded under the step key `key` (the ID `record` derives from it), or undefined; a read that fails is undefined. */
@@ -116,7 +118,7 @@ export function stagedSubmit(deps: {
       if (overlap.length > 0) throw new SubmitRefused(l.head, overlap, `the landing branch moved to ${l.head} and changed ${overlap.length} of the staged files (${shownFiles(overlap)}); nothing was submitted`);
     }
     const refreshRound = deps.refreshRounds === undefined ? 0 : await deps.refreshRounds(attempt);
-    const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound }, { attemptId: attempt.attemptId });
+    const made = await deps.submissions.record(by, { commandId: key, taskId: attempt.taskId, kind: "code", role: "author", base: staged.base, tree: staged.tree, patchId: staged.patchId, refreshRound }, { attemptId: attempt.attemptId, leftBy: staged.leftBy });
     return { submissionId: made.id };
   };
 }
@@ -140,7 +142,7 @@ export function dispatcherStage(dispatch: () => { readonly dispatcher: Pick<Disp
     const h = dispatch();
     if (h === undefined || h.dispatcher.stageWork === undefined) throw new DomainError("unavailable", "the dispatcher is not running, so the work cannot be staged now");
     const s = await h.dispatcher.stageWork(h.principal, attempt.attemptId);
-    return { base: s.base, tree: s.tree, patchId: s.patchId, files: [...s.files] };
+    return { base: s.base, tree: s.tree, patchId: s.patchId, files: [...s.files], ...(s.leftBy === undefined ? {} : { leftBy: s.leftBy }) };
   };
 }
 

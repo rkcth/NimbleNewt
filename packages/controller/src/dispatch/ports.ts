@@ -230,7 +230,14 @@ export interface DoneCheckReport {
 /** What a submit is checked against (card H12n): the checkout's base, the landing branch's head, the files the agent changed against the base and the files the landing branch changed since. */
 export interface HostSubmitView { readonly base: string; readonly head: string; readonly mine: readonly string[]; readonly landed: readonly string[] }
 /** The agent's work as the host staged it for a submission (card H12n). */
-export interface HostStagedWork { readonly base: string; readonly tree: string; readonly patchId: string; readonly files: readonly string[] }
+export interface HostStagedWork {
+  readonly base: string; readonly tree: string; readonly patchId: string; readonly files: readonly string[];
+  /**
+   * Card Q04: the earlier attempts of the task that left the checkout different from what they were handed (the worker package's `LocalWorkspaces.stageWork`), and whether that list is whole. A host that does not say
+   * leaves it out; the submission then fails closed (see `leftChangesBy` in `submissions/contributors.ts`).
+   */
+  readonly leftBy?: { readonly attempts: readonly string[]; readonly complete: boolean };
+}
 
 /** What the dispatcher knows of an attempt before its order exists: enough for a host to say whether it would take it (card H07e). */
 export interface HostProbe { readonly attemptId: string; readonly taskId: string; readonly projectId: string; readonly agentId: string; readonly generation: number; readonly harness?: string; readonly route: string; readonly expiresAt?: string }
