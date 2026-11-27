@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,14 +17,21 @@ const sh = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c"
 // and a replace of it is refused (EPERM). There an access entry denies this user reading the file's data instead; its attributes can still be read and it can still be replaced, as with chmod on POSIX. Answers the undo.
 // CI fix 2026-11-27 (second): the Windows tools are named by their full System32 path, as the product names its own. By bare name, the CI job's bash step had Git for Windows' `usr\bin` first on PATH, so
 // `whoami` was GNU coreutils' ("whoami: extra operand '/user'") and this test failed on every Windows job that reached it.
+// CI fix 5 2026-11-27: with the full paths the deny entry was set, yet the hosted Windows runner (an administrator account) still read the file, so the ACL route is dropped. The record is made unreadable without
+// access rights: it stays a plain file but is grown, sparse, past the 2 GiB Node reads in one call, so every read of it fails (ERR_FS_FILE_TOO_LARGE, not ENOENT) on every platform and for root, uses no disk
+// blocks where the file system keeps holes, and can still be replaced by a rename (a directory at the name would be read as damaged too, but the hand-out's rename over it fails, so the hand-out is refused whether
+// the record counts as damaged or as none and the test could not tell them apart). POSIX also keeps the permission route (chmod 000) when not root.
 const system32 = (exe: string): string => `${process.env["SystemRoot"] ?? "C:\\Windows"}\\System32\\${exe}`;
-async function unreadable(file: string): Promise<() => Promise<void>> {
-  if (process.platform !== "win32") { await chmod(file, 0o000); return async () => { await chmod(file, 0o600); }; }
-  const sid = /"(S-1-[0-9-]+)"\s*$/.exec(execFileSync(system32("whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim())?.[1];
-  assert.ok(sid !== undefined, "the current user's SID is known");
-  execFileSync(system32("icacls.exe"), [file, "/deny", `*${sid}:(RD)`], { stdio: "ignore" });
-  return async () => { execFileSync(system32("icacls.exe"), [file, "/remove:d", `*${sid}`], { stdio: "ignore" }); };
-}
+const tooLarge = async (file: string): Promise<void> => {
+  // NTFS allocates an extended file unless it is marked sparse first; best effort, the size alone makes the read fail.
+  if (process.platform === "win32") { try { execFileSync(system32("fsutil.exe"), ["sparse", "setflag", file], { stdio: "ignore" }); } catch { /* allocated instead */ } }
+  await truncate(file, 2 ** 31 + 4096);
+};
+const noReadPermission = async (file: string): Promise<void> => { await chmod(file, 0o000); };
+const UNREADABLE: ReadonlyArray<{ readonly name: string; readonly make: (file: string) => Promise<void>; readonly skip: string | false }> = [
+  { name: "too large to read", make: tooLarge, skip: false },
+  { name: "no read permission", make: noReadPermission, skip: process.platform === "win32" ? "chmod 0o000 only sets the read-only attribute on Windows" : process.getuid?.() === 0 ? "root reads every file" : false },
+];
 let counter = 0;
 const rid = (): string => { const n = counter++; return `wsr-pqqqqqqqqqqqqqqq${"abcdefghijklmnopqrstuvwxyz"[Math.floor(n / 26) % 26]}${"abcdefghijklmnopqrstuvwxyz"[n % 26]}aa`; };
 const call = (operation: HostWorkspaceCall["operation"], more: Partial<HostWorkspaceCall> = {}): HostWorkspaceCall => ({ requestId: rid(), operation, taskId: "tsk-one", projectId: "prj-one", reason: "test", quietAttempts: [], ...more });
@@ -413,18 +420,22 @@ test("a host that stops part-way through a platform request: the request's chang
   } finally { await w.done(); }
 });
 
-test("a record that is there but cannot be read counts as damaged, not as none: the list it held is not known, so it stays incomplete (card Q04, first review)", { skip: skip || (process.getuid?.() === 0 ? "root reads every file" : false) }, async () => {
-  const w = await world();
-  let undo: (() => Promise<void>) | undefined;
-  try {
-    const a = await hand(w.ws, "att-a");
-    await writeFile(join(a.checkout, "src", "a.ts"), "export const a = 7;\n");
-    await hand(w.ws, "att-b");
-    assert.deepEqual(w.handover().left, ["att-a"]);
-    undo = await unreadable(join(w.task, "handover.json"));
-    assert.throws(() => readFileSync(join(w.task, "handover.json")), "the record is there but cannot be read");
-    await hand(w.ws, "att-c");
-    assert.equal(w.handover().overflow, true, "the unreadable record's list (att-a) is lost, so the new one says it is incomplete");
-    assert.equal((await leftBy(w.ws, a.checkout)).complete, false);
-  } finally { await undo?.().catch(() => undefined); await w.done(); }
-});
+for (const way of UNREADABLE) {
+  test(`a record that is there but cannot be read counts as damaged, not as none: the list it held is not known, so it stays incomplete (card Q04, first review; ${way.name})`, { skip: skip || way.skip }, async () => {
+    const w = await world();
+    const record = join(w.task, "handover.json");
+    try {
+      const a = await hand(w.ws, "att-a");
+      await writeFile(join(a.checkout, "src", "a.ts"), "export const a = 7;\n");
+      await hand(w.ws, "att-b");
+      assert.deepEqual(w.handover().left, ["att-a"]);
+      await way.make(record);
+      assert.ok(lstatSync(record).isFile(), "the record is still a plain file");
+      assert.throws(() => readFileSync(record), (error: NodeJS.ErrnoException) => error.code !== "ENOENT", "the record is there but cannot be read");
+      await hand(w.ws, "att-c");
+      assert.equal(w.handover().overflow, true, "the unreadable record's list (att-a) is lost, so the new one says it is incomplete");
+      assert.equal(w.handover().attemptId, "att-c");
+      assert.equal((await leftBy(w.ws, a.checkout)).complete, false);
+    } finally { await chmod(record, 0o600).catch(() => undefined); await w.done(); }
+  });
+}
