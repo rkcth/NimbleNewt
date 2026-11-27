@@ -13,7 +13,7 @@ import type { Change, ControllerStorage, JsonObject } from "../storage/types.js"
 import { readApprovalReliance, readReviewCite, relianceBasis, shapeReviewCite } from "./review-citation.js";
 import { dependencyChangesNow, dependencyChangeText, readDependencyBasis } from "./dependency-basis.js";
 import { approvalOutdated, type ApprovalBasis } from "./approval-standing.js";
-import { CONTRIBUTOR_APPROVAL_TEXT, CONTRIBUTOR_SIGNOFF_TEXT, CONTRIBUTORS, contributorChange, principalOf, taskContributors } from "./contributors.js";
+import { CONTRIBUTOR_APPROVAL_TEXT, CONTRIBUTOR_SIGNOFF_TEXT, CONTRIBUTORS, contributorChange, leftChangesBy, principalOf, taskContributors } from "./contributors.js";
 
 export const SUBMISSION_KINDS = ["code", "review", "qa", "document", "signoff"] as const;
 export type SubmissionKind = (typeof SUBMISSION_KINDS)[number];
@@ -395,7 +395,11 @@ export class SubmissionService {
    * `from` is for the controller's own callers only (the work.end ending, card H12n), never an agent argument: the attempt whose work is being submitted. The task's current attempt must then be
    * exactly that attempt, so an ending of an attempt that is no longer current (it ended and a newer attempt of the same agent took over) is refused instead of being recorded under the newer attempt.
    */
-  async record(by: Principal, command: NoActor & RecordSubmission, from?: { readonly attemptId: string }): Promise<{ id: string; revision: number; replayed: boolean }> {
+  /**
+   * `from` is given by the controller's ending of an attempt (card H12n): the attempt the staged work came from and, for a code submission, what its host said about the earlier attempts that left changes in the task's
+   * checkout (`leftBy`, card Q04; absent or malformed is "not known", which fails closed, see `leftChangesBy`). Their agents become contributors of the task in the same write.
+   */
+  async record(by: Principal, command: NoActor & RecordSubmission, from?: { readonly attemptId: string; readonly leftBy?: unknown }): Promise<{ id: string; revision: number; replayed: boolean }> {
     if (by.kind !== "agent") throw new DomainError("forbidden", `${by.id} is not an agent, so it has no role to submit in`);
     if (command === null || typeof command !== "object") throw new DomainError("invalid_command", "a command is an object");
     const unknown = Object.keys(command).filter((k) => !(FIELDS as readonly string[]).includes(k));
@@ -525,7 +529,7 @@ export class SubmissionService {
           body = { ...body, judgedAgainst: { criteriaRevision, decisions: relied.relied, dependencies: deps.snapshot } };
         }
         const ref = { kind: "submission", id };
-        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...(await this.#contributorChange(body)), ...contributorCheck, ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
+        return { ref, creates: true, changes: [{ type: "create" as const, ref, body: body as unknown as JsonObject }, ...citeChecks, ...(await this.#verdictChange(id, body)), ...(await this.#lineageChange(id, body)), ...(await this.#signoffChange(id, body)), ...(await this.#docIndexChange(id, body)), ...(await this.#codeIndexChange(id, body)), ...(await this.#contributorChange(body, kind === "code" && from !== undefined ? await leftChangesBy(this.#runner, taskId, from.attemptId, from.leftBy) : [])), ...contributorCheck, ...guards.map((g) => ({ type: "check" as const, ref: { kind: g.kind, id: g.id }, expectedRevision: g.revision }))], detail: { taskId, kind, role }, contention: async () => (await this.#guarded(guards)) ?? await this.#contention(id, body) };
       },
     }));
     if (this.#onRecorded !== undefined) { try { await this.#onRecorded({ submissionId: result.id, taskId, kind, role, submittedBy: by.id, ...(body.verdict === undefined ? {} : { verdict: body.verdict }), ...(body.decision === undefined ? {} : { decision: body.decision }) }); } catch { /* the record of a step never changes what happened */ } }
@@ -675,9 +679,10 @@ export class SubmissionService {
    * when it covers every code submission of the project, otherwise from one bounded scan of the submission table (the same bound as the code index's own seed), complete only when that scan reached the end. A project
    * whose code index was written from its first code on (`contributorsRecorded`) needs neither: a task with no record has no earlier code (so a project past `CODE_INDEX_KEPT` entries does not scan for every new task).
    */
-  async #contributorChange(body: SubmissionBody): Promise<Change[]> {
+  async #contributorChange(body: SubmissionBody, leftChanges: readonly string[] = []): Promise<Change[]> {
     if (body.kind !== "code" || body.tree === undefined) return [];
-    return contributorChange(this.#runner, body.taskId, body.submittedBy, async () => {
+    // Card Q04: the agents whose attempts left changes in the checkout this submission staged are added in the same write.
+    return contributorChange(this.#runner, body.taskId, [body.submittedBy, ...leftChanges], async () => {
       const index = await this.#readCodeIndex(body.projectId);
       // Every code submission of this project wrote its task's record (see `CodeIndexBody.contributorsRecorded`): a task without one has no earlier code, so nothing is scanned.
       if (index?.body.contributorsRecorded === true) return { ids: [], complete: true };

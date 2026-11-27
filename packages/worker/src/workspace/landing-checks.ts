@@ -44,6 +44,13 @@ export interface LandingCheckReport {
   readonly reviewedProblem?: string;
   /** When `carried` was asked: the stable patch ID of each one's base..tree, in the order asked (`null`: it could not be computed or holds no change). */
   readonly carriedPatchIds?: readonly (string | null)[];
+  /**
+   * Card P08 landing re-check (first review): when `reviewed` was asked and the change was read, whether the landed tree is exactly the reviewed change carried onto the landed base (`GitBridge.replays`: the same tree on
+   * the same base, else a conflict-free three-way re-apply onto a later commit that gives exactly that tree). `null`: it could not be shown (git failed). The controller lets a judgement count for another tree only on `true`.
+   */
+  readonly reviewedReplays?: boolean | null;
+  /** The same for each of `carried`, in the order asked, against the landed tree. */
+  readonly carriedReplays?: readonly (boolean | null)[];
 }
 /** At most this many earlier submissions' patch IDs are computed for one landing. */
 export const CARRIED_MAX = 20;
@@ -83,20 +90,27 @@ export function landingChecks(options: LandingChecksOptions): (call: LandingChec
     let change: LandingCheckReport["change"];
     try { change = await options.git.committedChange({ gitDir: where.gitDir }); } catch (error) { return { checkout: true, problem: reason(error), checks: notRun(`the checkout's committed change could not be read: ${reason(error)}`) }; }
     const ran: LandingCheckRun[] = [];
-    let reviewed: { reviewedPatchId: string } | { reviewedProblem: string } | Record<string, never> = {};
+    let reviewed: { reviewedPatchId?: string; reviewedProblem?: string; reviewedReplays?: boolean | null } = {};
     if (call.reviewed !== undefined) {
       try {
         const id = await options.git.patchId({ gitDir: where.gitDir, base: String(call.reviewed?.base), to: String(call.reviewed?.tree) });
         reviewed = id === undefined ? { reviewedProblem: "the reviewed base and tree hold no change" } : { reviewedPatchId: id };
       } catch (error) { reviewed = { reviewedProblem: `the reviewed change could not be read: ${reason(error)}` }; }
     }
-    let carried: { carriedPatchIds: (string | null)[] } | Record<string, never> = {};
+    // Card P08 landing re-check (first review): whether the landed tree is exactly a judged change carried onto the landed base; a patch ID alone does not show it (it leaves out where in a file an edit is).
+    const replays = async (judged: { readonly base?: unknown; readonly tree?: unknown } | undefined): Promise<boolean | null> => {
+      try { return await options.git.replays({ gitDir: where.gitDir, judged: { base: String(judged?.base), tree: String(judged?.tree) }, landed: { base: change!.base, tree: change!.tree } }); } catch { return null; }
+    };
+    if (call.reviewed !== undefined) reviewed = { ...reviewed, reviewedReplays: await replays(call.reviewed) };
+    let carried: { carriedPatchIds: (string | null)[]; carriedReplays: (boolean | null)[] } | Record<string, never> = {};
     if (Array.isArray(call.carried) && call.carried.length > 0) {
       const ids: (string | null)[] = [];
+      const same: (boolean | null)[] = [];
       for (const c of call.carried.slice(0, CARRIED_MAX)) {
         try { ids.push((await options.git.patchId({ gitDir: where.gitDir, base: String(c?.base), to: String(c?.tree) })) ?? null); } catch { ids.push(null); }
+        same.push(await replays(c));
       }
-      carried = { carriedPatchIds: ids };
+      carried = { carriedPatchIds: ids, carriedReplays: same };
     }
     for (const check of asked) ran.push(stopped(call.signal) ? { name: String(check?.name ?? ""), state: "not-run", reason: STOPPED } : await runOne(options, where, change!.tree, check, call.maxOutputBytes, call.signal));
     return { checkout: true, change, checks: ran, ...reviewed, ...carried };

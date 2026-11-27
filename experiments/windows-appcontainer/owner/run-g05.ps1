@@ -8,6 +8,14 @@
 #      (-ExecutionPolicy Bypass applies to this one PowerShell process only; nothing is changed on the machine.)
 #   3. Send the file nn-g05-results.zip it leaves on your Desktop (or in Downloads when there is no Desktop folder).
 #
+# The sign-out check (card A03b: what a sign-out or restart does to a running confined task), in the same folder, ONE short step by you in the middle:
+#   a. powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -Hold
+#      (starts one confined idle task that does nothing; it ends by itself after 30 minutes at the latest)
+#   b. Within 30 minutes, sign out of Windows (Start, your name, Sign out) and sign back in. A restart instead works the same.
+#   c. powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -AfterSignIn
+#      (checks that the task is gone, sweeps what it left, checks again, then runs the ten cases as above)
+#   d. Send nn-g05-results.zip as in step 3.
+#
 # What it does, in order, and what it never does:
 #   - refuses to run elevated (a member of Administrators with an elevated token): the question is what a NORMAL signed-in account can confine;
 #   - checks every file of this folder against SHA256SUMS (a missing, extra or changed file stops it before anything runs);
@@ -20,12 +28,15 @@
 #   - refuses to make the zip when results\ (file contents or file names) still holds your account name, computer, domain or network host name, home folder, a ...\Users\ path
 #     (also written with / or doubled \\ as in JSON), an account, Azure AD account or logon-session SID, or an IPv4, IPv6 or MAC address (it prints which kind of text, never the text itself);
 #   - writes nn-g05-results.zip and prints "N/10 cases hold, M inconclusive".
+# -Hold: the same checks first, then one confined idle task through the same launcher, detached so it outlives this window (control\hold\ keeps its state; the launcher's time limit ends it after
+#   30 minutes), and it tells you to sign out. -AfterSignIn: the same checks, then the sign-out check (nothing of the held task still runs, the backend's leftover sweep, the held grants read back,
+#   leftover profiles counted, the held run recorded as interrupted), then the ten cases with that check in the report.
 # It downloads nothing, installs nothing, and changes no security setting, policy, registry value, firewall rule, service or scheduled task.
 # Everything it writes is inside this folder, a throw-away folder nn-g05-* under your TEMP (the cases' own files, removed at the end), the container profiles the launcher makes and
 # deletes again under your own AppData, and the zip. The confined (sandboxed) run TRIES to create a file g05-x in C:\Windows, C:\Windows\System32, C:\ and C:\Program Files: that must be
 # refused; if one ever exists afterwards the run says so (and the case fails). The cases listen on 127.0.0.1 only, on a free port, for the loopback case.
 [CmdletBinding()]
-param()
+param([switch] $Hold, [switch] $AfterSignIn)
 
 Set-StrictMode -Version 3
 $ErrorActionPreference = 'Stop'
@@ -45,6 +56,10 @@ if ($principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administ
   exit 2
 }
 Write-Host 'not elevated: good'
+if ($Hold -and $AfterSignIn) {
+  Write-Host 'REFUSED: -Hold and -AfterSignIn are two separate steps (first -Hold, then sign out and in, then -AfterSignIn). Nothing was run.'
+  exit 2
+}
 
 # One run at a time on this PC (a manual run and the own runner's job both run as this account): a second run would see the first one's live container profiles as leftovers and
 # remove its zip. The lock is a named mutex, released by Windows when this process ends, however it ends.
@@ -178,6 +193,12 @@ $node = Join-Path $b 'node\node.exe'
 $control = Join-Path $b 'control'
 $raw = Join-Path $control 'raw'
 $infoDir = Join-Path $control 'info'
+$holdDir = Join-Path $control 'hold'
+$holdState = Join-Path $holdDir 'state.json'
+$holdChecked = Join-Path $holdDir 'state-checked.json'
+$holdResult = Join-Path $holdDir 'after-sign-out.json'
+$holdLogon = Join-Path $holdDir 'logon.sha256'
+$holdLog = Join-Path $holdDir 'hold.log.txt'
 $results = Join-Path $b 'results'
 # The folders this script writes (not covered by SHA256SUMS) must be plain folders: a link or junction there would send writes, or the delete below, somewhere else.
 function Get-EntryKind([string] $p) {
@@ -188,7 +209,7 @@ function Get-EntryKind([string] $p) {
   if (($a -band [System.IO.FileAttributes]::Directory) -ne 0) { return 'dir' }
   return 'file'
 }
-foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $results)) {
+foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $holdDir, $results)) {
   $kind = Get-EntryKind $d
   if ($kind -eq 'link' -or $kind -eq 'file') {
     Write-Host "REFUSED: $($d.Substring($b.Length + 1)) in this folder is a $kind, not a plain folder. Extract the artifact again into an EMPTY folder. Nothing was run."
@@ -197,7 +218,7 @@ foreach ($d in @($control, $raw, $infoDir, (Join-Path $control 'profiles'), $res
 }
 # Removed with [System.IO.Directory]::Delete, which deletes a link inside without following it (Remove-Item -Recurse in Windows PowerShell 5.1 may follow a directory link).
 foreach ($d in @($results, $raw)) { if ((Get-EntryKind $d) -eq 'dir') { [System.IO.Directory]::Delete($d, $true) } }
-New-Item -ItemType Directory -Path $control, $raw, $infoDir, $results -Force | Out-Null
+New-Item -ItemType Directory -Path $control, $raw, $infoDir, $holdDir, $results -Force | Out-Null
 $env:NIMBLENEWT_WIN_LAUNCHER = "$b\bin\nn-launcher.exe"
 $env:NIMBLENEWT_WIN_CONTROL_DIR = "$b\control"
 # The bundle's node must load only the bundle's code: options a user environment may carry for node are not passed on.
@@ -292,6 +313,124 @@ function Show-Cleanup {
   }
 }
 
+# ---------------------------------------------------------------------------------------------- 4b. the sign-out check (-Hold, -AfterSignIn)
+# The logon session as a SHA-256 of whoami /logonid (the logon SID S-1-5-5-...): a sign-out and sign-in, or a restart, gives a new one. Only the hash is kept, in control\hold\ (never zipped).
+function Get-LogonHash {
+  $t = Get-WhoamiText @('/logonid')
+  if ($null -eq $t -or $t.Trim() -notmatch '^S-1-5-5-\d+-\d+$') { return $null }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try { $h = $sha.ComputeHash($utf8.GetBytes($t.Trim())) } finally { $sha.Dispose() }
+  return (($h | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+function Read-JsonFile([string] $p) {
+  if (-not [System.IO.File]::Exists($p)) { return $null }
+  try { return ([System.IO.File]::ReadAllText($p) | ConvertFrom-Json) } catch { return $null }
+}
+function Format-LocalTime($iso) {
+  try { return [DateTime]::Parse([string] $iso, [System.Globalization.CultureInfo]::InvariantCulture).ToLocalTime().ToString('HH:mm') } catch { return [string] $iso }
+}
+
+if (-not $Hold -and -not $AfterSignIn -and [System.IO.File]::Exists($holdState)) {
+  Write-Host 'REFUSED: a sign-out check is in progress here (run-g05.ps1 -Hold was run). Sign out of Windows and back in, then run run-g05.ps1 -AfterSignIn, which also runs the ten cases. Nothing was run.'
+  exit 2
+}
+
+if ($Hold) {
+  Write-Host 'sign-out check, step 1 of 2: starting one confined idle task (it does nothing and ends by itself after 30 minutes at the latest) ...'
+  if ([System.IO.File]::Exists($holdLog)) { [System.IO.File]::Delete($holdLog) }
+  # The hold already recorded here, if any: a new hold that is refused (or a node that stops before it writes a state) leaves that hold and its logon hash as they are, for its -AfterSignIn.
+  $prevRun = [string] (Get-Field (Read-JsonFile $holdState) 'runId')
+  # NOT through Invoke-Captured: the task's runner is started detached and outlives node, and a pipe node got from this script could be inherited by it (this script would then wait for its end).
+  # node writes its own log file instead (control\hold\hold.log.txt), and its console output, if any, is only this window's.
+  $holdCode = $null
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $node
+    $psi.Arguments = ((@('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'hold', '--log', $holdLog) | ForEach-Object { ConvertTo-WinArg $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.WorkingDirectory = $b
+    $hp = [System.Diagnostics.Process]::Start($psi)
+    if (-not $hp.WaitForExit(5 * 60000)) { try { $hp.Kill() } catch { }; throw 'it was still running after 5 minutes and was stopped' }
+    $holdCode = $hp.ExitCode
+  } catch { Write-Host "FAILED: the hold could not be started: $($_.Exception.Message). Nothing is held."; exit 1 }
+  $st = Read-JsonFile $holdState
+  if ($holdCode -eq 2 -or $null -eq $st -or [string] (Get-Field $st 'runId') -eq $prevRun) {
+    Write-Host "REFUSED: the hold was not started (exit $holdCode; the reason is in control\hold\hold.log.txt). If it says an earlier hold is still running, sign out and in, then run -AfterSignIn."
+    exit 2
+  }
+  # A new hold is recorded: its logon hash replaces the earlier one (none when whoami fails, never an older hold's), and an earlier check's leftover state goes.
+  if ([System.IO.File]::Exists($holdChecked)) { [System.IO.File]::Delete($holdChecked) }
+  $logonHash = Get-LogonHash
+  if ($null -ne $logonHash) { [System.IO.File]::WriteAllText($holdLogon, $logonHash, $utf8) }
+  else {
+    if ([System.IO.File]::Exists($holdLogon)) { [System.IO.File]::Delete($holdLogon) }
+    Write-Host '  whoami /logonid could not be read: the check will say the sign-out was not recorded (the gate refuses that).'
+  }
+  $until = Format-LocalTime (Get-Field $st 'until')
+  if ($holdCode -ne 0 -or (Get-Field $st 'childSeen') -ne $true) {
+    Write-Host "FAILED: the task was started but was not seen running in its container (details: control\hold\hold.log.txt). It ends by itself by $until at the latest."
+    Write-Host 'Run run-g05.ps1 -AfterSignIn (no sign-out needed) to clean up and make the zip, and send it.'
+    exit 1
+  }
+  Write-Host "HELD: the confined idle task is running. It ends by itself at $until at the latest, so nothing is left running if you stop here."
+  Write-Host ''
+  Write-Host "NOW, before $($until): sign out of Windows (Start, your name, Sign out), sign back in, open PowerShell in this folder again and run:"
+  Write-Host '  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-g05.ps1 -AfterSignIn'
+  Write-Host '(A restart instead of the sign-out works the same. You may close this window.)'
+  exit 0
+}
+
+$afterSignOutArgs = @()
+if ($AfterSignIn) {
+  if (-not [System.IO.File]::Exists($holdState)) {
+    Write-Host 'REFUSED: no hold is recorded in this folder. Run run-g05.ps1 -Hold first, then sign out and in, then -AfterSignIn. Nothing was run.'
+    exit 2
+  }
+  Write-Host 'sign-out check, step 2 of 2: is the held task gone, and what did it leave ...'
+  $newLogon = 'unknown'
+  $before = $null
+  if ([System.IO.File]::Exists($holdLogon)) { $before = [System.IO.File]::ReadAllText($holdLogon).Trim() }
+  $nowHash = Get-LogonHash
+  if ($before -and $nowHash) { if ($before -ceq $nowHash) { $newLogon = 'no' } else { $newLogon = 'yes' } }
+  if ($newLogon -eq 'no') { Write-Host '  this is still the same Windows sign-in as at -Hold: sign out and back in first (the check will not hold otherwise).' }
+  if ([System.IO.File]::Exists($holdResult)) { [System.IO.File]::Delete($holdResult) }
+  $stBefore = Read-JsonFile $holdState
+  $afterCode = $null
+  try {
+    $afterCode = Invoke-Captured $node @('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'after-sign-in', '--new-logon', $newLogon) (Join-Path $raw 'after-sign-in.stdout.txt') (Join-Path $raw 'after-sign-in.stderr.txt') $null 10
+  } catch { Add-Problem "the sign-out check could not be run: $($_.Exception.Message)" }
+  if ($afterCode -eq 3) {
+    Write-Host "REFUSED: the held task is still running, so you have not signed out since -Hold (or Windows did not end it). Sign out and back in, then run -AfterSignIn again. It ends by itself at $(Format-LocalTime (Get-Field $stBefore 'until')) at the latest."
+    exit 1
+  }
+  $as = $null
+  $asFile = Read-JsonFile $holdResult
+  if ($null -ne $asFile) { $as = Get-Field $asFile 'afterSignOut' }
+  # Whenever the check wrote its file, it goes into the report: a file that does not read as the check gives no nativeWindows block at all, which the gate refuses (never a report without it).
+  if ([System.IO.File]::Exists($holdResult)) { $afterSignOutArgs = @('--after-sign-out', $holdResult) }
+  if ($afterCode -ne 0 -or $null -eq $as) { Add-Problem "the sign-out check did not finish (exit $afterCode; see results\after-sign-in.stdout.txt in the zip)" }
+  else {
+    $facts = @('held', 'newLogon', 'taskRunningAfter', 'profileLeftBeforeSweep', 'sweepProblems', 'leftoverAfterSweep', 'grantsAfter', 'interruptedRecorded') | ForEach-Object { "$_=$(Get-Field $as $_)" }
+    Write-Host "  sign-out check: $($facts -join ', ')"
+    $holds = ((Get-Field $as 'held') -eq $true) -and ((Get-Field $as 'newLogon') -eq $true) -and ((Get-Field $as 'taskRunningAfter') -eq $false) -and ((Get-Field $as 'sweepProblems') -eq 0) -and ((Get-Field $as 'leftoverAfterSweep') -eq 0) -and ((Get-Field $as 'grantsAfter') -eq 'clean') -and ((Get-Field $as 'interruptedRecorded') -eq $true)
+    if ($holds) { Write-Host '  the sign-out check holds: the task was stopped, nothing of it was left after the sweep, and it is recorded as interrupted' }
+    else {
+      Add-Problem 'the sign-out check does not hold (the fields above; the report says which, and the release gate refuses it)'
+      # The held task's time limit had passed: it may have ended by itself before the sign-out (its record then says timed out, not interrupted).
+      $untilAt = $null
+      try { $untilAt = [DateTime]::Parse([string] (Get-Field $stBefore 'until'), [System.Globalization.CultureInfo]::InvariantCulture).ToUniversalTime() } catch { $untilAt = $null }
+      if ($null -ne $untilAt -and [DateTime]::UtcNow -gt $untilAt) { Write-Host '  the hold''s 30 minutes had passed before this check, so the task may have ended by itself before the sign-out.' }
+      Write-Host '  To try again: run -Hold, sign out and back in within 30 minutes, then run -AfterSignIn.'
+    }
+    # The held task's own folders (a new nn-g05hold-* folder under TEMP), now that nothing of it runs and the sweep is done: removed without following a link.
+    $root = [string] (Get-Field (Read-JsonFile $holdChecked) 'root')
+    if ($root -and [System.IO.Path]::GetFileName($root) -match '^nn-g05hold-[A-Za-z0-9]+$' -and (Get-EntryKind $root) -eq 'dir') {
+      try { [System.IO.Directory]::Delete($root, $true) } catch { Write-Host '  the held task''s folder under TEMP could not be removed (it is harmless; it holds only an empty work folder)' }
+    }
+  }
+  if ([System.IO.File]::Exists($holdLog)) { [System.IO.File]::Copy($holdLog, (Join-Path $raw 'hold.log.txt'), $true) }
+}
+
 # ---------------------------------------------------------------------------------------------- 5. the launcher's info (one throw-away profile)
 $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
 $rb = New-Object byte[] 8
@@ -319,6 +458,8 @@ if ($infoOk) {
     $evidenceArgs = @('--import', './scripts/offline-guard.mjs', 'scripts\containment-evidence.mjs', 'run', '--prebuilt', '--out', $results, '--redact', '--native-info', (Join-Path $raw 'info.stdout.txt'))
     if ($null -ne $accountKind) { $evidenceArgs += @('--account-kind', $accountKind) }
     if ($null -ne $linkRight) { $evidenceArgs += @('--symlink-right', $linkRight) }
+    # -AfterSignIn: the sign-out check goes into the report (nativeWindows.afterSignOut), where the release gate judges it.
+    if ($afterSignOutArgs.Count -gt 0) { $evidenceArgs += $afterSignOutArgs }
     $evidenceCode = Invoke-Captured $node $evidenceArgs (Join-Path $raw 'evidence.stdout.txt') (Join-Path $raw 'evidence.stderr.txt') $null 25
     Write-Host "  the evidence run ended with exit $evidenceCode (0: every case held; 1: a case did not hold or there was no capacity; anything else: it failed)"
     if ($evidenceCode -ne 0 -and $evidenceCode -ne 1) { Add-Problem "the evidence run failed (exit $evidenceCode)" }
@@ -326,7 +467,7 @@ if ($infoOk) {
 }
 
 # ---------------------------------------------------------------------------------------------- 7. redacted copies of the raw output
-foreach ($name in @('info.stdout.txt', 'info.stderr.txt', 'evidence.stdout.txt', 'evidence.stderr.txt')) {
+foreach ($name in @('info.stdout.txt', 'info.stderr.txt', 'evidence.stdout.txt', 'evidence.stderr.txt', 'hold.log.txt', 'after-sign-in.stdout.txt', 'after-sign-in.stderr.txt')) {
   $src = Join-Path $raw $name
   if (-not [System.IO.File]::Exists($src)) { continue }
   try { [void](Invoke-Captured $node @('scripts\redact-log.mjs') (Join-Path $results $name) (Join-Path $raw "redact-$name") $src 5) }

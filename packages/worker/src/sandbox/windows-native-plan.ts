@@ -48,7 +48,8 @@ export const EXIT_BUSY = 75;
 export const FAILURE_PREFIX = "nn-native-failure";
 
 /** Why a launch was stopped before or after the program ran. Every kind is a typed reason, never a silent fallback. */
-export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel" | "profile";
+/** `interrupted` is written only by the leftover sweep, for a run whose runner ended without its own record (killed, the owner signed out, the machine restarted). */
+export type NativeFailure = "busy" | "filesystem" | "grant" | "container" | "job" | "files" | "start" | "launcher" | "revoke" | "refused" | "channel" | "profile" | "interrupted";
 
 export type ContainerKind = "lpac" | "appcontainer";
 export type GrantMode = "ro" | "rx" | "modify" | "modify-root" | "seal";
@@ -83,7 +84,7 @@ const bad = (message: string): never => { throw new SandboxError("invalid_recipe
 /** The variables the launcher sets itself, compared without regard to case (Windows names are case-insensitive). */
 const OWN_ENV = new Set(["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "TMPDIR", "PATH", "SYSTEMROOT", "WINDIR", "NPM_CONFIG_CACHE"]);
 
-export const REFUSED_ROUTE = "route: the native Windows backend gives an agent no route out in this release (a proxy on the loopback would need a loopback exemption, which is never added); a task that needs the web or a local server waits for a Linux or macOS host";
+export const REFUSED_ROUTE = "route: the native Windows backend gives an agent no route out in this release (a proxy on the loopback would need a loopback exemption, which is never added); a task that needs the web or a local server waits for a Linux host";
 
 /** A local absolute normalised path of a program or folder the supervisor reads (these may live in Program Files). */
 export function checkProgramFolder(label: string, path: unknown): string {

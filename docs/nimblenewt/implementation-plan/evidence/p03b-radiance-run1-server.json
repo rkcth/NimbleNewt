@@ -1,0 +1,46 @@
+{
+  "startedAt": "2026-11-27T03:52:23.450Z",
+  "endedAt": "2026-11-27T03:53:36.578Z",
+  "wallMs": 73128,
+  "testExit": 0,
+  "forwardedRequests": 21,
+  "maxInFlight": 1,
+  "server": {
+    "before": {
+      "version": "2.2.0",
+      "in_flight": 0,
+      "running": 0,
+      "waiting": 0,
+      "max_num_seqs": 8,
+      "total_requests": 2,
+      "kv_tokens_used": 0,
+      "kv_tokens_total": 1036596,
+      "kv_tokens_cached": 0,
+      "prefix_evictions": 0,
+      "checkpoints_written": 6,
+      "hit_cut_tokens": 0,
+      "linear_cached_tokens": 0
+    },
+    "after": {
+      "version": "2.2.0",
+      "in_flight": 0,
+      "running": 0,
+      "waiting": 0,
+      "max_num_seqs": 8,
+      "total_requests": 23,
+      "kv_tokens_used": 0,
+      "kv_tokens_total": 1036596,
+      "kv_tokens_cached": 0,
+      "prefix_evictions": 0,
+      "checkpoints_written": 14,
+      "hit_cut_tokens": 28548,
+      "linear_cached_tokens": 200704
+    },
+    "delta": {
+      "requests": 21,
+      "checkpointsWritten": 8,
+      "prefixEvictions": 0,
+      "restarted": false
+    }
+  }
+}

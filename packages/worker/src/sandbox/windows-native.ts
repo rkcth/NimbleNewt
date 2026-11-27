@@ -243,6 +243,8 @@ export function windowsNativeBackend(options: WindowsNativeOptions): SandboxBack
     // controller's lines through two files (windows-native-channel.ts; card A03b, slice 4). True because that relay is wired end to end through `runNativeJob` and tested with a simulated launcher; how a REAL
     // container treats the files (its read and append access, sharing, caching) is not measured.
     interactiveInput: true,
+    // No route in this release (card H12i, decision 3 of 2026-11-25): the launcher refuses a routed recipe before planning, in these words (the plan and the recipe check refuse it too).
+    routeRefusal: REFUSED_ROUTE,
     plan,
     guestView,
     health,

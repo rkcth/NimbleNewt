@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { win32 } from "node:path";
-import type { ContainmentReport, NativeWindowsEvidence } from "./containment.js";
-import { PACKAGED_CONTROLLER_EXISTS, isNativeWindowsEvidence } from "./containment.js";
+import type { AfterSignOutEvidence, ContainmentReport, NativeWindowsEvidence } from "./containment.js";
+import { PACKAGED_CONTROLLER_EXISTS, isAfterSignOutEvidence, isNativeWindowsEvidence } from "./containment.js";
 import { parseWorkdirCheck } from "./containment-windows-evidence.js";
 
 /*
@@ -13,11 +13,14 @@ import { parseWorkdirCheck } from "./containment-windows-evidence.js";
  *   - the backend's run records (`<control>\records\*.json`, windows-native-job.ts) of this evidence run, for the grant read-back of every run;
  *   - the count of `NimbleNewtRun-*` profiles left under `%LOCALAPPDATA%\Packages` after the run;
  *   - the account kind and whether the account holds SeCreateSymbolicLinkPrivilege, as run-g05.ps1 found them (`containment-evidence.mjs run --account-kind ... --symlink-right ...`);
- *   - the working-directory check output when one was run; otherwise, while no packaged controller exists (PACKAGED_CONTROLLER_EXISTS), the fact that there is none (`packaged: false`).
+ *   - the working-directory check output when one was run; otherwise, while no packaged controller exists (PACKAGED_CONTROLLER_EXISTS), the fact that there is none (`packaged: false`);
+ *   - optionally, the sign-out / restart check `run-g05.ps1 -AfterSignIn` wrote (`containment-evidence.mjs after-sign-in`, windows-native-signout.ts): given but unreadable or malformed is no block at all.
  * Anything not given is `not-measured` / `null`, which the release gate refuses, and is named in `notProven`.
  */
 
 export const LAUNCHER_RECORD_SCHEMA = "nimblenewt.native-launcher-record/1";
+/** The file `afterSignIn` (windows-native-signout.ts) writes: `{ schema, afterSignOut }`, nothing else. */
+export const AFTER_SIGNOUT_SCHEMA = "nimblenewt.g05-after-sign-out/1";
 /** Defined with the gate (containment.ts), which refuses `packaged: false` once it is true; while false, a run without the check records `packaged: false`, accepted as "not yet measurable". */
 export { PACKAGED_CONTROLLER_EXISTS };
 const MAX_INPUT_BYTES = 64 * 1024;
@@ -43,6 +46,17 @@ export interface NativeEvidenceInput {
   readonly workdirRaw?: string;
   /** Tests only: whether a packaged controller exists (default `PACKAGED_CONTROLLER_EXISTS`). */
   readonly packagedControllerExists?: boolean;
+  /** The sign-out / restart check file (`AFTER_SIGNOUT_SCHEMA`), when `run-g05.ps1 -AfterSignIn` made one. */
+  readonly afterSignOutRaw?: string;
+}
+
+/** The sign-out check file read as data: exactly `{ schema, afterSignOut }` with a well-formed block, or why not. */
+export function parseAfterSignOut(raw: string): { afterSignOut: AfterSignOutEvidence } | { error: string } {
+  if (Buffer.byteLength(raw, "utf8") > MAX_INPUT_BYTES) return { error: "the sign-out check file is too large" };
+  let v: unknown;
+  try { v = JSON.parse(raw); } catch { return { error: "the sign-out check file is not JSON" }; }
+  if (!isObject(v) || Object.keys(v).length !== 2 || v["schema"] !== AFTER_SIGNOUT_SCHEMA || !isAfterSignOutEvidence(v["afterSignOut"])) return { error: `the sign-out check file is not a ${AFTER_SIGNOUT_SCHEMA} with a complete afterSignOut block` };
+  return { afterSignOut: v["afterSignOut"] };
 }
 
 function lastInfoLine(text: string): Record<string, unknown> | undefined {
@@ -93,6 +107,12 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     if ("error" in wd) return { error: wd.error };
     workingDirectory = wd;
   }
+  let afterSignOut: AfterSignOutEvidence | undefined;
+  if (input.afterSignOutRaw !== undefined) {
+    const a = parseAfterSignOut(input.afterSignOutRaw);
+    if ("error" in a) return { error: a.error };
+    afterSignOut = a.afterSignOut;
+  }
   const leftover = input.leftoverProfiles !== undefined && Number.isSafeInteger(input.leftoverProfiles) && input.leftoverProfiles >= 0 ? input.leftoverProfiles : null;
   const grants = input.runRecordsRaw === undefined ? { state: "not-measured" as const, why: "no run record was given" } : grantsReadBackOf(input.runRecordsRaw);
   const evidence: NativeWindowsEvidence = {
@@ -106,6 +126,7 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     grantsReadBack: grants.state,
     symlinkRight: input.symlinkRight ?? null,
     packagedControllerWorkingDirectory: workingDirectory,
+    ...(afterSignOut === undefined ? {} : { afterSignOut }),
   };
   if (!isNativeWindowsEvidence(evidence)) return { error: "the native Windows evidence would not read back as evidence" };
   const notProven = [
@@ -114,7 +135,8 @@ export function nativeWindowsEvidence(input: NativeEvidenceInput): { evidence: N
     ...(grants.state === "not-measured" ? [`the grant read-back after each run (${grants.why ?? "not given"})`] : []),
     ...(evidence.symlinkRight === null ? ["whether the account holds SeCreateSymbolicLinkPrivilege"] : []),
     ...(workingDirectory === null ? ["the controller working-directory check"] : workingDirectory.packaged ? [] : ["the working-directory check on a packaged controller (none exists yet)"]),
-    "a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)",
+    // Present, the check is judged field by field by the gate; absent, it is only listed here (AFTER_SIGNOUT_REQUIRED is false in this slice).
+    ...(afterSignOut === undefined ? ["a run attempted after the owner signs out is refused cleanly and leaves nothing (the hold / sign-out step; not required by the gate in this slice)"] : []),
   ];
   return { evidence, notProven };
 }
@@ -142,6 +164,8 @@ export interface NativeEvidenceSources {
   readonly accountKind?: "standard" | "administrator-filtered";
   readonly symlinkRight?: boolean;
   readonly workdirRaw?: string;
+  /** The sign-out check file `run-g05.ps1 -AfterSignIn` wrote (`--after-sign-out`). Given but unreadable is an error (no block), never "not given". */
+  readonly afterSignOutFile?: string;
 }
 
 /** The folder of a path written with \ or / (a Windows path on Windows; a POSIX one in the tests). */
@@ -158,6 +182,11 @@ export function collectNativeEvidence(src: NativeEvidenceSources, join: (...part
   const read = (p: string): string | undefined => { try { const b = readFileSync(p); return b.length > MAX_INPUT_BYTES ? undefined : b.toString("utf8"); } catch { return undefined; } };
   const infoRaw = read(src.infoFile);
   if (infoRaw === undefined) return { error: "the launcher's info output could not be read" };
+  let afterSignOutRaw: string | undefined;
+  if (src.afterSignOutFile !== undefined) {
+    afterSignOutRaw = read(src.afterSignOutFile);
+    if (afterSignOutRaw === undefined) return { error: "the sign-out check file could not be read" };
+  }
   const recordRaw = read(join(folderOf(src.launcher), "nn-launcher.record.json"));
   if (recordRaw === undefined) return { error: "the launcher's release record (nn-launcher.record.json next to the launcher) could not be read" };
   let launcherSha256: string;
@@ -193,5 +222,6 @@ export function collectNativeEvidence(src: NativeEvidenceSources, join: (...part
     ...(src.accountKind === undefined ? {} : { accountKind: src.accountKind }),
     ...(src.symlinkRight === undefined ? {} : { symlinkRight: src.symlinkRight }),
     ...(src.workdirRaw === undefined ? {} : { workdirRaw: src.workdirRaw }),
+    ...(afterSignOutRaw === undefined ? {} : { afterSignOutRaw }),
   };
 }

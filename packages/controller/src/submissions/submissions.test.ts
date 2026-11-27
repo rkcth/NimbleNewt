@@ -10,6 +10,8 @@ import { CommandRunner } from "../domain/runner.js";
 import { scopedCommandId } from "../security/credentials.js";
 import { SubmissionService, type SubmissionBody, type SubmissionOptions } from "./index.js";
 import { recordedSubmission, stagedSubmit } from "../work-end/index.js";
+/** What the product's host reports when no earlier attempt left changes in the checkout (card Q04, `LocalWorkspaces.stageWork`). */
+const NONE_LEFT = { attempts: [], complete: true } as const;
 
 after(stopServer);
 
@@ -260,7 +262,7 @@ for (const backend of backends) {
     let attempt: { ownerId: string; state: string; attemptId?: string } | undefined = { ownerId: ann.id, state: "active", attemptId: "att-new" };
     const gated = c.open(async (id) => c.roles.get(id) ?? [], { attemptOf: async () => attempt });
     const staged: string[] = [];
-    const submit = stagedSubmit({ stage: async (a) => { staged.push(a.attemptId); return { base: BASE, tree: T1, patchId: PATCH, files: [] }; }, submissions: gated, principalOf: async () => ann });
+    const submit = stagedSubmit({ stage: async (a) => { staged.push(a.attemptId); return { base: BASE, tree: T1, patchId: PATCH, files: [], leftBy: NONE_LEFT }; }, submissions: gated, principalOf: async () => ann });
     const ending = (attemptId: string) => ({ attemptId, taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true, hostId: "h", generation: 1 }) as never;
     await refuses("forbidden", () => submit(ending("att-old"), BASE, cid("end")), /no longer the task's current attempt/);
     assert.deepEqual(staged, ["att-old"]);
@@ -274,7 +276,7 @@ for (const backend of backends) {
     assert.equal((await gated.get(ann, made.submissionId))?.attemptId, "att-new");
     // the same check straight on the service: `from` must be the current attempt
     await refuses("forbidden", () => gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-new" }), /no longer the task's current attempt/);
-    const direct = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-later" });
+    const direct = await gated.record(ann, { commandId: cid("s"), taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }, { attemptId: "att-later", leftBy: NONE_LEFT });
     assert.equal((await gated.get(ann, direct.id))?.attemptId, "att-later");
   });
 
@@ -283,7 +285,7 @@ for (const backend of backends) {
     const svc = c.open(async (id) => c.roles.get(id) ?? []);
     let staged = 0; let reads = 0;
     let landing: () => Promise<{ base: string; head: string; mine: string[]; landed: string[] } | undefined> = async () => ({ base: BASE, head: BASE, mine: [], landed: [] });
-    const submit = stagedSubmit({ stage: async () => { staged++; return { base: BASE, tree: T1, patchId: PATCH, files: ["a.ts"] }; }, submissions: svc, principalOf: async () => ann, landing: async () => { reads++; return landing(); } });
+    const submit = stagedSubmit({ stage: async () => { staged++; return { base: BASE, tree: T1, patchId: PATCH, files: ["a.ts"], leftBy: NONE_LEFT }; }, submissions: svc, principalOf: async () => ann, landing: async () => { reads++; return landing(); } });
     const ending = { attemptId: "att-1", taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true } as never;
     const key = cid("end");
     const made = await submit(ending, BASE, key);
@@ -300,7 +302,7 @@ for (const backend of backends) {
     // another agent's record under the same command ID is never taken as this one's
     const bob = await c.agent("bob", ["author"]);
     landing = async () => ({ base: BASE, head: BASE, mine: [], landed: [] });
-    const bobs = stagedSubmit({ stage: async () => ({ base: BASE, tree: T2, patchId: PATCH, files: ["b.ts"] }), submissions: svc, principalOf: async () => bob, landing: async () => landing() });
+    const bobs = stagedSubmit({ stage: async () => ({ base: BASE, tree: T2, patchId: PATCH, files: ["b.ts"], leftBy: NONE_LEFT }), submissions: svc, principalOf: async () => bob, landing: async () => landing() });
     assert.notEqual((await bobs({ ...(ending as object), agentId: bob.id } as never, BASE, key)).submissionId, made.submissionId);
   });
 
@@ -312,7 +314,7 @@ for (const backend of backends) {
     // An agent's own record under the ending's key would be taken as the staged one: refused, nothing recorded; the ending's own record (with its attempt) is made.
     for (const by of [ann, bob]) await assert.rejects(svc.record(by, { commandId: key, taskId: c.task, kind: "code", role: "author", base: BASE, tree: T2, patchId: PATCH }), (e: unknown) => e instanceof DomainError && e.code === "invalid_command" && /commandId: starting with workend:/.test(e.message));
     assert.equal((await svc.list(ann, c.task, { limit: 10 })).items.length, 0);
-    const submit = stagedSubmit({ stage: async () => ({ base: BASE, tree: T1, patchId: PATCH, files: ["a.ts"] }), submissions: svc, principalOf: async () => ann });
+    const submit = stagedSubmit({ stage: async () => ({ base: BASE, tree: T1, patchId: PATCH, files: ["a.ts"], leftBy: NONE_LEFT }), submissions: svc, principalOf: async () => ann });
     const ending = { attemptId: "att-1", taskId: c.task, projectId: c.projects.task, agentId: ann.id, live: true };
     const made = await submit(ending as never, BASE, key);
     const recorded = (by: Principal | undefined) => recordedSubmission({ submissions: svc, principalOf: async () => by });

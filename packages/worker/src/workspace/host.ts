@@ -145,6 +145,11 @@ export interface WorkspaceHostOptions {
    */
   readonly release?: boolean;
   readonly attemptsQuiet?: (attemptIds: readonly string[], call: { readonly taskId: string; readonly projectId: string }) => Promise<boolean> | boolean;
+  /**
+   * Card Q04 (who left changes in a task's checkout): wraps every request this host carries out on a checkout (each operation of `run`, and `restack`), in the checkout's turn and only once the request is to start, so the
+   * layout that keeps the record can tell a change the platform made (a refresh, a re-apply, a release) from one an attempt left. It must run `work` once and answer what `work` answers (or throw what it throws).
+   */
+  readonly tracked?: <T>(where: CheckoutLocation, work: () => Promise<T>) => Promise<T>;
 }
 
 const REQUEST = /^wsr-[a-z2-7]{20}$/;
@@ -186,7 +191,9 @@ export class WorkspaceHost {
     const work = async (): Promise<HostWorkspaceOutcome> => {
       // Checked at the moment the work would start, after any wait behind another request: the controller may have given up and freed the agent by then.
       const stale = await this.#notNow(call);
-      return stale !== undefined ? no(stale) : this.#once(call, operation as HostOperation, where);
+      if (stale !== undefined) return no(stale);
+      const tracked = this.#options.tracked;
+      return tracked === undefined ? this.#once(call, operation as HostOperation, where) : tracked(where, () => this.#once(call, operation as HostOperation, where));
     };
     // What writes the shared working tree is one at a time per shared tree, whichever task asks (the order is always checkout, then shared tree).
     // The key is the shared tree itself, not one spelling of its path: a link, a different case or a trailing slash must not give a second lock.
@@ -208,7 +215,9 @@ export class WorkspaceHost {
     const where = await this.#options.locate({ taskId: call.taskId, projectId: call.projectId });
     if (where === undefined) return no("the checkout of that task is not on this host") as HostRestackOutcome;
     for (const p of [where.shared, where.checkout, where.gitDir]) if (typeof p !== "string" || !isAbsolute(p)) return no("this host's location for the checkout is not an absolute path (a host fault)") as HostRestackOutcome;
-    const work = async (): Promise<HostRestackOutcome> => {
+    const tracked = this.#options.tracked;
+    const work = (): Promise<HostRestackOutcome> => (tracked === undefined ? reapply() : tracked(where, reapply));
+    const reapply = async (): Promise<HostRestackOutcome> => {
       const asLanding: HostWorkspaceCall = { requestId: call.requestId, operation: "landing", taskId: call.taskId, projectId: call.projectId, reason: "re-apply", ...(call.quietAttempts === undefined ? {} : { quietAttempts: call.quietAttempts }) };
       const stale = await this.#notNow(asLanding);
       if (stale !== undefined) return no(stale) as HostRestackOutcome;

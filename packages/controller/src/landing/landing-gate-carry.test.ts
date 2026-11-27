@@ -25,7 +25,7 @@ const run = async (o: { required?: ("review" | "qa")[]; approval: () => Reviewed
   const h: LandingCheckHost = { landingChecks: async (call) => {
     calls.push(call);
     const ids = o.carriedIds === undefined ? call.carried?.map(() => PATCH) : o.carriedIds(call);
-    return { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH }), ...(ids === undefined ? {} : { carriedPatchIds: ids }) } as LandingCheckHostReport;
+    return { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH, reviewedReplays: true }), ...(ids === undefined ? {} : { carriedPatchIds: ids, carriedReplays: ids.map(() => true) }) } as LandingCheckHostReport;
   } };
   const record = await g.evaluate({ taskId: TASK, projectId: "proj-x", submissionId: SUB, host: h });
   return { g, record, calls };
