@@ -140,7 +140,7 @@ test("the next attempt is told the code submission its work.end opened, and an a
     const two = await runAttempt(2);
     assert.equal(two.attempt.outcome?.status, "succeeded", JSON.stringify(two.attempt.outcome));
     const opening = seen[firstOfTwo]!;
-    assert.ok(opening.includes(`Your newest code submission of this task is ${sid}; draft its code deliverable with nimblenewt__deliverable-draft naming it`), `the next attempt is told its submission in its first call: ${opening.slice(-1200)}`);
+    assert.ok(opening.includes(`Your newest code submission of this task is ${sid}; if no code deliverable of this task names it yet, draft one naming it with nimblenewt__deliverable-draft`), `the next attempt is told its submission in its first call: ${opening.slice(-1200)}`);
     assert.doesNotMatch(opening, /submission-list/);
     const items = (await api("deliverable.record.list", { taskId })).result.items as { id: string }[];
     assert.equal(items.length, 1, JSON.stringify(items));

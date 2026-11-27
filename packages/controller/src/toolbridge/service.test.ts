@@ -1828,7 +1828,7 @@ for (const backend of backends) {
       return { status: "completed", text: "done" };
     };
     await c.tick();
-    assert.ok(content.includes(`Your newest code submission of this task is ${newest}; draft its code deliverable with nimblenewt__deliverable-draft naming it`), content.slice(-1500));
+    assert.ok(content.includes(`Your newest code submission of this task is ${newest}; if no code deliverable of this task names it yet, draft one naming it with nimblenewt__deliverable-draft`), content.slice(-1500));
     assert.ok(!content.includes(first) && !content.includes(bens) && !content.includes(other) && !content.includes(far), "only the agent's newest of this task");
     assert.deepEqual(drafted, [{ type: "code", title: "patch", submissionIds: [newest], taskId }]);
     // An index entry is only a pointer: one that names another task's submission, or a submission of another agent or another time, names nothing.
@@ -1838,6 +1838,28 @@ for (const backend of backends) {
     const planted = { ...(index.body as Record<string, unknown>), entries: [{ taskId, id: other, at: await at(other), by: ann.id }, { taskId, id: newest, at: await at(newest), by: "agent:zed" }, { taskId, id: bens, at: "2000-01-01T00:00:00.000Z", by: ben.id }] };
     await runner.command("test.plant", { commandId: uid("plant"), actor: c.owner.id }, async () => ({ payload: { n: uid("i") }, build: async () => ({ ref: { kind: "code-submission-index", id: c.project }, creates: false, changes: [{ type: "update" as const, ref: { kind: "code-submission-index", id: c.project }, expectedRevision: index.revision, body: planted as unknown as JsonObject }], detail: {} }) }));
     assert.deepEqual([await subs.newestCodeOf(c.project, taskId, ann.id), await subs.newestCodeOf(c.project, taskId, "agent:zed"), await subs.newestCodeOf(c.project, taskId, ben.id)], [undefined, undefined, undefined], "another task's submission, another agent's, and another time are not named");
+    // Review: an entry whose record is absent, or whose record is a document submission of the same task, agent and time, names nothing; nor does a damaged index.
+    const docId = "sbm-dddddddddddddddddddd", goneId = "sbm-gggggggggggggggggggg", docAt = await at(newest);
+    const docBody = { ...((await runner.get("submission", newest))!.body as Record<string, unknown>), kind: "document" };
+    const now = (await runner.get("code-submission-index", c.project))!;
+    await runner.command("test.plant", { commandId: uid("plant"), actor: c.owner.id }, async () => ({ payload: { n: uid("i") }, build: async () => ({ ref: { kind: "code-submission-index", id: c.project }, creates: false, changes: [
+      { type: "create" as const, ref: { kind: "submission", id: docId }, body: docBody as unknown as JsonObject },
+      { type: "update" as const, ref: { kind: "code-submission-index", id: c.project }, expectedRevision: now.revision, body: { complete: true, entries: [{ taskId, id: docId, at: docAt, by: ann.id }, { taskId: otherTask, id: goneId, at: docAt, by: ann.id }] } as unknown as JsonObject },
+    ], detail: {} }) }));
+    assert.deepEqual([await subs.newestCodeOf(c.project, taskId, ann.id), await subs.newestCodeOf(c.project, otherTask, ann.id)], [undefined, undefined], "a document submission and an absent record are not named");
+    const now2 = (await runner.get("code-submission-index", c.project))!;
+    await runner.command("test.plant", { commandId: uid("plant"), actor: c.owner.id }, async () => ({ payload: { n: uid("i") }, build: async () => ({ ref: { kind: "code-submission-index", id: c.project }, creates: false, changes: [{ type: "update" as const, ref: { kind: "code-submission-index", id: c.project }, expectedRevision: now2.revision, body: { complete: true, entries: "damaged" } as unknown as JsonObject }], detail: {} }) }));
+    assert.equal(await subs.newestCodeOf(c.project, taskId, ann.id), undefined, "a damaged index names nothing");
+    // A failing read never keeps an attempt from starting: its line is simply left out, and the failure is reported.
+    const errors: unknown[] = [];
+    c.dispatcher = c.restart({ replaySafe: c.svc.replaySafe, newestCodeOf: async () => { throw new Error("index read failed"); } }, { onError: (e: unknown) => { errors.push(e); } });
+    await c.task("again", ann);
+    let started = "";
+    c.worker.script = async ({ order }) => { started = order.content; return { status: "completed", text: "done" }; };
+    await c.tick();
+    assert.ok(started.length > 0, "the attempt started");
+    assert.doesNotMatch(started, /newest code submission/);
+    assert.ok(errors.some((e) => /index read failed/.test(String((e as Error)?.message))), "the failure is reported");
   });
 
   suite("toolbox (card T08): from a run the agent reads a shared tool's source, copies it, lists its copies, proposes an improvement for its own task and reads its notices; the copy and the proposal are writes a pause stops", async (c) => {
