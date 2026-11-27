@@ -1446,3 +1446,39 @@ test("rollback, late work found and the take-back committed but its answer was l
     assert.equal((await readJournal(st(f)))?.phase, "switched");
   } finally { await finish(f); }
 });
+
+const holderOf = async (s: ControllerStorage): Promise<unknown> => { const snap = await s.snapshot(); try { return (await snap.read("state", { limit: 1 }))[0]?.["holder"]; } finally { await snap.close(); } };
+test("a controller whose epoch was taken (a controller promotion's fence) can neither move the database nor roll a move back, so it cannot take the store back; with its own epoch it moves as before (card K05 review)", async () => {
+  const f = await fixture();
+  try {
+    const target = await sqlTarget(f, "dest.sqlite");
+    const fence = "promotion-fence:p1:" + f.epoch;
+    await f.src.acquireEpoch({ holder: fence, at: AT, expectedEpoch: f.epoch });
+    const svc = await service(f, [target], { epoch: f.epoch });
+    const plan = await svc.preview("sqlite2");
+    await assert.rejects(svc.apply("sqlite2", plan.token), /no longer holds the database .*nothing was changed/);
+    assert.equal(await holderOf(f.src), fence, "the fence still holds the store");
+    assert.equal(await f.src.currentEpoch(), f.epoch + 1);
+    assert.equal(f.barrier.held, false, "a refused move leaves the barrier down");
+    assert.equal(await readAuthority(st(f)), undefined, "nothing was switched");
+    const j = await readJournal(st(f));
+    assert.equal(j?.phase, "failed"); assert.equal(j?.failure?.phase, "validating", "refused before anything was copied"); assert.equal(j?.failure?.destinationClean, true);
+  } finally { await finish(f); }
+  const g = await fixture();
+  try {
+    const target = await sqlTarget(g, "dest.sqlite");
+    const svc = await service(g, [target], { epoch: g.epoch });
+    await svc.apply("sqlite2", (await svc.preview("sqlite2")).token);
+    assert.equal((await readJournal(st(g)))?.phase, "switched", "the controller's own epoch moves as before");
+    const { live, epoch } = await startOnDestination(g, target);
+    const fence = "promotion-fence:p2:" + epoch;
+    await live.acquireEpoch({ holder: fence, at: AT, expectedEpoch: epoch });
+    const barrier = new MaintenanceBarrier();
+    const stale = new DatabaseTransferService({ storage: live, source: { kind: "sqlite", fingerprint: target.fingerprint, name: target.name }, targets: () => [], stateDirectory: st(g), barrier, now: () => new Date(AT), epoch });
+    await assert.rejects(stale.rollback(), /no longer holds the database .*cannot roll the move back/);
+    assert.equal(await holderOf(live), fence);
+    assert.equal((await readJournal(st(g)))?.phase, "switched", "the move stands");
+    assert.equal((await readAuthority(st(g)))?.active.fingerprint, target.fingerprint);
+    assert.equal(barrier.held, false);
+  } finally { await finish(g); }
+});
