@@ -719,7 +719,10 @@ export class StagedRestore {
     // A live record that cannot be read refuses the preview as it would the apply (who may use the restored store would not be known).
     let authority: ReturnType<typeof carryControllerAuthority>["record"];
     try { this.#stillPrimary(side.epoch); authority = carryControllerAuthority(side, { epoch: 0, holder: null }).record; } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; }
-    if (authority !== undefined) warnings.push(`The record of the last controller promotion (${authority.promotionId}, ${authority.state === "promoted" ? `naming ${authority.successor}` : "not finished"}) and the database's epoch are kept from the running database unless the backup was made at a later epoch, so the restored data does not bring back the controller that promotion replaced.`);
+    // The manifest's epoch says which side will decide (second review): the apply decides from the backup's state row, read when the backup is opened.
+    const promotion = authority === undefined ? "" : `the last controller promotion (${authority.promotionId}, ${authority.state === "promoted" ? `naming ${authority.successor}` : "not finished"})`;
+    if (authority !== undefined && m.epoch > side.epoch) warnings.push(`This backup was made at a later epoch (${m.epoch}) than the running database (${side.epoch}), so its own promotion record, holder and epoch are used. It must hold ${promotion} or a later one; otherwise the restore is refused when you approve, and nothing is changed.`);
+    else if (authority !== undefined) warnings.push(`The record of ${promotion} and the database's epoch are kept from the running database, so the restored data does not bring back the controller that promotion replaced.`);
     const last = await this.#lastAuditSeq();
     const backupSeq = m.files.find((f) => f.table === "audit")?.rows;
     const changes = last === undefined || backupSeq === undefined ? undefined : Math.max(0, last - backupSeq);

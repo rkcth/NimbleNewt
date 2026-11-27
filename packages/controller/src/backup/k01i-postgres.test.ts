@@ -241,3 +241,44 @@ test("on PostgreSQL the successor restores a backup made before the promotion: t
     rmSync(r.d, { recursive: true, force: true });
   }
 });
+
+test("on PostgreSQL a restore whose authority carry is refused at apply (the running promotion record changed after the preview and no longer reads) stages nothing: no staged schema, no marker, the live schema as it was (K05 second slice, second review)", async () => {
+  const r = await rig();
+  const at = new Date("2026-11-27T12:10:00.000Z");
+  const opened: Controller[] = [];
+  const open = async (holder?: string): Promise<Controller> => {
+    const c = await startController({ storage: { kind: "postgres", url: r.url, schema: r.schema }, dataDirectory: join(r.d, "data"), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
+      ...(holder === undefined ? {} : { holder }), backup: { directory: join(r.d, "backups"), now: () => at, piState: { list: async () => [{ id: "att-1", dir: join(r.live, "att-1") }] }, restore: { piFinal: (id: string) => join(r.live, id) } } } as never);
+    opened.push(c); return c;
+  };
+  try {
+    const a = await open();
+    const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+    await call(a, boot.token, "project.create", { name: "Garden" }, "p1");
+    const name = (await call(a, boot.token, "backup.now", {}, "b1")).result.item.name as string;
+    await call(a, boot.token, "project.create", { name: "Late" }, "p2");
+    await a.close();
+    const s = await PostgresStorage.open({ connectionString: r.url, schema: r.schema });
+    try {
+      await writeFencedRecoveryManifest({ storage: s, epoch: await s.currentEpoch(), directory: join(r.d, "m"), now: () => at });
+      await promoteController({ storage: s, manifestDirectory: join(r.d, "m"), blobs: await FileBlobStore.open({ directory: join(r.d, "blobs-b") }), successor: "controller-b", promotionId: "k05pg3", now: () => at });
+    } finally { await s.close(); }
+    const b = await open("controller-b");
+    const preview = await call(b, boot.token, "backup.restore.preview", { name });
+    assert.equal(preview.ok, true, JSON.stringify(preview));
+    const ref = { kind: "controller-authority", id: "primary" };
+    const current = await b.storage.getAggregate(ref);
+    await b.storage.applyOperation({ operationId: "k05-r2-damage", epoch: b.epoch, actor: "t", correlationId: "k05-r2", at: at.toISOString(), changes: [{ type: "update", ref, expectedRevision: current!.revision, body: { format: 99 } }],
+      audit: [], outbox: [], effects: [], timers: [], cancelTimers: [], completeDeliveries: [], completeTimers: [], settleEffects: [] } as never);
+    const applied = await call(b, boot.token, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1");
+    assert.equal(applied.ok, false, JSON.stringify(applied));
+    assert.match(JSON.stringify(applied), /record of a controller promotion in the running database cannot be read.*nothing was changed/);
+    assert.equal(await r.port.exists(stagedSchemaOf(r.schema, at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z"))), false, "the staged schema is dropped");
+    assert.equal(existsSync(join(r.d, "data", PENDING_FILE)), false, "no restore is recorded for the next start");
+    assert.equal(await r.port.liveEpoch!(r.schema), b.epoch, "the live schema keeps its epoch");
+    assert.match(await projectNames(b, boot.token), /Late/);
+  } finally {
+    for (const c of opened) await c.close().catch(() => undefined);
+    rmSync(r.d, { recursive: true, force: true });
+  }
+});
