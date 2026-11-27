@@ -86,21 +86,51 @@ export function instructionText(bytes: Buffer, max: number): { text: string; cut
 }
 
 /**
- * A sentence that names a sign-off: the trailer, the certificate, git's flag (`-s`, matched in its own case: `-S` signs with a key, a different thing), or `DCO` beside a word about signing or the certificate (a bare `DCO`
+ * A sentence that names a sign-off: the trailer, the certificate, git's flag (`-s`, matched in its own case: `-S` signs with a key, a different thing), or `DCO` beside a sign-off word (a bare `DCO`
  * is also, for one, an oscillator).
  */
-const SIGN_WORD = String.raw`\b(?:sign(?:[- ]?offs?|ed|s|ing)?\b|certificate)`;
-const SIGN_OFF_MARK = new RegExp(String.raw`\bsigned-off-by\b|\bdeveloper certificate of origin\b|--signoff\b|\bdevelopercertificate\.org\b|\bDCO\b(?=.*${SIGN_WORD})|${SIGN_WORD}.*\bDCO\b`, "i");
-const GIT_SIGN_OFF_FLAG = /\bgit\s+commit\b[^\n]*?\s-s(?![\w-])/;
-/** Words that make such a sentence say no sign-off is wanted ("not required", "optional", "do not add a Signed-off-by"). */
-const SIGN_OFF_NOT = /\b(?:not|never|no longer)\s+(?:be\s+)?(?:required|needed|necessary|mandatory|used|wanted|asked)\b|\boptional\b|\bno need\b|\bunnecessary\b|\b(?:do|does|did|need)\s+not\s+(?:need|require|use|add|sign|ask|want)\b|\b(?:don't|doesn't|didn't|dont|doesnt|needn't)\s+(?:need|require|use|add|sign|ask|want)\b|\bno\s+(?:sign[- ]?offs?|signed-off-by|dco)\b/i;
+// Every test here is linear in the sentence (re-check of the second review: `DCO(?=.*sign)`, `sign.*DCO` and a lazy scan after `git commit` were quadratic on one long line, 2 s at 100 KB): no pattern scans ahead from
+// each of many starting points.
+const SIGN_OFF_MARK = /\bsigned-off-by\b|\bdeveloper'?s?\s+certificate\s+of\s+origin\b|--signoff\b|\bdevelopercertificate\.org\b/i;
+const DCO = /\bDCO\b/i;
+/** The words beside `DCO` that make it the certificate: a sign-off, not any `sign` (a "certificate signing request" for a `DCO` module is not one). */
+const DCO_SIGN_OFF = /\bsign(?:ed|ing)?[- ]?offs?\b/i;
+const GIT_COMMIT = /\bgit\s+commit\b/;
+const SHORT_SIGN_OFF = /\s-s(?![\w-])/;
+/** Words that say a sign-off is not wanted, not wanted any more, or not always ("not required", "optional", "no longer", "only if", "avoid", "we stopped"). */
+const SIGN_OFF_NOT = /\b(?:not|no|nor|neither|never|none|cannot|dont|doesnt|didnt|isnt|arent|optional(?:ly)?|voluntar(?:y|ily)|unnecessary|avoid(?:ed|ing)?|unless|except|exempt(?:ed)?|deprecated|waived?|disabled|encouraged|recommended|welcome|stopped|dropped|removed|formerly|previously|used\s+to|only\s+(?:if|when|for)|n\/a)\b|n't\b/i;
+/** Words that make it a permission, not a request ("you may add", "you can sign off if you like"). */
+const SIGN_OFF_MAY = /\b(?:may|might|can|could|feel\s+free|if\s+you\s+(?:like|want|wish|prefer|choose))\b/i;
+/** "Commits without a Signed-off-by line are not accepted" asks for one: the refusal is not a negation of the request. */
+const LACKING = /\b(?:without|lack(?:s|ing)?|missing)\b/i;
+const REFUSED = /(?:\bnot|n't|\bnever)\s+(?:be\s+)?(?:accepted|merged|considered|reviewed)\b/gi;
+/** A next sentence about the one before ("This is optional.", "(not required)"). */
+const REFERS_BACK = /^\s*(?:\(|(?:this|that|it|these|those|they|doing\s+so|which|but)\b)/i;
+/** Sentences end at a newline or after `.`, `!`, `?`, `;` and a space, not after a common abbreviation ("see e.g. the DCO" is one sentence). */
+const SENTENCE_END = /\n|(?<=[.!?;])(?<!\b(?:e\.g|i\.e|etc|vs|cf|approx)\.)\s+/i;
+
+const namesSignOff = (s: string): boolean => {
+  if (SIGN_OFF_MARK.test(s) || (DCO.test(s) && DCO_SIGN_OFF.test(s))) return true;
+  const commit = GIT_COMMIT.exec(s);
+  return commit !== null && SHORT_SIGN_OFF.test(s.slice(commit.index + commit[0].length));
+};
+const saysNot = (s: string): boolean => SIGN_OFF_NOT.test(LACKING.test(s) ? s.replace(REFUSED, " refused") : s);
 
 /**
  * Whether a repository's guidance asks for a sign-off on each commit (a Developer Certificate of Origin): a later contribution commit then carries `Signed-off-by` for its human author, so a wrong yes would put an attestation in
- * that person's name (second review). Read sentence by sentence: a sentence counts when it names a sign-off and does not say it is unneeded. A requirement worded only as a negation may be missed; a missed one shows as the
- * project's own check failing, which is the safer of the two mistakes.
+ * that person's name (second review). Read sentence by sentence: a sentence counts when it names a sign-off and has no word of negation, of permission or of a past or partial rule in it, and the next sentence is not one
+ * about it that says no ("Add a Signed-off-by line. This is optional."). Lines inside a fenced code block are examples, never a request on their own (a `git commit -s` under "we do not use:"). A requirement worded with
+ * any such word is missed; a missed one shows as the project's own check failing, which is the safer of the two mistakes.
  */
-export const asksSignOff = (text: string): boolean => text.replace(/[\u2018\u2019]/g, "'").split(/\n|(?<=[.!?;])\s+/).some((s) => (SIGN_OFF_MARK.test(s) || GIT_SIGN_OFF_FLAG.test(s)) && !SIGN_OFF_NOT.test(s));
+export const asksSignOff = (text: string): boolean => {
+  const sentences: string[] = [];
+  let fenced = false;
+  for (const line of String(text).replace(/[\u2018\u2019]/g, "'").split(/\r?\n/)) {
+    if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; continue; }
+    if (!fenced) sentences.push(...line.split(SENTENCE_END));
+  }
+  return sentences.some((s, i) => namesSignOff(s) && !saysNot(s) && !SIGN_OFF_MAY.test(s) && !(i + 1 < sentences.length && REFERS_BACK.test(sentences[i + 1]!) && saysNot(sentences[i + 1]!)));
+};
 
 /** Names of NimbleNewt's own state, in any folder (compared folded). A contribution never carries a file under one of them. */
 const STATE_DIRS = new Set([".nimblenewt", "nimblenewt-state", ".nn"]);

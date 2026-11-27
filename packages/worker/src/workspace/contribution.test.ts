@@ -337,6 +337,19 @@ test("a sign-off is asked only by a sentence that names one and does not say it 
     "Do not add a Signed-off-by line.", "Don’t add Signed-off-by trailers.", "We have no DCO.", "There is no need to sign off (no DCO).", "You need not sign off: the Developer Certificate of Origin is not required here.", ""]) assert.equal(asksSignOff(no), false, no);
 });
 
+test("re-check of the second review: no yes from a past, partial, permitted or refused sign-off, a code block or a next sentence that takes it back; the reading stays linear on one long line (card P05)", () => {
+  for (const no of ["We used to require a DCO sign-off but no longer do.", "You don't have to add a Signed-off-by line.", "Signing off (DCO) is voluntary.", "Developer Certificate of Origin: not applicable to this project.", "Avoid `git commit -s` here.",
+    "The certificate signing request (CSR) for the DCO module...", "Use git commit -s only if your employer requires it.", "Signed-off-by is neither required nor checked.", "We stopped requiring Signed-off-by lines.", "Signed-off-by: is not enforced.",
+    "You may add a Signed-off-by line if you like.", "We don't use sign-offs:\n```\ngit commit -s\n```", "Add a Signed-off-by line. This is optional.", "Signed-off-by lines (see e.g. the DCO) are optional.", "* Signed-off-by line\n  (optional)",
+    "Commits without a Signed-off-by line are not rejected.", "Sign-off via `git commit -s` is welcome but not checked.", "Signed-off-by lines are recommended.", "Before contributing you must sign the Apache Individual Contributor License Agreement (ICLA).",
+    "We require verified (signed) commits. Configure GPG or SSH signing so GitHub shows Verified.", "Each commit needs a Change-Id footer for Gerrit."]) assert.equal(asksSignOff(no), false, no);
+  for (const yes of ["Commits that lack a Signed-off-by line will not be merged.", "Commits without a sign-off fail the DCO check.", "We follow the Developer's Certificate of Origin 1.1.", "Sign off your commits:\n```\ngit commit -s -m 'fix'\n```\nThe DCO bot checks every commit for a sign-off.",
+    "Signed-off-by is required.\r\nThanks!", "CNCF projects require a DCO sign-off on all commits.", "| Requirement | Status |\n|---|---|\n| DCO sign-off | required |"]) assert.equal(asksSignOff(yes), true, yes);
+  const started = performance.now();
+  for (const unit of ["DCO ", "sign ", "certificate ", "git commit ", "sign-off no ", "without not accepted ", "a. "]) asksSignOff(unit.repeat(Math.ceil(100_000 / unit.length)));
+  assert.ok(performance.now() - started < 1_000, `seven 100 KB lines read in ${Math.round(performance.now() - started)} ms (quadratic patterns took seconds)`);
+});
+
 test("the project-wide guidance comes before folder-level agent files, so the file bound never pushes out the contribution guide or a template; template folders at the top and in docs/ are templates (card P05, second review)", { skip }, async () => {
   assert.equal(instructionKind("PULL_REQUEST_TEMPLATE/bug.md"), "pull-request-template");
   assert.equal(instructionKind("docs/pull_request_template/feature.md"), "pull-request-template");
