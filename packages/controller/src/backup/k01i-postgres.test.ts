@@ -9,6 +9,8 @@ import { startController } from "../api/index.js";
 import { PostgresStorage, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { startTestServer, type TestServer } from "../storage/postgres/testing/server.js";
 import { JOURNAL_FILE, PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
+import { FileBlobStore } from "../artifacts/index.js";
+import { promoteController, readControllerAuthority, writeFencedRecoveryManifest } from "../recovery/index.js";
 
 // Card K01i: the owner's restore from inside the running controller on PostgreSQL. The backup is restored into a new schema of the same (disposable, embedded test) database; the next start swaps it in with one
 // transaction, after the conversation folders, in the same journal.
@@ -196,4 +198,46 @@ test("a restore prepared before another controller or a controller promotion too
     assert.match(JSON.parse(readFileSync(join(r.d, "data", PENDING_FILE), "utf8")).failed.reason, /taken by another controller/);
     void token;
   } finally { rmSync(r.d, { recursive: true, force: true }); }
+});
+
+test("on PostgreSQL the successor restores a backup made before the promotion: the swapped-in schema keeps the promotion record, the successor's holder and the live epoch, so the old controller is still refused (K05 second slice)", async () => {
+  const r = await rig();
+  const opened: Controller[] = [];
+  const open = async (holder?: string): Promise<Controller> => {
+    const c = await startController({ storage: { kind: "postgres", url: r.url, schema: r.schema }, dataDirectory: join(r.d, "data"), argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), intervalMs: 1000 },
+      ...(holder === undefined ? {} : { holder }), backup: { directory: join(r.d, "backups"), piState: { list: async () => [{ id: "att-1", dir: join(r.live, "att-1") }] }, restore: { piFinal: (id: string) => join(r.live, id) } } } as never);
+    opened.push(c); return c;
+  };
+  const onSchema = async <R>(f: (s: PostgresStorage) => Promise<R>): Promise<R> => { const s = await PostgresStorage.open({ connectionString: r.url, schema: r.schema }); try { return await f(s); } finally { await s.close(); } };
+  try {
+    const a = await open();
+    const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+    await call(a, boot.token, "project.create", { name: "Garden" }, "p1");
+    const name = (await call(a, boot.token, "backup.now", {}, "b1")).result.item.name as string;
+    await call(a, boot.token, "project.create", { name: "Late" }, "p2");
+    await a.close();
+    const now = () => new Date("2026-11-27T12:05:00.000Z");
+    await onSchema(async (s) => {
+      await writeFencedRecoveryManifest({ storage: s, epoch: await s.currentEpoch(), directory: join(r.d, "m"), now });
+      await promoteController({ storage: s, manifestDirectory: join(r.d, "m"), blobs: await FileBlobStore.open({ directory: join(r.d, "blobs-b") }), successor: "controller-b", promotionId: "k05pg2", now });
+    });
+    const b = await open("controller-b");
+    const preview = await call(b, boot.token, "backup.restore.preview", { name });
+    assert.ok((await call(b, boot.token, "backup.restore.apply", { name, confirm: preview.result.item.token }, "r1")).ok);
+    const epochB = await r.port.liveEpoch!(r.schema);
+    await b.close();
+    const b2 = await open("controller-b");
+    const names = await projectNames(b2, boot.token);
+    assert.ok(names.includes("Garden") && !names.includes("Late"), names);
+    await b2.close();
+    const st = await onSchema(async (s) => ({ epoch: await s.currentEpoch(), record: await readControllerAuthority(s) }));
+    assert.equal(st.epoch, epochB! + 1, "the restored schema went on from the live epoch");
+    assert.ok(st.record !== undefined && st.record !== "unreadable" && st.record.successor === "controller-b" && st.record.promotionId === "k05pg2");
+    await assert.rejects(open(), /the controller promotion k05pg2 named controller-b .*this controller starts as controller/);
+    const b3 = await open("controller-b");
+    assert.equal((await call(b3, boot.token, "project.create", { name: "After" }, "p3")).ok, true);
+  } finally {
+    for (const c of opened) await c.close().catch(() => undefined);
+    rmSync(r.d, { recursive: true, force: true });
+  }
 });

@@ -25,6 +25,7 @@ import { filesSealed, tableFile, type BackupManifest, type BackupScopeRecord } f
 import { validStoreId } from "./pi-state.js";
 import { acquireDataLocks, LINK_FALLBACK_CODES, type DataLock } from "./data-lock.js";
 import { canon, canonSync } from "./canon.js";
+import { AuthorityCarryRefused, authoritySideOf, carryControllerAuthority, type AuthoritySide } from "../recovery/carry.js";
 export { canon, canonSync };
 
 /**
@@ -625,6 +626,18 @@ export class StagedRestore {
     if (this.#o.epoch !== undefined && epoch !== this.#o.epoch) throw new DomainError("invalid_transition", "this controller no longer holds the database (another controller or a controller promotion took it), so it cannot restore a backup onto it; nothing was staged");
   }
 
+  /**
+   * The running store's epoch, holder and promotion record, read from one snapshot (card K05, second slice): the restored store is given them when the running store is the newer, so a backup
+   * made before a controller promotion does not bring back the controller it replaced. The epoch must still be this controller's.
+   */
+  async #liveAuthority(): Promise<AuthoritySide> {
+    const snap = await this.#o.storage.snapshot();
+    let side: AuthoritySide;
+    try { side = await authoritySideOf(snap); } finally { await snap.close(); }
+    this.#stillPrimary(side.epoch);
+    return side;
+  }
+
   async #issue(m: BackupManifest, changes: number | undefined): Promise<{ token: string; expiresAt?: string }> {
     const epoch = await this.#o.storage.currentEpoch();
     this.#stillPrimary(epoch);
@@ -668,10 +681,13 @@ export class StagedRestore {
   /** The plan without its token. `verify`: check a plain backup and count its effects and deliveries (a preview does; the apply verifies once, in the restore itself). */
   async #plan(path: string, m: BackupManifest, verify: boolean): Promise<Omit<RestorePlan, "token" | "expiresAt">> {
     const probe = await this.#o.storage.snapshot();
-    const live = probe.schemaVersion;
-    const since = await externalSince(probe, m.createdAt);
-    await probe.close();
-    if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
+    let since: ExternalSince | undefined, side: AuthoritySide;
+    try {
+      const live = probe.schemaVersion;
+      since = await externalSince(probe, m.createdAt);
+      if (live !== m.schemaVersion) throw new DomainError("invalid_command", `the backup has schema version ${m.schemaVersion} and this installation has ${live}; restore it with the version of NimbleNewt that made it, then upgrade`);
+      side = await authoritySideOf(probe);
+    } finally { await probe.close(); }
     const encrypted = m.encryption !== undefined;
     // Only the scope "everything" seals the table files: in a "secrets only" backup they are plain and can be checked and counted without a key.
     const sealedFiles = filesSealed(m);
@@ -700,6 +716,10 @@ export class StagedRestore {
       warnings.push(`Since this backup was made, ${what.join(", ")}${since.truncated ? " (at least; the live data is larger than was read)" : ""}. A restore cannot undo any of that, and the restored data will not know it happened${since.targets.length === 0 ? "" : `: check ${since.targets.join(", ")} before anything is repeated`}. Actions the backup holds as only intended come back as uncertain and are never run again by themselves.`);
     }
     if (m.contentScope !== undefined) warnings.push(`NOT A FULL COPY. ${m.contentScope.text}`);
+    // A live record that cannot be read refuses the preview as it would the apply (who may use the restored store would not be known).
+    let authority: ReturnType<typeof carryControllerAuthority>["record"];
+    try { this.#stillPrimary(side.epoch); authority = carryControllerAuthority(side, { epoch: 0, holder: null }).record; } catch (error) { throw error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; }
+    if (authority !== undefined) warnings.push(`The record of the last controller promotion (${authority.promotionId}, ${authority.state === "promoted" ? `naming ${authority.successor}` : "not finished"}) and the database's epoch are kept from the running database unless the backup was made at a later epoch, so the restored data does not bring back the controller that promotion replaced.`);
     const last = await this.#lastAuditSeq();
     const backupSeq = m.files.find((f) => f.table === "audit")?.rows;
     const changes = last === undefined || backupSeq === undefined ? undefined : Math.max(0, last - backupSeq);
@@ -850,11 +870,13 @@ export class StagedRestore {
         if (t === undefined) { t = canonSync(this.#o.piFinal?.(id) ?? join(data, "restored-pi-state", id)); safeTarget(t, data, liveDb.dbDir); targets.set(id, t); }
         return stagedOf(t, stamp);
       };
+      // Card K05, second slice: read now, from the running store; the marker records this epoch, so a promotion after this read refuses the swap at the start.
+      const liveSide = await this.#liveAuthority();
       const fresh: ControllerStorage = liveDb.pg === undefined ? await SqliteStorage.open({ path: stagedDb }) : await (liveDb.pg.openStaged ?? ((schema: string) => PostgresStorage.open({ connectionString: liveDb.pg!.url, schema })))(stagedDb);
       try {
         // The one verification: the restore checks the backup, and the manifest it checked must be the one the approval named.
-        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), ...(this.#o.secrets === undefined ? { skipSecrets: true } : { secrets: this.#o.secrets }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest) });
-      } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error; }
+        result = await restoreBackup(path, fresh, { ...(await this.#signatureOption()), ...(this.#o.blobs === undefined ? {} : { blobs: this.#o.blobs }), ...(unlock === undefined ? {} : { unlock }), ...(this.#o.secrets === undefined ? { skipSecrets: true } : { secrets: this.#o.secrets }), deletions: await this.#o.deletions?.() ?? [], piTarget, expectedManifestDigest: manifestDigestOf(manifest), carryAuthority: (backup) => carryControllerAuthority(liveSide, backup) });
+      } catch (error) { await fresh.close().catch(() => undefined); throw error instanceof RestoreRefused ? new DomainError("integrity", error.message) : error instanceof AuthorityCarryRefused ? new DomainError("invalid_transition", error.message) : error; }
       await fresh.close();
       await this.#checkMargin(manifest, margin, shown);
       for (const [id, target] of targets) {
@@ -878,8 +900,8 @@ export class StagedRestore {
         const lastSeq = await this.#lastAuditSeq();
         const backupSeq = manifest.files.find((f) => f.table === "audit")?.rows;
         const key = await requireKey(data, true, this.#o.link);
-        // The controller's own epoch (checked against the store's by the token), or the store's when the restore is driven alone: the start that swaps it in refuses when the live epoch moved (card K05, second review).
-        const stagedEpoch = this.#o.epoch ?? await this.#o.storage.currentEpoch();
+        // The epoch the authority carried into the restored store was read at (the controller's own, checked by #liveAuthority): the start that swaps it in refuses when the live epoch moved (card K05).
+        const stagedEpoch = liveSide.epoch;
         const body: Omit<PendingRestore, "mac"> = { format: 2, name: manifest.name, stamp, preparedAt: this.#now().toISOString(), ...(liveDb.pg === undefined ? {} : { database: "postgres" as const }), stagedDb, liveDb: live, pi: staged.pi, epoch: stagedEpoch };
         const pending: PendingRestore = { ...body, mac: macOf(key, body) };
         markerPath = join(data, PENDING_FILE);

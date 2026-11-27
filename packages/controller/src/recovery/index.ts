@@ -8,3 +8,4 @@ export { reportRestoredStore, type RestoredReport } from "./restored.js";
 export { RecoveryWriteRefused, writeFencedRecoveryManifest, type FencedWriteOptions, type RecoveryWriteRefusal } from "./writer.js";
 export { RECOVERY_MANIFEST_EVERY_MS_DEFAULT, RecoveryWatermarkService, type ManifestState, type RecoveryAttempt, type RecoveryRunOutcome, type RecoveryWatermarkOptions, type RecoveryWatermarkStatus } from "./service.js";
 export { CONTROLLER_AUTHORITY, ControllerPromotionRefused, PROMOTION_FENCE_PREFIX, assertStartAllowed, promoteController, readControllerAuthority, type AuthorityState, type ControllerAuthority, type ControllerPromotionOptions, type ControllerPromotionResult } from "./controller.js";
+export { AuthorityCarryRefused, authorityOfRow, authoritySideOf, carryControllerAuthority, isAuthorityRow, type AuthoritySide, type CarriedAuthority } from "./carry.js";
