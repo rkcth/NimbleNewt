@@ -63,7 +63,8 @@ for (const backend of backends) {
       assert.equal(written.watermark.epoch, epoch);
       assert.equal(readRecoveryManifest(m).blobRefs().length, 1, "the fenced writer writes a whole manifest a promotion can read");
       const before = manifestText(m);
-      for (const f of ["manifest.json", "aggregates.jsonl", "blobs.jsonl"]) assert.equal(statSync(join(m, f)).mode & 0o777, 0o600, `${f} is the owner's alone`);
+      // Windows has no POSIX permission bits (a file reads 0o666): the owner-only mode is checked off Windows only.
+      if (process.platform !== "win32") for (const f of ["manifest.json", "aggregates.jsonl", "blobs.jsonl"]) assert.equal(statSync(join(m, f)).mode & 0o777, 0o600, `${f} is the owner's alone`);
 
       // a second controller takes the epoch: the first is now an old primary
       await world.storage.acquireEpoch({ holder: "c2", at: T, expectedEpoch: epoch });

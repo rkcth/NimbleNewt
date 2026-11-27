@@ -66,6 +66,8 @@ export interface PostgresRestorePort {
   swapRefusal?(live: string): Promise<string | undefined>;
   /** The schemas earlier restores kept aside for `live` (`<live>_br_<stamp>`), oldest first. Nothing drops them; the owner is shown them so they can be removed by hand. */
   keptSchemas?(live: string): Promise<string[]>;
+  /** The epoch in the live schema's state row, or undefined when the schema or its state table is not there (card K05, second review: a restore prepared at another epoch is not swapped in). */
+  liveEpoch?(live: string): Promise<number | undefined>;
 }
 
 function check(s: SchemaSwap): void {
@@ -131,6 +133,15 @@ export function postgresRestorePort(connectionString: string): PostgresRestorePo
     dropStaged: async (live, staged) => {
       if (!SCHEMA_NAME.test(live) || !SCHEMA_NAME.test(staged) || !/^nnrs_[0-9a-f]{8}_[0-9]{8}t[0-9]{6}z$/.test(staged) || !staged.startsWith(stagedSchemaOf(live, "20000101T000000Z").slice(0, 14))) throw new Error("only a staged restore schema of this installation may be dropped");
       await withClient(connectionString, { name: `dropping the staged restore schema ${staged}`, writes: true }, async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${staged} CASCADE`); });
+    },
+    liveEpoch: async (live) => {
+      if (!SCHEMA_NAME.test(live)) throw new Error("invalid schema name");
+      return withClient(connectionString, { name: `reading the epoch of schema ${live}`, writes: false }, async (c) => {
+        if ((await c.query("SELECT to_regclass($1)::text AS t", [`${live}.state`])).rows[0]?.t == null) return undefined;
+        const row = (await c.query(`SELECT epoch::text AS epoch FROM ${live}.state WHERE singleton = 1`)).rows[0] as { epoch?: string } | undefined;
+        const epoch = Number(row?.epoch);
+        return row === undefined || !Number.isSafeInteger(epoch) ? undefined : epoch;
+      });
     },
     keptSchemas: async (live) => {
       if (!SCHEMA_NAME.test(live)) throw new Error("invalid schema name");

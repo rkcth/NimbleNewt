@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { startController } from "../api/index.js";
-import { asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
+import { PostgresStorage, asideSchemaOf, postgresRestorePort, stagedSchemaOf, type PostgresRestorePort } from "../storage/postgres/index.js";
 import { startTestServer, type TestServer } from "../storage/postgres/testing/server.js";
 import { JOURNAL_FILE, PENDING_FILE, applyPendingRestore } from "./staged-restore.js";
 
@@ -175,5 +175,25 @@ test("a rollback that stops after the schema swap committed is continued by the 
     try { assert.ok((await projectNames(c, token)).includes("Late")); } finally { await c.close(); }
     assert.equal(await r.port.exists(stagedSchemaOf(r.schema, stamp)), true);
     assert.equal(JSON.parse(readFileSync(join(r.d, "data", PENDING_FILE), "utf8")).failed.rolledBack, true);
+  } finally { rmSync(r.d, { recursive: true, force: true }); }
+});
+
+test("a restore prepared before another controller or a controller promotion took the schema is not swapped in; the live schema stays as that one left it (K05 second review)", async () => {
+  const r = await rig();
+  try {
+    const { token, stamp } = await prepared(r);
+    assert.equal(await r.port.liveEpoch!(r.schema), 1, "the live epoch reads back");
+    assert.equal(await r.port.liveEpoch!("k05_no_such_schema"), undefined, "a schema that is not there has no epoch");
+    // Another handle takes the epoch after the restore was prepared (what a promotion's fence does).
+    const other = await PostgresStorage.open({ connectionString: r.url, schema: r.schema });
+    try { await other.acquireEpoch({ holder: "promotion-fence:k05pg:1:controller", at: "2026-11-27T12:05:00.000Z", expectedEpoch: 1 }); } finally { await other.close(); }
+    const lines: string[] = [];
+    assert.equal(await applyPendingRestore(join(r.d, "data"), { postgres: { url: r.url, schema: r.schema } }, (l) => { lines.push(l); }, { piFinal: (id: string) => join(r.live, id), controllersGoneMs: 0 }), undefined);
+    assert.match(lines.join("\n"), /was not applied: the database was taken by another controller or a controller promotion .*epoch is 2, the restore was prepared at epoch 1/);
+    assert.equal(await r.port.exists(stagedSchemaOf(r.schema, stamp)), true, "the staged schema is left for a cancel");
+    assert.equal(await r.port.exists(asideSchemaOf(r.schema, stamp)), false, "the live schema was not renamed aside");
+    assert.equal(await r.port.liveEpoch!(r.schema), 2);
+    assert.match(JSON.parse(readFileSync(join(r.d, "data", PENDING_FILE), "utf8")).failed.reason, /taken by another controller/);
+    void token;
   } finally { rmSync(r.d, { recursive: true, force: true }); }
 });

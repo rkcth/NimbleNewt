@@ -75,11 +75,15 @@ test("the smallest window that can start a task, and the warning for an accepted
 // literals of their own that a raise of the fixed part would leave behind (they said 32,768 tokens, which no longer starts a task, and 4,096).
 test("the scripts' hosts take the fallback window and the reply room from the controller, and that window starts a task with that room", () => {
   const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-  for (const file of ["local-host.mjs", "remote-host.mjs"]) {
-    const source = readFileSync(join(repository, "scripts", file), "utf8");
-    assert.match(source, /contextWindow: entry\?\.contextTokens \?\? controller\.DEFAULT_CONTEXT_TOKENS, maxTokens: entry\?\.maxTokens \?\? controller\.DEFAULT_REPLY_TOKENS,/, file);
-    assert.doesNotMatch(source, /FALLBACK_WINDOW|32_768|\?\? 4096/, `${file} keeps a literal window or reply room; ${RAISE}`);
-  }
+  // The remote host gives both figures inline. The local host (since the W09 fixes, f5427f9b) names them first and gives those two names as the window and the reply limit, with the reply ceiling worked out from
+  // them by the controller (never below the reply limit; the owner's own reply limit, when the route has one, is the ceiling).
+  const remote = readFileSync(join(repository, "scripts", "remote-host.mjs"), "utf8");
+  assert.match(remote, /contextWindow: entry\?\.contextTokens \?\? controller\.DEFAULT_CONTEXT_TOKENS, maxTokens: entry\?\.maxTokens \?\? controller\.DEFAULT_REPLY_TOKENS,/, "remote-host.mjs");
+  const local = readFileSync(join(repository, "scripts", "local-host.mjs"), "utf8");
+  assert.match(local, /const contextWindow = entry\?\.contextTokens \?\? controller\.DEFAULT_CONTEXT_TOKENS;\r?\n\s*const maxTokens = entry\?\.maxTokens \?\? controller\.DEFAULT_REPLY_TOKENS;\r?\n/, "local-host.mjs: the window and the reply limit");
+  assert.match(local, /modelId: route\.slice\(slash \+ 1\), contextWindow, maxTokens, replyCeiling: Math\.max\(maxTokens, controller\.replyCeilingFor\(\{ contextTokens: contextWindow, \.\.\.\(entry\?\.maxTokens === undefined \? \{\} : \{ maxTokens: entry\.maxTokens \}\) \}\)\),/, "local-host.mjs: the model entry");
+  assert.equal(local.match(/\b(contextWindow|maxTokens) =(?!=)/g)?.length, 2, "local-host.mjs: the window and the reply limit are set once each, nowhere else");
+  for (const [file, source] of [["local-host.mjs", local], ["remote-host.mjs", remote]] as const) assert.doesNotMatch(source, /FALLBACK_WINDOW|32_768|\?\? 4096/, `${file} keeps a literal window or reply room; ${RAISE}`);
   const r = real();
   assert.equal(windowCanStartTask(DEFAULT_CONTEXT_TOKENS, r.systemPromptChars + r.toolSchemaChars, DEFAULT_REPLY_TOKENS), true, derived(r));
 });

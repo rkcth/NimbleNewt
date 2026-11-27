@@ -4,6 +4,7 @@ import { assignmentIdOf } from "../domain/assignment-model.js";
 import type { AssignmentService } from "../domain/assignments.js";
 import type { SimulationService } from "../simulation/scopes.js";
 import type { RecoveryWatermarkStatus } from "../recovery/service.js";
+import type { ControllerAuthority } from "../recovery/controller.js";
 import type { ActivityBody, AssignmentBody, AttemptBody, GenerationBody } from "../domain/assignment-model.js";
 import { defaultBasis, type BlockerBasis, type BlockerBody, type BlockerService, type BlockerType } from "../domain/blockers.js";
 import { versionIdOf } from "../catalog/catalog.js";
@@ -582,6 +583,22 @@ export function recoveryWatermarkLines(st: RecoveryWatermarkStatus, ref: Cite): 
   return lines;
 }
 
+/**
+ * The last controller promotion of this store in plain lines (card K05), read only: which controller was fenced, at which epoch, and which one may use the store now, or why none may. Bounded; no path.
+ */
+export function controllerAuthorityLines(a: ControllerAuthority | "unreadable", ref: Cite): Line[] {
+  if (a === "unreadable") return [line("The record of a controller promotion on this store cannot be read, so no controller may start on it until that is resolved.", ref)];
+  const who = `the controller of epoch ${a.fencedEpoch}${a.fencedHolder === null ? "" : ` (${shown(a.fencedHolder, 80)})`}`;
+  const lines: Line[] = [];
+  if (a.state === "promoted") {
+    lines.push(line(`Controller promotion ${shown(a.promotionId, 48)} (${shown(a.at, 40)}) fenced ${who} at epoch ${a.fenceEpoch} and then named ${shown(a.successor, 80)} as the controller of this store: only a controller started as ${shown(a.successor, 80)} may use it, and the old one cannot write or dispatch.`, ref));
+  } else {
+    lines.push(line(`Controller promotion ${shown(a.promotionId, 48)} (${shown(a.at, 40)}) fenced ${who} at epoch ${a.fenceEpoch} but did not name a successor, so no controller may start on this store until a promotion goes through${a.reasons === undefined || a.reasons.length === 0 ? "" : `: ${a.reasons.slice(0, 2).map((r) => shown(r, 200)).join("; ")}`}.`, ref));
+  }
+  if (a.manifest !== undefined) lines.push(line(`It was decided on a recovery manifest written after the fence (${shown(a.manifest.createdAt, 40)}, epoch ${a.manifest.epoch}, ${a.manifest.records} record${a.manifest.records === 1 ? "" : "s"}, ${a.manifest.blobs} artifact file${a.manifest.blobs === 1 ? "" : "s"}).`, ref));
+  return lines;
+}
+
 const RETENTION_SHOWN = { quotaScopes: 10, deletions: 5, runs: 5, backups: 9, backupLine: 330, valueLine: 330, bulkLogs: 3 } as const;
 /**
  * Card K06d, second review: the chat shows the first 30 lines of a status answer (`CHAT_LIMITS.statusLines`, the same number; a test holds them equal), so the whole retention answer is kept to that many
@@ -806,6 +823,8 @@ export interface StatusDeps {
   /** Where the controller database lives and what a move did (card F04m). Owner only. Absent: the view is not offered. */
   /** The recovery watermark (card K04): the latest recovery manifest and this controller's writes of it, read only, shown in the `database_transfer` view. Absent: not set up here. */
   readonly recoveryWatermark?: { status(): Promise<RecoveryWatermarkStatus> };
+  /** The last controller promotion of this store (card K05), read only, shown in the `database_transfer` view when there was one. */
+  readonly controllerAuthority?: { get(): Promise<ControllerAuthority | "unreadable" | undefined> };
   readonly databaseTransfer?: { status(): Promise<{ readonly source: { readonly name: string; readonly kind: string }; readonly targets: readonly { readonly name: string; readonly kind: string }[]; readonly journal?: { readonly id: string; readonly phase: string; readonly to: { readonly name: string }; readonly note?: string; readonly failure?: { readonly reason: string; readonly destinationClean: boolean }; readonly restart?: { readonly state: string; readonly reason?: string } } }>; settings(): Promise<{ readonly enabled: boolean; readonly restart: boolean; readonly restartOffered: boolean }> };
   readonly shutdown?: { readiness(by: Principal): Promise<{ readonly ready: boolean; readonly paused: boolean; readonly unsettled: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly tracked?: readonly { readonly kind: string; readonly ref: string; readonly state: string }[]; readonly truncated: boolean }> };
   /** What the latest suspension or stop of a scope spent on cleanup (card L02d). Absent: the view is not offered. */
@@ -2369,11 +2388,12 @@ export class StatusService {
   }
 
   async databaseTransferLines(by: Principal): Promise<{ readonly observedAt: string; readonly lines: readonly Line[] } | undefined> {
-    if ((this.#deps.databaseTransfer === undefined && this.#deps.recoveryWatermark === undefined) || by.kind !== "owner") return undefined;
+    if ((this.#deps.databaseTransfer === undefined && this.#deps.recoveryWatermark === undefined && this.#deps.controllerAuthority === undefined) || by.kind !== "owner") return undefined;
     const at = this.#runner.now();
     const here = cite("installation", "installation");
-    const recovery = this.#deps.recoveryWatermark === undefined ? [] : recoveryWatermarkLines(await this.#deps.recoveryWatermark.status(), here);
-    if (this.#deps.databaseTransfer === undefined) return { observedAt: at, lines: recovery };
+    const authority = this.#deps.controllerAuthority === undefined ? undefined : await this.#deps.controllerAuthority.get();
+    const recovery = [...(authority === undefined ? [] : controllerAuthorityLines(authority, here)), ...(this.#deps.recoveryWatermark === undefined ? [] : recoveryWatermarkLines(await this.#deps.recoveryWatermark.status(), here))];
+    if (this.#deps.databaseTransfer === undefined) return this.#deps.recoveryWatermark === undefined && authority === undefined ? undefined : { observedAt: at, lines: recovery };
     const st = await this.#deps.databaseTransfer.status(), se = await this.#deps.databaseTransfer.settings();
     const lines: Line[] = [line(`The controller database is ${shown(st.source.name)} (${shown(st.source.kind)}). It can be moved to: ${st.targets.length === 0 ? "nowhere (no destination is configured)" : st.targets.map((t) => `${shown(t.name)} (${shown(t.kind)})`).join(", ")}.`, here)];
     lines.push(line(se.enabled ? "Moving the database is allowed." : "Moving the database is switched off.", here));
