@@ -66,7 +66,8 @@ test("a backup newer by epoch never drops a promotion the running store holds: i
   // no promotion on the running store: a newer backup is taken as it is, with or without a record
   assert.equal(carryControllerAuthority({ epoch: 2, holder: "controller" }, { epoch: 8, holder: "x" }).authority, null);
   // a tie still goes to the running store, whatever the backup holds
-  assert.equal(carryControllerAuthority(live, { epoch: 5, holder: "ctl-a" }).authority, live.authority);
+  const tie = carryControllerAuthority(live, { epoch: 5, holder: "ctl-a" });
+  assert.equal(tie.authority, live.authority); assert.equal(tie.holder, "ctl-b", "a tie keeps the running store's holder, not the backup's");
 });
 
 test("records and states that do not read are refused, never carried or dropped silently (K05 second slice)", () => {
@@ -304,5 +305,18 @@ test("a staged restore of a newer backup that lacks the running store's promotio
     await assert.rejects(sr2.apply(tm.manifest.name, p2.token), bound);
     await assert.rejects(sr2.preview(tm.manifest.name), bound);
     assert.deepEqual(readdirSync(d2), []);
+
+    // the store taken by another controller between the preview and the apply: nothing is staged
+    const u = new MemoryStorage();
+    const eU = await start(u, "ctl-a");
+    const ub = new BackupService(u, { root: join(dir, "ub"), version: "t", now });
+    const um = await ub.backUpNow("manual");
+    const d3 = join(dir, "d3"); mkdirSync(d3);
+    const sr3 = new StagedRestore({ backups: ub, root: join(dir, "ub"), barrier: new MaintenanceBarrier(), sqlitePath: join(d3, "z.sqlite"), dataDirectory: d3, storage: u, epoch: eU, now });
+    const p3 = await sr3.preview(um.manifest.name);
+    await start(u, "ctl-z");
+    await assert.rejects(sr3.apply(um.manifest.name, p3.token), (e: unknown) => e instanceof DomainError && e.code === "invalid_transition" && /no longer holds the database/.test(e.message));
+    assert.deepEqual(readdirSync(d3), []);
+    assert.equal(sr3.pending, undefined);
   } finally { gone(dir); }
 });
