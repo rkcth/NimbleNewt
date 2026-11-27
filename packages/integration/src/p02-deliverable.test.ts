@@ -13,8 +13,8 @@ import { sse } from "./h12-worker-support.js";
 // Card P02, the clause moved from Q01 on 2026-11-27: work made in the task workspace reaches Q01 as a versioned code deliverable linked to its code submission and is accepted or rejected there, and tool completion
 // alone still cannot accept it. Through the PRODUCT composition, with the rig of h12n-launcher-submit: the launcher's worker host on this computer (scripts/local-host.mjs), a real bubblewrap sandbox, a real git
 // checkout and a scripted model behind an injected fetch (nothing leaves the machine). (1) The agent edits its task checkout and ends with `work.end { submit: true }`, which opens a code submission with the checkout's
-// real base, staged tree and patch ID. (2) The responsible agent drafts a code deliverable naming that submission, through the same door its tool bridge uses (the state API with its task credential), and submits it
-// against the contract version its attempt began with. (3) A different agent holding the reviewer role starts the review and accepts version 1; the agent that made the submission cannot. (4) A second version is
+// real base, staged tree and patch ID. (2) In the task's next attempt the responsible agent reads the submission ID back with task.recall, drafts a code deliverable naming it and submits it, all through its own tool
+// bridge (the bridge names the task and the contract version the attempt began with). (3) A different agent holding the reviewer role starts the review and accepts version 1; the agent that made the submission cannot. (4) A second version is
 // rejected with its reason and the rejection stays on the record when a third version starts. (5) Finishing the task accepts nothing: the third version stays submitted. Skipped without bubblewrap unless
 // NIMBLENEWT_REQUIRE_SANDBOX=1 (set in CI), where it fails instead.
 const required = process.env["NIMBLENEWT_REQUIRE_SANDBOX"] === "1";
@@ -35,7 +35,10 @@ const usage = { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 };
 const REPORT = "did the work; found nothing; left nothing; could not do nothing";
 const reply = (body: string): Response => new Response(`${body}data: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
 const say = (text: string): Response => reply(`${sse({ role: "assistant", content: "" }, null)}${sse({ content: text }, null)}${sse({}, "stop", usage)}`);
-const workEnd = (args: Record<string, unknown>, id: string): Response => reply(sse({ role: "assistant", content: "" }, null) + sse({ tool_calls: [{ index: 0, id, type: "function", function: { name: "nimblenewt__work-end", arguments: JSON.stringify(args) } }] }, null) + sse({}, "tool_calls", usage));
+const tool = (name: string, args: Record<string, unknown>, id: string): Response => reply(sse({ role: "assistant", content: "" }, null) + sse({ tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: JSON.stringify(args) } }] }, null) + sse({}, "tool_calls", usage));
+const workEnd = (args: Record<string, unknown>, id: string): Response => tool("nimblenewt__work-end", args, id);
+// What the bridge answered to one tool call of this attempt, read back from the messages the worker sent the model next (undefined until it has answered).
+const answerTo = (text: string, callId: string): any => { const m = (JSON.parse(text) as { role?: string; tool_call_id?: string; content?: string }[]).find((x) => x.role === "tool" && x.tool_call_id === callId); return m?.content === undefined ? undefined : JSON.parse(m.content); };
 
 test("work made in the task workspace reaches acceptance as a versioned code deliverable linked to its real code submission: a different reviewer accepts one version and rejects the next, the rejection is kept, and finishing the task accepts nothing (card P02, clause moved from Q01)", { skip: hasGit ? false : "git is not installed" }, async (t) => {
   const probe = await SandboxLauncher.create({ protectedPaths: [], audit: () => undefined });
@@ -131,7 +134,6 @@ test("work made in the task workspace reaches acceptance as a versioned code del
     await d.dispatcher.idle();
     await until(async () => (await s.workEnd.get(attemptId))?.state === "done", 60_000, "the ending was not completed");
     const ending = (await s.workEnd.get(attemptId))!;
-    const attempt = (await d.dispatcher.get(d.principal, attemptId))!;
     assert.deepEqual([ending.outcome, typeof ending.submissionId], ["submitted", "string"], JSON.stringify(ending));
     const sid = ending.submissionId!;
     const sub = (await api("submission.get", { submissionId: sid })).result.item;
@@ -142,33 +144,55 @@ test("work made in the task workspace reaches acceptance as a versioned code del
     // The ending itself made no deliverable and accepted nothing.
     assert.deepEqual((await api("deliverable.record.list", { taskId })).result.items, [], "work.end drafts no deliverable");
 
-    // ---- (2) the responsible agent drafts a code deliverable naming that submission and submits it against its attempt's contract version ----
-    // Ann's task credential is what her tool bridge forwards (nimblenewt__deliverable-draft and -submit go through the same state API with it).
-    const annToken = (await s.taskCredentials.issue(owner, { commandId: "tc-ann", taskId, agentId: ann })).token;
-    const contractVersion = attempt.revisions?.contract ?? 0;
-    // Only Ann's own submission of this task can be linked: another task's deliverable, another agent and an unknown ID are refused in plain words.
+    // ---- (2) the responsible agent drafts a code deliverable naming that submission and submits it, through its own tool bridge in the task's next attempt ----
+    // Only Ann's own submission of this task can be linked: another task's deliverable, another agent and an unknown ID are refused in plain words. Ann's task credential is the one her tool bridge forwards with.
+    let annToken = (await s.taskCredentials.issue(owner, { commandId: "tc-ann", taskId, agentId: ann })).token;
+    const notOurs = /is not a submission of this task by the responsible agent/;
     const elsewhere = await api("deliverable.draft", { taskId: otherTask, type: "code", title: "Wrong task", responsibleAgent: ann, submissionIds: [sid] }, "x1");
     assert.equal(elsewhere.error?.code, "invalid_command", JSON.stringify(elsewhere));
     assert.match(elsewhere.error.message, new RegExp(`${sid} is not a submission of this task by the responsible agent`));
     assert.ok(elsewhere.error.message.length < 300);
-    assert.equal((await call(bobToken, "deliverable.draft", { taskId, type: "code", title: "Not mine", submissionIds: [sid] }, "x2")).error?.code, "invalid_command", "another author cannot claim Ann's code");
-    assert.equal((await call(annToken, "deliverable.draft", { taskId, type: "code", title: "Unknown", submissionIds: ["sbm-aaaaaaaaaaaaaaaaaaaa"] }, "x3")).error?.code, "invalid_command");
-    const drafted = await call(annToken, "deliverable.draft", { taskId, type: "code", title: "Bean patch", submissionIds: [sid] }, "d1");
-    assert.equal(drafted.ok, true, JSON.stringify(drafted));
-    const id = drafted.result.id as string;
-    const submitted = await call(annToken, "deliverable.submit", { id, expectedRevision: drafted.result.revision, contractVersion }, "d2");
-    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    const claimed = await call(bobToken, "deliverable.draft", { taskId, type: "code", title: "Not mine", submissionIds: [sid] }, "x2");
+    assert.deepEqual([claimed.error?.code, notOurs.test(claimed.error?.message ?? "")], ["invalid_command", true], `another author cannot claim Ann's code: ${JSON.stringify(claimed)}`);
+    const unknown = await call(annToken, "deliverable.draft", { taskId, type: "code", title: "Unknown", submissionIds: ["sbm-aaaaaaaaaaaaaaaaaaaa"] }, "x3");
+    assert.deepEqual([unknown.error?.code, notOurs.test(unknown.error?.message ?? "")], ["invalid_command", true], JSON.stringify(unknown));
+    // The next attempt of the task is not handed the submission ID; the agent reads it back with task.recall (the earlier attempt's outcome names it), then drafts the deliverable and submits it with the bridge's own tools. The bridge
+    // names the task (the attempt's) and the contract version (the one this attempt began with); the agent names neither.
+    const a2 = (await s.assignments.getAssignment(taskId))!;
+    const attempt2Id = (await s.assignments.admitAttempt({ commandId: "ad2", actor: "inbox", taskId, expectedRevision: a2.revision, generation: a2.generation, owner: { kind: "agent", id: ann.slice("agent:".length) }, harness: "pi" })).id;
+    let learned: string | undefined; let draftAnswer: any; let submitAnswer: any;
+    seen.set(title, []);
+    scripts.set(title, [
+      () => tool("nimblenewt__task-recall", { part: "activity" }, "call_r"),
+      (text) => { learned = /sbm-[a-z0-9]{20}/.exec(String(answerTo(text, "call_r")?.text ?? ""))?.[0]; return tool("nimblenewt__deliverable-draft", { type: "code", title: "Bean patch", submissionIds: [learned ?? "none"] }, "call_d"); },
+      (text) => { draftAnswer = answerTo(text, "call_d"); return tool("nimblenewt__deliverable-submit", { id: draftAnswer?.id ?? "none", expectedRevision: draftAnswer?.revision ?? 0 }, "call_s"); },
+      (text) => { submitAnswer = answerTo(text, "call_s"); return workEnd({ report: REPORT, result: "done" }, "call_e"); },
+      () => say("all done"),
+    ]);
+    assert.deepEqual((await d.dispatcher.tick()).started, [attempt2Id]);
+    await until(async () => (await d.dispatcher.get(d.principal, attempt2Id))?.state === "finished", 180_000, () => `the second attempt never finished (${seen.get(title)?.length ?? 0} model calls)`);
+    await d.dispatcher.idle();
+    // The second attempt's own task credential replaced the one issued above (issuing again for the same agent and task replaces the earlier one); Ann's later steps (her refused review, the new versions) use a new one.
+    assert.equal((await call(annToken, "deliverable.record.list", { taskId })).error?.code, "unauthenticated");
+    annToken = (await s.taskCredentials.issue(owner, { commandId: "tc-ann2", taskId, agentId: ann })).token;
+    assert.equal(learned, sid, "task.recall names the earlier attempt's submission");
+    assert.match(String(draftAnswer?.id), /^dlv-/, JSON.stringify(draftAnswer));
+    assert.equal(submitAnswer?.id, draftAnswer.id, JSON.stringify(submitAnswer));
+    const id = draftAnswer.id as string;
+    const contractVersion = (await d.dispatcher.get(d.principal, attempt2Id))!.revisions?.contract ?? 0;
     const v1 = (await api("deliverable.record.get", { id })).result.item;
-    assert.deepEqual([v1.type, v1.responsibleAgent, v1.state, v1.version.version, v1.version.contractVersion, v1.version.submittedBy, v1.version.review.required], ["code", ann, "submitted", 1, contractVersion, ann, true]);
+    assert.deepEqual([v1.type, v1.taskId, v1.responsibleAgent, v1.state, v1.version.version, v1.version.contractVersion, v1.version.submittedBy, v1.version.review.required], ["code", taskId, ann, "submitted", 1, contractVersion, ann, true]);
     assert.deepEqual(v1.version.content.submissions, [{ id: sid, kind: "code", submittedBy: ann, tree }], "the version binds the submission and the tree it was made with");
 
     // ---- (3) a different reviewer starts the review and accepts it; the agent that made the code cannot ----
     const self = await call(annToken, "deliverable.review.start", { id, version: 1 }, "rs0");
     assert.deepEqual([self.error?.code, /no self-review/.test(self.error?.message ?? "")], ["forbidden", true], `the submitter of the linked code is a contributor and cannot review it, though she holds the reviewer role: ${JSON.stringify(self)}`);
-    assert.equal((await call(bobToken, "deliverable.review.start", { id, version: 1 }, "rs0b")).error?.code, "forbidden", "an author without the reviewer role cannot review it");
+    const noRole = await call(bobToken, "deliverable.review.start", { id, version: 1 }, "rs0b");
+    assert.deepEqual([noRole.error?.code, /only the owner, a director of this project or a reviewer/.test(noRole.error?.message ?? "")], ["forbidden", true], `an author without the reviewer role cannot review it: ${JSON.stringify(noRole)}`);
     assert.equal((await call(revToken, "deliverable.review.start", { id, version: 1 }, "rs1")).ok, true);
     assert.equal((await call(annToken, "deliverable.accept", { id, version: 1 }, "ac0")).error?.code, "forbidden", "the responsible agent cannot accept its own work");
-    assert.equal((await call(raeToken, "deliverable.accept", { id, version: 1 }, "ac0b")).error?.code, "forbidden", "a reviewer decides only on a review it started");
+    const other = await call(raeToken, "deliverable.accept", { id, version: 1 }, "ac0b");
+    assert.deepEqual([other.error?.code, /decides only on a review it started/.test(other.error?.message ?? "")], ["forbidden", true], `a reviewer decides only on a review it started: ${JSON.stringify(other)}`);
     const accepted = await call(revToken, "deliverable.accept", { id, version: 1, reason: "the beans are sown" }, "ac1");
     assert.equal(accepted.ok, true, JSON.stringify(accepted));
     const got1 = (await api("deliverable.record.get", { id, version: 1 })).result.item;
@@ -177,6 +201,8 @@ test("work made in the task workspace reaches acceptance as a versioned code del
     // ---- (4) a second version of the same code is rejected, and the rejection stays on the record when a third version starts ----
     const nv2 = await call(annToken, "deliverable.version.new", { id, expectedRevision: (await api("deliverable.record.get", { id })).result.item.revision, submissionIds: [sid], note: "second look" }, "v2");
     assert.equal(nv2.ok, true, JSON.stringify(nv2));
+    const stale = await call(annToken, "deliverable.submit", { id, expectedRevision: nv2.result.revision, contractVersion: contractVersion + 1 }, "v2s0");
+    assert.deepEqual([stale.error?.code, /^the task contract is at version/.test(stale.error?.message ?? "")], ["stale_revision", true], `a version is submitted only against the task's current contract version: ${JSON.stringify(stale)}`);
     assert.equal((await call(annToken, "deliverable.submit", { id, expectedRevision: nv2.result.revision, contractVersion }, "v2s")).ok, true);
     assert.equal((await call(revToken, "deliverable.review.start", { id, version: 2 }, "v2r")).ok, true);
     assert.equal((await call(revToken, "deliverable.reject", { id, version: 2 }, "v2x0")).error?.code, "invalid_command", "a rejection says why");
