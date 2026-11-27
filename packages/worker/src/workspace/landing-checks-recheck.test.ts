@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,9 +42,9 @@ test("the same edit in either of two identical blocks has the same patch ID on t
     assert.deepEqual([report.change?.base, report.change?.tree], [base, later.tree], "the landed base is the reviewed base and the landed tree is not the reviewed one: the gate refuses on that");
     // First review: the host also says whether the landed tree is exactly the judged change (here: on the same base, only the same tree is).
     assert.equal(report.reviewedReplays, false);
-    const own = await ws.port.landingChecks!({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: later.tree }, carried: [{ base, tree: reviewed.tree }, { base, tree: later.tree }, { base: "f".repeat(40), tree: later.tree }] });
+    const own = await ws.port.landingChecks!({ ...scope, checks: [], maxOutputBytes: 1000, reviewed: { base, tree: later.tree }, carried: [{ base, tree: reviewed.tree }, { base, tree: later.tree }, { base: "f".repeat(40), tree: later.tree }, { base: "HEAD", tree: later.tree }] });
     assert.equal(own.reviewedReplays, true, "the landed tree itself, on its own base");
-    assert.deepEqual(own.carriedReplays, [false, true, false], "per earlier submission, in order: another tree, the same tree, a base this checkout does not hold (not a later commit of it: not shown)");
+    assert.deepEqual(own.carriedReplays, [false, true, false, null], "per earlier submission, in order: another tree, the same tree, a base this checkout does not hold (not a later commit of it: not shown), and a name git was not asked about (could not be shown: null)");
   } finally {
     try { execFileSync("chmod", ["-R", "u+rwX", dir]); } catch { /* nothing */ }
     await rm(dir, { recursive: true, force: true });
@@ -91,6 +92,52 @@ test("GitBridge.replays: on another base a judgement holds only for the judged c
     assert.equal(await replays({ base: side, tree: await treeWith(block("Y") + block("y")) }), false);
     // Names that are not full object IDs are refused, not looked up.
     await assert.rejects(git.replays({ gitDir, judged: { base: "HEAD", tree: judged.tree }, landed: { base: b2, tree: refreshed } }), /full object IDs/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GitBridge.replays: merge attributes a tree carries pick no merge driver, so no program runs and a conflict is not turned clean (card P08 landing re-check, second review)", { skip }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-p08m-"));
+  try {
+    const gitDir = join(dir, "host.git");
+    sh(dir, "init", "-q", "--bare", gitDir);
+    const raw = (args: string[], input?: string): string => execFileSync("git", ["--git-dir", gitDir, ...args], { cwd: dir, encoding: "utf8", ...(input === undefined ? {} : { input }), env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+    const marker = join(dir, "driver-ran");
+    // Every tree names a builtin driver (union would join both sides' lines with no conflict) and a custom one. Even with the custom one defined in the repository's own configuration (which only the host writes), the
+    // attributes of the trees are not read, so the custom driver never runs and the union driver never applies.
+    const attrs = raw(["hash-object", "-w", "--stdin"], "a.txt merge=union\nb.txt merge=nnx\n");
+    const tree = (a: string, b: string): string => raw(["mktree"], `100644 blob ${attrs}\t.gitattributes\n100644 blob ${raw(["hash-object", "-w", "--stdin"], a)}\ta.txt\n100644 blob ${raw(["hash-object", "-w", "--stdin"], b)}\tb.txt\n`);
+    const b1 = raw(["commit-tree", tree("x\n", "x\n"), "-m", "base"]);
+    const b2 = raw(["commit-tree", tree("main\n", "main\n"), "-p", b1, "-m", "main moves on the same lines"]);
+    const judged = { base: b1, tree: tree("judged\n", "judged\n") };
+    raw(["config", "merge.nnx.driver", `touch ${marker}; cp %B %A; exit 0`]);
+    raw(["update-ref", "HEAD", raw(["commit-tree", judged.tree, "-p", b1, "-m", "head holds the attributes"])]);
+    const git = await GitBridge.create({ scratch: join(dir, "scratch") });
+    for (const landed of [tree("main\njudged\n", "judged\n"), tree("judged\nmain\n", "main\n"), tree("main\n", "main\n")]) {
+      assert.equal(await git.replays({ gitDir, judged, landed: { base: b2, tree: landed } }), false, "a conflicting re-apply is never shown, whatever the trees' attributes say");
+    }
+    assert.equal(existsSync(marker), false, "no merge driver program ran");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GitBridge.replays: no rename detection, so an edit carried into a file the landing branch moved is not shown to be the judged change (card P08 landing re-check, second review)", { skip }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "nn-p08n-"));
+  try {
+    const gitDir = join(dir, "host.git");
+    sh(dir, "init", "-q", "--bare", gitDir);
+    const raw = (args: string[], input?: string): string => execFileSync("git", ["--git-dir", gitDir, ...args], { cwd: dir, encoding: "utf8", ...(input === undefined ? {} : { input }), env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+    const blob = (text: string): string => raw(["hash-object", "-w", "--stdin"], text);
+    const tree = (files: Record<string, string>): string => raw(["mktree"], Object.entries(files).map(([n, t]) => `100644 blob ${blob(t)}\t${n}\n`).join(""));
+    const text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n", edited = text.replace("four", "FOUR");
+    const b1 = raw(["commit-tree", tree({ "a.txt": text }), "-m", "base"]);
+    const b2 = raw(["commit-tree", tree({ "c.txt": text }), "-p", b1, "-m", "main moves a.txt to c.txt"]);
+    const git = await GitBridge.create({ scratch: join(dir, "scratch") });
+    const judged = { base: b1, tree: tree({ "a.txt": edited }) };
+    assert.equal(await git.replays({ gitDir, judged, landed: { base: b2, tree: tree({ "c.txt": edited }) } }), false, "the edit followed the move: a rename-detecting merge would accept it, a file-by-file re-apply conflicts");
+    assert.equal(await git.replays({ gitDir, judged, landed: { base: b2, tree: tree({ "a.txt": edited, "c.txt": text }) } }), false);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

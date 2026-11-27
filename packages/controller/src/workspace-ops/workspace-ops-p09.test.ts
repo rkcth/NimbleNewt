@@ -177,6 +177,9 @@ for (const backend of backends) {
       assert.ok(owner[0]!.text.length <= 200);
       assert.equal((await r.land(notifying, "r0", S1)).state, "refused", "a repeat answers the recorded outcome");
       assert.equal(owner.length, 1, "the owner is not told again for the same request");
+      assert.equal((await r.land(notifying, "r0b", S1)).state, "refused", "another request for the same tree is refused too");
+      assert.equal(owner.length, 2, "the owner is told once per request, not once per task");
+      assert.notEqual(owner[1]!.commandId, owner[0]!.commandId);
       assert.deepEqual(r.approvals.get(S1), { ...reviewedAs, tree: OLD_TREE }, "the submission's approval is not touched");
       // Reviewed on an older tree of an older base, refreshed onto a newer base: same patch, so the approval carries over.
       r.approvals.set(S1, { ...reviewedAs, base: OLD_BASE, tree: OLD_TREE });
@@ -184,7 +187,7 @@ for (const backend of backends) {
       assert.equal(carried.state, "done", carried.summary);
       assert.match(carried.checks!.results[1]!.summary, /carried over to this tree because the patch is unchanged/);
       assert.equal(carried.checks!.results[1]!.treeMismatch, undefined);
-      assert.equal(owner.length, 1, "a landing that passed tells the owner nothing of this");
+      assert.equal(owner.length, 2, "a landing that passed tells the owner nothing of this");
       // The work changed after the review (a new patch): refused, a new review is needed.
       r.host.change = { base: BASE, head: HEAD, tree: TREE, patchId: NEW_PATCH };
       const changed = await r.land(r.service(), "r2", S1);
