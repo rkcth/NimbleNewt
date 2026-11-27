@@ -29,6 +29,8 @@ export interface HandoffBriefFacts {
   readonly handedIn?: { readonly id: string };
   /** The hand-off note of the attempt this one follows, whoever wrote it. */
   readonly note?: { readonly id: string; readonly attemptId: string; readonly source: "attempt" | "controller" };
+  /** Card bridge-submissions: the newest code submission of this task by this attempt's agent (an earlier attempt's `work.end { submit: true }` opened it). */
+  readonly submission?: { readonly id: string };
   /** The task's open blockers, oldest first. */
   readonly blockers?: readonly { readonly id: string; readonly type: string; readonly summary: string; readonly resolver: string }[];
 }
@@ -59,6 +61,7 @@ export function handoffBrief(facts: HandoffBriefFacts): string {
     const by = facts.note.source === "controller" ? "written by the controller when that attempt ended" : "written by that attempt before it ended";
     fixed.push(`The attempt before yours (${ref(facts.note.attemptId)}) left a hand-off note ${id}, ${by}. Read it with the operation context.handoff.read (noteId ${JSON.stringify(id)}).`);
   }
+  if (facts.submission !== undefined) fixed.push(`Your newest code submission of this task is ${ref(facts.submission.id)}; if no code deliverable of this task names it yet, draft one naming it with nimblenewt__deliverable-draft (the operation deliverable.draft; type code, submissionIds).`);
   const blockers = facts.blockers ?? [];
   if (blockers.length === 0) return fixed.length === 1 ? "" : `\n\n[${fixed.join("\n")}]`;
 

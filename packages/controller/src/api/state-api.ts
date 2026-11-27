@@ -226,7 +226,7 @@ export interface StateApiDeps {
   readonly environments?: Pick<EnvironmentService, "get">;
   readonly capacityLimits?: Pick<CapacityLimitsService, "get" | "change">;
   /** The host and global admission quotas (card H10). */
-  readonly capacityQuotas?: Pick<AdmissionService, "quotas" | "changeQuotas">;
+  readonly capacityQuotas?: Pick<AdmissionService, "quotas" | "changeQuotas" | "borrow">;
   /** The owner's limits on spawning child tasks (card H10). */
   readonly swarmLimits?: Pick<SwarmLimitsService, "get" | "change">;
   readonly streamSettings?: Pick<StreamSettingsService, "get" | "change">;

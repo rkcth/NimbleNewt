@@ -719,6 +719,17 @@ export class SubmissionService {
     return codeIndexOf(await this.#runner.get(CODE_INDEX, projectId));
   }
 
+  /**
+   * Card bridge-submissions: the newest code submission of a task by one agent, read from its project's code index only (one read, never a scan), and only when the submission itself is that agent's code of that task made at
+   * the time the index entry says. `undefined` when the index is absent or unreadable, names none for the pair, or the entry does not match. The controller's own question (the next attempt's hand-off brief); takes no caller.
+   */
+  async newestCodeOf(projectId: string, taskId: string, by: string): Promise<string | undefined> {
+    const entry = (await this.#readCodeIndex(projectId))?.body.entries.find((e) => e.taskId === taskId && e.by === by);
+    if (entry === undefined || !/^sbm-[a-z2-7]{20}$/.test(entry.id)) return undefined;
+    const b = (await this.#runner.get("submission", entry.id))?.body as unknown as SubmissionBody | undefined;
+    return b !== undefined && b.kind === "code" && b.taskId === taskId && b.projectId === projectId && b.submittedBy === by && b.submittedAt === entry.at ? entry.id : undefined;
+  }
+
   /** A code submission is added to its project's index in the same write (card Q01b sixth slice); the first one of a project with older code seeds the index from one bounded scan. */
   async #codeIndexChange(id: string, body: SubmissionBody): Promise<Change[]> {
     if (body.kind !== "code" || body.tree === undefined || body.base === undefined || this.#codeKept <= 0) return [];
