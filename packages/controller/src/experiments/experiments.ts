@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DomainError } from "../domain/errors.js";
 import { derivedId } from "../domain/ids.js";
+import { keptWindow, waitingOf } from "../domain/kept-window.js";
 import { onlyKnown, projectId as checkProjectId, revision as checkRevision, type View } from "../domain/model.js";
 import { CommandRunner, view, type RunnerOptions } from "../domain/runner.js";
 import { allows, inTaskScope } from "../security/access.js";
@@ -24,6 +25,10 @@ import { clean, invalid, plain, whole } from "../standups/shared.js";
  * - **Budget exhaustion pauses.** When the runs or the cost reach the pinned budget the experiment is `paused` (reason budget): another run is refused (`unavailable`) and nothing changes until a manager
  *   raises the budget or concludes it. The run that used the last of the budget is kept.
  * - **Savings are counted once.** An improvement's saving on a metric is claimed per (metric, affected work): a second improvement over the same metric and work is recorded as not counted and names the first.
+ * - **Retention (B05 retention slice).** Only OPEN experiments (proposed, running or paused) count toward the project's limit (`EXPERIMENT_LIMITS.open`), and one proposer has at most
+ *   `EXPERIMENT_LIMITS.waiting` proposals waiting for their criteria in a project at once, so proposing and withdrawing cannot fill the project. The list keeps the newest `EXPERIMENT_LIMITS.listed`; when it
+ *   is full, the oldest ENDED experiment (concluded or withdrawn) leaves the list in the same write as the new proposal and is counted as `archived`. An archived experiment, its runs and its result are kept
+ *   unchanged and stay readable (and adoptable) by its ID with the same rights; its savings claims stay counted.
  */
 export const EXPERIMENT_STATUSES = ["proposed", "running", "paused", "concluded", "withdrawn"] as const;
 export type ExperimentStatus = (typeof EXPERIMENT_STATUSES)[number];
@@ -99,12 +104,25 @@ export interface ExperimentBody {
   readonly history: readonly { readonly at: string; readonly by: string; readonly to: ExperimentStatus; readonly cause?: string }[];
 }
 
-export const EXPERIMENT_LIMITS = { title: 200, text: 600, affectedKey: 60, label: 200, finding: 1000, cases: 20, runs: 50, raises: 10, history: 12, page: 100, listed: 300, retries: 8, cost: 1e9 } as const;
+/** `listed`: the experiments a project lists (open and the newest ended); `open`: the most open (proposed, running or paused) at once in a project; `waiting`: the most of one proposer's proposals waiting for criteria in a project. */
+export const EXPERIMENT_LIMITS = { title: 200, text: 600, affectedKey: 60, label: 200, finding: 1000, cases: 20, runs: 50, raises: 10, history: 12, page: 100, listed: 300, open: 300, waiting: 5, retries: 8, cost: 1e9 } as const;
 const EXPERIMENT_ID = /^exp-[a-z2-7]{20}$/;
 const LESSON_ID = /^lsn-[a-z2-7]{20}$/;
 const CASE_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
-interface IndexBody { readonly ids: readonly string[]; readonly claims: Readonly<Record<string, string>> }
+interface IndexBody {
+  readonly ids: readonly string[];
+  readonly claims: Readonly<Record<string, string>>;
+  /** Open experiments (proposed, running, paused): ID to its proposer (retention slice; absent in an index written before it, then rebuilt from the records). */
+  readonly open?: Readonly<Record<string, string>>;
+  /** Proposed experiments waiting for their criteria: ID to its proposer. */
+  readonly waiting?: Readonly<Record<string, string>>;
+  /** How many ended experiments have left the list (kept, readable by ID). */
+  readonly archived?: number;
+}
+interface Index { readonly ids: readonly string[]; readonly claims: Readonly<Record<string, string>>; readonly open: Readonly<Record<string, string>>; readonly waiting: Readonly<Record<string, string>>; readonly archived: number; readonly revision: number }
+const ENDED: readonly string[] = ["concluded", "withdrawn"];
+const without = (m: Readonly<Record<string, string>>, id: string): Record<string, string> => Object.fromEntries(Object.entries(m).filter(([k]) => k !== id));
 
 const canonical = (v: unknown): string => (v === null || typeof v !== "object" ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}`);
 /** The seal over the pinned criteria. */
@@ -176,11 +194,14 @@ export class ExperimentService {
           if (l === undefined || lb?.projectId !== projectId || !(by.kind === "owner" || this.#mayRead(by, projectId) || lb.proposedBy === by.id)) invalid("lessonId", "must be a lesson of this project that you may read");
         }
         const index = await this.#index(projectId);
-        if (index.ids.length >= EXPERIMENT_LIMITS.listed) throw new DomainError("unavailable", `${EXPERIMENT_LIMITS.listed} experiments are kept in this project, the most; results are never deleted`);
+        if (waitingOf(index.waiting, by.id) >= EXPERIMENT_LIMITS.waiting) throw new DomainError("unavailable", `you already have ${EXPERIMENT_LIMITS.waiting} proposals waiting for their criteria in this project, the most; one is pinned or withdrawn first`);
+        if (Object.keys(index.open).length >= EXPERIMENT_LIMITS.open) throw new DomainError("unavailable", `${EXPERIMENT_LIMITS.open} experiments are open (proposed, running or paused) in this project, the most; one is concluded or withdrawn first`);
+        const kept = keptWindow(index.ids, (x) => index.open[x] !== undefined, EXPERIMENT_LIMITS.listed, id);
+        if (kept === undefined) throw new DomainError("unavailable", `${EXPERIMENT_LIMITS.listed} experiments are listed in this project and all are open; one is concluded or withdrawn first`);
         const nowIso = this.#runner.now();
         const body: ExperimentBody = { projectId, title, proposedBy: by.id, proposal, affectedKey, ...(lessonId === undefined ? {} : { lessonId }), status: "proposed", spent: { runs: 0, cost: 0 }, runs: [], budgetRaises: [], history: [{ at: nowIso, by: by.id, to: "proposed" }] };
         const ref: AggregateRef = { kind: "experiment", id };
-        return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#indexChange(projectId, index, [...index.ids, id], index.claims)], detail: { projectId } };
+        return { ref, creates: true, changes: [{ type: "create", ref, body: clean(body) }, this.#indexChange(projectId, index, { ...index, ids: kept.ids, open: { ...index.open, [id]: by.id }, waiting: { ...index.waiting, [id]: by.id }, archived: index.archived + kept.archived.length })], detail: { projectId } };
       },
     })));
     return { id: result.id, replayed: result.replayed };
@@ -204,7 +225,9 @@ export class ExperimentService {
         if (got.body.status !== "proposed") throw new DomainError("invalid_command", `experiment ${id} is ${got.body.status}; criteria are pinned once, when it is proposed`, { field: "experimentId" });
         const nowIso = this.#runner.now();
         const next: ExperimentBody = { ...got.body, status: "running", criteria, criteriaDigest: seal, pinnedBy: by.id, history: this.#history(got.body, nowIso, by.id, "running") };
-        return { ref: { kind: "experiment", id }, creates: false, changes: [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }], detail: { projectId: got.body.projectId } };
+        // Pinned, it no longer waits for criteria (it stays open) in the same write.
+        const index = await this.#index(got.body.projectId);
+        return { ref: { kind: "experiment", id }, creates: false, changes: [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }, this.#indexChange(got.body.projectId, index, { ...index, waiting: without(index.waiting, id) })], detail: { projectId: got.body.projectId } };
       },
     })));
     return { revision: result.revision, seal };
@@ -334,7 +357,8 @@ export class ExperimentService {
         verdict = judged.verdict;
         const next: ExperimentBody = { ...b, status: "concluded", result: { ...part, at: nowIso, by: by.id, finding, savings }, history: this.#history(b, nowIso, by.id, "concluded", judged.verdict) };
         const changes: Change[] = [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }];
-        if (savings.some((s) => s.counted)) changes.push(this.#indexChange(b.projectId, index, index.ids, claims));
+        // Concluded, it is no longer open (its savings claims, if any, in the same write).
+        changes.push(this.#indexChange(b.projectId, index, { ...index, claims, open: without(index.open, id), waiting: without(index.waiting, id) }));
         return { ref: { kind: "experiment", id }, creates: false, changes, detail: { projectId: b.projectId, verdict: judged.verdict } };
       },
     })));
@@ -359,7 +383,8 @@ export class ExperimentService {
         if (got.found.revision !== expected) throw new DomainError("stale_revision", `experiment ${id} is at revision ${got.found.revision}, not ${expected}`, { currentRevision: got.found.revision });
         if (got.body.status !== "proposed") throw new DomainError("invalid_command", `experiment ${id} is ${got.body.status}; only one not yet started is withdrawn (a started one is concluded and its runs kept)`, { field: "experimentId" });
         const next: ExperimentBody = { ...got.body, status: "withdrawn", history: this.#history(got.body, this.#runner.now(), by.id, "withdrawn", reason) };
-        return { ref: { kind: "experiment", id }, creates: false, changes: [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }], detail: { projectId: got.body.projectId } };
+        const index = await this.#index(got.body.projectId);
+        return { ref: { kind: "experiment", id }, creates: false, changes: [{ type: "update", ref: { kind: "experiment", id }, expectedRevision: got.found.revision, body: clean(next) }, this.#indexChange(got.body.projectId, index, { ...index, open: without(index.open, id), waiting: without(index.waiting, id) })], detail: { projectId: got.body.projectId } };
       },
     })));
     return { revision: result.revision };
@@ -374,12 +399,12 @@ export class ExperimentService {
   }
 
   /** The experiments of a project, oldest first, paged (whoever may read them). `status` keeps one status. */
-  async list(viewer: Principal, projectId: string, page: { afterId?: string; limit?: number; status?: string } = {}): Promise<{ items: View<ExperimentBody>[]; next?: string } | undefined> {
+  async list(viewer: Principal, projectId: string, page: { afterId?: string; limit?: number; status?: string } = {}): Promise<{ items: View<ExperimentBody>[]; next?: string; archived?: number } | undefined> {
     const project = checkProjectId(projectId);
     if (!this.#mayRead(viewer, project)) return undefined;
     const limit = page.limit === undefined ? 20 : whole(page.limit, "limit", 1, EXPERIMENT_LIMITS.page);
     const status = page.status === undefined ? undefined : ((EXPERIMENT_STATUSES as readonly string[]).includes(page.status) ? page.status : invalid("status", `must be one of ${EXPERIMENT_STATUSES.join(", ")}`));
-    const index = await this.#index(project);
+    const index = await this.#index(project, false);
     const start = page.afterId === undefined ? 0 : index.ids.indexOf(page.afterId) + 1;
     if (page.afterId !== undefined && start === 0) invalid("afterId", "is not in the list");
     const items: View<ExperimentBody>[] = [];
@@ -388,7 +413,7 @@ export class ExperimentService {
       const found = await this.#runner.get("experiment", index.ids[pos]!);
       if (found !== undefined && (status === undefined || (found.body as unknown as ExperimentBody).status === status)) items.push(view<ExperimentBody>(found));
     }
-    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}) };
+    return { items, ...(pos < index.ids.length ? { next: index.ids[pos - 1]! } : {}), ...(index.archived > 0 ? { archived: index.archived } : {}) };
   }
 
   // ---- internals -------------------------------------------------------------------------------------------------------------
@@ -457,15 +482,30 @@ export class ExperimentService {
   #mayRun(by: Principal, b: ExperimentBody): boolean { return this.#mayJudge(by, b) || (b.proposedBy === by.id && this.#mayPropose(by, b.projectId)); }
   #id(value: unknown): string { return typeof value === "string" && EXPERIMENT_ID.test(value) ? value : invalid("experimentId", "is not an experiment ID"); }
 
-  async #index(projectId: string): Promise<{ ids: readonly string[]; claims: Readonly<Record<string, string>>; revision: number }> {
+  /** `writing`: the open and waiting maps are needed (a read that only lists skips rebuilding them for an older index). */
+  async #index(projectId: string, writing = true): Promise<Index> {
     const found = await this.#runner.get("experiment-index", projectId);
     const b = found?.body as unknown as IndexBody | undefined;
-    return found === undefined || b === undefined ? { ids: [], claims: {}, revision: 0 } : { ids: b.ids, claims: b.claims, revision: found.revision };
+    if (found === undefined || b === undefined) return { ids: [], claims: {}, open: {}, waiting: {}, archived: 0, revision: 0 };
+    const archived = typeof b.archived === "number" && Number.isSafeInteger(b.archived) && b.archived >= 0 ? b.archived : 0;
+    const isMap = (m: unknown): m is Record<string, string> => m !== null && typeof m === "object" && !Array.isArray(m);
+    if (!writing || (isMap(b.open) && isMap(b.waiting))) return { ids: b.ids, claims: b.claims, open: isMap(b.open) ? b.open : {}, waiting: isMap(b.waiting) ? b.waiting : {}, archived, revision: found.revision };
+    // An index written before the retention slice: rebuilt from the listed records (at most EXPERIMENT_LIMITS.listed reads) and written with the next change of the index. A record that cannot be read
+    // counts as open (it is never moved out of the list and takes a place in the limit), so a damaged record makes the rule stricter, not looser.
+    const open: Record<string, string> = {};
+    const waiting: Record<string, string> = {};
+    for (const listed of b.ids.slice(-EXPERIMENT_LIMITS.listed)) {
+      const e = (await this.#runner.get("experiment", listed))?.body as unknown as ExperimentBody | undefined;
+      const proposer = typeof e?.proposedBy === "string" ? e.proposedBy : "";
+      if (e === undefined || !ENDED.includes(e.status)) open[listed] = proposer;
+      if (e?.status === "proposed") waiting[listed] = proposer;
+    }
+    return { ids: b.ids, claims: b.claims, open, waiting, archived, revision: found.revision };
   }
 
-  #indexChange(projectId: string, index: { revision: number }, ids: readonly string[], claims: Readonly<Record<string, string>>): Change {
+  #indexChange(projectId: string, index: { revision: number }, next: { ids: readonly string[]; claims: Readonly<Record<string, string>>; open: Readonly<Record<string, string>>; waiting: Readonly<Record<string, string>>; archived: number }): Change {
     const ref: AggregateRef = { kind: "experiment-index", id: projectId };
-    const body = { ids: [...ids], claims: { ...claims } } as unknown as JsonObject;
+    const body = { ids: [...next.ids], claims: { ...next.claims }, open: { ...next.open }, waiting: { ...next.waiting }, archived: next.archived } as unknown as JsonObject;
     return index.revision === 0 ? { type: "create", ref, body } : { type: "update", ref, expectedRevision: index.revision, body };
   }
 
