@@ -36,6 +36,9 @@ export type PoolAnswer =
   | { readonly outcome: "holding"; readonly projectId: string; readonly branch: string; readonly lease: IntegratorLease; readonly holding: number; readonly reason: string }
   | { readonly outcome: "none"; readonly reason: string; readonly heldByOthers: number; readonly awaitingWork: number; readonly unreadable: number; readonly partial: boolean };
 
+/** Whether an integrator principal serves a project in the pool: its own credential (no task scope) with the exact right `integration.lease` there (a grant for every project counts). One rule for the pool and the capacity view. */
+export const servesProject = (by: Principal, projectId: string): boolean => by.taskScope === undefined && inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
+
 const holderOf = (by: Principal): string | undefined => (by.kind === "agent" && by.id.startsWith("agent:") && by.id.length > "agent:".length ? by.id.slice("agent:".length) : undefined);
 const sinceMs = (at: string | undefined): number => { const t = typeof at === "string" ? Date.parse(at) : NaN; return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY; };
 const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -50,7 +53,7 @@ export class IntegratorPool {
   }
 
   #serves(by: Principal, projectId: string): boolean {
-    return by.taskScope === undefined && inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
+    return servesProject(by, projectId);
   }
 
   #holding(l: IntegratorLease, count = 1): PoolAnswer {
