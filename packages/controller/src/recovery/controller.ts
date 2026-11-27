@@ -95,14 +95,19 @@ const said = (error: unknown): string => {
 };
 const isReserved = (holder: string): boolean => RESERVED_PREFIXES.some((p) => holder.startsWith(p));
 
-/** `promotion-fence:<promotionId>:<replaced epoch>`: the replaced epoch is in the fence itself, so a promotion that stopped before its record was written can be run again. */
-export function fenceHolder(promotionId: string, fencedEpoch: number): string { return `${PROMOTION_FENCE_PREFIX}${promotionId}:${fencedEpoch}`; }
-export function parseFenceHolder(holder: string | null | undefined): { readonly promotionId: string; readonly fencedEpoch: number } | undefined {
+/**
+ * `promotion-fence:<promotionId>:<replaced epoch>[:<replaced holder>]`: the replaced epoch, and the replaced holder's name when it is a plain holder name, are in the fence itself, so a promotion that
+ * stopped before its record was written can be run again and still refuses a successor with the replaced controller's name (review of K05).
+ */
+export function fenceHolder(promotionId: string, fencedEpoch: number, fencedHolder?: string | null): string {
+  return `${PROMOTION_FENCE_PREFIX}${promotionId}:${fencedEpoch}${typeof fencedHolder === "string" && HOLDER_PATTERN.test(fencedHolder) ? `:${fencedHolder}` : ""}`;
+}
+export function parseFenceHolder(holder: string | null | undefined): { readonly promotionId: string; readonly fencedEpoch: number; readonly fencedHolder: string | null } | undefined {
   if (typeof holder !== "string" || !holder.startsWith(PROMOTION_FENCE_PREFIX)) return undefined;
-  const m = /^([A-Za-z0-9][A-Za-z0-9_-]{0,47}):([1-9][0-9]{0,15})$/.exec(holder.slice(PROMOTION_FENCE_PREFIX.length));
+  const m = /^([A-Za-z0-9][A-Za-z0-9_-]{0,47}):([1-9][0-9]{0,15})(?::([A-Za-z0-9][A-Za-z0-9._-]{0,79}))?$/.exec(holder.slice(PROMOTION_FENCE_PREFIX.length));
   if (m === null) return undefined;
   const fencedEpoch = Number(m[2]);
-  return Number.isSafeInteger(fencedEpoch) ? { promotionId: m[1]!, fencedEpoch } : undefined;
+  return Number.isSafeInteger(fencedEpoch) ? { promotionId: m[1]!, fencedEpoch, fencedHolder: m[3] ?? null } : undefined;
 }
 
 async function readState(storage: ControllerStorage): Promise<{ epoch: number; holder: string | null; auditSeq: number; deliverySeq: number }> {
@@ -135,7 +140,10 @@ export async function readControllerAuthority(storage: Pick<ControllerStorage, "
  */
 export async function promoteController(options: ControllerPromotionOptions): Promise<ControllerPromotionResult> {
   const now = (): string => (options.now?.() ?? new Date()).toISOString();
-  const refusal = (reasons: string[], problems: readonly Problem[] = []): ControllerPromotionRefused => new ControllerPromotionRefused(false, reasons.map(bound), problems);
+  // The manifest reader names the folder in some of its reasons; a refusal and the stored record say "its folder" instead (no path, review of K05).
+  const folder = typeof options.manifestDirectory === "string" && options.manifestDirectory.length > 1 ? options.manifestDirectory : undefined;
+  const plain = (text: string): string => bound(folder === undefined ? text : text.split(folder).join("its folder"));
+  const refusal = (reasons: string[], problems: readonly Problem[] = []): ControllerPromotionRefused => new ControllerPromotionRefused(false, reasons.map(plain), problems);
   const { storage } = options;
   if (typeof options.successor !== "string" || !HOLDER_PATTERN.test(options.successor) || isReserved(options.successor)) throw refusal(["successor: the holder name the new controller starts with (letters, digits, dot, dash or underscore, at most 80)"]);
   if (typeof options.manifestDirectory !== "string" || !isAbsolute(options.manifestDirectory)) throw refusal(["manifestDirectory: an absolute path"]);
@@ -154,7 +162,7 @@ export async function promoteController(options: ControllerPromotionOptions): Pr
   if (authority === "unreadable") throw refusal(["the record of an earlier controller promotion cannot be read"]);
   // The controller being replaced: the holder of the epoch, or, when an earlier promotion fenced the store and did not finish, the one that fence replaced.
   const fencedEpoch = priorFence?.fencedEpoch ?? state.epoch;
-  const fencedHolder = priorFence === undefined ? state.holder : (authority !== undefined && authority.fenceEpoch === state.epoch ? authority.fencedHolder : null);
+  const fencedHolder = priorFence === undefined ? state.holder : (priorFence.fencedHolder ?? (authority !== undefined && authority.fenceEpoch === state.epoch ? authority.fencedHolder : null));
   if (fencedHolder !== null && fencedHolder === options.successor) throw refusal([`the successor's name is the name of the controller being replaced (${fencedHolder}): give the new controller its own holder name, or a returning old controller could not be told from it`]);
   let manifest: ReadManifest;
   try { manifest = readRecoveryManifest(options.manifestDirectory); } catch (error) {
@@ -162,15 +170,15 @@ export async function promoteController(options: ControllerPromotionOptions): Pr
     throw refusal([`the recovery manifest folder cannot be read (${said(error)})`]);
   }
   const m = manifest!.manifest.watermark;
-  const allowed = priorFence === undefined ? [state.epoch] : [fencedEpoch, state.epoch];
   if (m.epoch < fencedEpoch) throw refusal([`the recovery manifest is stale: it was written under epoch ${m.epoch}, and the controller being replaced holds epoch ${fencedEpoch}, so what that controller wrote may not be in it`]);
   if (m.epoch > state.epoch) throw refusal([`the recovery manifest was written under epoch ${m.epoch}, later than this store's epoch ${state.epoch}: this store is an older copy than the one the manifest describes`]);
-  if (!allowed.includes(m.epoch)) throw refusal([`the recovery manifest was written under epoch ${m.epoch}, which is neither the replaced controller's (${fencedEpoch}) nor this store's (${state.epoch})`]);
+  // Between the replaced epoch and the store's, every epoch was a promotion's fence (a fence is only carried on from another fence), under which only promotion records and manifests were written:
+  // a manifest of any of them was written from the frozen store. Without an earlier fence the two checks above leave only the store's own epoch.
   const first = await compareWith(manifest!, storage, options.blobs);
   if (first.problems.length > 0) throw refusal([`before the fence: ${first.text}`], first.problems);
 
   // 2. the fence
-  const fence = fenceHolder(promotionId, fencedEpoch);
+  const fence = fenceHolder(promotionId, fencedEpoch, fencedHolder);
   let fenceEpoch: number;
   try { fenceEpoch = (await storage.acquireEpoch({ holder: fence, at: now(), expectedEpoch: state.epoch })).epoch; } catch (error) {
     if (isStorageError(error, "stale_epoch")) throw refusal(["the store's epoch moved while it was checked (a controller started or another promotion ran): nothing was fenced; look again and run the promotion again"]);
@@ -181,14 +189,14 @@ export async function promoteController(options: ControllerPromotionOptions): Pr
   }
   // From here the old controller is fenced; every failure leaves it so and says so.
   const stopFenced = async (reasons: string[], problems: readonly Problem[] = [], written?: ControllerAuthority["manifest"]): Promise<never> => {
-    const kept = reasons.map(bound);
-    await writeAuthority(storage, fenceEpoch, actor, now(), { promotionId, state: "fenced", successor: options.successor, fencedEpoch, fencedHolder, fenceEpoch, ...(written === undefined ? {} : { manifest: written }), reasons: kept.slice(0, REASONS_KEPT) }).catch((error: unknown) => kept.push(bound(`the record of the fence could not be updated (${said(error)})`)));
+    const kept = reasons.map(plain);
+    await writeAuthority(storage, fenceEpoch, actor, now(), { promotionId, state: "fenced", successor: options.successor, fencedEpoch, fencedHolder, fenceEpoch, ...(written === undefined ? {} : { manifest: written }), reasons: kept.slice(0, REASONS_KEPT) }).catch((error: unknown) => kept.push(plain(`the record of the fence could not be updated (${said(error)})`)));
     throw new ControllerPromotionRefused(true, kept, problems);
   };
 
   // 3. the record says fenced before anything else is tried
   try { await writeAuthority(storage, fenceEpoch, actor, now(), { promotionId, state: "fenced", successor: options.successor, fencedEpoch, fencedHolder, fenceEpoch, reasons: ["the promotion is under way"] }); } catch (error) {
-    throw new ControllerPromotionRefused(true, [bound(`the record of the fence could not be written (${said(error)}); the store stays fenced by its holder, run the promotion again`)]);
+    throw new ControllerPromotionRefused(true, [plain(`the record of the fence could not be written (${said(error)}); the store stays fenced by its holder, run the promotion again`)]);
   }
 
   // 4. a manifest written now, from the store no one else can change, and the successor's files against it
@@ -208,7 +216,7 @@ export async function promoteController(options: ControllerPromotionOptions): Pr
 
   // 5. the successor is named
   try { await writeAuthority(storage, fenceEpoch, actor, now(), { promotionId, state: "promoted", successor: options.successor, fencedEpoch, fencedHolder, fenceEpoch, manifest: written }); } catch (error) {
-    throw new ControllerPromotionRefused(true, [bound(`the successor could not be recorded (${said(error)}); the store stays fenced, run the promotion again`)]);
+    throw new ControllerPromotionRefused(true, [plain(`the successor could not be recorded (${said(error)}); the store stays fenced, run the promotion again`)]);
   }
   const notes = [
     `the controller of epoch ${fencedEpoch}${fencedHolder === null ? "" : ` (${fencedHolder})`} was fenced at epoch ${fenceEpoch} before ${options.successor} was named; start ${options.successor} with that holder name, no other controller may start on this store`,

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { ArtifactService, FileBlobStore } from "../artifacts/index.js";
 import { backends, stopServer } from "../domain/testing/backends.js";
+import { BackupService, MaintenanceBarrier, PENDING_FILE, StagedRestore } from "../backup/index.js";
 import { controllerAuthorityLines } from "../status/status.js";
 import { MemoryStorage, type ControllerStorage } from "../storage/index.js";
 import { CONTROLLER_AUTHORITY, ControllerPromotionRefused, assertStartAllowed, promoteController, readControllerAuthority, writeFencedRecoveryManifest, RECOVERY_MANIFEST_FILE, RecoveryWriteRefused } from "./index.js";
@@ -65,7 +66,8 @@ for (const backend of backends) {
       assert.equal(result.fencedHolder, "ctl-a");
       assert.equal(result.fenceEpoch, epochA + 1);
       assert.equal(await world.storage.currentEpoch(), epochA + 1);
-      assert.equal(await holderOf(world.storage), fenceHolder("p1", epochA));
+      assert.equal(await holderOf(world.storage), fenceHolder("p1", epochA, "ctl-a"));
+      assert.equal(await holderOf(world.storage), `promotion-fence:p1:${epochA}:ctl-a`, "the fence names the replaced epoch and holder");
       assert.equal(result.manifest.epoch, epochA + 1, "the decision was made on a manifest written after the fence");
       assert.equal(result.manifest.blobs, 1);
       assert.equal(JSON.parse(readFileSync(join(m, RECOVERY_MANIFEST_FILE), "utf8")).watermark.epoch, epochA + 1, "the fresh manifest replaced the old controller's");
@@ -203,11 +205,14 @@ for (const backend of backends) {
         assert.doesNotMatch((e as Error).message, /secret/);
         return true;
       });
-      assert.equal(await holderOf(world.storage), fenceHolder("crash", e2));
+      assert.equal(await holderOf(world.storage), fenceHolder("crash", e2, "ctl-b"));
       for (const who of ["ctl-b", "ctl-c"]) await assert.rejects(assertStartAllowed(world.storage, who, e2 + 1), /has not named a successor/);
+      // the replaced controller's name is read from the fence holder too: a run again that names it as the successor is refused, nothing changed
+      await assert.rejects(promoteController({ storage: world.storage, manifestDirectory: m, blobs, successor: "ctl-b", promotionId: "redo-b", now }), refused(false, /own holder name/));
+      assert.equal(await holderOf(world.storage), fenceHolder("crash", e2, "ctl-b"));
       const done = await promoteController({ storage: world.storage, manifestDirectory: m, blobs, successor: "ctl-c", promotionId: "redo", now });
       assert.equal(done.fencedEpoch, e2, "read from the fence holder");
-      assert.equal(done.fencedHolder, null, "the name was not recorded by the promotion that stopped");
+      assert.equal(done.fencedHolder, "ctl-b", "the name is read from the fence holder although the promotion that stopped recorded nothing");
       await assertStartAllowed(world.storage, "ctl-c", e2 + 2);
       await assert.rejects(assertStartAllowed(world.storage, "ctl-b", e2 + 2), /may not use this store/);
     } finally { await world.close(); gone(dir); }
@@ -231,7 +236,18 @@ test("refusals with nothing changed: no controller yet, a database transfer's ho
     await assert.rejects(promoteController({ storage: s, manifestDirectory: "relative/m", blobs, successor: "b", now }), refused(false, /absolute path/));
     await assert.rejects(promoteController({ storage: s, manifestDirectory: m, blobs: {} as never, successor: "b", now }), refused(false, /blobs/));
     await assert.rejects(promoteController({ storage: s, manifestDirectory: m, blobs, successor: "b", promotionId: "bad id!", now }), refused(false, /promotionId/));
-    await assert.rejects(promoteController({ storage: s, manifestDirectory: join(dir, "none"), blobs, successor: "b", now }), refused(false));
+    await assert.rejects(promoteController({ storage: s, manifestDirectory: join(dir, "none"), blobs, successor: "b", now }), (e: unknown) => {
+      refused(false, /recovery manifest in its folder cannot be read/)(e);
+      assert.ok(!(e as Error).message.includes(dir), "no path in the refusal");
+      return true;
+    });
+    // a fence take that fails without committing: refused, nothing fenced
+    const failing = new Proxy(s, { get(t, k) {
+      if (k === "acquireEpoch") return async () => { throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" }); };
+      const v = Reflect.get(t, k, t) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+    } });
+    await assert.rejects(promoteController({ storage: failing, manifestDirectory: m, blobs, successor: "b", now }), refused(false, /fence could not be taken \(ECONNRESET\)/));
+    assert.equal(await holderOf(s), "ctl-a");
     // a manifest with a later epoch than the store: the store is an older copy
     const later = new MemoryStorage();
     for (let i = 0; i < 3; i++) await later.acquireEpoch({ holder: "ctl-a", at: T });
@@ -288,8 +304,11 @@ test("refusals with nothing changed: no controller yet, a database transfer's ho
 });
 
 test("the fence holder and the record are read strictly", () => {
-  assert.deepEqual(parseFenceHolder(fenceHolder("p1", 7)), { promotionId: "p1", fencedEpoch: 7 });
-  for (const h of [null, undefined, "", "controller", "promotion-fence:", "promotion-fence:p1", "promotion-fence:p1:0", "promotion-fence:p1:-1", "promotion-fence:p1:1.5", "promotion-fence:p 1:3", "promotion-fence:p1:99999999999999999", "promotion-fence::3", "promotion-fence:p1:3:4"]) {
+  assert.deepEqual(parseFenceHolder(fenceHolder("p1", 7)), { promotionId: "p1", fencedEpoch: 7, fencedHolder: null });
+  assert.deepEqual(parseFenceHolder(fenceHolder("p1", 7, "ctl.a-1")), { promotionId: "p1", fencedEpoch: 7, fencedHolder: "ctl.a-1" });
+  assert.equal(fenceHolder("p1", 7, "a b"), "promotion-fence:p1:7", "a holder that is not a plain name is left out");
+  assert.equal(fenceHolder("p1", 7, null), "promotion-fence:p1:7");
+  for (const h of [null, undefined, "", "controller", "promotion-fence:", "promotion-fence:p1", "promotion-fence:p1:0", "promotion-fence:p1:-1", "promotion-fence:p1:1.5", "promotion-fence:p 1:3", "promotion-fence:p1:99999999999999999", "promotion-fence::3", "promotion-fence:p1:3:", "promotion-fence:p1:3:a b", "promotion-fence:p1:3:a:b", "promotion-fence:p1:3:" + "x".repeat(81), "promotion-fence:p1:3:.a"]) {
     assert.equal(parseFenceHolder(h), undefined, String(h));
   }
   const agg = (body: Record<string, unknown>) => ({ kind: "controller-authority", id: "primary", revision: 1, body, createdAt: T, updatedAt: T }) as never;
@@ -299,4 +318,55 @@ test("the fence holder and the record are read strictly", () => {
   for (const bad of [{ ...good, format: 2 }, { ...good, state: "active" }, { ...good, successor: "a b" }, { ...good, fencedEpoch: -1 }, { ...good, fenceEpoch: "2" }, { ...good, fencedHolder: 3 }, { ...good, at: 1 }, { ...good, promotionId: undefined }]) {
     assert.equal(parseAuthority(agg(bad)), "unreadable", JSON.stringify(bad));
   }
+});
+
+test("two promotions that stop in a row (the first after its manifest, the second right after its fence) do not leave the store fenced for good: the next run goes through (K05 review)", async () => {
+  const dir = tmp();
+  try {
+    const s = new MemoryStorage();
+    const blobsA = await FileBlobStore.open({ directory: join(dir, "blobs-a") });
+    const art = await ArtifactService.open(s, blobsA, { holder: "ctl-a", ...fast });
+    await art.publish({ commandId: cid("one"), actor: "rob", name: "one", files: [file("a.txt", "alpha")] });
+    const e = await s.currentEpoch();
+    const m = join(dir, "m");
+    await writeFencedRecoveryManifest({ storage: s, epoch: e, directory: m, now });
+    cpSync(join(dir, "blobs-a"), join(dir, "blobs-b"), { recursive: true, force: false, errorOnExist: false });
+    const blobsB = await FileBlobStore.open({ directory: join(dir, "blobs-b") });
+    await art.publish({ commandId: cid("two"), actor: "rob", name: "two", files: [file("b.txt", "beta")] });
+    // 1. stops after the fence and its manifest: a file the successor lacks
+    await assert.rejects(promoteController({ storage: s, manifestDirectory: m, blobs: blobsB, successor: "ctl-b", promotionId: "p1", now }), refused(true, /after the fence/));
+    assert.equal(JSON.parse(readFileSync(join(m, RECOVERY_MANIFEST_FILE), "utf8")).watermark.epoch, e + 1);
+    // 2. the file is copied; this run stops right after its fence: the record cannot be written, no manifest
+    cpSync(join(dir, "blobs-a"), join(dir, "blobs-b"), { recursive: true, force: false, errorOnExist: false });
+    const noRecord = new Proxy(s, { get(t, k) {
+      if (k === "applyOperation") return async () => { throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); };
+      const v = Reflect.get(t, k, t) as unknown; return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+    } });
+    await assert.rejects(promoteController({ storage: noRecord, manifestDirectory: m, blobs: blobsB, successor: "ctl-b", promotionId: "p2", now }), refused(true, /ENOSPC/));
+    assert.equal(await s.currentEpoch(), e + 2);
+    assert.equal(JSON.parse(readFileSync(join(m, RECOVERY_MANIFEST_FILE), "utf8")).watermark.epoch, e + 1, "the folder still holds the first fence's manifest");
+    // 3. the folder's manifest is of the first fence's epoch, between the replaced one and the store's: the run goes through
+    const r = await promoteController({ storage: s, manifestDirectory: m, blobs: blobsB, successor: "ctl-b", promotionId: "p3", now });
+    assert.equal(r.fencedEpoch, e); assert.equal(r.fencedHolder, "ctl-a", "carried through both fences"); assert.equal(r.fenceEpoch, e + 3);
+    await assertStartAllowed(s, "ctl-b", e + 3);
+    await assert.rejects(assertStartAllowed(s, "ctl-a", e + 3), /may not use this store/);
+  } finally { gone(dir); }
+});
+
+test("a controller fenced by a promotion can no longer stage a backup restore onto the store (which would bring it back in charge at its restart); with its own epoch the preview is as before (K05 review)", async () => {
+  const dir = tmp();
+  try {
+    const s = new MemoryStorage();
+    const { epoch } = await s.acquireEpoch({ holder: "ctl-a", at: T });
+    const backups = new BackupService(s, { root: join(dir, "b"), version: "t", now });
+    const made = await backups.backUpNow("manual");
+    const data = join(dir, "data"); mkdirSync(data);
+    const sr = new StagedRestore({ backups, root: join(dir, "b"), barrier: new MaintenanceBarrier(), sqlitePath: join(data, "x.sqlite"), dataDirectory: data, storage: s, epoch, now });
+    const plan = await sr.preview(made.manifest.name);
+    assert.equal(typeof plan.token, "string");
+    await s.acquireEpoch({ holder: fenceHolder("p1", epoch, "ctl-a"), at: T, expectedEpoch: epoch });
+    await assert.rejects(sr.preview(made.manifest.name), /no longer holds the database .*nothing was staged/);
+    await assert.rejects(sr.apply(made.manifest.name, plan.token), /no longer holds the database .*nothing was staged/);
+    assert.equal(existsSync(join(data, PENDING_FILE)), false, "no restore is recorded for the next start");
+  } finally { gone(dir); }
 });

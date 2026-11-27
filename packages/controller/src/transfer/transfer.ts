@@ -140,6 +140,11 @@ export interface TransferOptions {
   readonly onError?: (error: unknown) => void;
   /** The owner's settings of this feature, read and written through the configuration. */
   readonly settings?: TransferSettingsPort;
+  /**
+   * The epoch the controller running this service took (card K05 review). A move or a rollback is refused when the store's epoch is no longer this one: another controller or a controller promotion took the
+   * store, and the fence's compare-and-set would otherwise be made against the epoch it just read (theirs) and take the store back from them. Absent: not checked (tests that drive the service alone).
+   */
+  readonly epoch?: number;
 }
 
 export interface RestartEvent { readonly reason: "switched" | "rolled-back"; readonly transferId: string; readonly to: string }
@@ -886,6 +891,7 @@ export class DatabaseTransferService {
         await this.#at("drained");
         stage = "validating";
         const before = await this.#mark(this.#o.storage);
+        if (this.#o.epoch !== undefined && before.epoch !== this.#o.epoch) throw new DomainError("invalid_transition", "this controller no longer holds the database (another controller or a controller promotion took it), so it cannot move it; nothing was changed");
         snap = await this.#o.storage.snapshot();
         const report = await this.scan(snap);
         const errors = report.findings.filter((f) => f.severity === "error");
@@ -1012,6 +1018,7 @@ export class DatabaseTransferService {
       release = await this.#o.barrier.raise("a database transfer is being rolled back");
       const holder = await this.#holder(this.#o.storage);
       const now = await this.#mark(this.#o.storage);
+      if (this.#o.epoch !== undefined && now.epoch !== this.#o.epoch) throw new DomainError("invalid_transition", "this controller no longer holds the database (another controller or a controller promotion took it), so it cannot roll the move back; nothing was changed");
       if (now.auditSeq !== mark.auditSeq || now.deliverySeq !== mark.deliverySeq) throw new DomainError("invalid_transition", `the new database has recorded work since it started (${now.auditSeq - mark.auditSeq} audit records, ${now.deliverySeq - mark.deliverySeq} messages), so going back would lose it. Use a reverse transfer to move it back with its records.`);
       // Writes that bump neither counter are found by the records themselves.
       const changedTables = mark.digests === undefined ? [] : await this.#changedSince(mark.digests);

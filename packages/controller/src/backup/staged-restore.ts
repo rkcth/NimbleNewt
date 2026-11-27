@@ -157,6 +157,11 @@ export interface StagedRestoreOptions {
   /** The folder the markers and the key live in (the data directory). */
   readonly dataDirectory: string;
   readonly storage: Pick<ControllerStorage, "currentEpoch" | "snapshot"> & Partial<Pick<ControllerStorage, "listAudit">>;
+  /**
+   * The epoch the controller running this took (card K05 review). A preview and an apply are refused when the store's epoch is no longer this one: another controller or a controller promotion took the
+   * store, and a backup restored by the controller it replaced would bring back a store with that controller in charge. Absent: not checked (tests that drive the restore alone).
+   */
+  readonly epoch?: number;
   readonly blobs?: FileBlobStore;
   /** Where the live conversation store `id` is on this machine; one not known goes to `<data>/restored-pi-state/<id>`. The same function must be given to `applyPendingRestore` (it is the list of places a restore may write to). */
   readonly piFinal?: (id: string) => string | undefined;
@@ -589,8 +594,13 @@ export class StagedRestore {
   }
 
   /** The token: the time it was issued, a nonce and an HMAC (under a key only this process holds) over the whole manifest's digest, the backup's name, the installation's epoch and those two. How long it stays good is the owner's setting at the moment it is used. */
+  #stillPrimary(epoch: number): void {
+    if (this.#o.epoch !== undefined && epoch !== this.#o.epoch) throw new DomainError("invalid_transition", "this controller no longer holds the database (another controller or a controller promotion took it), so it cannot restore a backup onto it; nothing was staged");
+  }
+
   async #issue(m: BackupManifest, changes: number | undefined): Promise<{ token: string; expiresAt?: string }> {
     const epoch = await this.#o.storage.currentEpoch();
+    this.#stillPrimary(epoch);
     const ttl = await this.#ttlMs();
     const iat = this.#now().getTime();
     const nonce = randomBytes(8).toString("hex");
@@ -606,7 +616,9 @@ export class StagedRestore {
     const parts = /^(\d{1,16})\.([0-9a-f]{16})\.([0-9a-f]{32})$/.exec(confirm);
     if (parts === null) return wrong("it is not a restore token");
     const iat = Number(parts[1]);
-    const expected = macOf(this.#sessionKey, { name: m.name, digest: manifestDigestOf(m), epoch: await this.#o.storage.currentEpoch(), iat, nonce: parts[2]! }).slice(0, 32);
+    const epoch = await this.#o.storage.currentEpoch();
+    this.#stillPrimary(epoch);
+    const expected = macOf(this.#sessionKey, { name: m.name, digest: manifestDigestOf(m), epoch, iat, nonce: parts[2]! }).slice(0, 32);
     if (!macEqual(expected, parts[3])) return wrong("the preview is out of date, or the approval was for something else (the backup, or the installation, has changed)");
     const ttl = await this.#ttlMs();
     if (ttl !== null && this.#now().getTime() - iat > ttl) return wrong("it has expired; ask for a new preview");

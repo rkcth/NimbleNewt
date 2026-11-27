@@ -9,6 +9,7 @@ import { ManualTimer } from "../dispatch/testing/timer.js";
 import type { EnvironmentFacts, FilesystemDetector } from "../environment/index.js";
 import { promoteController } from "../recovery/index.js";
 import { SqliteStorage } from "../storage/index.js";
+import { sqliteTarget } from "../transfer/index.js";
 import { startController } from "./index.js";
 
 // Card K05, first slice, through the composed controller: two controllers on one SQLite file. The running one is fenced by a promotion made on another handle: its dispatcher stops at its next
@@ -57,6 +58,11 @@ test("a promotion fences the running controller before naming the successor; the
     const answer = JSON.stringify((await b.chat!.submit(boot.token, { messageId: "q1", text })).outcomes);
     assert.match(answer, /Controller promotion k05s .* fenced the controller of epoch \d+ \(controller\) at epoch \d+ and then named controller-b/, answer);
     assert.doesNotMatch(answer, new RegExp(d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "no path in the answer");
+    const owner = await b.services.principals.authenticate(boot.token);
+    await b.services.principals.enroll(owner, { commandId: "e-zed", kind: "agent", name: "zed", grants: [] });
+    const zed = (await b.services.principals.issueCredential(owner, "agent:zed")).token;
+    const asAgent = JSON.stringify(await b.api.handle(zed, { v: 1, op: "status.ask", args: { request: { kind: "database_transfer" } } } as never));
+    assert.doesNotMatch(asAgent, /Controller promotion|controller-b/, asAgent);
     await b.close(); b = undefined;
     // the successor restarts as itself
     b = await startController({ ...base, holder: "controller-b" } as never);
@@ -78,4 +84,30 @@ test("without a promotion every start is as before, and the owner's view says no
       assert.doesNotMatch(JSON.stringify((await c2.chat!.submit(boot.token, { messageId: "m1", text })).outcomes), /Controller promotion/);
     } finally { await c2.close(); }
   } finally { rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+});
+
+test("a controller fenced by a promotion can neither move its database nor restore a backup onto it, either of which would take the store back (K05 review)", async () => {
+  const d = mkdtempSync(join(tmpdir(), "nn-k05w-"));
+  const dbPath = join(d, "c.sqlite"), manifests = join(d, "recovery"), moved = join(d, "moved", "m.sqlite");
+  const a = await startController({ storage: { kind: "sqlite", path: dbPath }, argv: [], env: {}, print: () => undefined, facts: supported, filesystem: ext4, features: [], harnesses: [], dispatch: { timer: new ManualTimer(), manual: true },
+    recovery: { manifestDirectory: manifests, everyMs: 60_000, now: () => new Date("2026-11-27T12:00:00.000Z") }, backup: { directory: join(d, "backups") },
+    transfer: { stateDirectory: join(d, "state"), targets: [await sqliteTarget({ name: "moved", path: moved, open: () => SqliteStorage.open({ path: moved }) })] } } as never);
+  try {
+    const boot = await a.services.principals.bootstrapOwner({ name: "rob" });
+    const call = async (op: string, args: Record<string, unknown>, commandId?: string) => (await a.api.handle(boot.token, { v: 1, op, ...(commandId === undefined ? {} : { commandId }), args } as never)) as any;
+    assert.equal((await call("project.create", { name: "Orchard" }, "p1")).ok, true);
+    await a.dispatch!.driver.runOnce();
+    const name = (await call("backup.now", {}, "b1")).result.item.name as string;
+    const before = await call("database.transfer.preview", { target: "moved" });
+    assert.equal(before.result.item.ok, true, JSON.stringify(before));
+    assert.equal(typeof (await call("backup.restore.preview", { name })).result.item.token, "string", "before the fence the restore preview is as before");
+    const other = await SqliteStorage.open({ path: dbPath });
+    try { await promoteController({ storage: other, manifestDirectory: manifests, blobs: await FileBlobStore.open({ directory: join(d, "blobs-b") }), successor: "controller-b", promotionId: "k05w", now: () => new Date("2026-11-27T12:05:00.000Z") }); } finally { await other.close(); }
+    const holder = async (): Promise<unknown> => { const s = await SqliteStorage.open({ path: dbPath }); try { const snap = await s.snapshot(); try { return (await snap.read("state", { limit: 1 }))[0]?.["holder"]; } finally { await snap.close(); } } finally { await s.close(); } };
+    const fence = await holder();
+    const move = await call("database.transfer.apply", { target: "moved", confirm: (await call("database.transfer.preview", { target: "moved" })).result.item.token }, "t1");
+    assert.match(JSON.stringify(move), /no longer holds the database .*cannot move it/, JSON.stringify(move));
+    assert.match(JSON.stringify(await call("backup.restore.preview", { name })), /no longer holds the database .*cannot restore a backup/);
+    assert.equal(await holder(), fence, "the promotion's holder still holds the store");
+  } finally { await a.close().catch(() => undefined); rmSync(d, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
 });
