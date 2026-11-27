@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { canonicalJson } from "../storage/index.js";
 import type { RecoverySource, Watermark } from "./source.js";
@@ -93,7 +93,9 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
     // unseen. A file system without hard links falls back to the rename.
     let taken = false;
     try { linkSync(join(staging, RECOVERY_MANIFEST_FILE), join(directory, RECOVERY_MANIFEST_FILE)); } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") taken = true;
+      // Late-change re-check: any other error (a file system without hard links answers EPERM, ENOTSUP, or on Windows FAT another code) falls back to the rename, but only after a look at
+      // the name: one that is taken now goes to the same decision as EEXIST instead of being renamed over (a write between this look and the rename is the documented residual).
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST" || nameTaken(join(directory, RECOVERY_MANIFEST_FILE))) taken = true;
       else renameSync(join(staging, RECOVERY_MANIFEST_FILE), join(directory, RECOVERY_MANIFEST_FILE));
     }
     if (taken) {
@@ -101,7 +103,8 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
         if (options.slotTaken === undefined) throw new RecoveryManifestBad("another writer put a manifest.json in the folder while this one was put in place; it was left as it is");
         options.slotTaken(manifest);
       } catch (error) {
-        restoreDisplacedOf(directory, displaced, manifest);
+        // Late-change re-check: a put-back that fails (a file another writer holds open, a manifest.json of JSON null) never hides why the write stopped.
+        try { restoreDisplacedOf(directory, displaced, manifest); } catch { /* left as it is: a mix never matches the checksums, so a promotion refuses it */ }
         throw error;
       }
       renameSync(join(staging, RECOVERY_MANIFEST_FILE), join(directory, RECOVERY_MANIFEST_FILE));
@@ -120,6 +123,7 @@ export async function writeRecoveryManifest(source: RecoverySource, directory: s
 function restoreDisplacedOf(directory: string, displaced: string, ours: RecoveryManifest): void {
   let theirs: Record<string, unknown>;
   try { theirs = JSON.parse(readFileSync(join(directory, RECOVERY_MANIFEST_FILE), "utf8")) as Record<string, unknown>; } catch { return; }
+  if (typeof theirs !== "object" || theirs === null) return;
   const shaOf = (path: string): string | undefined => { try { return sha256(readFileSync(path)); } catch { return undefined; } };
   for (const [name, key, mine] of [[RECOVERY_AGGREGATES_FILE, "aggregates", ours.aggregates.sha256], [RECOVERY_BLOBS_FILE, "blobs", ours.blobs.sha256]] as const) {
     const want = (theirs[key] as { sha256?: unknown } | undefined)?.sha256;
@@ -127,6 +131,11 @@ function restoreDisplacedOf(directory: string, displaced: string, ours: Recovery
     const now = shaOf(join(directory, name));
     if (now === undefined || now === mine) renameSync(join(displaced, name), join(directory, name));
   }
+}
+
+/** Whether `path` names anything now (a link or folder counts as taken). */
+function nameTaken(path: string): boolean {
+  try { lstatSync(path); return true; } catch (error) { return (error as NodeJS.ErrnoException)?.code !== "ENOENT"; }
 }
 
 function writeFlushed(path: string, text: string): void {

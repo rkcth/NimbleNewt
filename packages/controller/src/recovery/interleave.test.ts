@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -23,11 +23,11 @@ const realRename = fsc.renameSync;
 const realLink = fsc.linkSync;
 
 /** Runs `inject` right after A's `at`-th rename or link that touches `folder` (0: before the first move-aside); after the run when A made fewer calls. Restores the real functions after. */
-async function interleaved<T>(folder: string, at: number, inject: () => void, run: () => Promise<T>): Promise<{ readonly result: T | undefined; readonly error: unknown; readonly calls: number }> {
-  let calls = 0; let done = false;
+async function interleaved<T>(folder: string, at: number, inject: () => void, run: () => Promise<T>): Promise<{ readonly result: T | undefined; readonly error: unknown; readonly calls: number; readonly during: boolean }> {
+  let calls = 0; let done = false; let during = false;
   const touches = (a: unknown, b: unknown): boolean => dirname(String(a)) === folder || dirname(String(b)) === folder;
   // `at` k: B runs after A's k-th call and before its next one (0: before the first); a call that throws still counts
-  const now = (): void => { if (calls === at && !done) { done = true; inject(); } };
+  const now = (): void => { if (calls === at && !done) { done = true; during = true; inject(); } };
   const step = <R>(a: unknown, b: unknown, real: () => R): R => { if (!touches(a, b)) return real(); now(); try { return real(); } finally { calls++; now(); } };
   fsc.renameSync = ((a: string, b: string) => step(a, b, () => realRename(a, b))) as typeof fsc.renameSync;
   fsc.linkSync = ((a: string, b: string) => step(a, b, () => realLink(a, b))) as typeof fsc.linkSync;
@@ -35,10 +35,10 @@ async function interleaved<T>(folder: string, at: number, inject: () => void, ru
   try {
     const result = await run();
     if (!done) { done = true; inject(); }
-    return { result, error: undefined, calls };
+    return { result, error: undefined, calls, during };
   } catch (error) {
     if (!done) { done = true; inject(); }
-    return { result: undefined, error, calls };
+    return { result: undefined, error, calls, during };
   } finally {
     fsc.renameSync = realRename; fsc.linkSync = realLink; syncBuiltinESMExports();
   }
@@ -92,6 +92,8 @@ test("A stale and B current, B's swap at every step of A's: the folder ends with
         const r = await interleaved(m, at, () => swapIn(m, bsrc, moveAside), () => writeFencedRecoveryManifest({ storage: s.a, epoch: s.ea, directory: m }));
         const final = epochOf(m);
         const label = `${scenario}, B before A's step ${at} (A made ${r.calls} calls)`;
+        // late-change re-check: the interception fired inside A's run at the step named, not after it (A always reaches its link: 3 move-asides, 2 renames, 1 link)
+        assert.ok(r.during && r.calls >= 6, label);
         assert.notEqual(final, s.ea, `${label}: an older manifest a promotion would accept is in place`);
         if (final === "refused") assert.equal(text(join(m, RECOVERY_MANIFEST_FILE)), bManifest, `${label}: a refused folder still holds B's manifest.json`);
         else assert.equal(final, s.eb, label);
@@ -120,6 +122,7 @@ test("A current and C stale, C's swap at every step of A's: A's whole manifest e
       const m = join(dir, `m-${at}`);
       await writeFencedRecoveryManifest({ storage: s.b, epoch: s.eb, directory: m, now: () => new Date("2026-11-27T09:00:00.000Z") });
       const r = await interleaved(m, at, () => swapIn(m, csrc, true), () => writeFencedRecoveryManifest({ storage: s.b, epoch: s.eb, directory: m }));
+      assert.ok(r.during && r.calls >= 6, `step ${at}: the interception fired inside A's run (${r.calls} calls)`);
       const final = epochOf(m);
       if (r.error === undefined) assert.equal(final, s.eb, `step ${at}: written means A's whole manifest is in place`);
       else assert.ok(!(r.error instanceof RecoveryWriteRefused && r.error.reason === "manifest_newer"), `step ${at}: the current writer is never fenced by an older manifest (${String(r.error)})`);
@@ -151,6 +154,7 @@ test("two writers in one process never share a staging folder, and the manifest.
     await writeRecoveryManifest(src(9), other);
     const keep = text(join(other, RECOVERY_MANIFEST_FILE));
     const r = await interleaved(m, 5, () => swapIn(m, other, true), () => writeRecoveryManifest(src(3), m));
+    assert.ok(r.during, "the interception fired inside the run");
     assert.ok(r.error instanceof RecoveryManifestBad && /another writer put a manifest\.json/.test(r.error.message), String(r.error));
     assert.equal(text(join(m, RECOVERY_MANIFEST_FILE)), keep);
     assert.equal(readRecoveryManifest(m).manifest.watermark.epoch, 9, "whole: its own aggregates and blobs files");
@@ -158,6 +162,7 @@ test("two writers in one process never share a staging folder, and the manifest.
     const m2 = join(dir, "m2");
     await writeRecoveryManifest(src(1), m2);
     const r2 = await interleaved(m2, 1, () => swapIn(m2, other, false), () => writeRecoveryManifest(src(3), m2));
+    assert.ok(r2.during, "the interception fired inside the run");
     assert.ok(r2.error instanceof RecoveryManifestBad, String(r2.error));
     assert.equal(readRecoveryManifest(m2).manifest.watermark.epoch, 9, "the displaced aggregates and blobs of the kept manifest were put back");
   } finally { gone(dir); }
@@ -172,7 +177,8 @@ test("a crash at any step of a single writer's swap leaves the old manifest, non
       await writeRecoveryManifest(src(1), m);
       const snap = join(dir, `snap-${at}`);
       // the folder as a crash at this step would leave it (copied before the step runs)
-      await interleaved(m, at, () => { mkdirSync(snap); for (const f of FILES) if (existsSync(join(m, f))) copyFileSync(join(m, f), join(snap, f)); }, () => writeRecoveryManifest(src(2), m));
+      const c = await interleaved(m, at, () => { mkdirSync(snap); for (const f of FILES) if (existsSync(join(m, f))) copyFileSync(join(m, f), join(snap, f)); }, () => writeRecoveryManifest(src(2), m));
+      assert.ok(c.during && c.calls === 6, `step ${at}: the snapshot was taken inside the run (${c.calls} calls)`);
       const e = epochOf(snap);
       assert.ok(e === 1 || e === 2 || e === "refused", `step ${at}: ${e}`);
       if (e === "refused") assert.equal(existsSync(join(snap, RECOVERY_MANIFEST_FILE)), false, `step ${at}: refused only for want of manifest.json, never a mix`);
@@ -207,4 +213,91 @@ test("a mix of two manifests' files is refused by a promotion (manifest.json is 
     await assert.rejects(promoteDatabaseWith({ ...options, manifestDirectory: older }, behind), (e: unknown) => e instanceof Error && e.name === "PromotionRefused" && /audit log stops at 9/.test(e.message));
     assert.equal(promoted, 2);
   } finally { gone(dir); }
+});
+
+test("late-change re-check: a link refused for want of hard links falls back to the rename only when the name is free, and a taken slot holding JSON null keeps the write's own reason", async () => {
+  const dir = tmp();
+  const src = (epoch: number): RecoverySource => ({ watermark: async () => ({ epoch, auditSeq: epoch, deliverySeq: 0 }), aggregates: async function* () { yield { kind: "task", id: `t${epoch}`, revision: 1 }; } });
+  const withLink = async <R>(link: (a: string, b: string) => void, run: () => Promise<R>): Promise<R> => {
+    fsc.linkSync = link as typeof fsc.linkSync; syncBuiltinESMExports();
+    try { return await run(); } finally { fsc.linkSync = realLink; syncBuiltinESMExports(); }
+  };
+  const eperm = (): never => { throw Object.assign(new Error("EPERM: operation not permitted, link"), { code: "EPERM" }); };
+  try {
+    const other = join(dir, "other");
+    await writeRecoveryManifest(src(9), other);
+    // no hard links and a free name: the rename puts it in, mode kept
+    const m = join(dir, "m");
+    let refusedLinks = 0;
+    const written = await withLink(() => { refusedLinks++; eperm(); }, () => writeRecoveryManifest(src(3), m));
+    assert.equal(refusedLinks, 1);
+    assert.equal(readRecoveryManifest(m).manifest.sha256, written.sha256);
+    assert.equal(statSync(join(m, RECOVERY_MANIFEST_FILE)).mode & 0o777, 0o600);
+    // no hard links and the name taken in the moment before the link: kept, as with EEXIST, never renamed over
+    const keep = text(join(other, RECOVERY_MANIFEST_FILE));
+    const m2 = join(dir, "m2");
+    await writeRecoveryManifest(src(1), m2);
+    let taken = 0;
+    await assert.rejects(withLink((_a, b) => { taken++; copyFileSync(join(other, RECOVERY_MANIFEST_FILE), b); eperm(); }, () => writeRecoveryManifest(src(3), m2)), (e: unknown) => e instanceof RecoveryManifestBad && /another writer put a manifest\.json/.test(e.message));
+    assert.equal(taken, 1);
+    assert.equal(text(join(m2, RECOVERY_MANIFEST_FILE)), keep);
+    // a taken slot holding JSON null: the put-back reads nothing, and the write still fails with its own reason (not a TypeError)
+    const m3 = join(dir, "m3");
+    await writeRecoveryManifest(src(1), m3);
+    let nulls = 0;
+    await assert.rejects(withLink((a, b) => { nulls++; writeFileSync(b, "null"); realLink(a, b); }, () => writeRecoveryManifest(src(3), m3)), (e: unknown) => e instanceof RecoveryManifestBad && /another writer put a manifest\.json/.test(e.message));
+    assert.equal(nulls, 1);
+    assert.equal(text(join(m3, RECOVERY_MANIFEST_FILE)), "null");
+    assert.deepEqual(readdirSync(dir).filter((n) => n.includes(".partial-")), []);
+  } finally { gone(dir); }
+});
+
+test("late-change re-check: the fenced writer at a taken slot keeps one ahead under the same epoch or unreadable, and after the swap a newer manifest.json is a refusal, an older one or a missing file a failure", async () => {
+  const w = await backends[0]!.open();
+  const dir = tmp();
+  const onLink = async <R>(folder: string, act: (a: string, b: string) => void, run: () => Promise<R>): Promise<{ readonly out: R | undefined; readonly error: unknown; readonly fired: number }> => {
+    let fired = 0;
+    fsc.linkSync = ((a: string, b: string) => { if (dirname(String(b)) === folder) { fired++; act(a, b); } else realLink(a, b); }) as typeof fsc.linkSync; syncBuiltinESMExports();
+    try { return { out: await run(), error: undefined, fired }; } catch (error) { return { out: undefined, error, fired }; } finally { fsc.linkSync = realLink; syncBuiltinESMExports(); }
+  };
+  try {
+    await w.storage.acquireEpoch({ holder: "p", at: T });
+    const e = await w.storage.currentEpoch();
+    const made = async (name: string, wm: { epoch: number; auditSeq: number }): Promise<string> => {
+      const d = join(dir, name);
+      await writeRecoveryManifest({ watermark: async () => ({ ...wm, deliverySeq: 0 }), aggregates: async function* () { yield { kind: "task", id: name, revision: 1 }; } }, d);
+      return join(d, RECOVERY_MANIFEST_FILE);
+    };
+    const sameEpochAhead = await made("ahead", { epoch: e, auditSeq: 1_000_000 });
+    const nextEpoch = await made("next", { epoch: e + 1, auditSeq: 0 });
+    const older = await made("older", { epoch: e - 1 < 0 ? 0 : e - 1, auditSeq: 0 });
+    const fenced = (m: string) => () => writeFencedRecoveryManifest({ storage: w.storage, epoch: e, directory: m });
+    // taken before the link: one ahead under the same epoch is kept and refused
+    const m1 = join(dir, "m1");
+    const r1 = await onLink(m1, (a, b) => { copyFileSync(sameEpochAhead, b); realLink(a, b); }, fenced(m1));
+    assert.equal(r1.fired, 1);
+    assert.ok(r1.error instanceof RecoveryWriteRefused && r1.error.reason === "manifest_newer", String(r1.error));
+    assert.equal(text(join(m1, RECOVERY_MANIFEST_FILE)), text(sameEpochAhead));
+    // taken before the link by one that cannot be read: kept and refused as unreadable
+    const m2 = join(dir, "m2");
+    const r2 = await onLink(m2, (a, b) => { writeFileSync(b, "{not json"); realLink(a, b); }, fenced(m2));
+    assert.ok(r2.error instanceof RecoveryWriteRefused && r2.error.reason === "manifest_unreadable", String(r2.error));
+    assert.equal(text(join(m2, RECOVERY_MANIFEST_FILE)), "{not json");
+    // replaced right after the link (a rename over the name): a newer one is a refusal (manifest_newer), an older one a failure that is not a refusal
+    const over = (from: string) => (a: string, b: string): void => { realLink(a, b); copyFileSync(from, `${b}.x`); realRename(`${b}.x`, b); };
+    const m3 = join(dir, "m3");
+    const r3 = await onLink(m3, over(nextEpoch), fenced(m3));
+    assert.ok(r3.error instanceof RecoveryWriteRefused && r3.error.reason === "manifest_newer", String(r3.error));
+    const m4 = join(dir, "m4");
+    const r4 = await onLink(m4, over(older), fenced(m4));
+    assert.ok(r4.error instanceof Error && !(r4.error instanceof RecoveryWriteRefused) && /replaced the manifest just put in place with an older one/.test(r4.error.message), String(r4.error));
+    // its own manifest.json in place but its aggregates file gone: a failure, not a write
+    const m5 = join(dir, "m5");
+    const r5 = await onLink(m5, (a, b) => { realLink(a, b); rmSync(join(m5, "aggregates.jsonl")); }, fenced(m5));
+    assert.ok(r5.error instanceof Error && /files no longer match it/.test(r5.error.message), String(r5.error));
+    // and with nothing in the way the same writer writes
+    const m6 = join(dir, "m6");
+    const r6 = await onLink(m6, (a, b) => realLink(a, b), fenced(m6));
+    assert.equal(r6.error, undefined, String(r6.error)); assert.equal(r6.fired, 1);
+  } finally { await w.close(); gone(dir); }
 });
