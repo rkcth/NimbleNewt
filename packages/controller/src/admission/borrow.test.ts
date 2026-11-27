@@ -293,6 +293,18 @@ for (const backend of backends) {
     assert.equal((await c.admission.snapshot()).borrows, undefined, "nothing was recorded");
     assert.equal((await c.ask("P")).state, "running", "admission goes on");
     assert.equal((await c.admission.balance(owner)).borrowProblem, undefined);
+    // The boundary is the same on both sides, counted in the same unit (UTF-16, as String length): exactly 300 as kept is stored and read back as valid, 301 is refused. 13 hidden URLs are 298 as kept,
+    // an astral character (a surrogate pair) is 2 more; 150 astral characters are 300 as written and unchanged.
+    const urls = Array.from({ length: 13 }, () => "https://u:p@h").join(" ");
+    await refuses("invalid_command", () => c.lend({ reason: `${urls}😀a` }), /^reason: .*it is 301/);
+    for (const reason of [`${urls}😀`, "😀".repeat(150)]) {
+      const made = await c.lend({ reason });
+      const kept = ((await c.reopen().snapshot()).borrows ?? []).find((b) => b.id === made.borrowId)!;
+      assert.equal(kept.reason.length, 300);
+      assert.equal((await c.reopen().balance(owner)).borrowProblem, undefined, "read back as valid");
+      await c.lend({ end: true, reason: undefined, places: undefined, until: undefined, reviewBy: undefined });
+    }
+    assert.equal((await c.ask("P")).state, "running", "admission goes on");
   });
 
   suite("exactly once: a repeated command ID answers with the same borrow and writes nothing; another direction under the same ID is a conflict; two controllers borrowing at once start only one", async (c) => {
