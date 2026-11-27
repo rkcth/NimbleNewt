@@ -53,6 +53,10 @@ export class IntegratorPool {
     return by.taskScope === undefined && inTaskScope(by, projectId) && allowsExactly(by, "integration.lease", projectId);
   }
 
+  #holding(l: IntegratorLease, count = 1): PoolAnswer {
+    return { outcome: "holding", projectId: l.projectId, branch: l.branch, lease: l, holding: count, reason: `you hold the integrator lease of branch ${l.branch} until ${l.expiresAt}; release it when its queue is done, then ask the pool again` };
+  }
+
   /** Takes the next project with queued work for the calling integrator (see the class). */
   async next(by: Principal, command: NoActor & { ttlMs: number }): Promise<PoolAnswer> {
     onlyKnown(command, ["commandId", "ttlMs"]);
@@ -67,10 +71,7 @@ export class IntegratorPool {
     const held = await this.#leases.heldBy(holder);
     if (held.partial) throw new DomainError("unavailable", "the integrator leases could not all be read, so it is not known whether you already hold one; nothing was taken");
     const own = held.leases.filter((l) => this.#serves(by, l.projectId));
-    if (own.length > 0) {
-      const l = own[0]!;
-      return { outcome: "holding", projectId: l.projectId, branch: l.branch, lease: l, holding: own.length, reason: `you hold the integrator lease of branch ${l.branch} until ${l.expiresAt}; release it when its queue is done, then ask the pool again` };
-    }
+    if (own.length > 0) return this.#holding(own[0]!, own.length);
 
     const { queues, partial: queuesPartial } = await this.#queue.queuesWithEntries();
     let awaitingWork = 0, heldByOthers = 0, unreadable = 0;
@@ -96,8 +97,11 @@ export class IntegratorPool {
       if (landing !== c.q.branch) continue;
       // The lease door takes the lease of the task's own project: a queue record that names another project for its first task is not trusted (the answer would name one project and the hold be another's).
       if ((await this.#leases.projectOfTask(c.taskId)) !== c.q.projectId) { unreadable++; continue; }
-      const current = await this.#leases.get(IntegratorLeaseService.leaseIdOf(c.q.projectId, c.q.branch));
-      if (current !== undefined && current.live && current.holder !== holder && (this.#options.activeAgent === undefined || (await this.#options.activeAgent(current.holder)))) { heldByOthers++; continue; }
+      const leaseId = IntegratorLeaseService.leaseIdOf(c.q.projectId, c.q.branch);
+      const current = await this.#leases.get(leaseId);
+      // The caller's own live hold here (another request of the same agent took it since the free check above): that is its hold, answered as such, and nothing more is taken.
+      if (current !== undefined && current.live && current.holder === holder) return this.#holding(current);
+      if (current !== undefined && current.live && (this.#options.activeAgent === undefined || (await this.#options.activeAgent(current.holder)))) { heldByOthers++; continue; }
       tries++;
       // One command per request and branch, so a repeat of the request for the same branch is the same command.
       const commandId = `pool:${createHash("sha256").update(`${command.commandId}\0${c.q.projectId}\0${c.q.branch}`).digest("hex").slice(0, 40)}`;
@@ -106,8 +110,14 @@ export class IntegratorPool {
         lease = await this.#leaseOps.acquire(by, { commandId, taskId: c.taskId, branch: c.q.branch, ttlMs: ttl });
       } catch (error) {
         if (!(error instanceof DomainError)) throw error;
-        if (error.code === "unavailable") { heldByOthers++; continue; }
-        if (error.code === "forbidden" || error.code === "not_found") continue;
+        if (error.code === "unavailable") {
+          // Lost the branch at the same moment: to another request of the caller's own (answered as its hold), or to another integrator.
+          const now = await this.#leases.get(leaseId);
+          if (now !== undefined && now.live && now.holder === holder) return this.#holding(now);
+          heldByOthers++; continue;
+        }
+        // The pool's own checks passed but the door refused (the landing branch, the task or the right changed during the request): not judged now, and counted, so the answer never says that no work waits.
+        if (error.code === "forbidden" || error.code === "not_found") { unreadable++; continue; }
         throw error;
       }
       // A replayed command answers the lease as it is now: only a live hold of the caller's own is work taken.

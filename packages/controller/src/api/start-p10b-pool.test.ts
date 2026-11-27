@@ -73,6 +73,10 @@ test("the integrator pool through the state API: the next project with queued wo
     const second = await next(ivy.token, "i3");
     assert.deepEqual([second.result.outcome, second.result.projectId], ["taken", garden]);
     assert.equal((await next(jo.token, "j1")).result.heldByOthers, 1);
+    // Max is disabled while he holds Orchard: his hold is not passed over (the composed pool asks whether its holder is an active agent), and Jo takes the branch with a new fence.
+    await s.principals.disable(rob, { commandId: "d-max", principalId: max.id, expectedRevision: (await s.principals.get(max.id))!.revision });
+    const jos = await next(jo.token, "j1b");
+    assert.deepEqual([jos.result.outcome, jos.result.projectId, jos.result.lease.holder, jos.result.lease.fence], ["taken", orchard, jo.agentId, 3], JSON.stringify(jos));
 
     // Refused: the owner (it names an agent with integrator.lease.acquire), unknown arguments, a bad hold time, no command ID.
     assert.equal((await next(O, "o1")).error?.code, "forbidden");

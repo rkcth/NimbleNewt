@@ -21475,7 +21475,7 @@ Blockers P10, H03, A10b and R05 are all implemented, so the coordinator's build-
 - Each request reads at most 100 landing policies (`POOL_LIMITS.policyReads`) and tries at most 10 leases (`POOL_LIMITS.tries`).
 - The owner is refused with `forbidden` (the owner uses `integrator.lease.acquire` with `holder`). So are task credentials, at both the operation and the service, and non-agents.
 - Unknown arguments, a bad `ttlMs` and a bad command ID are refused with `invalid_command`.
-- A lost race (`unavailable`) moves on to the next queue. `forbidden` and `not_found` skip the queue. Any other error is thrown.
+- A lost race (`unavailable`) moves on to the next queue, unless the branch is now the caller's own live hold (another request of the same agent took it), which is answered as `holding`. `forbidden` and `not_found` from the lease door after the pool's own checks passed (the branch, task or right changed during the request) skip the queue and are counted in `unreadable`, so the answer never says that no work waits. Any other error is thrown.
 - A lease answer that is not the caller's live hold of that exact project and branch is not counted as taken. This covers a replayed command, or a door answering for another project.
 - A queue record whose first task belongs to another project is passed over before any lease is asked for. Found by the first test run: without this check, the answer named the record's project while the lease door took the task's own project.
 
@@ -21495,7 +21495,7 @@ Blockers P10, H03, A10b and R05 are all implemented, so the coordinator's build-
   - Not caught at first: dropping the pool's own off-branch skip (the lease door refused for it) and dropping the post-check of the lease's project and branch (the pre-check made it unreachable). Both are caught by the two tests added afterwards, so 22 of 22.
 
 **Limits stated (follow-ups, not hidden).**
-- The free check is a read before the take, not part of the lease write. The same agent asking twice at the very same moment can end with two holds (never the same branch twice). The race test states this.
+- The free check is a read before the take, not part of the lease write. Two requests of the same agent at the very same moment go for the same oldest queue; the one that does not take it finds the caller's own hold there (before or at the lease door) and answers `holding`, so the race test ends with one hold. Two holds (never the same branch twice) remain possible only if the two requests see different candidate lists, for example when the queues or the agent's rights change between their reads. P10's rules stay intact then: each landing is checked against its own lease and fence.
 - The pool does not renew or release for the agent.
 - Queue records past the 10,000-record scan are not seen (`partial`).
 
@@ -21504,3 +21504,13 @@ Blockers P10, H03, A10b and R05 are all implemented, so the coordinator's build-
 2. "Credentials and context are fresh per project (no data crosses between projects, test)". At a pool take: issue the A10b task credential for the project's task, start a fresh harness context per project, and test that nothing crosses between projects.
 3. "A full queue of author attempts does not starve landing". The admission reservation from item 1, with a saturation test.
 4. "When no capacity is left, work waits with a visible reason". The pool's `none` reason covers the integrator's side. The owner still needs a reason shown in the status view, read-only so that no chat text is needed.
+
+### P10b first slice, first review (Claude agent, Opus 5.5, 2026-11-27 EST)
+
+- Two concurrent requests of one agent: the request that did not take the oldest branch was told the branch was "held by another integrator" (its own fresh hold) and went on to take a second project. The pool now answers the caller's own live hold on a candidate branch as `holding`, both when it reads the lease before the door and when the door answers `unavailable`. The race test now asserts one hold, with one `taken` and one `holding` answer.
+- A `forbidden` or `not_found` from the lease door after the pool's own checks had passed was passed over without being counted. The answer could then say that no project had work waiting. It is now counted in `unreadable`.
+- Tests added: the door's `forbidden` and `not_found` are counted; the caller's own hold seen before the door and at the door is answered `holding`; another integrator's hold seen only at the door stays `heldByOthers`.
+- Also added: an active integrator's live hold seen before the door is passed over without asking the door (it costs no try); a door answer that is another holder's live lease is not counted as taken; through the composed controller, a disabled holder's branch is taken by the next integrator (the pool's `activeAgent` wiring in `start.ts`).
+- 25 deliberate breakages of the changed lines (built `dist`, each alone, restored and checked by sha256; script `/tmp/claude-1000/p10b-r1/breakages.py`). First run: 22 of 24 caught. Not caught: the pass-over of another's live hold (the door refused for it) and the post-check of the returned lease's holder. The `start.ts` breakage did not apply at first because its text occurs four times. With the added tests: 25 of 25.
+- Node 22 and 24: 573 of 573 each (landing, start-p10*, api, chat-gaps, gaps1, prompt-room, retirement, guide-commands). The chat sources are unchanged.
+

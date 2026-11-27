@@ -173,10 +173,12 @@ for (const backend of backends) {
       const solo = await r.project("P4"); await r.queued(solo); const other = await r.project("P5"); await r.queued(other);
       const loner = await r.person("loner", [{ action: "integration.lease", project: solo }, { action: "integration.lease", project: other }]);
       const twice = await Promise.all([doors[0]!.next(loner, { commandId: "l1", ttlMs: 10 * MIN }), doors[1]!.next(loner, { commandId: "l2", ttlMs: 10 * MIN })]);
-      assert.ok(twice.some((x) => x.outcome === "taken"), JSON.stringify(twice));
-      // Two concurrent asks of one agent may each take a branch before seeing the other (the free check is a read); stated as a limit in the notes. Never the same branch twice.
+      // Both asks go for the same oldest queue: one takes it, the other finds the caller's own hold there (before or at the door) and answers it; never "held by another integrator", never a second branch.
+      assert.deepEqual(twice.map((x) => x.outcome).sort(), ["holding", "taken"], JSON.stringify(twice));
       const held = (await r.leases.heldBy("loner")).leases;
-      assert.ok(held.length >= 1 && held.length <= 2 && new Set(held.map((l) => l.leaseId)).size === held.length);
+      assert.deepEqual(held.map((l) => l.projectId), [solo]);
+      const h = twice.find((x) => x.outcome === "holding");
+      assert.equal(h?.outcome === "holding" ? h.lease.leaseId : "", held[0]!.leaseId);
     } finally { await r.close(); }
   });
 
@@ -207,6 +209,27 @@ for (const backend of backends) {
       // A lease door that fails otherwise is not swallowed.
       const broken = { acquire: async () => { throw new DomainError("stale_revision", "boom"); } };
       await refuses("stale_revision", () => new IntegratorPool(r.leases, broken, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p5", ttlMs: 10 * MIN }));
+      // A door refusing after the pool's own checks passed (the branch, task or right changed meanwhile) is counted, never "no work waits".
+      for (const code of ["forbidden", "not_found"] as const) {
+        const changed = await new IntegratorPool(r.leases, { acquire: async () => { throw new DomainError(code, "changed"); } }, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: `p5-${code}`, ttlMs: 10 * MIN });
+        assert.deepEqual(changed.outcome === "none" ? [changed.unreadable, changed.heldByOthers, changed.partial] : changed, [1, 0, false], code);
+      }
+      // The caller's own live hold found at the branch after the free check (another request of its own took it meanwhile): answered as its hold, before or after the door.
+      const mineNow = await r.leaseOps.acquire(ivy, { commandId: "p5-own", taskId: real[0]!.entries[0]!.taskId, branch: "main", ttlMs: 10 * MIN });
+      const blind = { heldBy: async () => ({ leases: [], partial: false }), get: (id: string) => r.leases.get(id), projectOfTask: (t: string) => r.leases.projectOfTask(t) };
+      let doorAsked = 0;
+      const seenBefore = await new IntegratorPool(blind, { acquire: async () => { doorAsked++; throw new DomainError("unavailable", "held"); } }, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p5-b", ttlMs: 10 * MIN });
+      assert.deepEqual(seenBefore.outcome === "holding" ? [seenBefore.lease.leaseId, seenBefore.holding, doorAsked] : seenBefore, [mineNow.leaseId, 1, 0]);
+      let gets = 0;
+      const lateGet = { ...blind, get: async (id: string) => (gets++ === 0 ? undefined : r.leases.get(id)) };
+      const seenAfter = await new IntegratorPool(lateGet, { acquire: async () => { throw new DomainError("unavailable", "held"); } }, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p5-c", ttlMs: 10 * MIN });
+      assert.deepEqual(seenAfter.outcome === "holding" ? seenAfter.lease.leaseId : seenAfter, mineNow.leaseId);
+      // Another integrator's hold seen only at the door stays "held by another".
+      const othersGet = { ...blind, get: async (id: string) => (gets++ % 2 === 0 ? undefined : { ...(await r.leases.get(id))!, holder: "someone" }) };
+      gets = 0;
+      const lostLate = await new IntegratorPool(othersGet, { acquire: async () => { throw new DomainError("unavailable", "held"); } }, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p5-d", ttlMs: 10 * MIN });
+      assert.deepEqual(lostLate.outcome === "none" ? [lostLate.heldByOthers, lostLate.unreadable] : lostLate, [1, 0]);
+      await r.leaseOps.release(ivy, { commandId: "p5-own-r", leaseId: mineNow.leaseId, fence: mineNow.fence });
       // A replayed lease answer that is not the caller's live hold is not work taken.
       const stale = { acquire: async () => ({ ...(await r.leases.get(IntegratorLeaseService.leaseIdOf(a, "main")))!, live: false }) };
       assert.equal((await new IntegratorPool(r.leases, stale, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p6", ttlMs: 10 * MIN })).outcome, "none");
@@ -217,7 +240,13 @@ for (const backend of backends) {
       assert.deepEqual(asked, [], "an off-branch queue is passed over before any lease is asked for");
       // A door answering a live hold of the caller that is another project's or branch's lease is not work taken for this queue.
       const mine = { ...(await r.leases.get(IntegratorLeaseService.leaseIdOf(a, "main")))!, live: true, holder: "ivy" };
-      for (const wrong of [{ ...mine, projectId: "proj-elsewhere" }, { ...mine, branch: "other" }]) {
+      // An active integrator's live hold seen before the door is passed over without asking the door (it costs no try).
+      let doorCalls = 0;
+      const othersHold = { ...blind, get: async (id: string) => ({ ...(await r.leases.get(id))!, live: true, holder: "someone" }) };
+      const passed = await new IntegratorPool(othersHold, { acquire: async () => { doorCalls++; return mine; } }, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p6d", ttlMs: 10 * MIN });
+      assert.deepEqual([passed.outcome, passed.outcome === "none" ? passed.heldByOthers : -1, doorCalls], ["none", 1, 0]);
+      // ... and a live hold of another holder, or of another project or branch, answered by the door is not work taken for this queue.
+      for (const wrong of [{ ...mine, projectId: "proj-elsewhere" }, { ...mine, branch: "other" }, { ...mine, holder: "someone" }]) {
         assert.equal((await new IntegratorPool(r.leases, { acquire: async () => wrong }, walk(real, false), { landingBranch: r.landingBranch }).next(ivy, { commandId: "p6c", ttlMs: 10 * MIN })).outcome, "none", JSON.stringify([wrong.projectId, wrong.branch]));
       }
       // Hostile records: an unreadable `since` sorts last; a queue of a project string the caller has no right on is not looked at; an entry list with a first place of another task than the front mark uses the entry's time.
