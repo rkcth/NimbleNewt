@@ -11050,12 +11050,51 @@
       ],
       "deliverable": "Required checks of the policy run on the integrated tree; the author's evidence is checked against the submitted tree; a reviewer verdict carries over only when the patch-id is unchanged",
       "acceptance_and_verification": "A different tree never passes on old evidence; a failure goes back to the author with the results; not-run counts as failed",
-      "status": "planned",
+      "status": "implemented",
       "research_evidence": null,
       "activation_gate": "Planning synchronization authorized; execution requires N00 scope/budget authorization and completed leaf prerequisites",
       "attempt_budget": "Provisional 60-minute work window; checkpoint by 45 minutes, reserve final 15 minutes for validation and continuation. Preflight must split any card that cannot produce its bounded artifact within a window; never discard completed work.",
       "continuation": "Persist source/artifact hashes, executed checks and results, remaining acceptance items, blockers, exact next command/action, effect uncertainty and branch/workspace location. Link all attempts to this card.",
-      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance."
+      "completion": "Current artifact plus reproducible verification evidence and required independent review; all native blockers satisfied. A successful attempt is not by itself task acceptance.",
+      "progress": {
+        "commits": [
+          "b130f9e2",
+          "864db435",
+          "d2f46844",
+          "a0f9216c",
+          "506b193d",
+          "6f214eb1",
+          "8602d8d3",
+          "01686afe",
+          "e2ec5776",
+          "7bba452e",
+          "b9413326",
+          "b8593cd4",
+          "878f61ee",
+          "2c5b6fd8",
+          "1c5704ba",
+          "a00fdaed",
+          "fee8576a",
+          "ae7a1aea",
+          "5a70b070",
+          "46e69e3a",
+          "f9d47278",
+          "de481a70",
+          "4a51d1cb",
+          "79bcf12d",
+          "644296d7",
+          "70e61f92",
+          "85971a6b",
+          "20addb18",
+          "c3e590bd"
+        ],
+        "ci_runs": [
+          "45926151243"
+        ],
+        "reviewed_by": "reviewed and approved before commit by a separate AI review session (Claude Opus); not a human review, so the plan's independent-review requirement is still for the owner to judge",
+        "record": "docs/nimblenewt/implementation-plan/implementation-notes.md",
+        "note": "A landing is gated on the project's required checks (P08 policy): tests runs the task contract's test commands (only versions whose checks someone other than the task's authors set) in the sandbox on a fresh copy of the integrated tree; review, qa, docs and director read the reviewed submission's approval, QA gate, documentation obligations and director sign-off, each bound to the landed submission and carried to a refreshed tree only while the host-computed patch ID (git patch-id --verbatim) is unchanged; the records are read again after the host's run and the required checks once more as the last step. Every result is bound to the integrated tree and kept on the landing record; the host lands only the tree the checks ran on; results are never reused. not_run counts as failed. A refusal goes back to the submitter (else the assignee) with the results and to a quiet attempt; the owner gets a needs-you notice when only the authors set test commands, and can accept them by naming them in contract.set. The author's recorded evidence is compared with the gate's own result for the same tree (a false fail claim refuses, a false pass claim is flagged and never passes). The owner reads the checks of the newest landings by chat (landing_checks). Limits: a remote host has no landingChecks (no protocol field), so a gated landing there is refused (fails closed, as a remote host also cannot submit code, H12n); a change recorded after the final re-read and before the host writes is not seen; an owner landing with an empty queue names no submission and refuses when review, qa, docs or director is required; claims are compared only on the same tree and by required-check name; SHA-256 repositories and git older than 2.39 fail closed; a mode-only change can make the landed tree differ from the checked one in modes only; the prompt sentence of the view was checked with a stand-in model only. Follow-ups, not clauses here."
+      }
     },
     {
       "id": "P10",
