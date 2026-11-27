@@ -93,8 +93,11 @@ process.exit(0);
 function findCurl(): { path: string } | { skip: string } {
   let path: string;
   try { path = execFileSync("/bin/sh", ["-c", "command -v curl"], { encoding: "utf8" }).trim(); } catch { return { skip: "curl is not installed on this host (`command -v curl` found nothing); the Node client test covers the proxy" }; }
-  if (!/^\/(usr|bin)\//.test(path)) return { skip: `curl is at ${path}, outside the system directories the sandbox binds; the Node client test covers the proxy` };
-  return { path };
+  // The real file, not the name found: a /usr/bin/curl that is a link to somewhere else (a snap, a home directory) would not be there inside the sandbox.
+  let real: string;
+  try { real = realpathSync(path); } catch { return { skip: `curl at ${path} could not be resolved; the Node client test covers the proxy` }; }
+  if (!/^\/(usr|bin)\//.test(real)) return { skip: `curl is at ${real}, outside the system directories the sandbox binds; the Node client test covers the proxy` };
+  return { path: real };
 }
 
 async function until(label: string, check: () => boolean | Promise<boolean>, ms = 30_000): Promise<void> {

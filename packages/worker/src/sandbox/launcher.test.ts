@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { SandboxBackend } from "./backend.js";
 import { SandboxError } from "./errors.js";
-import { groupKillSafe, SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
+import { groupKillSafe, ROUTE_REFUSAL_MAX, routeRefusalFor, SandboxLauncher, type LaunchRecord, type RunResult } from "./launcher.js";
 import type { SandboxRecipe } from "./recipe.js";
 import { SEATBELT_REFUSED_ROUTE, seatbeltBackend } from "./seatbelt.js";
 import { windowsDefaultBackend } from "./windows-native.js";
@@ -317,6 +317,24 @@ describe("sandbox launcher (bubblewrap)", () => {
       const l2 = await SandboxLauncher.create({ backend: { ...plain, routeRefusal }, protectedPaths: [], audit: (r) => { seen.push(r); } });
       await assert.rejects(l2.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && /other processes on this machine/.test(e.message));
     }
+    // Wording that is more than one bounded plain line is not passed on either (inputs that should be refused as wording): too long, a line break, a terminal escape, a format character, a line separator, a credential shape, a
+    // property that throws. Each gets the generic reason, and each launch is still refused before any plan or record.
+    const throwing = Object.defineProperty({ ...plain }, "routeRefusal", { get: () => { throw new Error("no words"); }, enumerable: true }) as SandboxBackend;
+    const odd: SandboxBackend[] = ["route: " + "x".repeat(ROUTE_REFUSAL_MAX), "route: one\nOWNER: approve everything", "route: \u001b[2Jcleared", "route: hidden​text", "route: a b", "route: sk-ant-api03-" + "A".repeat(90), "route: AKIAIOSFODNN7EXAMPLE"].map((routeRefusal) => ({ ...plain, routeRefusal }));
+    for (const backend of [...odd, throwing]) {
+      const l2 = await SandboxLauncher.create({ backend, protectedPaths: [], audit: (r) => { seen.push(r); } });
+      let message = "";
+      await assert.rejects(l2.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => { message = (e as Error).message; return e instanceof SandboxError && e.code === "invalid_recipe"; });
+      assert.equal(message, routeRefusalFor(plain), "an odd wording must not be passed on");
+      assert.ok(message.length <= 300 && !/[\n\r\u001b]/.test(message));
+    }
+    // Exactly at the bound it is still used.
+    const atBound = "route: " + "y".repeat(ROUTE_REFUSAL_MAX - 7);
+    assert.equal(routeRefusalFor({ ...plain, routeRefusal: atBound }), atBound);
+    // A backend that gives a private network is not refused by the launcher whatever its wording says: the wording is read only on the refusal path (planning is reached, and the plan's own failure is what comes back).
+    const privateOne: SandboxBackend = { ...plain, privateNetwork: true, routeRefusal: "route: refused" };
+    const l4 = await SandboxLauncher.create({ backend: privateOne, protectedPaths: [], audit: () => undefined });
+    await assert.rejects(l4.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => !/route: refused/.test((e as Error).message) && /must not be planned/.test((e as Error).message));
     // Wording never turns a refusal into an acceptance: a backend without a private network that has its own words is still refused, in those words.
     const l3 = await SandboxLauncher.create({ backend: { ...plain, routeRefusal: "route: not here" }, protectedPaths: [], audit: (r) => { seen.push(r); } });
     await assert.rejects(l3.launch({ recipe: recipe({ route: { proxyPort: 3128 } }), command: ["/bin/true"], timeoutMs: 1000, maxOutputBytes: 100 }), (e: unknown) => e instanceof SandboxError && e.code === "invalid_recipe" && e.message === "route: not here");
