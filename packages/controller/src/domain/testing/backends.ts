@@ -18,6 +18,15 @@ export async function stopServer(): Promise<void> {
   if (serverPromise !== undefined) await (await serverPromise).stop();
 }
 
+/**
+ * How long a domain suite's PostgreSQL storage waits for one new connection (TCP connect, startup and sign-in) to the embedded test server, in place of the product default of 5 s
+ * (CI fix 6). The server is local and known to be running, so a connection that has not finished is a slow machine, not an absent server: on the hosted Windows runner every new
+ * connection is a new postgres.exe process, started while two other test files run beside it, and once in 781 PostgreSQL tests (exhaustive run 46037162616, Node 24, shard 1) one
+ * took more than 5 s and failed its test with "timeout expired" while the tests before and after took about a second. Lock and statement timeouts stay the product's; the tests that
+ * check the connect timeout itself set their own (postgres.test.ts, no-answer.test.ts, standby.test.ts).
+ */
+export const TEST_CONNECT_TIMEOUT_MS = 30_000;
+
 const sqliteDir = () => mkdtempSync(join(tmpdir(), "nn-domain-"));
 const remove = (dir: string) => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 
@@ -36,7 +45,7 @@ const all: Backend[] = [
   { name: "PostgreSQL", open: async () => {
     const s = await server();
     const schema = `domain_${process.pid}_${Math.random().toString(36).slice(2, 8)}`;
-    const storage = await PostgresStorage.open({ connectionString: s.url(), schema });
+    const storage = await PostgresStorage.open({ connectionString: s.url(), schema, connectTimeoutMs: TEST_CONNECT_TIMEOUT_MS });
     return { storage, close: async () => { await storage.close(); await withClient(s.url(), async (c) => { await c.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); }); } };
   } },
 ];

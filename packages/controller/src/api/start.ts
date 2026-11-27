@@ -843,7 +843,8 @@ async function startControllerWith(options: StartOptions, takeLock: (() => Promi
     // Card B03: versioned lessons, their links and evidence; the outcomes are told to the proposers by the dispatcher's loop (dispatch-compose), which has the notices.
     const lessons = LessonService.withEpoch(storage, epoch);
     // Card B04: bounded baseline experiments (pinned criteria, runs in disposable environments, saved results); nothing here spends or launches anything.
-    const experiments = ExperimentService.withEpoch(storage, epoch);
+    // A run's environment is checked against A08's revisions (slice 2); the environment service is made further down, and this is only called once requests are served.
+    const experiments = ExperimentService.withEpoch(storage, epoch, { environments: { verify: (by, ref) => environments.verify(by, ref) } });
     const reviews = ReviewService.withEpoch(storage, epoch, {
       onDecided: async (e) => { if (e.verdict === "deny") await observe({ commandId: `obs-deny:${e.requestId}`, kind: "correction", summary: `${e.decidedBy} denied a request to use ${e.tool} on task ${e.taskId}.`, detail: e.reason, sources: [{ kind: "review", id: e.requestId }] }); await activity.record({ id: "service:reviews", kind: "service", name: "reviews", grants: [] } as Principal, { commandId: `rev-act:${e.requestId}:${e.verdict}`, taskId: e.taskId, kind: "approval", summary: `${e.decidedBy} ${e.verdict === "allow" ? "approved" : "denied"} ${e.tool}: ${e.reason}`, manifest: { refs: [{ kind: "review", id: e.requestId }] }, outcome: "confirmed" } as never); },
       onUsage: (u) => charged({ commandId: u.commandId, activity: "review", taskId: u.taskId, agentId: u.agentId, computeMs: u.computeMs }), availability: pauses.workAvailability /* a meeting wake does not make a stopped agent a reviewer (card M04h) */, reviewerHost: async (principalId) => { try { return await dispatch?.hostOfAgent(principalId); } catch { return undefined; } } });
