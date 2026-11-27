@@ -37,7 +37,7 @@ for (const backend of backends) {
     const calls = { runs: 0 };
     const port = (): WorkspacePort => ({
       run: async () => { calls.runs++; return { ok: true, summary: "landed", detail: { landed: true, changed: true, written: 1 } }; },
-      landingChecks: async (call) => ({ checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch }), checks: call.checks.map((c) => ({ name: c.name, state: host.unit, exitCode: host.unit === "passed" ? 0 : 1 })) }),
+      landingChecks: async (call) => ({ checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch, reviewedReplays: true }), checks: call.checks.map((c) => ({ name: c.name, state: host.unit, exitCode: host.unit === "passed" ? 0 : 1 })) }),
     });
     const told: { text: string }[] = [];
     const deps = (): WorkspaceDeps => ({

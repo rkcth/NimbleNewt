@@ -78,7 +78,7 @@ for (const backend of backends) {
       landingChecks: async (call) => {
         calls.checks.push(call);
         if (host.during !== undefined) await host.during();
-        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch }), checks: [] };
+        return { checkout: true, ...(host.change === undefined ? {} : { change: host.change }), ...(call.reviewed === undefined || host.reviewedPatch === undefined ? {} : { reviewedPatchId: host.reviewedPatch, reviewedReplays: true }), checks: [] };
       },
     });
     const told: { text: string }[] = [];

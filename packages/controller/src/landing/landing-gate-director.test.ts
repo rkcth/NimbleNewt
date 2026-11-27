@@ -19,7 +19,7 @@ const rig = (o: { director?: DirectorGateView | undefined | (() => Promise<Direc
   });
   const calls: Parameters<NonNullable<LandingCheckHost["landingChecks"]>>[0][] = [];
   const hostWith = (over: { [K in keyof LandingCheckHostReport]?: LandingCheckHostReport[K] | undefined } = {}): LandingCheckHost => ({
-    landingChecks: async (call) => { calls.push(call); return { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH }), ...over } as LandingCheckHostReport; },
+    landingChecks: async (call) => { calls.push(call); return { checkout: true, change: { base: BASE, head: "f".repeat(40), tree: TREE, patchId: PATCH }, checks: [], ...(call.reviewed === undefined ? {} : { reviewedPatchId: PATCH, reviewedReplays: true }), ...over } as LandingCheckHostReport; },
   });
   const run = (host: LandingCheckHost = hostWith(), submissionId: string | null = SUB) => g.evaluate({ taskId: TASK, projectId: "proj-x", host, ...(submissionId === null ? {} : { submissionId }) });
   return { g, calls, hostWith, run };
